@@ -1,0 +1,46 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "managed-agents",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "rules": [
+    { "type": "Text", "globs": ["**/*.html"] }
+  ],
+
+  // Create KV namespace: npx wrangler kv namespace create CONFIG_KV
+  // Paste the returned ID below. Local dev uses local storage automatically.
+  "kv_namespaces": [
+    { "binding": "CONFIG_KV", "id": "" }
+  ],
+
+  "r2_buckets": [
+    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_DO", "class_name": "SessionDO" },
+      { "name": "SANDBOX", "class_name": "Sandbox" }
+    ]
+  },
+
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "./node_modules/@cloudflare/sandbox/Dockerfile",
+      "instance_type": "lite",
+      "max_instances": 10
+    }
+  ],
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionDO", "Sandbox"]
+    }
+  ],
+
+  "observability": { "enabled": true }
+}
