@@ -1,0 +1,1049 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Managed Agents Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<style>
+*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
+:root{
+  --bg:#faf8f5;--bg-alt:#f2efe9;--bg-deep:#e8e4dc;
+  --fg:#1a1917;--fg-muted:#6b6860;--fg-faint:#9e9a91;
+  --sidebar:#1a1917;--sidebar-fg:#d4d0c8;--sidebar-hover:#2a2926;--sidebar-active:#3a3836;
+  --accent:#c4703b;--accent-hover:#b3622f;
+  --green:#3d7a4a;--red:#b84033;--blue:#3b6fa0;
+  --border:#ddd9d0;--border-light:#eae6de;
+  --radius:6px;--radius-lg:10px;
+  --font-display:'Source Serif 4',Georgia,serif;
+  --font-body:'DM Sans',-apple-system,sans-serif;
+  --shadow-sm:0 1px 2px rgba(26,25,23,.06);
+  --shadow:0 2px 8px rgba(26,25,23,.08);
+  --transition:180ms ease;
+}
+html{font-size:15px}
+body{font-family:var(--font-body);color:var(--fg);background:var(--bg);display:flex;height:100vh;overflow:hidden;padding:10px;gap:10px}
+
+/* Sidebar */
+.sidebar{width:240px;background:var(--sidebar);color:var(--sidebar-fg);display:flex;flex-direction:column;flex-shrink:0;overflow-y:auto;border-radius:16px;box-shadow:0 8px 32px rgba(26,25,23,.18),0 2px 8px rgba(26,25,23,.1)}
+.sidebar-logo{padding:20px 20px 16px;font-family:var(--font-display);font-size:1.15rem;font-weight:600;color:#fff;letter-spacing:-.02em}
+.sidebar-section{padding:6px 10px;font-size:.7rem;text-transform:uppercase;letter-spacing:.08em;color:var(--fg-faint);margin-top:12px}
+.sidebar a{display:flex;align-items:center;gap:10px;padding:8px 16px;color:var(--sidebar-fg);text-decoration:none;font-size:.875rem;border-radius:var(--radius);margin:1px 8px;transition:background var(--transition)}
+.sidebar a:hover{background:var(--sidebar-hover)}
+.sidebar a.active{background:var(--sidebar-active);color:#fff;font-weight:500}
+.sidebar a svg{width:16px;height:16px;opacity:.6;flex-shrink:0}
+.sidebar a.active svg{opacity:1}
+.sidebar-footer{margin-top:auto;padding:16px;border-top:1px solid rgba(255,255,255,.08)}
+
+/* Key input */
+.key-bar{display:flex;align-items:center;gap:6px}
+.key-bar input{flex:1;background:var(--sidebar-hover);border:1px solid transparent;color:var(--sidebar-fg);padding:6px 10px;border-radius:var(--radius);font-size:.8rem;font-family:var(--font-body);outline:none;transition:border-color var(--transition)}
+.key-bar input:focus{border-color:var(--accent)}
+.key-bar input::placeholder{color:var(--fg-faint)}
+.key-label{font-size:.7rem;color:var(--fg-faint);margin-bottom:4px}
+
+/* Main */
+.main{flex:1;display:flex;flex-direction:column;overflow:hidden;background:var(--bg);border-radius:16px;border:1px solid var(--border-light);box-shadow:var(--shadow-sm)}
+.page{flex:1;overflow-y:auto;padding:32px 40px}
+.page-header{display:flex;align-items:flex-start;justify-content:space-between;margin-bottom:28px}
+.page-header h1{font-family:var(--font-display);font-size:1.6rem;font-weight:600;letter-spacing:-.02em}
+.page-header p{color:var(--fg-muted);font-size:.9rem;margin-top:4px}
+
+/* Buttons */
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 16px;border-radius:var(--radius);font-size:.85rem;font-weight:500;font-family:var(--font-body);border:none;cursor:pointer;transition:all var(--transition);text-decoration:none}
+.btn-primary{background:var(--fg);color:var(--bg);}.btn-primary:hover{background:#333028}
+.btn-ghost{background:transparent;color:var(--fg);border:1px solid var(--border)}.btn-ghost:hover{background:var(--bg-alt);border-color:var(--fg-faint)}
+.btn-sm{padding:5px 12px;font-size:.8rem}
+.btn svg{width:14px;height:14px}
+.btn:disabled{opacity:.5;cursor:not-allowed}
+
+/* Tables */
+.table-wrap{border:1px solid var(--border-light);border-radius:var(--radius-lg);overflow:hidden}
+table{width:100%;border-collapse:collapse}
+th{text-align:left;padding:10px 16px;font-size:.75rem;font-weight:500;color:var(--fg-muted);text-transform:uppercase;letter-spacing:.05em;background:var(--bg-alt);border-bottom:1px solid var(--border-light)}
+td{padding:12px 16px;font-size:.875rem;border-bottom:1px solid var(--border-light)}
+tr:last-child td{border-bottom:none}
+tr:hover td{background:var(--bg-alt)}
+td.mono{font-family:'SF Mono',Menlo,monospace;font-size:.8rem;color:var(--fg-muted)}
+td .status{display:inline-flex;align-items:center;gap:5px;font-size:.8rem}
+td .status::before{content:'';width:6px;height:6px;border-radius:50%}
+td .status.idle::before{background:var(--green)}
+td .status.active::before{background:var(--green)}
+td .status.processing::before{background:var(--accent);animation:pulse 1.5s infinite}
+td .status.running::before{background:var(--blue);animation:pulse 1.5s infinite}
+td .status.error::before{background:var(--red)}
+td .status.terminated::before{background:var(--red)}
+td .status.archived::before{background:var(--fg-faint)}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}}
+.clickable{cursor:pointer}
+
+/* Filter bar */
+.filter-bar{display:flex;align-items:center;gap:10px;margin-bottom:16px;flex-wrap:wrap}
+.search-input{padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:.85rem;font-family:var(--font-body);background:var(--bg);color:var(--fg);outline:none;transition:border-color var(--transition);min-width:200px}
+.search-input:focus{border-color:var(--accent)}
+.search-input::placeholder{color:var(--fg-faint)}
+.filter-select{padding:7px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:.85rem;font-family:var(--font-body);background:var(--bg);color:var(--fg);outline:none;cursor:pointer}
+
+/* Toggle switch */
+.toggle-wrap{display:flex;align-items:center;gap:8px;font-size:.85rem;color:var(--fg-muted);cursor:pointer;user-select:none}
+.toggle-switch{position:relative;width:36px;height:20px;flex-shrink:0}
+.toggle-switch input{opacity:0;width:0;height:0;position:absolute}
+.toggle-slider{position:absolute;inset:0;background:var(--border);border-radius:10px;transition:background var(--transition);cursor:pointer}
+.toggle-slider::before{content:'';position:absolute;width:14px;height:14px;left:3px;top:3px;background:#fff;border-radius:50%;transition:transform var(--transition)}
+.toggle-switch input:checked+.toggle-slider{background:var(--accent)}
+.toggle-switch input:checked+.toggle-slider::before{transform:translateX(16px)}
+
+/* Tab group */
+.tab-group{display:inline-flex;border:1px solid var(--border);border-radius:var(--radius);overflow:hidden}
+.tab-group button{padding:6px 16px;font-size:.825rem;font-family:var(--font-body);border:none;background:transparent;color:var(--fg-muted);cursor:pointer;transition:all var(--transition);font-weight:500}
+.tab-group button.active{background:var(--fg);color:var(--bg)}
+.tab-group button:not(:last-child){border-right:1px solid var(--border)}
+
+/* Pagination */
+.pagination{display:flex;align-items:center;justify-content:space-between;margin-top:16px;padding:4px 0}
+.pagination .page-info{font-size:.825rem;color:var(--fg-muted)}
+.pagination .page-btns{display:flex;gap:6px}
+
+/* Empty state */
+.empty{text-align:center;padding:60px 20px;color:var(--fg-muted)}
+.empty h3{font-family:var(--font-display);font-size:1.1rem;color:var(--fg);margin-bottom:6px}
+.empty p{font-size:.9rem;margin-bottom:20px}
+
+/* Dialog */
+.dialog-overlay{position:fixed;inset:0;background:rgba(26,25,23,.4);display:flex;align-items:center;justify-content:center;z-index:100;opacity:0;pointer-events:none;transition:opacity 200ms}
+.dialog-overlay.open{opacity:1;pointer-events:auto}
+.dialog{background:var(--bg);border-radius:var(--radius-lg);box-shadow:0 20px 60px rgba(0,0,0,.2);width:520px;max-height:85vh;overflow-y:auto;padding:28px}
+.dialog h2{font-family:var(--font-display);font-size:1.2rem;margin-bottom:20px}
+.dialog .close{position:absolute;right:16px;top:16px;background:none;border:none;cursor:pointer;color:var(--fg-muted);font-size:1.2rem}
+
+/* Form */
+.field{margin-bottom:16px}
+.field label{display:block;font-size:.8rem;font-weight:500;margin-bottom:5px;color:var(--fg-muted)}
+.field input,.field select,.field textarea{width:100%;padding:9px 12px;border:1px solid var(--border);border-radius:var(--radius);font-size:.875rem;font-family:var(--font-body);background:var(--bg);color:var(--fg);outline:none;transition:border-color var(--transition)}
+.field input:focus,.field select:focus,.field textarea:focus{border-color:var(--accent)}
+.field textarea{resize:vertical;min-height:80px}
+.field .helper{font-size:.75rem;color:var(--fg-faint);margin-top:3px}
+.form-actions{display:flex;gap:8px;justify-content:flex-end;margin-top:24px;padding-top:16px;border-top:1px solid var(--border-light)}
+
+/* Session detail */
+.session-view{display:flex;flex-direction:column;height:100%}
+.session-top{padding:20px 40px;border-bottom:1px solid var(--border-light);display:flex;align-items:center;gap:12px}
+.session-top .back{color:var(--fg-muted);text-decoration:none;font-size:.85rem;display:flex;align-items:center;gap:4px}
+.session-top .back:hover{color:var(--fg)}
+.session-top h2{font-family:var(--font-display);font-size:1.15rem}
+.session-top .meta{margin-left:auto;font-size:.8rem;color:var(--fg-muted)}
+
+.events-scroll{flex:1;overflow-y:auto;padding:24px 40px}
+.event{margin-bottom:16px;max-width:720px}
+.event.user .bubble{background:var(--fg);color:var(--bg);border-radius:var(--radius-lg) var(--radius-lg) 4px var(--radius-lg);padding:12px 16px;margin-left:auto;max-width:520px}
+.event.agent .bubble{background:var(--bg-alt);border-radius:var(--radius-lg) var(--radius-lg) var(--radius-lg) 4px;padding:12px 16px;max-width:600px;line-height:1.55}
+.event-label{font-size:.7rem;color:var(--fg-faint);margin-bottom:4px;text-transform:uppercase;letter-spacing:.04em}
+.event.user .event-label{text-align:right}
+
+.tool-card{border:1px solid var(--border);border-radius:var(--radius);margin-bottom:8px;overflow:hidden;max-width:600px}
+.tool-header{display:flex;align-items:center;gap:8px;padding:8px 12px;background:var(--bg-alt);cursor:pointer;font-size:.825rem;font-weight:500}
+.tool-header svg{width:14px;height:14px;color:var(--blue);flex-shrink:0}
+.tool-header .arrow{margin-left:auto;transition:transform 200ms;color:var(--fg-faint)}
+.tool-header .arrow.open{transform:rotate(180deg)}
+.tool-body{padding:10px 12px;font-family:'SF Mono',Menlo,monospace;font-size:.78rem;white-space:pre-wrap;word-break:break-all;background:var(--bg);border-top:1px solid var(--border-light);color:var(--fg-muted);max-height:300px;overflow-y:auto;display:none}
+.tool-body.open{display:block}
+.tool-result{border-left:3px solid var(--green);padding:8px 12px;font-family:'SF Mono',Menlo,monospace;font-size:.78rem;white-space:pre-wrap;background:var(--bg-alt);border-radius:0 var(--radius) var(--radius) 0;margin-bottom:8px;max-width:600px;max-height:200px;overflow-y:auto;color:var(--fg-muted)}
+
+.idle-marker{text-align:center;color:var(--fg-faint);font-size:.8rem;padding:12px;display:flex;align-items:center;gap:8px;justify-content:center}
+.idle-marker::before,.idle-marker::after{content:'';flex:1;max-width:80px;height:1px;background:var(--border)}
+
+.typing{display:flex;gap:4px;padding:8px 0}
+.typing span{width:6px;height:6px;background:var(--fg-faint);border-radius:50%;animation:typingDot 1.2s infinite}
+.typing span:nth-child(2){animation-delay:.2s}
+.typing span:nth-child(3){animation-delay:.4s}
+@keyframes typingDot{0%,60%,100%{opacity:.3;transform:translateY(0)}30%{opacity:1;transform:translateY(-4px)}}
+
+.error-event{background:#fef2f0;border:1px solid #f0c6c0;border-radius:var(--radius);padding:10px 14px;font-size:.85rem;color:var(--red);max-width:600px;margin-bottom:8px}
+
+/* Status indicator (inline) */
+.status-indicator{display:flex;align-items:center;gap:6px;font-size:.825rem;color:var(--fg-muted);padding:8px 0}
+.status-indicator .dot{width:8px;height:8px;border-radius:50%;animation:pulse 1.5s infinite}
+.status-indicator .dot.blue{background:var(--blue)}
+.status-indicator .dot.accent{background:var(--accent)}
+
+/* Chat input */
+.chat-input{padding:16px 40px 20px;border-top:1px solid var(--border-light);display:flex;gap:8px;background:var(--bg)}
+.chat-input input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-lg);font-size:.9rem;font-family:var(--font-body);outline:none;transition:border-color var(--transition)}
+.chat-input input:focus{border-color:var(--accent)}
+.chat-input button{flex-shrink:0}
+
+/* Dashboard */
+.dash-actions{display:flex;gap:12px;flex-wrap:wrap;margin-bottom:32px}
+.dash-card{border:1px solid var(--border);border-radius:var(--radius-lg);padding:20px 24px;cursor:pointer;transition:all var(--transition);flex:1;min-width:200px}
+.dash-card:hover{border-color:var(--fg-faint);box-shadow:var(--shadow)}
+.dash-card h3{font-family:var(--font-display);font-size:1rem;margin-bottom:4px}
+.dash-card p{font-size:.825rem;color:var(--fg-muted)}
+
+/* Responsive */
+@media(max-width:768px){
+  .sidebar{width:56px}.sidebar-logo{padding:16px 12px;font-size:0}.sidebar-logo::first-letter{font-size:1.1rem}
+  .sidebar-section{display:none}.sidebar a span{display:none}.sidebar a{padding:10px;justify-content:center;margin:1px 4px}
+  .page{padding:20px}.session-top,.events-scroll,.chat-input{padding-left:16px;padding-right:16px}
+  .filter-bar{flex-direction:column;align-items:stretch}
+}
+
+/* Util */
+.hidden{display:none !important}
+.fade-in{animation:fadeIn 250ms ease}
+@keyframes fadeIn{from{opacity:0;transform:translateY(6px)}to{opacity:1;transform:translateY(0)}}
+</style>
+</head>
+<body>
+
+<nav class="sidebar">
+  <div class="sidebar-logo">Managed Agents</div>
+  <div class="sidebar-section">Overview</div>
+  <a href="#" data-page="dashboard" class="active">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 9l9-7 9 7v11a2 2 0 01-2 2H5a2 2 0 01-2-2z"/><polyline points="9 22 9 12 15 12 15 22"/></svg>
+    <span>Dashboard</span>
+  </a>
+  <div class="sidebar-section">Managed Agents</div>
+  <a href="#" data-page="quickstart">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2"/></svg>
+    <span>Quickstart</span>
+  </a>
+  <a href="#" data-page="agents">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 1v4m0 14v4m-9-9h4m14 0h4m-3.3-6.7l-2.8 2.8m-8.5 8.5l-2.8 2.8m0-14.1l2.8 2.8m8.5 8.5l2.8 2.8"/></svg>
+    <span>Agents</span>
+  </a>
+  <a href="#" data-page="sessions">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 15a2 2 0 01-2 2H7l-4 4V5a2 2 0 012-2h14a2 2 0 012 2z"/></svg>
+    <span>Sessions</span>
+  </a>
+  <a href="#" data-page="environments">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="2" y="3" width="20" height="14" rx="2"/><line x1="8" y1="21" x2="16" y2="21"/><line x1="12" y1="17" x2="12" y2="21"/></svg>
+    <span>Environments</span>
+  </a>
+  <a href="#" data-page="credentials">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0110 0v4"/></svg>
+    <span>Credential vaults</span>
+  </a>
+  <div class="sidebar-footer">
+    <div class="key-label">API Key</div>
+    <div class="key-bar">
+      <input type="password" id="apiKey" placeholder="x-api-key" autocomplete="off">
+    </div>
+  </div>
+</nav>
+
+<div class="main">
+  <!-- Dashboard -->
+  <div id="page-dashboard" class="page">
+    <div class="page-header"><div><h1>Dashboard</h1><p>Open Managed Agents on Cloudflare</p></div></div>
+    <div class="dash-actions">
+      <div class="dash-card" onclick="navigate('agents')"><h3>Agents</h3><p>Create and manage autonomous agents</p></div>
+      <div class="dash-card" onclick="navigate('sessions')"><h3>Sessions</h3><p>Trace and debug agent sessions</p></div>
+      <div class="dash-card" onclick="navigate('environments')"><h3>Environments</h3><p>Configure container templates</p></div>
+    </div>
+  </div>
+
+  <!-- Agents -->
+  <div id="page-agents" class="page hidden">
+    <div class="page-header">
+      <div><h1>Agents</h1><p>Create and manage autonomous agents.</p></div>
+      <button class="btn btn-primary" onclick="openDialog('agent-dialog')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New agent
+      </button>
+    </div>
+    <div class="filter-bar">
+      <input class="search-input" id="agents-search" type="text" placeholder="Go to agent ID" onkeydown="if(event.key==='Enter')goToAgentId()">
+      <select class="filter-select" id="agents-created-filter" onchange="loadAgents()">
+        <option value="">Created: All time</option>
+        <option value="24h">Last 24 hours</option>
+        <option value="7d">Last 7 days</option>
+        <option value="30d">Last 30 days</option>
+      </select>
+      <label class="toggle-wrap">
+        <div class="toggle-switch">
+          <input type="checkbox" id="agents-show-archived" onchange="loadAgents()">
+          <span class="toggle-slider"></span>
+        </div>
+        Show archived
+      </label>
+    </div>
+    <div id="agents-content"></div>
+  </div>
+
+  <!-- Sessions -->
+  <div id="page-sessions" class="page hidden">
+    <div class="page-header">
+      <div><h1>Sessions</h1><p>Trace and debug agent sessions.</p></div>
+      <button class="btn btn-primary" onclick="openDialog('session-dialog')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New session
+      </button>
+    </div>
+    <div class="filter-bar">
+      <input class="search-input" id="sessions-search" type="text" placeholder="Go to session ID" onkeydown="if(event.key==='Enter')goToSessionId()">
+      <select class="filter-select" id="sessions-created-filter" onchange="loadSessions()">
+        <option value="">Created: All time</option>
+        <option value="24h">Last 24 hours</option>
+        <option value="7d">Last 7 days</option>
+        <option value="30d">Last 30 days</option>
+      </select>
+      <select class="filter-select" id="sessions-agent-filter" onchange="loadSessions()">
+        <option value="">Agent: All</option>
+      </select>
+      <label class="toggle-wrap">
+        <div class="toggle-switch">
+          <input type="checkbox" id="sessions-show-archived" onchange="loadSessions()">
+          <span class="toggle-slider"></span>
+        </div>
+        Show archived
+      </label>
+    </div>
+    <div id="sessions-content"></div>
+  </div>
+
+  <!-- Session Detail -->
+  <div id="page-session-detail" class="session-view hidden">
+    <div class="session-top">
+      <a href="#" class="back" onclick="navigate('sessions');return false">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="15 18 9 12 15 6"/></svg>
+        Sessions
+      </a>
+      <h2 id="session-title"></h2>
+      <div class="meta" id="session-meta"></div>
+    </div>
+    <div class="events-scroll" id="events-scroll"></div>
+    <div id="typing-indicator" class="hidden" style="padding:0 40px"><div class="typing"><span></span><span></span><span></span></div></div>
+    <div class="chat-input">
+      <input type="text" id="chat-msg" placeholder="Send a message..." onkeydown="if(event.key==='Enter')sendMessage()">
+      <button class="btn btn-primary" onclick="sendMessage()">Send</button>
+    </div>
+  </div>
+
+  <!-- Environments -->
+  <div id="page-environments" class="page hidden">
+    <div class="page-header">
+      <div><h1>Environments</h1><p>Configuration templates for containers.</p></div>
+      <button class="btn btn-primary" onclick="openDialog('env-dialog')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        Add environment
+      </button>
+    </div>
+    <div class="filter-bar">
+      <div class="tab-group" id="envs-tab-group">
+        <button class="active" onclick="setEnvFilter('all',this)">All</button>
+        <button onclick="setEnvFilter('active',this)">Active</button>
+      </div>
+    </div>
+    <div id="envs-content"></div>
+  </div>
+
+  <!-- Quickstart -->
+  <div id="page-quickstart" class="page hidden">
+    <div class="page-header"><div><h1>Quickstart</h1><p>Get started with Managed Agents in minutes.</p></div></div>
+    <div style="max-width:640px">
+      <div style="margin-bottom:24px">
+        <h3 style="font-family:var(--font-display);margin-bottom:8px">1. Set your API key</h3>
+        <p style="color:var(--fg-muted);font-size:.9rem;line-height:1.6">Enter your API key in the sidebar below. This is stored in your browser only.</p>
+      </div>
+      <div style="margin-bottom:24px">
+        <h3 style="font-family:var(--font-display);margin-bottom:8px">2. Create an agent</h3>
+        <p style="color:var(--fg-muted);font-size:.9rem;line-height:1.6">Go to <a href="#" onclick="navigate('agents');return false" style="color:var(--accent)">Agents</a> and click <strong>New agent</strong>. Choose a model and system prompt.</p>
+      </div>
+      <div style="margin-bottom:24px">
+        <h3 style="font-family:var(--font-display);margin-bottom:8px">3. Create an environment</h3>
+        <p style="color:var(--fg-muted);font-size:.9rem;line-height:1.6">Go to <a href="#" onclick="navigate('environments');return false" style="color:var(--accent)">Environments</a> and create a container template.</p>
+      </div>
+      <div style="margin-bottom:24px">
+        <h3 style="font-family:var(--font-display);margin-bottom:8px">4. Start a session</h3>
+        <p style="color:var(--fg-muted);font-size:.9rem;line-height:1.6">Go to <a href="#" onclick="navigate('sessions');return false" style="color:var(--accent)">Sessions</a>, create a new session binding your agent + environment, and start chatting.</p>
+      </div>
+      <div style="margin-bottom:24px">
+        <h3 style="font-family:var(--font-display);margin-bottom:8px">Or use the API directly</h3>
+        <pre style="background:var(--fg);color:var(--bg-alt);padding:16px;border-radius:var(--radius-lg);font-size:.8rem;overflow-x:auto;line-height:1.5"><code># Create agent
+curl -X POST /v1/agents -H "x-api-key: $KEY" \
+  -d '{"name":"Assistant","model":"claude-sonnet-4-6"}'
+
+# Create environment
+curl -X POST /v1/environments -H "x-api-key: $KEY" \
+  -d '{"name":"default","config":{"type":"cloud"}}'
+
+# Create session
+curl -X POST /v1/sessions -H "x-api-key: $KEY" \
+  -d '{"agent":"agent_...","environment_id":"env_..."}'
+
+# Send message
+curl -X POST /v1/sessions/$ID/events -H "x-api-key: $KEY" \
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Hello"}]}]}'
+
+# Stream response
+curl -N /v1/sessions/$ID/events -H "x-api-key: $KEY"</code></pre>
+      </div>
+    </div>
+  </div>
+
+  <!-- Credential vaults -->
+  <div id="page-credentials" class="page hidden">
+    <div class="page-header">
+      <div><h1>Credential vaults</h1><p>Manage credentials for MCP servers and external tools.</p></div>
+      <button class="btn btn-primary" onclick="openDialog('vault-dialog')">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+        New vault
+      </button>
+    </div>
+    <div class="filter-bar">
+      <div class="tab-group" id="vaults-tab-group">
+        <button class="active" onclick="setVaultFilter('all',this)">All</button>
+        <button onclick="setVaultFilter('active',this)">Active</button>
+      </div>
+    </div>
+    <div id="vaults-content"></div>
+  </div>
+</div>
+
+<!-- Dialogs -->
+<div class="dialog-overlay" id="agent-dialog" onclick="if(event.target===this)closeDialogs()">
+  <div class="dialog">
+    <h2>Create agent</h2>
+    <div class="field"><label>Name</label><input id="a-name" placeholder="e.g. Coding Assistant"></div>
+    <div class="field"><label>Description</label><textarea id="a-desc" rows="2" placeholder="A brief description of this agent's purpose"></textarea></div>
+    <div class="field"><label>Model</label>
+      <select id="a-model">
+        <option value="claude-sonnet-4-6">claude-sonnet-4-6</option>
+        <option value="claude-opus-4-6">claude-opus-4-6</option>
+        <option value="claude-haiku-4-5">claude-haiku-4-5</option>
+      </select>
+    </div>
+    <div class="field"><label>System prompt</label><textarea id="a-system" rows="4" placeholder="You are a helpful coding assistant..."></textarea></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeDialogs()">Cancel</button>
+      <button class="btn btn-primary" onclick="createAgent()">Create agent</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="session-dialog" onclick="if(event.target===this)closeDialogs()">
+  <div class="dialog">
+    <h2>New session</h2>
+    <div class="field"><label>Title</label><input id="s-title" placeholder="Optional title"></div>
+    <div class="field"><label>Agent</label><select id="s-agent"><option value="">Loading...</option></select></div>
+    <div class="field"><label>Environment</label><select id="s-env"><option value="">Loading...</option></select></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeDialogs()">Cancel</button>
+      <button class="btn btn-primary" onclick="createSession()">Create session</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="env-dialog" onclick="if(event.target===this)closeDialogs()">
+  <div class="dialog">
+    <h2>Add environment</h2>
+    <div class="field"><label>Name</label><input id="e-name" placeholder="e.g. default-env"></div>
+    <div class="field"><label>Description</label><textarea id="e-desc" rows="2" placeholder="A brief description of this environment"></textarea></div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeDialogs()">Cancel</button>
+      <button class="btn btn-primary" onclick="createEnv()">Create environment</button>
+    </div>
+  </div>
+</div>
+
+<div class="dialog-overlay" id="vault-dialog" onclick="if(event.target===this)closeDialogs()">
+  <div class="dialog">
+    <h2>Create vault</h2>
+    <div class="field">
+      <label>Name</label>
+      <input id="v-name" placeholder="e.g. production-secrets" maxlength="50">
+      <div class="helper">50 characters or fewer</div>
+    </div>
+    <div class="form-actions">
+      <button class="btn btn-ghost" onclick="closeDialogs()">Cancel</button>
+      <button class="btn btn-primary" onclick="createVault()">Create vault</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// --- State ---
+let currentPage = 'dashboard';
+let currentSessionId = null;
+let eventSource = null;
+let agentsCache = [];
+let envsCache = [];
+let sessionsCache = [];
+let vaultsCache = [];
+
+// Pagination state
+const PAGE_SIZE = 20;
+let agentsPage = 0;
+let sessionsPage = 0;
+let envsPage = 0;
+let vaultsPage = 0;
+
+// Filter state
+let envsFilter = 'all'; // 'all' or 'active'
+let vaultsFilter = 'all';
+
+// --- API ---
+function getKey() { return document.getElementById('apiKey').value; }
+function headers() { return { 'x-api-key': getKey(), 'Content-Type': 'application/json' }; }
+
+async function api(path, opts = {}) {
+  const res = await fetch(path, { ...opts, headers: { ...headers(), ...opts.headers } });
+  if (!res.ok && res.status !== 202) {
+    const err = await res.json().catch(() => ({ error: res.statusText }));
+    throw new Error(err.error || res.statusText);
+  }
+  if (res.status === 202) return null;
+  return res.json();
+}
+
+// --- Navigation ---
+function navigate(page, param) {
+  document.querySelectorAll('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
+  document.querySelectorAll('[id^="page-"]').forEach(p => p.classList.add('hidden'));
+
+  if (page === 'session-detail') {
+    document.getElementById('page-session-detail').classList.remove('hidden');
+    openSession(param);
+  } else {
+    const el = document.getElementById('page-' + page);
+    if (el) { el.classList.remove('hidden'); el.classList.add('fade-in'); }
+    if (page === 'agents') loadAgents();
+    if (page === 'sessions') loadSessions();
+    if (page === 'environments') loadEnvs();
+    if (page === 'credentials') renderVaultsTable();
+  }
+  currentPage = page;
+}
+
+// --- Agents ---
+async function loadAgents() {
+  const el = document.getElementById('agents-content');
+  try {
+    let path = '/v1/agents';
+    const params = [];
+    if (document.getElementById('agents-show-archived').checked) {
+      params.push('include_archived=true');
+    }
+    if (params.length) path += '?' + params.join('&');
+    const res = await api(path);
+    agentsCache = res.data || [];
+    agentsPage = 0;
+    renderAgentsTable();
+  } catch (e) { el.innerHTML = renderEmpty('No agents yet', 'Create your first agent to get started.'); }
+}
+
+function goToAgentId() {
+  const val = document.getElementById('agents-search').value.trim();
+  if (!val) return;
+  const found = agentsCache.find(a => a.id === val);
+  if (found) {
+    alert('Agent found: ' + found.name + ' (' + found.id + ')');
+  } else {
+    alert('Agent not found: ' + val);
+  }
+  document.getElementById('agents-search').value = '';
+}
+
+async function createAgent() {
+  const name = document.getElementById('a-name').value;
+  const desc = document.getElementById('a-desc').value;
+  const model = document.getElementById('a-model').value;
+  const system = document.getElementById('a-system').value;
+  if (!name) return;
+  try {
+    const body = {
+      name,
+      model,
+      tools: [{ type: 'agent_toolset_20260401' }]
+    };
+    if (desc) body.description = desc;
+    if (system) body.system = system;
+    const agent = await api('/v1/agents', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    closeDialogs();
+    document.getElementById('a-name').value = '';
+    document.getElementById('a-desc').value = '';
+    document.getElementById('a-system').value = '';
+    agentsCache.push(agent);
+    renderAgentsTable();
+  } catch (e) { alert(e.message); }
+}
+
+function renderAgentsTable() {
+  const el = document.getElementById('agents-content');
+  let data = agentsCache;
+
+  // Apply created filter
+  const createdFilter = document.getElementById('agents-created-filter').value;
+  if (createdFilter) {
+    const now = Date.now();
+    const ms = createdFilter === '24h' ? 86400000 : createdFilter === '7d' ? 604800000 : 2592000000;
+    data = data.filter(a => a.created_at && (now - new Date(a.created_at).getTime()) < ms);
+  }
+
+  if (!data.length) {
+    el.innerHTML = renderEmpty('No agents yet', 'Create your first agent to get started.');
+    return;
+  }
+
+  const totalPages = Math.ceil(data.length / PAGE_SIZE);
+  const pageData = data.slice(agentsPage * PAGE_SIZE, (agentsPage + 1) * PAGE_SIZE);
+
+  el.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Name</th><th>Model</th><th>Status</th><th>Created</th><th>Last updated</th></tr></thead>
+    <tbody>${pageData.map(a => `<tr>
+      <td class="mono">${a.id}</td><td>${esc(a.name)}</td><td>${a.model}</td>
+      <td><span class="status ${a.status || 'active'}">${a.status || 'active'}</span></td>
+      <td>${fmtDate(a.created_at)}</td><td>${fmtDate(a.updated_at || a.created_at)}</td>
+    </tr>`).join('')}</tbody></table></div>
+    ${renderPagination(data.length, agentsPage, totalPages, 'agentsPage', 'renderAgentsTable')}`;
+}
+
+// --- Environments ---
+let envFilterMode = 'all';
+
+function setEnvFilter(mode, btn) {
+  envFilterMode = mode;
+  document.querySelectorAll('#envs-tab-group button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  envsPage = 0;
+  renderEnvsTable();
+}
+
+async function loadEnvs() {
+  const el = document.getElementById('envs-content');
+  try {
+    const res = await api('/v1/environments');
+    envsCache = res.data || [];
+    envsPage = 0;
+    renderEnvsTable();
+  } catch (e) { el.innerHTML = renderEmpty('No environments yet', 'Create your first environment to get started.'); }
+}
+
+async function createEnv() {
+  const name = document.getElementById('e-name').value;
+  const desc = document.getElementById('e-desc').value;
+  if (!name) return;
+  try {
+    const body = { name, config: { type: 'cloud', networking: { type: 'unrestricted' } } };
+    if (desc) body.description = desc;
+    const env = await api('/v1/environments', {
+      method: 'POST',
+      body: JSON.stringify(body)
+    });
+    closeDialogs();
+    document.getElementById('e-name').value = '';
+    document.getElementById('e-desc').value = '';
+    envsCache.push(env);
+    renderEnvsTable();
+  } catch (e) { alert(e.message); }
+}
+
+function renderEnvsTable() {
+  const el = document.getElementById('envs-content');
+  let data = envsCache;
+
+  if (envFilterMode === 'active') {
+    data = data.filter(e => !e.status || e.status === 'active');
+  }
+
+  if (!data.length) {
+    el.innerHTML = renderEmpty('No environments yet', 'Create your first environment to get started.');
+    return;
+  }
+
+  const totalPages = Math.ceil(data.length / PAGE_SIZE);
+  const pageData = data.slice(envsPage * PAGE_SIZE, (envsPage + 1) * PAGE_SIZE);
+
+  el.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Name</th><th>Type</th><th>Status</th><th>Created</th></tr></thead>
+    <tbody>${pageData.map(e => `<tr>
+      <td class="mono">${e.id}</td><td>${esc(e.name)}</td><td>${e.config?.type || 'cloud'}</td>
+      <td><span class="status ${e.status || 'active'}">${e.status || 'active'}</span></td>
+      <td>${fmtDate(e.created_at)}</td>
+    </tr>`).join('')}</tbody></table></div>
+    ${renderPagination(data.length, envsPage, totalPages, 'envsPage', 'renderEnvsTable')}`;
+}
+
+// --- Sessions ---
+async function loadSessions() {
+  const el = document.getElementById('sessions-content');
+  try {
+    let path = '/v1/sessions';
+    const params = [];
+    const agentFilter = document.getElementById('sessions-agent-filter').value;
+    if (agentFilter) params.push('agent_id=' + encodeURIComponent(agentFilter));
+    if (document.getElementById('sessions-show-archived').checked) {
+      params.push('include_archived=true');
+    }
+    if (params.length) path += '?' + params.join('&');
+    const res = await api(path);
+    sessionsCache = res.data || [];
+    sessionsPage = 0;
+
+    // Update agent filter dropdown
+    updateSessionsAgentFilter();
+
+    renderSessionsTable();
+  } catch (e) { el.innerHTML = renderEmpty('No sessions yet', 'Sessions appear here once created.'); }
+}
+
+function updateSessionsAgentFilter() {
+  const sel = document.getElementById('sessions-agent-filter');
+  const currentVal = sel.value;
+  let html = '<option value="">Agent: All</option>';
+  agentsCache.forEach(a => {
+    html += `<option value="${a.id}"${a.id === currentVal ? ' selected' : ''}>${esc(a.name)}</option>`;
+  });
+  sel.innerHTML = html;
+}
+
+function goToSessionId() {
+  const val = document.getElementById('sessions-search').value.trim();
+  if (!val) return;
+  const found = sessionsCache.find(s => s.id === val);
+  if (found) {
+    navigate('session-detail', found.id);
+  } else {
+    alert('Session not found: ' + val);
+  }
+  document.getElementById('sessions-search').value = '';
+}
+
+async function createSession() {
+  const agent = document.getElementById('s-agent').value;
+  const env_id = document.getElementById('s-env').value;
+  const title = document.getElementById('s-title').value;
+  if (!agent || !env_id) { alert('Select an agent and environment'); return; }
+  try {
+    const session = await api('/v1/sessions', {
+      method: 'POST',
+      body: JSON.stringify({ agent, environment_id: env_id, title: title || undefined })
+    });
+    closeDialogs();
+    document.getElementById('s-title').value = '';
+    sessionsCache.push(session);
+    navigate('session-detail', session.id);
+  } catch (e) { alert(e.message); }
+}
+
+function renderSessionsTable() {
+  const el = document.getElementById('sessions-content');
+  let data = sessionsCache;
+
+  // Apply created filter
+  const createdFilter = document.getElementById('sessions-created-filter').value;
+  if (createdFilter) {
+    const now = Date.now();
+    const ms = createdFilter === '24h' ? 86400000 : createdFilter === '7d' ? 604800000 : 2592000000;
+    data = data.filter(s => s.created_at && (now - new Date(s.created_at).getTime()) < ms);
+  }
+
+  if (!data.length) {
+    el.innerHTML = renderEmpty('No sessions yet', 'Sessions appear here once created.');
+    return;
+  }
+
+  const totalPages = Math.ceil(data.length / PAGE_SIZE);
+  const pageData = data.slice(sessionsPage * PAGE_SIZE, (sessionsPage + 1) * PAGE_SIZE);
+
+  el.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Title</th><th>Status</th><th>Agent</th><th>Created</th></tr></thead>
+    <tbody>${pageData.map(s => `<tr class="clickable" onclick="navigate('session-detail','${s.id}')">
+      <td class="mono">${s.id}</td><td>${esc(s.title || '\u2014')}</td>
+      <td><span class="status ${s.status}">${s.status}</span></td>
+      <td class="mono">${s.agent_id}</td><td>${fmtDate(s.created_at)}</td>
+    </tr>`).join('')}</tbody></table></div>
+    ${renderPagination(data.length, sessionsPage, totalPages, 'sessionsPage', 'renderSessionsTable')}`;
+}
+
+// --- Credential Vaults (in-memory) ---
+let vaultFilterMode = 'all';
+
+function setVaultFilter(mode, btn) {
+  vaultFilterMode = mode;
+  document.querySelectorAll('#vaults-tab-group button').forEach(b => b.classList.remove('active'));
+  btn.classList.add('active');
+  vaultsPage = 0;
+  renderVaultsTable();
+}
+
+function createVault() {
+  const name = document.getElementById('v-name').value.trim();
+  if (!name) return;
+  if (name.length > 50) { alert('Name must be 50 characters or fewer'); return; }
+  const vault = {
+    id: 'vault_' + Math.random().toString(36).slice(2, 14),
+    name,
+    status: 'active',
+    created_at: new Date().toISOString()
+  };
+  vaultsCache.push(vault);
+  closeDialogs();
+  document.getElementById('v-name').value = '';
+  renderVaultsTable();
+}
+
+function renderVaultsTable() {
+  const el = document.getElementById('vaults-content');
+  let data = vaultsCache;
+
+  if (vaultFilterMode === 'active') {
+    data = data.filter(v => v.status === 'active');
+  }
+
+  if (!data.length) {
+    el.innerHTML = renderEmpty('No credential vaults yet', 'Create a vault to securely store credentials for your agents.');
+    return;
+  }
+
+  const totalPages = Math.ceil(data.length / PAGE_SIZE);
+  const pageData = data.slice(vaultsPage * PAGE_SIZE, (vaultsPage + 1) * PAGE_SIZE);
+
+  el.innerHTML = `<div class="table-wrap"><table>
+    <thead><tr><th>ID</th><th>Name</th><th>Status</th><th>Created</th></tr></thead>
+    <tbody>${pageData.map(v => `<tr>
+      <td class="mono">${v.id}</td><td>${esc(v.name)}</td>
+      <td><span class="status ${v.status}">${v.status}</span></td>
+      <td>${fmtDate(v.created_at)}</td>
+    </tr>`).join('')}</tbody></table></div>
+    ${renderPagination(data.length, vaultsPage, totalPages, 'vaultsPage', 'renderVaultsTable')}`;
+}
+
+// --- Session Detail ---
+function openSession(id) {
+  currentSessionId = id;
+  const s = sessionsCache.find(s => s.id === id) || { id, title: id, agent_id: '\u2014' };
+  document.getElementById('session-title').textContent = s.title || s.id;
+  document.getElementById('session-meta').textContent = `Agent: ${s.agent_id}`;
+  document.getElementById('events-scroll').innerHTML = '';
+  document.getElementById('typing-indicator').classList.add('hidden');
+
+  // Connect SSE
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  const url = `/v1/sessions/${id}/events`;
+  eventSource = new EventSource(url); // Note: EventSource doesn't support custom headers natively
+
+  // For API key auth, we use fetch-based SSE instead
+  connectSSE(id);
+}
+
+async function connectSSE(sessionId) {
+  if (eventSource) { eventSource.close(); eventSource = null; }
+  try {
+    const res = await fetch(`/v1/sessions/${sessionId}/events`, {
+      headers: { 'x-api-key': getKey() }
+    });
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+
+    const read = async () => {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const lines = buffer.split('\n\n');
+        buffer = lines.pop();
+        for (const chunk of lines) {
+          if (!chunk.startsWith('data: ')) continue;
+          try {
+            const event = JSON.parse(chunk.slice(6));
+            renderEvent(event);
+          } catch {}
+        }
+      }
+    };
+    read();
+  } catch (e) { console.error('SSE error:', e); }
+}
+
+function renderEvent(event) {
+  const scroll = document.getElementById('events-scroll');
+  const typing = document.getElementById('typing-indicator');
+
+  const div = document.createElement('div');
+  div.className = 'event fade-in';
+
+  switch (event.type) {
+    case 'user.message':
+      div.classList.add('user');
+      div.innerHTML = `<div class="event-label">You</div><div class="bubble">${esc(event.content?.[0]?.text || '')}</div>`;
+      typing.classList.add('hidden');
+      break;
+
+    case 'agent.message':
+      div.classList.add('agent');
+      const text = (event.content || []).map(b => esc(b.text || '')).join('');
+      div.innerHTML = `<div class="event-label">Agent</div><div class="bubble">${text}</div>`;
+      typing.classList.add('hidden');
+      break;
+
+    case 'agent.tool_use': {
+      const toolId = 'tool-' + (event.id || Math.random().toString(36).slice(2));
+      div.innerHTML = `<div class="tool-card">
+        <div class="tool-header" onclick="toggleTool('${toolId}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z"/></svg>
+          <span>${esc(event.name)}</span>
+          <svg class="arrow" id="${toolId}-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="tool-body" id="${toolId}-body">${esc(JSON.stringify(event.input, null, 2))}</div>
+      </div>`;
+      typing.classList.remove('hidden');
+      break;
+    }
+
+    case 'agent.custom_tool_use': {
+      const ctoolId = 'ctool-' + (event.id || Math.random().toString(36).slice(2));
+      div.innerHTML = `<div class="tool-card">
+        <div class="tool-header" onclick="toggleTool('${ctoolId}')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 9l6 6m0-6l-6 6"/></svg>
+          <span>${esc(event.name || 'Custom tool')}</span>
+          <svg class="arrow" id="${ctoolId}-arrow" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="14" height="14"><polyline points="6 9 12 15 18 9"/></svg>
+        </div>
+        <div class="tool-body" id="${ctoolId}-body">${esc(JSON.stringify(event.input || event.content || {}, null, 2))}</div>
+      </div>`;
+      typing.classList.remove('hidden');
+      break;
+    }
+
+    case 'agent.tool_result':
+      div.innerHTML = `<div class="tool-result">${esc(event.content || '')}</div>`;
+      typing.classList.remove('hidden');
+      break;
+
+    case 'session.status_running':
+      div.innerHTML = `<div class="status-indicator"><span class="dot blue"></span> Agent is working...</div>`;
+      typing.classList.remove('hidden');
+      break;
+
+    case 'agent.thinking':
+      div.innerHTML = `<div class="status-indicator"><span class="dot accent"></span> Thinking...</div>`;
+      typing.classList.remove('hidden');
+      break;
+
+    case 'session.status_idle':
+      div.innerHTML = `<div class="idle-marker">Session idle</div>`;
+      typing.classList.add('hidden');
+      break;
+
+    case 'session.error':
+      div.innerHTML = `<div class="error-event">${esc(event.error || 'Unknown error')}</div>`;
+      typing.classList.add('hidden');
+      break;
+
+    default: return;
+  }
+
+  scroll.appendChild(div);
+  scroll.scrollTop = scroll.scrollHeight;
+}
+
+function toggleTool(id) {
+  document.getElementById(id + '-body').classList.toggle('open');
+  document.getElementById(id + '-arrow').classList.toggle('open');
+}
+
+async function sendMessage() {
+  const input = document.getElementById('chat-msg');
+  const text = input.value.trim();
+  if (!text || !currentSessionId) return;
+  input.value = '';
+
+  // Optimistic render
+  renderEvent({ type: 'user.message', content: [{ type: 'text', text }] });
+  document.getElementById('typing-indicator').classList.remove('hidden');
+
+  try {
+    await api(`/v1/sessions/${currentSessionId}/events`, {
+      method: 'POST',
+      body: JSON.stringify({ events: [{ type: 'user.message', content: [{ type: 'text', text }] }] })
+    });
+  } catch (e) {
+    renderEvent({ type: 'session.error', error: e.message });
+  }
+}
+
+// --- Dialogs ---
+function openDialog(id) {
+  document.getElementById(id).classList.add('open');
+  // Populate selects for session dialog
+  if (id === 'session-dialog') {
+    // Auto-fetch agents and environments if not cached
+    const fetchPromises = [];
+    if (!agentsCache.length) {
+      fetchPromises.push(
+        api('/v1/agents').then(res => { agentsCache = res.data || []; }).catch(() => {})
+      );
+    }
+    if (!envsCache.length) {
+      fetchPromises.push(
+        api('/v1/environments').then(res => { envsCache = res.data || []; }).catch(() => {})
+      );
+    }
+
+    if (fetchPromises.length) {
+      Promise.all(fetchPromises).then(() => populateSessionSelects());
+    } else {
+      populateSessionSelects();
+    }
+  }
+}
+
+function populateSessionSelects() {
+  const agentSel = document.getElementById('s-agent');
+  const envSel = document.getElementById('s-env');
+  agentSel.innerHTML = agentsCache.length
+    ? agentsCache.map(a => `<option value="${a.id}">${esc(a.name)} (${a.id})</option>`).join('')
+    : '<option value="">No agents \u2014 create one first</option>';
+  envSel.innerHTML = envsCache.length
+    ? envsCache.map(e => `<option value="${e.id}">${esc(e.name)} (${e.id})</option>`).join('')
+    : '<option value="">No environments \u2014 create one first</option>';
+}
+
+function closeDialogs() {
+  document.querySelectorAll('.dialog-overlay').forEach(d => d.classList.remove('open'));
+}
+
+// --- Pagination helper ---
+function renderPagination(total, page, totalPages, pageVar, renderFn) {
+  if (totalPages <= 1) return '';
+  const start = page * PAGE_SIZE + 1;
+  const end = Math.min((page + 1) * PAGE_SIZE, total);
+  return `<div class="pagination">
+    <span class="page-info">Showing ${start}\u2013${end} of ${total}</span>
+    <div class="page-btns">
+      <button class="btn btn-ghost btn-sm" ${page === 0 ? 'disabled' : ''} onclick="${pageVar}--;${renderFn}()">Previous</button>
+      <button class="btn btn-ghost btn-sm" ${page >= totalPages - 1 ? 'disabled' : ''} onclick="${pageVar}++;${renderFn}()">Next</button>
+    </div>
+  </div>`;
+}
+
+// --- Helpers ---
+function esc(s) { const d = document.createElement('div'); d.textContent = s; return d.innerHTML; }
+function fmtDate(iso) {
+  if (!iso) return '\u2014';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
+    d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
+function renderEmpty(title, desc) {
+  return `<div class="empty"><h3>${title}</h3><p>${desc}</p></div>`;
+}
+
+// --- Init ---
+document.getElementById('apiKey').value = localStorage.getItem('agent-api-key') || '';
+document.getElementById('apiKey').addEventListener('input', e => localStorage.setItem('agent-api-key', e.target.value));
+
+document.querySelectorAll('.sidebar a[data-page]').forEach(a => {
+  a.addEventListener('click', e => { e.preventDefault(); navigate(a.dataset.page); });
+});
+
+// Keyboard shortcut: Escape closes dialogs
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeDialogs(); });
+</script>
+</body>
+</html>
