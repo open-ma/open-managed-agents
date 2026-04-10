@@ -2,8 +2,7 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
-sandbox-worker/build-*
-sandbox-worker/.dev.vars
+apps/agent/build-*
 wrangler.deploy.jsonc
 .act.secrets
 .act.vars

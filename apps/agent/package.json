@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@ai-sdk/anthropic": "^1.2.0",
+    "@cloudflare/sandbox": "^0.1.0",
+    "@open-managed-agents/shared": "*",
+    "ai": "^4.3.0",
+    "hono": "^4.7.0"
+  }
+}
