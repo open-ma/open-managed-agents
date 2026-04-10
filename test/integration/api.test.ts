@@ -67,15 +67,15 @@ function postMessage(sessionId: string, text: string) {
 
 // Helper: fetch DO status directly
 function getDoStatus(sessionId: string) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(new Request("http://internal/status"));
 }
 
 // Helper: open WebSocket to DO and collect replayed events
 async function collectReplayedEvents(sessionId: string): Promise<any[]> {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   const wsRes = await stub.fetch(
     new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
   );

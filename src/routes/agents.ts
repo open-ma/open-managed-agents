@@ -9,7 +9,7 @@ const app = new Hono<{ Bindings: Env }>();
 app.post("/", async (c) => {
   const body = await c.req.json<{
     name: string;
-    model: string | { id: string; speed?: string };
+    model: string | { id: string; speed?: "standard" | "fast" };
     system?: string;
     tools?: AgentConfig["tools"];
     harness?: string;

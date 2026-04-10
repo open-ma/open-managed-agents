@@ -51,22 +51,22 @@ async function createFullSession(overrides?: Record<string, unknown>) {
 
 // Helper: fetch DO status directly
 function getDoStatus(sessionId: string) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(new Request("http://internal/status"));
 }
 
 // Helper: get DO events directly
 function getDoEvents(sessionId: string, params?: string) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(new Request(`http://internal/events${params ? `?${params}` : ""}`));
 }
 
 // Helper: post event directly to DO
 function postDoEvent(sessionId: string, event: unknown) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(
     new Request("http://internal/event", {
       method: "POST",
@@ -78,8 +78,8 @@ function postDoEvent(sessionId: string, event: unknown) {
 
 // Helper: init DO directly
 function initDo(sessionId: string, params: { agent_id: string; environment_id: string; title: string }) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(
     new Request("http://internal/init", {
       method: "PUT",
@@ -91,15 +91,15 @@ function initDo(sessionId: string, params: { agent_id: string; environment_id: s
 
 // Helper: destroy DO directly
 function destroyDo(sessionId: string) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(new Request("http://internal/destroy", { method: "DELETE" }));
 }
 
 // Helper: post usage to DO directly
 function postDoUsage(sessionId: string, input_tokens: number, output_tokens: number) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(
     new Request("http://internal/usage", {
       method: "POST",
@@ -111,8 +111,8 @@ function postDoUsage(sessionId: string, input_tokens: number, output_tokens: num
 
 // Helper: open WebSocket to DO
 function openDoWebSocket(sessionId: string) {
-  const doId = env.SESSION_DO.idFromName(sessionId);
-  const stub = env.SESSION_DO.get(doId);
+  const doId = env.SESSION_DO!.idFromName(sessionId);
+  const stub = env.SESSION_DO!.get(doId);
   return stub.fetch(
     new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
   );
@@ -244,8 +244,8 @@ describe("Session DO - direct", () => {
   });
 
   it("unknown route returns 404", async () => {
-    const doId = env.SESSION_DO.idFromName(doSessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(doSessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const res = await stub.fetch(new Request("http://internal/nonexistent"));
     expect(res.status).toBe(404);
   });

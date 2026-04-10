@@ -10,27 +10,17 @@ import memoryRoutes from "./routes/memory";
 import filesRoutes from "./routes/files";
 import skillsRoutes from "./routes/skills";
 
-// --- Composition root: register harnesses here ---
-import { registerHarness } from "./harness/registry";
-import { DefaultHarness } from "./harness/default-loop";
+// Main worker: CRUD + routing layer.
+// SessionDO and Sandbox are in per-environment sandbox workers.
+// BuilderSandbox is DinD — builds and deploys sandbox workers.
 
-registerHarness("default", () => new DefaultHarness());
-// Future: registerHarness("coding", () => new CodingHarness());
-
-// --- Export DO classes (required by wrangler) ---
-export { SessionDO } from "./runtime/session-do";
-export { Sandbox } from "@cloudflare/sandbox";
-
-// --- Export outbound worker functions for container credential injection ---
-export { outbound, outboundByHost } from "./outbound";
+// Re-export Sandbox as BuilderSandbox for the DinD builder container binding
+export { Sandbox as BuilderSandbox } from "@cloudflare/sandbox";
 
 // --- HTTP app ---
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
-
-// Console UI — served by Wrangler Assets (console/dist)
-// SPA fallback handled by assets.not_found_handling = "single-page-application"
 
 app.use("/v1/*", authMiddleware);
 app.use("/v1/*", rateLimitMiddleware);

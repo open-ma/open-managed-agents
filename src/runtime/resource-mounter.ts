@@ -6,12 +6,10 @@ import type { SandboxExecutor } from "../harness/interface";
  * Resource types (aligned with Anthropic + our extensions):
  * - file:              Mount file content at a path
  * - github_repository: Clone repo with auth, checkout branch/commit
- * - env_secret:        Inject secret as env var via setEnvVars()
  *
  * Security model:
- * - authorization_token / value are write-only (never in API responses)
+ * - authorization_token is write-only (never in API responses)
  * - Git token wired into credential store (not visible via `git remote -v`)
- * - env_secret uses sandbox.setEnvVars() (agent CAN read via `env`, same as Anthropic)
  */
 export async function mountResources(
   sandbox: SandboxExecutor,
@@ -19,7 +17,6 @@ export async function mountResources(
   kv: KVNamespace,
   secretStore?: Map<string, string>,
 ): Promise<void> {
-  const envSecrets: Record<string, string> = {};
   let hasGitRepo = false;
 
   for (const res of resources) {
@@ -33,21 +30,9 @@ export async function mountResources(
           hasGitRepo = true;
           await mountGitRepo(sandbox, res, secretStore);
           break;
-        case "env_secret":
-          collectEnvSecret(res, envSecrets, secretStore);
-          break;
       }
     } catch {
       // Best-effort: skip failed resource, don't crash session
-    }
-  }
-
-  // Inject all env secrets at once
-  if (Object.keys(envSecrets).length > 0 && sandbox.setEnvVars) {
-    try {
-      await sandbox.setEnvVars(envSecrets);
-    } catch {
-      // Best-effort
     }
   }
 
@@ -130,20 +115,6 @@ async function mountGitRepo(
   const checkout = res.checkout as { type?: string; name?: string; sha?: string } | undefined;
   if (checkout?.type === "commit" && checkout.sha) {
     await sandbox.exec(`cd ${targetDir} && git checkout ${checkout.sha}`, 30000);
-  }
-}
-
-function collectEnvSecret(
-  res: Record<string, unknown>,
-  envSecrets: Record<string, string>,
-  secretStore?: Map<string, string>,
-): void {
-  const name = res.name as string;
-  const resId = res.id as string;
-  // Value stored in secretStore (from separate KV key), not in resource metadata
-  const value = resId ? secretStore?.get(resId) : undefined;
-  if (name && value) {
-    envSecrets[name] = value;
   }
 }
 

@@ -172,7 +172,7 @@ export class SessionDO extends DurableObject<Env> {
         // Using alarm() ensures the agent loop runs with full DO lifetime
         // (not limited by waitUntil's 30s after client disconnect).
         this.setMeta("pending_user_message", JSON.stringify(body));
-        await this.ctx.storage.setAlarm(Date.now() + 1); // trigger immediately
+        await this.ctx.storage.setAlarm(Date.now() + 1);
         return new Response(null, { status: 202 });
       }
 
@@ -359,7 +359,11 @@ export class SessionDO extends DurableObject<Env> {
    */
   private warmUpSandbox(): Promise<void> {
     if (!this.sandboxWarmupPromise) {
-      this.sandboxWarmupPromise = this.doWarmUpSandbox();
+      this.sandboxWarmupPromise = this.doWarmUpSandbox().catch((err) => {
+        // Clear cached promise on failure so next call retries
+        this.sandboxWarmupPromise = null;
+        throw err;
+      });
     }
     return this.sandboxWarmupPromise;
   }
@@ -369,22 +373,23 @@ export class SessionDO extends DurableObject<Env> {
     try {
       const sandbox = this.getOrCreateSandbox();
 
-      // Trigger container startup with retries — local dev has a known race
-      // condition where the first request fails before container is ready.
+      // Trigger container startup with retries — local dev containers can take
+      // 30-60s to start. SDK returns 503 while container port isn't listening.
       // See: https://github.com/cloudflare/containers/issues/155
       let ready = false;
-      for (let attempt = 0; attempt < 5; attempt++) {
+      for (let attempt = 0; attempt < 10; attempt++) {
         try {
           await sandbox.exec("true");
           ready = true;
           break;
         } catch {
-          // Container not ready yet — wait and retry
-          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+          // Container not ready yet — exponential backoff: 3s, 4.5s, 6.75s, ...
+          const delay = 3000 * Math.pow(1.5, attempt);
+          await new Promise(r => setTimeout(r, Math.min(delay, 15000)));
         }
       }
       if (!ready) {
-        throw new Error("Sandbox container failed to start after 5 attempts");
+        throw new Error("Sandbox container failed to start after 10 attempts");
       }
 
       // Mount R2-backed /workspace for persistent file storage
@@ -459,9 +464,13 @@ export class SessionDO extends DurableObject<Env> {
           }
         }
       }
-    } catch {
-      // Warmup failed — sandbox may not be available (e.g., test environment).
-      // Tools will still try and return errors gracefully.
+    } catch (err) {
+      // Warmup failed — broadcast error event and re-throw to prevent harness from running
+      this.broadcastEvent({
+        type: "agent.message",
+        content: [{ type: "text", text: `Sandbox warmup failed: ${err instanceof Error ? err.message : String(err)}` }],
+      });
+      throw err;
     }
   }
 
@@ -485,7 +494,12 @@ export class SessionDO extends DurableObject<Env> {
     history: HistoryStore
   ): Promise<void> {
     const sandbox = this.getOrCreateSandbox();
-    await this.warmUpSandbox();
+    try {
+      await this.warmUpSandbox();
+    } catch {
+      this.broadcastEvent({ type: "session.error", error: "Sandbox not available" });
+      return;
+    }
 
     // Retrieve the pending tool call from session metadata
     const pendingJson = this.getMeta("pending_tool_calls");
@@ -720,8 +734,8 @@ export class SessionDO extends DurableObject<Env> {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
       },
     });
-    const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model.id;
-    const subModel = resolveModel(subModelId, this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
+    const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
+    const subModel = resolveModel(subModelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
 
     // Build sub-agent context: own history, shared sandbox, parent event log
     const subCtx: HarnessContext = {
@@ -733,6 +747,7 @@ export class SessionDO extends DurableObject<Env> {
       env: {
         ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
+        ANTHROPIC_MODEL: this.env.ANTHROPIC_MODEL,
         TAVILY_API_KEY: this.env.TAVILY_API_KEY,
         delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
           return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
@@ -788,7 +803,7 @@ export class SessionDO extends DurableObject<Env> {
     userMessage: UserMessageEvent,
     retryCount: number = 0,
     skipAppend: boolean = false
-  ) {
+  ): Promise<void> {
     const agentId = this.getMeta("agent_id");
     if (!agentId) return;
 
@@ -806,7 +821,16 @@ export class SessionDO extends DurableObject<Env> {
     const sandbox = this.getOrCreateSandbox();
 
     // Pre-warm sandbox on first use (container cold start + package install)
-    await this.warmUpSandbox();
+    try {
+      await this.warmUpSandbox();
+    } catch (err) {
+      this.broadcastEvent({
+        type: "session.error",
+        error: `Sandbox failed to start: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      this.setMeta("status", "error");
+      return;
+    }
 
     // Fetch environment config for networking restrictions
     const envId = this.getMeta("environment_id");
@@ -865,9 +889,10 @@ export class SessionDO extends DurableObject<Env> {
       Object.assign(allTools, memTools);
     }
 
-    // Resolve model
-    const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
-    const model = resolveModel(modelId, this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
+    // Resolve model — fall back to ANTHROPIC_MODEL env var if agent doesn't specify one
+    const modelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
+    const effectiveModelId = modelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+    const model = resolveModel(effectiveModelId, this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
 
     // Build system prompt: base + skill metadata
     let systemPrompt = agent.system || "";
@@ -926,6 +951,7 @@ export class SessionDO extends DurableObject<Env> {
       env: {
         ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
+        ANTHROPIC_MODEL: this.env.ANTHROPIC_MODEL,
         TAVILY_API_KEY: this.env.TAVILY_API_KEY,
         CONFIG_KV: this.env.CONFIG_KV,
         memoryStoreIds,
@@ -1000,7 +1026,8 @@ export class SessionDO extends DurableObject<Env> {
         const outcome = JSON.parse(outcomeJson);
         let iteration = parseInt(this.getMeta("outcome_iteration") || "1", 10);
         const maxIterations = Math.min(outcome.max_iterations || 3, 20);
-        const model = resolveModel(agent.model, ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
+        const outcomeModelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
+        const model = resolveModel(outcomeModelId || ctx.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
 
         while (iteration <= maxIterations) {
           // Collect agent output from recent events
@@ -1089,7 +1116,7 @@ export class SessionDO extends DurableObject<Env> {
         !p.toolName.startsWith("memory_")
       );
 
-      let stopReason: SessionEvent["type"] extends "session.status_idle" ? import("../types").SessionStatusEvent["stop_reason"] : never;
+      let stopReason: import("../types").SessionStatusEvent["stop_reason"];
       if (hasCustomToolPending) {
         stopReason = {
           type: "custom_tool_result_required" as const,

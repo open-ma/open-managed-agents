@@ -48,8 +48,8 @@ describe("SqliteHistory message conversion", () => {
   }
 
   async function collectEvents(sessionId: string, waitMs = 300): Promise<any[]> {
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(sessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );
@@ -340,8 +340,8 @@ describe("WebSocket broadcast", () => {
     const session = (await sessRes.json()) as any;
 
     // Open TWO WebSocket connections
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
 
     const ws1Res = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
     const ws1 = ws1Res.webSocket!;
@@ -425,8 +425,8 @@ describe("Edge cases", () => {
 
     // Verify via WebSocket replay
     await new Promise((r) => setTimeout(r, 100));
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
@@ -548,8 +548,8 @@ describe("Harness error handling", () => {
     let status = "processing";
     for (let i = 0; i < 15; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      const doId = env.SESSION_DO.idFromName(session.id);
-      const stub = env.SESSION_DO.get(doId);
+      const doId = env.SESSION_DO!.idFromName(session.id);
+      const stub = env.SESSION_DO!.get(doId);
       const statusRes = await stub.fetch(new Request("http://internal/status"));
       const body = (await statusRes.json()) as any;
       status = body.status;
@@ -558,8 +558,8 @@ describe("Harness error handling", () => {
     expect(status).toBe("idle");
 
     // Verify error event was broadcast
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
@@ -611,8 +611,8 @@ describe("Harness error handling", () => {
 
     // Session should still be functional (harness will error on LLM call, but won't crash on resolution)
     await new Promise((r) => setTimeout(r, 300));
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const statusRes = await stub.fetch(new Request("http://internal/status"));
     expect(statusRes.ok).toBe(true);
   });

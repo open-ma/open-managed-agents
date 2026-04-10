@@ -610,8 +610,8 @@ describe("Edge cases - concurrent and complex operations", () => {
     await new Promise((r) => setTimeout(r, 300));
 
     // Replay events from the DO
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );

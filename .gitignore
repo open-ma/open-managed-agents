@@ -2,3 +2,8 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+sandbox-worker/build-*
+sandbox-worker/.dev.vars
+wrangler.deploy.jsonc
+.act.secrets
+.act.vars
