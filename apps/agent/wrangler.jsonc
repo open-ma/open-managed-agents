@@ -1,37 +1,38 @@
 {
   "$schema": "../../node_modules/wrangler/config-schema.json",
-  "name": "managed-agents",
+  "name": "sandbox-default",
   "main": "src/index.ts",
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
 
-  "assets": {
-    "directory": "../console/dist",
-    "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
-  },
-
-  "rules": [
-    { "type": "Text", "globs": ["**/*.html"], "fallthrough": true }
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "docker.io/cloudflare/sandbox:0.7.0",
+      "instance_type": "lite",
+      "max_instances": 10
+    }
   ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_DO", "class_name": "SessionDO" },
+      { "name": "SANDBOX", "class_name": "Sandbox" }
+    ]
+  },
 
   "kv_namespaces": [
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
-  // Service bindings to agent workers
-  "services": [
-    { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" }
+  "r2_buckets": [
+    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" }
   ],
 
   "migrations": [
     {
       "tag": "v1",
       "new_sqlite_classes": ["SessionDO", "Sandbox"]
-    },
-    {
-      "tag": "v2",
-      "deleted_classes": ["SessionDO", "Sandbox"]
     }
   ],
 

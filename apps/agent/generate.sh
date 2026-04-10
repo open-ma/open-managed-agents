@@ -16,10 +16,14 @@ mkdir -p "$OUT_DIR"
 
 # --- Generate Dockerfile ---
 # Start from the npm package Dockerfile (works on both arm64 and amd64)
-BASE_DOCKERFILE="$SCRIPT_DIR/../node_modules/@cloudflare/sandbox/Dockerfile"
+# Find @cloudflare/sandbox — could be in root or local node_modules
+SANDBOX_PKG="$SCRIPT_DIR/../../node_modules/@cloudflare/sandbox"
+if [ ! -d "$SANDBOX_PKG" ]; then
+  SANDBOX_PKG="$SCRIPT_DIR/node_modules/@cloudflare/sandbox"
+fi
+BASE_DOCKERFILE="$SANDBOX_PKG/Dockerfile"
 cp "$BASE_DOCKERFILE" "$OUT_DIR/Dockerfile"
-# Copy container_src needed by the base Dockerfile
-cp -r "$SCRIPT_DIR/../node_modules/@cloudflare/sandbox/container_src" "$OUT_DIR/container_src" 2>/dev/null || true
+cp -r "$SANDBOX_PKG/container_src" "$OUT_DIR/container_src" 2>/dev/null || true
 
 # Append package install commands to the Dockerfile
 APT_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.apt // [] | join(" ")' 2>/dev/null || echo "")
