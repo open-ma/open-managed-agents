@@ -6,7 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
 
   "assets": {
-    "directory": "console/dist",
+    "directory": "../console/dist",
     "binding": "ASSETS",
     "not_found_handling": "single-page-application"
   },

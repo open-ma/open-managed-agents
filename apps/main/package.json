@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "dependencies": {
     "@cloudflare/sandbox": "^0.1.0",
-    "@open-managed-agents/shared": "*",
+    "@open-managed-agents/shared": "workspace:*",
     "hono": "^4.7.0"
   }
 }
