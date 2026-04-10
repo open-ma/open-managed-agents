@@ -3,7 +3,6 @@ import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource } from "@open-managed-agents/shared";
 import { generateSessionId, generateFileId, generateResourceId } from "@open-managed-agents/shared";
-import { envIdToBindingName } from "@open-managed-agents/shared";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -29,7 +28,8 @@ async function getSandboxBinding(
     return { binding: null, error: "No sandbox worker configured for this environment", status: 500 };
   }
 
-  const bindingName = envIdToBindingName(environmentId);
+  // Binding name derived from worker name: "sandbox-default" → "SANDBOX_sandbox_default"
+  const bindingName = `SANDBOX_${envConfig.sandbox_worker_name.replace(/-/g, "_")}`;
   const binding = (env as unknown as Record<string, unknown>)[bindingName] as Fetcher | undefined;
   if (!binding) {
     return { binding: null, error: `Service binding ${bindingName} not found`, status: 500 };

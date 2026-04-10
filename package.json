@@ -2,15 +2,12 @@
   "name": "open-managed-agents",
   "version": "0.1.0",
   "private": true,
-  "workspaces": [
-    "packages/*",
-    "apps/*"
-  ],
   "scripts": {
     "dev": "wrangler dev -c apps/main/wrangler.jsonc -c apps/agent/wrangler.dev.jsonc",
     "dev:main": "wrangler dev -c apps/main/wrangler.jsonc",
     "dev:agent": "wrangler dev -c apps/agent/wrangler.dev.jsonc",
-    "build:console": "cd apps/main/console && npx vite build",
+    "dev:console": "cd apps/console && npx vite",
+    "build:console": "cd apps/console && npx vite build",
     "deploy": "./scripts/deploy.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
