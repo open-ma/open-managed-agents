@@ -13,7 +13,7 @@ export class CloudflareSandbox implements SandboxExecutor {
     this.env = env;
     this.sessionId = sessionId;
     this.sandboxPromise = import("@cloudflare/sandbox")
-      .then((mod) => mod.getSandbox(env.SANDBOX, sessionId));
+      .then((mod) => mod.getSandbox(env.SANDBOX!, sessionId));
   }
 
   private async getSandbox() {

@@ -22,6 +22,7 @@ export interface HarnessContext {
   env: {
     ANTHROPIC_API_KEY: string;
     ANTHROPIC_BASE_URL?: string;
+    ANTHROPIC_MODEL?: string;
     TAVILY_API_KEY?: string;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     CONFIG_KV?: KVNamespace;

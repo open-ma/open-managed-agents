@@ -8,7 +8,9 @@
     "./sdk": "./src/sdk/index.ts"
   },
   "scripts": {
-    "dev": "wrangler dev",
+    "dev": "wrangler dev -c wrangler.jsonc -c sandbox-worker/wrangler.dev.jsonc",
+    "dev:main": "wrangler dev --port 8787",
+    "dev:sandbox": "cd sandbox-worker && wrangler dev --config wrangler.dev.jsonc --port 8788 --persist-to ../.wrangler/state",
     "dev:console": "cd console && npx vite",
     "build:console": "cd console && npx vite build",
     "deploy": "cd console && npx vite build && cd .. && wrangler deploy",

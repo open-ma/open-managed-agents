@@ -62,6 +62,8 @@ export interface EnvironmentConfig {
       allow_package_managers?: boolean;
     };
   };
+  status?: "building" | "ready" | "error";
+  sandbox_worker_name?: string;
   metadata?: Record<string, unknown>;
   created_at: string;
   updated_at?: string;
@@ -415,13 +417,13 @@ export interface FileRecord {
 export interface SessionResource {
   id: string;
   session_id: string;
-  type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
+  type: "file" | "memory_store" | "github_repository" | "github_repo";
   file_id?: string;
   memory_store_id?: string;
   url?: string;
   repo_url?: string;
   checkout?: { type?: string; name?: string; sha?: string };
-  name?: string; // env_secret name
+  name?: string;
   // authorization_token and value are NEVER stored in resource metadata
   // They go to separate KV keys: secret:{sessionId}:{resourceId}
   credential_id?: string;

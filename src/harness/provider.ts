@@ -24,9 +24,8 @@ export function resolveModel(
   // Speed "fast" is passed as a provider-specific option if supported
   if (speed === "fast") {
     return anthropic(modelId, {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      speed: "fast" as any,
-    });
+      providerOptions: { speed: "fast" },
+    } as Record<string, unknown>);
   }
 
   return anthropic(modelId);

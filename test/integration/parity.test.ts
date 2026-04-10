@@ -117,8 +117,8 @@ describe("user.define_outcome event", () => {
   it("define_outcome events appear in event replay", async () => {
     await new Promise((r) => setTimeout(r, 100));
 
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(sessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );

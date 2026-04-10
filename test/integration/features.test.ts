@@ -442,8 +442,8 @@ describe("New event types", () => {
   it("all events appear in replay", async () => {
     await new Promise((r) => setTimeout(r, 200));
 
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(sessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );
@@ -579,16 +579,16 @@ describe("Session harness status flow", () => {
     // Wait for processing
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      const doId = env.SESSION_DO.idFromName(session.id);
-      const stub = env.SESSION_DO.get(doId);
+      const doId = env.SESSION_DO!.idFromName(session.id);
+      const stub = env.SESSION_DO!.get(doId);
       const statusRes = await stub.fetch(new Request("http://internal/status"));
       const st = (await statusRes.json()) as any;
       if (st.status === "idle") break;
     }
 
     // Check events include status events
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
@@ -617,8 +617,8 @@ describe("Session harness status flow", () => {
     });
     await new Promise((r) => setTimeout(r, 500));
 
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
@@ -660,15 +660,15 @@ describe("Harness crash recovery", () => {
     // Wait for crash
     for (let i = 0; i < 20; i++) {
       await new Promise((r) => setTimeout(r, 100));
-      const doId = env.SESSION_DO.idFromName(session.id);
-      const stub = env.SESSION_DO.get(doId);
+      const doId = env.SESSION_DO!.idFromName(session.id);
+      const stub = env.SESSION_DO!.get(doId);
       const statusRes = await stub.fetch(new Request("http://internal/status"));
       const st = (await statusRes.json()) as any;
       if (st.status === "idle") break;
     }
 
-    const doId = env.SESSION_DO.idFromName(session.id);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(session.id);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
     const ws = wsRes.webSocket!;
     ws.accept();

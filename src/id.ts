@@ -1,14 +1,17 @@
-import { nanoid } from "nanoid";
+import { customAlphabet } from "nanoid";
 
-export const generateId = () => nanoid(16);
-export const generateAgentId = () => `agent_${nanoid(16)}`;
-export const generateEnvId = () => `env_${nanoid(16)}`;
-export const generateSessionId = () => `sess_${nanoid(16)}`;
-export const generateVaultId = () => `vlt_${nanoid(16)}`;
-export const generateCredentialId = () => `cred_${nanoid(16)}`;
-export const generateMemoryStoreId = () => `memstore_${nanoid(16)}`;
-export const generateMemoryId = () => `mem_${nanoid(16)}`;
-export const generateMemoryVersionId = () => `memver_${nanoid(16)}`;
-export const generateFileId = () => `file_${nanoid(16)}`;
-export const generateResourceId = () => `sesrsc_${nanoid(16)}`;
-export const generateEventId = () => `evt_${nanoid(16)}`;
+// Lowercase + digits only — safe for Docker tags, wrangler names, URLs
+const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
+
+export const generateId = () => nanoid();
+export const generateAgentId = () => `agent-${nanoid()}`;
+export const generateEnvId = () => `env-${nanoid()}`;
+export const generateSessionId = () => `sess-${nanoid()}`;
+export const generateVaultId = () => `vlt-${nanoid()}`;
+export const generateCredentialId = () => `cred-${nanoid()}`;
+export const generateMemoryStoreId = () => `memstore-${nanoid()}`;
+export const generateMemoryId = () => `mem-${nanoid()}`;
+export const generateMemoryVersionId = () => `memver-${nanoid()}`;
+export const generateFileId = () => `file-${nanoid()}`;
+export const generateResourceId = () => `sesrsc-${nanoid()}`;
+export const generateEventId = () => `evt-${nanoid()}`;

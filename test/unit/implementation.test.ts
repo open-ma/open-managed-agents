@@ -356,11 +356,11 @@ describe("Outbound Worker registration", () => {
     expect(typeof outboundByHost).toBe("function");
   });
 
-  it("outbound and outboundByHost are re-exported from index", async () => {
-    // Verify the exports exist in the main entry point
-    const index = await import("../../src/index");
-    expect(typeof index.outbound).toBe("function");
-    expect(typeof index.outboundByHost).toBe("function");
+  it("outbound and outboundByHost are re-exported from sandbox worker", async () => {
+    // Verify the exports exist in the sandbox worker entry point
+    const sandboxWorker = await import("../../sandbox-worker/index");
+    expect(typeof sandboxWorker.outbound).toBe("function");
+    expect(typeof sandboxWorker.outboundByHost).toBe("function");
   });
 });
 

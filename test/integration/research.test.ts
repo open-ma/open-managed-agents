@@ -526,8 +526,8 @@ describe("Outcomes", () => {
     await new Promise((r) => setTimeout(r, 100));
 
     // Connect via WebSocket to replay events and verify outcome was stored
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(sessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );
@@ -588,8 +588,8 @@ describe("Outcomes", () => {
     await new Promise((r) => setTimeout(r, 500));
 
     // Connect via WebSocket to verify the harness did run
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(sessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );
@@ -649,8 +649,8 @@ describe("Outcomes", () => {
 
     await new Promise((r) => setTimeout(r, 100));
 
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
+    const doId = env.SESSION_DO!.idFromName(sessionId);
+    const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
       new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
     );
