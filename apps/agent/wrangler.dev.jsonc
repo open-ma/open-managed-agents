@@ -1,0 +1,42 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "sandbox-default",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "containers": [
+    {
+      "class_name": "Sandbox",
+      "image": "../../node_modules/@cloudflare/sandbox/Dockerfile",
+      "instance_type": "lite",
+      "max_instances": 5
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "SESSION_DO", "class_name": "SessionDO" },
+      { "name": "SANDBOX", "class_name": "Sandbox" }
+    ]
+  },
+
+  // Same KV as main worker — share agent/env/session config
+  "kv_namespaces": [
+    { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
+  ],
+
+  "r2_buckets": [
+    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" }
+  ],
+
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["SessionDO", "Sandbox"]
+    }
+  ],
+
+  "limits": { "cpu_ms": 300000 },
+  "observability": { "enabled": true }
+}
