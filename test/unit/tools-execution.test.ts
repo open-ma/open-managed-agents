@@ -1,7 +1,8 @@
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { buildTools, buildMemoryTools } from "../../src/harness/tools";
-import { StubSandbox } from "../../src/runtime/sandbox";
+import { TestSandbox } from "../../src/runtime/sandbox";
+import { InMemoryHistory, eventsToMessages } from "../../src/runtime/history";
 import type { AgentConfig } from "../../src/types";
 
 // ============================================================
@@ -50,7 +51,7 @@ const TOOL_EXEC_OPTS = {
 // ============================================================
 describe("Built-in tool execution", () => {
   it("bash tool execute returns sandbox result", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.bash.execute(
@@ -81,7 +82,7 @@ describe("Built-in tool execution", () => {
   });
 
   it("read tool calls readFile with path", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.read.execute(
@@ -89,11 +90,11 @@ describe("Built-in tool execution", () => {
       TOOL_EXEC_OPTS
     );
     expect(result).toContain("/workspace/readme.md");
-    expect(result).toContain("stub");
+    expect(result).toContain("test");
   });
 
   it("write tool calls writeFile with path and content", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.write.execute(
@@ -103,19 +104,25 @@ describe("Built-in tool execution", () => {
     expect(result).toBe("ok");
   });
 
-  it("edit tool constructs python command", async () => {
-    let capturedCmd = "";
+  it("edit tool uses readFile and writeFile", async () => {
+    let readPath = "";
+    let writtenPath = "";
+    let writtenContent = "";
     const sandbox: any = {
-      exec: async (cmd: string) => {
-        capturedCmd = cmd;
-        return "exit=0\nok";
+      exec: async (cmd: string) => "exit=0\n",
+      readFile: async (path: string) => {
+        readPath = path;
+        return "hello foo world";
       },
-      readFile: async () => "",
-      writeFile: async () => "ok",
+      writeFile: async (path: string, content: string) => {
+        writtenPath = path;
+        writtenContent = content;
+        return "ok";
+      },
     };
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
-    await tools.edit.execute(
+    const result = await tools.edit.execute(
       {
         path: "/workspace/file.py",
         old_string: "foo",
@@ -123,13 +130,13 @@ describe("Built-in tool execution", () => {
       },
       TOOL_EXEC_OPTS
     );
-    expect(capturedCmd).toContain("python3");
-    expect(capturedCmd).toContain("/workspace/file.py");
-    expect(capturedCmd).toContain("foo");
-    expect(capturedCmd).toContain("bar");
+    expect(readPath).toBe("/workspace/file.py");
+    expect(writtenPath).toBe("/workspace/file.py");
+    expect(writtenContent).toBe("hello bar world");
+    expect(result).toBe("ok");
   });
 
-  it("glob tool uses find command", async () => {
+  it("glob tool uses bash globstar", async () => {
     let capturedCmd = "";
     const sandbox: any = {
       exec: async (cmd: string) => {
@@ -145,7 +152,7 @@ describe("Built-in tool execution", () => {
       { pattern: "**/*.ts", path: "/workspace/src" },
       TOOL_EXEC_OPTS
     );
-    expect(capturedCmd).toContain("find");
+    expect(capturedCmd).toContain("globstar");
     expect(capturedCmd).toContain("/workspace/src");
     expect(capturedCmd).toContain("**/*.ts");
   });
@@ -211,7 +218,7 @@ describe("Built-in tool execution", () => {
   });
 
   it("web_search without TAVILY_API_KEY returns error message", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.web_search.execute(
@@ -222,7 +229,7 @@ describe("Built-in tool execution", () => {
   });
 
   it("web_search with TAVILY_API_KEY is defined", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       TAVILY_API_KEY: "tvly-test-key",
     });
@@ -248,7 +255,7 @@ describe("Tool enable/disable combinations", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.bash).toBeDefined();
     expect(tools.read).toBeDefined();
@@ -272,7 +279,7 @@ describe("Tool enable/disable combinations", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.bash).toBeUndefined();
     expect(tools.read).toBeUndefined();
@@ -297,7 +304,7 @@ describe("Tool enable/disable combinations", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.bash).toBeDefined();
     expect(tools.grep).toBeDefined();
@@ -328,7 +335,7 @@ describe("Tool enable/disable combinations", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.bash).toBeUndefined();
     expect(tools.read).toBeUndefined();
@@ -353,7 +360,7 @@ describe("Tool enable/disable combinations", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.web_fetch).toBeDefined();
     expect(tools.web_search).toBeDefined();
@@ -379,7 +386,7 @@ describe("Tool enable/disable combinations", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.read).toBeDefined();
     expect(tools.write).toBeDefined();
@@ -393,7 +400,7 @@ describe("Tool enable/disable combinations", () => {
 
   it("no tools config results in all 8 enabled", async () => {
     const config = makeAgentConfig({ tools: [] });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.bash).toBeDefined();
     expect(tools.read).toBeDefined();
@@ -422,7 +429,7 @@ describe("Custom tools", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.get_weather).toBeDefined();
   });
@@ -438,7 +445,7 @@ describe("Custom tools", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.deploy_app).toBeDefined();
     // Custom tools created via tool() without execute have no execute property
@@ -463,7 +470,7 @@ describe("Custom tools", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     // Built-in tools present
     expect(tools.bash).toBeDefined();
@@ -484,7 +491,7 @@ describe("Custom tools", () => {
         },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     // All built-in tools should be present since there is no toolset config
     // (getEnabledTools returns allTools when no ToolsetConfig is found)
@@ -503,7 +510,7 @@ describe("MCP tools", () => {
         { name: "github", type: "sse", url: "https://mcp.github.com/sse" },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.mcp_github_list_tools).toBeDefined();
     expect(tools.mcp_github_call).toBeDefined();
@@ -516,7 +523,7 @@ describe("MCP tools", () => {
         { name: "slack", type: "sse", url: "https://mcp.slack.com/sse" },
       ],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
 
     expect(tools.mcp_github_list_tools).toBeDefined();
     expect(tools.mcp_github_call).toBeDefined();
@@ -665,5 +672,207 @@ describe("Memory tools", () => {
     );
     const afterItems = JSON.parse(afterDelete);
     expect(afterItems).toHaveLength(0);
+  });
+});
+
+// ============================================================
+// 5. New features: truncation, edit safety, glob fix, custom tool schema, event IDs
+// ============================================================
+describe("Tool result truncation", () => {
+  it("truncates results exceeding MAX_TOOL_RESULT_CHARS", async () => {
+    const bigOutput = "x".repeat(60000);
+    const sandbox: any = {
+      exec: async () => bigOutput,
+      readFile: async () => bigOutput,
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.bash.execute(
+      { command: "cat bigfile" },
+      TOOL_EXEC_OPTS
+    );
+    expect(result.length).toBeLessThan(60000);
+    expect(result).toContain("truncated");
+    expect(result).toContain("60000");
+  });
+
+  it("does not truncate small results", async () => {
+    const sandbox = new TestSandbox();
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.bash.execute(
+      { command: "echo hello" },
+      TOOL_EXEC_OPTS
+    );
+    expect(result).not.toContain("truncated");
+  });
+
+  it("truncates read tool results", async () => {
+    const bigContent = "y".repeat(60000);
+    const sandbox: any = {
+      exec: async () => "exit=0",
+      readFile: async () => bigContent,
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.read.execute(
+      { path: "/big.txt" },
+      TOOL_EXEC_OPTS
+    );
+    expect(result.length).toBeLessThan(60000);
+    expect(result).toContain("truncated");
+  });
+});
+
+describe("Edit tool safety", () => {
+  it("handles strings with triple quotes safely", async () => {
+    let writtenContent = "";
+    const sandbox: any = {
+      exec: async () => "exit=0",
+      readFile: async () => "before '''dangerous''' after",
+      writeFile: async (_p: string, content: string) => {
+        writtenContent = content;
+        return "ok";
+      },
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.edit.execute(
+      {
+        path: "/test.py",
+        old_string: "'''dangerous'''",
+        new_string: "'''safe'''",
+      },
+      TOOL_EXEC_OPTS
+    );
+    expect(result).toBe("ok");
+    expect(writtenContent).toBe("before '''safe''' after");
+  });
+
+  it("returns error when old_string not found", async () => {
+    const sandbox: any = {
+      exec: async () => "exit=0",
+      readFile: async () => "file content here",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.edit.execute(
+      {
+        path: "/test.py",
+        old_string: "nonexistent",
+        new_string: "replacement",
+      },
+      TOOL_EXEC_OPTS
+    );
+    expect(result).toContain("not found");
+  });
+});
+
+describe("Custom tool input_schema", () => {
+  it("converts JSON Schema properties to Zod parameters", async () => {
+    const config = makeAgentConfig({
+      tools: [
+        { type: "agent_toolset_20260401" },
+        {
+          type: "custom",
+          name: "my_tool",
+          description: "A custom tool",
+          input_schema: {
+            type: "object",
+            properties: {
+              query: { type: "string", description: "Search query" },
+              limit: { type: "number", description: "Max results" },
+              verbose: { type: "boolean" },
+            },
+            required: ["query"],
+          },
+        } as any,
+      ],
+    });
+    const tools = await buildTools(config, new TestSandbox());
+
+    expect(tools.my_tool).toBeDefined();
+    // Custom tools should not have execute (they are client-handled)
+    expect(tools.my_tool.execute).toBeUndefined();
+    // The tool should have a parameters schema
+    expect(tools.my_tool.parameters).toBeDefined();
+  });
+
+  it("uses empty schema when input_schema is not provided", async () => {
+    const config = makeAgentConfig({
+      tools: [
+        { type: "agent_toolset_20260401" },
+        {
+          type: "custom",
+          name: "simple_tool",
+          description: "A simple custom tool",
+          input_schema: {},
+        } as any,
+      ],
+    });
+    const tools = await buildTools(config, new TestSandbox());
+    expect(tools.simple_tool).toBeDefined();
+  });
+});
+
+describe("Event IDs on history", () => {
+  it("events get stamped with id and processed_at on append", () => {
+    const history = new InMemoryHistory();
+
+    const event: any = {
+      type: "user.message",
+      content: [{ type: "text", text: "hello" }],
+    };
+    history.append(event);
+
+    const events = history.getEvents();
+    expect(events[0].id).toBeDefined();
+    expect((events[0] as any).id).toMatch(/^evt_/);
+    expect((events[0] as any).processed_at).toBeDefined();
+  });
+
+  it("preserves existing id if already set", () => {
+    const history = new InMemoryHistory();
+
+    const event: any = {
+      type: "user.message",
+      id: "evt_custom_123",
+      content: [{ type: "text", text: "hello" }],
+    };
+    history.append(event);
+
+    const events = history.getEvents();
+    expect((events[0] as any).id).toBe("evt_custom_123");
+  });
+});
+
+describe("MCP event types in eventsToMessages", () => {
+  it("converts agent.mcp_tool_use and agent.mcp_tool_result to messages", () => {
+    const events: any[] = [
+      { type: "user.message", content: [{ type: "text", text: "use mcp" }] },
+      {
+        type: "agent.mcp_tool_use",
+        id: "tc_mcp_1",
+        mcp_server_name: "github",
+        name: "mcp_github_call",
+        input: { tool_name: "get_issue", arguments: { number: 42 } },
+      },
+      {
+        type: "agent.mcp_tool_result",
+        mcp_tool_use_id: "tc_mcp_1",
+        content: '{"title": "Bug fix"}',
+      },
+      { type: "agent.message", content: [{ type: "text", text: "Done" }] },
+    ];
+    const messages = eventsToMessages(events);
+    // user, assistant (tool-call), tool (tool-result), assistant (text)
+    expect(messages).toHaveLength(4);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+    expect(messages[2].role).toBe("tool");
+    expect(messages[3].role).toBe("assistant");
   });
 });

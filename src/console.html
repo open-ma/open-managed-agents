@@ -6,6 +6,9 @@
 <title>Managed Agents Console</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js"></script>
+<link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/highlight.js@11/styles/github.min.css">
+<script src="https://cdn.jsdelivr.net/npm/highlight.js@11/highlight.min.js"></script>
 <style>
 *,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
 :root{
@@ -169,6 +172,22 @@ td .status.archived::before{background:var(--fg-faint)}
 
 /* Chat input */
 .chat-input{padding:16px 40px 20px;border-top:1px solid var(--border-light);display:flex;gap:8px;background:var(--bg)}
+
+/* Markdown in agent bubbles */
+.bubble p{margin:0 0 .5em}
+.bubble p:last-child{margin-bottom:0}
+.bubble pre{background:var(--bg-deep);border:1px solid var(--border);border-radius:var(--radius);padding:10px 12px;overflow-x:auto;margin:.5em 0;font-size:.82rem}
+.bubble code{font-family:'SF Mono',Menlo,Consolas,monospace;font-size:.85em;background:var(--bg-deep);padding:1px 4px;border-radius:3px}
+.bubble pre code{background:none;padding:0;font-size:inherit}
+.bubble ul,.bubble ol{padding-left:1.4em;margin:.4em 0}
+.bubble li{margin:.2em 0}
+.bubble h1,.bubble h2,.bubble h3,.bubble h4{font-family:var(--font-display);margin:.6em 0 .3em;font-size:1em;font-weight:600}
+.bubble h1{font-size:1.15em}
+.bubble h2{font-size:1.05em}
+.bubble blockquote{border-left:3px solid var(--border);padding-left:12px;margin:.5em 0;color:var(--fg-muted)}
+.bubble table{border-collapse:collapse;margin:.5em 0;font-size:.85em;width:100%}
+.bubble th,.bubble td{border:1px solid var(--border);padding:4px 8px;text-align:left}
+.bubble th{background:var(--bg-deep)}
 .chat-input input{flex:1;padding:10px 14px;border:1px solid var(--border);border-radius:var(--radius-lg);font-size:.9rem;font-family:var(--font-body);outline:none;transition:border-color var(--transition)}
 .chat-input input:focus{border-color:var(--accent)}
 .chat-input button{flex-shrink:0}
@@ -303,6 +322,20 @@ td .status.archived::before{background:var(--fg-faint)}
   </div>
 
   <!-- Session Detail -->
+  <div id="page-agent-detail" class="page hidden">
+    <div class="page-header">
+      <div>
+        <a href="#" onclick="navigate('agents');return false" style="color:var(--fg-muted);font-size:.85rem;text-decoration:none">&larr; Agents</a>
+        <h1 id="agent-detail-name"></h1>
+      </div>
+      <div style="display:flex;gap:8px">
+        <button class="btn" onclick="archiveAgent()">Archive</button>
+        <button class="btn" style="color:var(--red)" onclick="deleteAgent()">Delete</button>
+      </div>
+    </div>
+    <div id="agent-detail-content"></div>
+  </div>
+
   <div id="page-session-detail" class="session-view hidden">
     <div class="session-top">
       <a href="#" class="back" onclick="navigate('sessions');return false">
@@ -502,7 +535,10 @@ function navigate(page, param) {
   document.querySelectorAll('.sidebar a').forEach(a => a.classList.toggle('active', a.dataset.page === page));
   document.querySelectorAll('[id^="page-"]').forEach(p => p.classList.add('hidden'));
 
-  if (page === 'session-detail') {
+  if (page === 'agent-detail') {
+    document.getElementById('page-agent-detail').classList.remove('hidden');
+    openAgentDetail(param);
+  } else if (page === 'session-detail') {
     document.getElementById('page-session-detail').classList.remove('hidden');
     openSession(param);
   } else {
@@ -594,9 +630,9 @@ function renderAgentsTable() {
 
   el.innerHTML = `<div class="table-wrap"><table>
     <thead><tr><th>ID</th><th>Name</th><th>Model</th><th>Status</th><th>Created</th><th>Last updated</th></tr></thead>
-    <tbody>${pageData.map(a => `<tr>
-      <td class="mono">${a.id}</td><td>${esc(a.name)}</td><td>${a.model}</td>
-      <td><span class="status ${a.status || 'active'}">${a.status || 'active'}</span></td>
+    <tbody>${pageData.map(a => `<tr style="cursor:pointer" onclick="navigate('agent-detail','${a.id}')">
+      <td class="mono">${a.id}</td><td>${esc(a.name)}</td><td>${typeof a.model === 'string' ? a.model : a.model?.id || ''}</td>
+      <td><span class="status ${a.archived_at ? 'archived' : 'active'}">${a.archived_at ? 'archived' : 'active'}</span></td>
       <td>${fmtDate(a.created_at)}</td><td>${fmtDate(a.updated_at || a.created_at)}</td>
     </tr>`).join('')}</tbody></table></div>
     ${renderPagination(data.length, agentsPage, totalPages, 'agentsPage', 'renderAgentsTable')}`;
@@ -813,16 +849,99 @@ function renderVaultsTable() {
     ${renderPagination(data.length, vaultsPage, totalPages, 'vaultsPage', 'renderVaultsTable')}`;
 }
 
+// --- Agent Detail ---
+let currentAgentId = null;
+async function openAgentDetail(id) {
+  currentAgentId = id;
+  document.getElementById('agent-detail-name').textContent = 'Loading...';
+  document.getElementById('agent-detail-content').innerHTML = '';
+
+  try {
+    const agent = await api(`/v1/agents/${id}`);
+    document.getElementById('agent-detail-name').textContent = agent.name;
+
+    const toolsDisplay = (agent.tools || []).map(t => {
+      if (t.type === 'agent_toolset_20260401') {
+        let label = 'Agent Toolset';
+        if (t.configs?.length) label += ` (${t.configs.map(c => c.name).join(', ')})`;
+        return label;
+      }
+      if (t.type === 'custom') return `Custom: ${t.name}`;
+      return t.type;
+    }).join(', ') || 'None';
+
+    const model = typeof agent.model === 'string' ? agent.model : `${agent.model?.id} (${agent.model?.speed || 'standard'})`;
+
+    let versionsHtml = '';
+    try {
+      const versions = await api(`/v1/agents/${id}/versions`);
+      if (versions.data?.length) {
+        versionsHtml = `<h3 style="margin-top:28px;font-family:var(--font-display)">Version History</h3>
+          <div class="table-wrap" style="margin-top:12px"><table>
+          <thead><tr><th>Version</th><th>System Prompt</th><th>Model</th></tr></thead>
+          <tbody>${versions.data.map(v => `<tr>
+            <td>v${v.version}</td>
+            <td style="max-width:400px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${esc(v.system || '')}</td>
+            <td>${typeof v.model === 'string' ? v.model : v.model?.id || ''}</td>
+          </tr>`).join('')}</tbody></table></div>`;
+      }
+    } catch {}
+
+    document.getElementById('agent-detail-content').innerHTML = `
+      <div style="display:grid;grid-template-columns:160px 1fr;gap:8px 16px;max-width:700px">
+        <div style="color:var(--fg-muted)">ID</div><div class="mono">${agent.id}</div>
+        <div style="color:var(--fg-muted)">Model</div><div>${model}</div>
+        <div style="color:var(--fg-muted)">Harness</div><div>${agent.harness || 'default'}</div>
+        <div style="color:var(--fg-muted)">Version</div><div>v${agent.version}</div>
+        <div style="color:var(--fg-muted)">Tools</div><div>${toolsDisplay}</div>
+        <div style="color:var(--fg-muted)">Created</div><div>${fmtDate(agent.created_at)}</div>
+        <div style="color:var(--fg-muted)">Updated</div><div>${fmtDate(agent.updated_at || agent.created_at)}</div>
+        ${agent.archived_at ? `<div style="color:var(--fg-muted)">Archived</div><div>${fmtDate(agent.archived_at)}</div>` : ''}
+      </div>
+      ${agent.system ? `<h3 style="margin-top:28px;font-family:var(--font-display)">System Prompt</h3>
+        <pre style="margin-top:8px;padding:16px;background:var(--bg-alt);border-radius:var(--radius);font-size:.82rem;white-space:pre-wrap;max-height:300px;overflow-y:auto;border:1px solid var(--border)">${esc(agent.system)}</pre>` : ''}
+      ${versionsHtml}`;
+  } catch (e) {
+    document.getElementById('agent-detail-content').innerHTML = `<div class="error-event">Failed to load agent: ${e.message}</div>`;
+  }
+}
+
+async function archiveAgent() {
+  if (!currentAgentId || !confirm('Archive this agent?')) return;
+  await api(`/v1/agents/${currentAgentId}/archive`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+  navigate('agents');
+}
+
+async function deleteAgent() {
+  if (!currentAgentId || !confirm('Delete this agent? This cannot be undone.')) return;
+  await api(`/v1/agents/${currentAgentId}`, { method: 'DELETE' });
+  navigate('agents');
+}
+
 // --- Session Detail ---
-function openSession(id) {
+async function openSession(id) {
   currentSessionId = id;
   const s = sessionsCache.find(s => s.id === id) || { id, title: id, agent_id: '\u2014' };
   document.getElementById('session-title').textContent = s.title || s.id;
   document.getElementById('session-meta').textContent = `Agent: ${s.agent_id}`;
   document.getElementById('events-scroll').innerHTML = '';
   document.getElementById('typing-indicator').classList.add('hidden');
+  renderedEventKeys.clear();
 
-  // Connect SSE
+  // Load historical events first
+  try {
+    const histRes = await fetch(`/v1/sessions/${id}/events?limit=1000&order=asc`, {
+      headers: { 'x-api-key': getKey(), 'Accept': 'application/json' }
+    });
+    if (histRes.ok) {
+      const histBody = await histRes.json();
+      for (const evt of (histBody.data || [])) {
+        renderEvent(evt.data || evt);
+      }
+    }
+  } catch (e) { console.error('Failed to load history:', e); }
+
+  // Then connect SSE for new events
   if (eventSource) { eventSource.close(); eventSource = null; }
   const url = `/v1/sessions/${id}/events`;
   eventSource = new EventSource(url); // Note: EventSource doesn't support custom headers natively
@@ -834,7 +953,7 @@ function openSession(id) {
 async function connectSSE(sessionId) {
   if (eventSource) { eventSource.close(); eventSource = null; }
   try {
-    const res = await fetch(`/v1/sessions/${sessionId}/events`, {
+    const res = await fetch(`/v1/sessions/${sessionId}/events/stream`, {
       headers: { 'x-api-key': getKey() }
     });
     const reader = res.body.getReader();
@@ -861,7 +980,13 @@ async function connectSSE(sessionId) {
   } catch (e) { console.error('SSE error:', e); }
 }
 
+const renderedEventKeys = new Set();
 function renderEvent(event) {
+  // Deduplicate: skip events already rendered from history load
+  const key = event.type + ':' + JSON.stringify(event.content || event.id || event.tool_use_id || '').slice(0, 100);
+  if (renderedEventKeys.has(key)) return;
+  renderedEventKeys.add(key);
+
   const scroll = document.getElementById('events-scroll');
   const typing = document.getElementById('typing-indicator');
 
@@ -877,8 +1002,13 @@ function renderEvent(event) {
 
     case 'agent.message':
       div.classList.add('agent');
-      const text = (event.content || []).map(b => esc(b.text || '')).join('');
-      div.innerHTML = `<div class="event-label">Agent</div><div class="bubble">${text}</div>`;
+      const rawText = (event.content || []).map(b => b.text || '').join('');
+      const rendered = typeof marked !== 'undefined' ? marked.parse(rawText) : esc(rawText);
+      div.innerHTML = `<div class="event-label">Agent</div><div class="bubble">${rendered}</div>`;
+      // Highlight code blocks
+      div.querySelectorAll('pre code').forEach(block => {
+        if (typeof hljs !== 'undefined') hljs.highlightElement(block);
+      });
       typing.classList.add('hidden');
       break;
 

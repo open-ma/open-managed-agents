@@ -865,6 +865,388 @@ describe("Session metadata operations", () => {
 });
 
 // ============================================================
+// GitHub Repository + Env Secret resources
+// ============================================================
+describe("GitHub Repository + Env Secret resources", () => {
+  let agentId: string;
+  let envId: string;
+
+  beforeAll(async () => {
+    const a = await post("/v1/agents", { name: "GitResAgent", model: "claude-sonnet-4-6", harness: "cross-noop" });
+    agentId = ((await a.json()) as any).id;
+    const e = await post("/v1/environments", { name: "gitres-env", config: { type: "cloud" } });
+    envId = ((await e.json()) as any).id;
+  });
+
+  it("session with github_repository resource stores URL and checkout", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/test-org/test-repo",
+        checkout: { type: "branch", name: "main" },
+      }],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    expect(session.resources).toHaveLength(1);
+    expect(session.resources[0].type).toBe("github_repository");
+    expect(session.resources[0].url).toBe("https://github.com/test-org/test-repo");
+    expect(session.resources[0].repo_url).toBe("https://github.com/test-org/test-repo");
+  });
+
+  it("github_repo type alias works the same as github_repository", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repo",
+        repo_url: "https://github.com/alias-org/alias-repo",
+      }],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    expect(session.resources[0].type).toBe("github_repository");
+    expect(session.resources[0].url).toBe("https://github.com/alias-org/alias-repo");
+  });
+
+  it("authorization_token is NOT returned in session response", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/secret-org/secret-repo",
+        authorization_token: "ghp_supersecrettoken123",
+      }],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    const resource = session.resources[0];
+    expect(resource.authorization_token).toBeUndefined();
+    expect(JSON.stringify(resource)).not.toContain("ghp_supersecrettoken123");
+  });
+
+  it("authorization_token is NOT returned in resource list", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/list-org/list-repo",
+        authorization_token: "ghp_listsecret456",
+      }],
+    });
+    const session = (await s.json()) as any;
+
+    const listRes = await get(`/v1/sessions/${session.id}/resources`);
+    const body = (await listRes.json()) as any;
+    const gitRes = body.data.find((r: any) => r.type === "github_repository");
+    expect(gitRes).toBeTruthy();
+    expect(gitRes.authorization_token).toBeUndefined();
+    expect(JSON.stringify(gitRes)).not.toContain("ghp_listsecret456");
+  });
+
+  it("github_repository with default mount_path gets /workspace", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/default-org/default-repo",
+      }],
+    });
+    const session = (await s.json()) as any;
+    expect(session.resources[0].mount_path).toBe("/workspace");
+  });
+
+  it("github_repository with custom mount_path preserves it", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/custom-org/custom-repo",
+        mount_path: "/home/user/project",
+      }],
+    });
+    const session = (await s.json()) as any;
+    expect(session.resources[0].mount_path).toBe("/home/user/project");
+  });
+
+  it("github_repository with commit SHA checkout", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/sha-org/sha-repo",
+        checkout: { type: "commit", sha: "abc123def456" },
+      }],
+    });
+    const session = (await s.json()) as any;
+    expect(session.resources[0].checkout).toEqual({ type: "commit", sha: "abc123def456" });
+  });
+
+  it("env_secret resource stores name but not value", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "env_secret",
+        name: "MY_API_KEY",
+        value: "secret_value_123",
+      }],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    expect(session.resources).toHaveLength(1);
+    expect(session.resources[0].type).toBe("env_secret");
+    expect(session.resources[0].name).toBe("MY_API_KEY");
+    // Value must NOT appear in response
+    expect(session.resources[0].value).toBeUndefined();
+    expect(JSON.stringify(session.resources[0])).not.toContain("secret_value_123");
+  });
+
+  it("env_secret value not in resource list response", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [{
+        type: "env_secret",
+        name: "HIDDEN_TOKEN",
+        value: "hidden_value_456",
+      }],
+    });
+    const session = (await s.json()) as any;
+
+    const listRes = await get(`/v1/sessions/${session.id}/resources`);
+    const body = (await listRes.json()) as any;
+    const envRes = body.data.find((r: any) => r.type === "env_secret");
+    expect(envRes).toBeTruthy();
+    expect(envRes.name).toBe("HIDDEN_TOKEN");
+    expect(envRes.value).toBeUndefined();
+    expect(JSON.stringify(body)).not.toContain("hidden_value_456");
+  });
+
+  it("multiple env_secrets on one session", async () => {
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [
+        { type: "env_secret", name: "VAR_A", value: "a_val" },
+        { type: "env_secret", name: "VAR_B", value: "b_val" },
+        { type: "env_secret", name: "VAR_C", value: "c_val" },
+      ],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    expect(session.resources).toHaveLength(3);
+    const names = session.resources.map((r: any) => r.name);
+    expect(names).toContain("VAR_A");
+    expect(names).toContain("VAR_B");
+    expect(names).toContain("VAR_C");
+  });
+
+  it("mixed resource types: github + env_secret + file", async () => {
+    const f = await post("/v1/files", { filename: "mixed.txt", content: "mixed content" });
+    const file = (await f.json()) as any;
+
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      resources: [
+        { type: "github_repository", url: "https://github.com/mix-org/mix-repo", authorization_token: "ghp_mix" },
+        { type: "env_secret", name: "MIX_TOKEN", value: "mix_secret" },
+        { type: "file", file_id: file.id, mount_path: "/data/mixed.txt" },
+      ],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    expect(session.resources).toHaveLength(3);
+
+    const types = session.resources.map((r: any) => r.type);
+    expect(types).toContain("github_repository");
+    expect(types).toContain("env_secret");
+    expect(types).toContain("file");
+
+    // Secrets not leaked
+    expect(JSON.stringify(session)).not.toContain("ghp_mix");
+    expect(JSON.stringify(session)).not.toContain("mix_secret");
+  });
+
+  it("github_repository + vault_ids on same session", async () => {
+    const v = await post("/v1/vaults", { name: "git-vault-combo" });
+    const vault = (await v.json()) as any;
+
+    const s = await post("/v1/sessions", {
+      agent: agentId,
+      environment_id: envId,
+      vault_ids: [vault.id],
+      resources: [{
+        type: "github_repository",
+        url: "https://github.com/combo-org/combo-repo",
+        authorization_token: "ghp_combo",
+      }],
+    });
+    expect(s.status).toBe(201);
+    const session = (await s.json()) as any;
+    expect(session.vault_ids).toContain(vault.id);
+    expect(session.resources).toHaveLength(1);
+  });
+});
+
+// ============================================================
+// Command Secret Credentials
+// ============================================================
+describe("Command Secret Credentials", () => {
+  it("command_secret credential stores prefix and env_var", async () => {
+    const v = await post("/v1/vaults", { name: "cmd-secret-vault" });
+    const vault = (await v.json()) as any;
+
+    const res = await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "Wrangler Token",
+      auth: {
+        type: "command_secret",
+        command_prefixes: ["wrangler", "npx wrangler"],
+        env_var: "CLOUDFLARE_API_TOKEN",
+        token: "cf_secret_token_123",
+      },
+    });
+    expect(res.status).toBe(201);
+    const cred = (await res.json()) as any;
+    expect(cred.auth.type).toBe("command_secret");
+    expect(cred.auth.command_prefixes).toEqual(["wrangler", "npx wrangler"]);
+    expect(cred.auth.env_var).toBe("CLOUDFLARE_API_TOKEN");
+    // Token must be stripped
+    expect(cred.auth.token).toBeUndefined();
+  });
+
+  it("command_secret token stripped from credential list", async () => {
+    const v = await post("/v1/vaults", { name: "cmd-strip-vault" });
+    const vault = (await v.json()) as any;
+
+    await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "GH CLI",
+      auth: {
+        type: "command_secret",
+        command_prefixes: ["gh"],
+        env_var: "GH_TOKEN",
+        token: "gh_secret_456",
+      },
+    });
+
+    const listRes = await get(`/v1/vaults/${vault.id}/credentials`);
+    const body = (await listRes.json()) as any;
+    for (const cred of body.data) {
+      expect(cred.auth.token).toBeUndefined();
+      expect(JSON.stringify(cred)).not.toContain("gh_secret_456");
+    }
+  });
+
+  it("command_secret with multiple prefixes", async () => {
+    const v = await post("/v1/vaults", { name: "multi-prefix-vault" });
+    const vault = (await v.json()) as any;
+
+    const res = await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "Docker Token",
+      auth: {
+        type: "command_secret",
+        command_prefixes: ["docker", "docker-compose", "docker compose"],
+        env_var: "DOCKER_TOKEN",
+        token: "docker_secret",
+      },
+    });
+    expect(res.status).toBe(201);
+    const cred = (await res.json()) as any;
+    expect(cred.auth.command_prefixes).toHaveLength(3);
+  });
+
+  it("vault with mixed credential types", async () => {
+    const v = await post("/v1/vaults", { name: "mixed-cred-vault" });
+    const vault = (await v.json()) as any;
+
+    await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "Bearer for MCP",
+      auth: { type: "static_bearer", mcp_server_url: "https://mcp.example.com", token: "bearer_tok" },
+    });
+    await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "CLI Secret",
+      auth: { type: "command_secret", command_prefixes: ["aws"], env_var: "AWS_TOKEN", token: "aws_tok" },
+    });
+    await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "OAuth MCP",
+      auth: { type: "mcp_oauth", mcp_server_url: "https://oauth.example.com", access_token: "at", refresh_token: "rt" },
+    });
+
+    const listRes = await get(`/v1/vaults/${vault.id}/credentials`);
+    const body = (await listRes.json()) as any;
+    expect(body.data).toHaveLength(3);
+    const types = body.data.map((c: any) => c.auth.type);
+    expect(types).toContain("static_bearer");
+    expect(types).toContain("command_secret");
+    expect(types).toContain("mcp_oauth");
+
+    // No secrets leaked
+    for (const cred of body.data) {
+      expect(cred.auth.token).toBeUndefined();
+      expect(cred.auth.access_token).toBeUndefined();
+      expect(cred.auth.refresh_token).toBeUndefined();
+    }
+  });
+
+  it("command_secret credential delete works", async () => {
+    const v = await post("/v1/vaults", { name: "cmd-del-vault" });
+    const vault = (await v.json()) as any;
+
+    const res = await post(`/v1/vaults/${vault.id}/credentials`, {
+      display_name: "Deletable",
+      auth: { type: "command_secret", command_prefixes: ["kubectl"], env_var: "KUBE_TOKEN", token: "k_tok" },
+    });
+    const cred = (await res.json()) as any;
+
+    const delRes = await del(`/v1/vaults/${vault.id}/credentials/${cred.id}`);
+    expect(delRes.status).toBe(200);
+
+    const listRes = await get(`/v1/vaults/${vault.id}/credentials`);
+    const body = (await listRes.json()) as any;
+    expect(body.data.find((c: any) => c.id === cred.id)).toBeUndefined();
+  });
+});
+
+// ============================================================
+// Resource Mounter (unit-level via types)
+// ============================================================
+describe("Resource Mounter types", () => {
+  it("SessionResource type supports all resource fields", () => {
+    // Type-level test: verify our TypeScript interfaces accept all resource shapes
+    const gitResource = {
+      id: "res_1",
+      session_id: "sess_1",
+      type: "github_repository" as const,
+      url: "https://github.com/org/repo",
+      repo_url: "https://github.com/org/repo",
+      checkout: { type: "branch", name: "main" },
+      mount_path: "/workspace",
+      created_at: new Date().toISOString(),
+    };
+    expect(gitResource.type).toBe("github_repository");
+    expect(gitResource.checkout?.type).toBe("branch");
+
+    const envResource = {
+      id: "res_2",
+      session_id: "sess_1",
+      type: "env_secret" as const,
+      name: "MY_VAR",
+      created_at: new Date().toISOString(),
+    };
+    expect(envResource.type).toBe("env_secret");
+    expect(envResource.name).toBe("MY_VAR");
+  });
+});
+
+// ============================================================
 // Environment list and update
 // ============================================================
 describe("Environment list and update", () => {

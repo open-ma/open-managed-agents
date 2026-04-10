@@ -3,6 +3,7 @@ import type { Env } from "../env";
 import type {
   AgentConfig,
   EnvironmentConfig,
+  CredentialConfig,
   SessionEvent,
   UserMessageEvent,
   UserInterruptEvent,
@@ -11,19 +12,33 @@ import type {
   UserDefineOutcomeEvent,
   OutcomeEvaluationEvent,
   AgentMessageEvent,
+  AgentToolUseEvent,
 } from "../types";
-import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor } from "../harness/interface";
+import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
 import { resolveModel } from "../harness/provider";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
+import { buildTools, buildMemoryTools } from "../harness/tools";
+import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
+import { mountResources } from "./resource-mounter";
 
 interface SessionInitParams {
   agent_id: string;
   environment_id: string;
   title: string;
   session_id?: string;
+}
+
+/**
+ * Pending tool call data stored in session metadata so that
+ * tool confirmation/custom tool result events can resume execution.
+ */
+interface PendingToolCall {
+  toolCallId: string;
+  toolName: string;
+  args: Record<string, unknown>;
 }
 
 /**
@@ -38,8 +53,10 @@ interface SessionInitParams {
 export class SessionDO extends DurableObject<Env> {
   private initialized = false;
   private sandbox: SandboxExecutor | null = null;
-  private sandboxWarmedUp = false;
+  private sandboxWarmupPromise: Promise<void> | null = null;
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
+  private currentAbortController: AbortController | null = null;
+  private backgroundTaskPollers = new Map<string, ReturnType<typeof setInterval>>();
 
   private ensureSchema() {
     if (this.initialized) return;
@@ -75,6 +92,32 @@ export class SessionDO extends DurableObject<Env> {
     );
   }
 
+  /**
+   * Alarm handler: runs the agent loop with full DO lifetime.
+   * Alarm handlers get 15 minutes wall-clock time (vs waitUntil's 30s).
+   * This is where the actual LLM calls + tool execution happens.
+   */
+  async alarm(): Promise<void> {
+    const pendingJson = this.getMeta("pending_user_message");
+    if (!pendingJson) return;
+
+    // Clear immediately to prevent re-processing on alarm retry
+    this.setMeta("pending_user_message", "");
+
+    try {
+      const userMessage = JSON.parse(pendingJson) as UserMessageEvent;
+      await this.processUserMessage(userMessage);
+    } catch (err) {
+      // If alarm processing fails, ensure we don't stay stuck in "processing"
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
+      history.append(errorEvent);
+      this.broadcastEvent(errorEvent);
+      this.setMeta("status", "idle");
+    }
+  }
+
   async fetch(request: Request): Promise<Response> {
     this.ensureSchema();
     const url = new URL(request.url);
@@ -97,8 +140,13 @@ export class SessionDO extends DurableObject<Env> {
 
     // DELETE /destroy — tear down sandbox and clean up
     if (request.method === "DELETE" && url.pathname === "/destroy") {
+      // Abort any running harness
+      if (this.currentAbortController) {
+        this.currentAbortController.abort();
+        this.currentAbortController = null;
+      }
       this.sandbox = null;
-      this.sandboxWarmedUp = false;
+      this.sandboxWarmupPromise = null;
       this.setMeta("status", "terminated");
 
       const terminatedEvent: SessionEvent = {
@@ -120,11 +168,20 @@ export class SessionDO extends DurableObject<Env> {
       if (body.type === "user.message") {
         history.append(body);
         this.setMeta("status", "processing");
-        this.ctx.waitUntil(this.processUserMessage(body));
+        // Store the message for alarm-based processing.
+        // Using alarm() ensures the agent loop runs with full DO lifetime
+        // (not limited by waitUntil's 30s after client disconnect).
+        this.setMeta("pending_user_message", JSON.stringify(body));
+        await this.ctx.storage.setAlarm(Date.now() + 1); // trigger immediately
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.interrupt") {
+        // Abort the running harness
+        if (this.currentAbortController) {
+          this.currentAbortController.abort();
+          this.currentAbortController = null;
+        }
         this.setMeta("status", "idle");
         const idleEvent: SessionEvent = { type: "session.status_idle" };
         history.append(body as UserInterruptEvent);
@@ -134,14 +191,37 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       if (body.type === "user.tool_confirmation") {
-        history.append(body as UserToolConfirmationEvent);
-        this.broadcastEvent(body as UserToolConfirmationEvent);
+        const confirmation = body as UserToolConfirmationEvent;
+        history.append(confirmation);
+        this.broadcastEvent(confirmation);
+
+        // Resume execution: execute the confirmed tool or inject denial, then re-run harness
+        this.setMeta("status", "processing");
+        this.ctx.waitUntil(this.handleToolConfirmation(confirmation, history));
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.custom_tool_result") {
-        history.append(body as UserCustomToolResultEvent);
-        this.broadcastEvent(body as UserCustomToolResultEvent);
+        const customResult = body as UserCustomToolResultEvent;
+        history.append(customResult);
+        this.broadcastEvent(customResult);
+
+        // Convert custom tool result to agent.tool_result and re-run harness
+        const toolResultEvent: SessionEvent = {
+          type: "agent.tool_result",
+          tool_use_id: customResult.custom_tool_use_id,
+          content: customResult.content.map(b => b.text).join(""),
+        };
+        history.append(toolResultEvent);
+        this.broadcastEvent(toolResultEvent);
+
+        // Re-run harness to continue the conversation
+        this.setMeta("status", "processing");
+        const resumeMsg: UserMessageEvent = {
+          type: "user.message",
+          content: [{ type: "text", text: "" }], // Empty message — history has the tool result
+        };
+        this.ctx.waitUntil(this.processUserMessage(resumeMsg, 0, true));
         return new Response(null, { status: 202 });
       }
 
@@ -274,16 +354,38 @@ export class SessionDO extends DurableObject<Env> {
   /**
    * Pre-warm the sandbox: run a no-op command to trigger container startup,
    * then install environment packages if configured.
+   * Returns a promise that resolves when warmup is complete.
+   * Multiple callers share the same promise — warmup runs exactly once.
    */
-  private async warmUpSandbox(): Promise<void> {
-    if (this.sandboxWarmedUp) return;
-    this.sandboxWarmedUp = true;
+  private warmUpSandbox(): Promise<void> {
+    if (!this.sandboxWarmupPromise) {
+      this.sandboxWarmupPromise = this.doWarmUpSandbox();
+    }
+    return this.sandboxWarmupPromise;
+  }
+
+  private async doWarmUpSandbox(): Promise<void> {
 
     try {
       const sandbox = this.getOrCreateSandbox();
 
-      // Trigger container startup with a simple command
-      await sandbox.exec("true");
+      // Trigger container startup with retries — local dev has a known race
+      // condition where the first request fails before container is ready.
+      // See: https://github.com/cloudflare/containers/issues/155
+      let ready = false;
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await sandbox.exec("true");
+          ready = true;
+          break;
+        } catch {
+          // Container not ready yet — wait and retry
+          await new Promise(r => setTimeout(r, 2000 * (attempt + 1)));
+        }
+      }
+      if (!ready) {
+        throw new Error("Sandbox container failed to start after 5 attempts");
+      }
 
       // Mount R2-backed /workspace for persistent file storage
       if (sandbox instanceof CloudflareSandbox) {
@@ -312,20 +414,48 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Mount file resources into sandbox
+      // Mount all session resources (files, git repos, env secrets)
       const sessionId = this.getMeta("session_id");
       if (sessionId) {
         const resourceList = await this.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
+        const resources: Array<Record<string, unknown>> = [];
+        const secretStore = new Map<string, string>();
+
         for (const k of resourceList.keys) {
           const data = await this.env.CONFIG_KV.get(k.name);
           if (!data) continue;
           const res = JSON.parse(data);
-          if (res.type === "file" && res.file_id) {
-            const fileContent = await this.env.CONFIG_KV.get(`filecontent:${res.file_id}`);
-            if (fileContent) {
-              const mountPath = res.mount_path || `/workspace/${res.file_id}`;
-              await sandbox.writeFile(mountPath, fileContent);
-            }
+          resources.push(res);
+
+          // Load write-only secrets from separate KV keys
+          if (res.id) {
+            const secretData = await this.env.CONFIG_KV.get(`secret:${sessionId}:${res.id}`);
+            if (secretData) secretStore.set(res.id, secretData);
+          }
+        }
+
+        if (resources.length) {
+          await mountResources(sandbox, resources, this.env.CONFIG_KV, secretStore);
+        }
+      }
+
+      // Register command_secret credentials from vaults
+      // These inject env vars only for commands matching specific prefixes
+      const vaultIds: string[] = JSON.parse(this.getMeta("vault_ids") || "[]");
+      if (vaultIds.length && sandbox.registerCommandSecrets) {
+        for (const vaultId of vaultIds) {
+          const credList = await this.env.CONFIG_KV.list({ prefix: `cred:${vaultId}:` });
+          for (const k of credList.keys) {
+            const credData = await this.env.CONFIG_KV.get(k.name);
+            if (!credData) continue;
+            try {
+              const cred = JSON.parse(credData) as CredentialConfig;
+              if (cred.auth?.type === "command_secret" && cred.auth.command_prefixes?.length && cred.auth.env_var && cred.auth.token) {
+                for (const prefix of cred.auth.command_prefixes) {
+                  sandbox.registerCommandSecrets(prefix, { [cred.auth.env_var]: cred.auth.token });
+                }
+              }
+            } catch {}
           }
         }
       }
@@ -344,6 +474,191 @@ export class SessionDO extends DurableObject<Env> {
         // Connection already closed
       }
     }
+  }
+
+  /**
+   * Handle tool confirmation: execute the confirmed tool or inject denial,
+   * then re-run the harness to continue the conversation.
+   */
+  private async handleToolConfirmation(
+    confirmation: UserToolConfirmationEvent,
+    history: HistoryStore
+  ): Promise<void> {
+    const sandbox = this.getOrCreateSandbox();
+    await this.warmUpSandbox();
+
+    // Retrieve the pending tool call from session metadata
+    const pendingJson = this.getMeta("pending_tool_calls");
+    const pendingCalls: PendingToolCall[] = pendingJson ? JSON.parse(pendingJson) : [];
+    const pending = pendingCalls.find(p => p.toolCallId === confirmation.tool_use_id);
+
+    if (confirmation.result === "allow" && pending) {
+      // Execute the tool
+      const agentId = this.getMeta("agent_id");
+      const agentJson = agentId ? await this.env.CONFIG_KV.get(`agent:${agentId}`) : null;
+
+      if (agentJson) {
+        const agent = JSON.parse(agentJson) as AgentConfig;
+
+        // Fetch environment config for networking restrictions
+        const envId = this.getMeta("environment_id");
+        let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
+        if (envId) {
+          const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
+          if (envJson) {
+            const envCfg = JSON.parse(envJson) as EnvironmentConfig;
+            environmentConfig = envCfg.config;
+          }
+        }
+
+        // Build tools with execute functions intact (not stripped for always_ask)
+        const allTools = await buildTools(agent, sandbox, {
+          ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
+          ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
+          TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+          environmentConfig,
+        });
+
+        // Find the original tool definition (before always_ask stripping)
+        // We need to re-build without permission stripping to get the execute function
+        const originalTool = allTools[pending.toolName];
+        if (originalTool?.execute) {
+          try {
+            const result = await originalTool.execute(pending.args, {
+              toolCallId: pending.toolCallId,
+              messages: [],
+              abortSignal: undefined,
+            });
+            const resultStr = typeof result === "string" ? result : JSON.stringify(result);
+            const toolResultEvent: SessionEvent = {
+              type: "agent.tool_result",
+              tool_use_id: pending.toolCallId,
+              content: resultStr,
+            };
+            history.append(toolResultEvent);
+            this.broadcastEvent(toolResultEvent);
+          } catch (e) {
+            const toolResultEvent: SessionEvent = {
+              type: "agent.tool_result",
+              tool_use_id: pending.toolCallId,
+              content: `Error: ${e instanceof Error ? e.message : String(e)}`,
+            };
+            history.append(toolResultEvent);
+            this.broadcastEvent(toolResultEvent);
+          }
+        }
+      }
+    } else {
+      // Denied or not found — inject denial result
+      const denyMsg = confirmation.deny_message || "Tool execution was denied by the user.";
+      const toolResultEvent: SessionEvent = {
+        type: "agent.tool_result",
+        tool_use_id: confirmation.tool_use_id,
+        content: `Denied: ${denyMsg}`,
+      };
+      history.append(toolResultEvent);
+      this.broadcastEvent(toolResultEvent);
+    }
+
+    // Remove the confirmed/denied call from pending
+    const remaining = pendingCalls.filter(p => p.toolCallId !== confirmation.tool_use_id);
+    if (remaining.length > 0) {
+      this.setMeta("pending_tool_calls", JSON.stringify(remaining));
+    } else {
+      this.setMeta("pending_tool_calls", "");
+    }
+
+    // Re-run the harness to continue the conversation
+    // Use an empty user message — the history already has the tool result
+    const resumeMsg: UserMessageEvent = {
+      type: "user.message",
+      content: [{ type: "text", text: "" }],
+    };
+    await this.processUserMessage(resumeMsg, 0, true);
+  }
+
+  /**
+   * Resolve a credential token from vault by credential ID.
+   */
+  private async resolveCredentialToken(credentialId?: string): Promise<string | null> {
+    if (!credentialId) return null;
+    const vaultIds: string[] = JSON.parse(this.getMeta("vault_ids") || "[]");
+    for (const vaultId of vaultIds) {
+      const credData = await this.env.CONFIG_KV.get(`cred:${vaultId}:${credentialId}`);
+      if (credData) {
+        const cred = JSON.parse(credData);
+        return cred.auth?.token || cred.auth?.access_token || null;
+      }
+    }
+    return null;
+  }
+
+  /**
+   * Register a background task for completion tracking.
+   * Starts a setInterval poller that checks process status every 2s.
+   * When complete, injects a task_notification event and re-triggers harness.
+   * Like CC's shellCommand.result.then() — but poll-based since we can't
+   * get exit events from container processes.
+   */
+  private watchBackgroundTask(
+    taskId: string,
+    pid: string,
+    outputFile: string,
+    proc: ProcessHandle | null,
+    sandbox: SandboxExecutor,
+  ): void {
+    // If we have a process handle, poll via getStatus()
+    // Otherwise, poll via kill -0 <pid>
+    const poller = setInterval(async () => {
+      try {
+        let done = false;
+        let exitCode = 0;
+
+        if (proc) {
+          const status = await proc.getStatus();
+          done = status === "completed" || status === "error" || status === "killed";
+          exitCode = status === "error" ? 1 : status === "killed" ? 137 : 0;
+        } else {
+          // Fallback: check PID via kill -0
+          const check = await sandbox.exec(`kill -0 ${pid} 2>/dev/null && echo running || echo done`, 5000);
+          done = check.includes("done");
+        }
+
+        if (!done) return;
+
+        // Task completed — stop polling
+        clearInterval(poller);
+        this.backgroundTaskPollers.delete(taskId);
+
+        // Read output
+        let output = "";
+        try { output = await sandbox.readFile(outputFile); } catch {}
+
+        // Inject task_notification event
+        const history = new SqliteHistory(this.ctx.storage.sql);
+        const notifEvent: SessionEvent = {
+          type: "user.message",
+          content: [{
+            type: "text",
+            text: `<task_notification>\nBackground task ${taskId} completed (exit code: ${exitCode}).\nOutput file: ${outputFile}\n\n${output.slice(0, 3000)}\n</task_notification>`,
+          }],
+        };
+        history.append(notifEvent);
+        this.broadcastEvent(notifEvent);
+
+        // Re-trigger harness if session is idle
+        const status = this.getMeta("status");
+        if (status === "idle") {
+          this.setMeta("status", "processing");
+          this.setMeta("pending_user_message", JSON.stringify(notifEvent));
+          await this.ctx.storage.setAlarm(Date.now() + 100);
+        }
+      } catch {
+        // Poll failed — will retry next interval
+      }
+    }, 2000);
+
+    this.backgroundTaskPollers.set(taskId, poller);
   }
 
   /**
@@ -396,15 +711,29 @@ export class SessionDO extends DurableObject<Env> {
       harness = resolveHarness("default");
     }
 
+    // Build sub-agent tools and model (platform prepares context for sub-agent too)
+    const subTools = await buildTools(subAgent, sandbox, {
+      ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
+      ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
+      TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
+        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
+      },
+    });
+    const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model.id;
+    const subModel = resolveModel(subModelId, this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
+
     // Build sub-agent context: own history, shared sandbox, parent event log
     const subCtx: HarnessContext = {
       agent: subAgent,
       userMessage: userMsg,
+      tools: subTools,
+      model: subModel,
+      systemPrompt: subAgent.system || "",
       env: {
         ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
         TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-        // Sub-agents can also delegate (nested threads)
         delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
           return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
         },
@@ -413,9 +742,7 @@ export class SessionDO extends DurableObject<Env> {
         history: subHistory,
         sandbox,
         broadcast: (event) => {
-          // Write to sub-agent's own history
           subHistory.append(event);
-          // Tag and write to parent log + broadcast
           const taggedEvent = { ...event, thread_id: threadId };
           parentHistory.append(taggedEvent);
           this.broadcastEvent(taggedEvent);
@@ -450,7 +777,18 @@ export class SessionDO extends DurableObject<Env> {
     return responseText || "(sub-agent produced no text output)";
   }
 
-  private async processUserMessage(userMessage: UserMessageEvent) {
+  /**
+   * Process a user message: resolve agent, build context, run harness,
+   * evaluate outcome, emit status.
+   *
+   * @param skipAppend — if true, the message is already in history (resume after tool confirmation)
+   * @param retryCount — for transient error retries
+   */
+  private async processUserMessage(
+    userMessage: UserMessageEvent,
+    retryCount: number = 0,
+    skipAppend: boolean = false
+  ) {
     const agentId = this.getMeta("agent_id");
     if (!agentId) return;
 
@@ -505,9 +843,86 @@ export class SessionDO extends DurableObject<Env> {
       harness = resolveHarness("default");
     }
 
+    // --- Platform prepares WHAT is available ---
+
+    // Build tools from agent config
+    const allTools = await buildTools(agent, sandbox, {
+      ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
+      ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
+      TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      environmentConfig,
+      delegateToAgent: async (agentId: string, message: string) => {
+        return this.runSubAgent(agentId, message, history, sandbox);
+      },
+      watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
+        this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
+      },
+    });
+
+    // Add memory tools if session has memory store resources
+    if (memoryStoreIds.length && this.env.CONFIG_KV) {
+      const memTools = buildMemoryTools(memoryStoreIds, this.env.CONFIG_KV);
+      Object.assign(allTools, memTools);
+    }
+
+    // Resolve model
+    const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
+    const model = resolveModel(modelId, this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
+
+    // Build system prompt: base + skill metadata
+    let systemPrompt = agent.system || "";
+    if (agent.skills?.length) {
+      // Built-in (anthropic) skills from the in-memory registry
+      const builtinSkills = resolveSkills(agent.skills);
+      const additions = builtinSkills.map(s => s.system_prompt_addition).filter(Boolean);
+
+      // Custom skills from KV — lightweight metadata for system prompt
+      if (this.env.CONFIG_KV) {
+        try {
+          const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV);
+          additions.push(...customSkills.map(s => s.system_prompt_addition).filter(Boolean));
+        } catch {
+          // Best-effort
+        }
+      }
+
+      if (additions.length) {
+        systemPrompt += "\n\n" + additions.join("\n\n");
+      }
+
+      // Mount custom skill files into sandbox (progressive disclosure)
+      if (this.env.CONFIG_KV) {
+        try {
+          const skillFilesResults = await getSkillFiles(agent.skills, this.env.CONFIG_KV);
+          for (const sf of skillFilesResults) {
+            for (const file of sf.files) {
+              try {
+                await sandbox.writeFile(
+                  `/home/user/.skills/${sf.skillName}/${file.filename}`,
+                  file.content,
+                );
+              } catch {
+                // Best-effort: skip individual file write failures
+              }
+            }
+          }
+        } catch {
+          // Best-effort
+        }
+      }
+    }
+
+    // Create an abort controller for this execution
+    const abortController = new AbortController();
+    this.currentAbortController = abortController;
+
+    // --- Harness receives a fully-prepared context ---
     const ctx: HarnessContext = {
       agent,
       userMessage,
+      tools: allTools,
+      model,
+      systemPrompt,
       env: {
         ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
@@ -517,6 +932,9 @@ export class SessionDO extends DurableObject<Env> {
         environmentConfig,
         delegateToAgent: async (agentId: string, message: string) => {
           return this.runSubAgent(agentId, message, history, sandbox);
+        },
+        watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
+          this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
         },
       },
       runtime: {
@@ -533,6 +951,7 @@ export class SessionDO extends DurableObject<Env> {
           this.setMeta("output_tokens", String(currentOutput + output_tokens));
         },
         pendingConfirmations: [],
+        abortSignal: abortController.signal,
       },
     };
 
@@ -544,61 +963,93 @@ export class SessionDO extends DurableObject<Env> {
 
       await harness.run(ctx);
 
-      // Outcome self-evaluation loop
+      // Store any pending tool calls in session metadata for confirmation flow
+      if (ctx.runtime.pendingConfirmations?.length) {
+        // Collect pending tool call details from the last harness run events
+        const recentEvents = history.getEvents();
+        const pendingCalls: PendingToolCall[] = [];
+        for (const eventId of ctx.runtime.pendingConfirmations) {
+          // Find the matching agent.tool_use or agent.custom_tool_use event
+          const toolUseEvent = recentEvents.find((e: SessionEvent) => {
+            if (e.type === "agent.tool_use") {
+              return (e as AgentToolUseEvent).id === eventId;
+            }
+            if (e.type === "agent.custom_tool_use") {
+              return (e as import("../types").AgentCustomToolUseEvent).id === eventId;
+            }
+            return false;
+          });
+          if (toolUseEvent) {
+            if (toolUseEvent.type === "agent.tool_use") {
+              const tue = toolUseEvent as AgentToolUseEvent;
+              pendingCalls.push({ toolCallId: tue.id, toolName: tue.name, args: tue.input });
+            } else if (toolUseEvent.type === "agent.custom_tool_use") {
+              const cte = toolUseEvent as import("../types").AgentCustomToolUseEvent;
+              pendingCalls.push({ toolCallId: cte.id, toolName: cte.name, args: cte.input });
+            }
+          }
+        }
+        if (pendingCalls.length) {
+          this.setMeta("pending_tool_calls", JSON.stringify(pendingCalls));
+        }
+      }
+
+      // Outcome self-evaluation loop (properly loops until satisfied or max iterations)
       const outcomeJson = this.getMeta("outcome");
       if (outcomeJson) {
         const outcome = JSON.parse(outcomeJson);
-        const iteration = parseInt(this.getMeta("outcome_iteration") || "1", 10);
+        let iteration = parseInt(this.getMeta("outcome_iteration") || "1", 10);
         const maxIterations = Math.min(outcome.max_iterations || 3, 20);
-
-        // Collect agent output from recent events
-        const recentEvents = history.getEvents();
-        const agentOutput = recentEvents
-          .filter((e: SessionEvent) => e.type === "agent.message")
-          .map((e: SessionEvent) => {
-            const msg = e as import("../types").AgentMessageEvent;
-            return msg.content?.map((b) => b.text).join("") || "";
-          })
-          .join("\n");
-
-        // Evaluate using the agent's model
         const model = resolveModel(agent.model, ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
 
-        // Span: outcome evaluation start
-        this.broadcastEvent({ type: "span.outcome_evaluation_start", iteration });
+        while (iteration <= maxIterations) {
+          // Collect agent output from recent events
+          const recentEvents = history.getEvents();
+          const agentOutput = recentEvents
+            .filter((e: SessionEvent) => e.type === "agent.message")
+            .map((e: SessionEvent) => {
+              const msg = e as AgentMessageEvent;
+              return msg.content?.map((b) => b.text).join("") || "";
+            })
+            .join("\n");
 
-        // Span: ongoing heartbeat before evaluation completes
-        const ongoingEvent: SessionEvent = {
-          type: "span.outcome_evaluation_ongoing",
-          iteration,
-        };
-        history.append(ongoingEvent);
-        this.broadcastEvent(ongoingEvent);
+          // Span: outcome evaluation start
+          this.broadcastEvent({ type: "span.outcome_evaluation_start", iteration });
 
-        const evalResult = await evaluateOutcome(model, outcome, agentOutput);
-
-        // Span: outcome evaluation end
-
-        if (evalResult.result === "satisfied") {
-          const evalEvent: OutcomeEvaluationEvent = {
-            type: "outcome.evaluation_end",
-            result: "satisfied",
-            iteration,
-            feedback: evalResult.feedback,
-          };
-          history.append(evalEvent);
-          this.broadcastEvent(evalEvent);
-          this.setMeta("outcome", "");
-        } else if (iteration >= maxIterations) {
-          const evalEvent: OutcomeEvaluationEvent = {
-            type: "outcome.evaluation_end",
-            result: "max_iterations_reached",
+          const ongoingEvent: SessionEvent = {
+            type: "span.outcome_evaluation_ongoing",
             iteration,
           };
-          history.append(evalEvent);
-          this.broadcastEvent(evalEvent);
-          this.setMeta("outcome", "");
-        } else {
+          history.append(ongoingEvent);
+          this.broadcastEvent(ongoingEvent);
+
+          const evalResult = await evaluateOutcome(model, outcome, agentOutput);
+
+          if (evalResult.result === "satisfied") {
+            const evalEvent: OutcomeEvaluationEvent = {
+              type: "outcome.evaluation_end",
+              result: "satisfied",
+              iteration,
+              feedback: evalResult.feedback,
+            };
+            history.append(evalEvent);
+            this.broadcastEvent(evalEvent);
+            this.setMeta("outcome", "");
+            break;
+          }
+
+          if (iteration >= maxIterations) {
+            const evalEvent: OutcomeEvaluationEvent = {
+              type: "outcome.evaluation_end",
+              result: "max_iterations_reached",
+              iteration,
+            };
+            history.append(evalEvent);
+            this.broadcastEvent(evalEvent);
+            this.setMeta("outcome", "");
+            break;
+          }
+
           // Needs revision — inject feedback and re-run
           const evalEvent: OutcomeEvaluationEvent = {
             type: "outcome.evaluation_end",
@@ -608,13 +1059,15 @@ export class SessionDO extends DurableObject<Env> {
           };
           history.append(evalEvent);
           this.broadcastEvent(evalEvent);
-          this.setMeta("outcome_iteration", String(iteration + 1));
+
+          iteration += 1;
+          this.setMeta("outcome_iteration", String(iteration));
 
           const feedbackMsg: UserMessageEvent = {
             type: "user.message",
             content: [{
               type: "text",
-              text: `[Outcome Evaluation - Iteration ${iteration}] Needs revision:\n${evalResult.feedback}\n\nPlease address the feedback and try again.`,
+              text: `[Outcome Evaluation - Iteration ${iteration - 1}] Needs revision:\n${evalResult.feedback}\n\nPlease address the feedback and try again.`,
             }],
           };
           history.append(feedbackMsg);
@@ -623,11 +1076,33 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Determine stop reason based on pending tool confirmations
+      // Determine stop reason based on pending tool confirmations or custom tool results
       const pendingConfirmations = ctx.runtime.pendingConfirmations || [];
-      const stopReason = pendingConfirmations.length > 0
-        ? { type: "tool_confirmation_required" as const, event_ids: pendingConfirmations }
-        : { type: "user.message_required" as const };
+
+      // Check if any pending are custom tool uses (no execute function, not always_ask built-in)
+      const pendingToolCallsJson = this.getMeta("pending_tool_calls");
+      const storedPendingCalls: PendingToolCall[] = pendingToolCallsJson ? JSON.parse(pendingToolCallsJson) : [];
+      const hasCustomToolPending = storedPendingCalls.some(p =>
+        !["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"].includes(p.toolName) &&
+        !p.toolName.startsWith("mcp_") &&
+        !p.toolName.startsWith("call_agent_") &&
+        !p.toolName.startsWith("memory_")
+      );
+
+      let stopReason: SessionEvent["type"] extends "session.status_idle" ? import("../types").SessionStatusEvent["stop_reason"] : never;
+      if (hasCustomToolPending) {
+        stopReason = {
+          type: "custom_tool_result_required" as const,
+          event_ids: pendingConfirmations,
+        };
+      } else if (pendingConfirmations.length > 0) {
+        stopReason = {
+          type: "tool_confirmation_required" as const,
+          event_ids: pendingConfirmations,
+        };
+      } else {
+        stopReason = { type: "user.message_required" as const };
+      }
 
       const idleEvent: SessionEvent = {
         type: "session.status_idle",
@@ -637,32 +1112,52 @@ export class SessionDO extends DurableObject<Env> {
       this.broadcastEvent(idleEvent);
     } catch (err) {
       const errorMessage = err instanceof Error ? err.message : String(err);
-      const TRANSIENT_PATTERNS = ["timeout", "network", "ECONNREFUSED", "fetch failed"];
+
+      // Don't retry if aborted
+      if (err instanceof Error && err.name === "AbortError") {
+        // Interrupt was handled — don't emit error
+        return;
+      }
+
+      const TRANSIENT_PATTERNS = ["timeout", "network", "ECONNREFUSED", "fetch failed", "rate limit", "429", "503"];
       const isTransient = TRANSIENT_PATTERNS.some((p) => errorMessage.toLowerCase().includes(p.toLowerCase()));
 
-      if (isTransient) {
+      if (isTransient && retryCount < 2) {
         const rescheduledEvent: SessionEvent = {
           type: "session.status_rescheduled",
           reason: errorMessage,
         };
         history.append(rescheduledEvent);
         this.broadcastEvent(rescheduledEvent);
-      } else {
-        const errorEvent: SessionEvent = {
-          type: "session.error",
-          error: errorMessage,
-        };
-        history.append(errorEvent);
-        this.broadcastEvent(errorEvent);
+
+        // Exponential backoff: 1s, 2s
+        const delay = 1000 * Math.pow(2, retryCount);
+        await new Promise(r => setTimeout(r, delay));
+        return this.processUserMessage(userMessage, retryCount + 1, skipAppend);
       }
+
+      if (isTransient) {
+        const rescheduledEvent: SessionEvent = {
+          type: "session.status_rescheduled",
+          reason: `${errorMessage} (exhausted ${retryCount} retries)`,
+        };
+        history.append(rescheduledEvent);
+        this.broadcastEvent(rescheduledEvent);
+      }
+
+      const errorEvent: SessionEvent = {
+        type: "session.error",
+        error: errorMessage,
+      };
+      history.append(errorEvent);
+      this.broadcastEvent(errorEvent);
 
       // Harness crashed — but session is recoverable.
       // The event log has everything up to the crash point.
       // The sandbox is still alive (container persists independently).
       // Client can send a new user.message to retry.
-      // This is the "brain is cattle" principle from Anthropic's design:
-      // the harness is stateless, it can crash and restart from the event log.
     } finally {
+      this.currentAbortController = null;
       this.setMeta("status", "idle");
     }
   }

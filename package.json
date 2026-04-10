@@ -9,7 +9,9 @@
   },
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "dev:console": "cd console && npx vite",
+    "build:console": "cd console && npx vite build",
+    "deploy": "cd console && npx vite build && cd .. && wrangler deploy",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
   },

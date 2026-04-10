@@ -1,6 +1,6 @@
 import { describe, it, expect } from "vitest";
 import { buildTools, buildMemoryTools, getToolPermission } from "../../src/harness/tools";
-import { StubSandbox } from "../../src/runtime/sandbox";
+import { TestSandbox } from "../../src/runtime/sandbox";
 import type { AgentConfig } from "../../src/types";
 import type { SandboxExecutor } from "../../src/harness/interface";
 
@@ -94,7 +94,7 @@ describe("Permission policy enforcement", () => {
         configs: [{ name: "bash", enabled: true, permission_policy: { type: "always_ask" } }],
       }],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
     expect(tools.bash).toBeDefined();
     expect(tools.bash.execute).toBeUndefined();
     // Other tools should still have execute
@@ -108,7 +108,7 @@ describe("Permission policy enforcement", () => {
         configs: [{ name: "bash", enabled: true, permission_policy: { type: "always_allow" } }],
       }],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
     expect(tools.bash).toBeDefined();
     expect(tools.bash.execute).toBeDefined();
   });
@@ -120,7 +120,7 @@ describe("Permission policy enforcement", () => {
         default_config: { enabled: true, permission_policy: { type: "always_ask" } },
       }],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
     expect(tools.bash.execute).toBeUndefined();
     expect(tools.read.execute).toBeUndefined();
     expect(tools.write.execute).toBeUndefined();
@@ -138,7 +138,7 @@ describe("Permission policy enforcement", () => {
         configs: [{ name: "bash", enabled: true, permission_policy: { type: "always_ask" } }],
       }],
     });
-    const tools = await buildTools(config, new StubSandbox());
+    const tools = await buildTools(config, new TestSandbox());
     expect(tools.bash.description).toBeTruthy();
     expect(tools.bash.parameters).toBeDefined();
   });
@@ -150,7 +150,7 @@ describe("Permission policy enforcement", () => {
 describe("Memory tools injection into harness", () => {
   it("memory tools merge correctly with built-in tools", async () => {
     const kv = makeMockKV();
-    const builtInTools = await buildTools(makeAgentConfig(), new StubSandbox());
+    const builtInTools = await buildTools(makeAgentConfig(), new TestSandbox());
     const memTools = buildMemoryTools(["store_1"], kv);
     Object.assign(builtInTools, memTools);
 
@@ -173,7 +173,7 @@ describe("Memory tools injection into harness", () => {
 
   it("memory tools are operational after merge", async () => {
     const kv = makeMockKV();
-    const builtInTools = await buildTools(makeAgentConfig(), new StubSandbox());
+    const builtInTools = await buildTools(makeAgentConfig(), new TestSandbox());
     const memTools = buildMemoryTools(["store_1"], kv);
     Object.assign(builtInTools, memTools);
 
@@ -369,7 +369,7 @@ describe("Outbound Worker registration", () => {
 // ============================================================
 describe("Networking limited mode", () => {
   it("web_fetch rejects disallowed hosts when networking is limited", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       environmentConfig: {
         networking: {
@@ -388,7 +388,7 @@ describe("Networking limited mode", () => {
   });
 
   it("web_fetch allows requests to allowed hosts", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       environmentConfig: {
         networking: {
@@ -402,13 +402,13 @@ describe("Networking limited mode", () => {
       { url: "https://api.example.com/data" },
       TOOL_EXEC_OPTS
     );
-    // StubSandbox returns a stub response, not an error
+    // TestSandbox returns a stub response, not an error
     expect(result).not.toContain("not allowed");
     expect(result).toContain("exit=0");
   });
 
   it("web_fetch allows all hosts when networking is unrestricted", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       environmentConfig: {
         networking: { type: "unrestricted" },
@@ -424,7 +424,7 @@ describe("Networking limited mode", () => {
   });
 
   it("web_fetch allows subdomain matching for allowed hosts", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       environmentConfig: {
         networking: {
@@ -443,7 +443,7 @@ describe("Networking limited mode", () => {
   });
 
   it("web_fetch rejects invalid URLs when networking is limited", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       environmentConfig: {
         networking: {
@@ -461,7 +461,7 @@ describe("Networking limited mode", () => {
   });
 
   it("web_fetch works normally when no environmentConfig provided", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.web_fetch.execute(
@@ -473,7 +473,7 @@ describe("Networking limited mode", () => {
   });
 
   it("web_fetch lists allowed hosts in error message", async () => {
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox, {
       environmentConfig: {
         networking: {

@@ -9,10 +9,15 @@ const app = new Hono<{ Bindings: Env }>();
 app.post("/", async (c) => {
   const body = await c.req.json<{
     name: string;
-    model: string;
-    system: string;
+    model: string | { id: string; speed?: string };
+    system?: string;
     tools?: AgentConfig["tools"];
     harness?: string;
+    description?: string;
+    mcp_servers?: AgentConfig["mcp_servers"];
+    skills?: AgentConfig["skills"];
+    callable_agents?: AgentConfig["callable_agents"];
+    metadata?: Record<string, unknown>;
   }>();
 
   if (!body.name || !body.model) {
@@ -27,6 +32,11 @@ app.post("/", async (c) => {
     system: body.system || "",
     tools: body.tools || [{ type: "agent_toolset_20260401" }],
     harness: body.harness,
+    description: body.description,
+    mcp_servers: body.mcp_servers,
+    skills: body.skills,
+    callable_agents: body.callable_agents,
+    metadata: body.metadata,
     version: 1,
     created_at: now,
     updated_at: now,
@@ -82,19 +92,26 @@ app.put("/:id", async (c) => {
 
   const body = await c.req.json<{
     name?: string;
-    model?: string;
+    model?: string | { id: string; speed?: string };
     system?: string;
     tools?: AgentConfig["tools"];
+    harness?: string;
     description?: string;
+    mcp_servers?: AgentConfig["mcp_servers"];
+    skills?: AgentConfig["skills"];
+    callable_agents?: AgentConfig["callable_agents"];
+    metadata?: Record<string, unknown>;
   }>();
 
   // Detect if anything actually changed
   let changed = false;
-  if (body.name !== undefined && body.name !== agent.name) changed = true;
-  if (body.model !== undefined && JSON.stringify(body.model) !== JSON.stringify(agent.model)) changed = true;
-  if (body.system !== undefined && body.system !== agent.system) changed = true;
-  if (body.tools !== undefined && JSON.stringify(body.tools) !== JSON.stringify(agent.tools)) changed = true;
-  if (body.description !== undefined && body.description !== agent.description) changed = true;
+  const fields = ["name", "model", "system", "tools", "harness", "description", "mcp_servers", "skills", "callable_agents", "metadata"] as const;
+  for (const key of fields) {
+    if (body[key] !== undefined && JSON.stringify(body[key]) !== JSON.stringify(agent[key])) {
+      changed = true;
+      break;
+    }
+  }
 
   if (!changed) {
     return c.json(agent);
@@ -103,11 +120,9 @@ app.put("/:id", async (c) => {
   // Save current version to version history before overwriting
   await c.env.CONFIG_KV.put(`agent:${id}:v${agent.version}`, data);
 
-  if (body.name !== undefined) agent.name = body.name;
-  if (body.model !== undefined) agent.model = body.model;
-  if (body.system !== undefined) agent.system = body.system;
-  if (body.tools !== undefined) agent.tools = body.tools;
-  if (body.description !== undefined) agent.description = body.description;
+  for (const key of fields) {
+    if (body[key] !== undefined) (agent as any)[key] = body[key];
+  }
   agent.version += 1;
   agent.updated_at = new Date().toISOString();
 
