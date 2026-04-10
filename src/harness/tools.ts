@@ -1,9 +1,188 @@
 import { tool } from "ai";
 import { z } from "zod";
 import type { AgentConfig, ToolsetConfig, CustomToolConfig } from "../types";
-import type { SandboxExecutor } from "./interface";
+import type { SandboxExecutor, ProcessHandle } from "./interface";
+import { nanoid } from "nanoid";
 
 const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"];
+const MAX_TOOL_RESULT_CHARS = 50000;
+const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
+const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
+
+/**
+ * Poll a started process with CC-aligned timeout strategies:
+ * - Completes before timeout → return result
+ * - Timeout + auto-backgroundable → keep running, redirect output to file, return path
+ * - Timeout + not auto-backgroundable → SIGTERM kill, return partial + "timed out"
+ */
+async function pollWithStrategies(
+  proc: ProcessHandle,
+  command: string,
+  timeoutMs: number,
+  isAutoBackgroundable: (cmd: string) => boolean,
+  sandbox: SandboxExecutor,
+  tasksDir: string,
+  env?: { watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void },
+): Promise<string> {
+  return new Promise<string>((resolve) => {
+    let settled = false;
+
+    // Timeout handler — decides strategy 2 vs 3
+    const timer = setTimeout(async () => {
+      if (settled) return;
+      settled = true;
+
+      let partial = "";
+      try {
+        const logs = await proc.getLogs();
+        partial = (logs.stdout || "") + (logs.stderr ? "\nstderr: " + logs.stderr : "");
+      } catch {}
+
+      if (isAutoBackgroundable(command)) {
+        // Strategy 2: auto-background — process keeps running
+        // Write partial output to file so agent can read it with read tool
+        const taskId = `task_${nanoid(12)}`;
+        const outFile = `${tasksDir}/${taskId}.out`;
+        try {
+          await sandbox.exec(`mkdir -p ${tasksDir}`, 5000);
+          await sandbox.writeFile(outFile, partial);
+        } catch {}
+        // Register watcher for completion notification
+        env?.watchBackgroundTask?.(taskId, String(proc.pid), outFile, proc);
+        resolve(truncateResult(
+          `exit=0\nCommand auto-backgrounded after ${Math.round(timeoutMs / 1000)}s (pid: ${proc.pid})\nPartial output: ${outFile}`.trim()
+        ));
+      } else {
+        // Strategy 3: kill — SIGTERM
+        try { await proc.kill("SIGTERM"); } catch {}
+        resolve(truncateResult(
+          `exit=143\nCommand timed out after ${Math.round(timeoutMs / 1000)}s\n${partial}`.trim()
+        ));
+      }
+    }, timeoutMs);
+
+    // Poll for normal completion
+    const poll = async () => {
+      while (!settled) {
+        try {
+          const status = await proc.getStatus();
+          if (status === "completed" || status === "error" || status === "killed") {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timer);
+            const logs = await proc.getLogs();
+            let out = logs.stdout || "";
+            if (logs.stderr) out += (out ? "\n" : "") + "stderr: " + logs.stderr;
+            const exitCode = status === "error" ? 1 : status === "killed" ? 137 : 0;
+            resolve(truncateResult(`exit=${exitCode}\n${out}`));
+            return;
+          }
+        } catch {}
+        await new Promise(r => setTimeout(r, 500));
+      }
+    };
+    poll().catch(() => {
+      if (!settled) { settled = true; clearTimeout(timer); resolve("exit=1\nProcess polling failed"); }
+    });
+  });
+}
+
+/**
+ * Wrap a tool execute function so errors are returned as strings to the LLM
+ * instead of crashing the entire harness (matching Claude Code's behavior).
+ * The LLM sees the error and can retry, try a different approach, or inform the user.
+ */
+function safe<T>(fn: (args: T) => Promise<string>): (args: T) => Promise<string> {
+  return async (args: T) => {
+    try {
+      const result = await fn(args);
+      // Handle empty results (CC pattern: prevent model stop sequence issues)
+      if (!result || result.trim() === "") return "(completed with no output)";
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      // Truncate error messages to avoid context overflow (CC caps at 10K)
+      const truncated = msg.length > 10000
+        ? msg.slice(0, 5000) + `\n[${msg.length - 10000} characters truncated]\n` + msg.slice(-5000)
+        : msg;
+      return `Error: ${truncated}`;
+    }
+  };
+}
+
+/**
+ * Truncate tool results that exceed the maximum size.
+ * CC persists to disk; we truncate with preview since we don't have
+ * local filesystem access from the harness layer.
+ */
+function truncateResult(result: string): string {
+  if (result.length > MAX_TOOL_RESULT_CHARS) {
+    return result.slice(0, MAX_TOOL_RESULT_CHARS) + `\n...(truncated, total ${result.length} chars)`;
+  }
+  return result;
+}
+
+/**
+ * Convert a JSON Schema properties object to a Zod schema.
+ * Supports basic types: string, number, integer, boolean, object, array, enum.
+ * Falls back to z.unknown() for unsupported types.
+ */
+function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodTypeAny {
+  const properties = schema.properties as Record<string, Record<string, unknown>> | undefined;
+  const required = (schema.required as string[]) || [];
+
+  if (!properties || typeof properties !== "object") {
+    return z.record(z.unknown());
+  }
+
+  const shape: Record<string, z.ZodTypeAny> = {};
+  for (const [key, prop] of Object.entries(properties)) {
+    let field = jsonSchemaPropertyToZod(prop);
+    if (prop.description && typeof prop.description === "string") {
+      field = (field as z.ZodString).describe(prop.description);
+    }
+    if (!required.includes(key)) {
+      field = field.optional();
+    }
+    shape[key] = field;
+  }
+
+  return z.object(shape);
+}
+
+function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
+  const type = prop.type as string | undefined;
+
+  // Handle enum
+  if (Array.isArray(prop.enum) && prop.enum.length > 0) {
+    return z.enum(prop.enum as [string, ...string[]]);
+  }
+
+  switch (type) {
+    case "string":
+      return z.string();
+    case "number":
+    case "integer":
+      return z.number();
+    case "boolean":
+      return z.boolean();
+    case "array": {
+      const items = prop.items as Record<string, unknown> | undefined;
+      if (items) {
+        return z.array(jsonSchemaPropertyToZod(items));
+      }
+      return z.array(z.unknown());
+    }
+    case "object": {
+      if (prop.properties) {
+        return jsonSchemaToZod(prop as Record<string, unknown>);
+      }
+      return z.record(z.unknown());
+    }
+    default:
+      return z.unknown();
+  }
+}
 
 /**
  * Resolve the permission policy for a given tool name from the agent config.
@@ -62,6 +241,7 @@ export async function buildTools(
     TAVILY_API_KEY?: string;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
+    watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
   }
 ): Promise<Record<string, any>> {
   const enabled = getEnabledTools(agentConfig.tools);
@@ -69,17 +249,68 @@ export async function buildTools(
   const tools: Record<string, any> = {};
 
   if (enabled.has("bash")) {
+    // CC-aligned: only "sleep" is disallowed for auto-backgrounding
+    const DISALLOWED_AUTO_BACKGROUND = ["sleep"];
+    const isAutoBackgroundable = (cmd: string) => {
+      const base = cmd.trim().split(/\s/)[0] || "";
+      return !DISALLOWED_AUTO_BACKGROUND.includes(base);
+    };
+    const TASKS_DIR = "/tmp/tasks";
+
     tools.bash = tool({
       description:
-        "Execute a bash command in the sandbox. Returns exit code + stdout/stderr.",
+        "Execute a bash command in the sandbox. Returns exit code + stdout/stderr. " +
+        "For long-running commands (builds, installs, servers), set run_in_background=true " +
+        "to get a task ID immediately. Output is written to a file — use the read tool to check progress.",
       parameters: z.object({
         command: z.string().describe("The bash command to execute"),
         timeout: z
           .number()
           .optional()
-          .describe("Timeout in milliseconds (default 30000)"),
+          .describe("Timeout in milliseconds (default 120000, max 600000)"),
+        run_in_background: z
+          .boolean()
+          .optional()
+          .describe("Run in background, returns immediately. Output written to file. Use read tool to check progress."),
       }),
-      execute: async ({ command, timeout }) => sandbox.exec(command, timeout),
+      execute: safe(async ({ command, timeout, run_in_background }) => {
+        const timeoutMs = Math.min(timeout || DEFAULT_BASH_TIMEOUT, MAX_BASH_TIMEOUT);
+
+        // Strategy 1: agent explicitly backgrounds
+        if (run_in_background) {
+          const taskId = `task_${nanoid(12)}`;
+          const outFile = `${TASKS_DIR}/${taskId}.out`;
+
+          // Use startProcess for proper lifecycle management (no orphan kills)
+          if (sandbox.startProcess) {
+            await sandbox.exec(`mkdir -p ${TASKS_DIR}`, 5000);
+            const proc = await sandbox.startProcess(`bash -c '(${command.replace(/'/g, "'\\''")}) > ${outFile} 2>&1'`);
+            if (proc) {
+              env?.watchBackgroundTask?.(taskId, String(proc.pid), outFile, proc);
+              return `Background task started (pid: ${proc.pid})\nOutput: ${outFile}`;
+            }
+          }
+
+          // Fallback: exec + & (test env without startProcess)
+          const wrapped = `mkdir -p ${TASKS_DIR} && ${command} > ${outFile} 2>&1 &\necho "pid=$!"`;
+          const result = await sandbox.exec(wrapped, 10000);
+          const pidMatch = result.match(/pid=(\d+)/);
+          const pid = pidMatch ? pidMatch[1] : "unknown";
+          env?.watchBackgroundTask?.(taskId, pid, outFile, null);
+          return `Background task started (pid: ${pid})\nOutput: ${outFile}`;
+        }
+
+        // If startProcess available, use it for strategies 2/3
+        if (sandbox.startProcess) {
+          const proc = await sandbox.startProcess(command);
+          if (proc) {
+            return await pollWithStrategies(proc, command, timeoutMs, isAutoBackgroundable, sandbox, TASKS_DIR, env);
+          }
+        }
+
+        // Fallback: simple exec (test env, no startProcess)
+        return truncateResult(await sandbox.exec(command, timeoutMs));
+      }),
     });
   }
 
@@ -89,7 +320,7 @@ export async function buildTools(
       parameters: z.object({
         path: z.string().describe("Absolute path to the file to read"),
       }),
-      execute: async ({ path }) => sandbox.readFile(path),
+      execute: safe(async ({ path }) => truncateResult(await sandbox.readFile(path))),
     });
   }
 
@@ -101,7 +332,7 @@ export async function buildTools(
         path: z.string().describe("Absolute path to write to"),
         content: z.string().describe("File content to write"),
       }),
-      execute: async ({ path, content }) => sandbox.writeFile(path, content),
+      execute: safe(async ({ path, content }) => sandbox.writeFile(path, content)),
     });
   }
 
@@ -114,26 +345,14 @@ export async function buildTools(
         old_string: z.string().describe("Exact string to find and replace"),
         new_string: z.string().describe("Replacement string"),
       }),
-      execute: async ({ path, old_string, new_string }) => {
-        // Read → replace → write via sandbox exec
-        const escaped_old = old_string.replace(/'/g, "'\\''");
-        const escaped_new = new_string.replace(/'/g, "'\\''");
-        return sandbox.exec(
-          `python3 -c "
-import sys
-p = '${path.replace(/'/g, "\\'")}'
-with open(p) as f: content = f.read()
-old = '''${escaped_old}'''
-new = '''${escaped_new}'''
-if old not in content:
-    print('Error: old_string not found in file', file=sys.stderr)
-    sys.exit(1)
-content = content.replace(old, new, 1)
-with open(p, 'w') as f: f.write(content)
-print('ok')
-"`
-        );
-      },
+      execute: safe(async ({ path, old_string, new_string }) => {
+        const content = await sandbox.readFile(path);
+        if (!content.includes(old_string)) {
+          return "Error: old_string not found in file";
+        }
+        const updated = content.replace(old_string, new_string);
+        return sandbox.writeFile(path, updated);
+      }),
     });
   }
 
@@ -148,10 +367,12 @@ print('ok')
           .optional()
           .describe("Directory to search in (default: /workspace)"),
       }),
-      execute: async ({ pattern, path }) => {
+      execute: safe(async ({ pattern, path }) => {
         const dir = path || "/workspace";
-        return sandbox.exec(`find ${dir} -path '${pattern}' -type f 2>/dev/null | head -100`);
-      },
+        return truncateResult(await sandbox.exec(
+          `bash -c 'shopt -s globstar nullglob && cd "${dir}" && printf "%s\\n" ${pattern} | head -100'`
+        ));
+      }),
     });
   }
 
@@ -170,13 +391,13 @@ print('ok')
           .optional()
           .describe('File pattern to include (e.g. "*.ts")'),
       }),
-      execute: async ({ pattern, path, include }) => {
+      execute: safe(async ({ pattern, path, include }) => {
         const dir = path || "/workspace";
         const includeFlag = include ? `--include='${include}'` : "";
-        return sandbox.exec(
+        return truncateResult(await sandbox.exec(
           `grep -rn ${includeFlag} '${pattern.replace(/'/g, "'\\''")}' ${dir} 2>/dev/null | head -100`
-        );
-      },
+        ));
+      }),
     });
   }
 
@@ -191,7 +412,7 @@ print('ok')
           .optional()
           .describe("Max response length in chars (default 50000)"),
       }),
-      execute: async ({ url, max_length }) => {
+      execute: safe(async ({ url, max_length }) => {
         // Enforce networking restrictions when environment uses limited mode
         if (env?.environmentConfig?.networking?.type === "limited") {
           const allowedHosts = env.environmentConfig.networking.allowed_hosts || [];
@@ -207,11 +428,11 @@ print('ok')
             return "Error: Invalid URL";
           }
         }
-        return sandbox.exec(
+        return truncateResult(await sandbox.exec(
           `curl -sL -m 30 '${url.replace(/'/g, "'\\''")}' | head -c ${max_length || 50000}`,
           35000
-        );
-      },
+        ));
+      }),
     });
   }
 
@@ -227,7 +448,7 @@ print('ok')
           .optional()
           .describe("Max results (default 5)"),
       }),
-      execute: async ({ query, max_results }) => {
+      execute: safe(async ({ query, max_results }) => {
         if (!tavilyKey)
           return "web_search unavailable: TAVILY_API_KEY not configured";
         const res = await fetch("https://api.tavily.com/search", {
@@ -249,17 +470,21 @@ print('ok')
             snippet: r.content,
           })) || data
         );
-      },
+      }),
     });
   }
 
-  // Custom tools — declared without execute so AI SDK returns them as pending tool calls
+  // Custom tools — convert JSON Schema to Zod for proper parameter definitions
   for (const t of agentConfig.tools) {
     if (t.type === "custom") {
       const ct = t as CustomToolConfig;
+      const params = ct.input_schema && typeof ct.input_schema === "object" && Object.keys(ct.input_schema).length > 0
+        ? jsonSchemaToZod(ct.input_schema)
+        : z.object({});
       tools[ct.name] = tool({
         description: ct.description,
-        parameters: z.object({}),
+        parameters: params,
+        // No execute — custom tools are handled by the client
       });
     }
   }
@@ -274,7 +499,7 @@ print('ok')
       tools[`mcp_${server.name}_list_tools`] = tool({
         description: `List available tools from MCP server "${server.name}".`,
         parameters: z.object({}),
-        execute: async () => {
+        execute: safe(async () => {
           // JSON-RPC request to list tools, routed through sandbox network
           const rpcBody = JSON.stringify({
             jsonrpc: "2.0",
@@ -282,13 +507,13 @@ print('ok')
             method: "tools/list",
             params: {},
           });
-          return sandbox.exec(
+          return truncateResult(await sandbox.exec(
             `curl -sS -X POST '${server.url.replace(/'/g, "'\\''")}' ` +
             `-H 'Content-Type: application/json' ` +
             `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
             15000
-          );
-        },
+          ));
+        }),
       });
 
       // Create a tool that calls any tool on this MCP server
@@ -298,20 +523,20 @@ print('ok')
           tool_name: z.string().describe("Name of the MCP tool to call"),
           arguments: z.record(z.unknown()).optional().describe("Tool arguments as JSON object"),
         }),
-        execute: async ({ tool_name, arguments: args }) => {
+        execute: safe(async ({ tool_name, arguments: args }) => {
           const rpcBody = JSON.stringify({
             jsonrpc: "2.0",
             id: 1,
             method: "tools/call",
             params: { name: tool_name, arguments: args || {} },
           });
-          return sandbox.exec(
+          return truncateResult(await sandbox.exec(
             `curl -sS -X POST '${server.url.replace(/'/g, "'\\''")}' ` +
             `-H 'Content-Type: application/json' ` +
             `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
             30000
-          );
-        },
+          ));
+        }),
       });
     }
   }
@@ -326,7 +551,7 @@ print('ok')
         parameters: z.object({
           message: z.string().describe("The task to delegate"),
         }),
-        execute: async ({ message }) => {
+        execute: safe(async ({ message }) => {
           if (!env?.delegateToAgent) {
             return "Multi-agent delegation not available: no thread executor configured";
           }
@@ -335,7 +560,7 @@ print('ok')
           } catch (e) {
             return `Sub-agent error: ${e instanceof Error ? e.message : String(e)}`;
           }
-        },
+        }),
       });
     }
   }
@@ -373,7 +598,7 @@ export function buildMemoryTools(
       store_id: z.string(),
       prefix: z.string().optional(),
     }),
-    execute: async ({ store_id, prefix }) => {
+    execute: safe(async ({ store_id, prefix }) => {
       const list = await kv.list({ prefix: `mem:${store_id}:` });
       const items = await Promise.all(
         list.keys.map(async (k) => {
@@ -385,7 +610,7 @@ export function buildMemoryTools(
         })
       );
       return JSON.stringify(items.filter(Boolean));
-    },
+    }),
   });
 
   tools.memory_read = tool({
@@ -394,12 +619,12 @@ export function buildMemoryTools(
       store_id: z.string(),
       memory_id: z.string(),
     }),
-    execute: async ({ store_id, memory_id }) => {
+    execute: safe(async ({ store_id, memory_id }) => {
       const data = await kv.get(`mem:${store_id}:${memory_id}`);
       if (!data) return "Error: memory not found";
       const mem = JSON.parse(data);
       return mem.content || "";
-    },
+    }),
   });
 
   tools.memory_write = tool({
@@ -410,7 +635,7 @@ export function buildMemoryTools(
       path: z.string().describe("Logical path, e.g. 'project/architecture'"),
       content: z.string(),
     }),
-    execute: async ({ store_id, path, content }) => {
+    execute: safe(async ({ store_id, path, content }) => {
       // Check if memory with this path already exists (upsert by path)
       const list = await kv.list({ prefix: `mem:${store_id}:` });
       let existingId: string | null = null;
@@ -441,7 +666,7 @@ export function buildMemoryTools(
       const mem = { id, store_id, path, content, size_bytes, created_at: now };
       await kv.put(`mem:${store_id}:${id}`, JSON.stringify(mem));
       return `Created memory at ${path}`;
-    },
+    }),
   });
 
   tools.memory_search = tool({
@@ -450,7 +675,7 @@ export function buildMemoryTools(
       store_id: z.string(),
       query: z.string(),
     }),
-    execute: async ({ store_id, query }) => {
+    execute: safe(async ({ store_id, query }) => {
       const list = await kv.list({ prefix: `mem:${store_id}:` });
       const matches: Array<{ path: string; snippet: string }> = [];
       const q = query.toLowerCase();
@@ -464,7 +689,7 @@ export function buildMemoryTools(
         }
       }
       return JSON.stringify(matches);
-    },
+    }),
   });
 
   tools.memory_delete = tool({
@@ -473,10 +698,10 @@ export function buildMemoryTools(
       store_id: z.string(),
       memory_id: z.string(),
     }),
-    execute: async ({ store_id, memory_id }) => {
+    execute: safe(async ({ store_id, memory_id }) => {
       await kv.delete(`mem:${store_id}:${memory_id}`);
       return "Deleted";
-    },
+    }),
   });
 
   return tools;

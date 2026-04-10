@@ -14,11 +14,19 @@ app.post("/", async (c) => {
     title?: string;
     vault_ids?: string[];
     resources?: Array<{
-      type: "file" | "memory_store";
+      type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
       file_id?: string;
       memory_store_id?: string;
       mount_path?: string;
       access?: "read_write" | "read_only";
+      // github_repository
+      url?: string;
+      repo_url?: string;
+      authorization_token?: string;
+      checkout?: { type?: string; name?: string; sha?: string };
+      // env_secret
+      name?: string;
+      value?: string;
     }>;
   }>();
 
@@ -114,6 +122,37 @@ app.post("/", async (c) => {
           mount_path: res.mount_path,
           created_at: new Date().toISOString(),
         };
+        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        createdResources.push(resource);
+      } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
+        const resourceId = generateResourceId();
+        const resource: SessionResource = {
+          id: resourceId,
+          session_id: sessionId,
+          type: "github_repository",
+          url: res.url || res.repo_url,
+          repo_url: res.url || res.repo_url,
+          mount_path: res.mount_path || "/workspace",
+          checkout: res.checkout,
+          created_at: new Date().toISOString(),
+        };
+        // Store token separately (write-only, never returned in API responses)
+        if (res.authorization_token) {
+          await c.env.CONFIG_KV.put(`secret:${sessionId}:${resourceId}`, res.authorization_token);
+        }
+        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        createdResources.push(resource);
+      } else if (res.type === "env_secret" && res.name && res.value) {
+        const resourceId = generateResourceId();
+        const resource: SessionResource = {
+          id: resourceId,
+          session_id: sessionId,
+          type: "env_secret",
+          name: res.name,
+          created_at: new Date().toISOString(),
+        };
+        // Store value separately (write-only)
+        await c.env.CONFIG_KV.put(`secret:${sessionId}:${resourceId}`, res.value);
         await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
         createdResources.push(resource);
       }

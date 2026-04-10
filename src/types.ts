@@ -94,48 +94,55 @@ export interface TextBlock {
 
 export type ContentBlock = TextBlock;
 
+// --- Event Base ---
+
+export interface EventBase {
+  id?: string;
+  processed_at?: string;
+}
+
 // --- Session Events ---
 
-export interface UserMessageEvent {
+export interface UserMessageEvent extends EventBase {
   type: "user.message";
   content: ContentBlock[];
 }
 
-export interface UserInterruptEvent {
+export interface UserInterruptEvent extends EventBase {
   type: "user.interrupt";
 }
 
-export interface UserToolConfirmationEvent {
+export interface UserToolConfirmationEvent extends EventBase {
   type: "user.tool_confirmation";
   tool_use_id: string;
   result: "allow" | "deny";
   deny_message?: string;
 }
 
-export interface UserCustomToolResultEvent {
+export interface UserCustomToolResultEvent extends EventBase {
   type: "user.custom_tool_result";
   custom_tool_use_id: string;
   content: ContentBlock[];
   is_error?: boolean;
 }
 
-export interface AgentMessageEvent {
+export interface AgentMessageEvent extends EventBase {
   type: "agent.message";
   content: ContentBlock[];
 }
 
-export interface AgentThinkingEvent {
+export interface AgentThinkingEvent extends EventBase {
   type: "agent.thinking";
 }
 
-export interface AgentCustomToolUseEvent {
+export interface AgentCustomToolUseEvent extends EventBase {
   type: "agent.custom_tool_use";
   id: string;
   name: string;
   input: Record<string, unknown>;
 }
 
-export interface AgentToolUseEvent {
+export interface AgentToolUseEvent extends EventBase {
   type: "agent.tool_use";
   id: string;
   name: string;
@@ -143,22 +150,22 @@ export interface AgentToolUseEvent {
   evaluated_permission?: "allow" | "ask";
 }
 
-export interface AgentToolResultEvent {
+export interface AgentToolResultEvent extends EventBase {
   type: "agent.tool_result";
   tool_use_id: string;
   content: string;
 }
 
-export interface SessionRunningEvent {
+export interface SessionRunningEvent extends EventBase {
   type: "session.status_running";
 }
 
-export interface SessionTerminatedEvent {
+export interface SessionTerminatedEvent extends EventBase {
   type: "session.status_terminated";
   reason?: string;
 }
 
-export interface SessionStatusEvent {
+export interface SessionStatusEvent extends EventBase {
   type: "session.status_idle";
   stop_reason?: {
     type: "user.message_required" | "tool_confirmation_required" | "custom_tool_result_required";
@@ -166,7 +173,7 @@ export interface SessionStatusEvent {
   };
 }
 
-export interface AgentMcpToolUseEvent {
+export interface AgentMcpToolUseEvent extends EventBase {
   type: "agent.mcp_tool_use";
   id: string;
   mcp_server_name: string;
@@ -174,14 +181,14 @@ export interface AgentMcpToolUseEvent {
   input: Record<string, unknown>;
 }
 
-export interface AgentMcpToolResultEvent {
+export interface AgentMcpToolResultEvent extends EventBase {
   type: "agent.mcp_tool_result";
   mcp_tool_use_id: string;
   content: string;
   is_error?: boolean;
 }
 
-export interface UserDefineOutcomeEvent {
+export interface UserDefineOutcomeEvent extends EventBase {
   type: "user.define_outcome";
   outcome: {
     description: string;
@@ -190,75 +197,75 @@ export interface UserDefineOutcomeEvent {
   };
 }
 
-export interface OutcomeEvaluationEvent {
+export interface OutcomeEvaluationEvent extends EventBase {
   type: "outcome.evaluation_end";
   result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed";
   iteration: number;
   feedback?: string;
 }
 
-export interface SessionErrorEvent {
+export interface SessionErrorEvent extends EventBase {
   type: "session.error";
   error: string;
 }
 
-export interface SessionThreadCreatedEvent {
+export interface SessionThreadCreatedEvent extends EventBase {
   type: "session.thread_created";
   thread_id: string;
   agent_id: string;
   agent_name: string;
 }
 
-export interface AgentThreadMessageEvent {
+export interface AgentThreadMessageEvent extends EventBase {
   type: "agent.thread_message";
   thread_id: string;
   content: ContentBlock[];
 }
 
 // Agent thread events (multi-agent)
-export interface AgentThreadMessageSentEvent {
+export interface AgentThreadMessageSentEvent extends EventBase {
   type: "agent.thread_message_sent";
   thread_id: string;
   content: ContentBlock[];
 }
 
-export interface AgentThreadMessageReceivedEvent {
+export interface AgentThreadMessageReceivedEvent extends EventBase {
   type: "agent.thread_message_received";
   thread_id: string;
   content: ContentBlock[];
 }
 
-export interface AgentThreadContextCompactedEvent {
+export interface AgentThreadContextCompactedEvent extends EventBase {
   type: "agent.thread_context_compacted";
   original_message_count: number;
   compacted_message_count: number;
 }
 
 // Session events
-export interface SessionRescheduledEvent {
+export interface SessionRescheduledEvent extends EventBase {
   type: "session.status_rescheduled";
   reason?: string;
 }
 
-export interface SessionOutcomeEvaluatedEvent {
+export interface SessionOutcomeEvaluatedEvent extends EventBase {
   type: "session.outcome_evaluated";
   result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed";
   iteration: number;
   feedback?: string;
 }
 
-export interface SessionThreadIdleEvent {
+export interface SessionThreadIdleEvent extends EventBase {
   type: "session.thread_idle";
   thread_id: string;
 }
 
 // Span events (observability)
-export interface SpanModelRequestStartEvent {
+export interface SpanModelRequestStartEvent extends EventBase {
   type: "span.model_request_start";
   model?: string;
 }
 
-export interface SpanModelRequestEndEvent {
+export interface SpanModelRequestEndEvent extends EventBase {
   type: "span.model_request_end";
   model?: string;
   model_usage?: {
@@ -268,17 +275,17 @@ export interface SpanModelRequestEndEvent {
   };
 }
 
-export interface SpanOutcomeEvaluationStartEvent {
+export interface SpanOutcomeEvaluationStartEvent extends EventBase {
   type: "span.outcome_evaluation_start";
   iteration: number;
 }
 
-export interface SpanOutcomeEvaluationOngoingEvent {
+export interface SpanOutcomeEvaluationOngoingEvent extends EventBase {
   type: "span.outcome_evaluation_ongoing";
   iteration: number;
 }
 
-export interface SpanOutcomeEvaluationEndEvent {
+export interface SpanOutcomeEvaluationEndEvent extends EventBase {
   type: "span.outcome_evaluation_end";
   result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed";
   iteration: number;
@@ -330,8 +337,9 @@ export interface VaultConfig {
 // --- Credential ---
 
 export interface CredentialAuth {
-  type: "mcp_oauth" | "static_bearer";
-  mcp_server_url: string;
+  type: "mcp_oauth" | "static_bearer" | "command_secret";
+  // mcp_oauth / static_bearer: match by MCP server URL
+  mcp_server_url?: string;
   // mcp_oauth fields
   access_token?: string;
   refresh_token?: string;
@@ -340,6 +348,9 @@ export interface CredentialAuth {
   client_secret?: string;
   // static_bearer fields
   token?: string;
+  // command_secret: inject env var only for matching command prefixes
+  command_prefixes?: string[];    // e.g. ["wrangler", "npx wrangler"]
+  env_var?: string;               // e.g. "CLOUDFLARE_API_TOKEN"
 }
 
 export interface CredentialConfig {
@@ -404,9 +415,16 @@ export interface FileRecord {
 export interface SessionResource {
   id: string;
   session_id: string;
-  type: "file" | "memory_store" | "github_repository";
+  type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
   file_id?: string;
   memory_store_id?: string;
+  url?: string;
+  repo_url?: string;
+  checkout?: { type?: string; name?: string; sha?: string };
+  name?: string; // env_secret name
+  // authorization_token and value are NEVER stored in resource metadata
+  // They go to separate KV keys: secret:{sessionId}:{resourceId}
+  credential_id?: string;
   mount_path?: string;
   access?: "read_write" | "read_only";
   prompt?: string;

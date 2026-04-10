@@ -415,8 +415,8 @@ describe("Edge cases - concurrent and complex operations", () => {
     // The API doesn't store callable_agents directly, but buildTools uses them
     // Test that buildTools creates call_agent tools from config
     const { buildTools } = await import("../../src/harness/tools");
-    const { StubSandbox } = await import("../../src/runtime/sandbox");
-    const sandbox = new StubSandbox();
+    const { TestSandbox } = await import("../../src/runtime/sandbox");
+    const sandbox = new TestSandbox();
     const tools = await buildTools({
       id: "agent_test_ca",
       name: "CA Agent",
@@ -436,8 +436,8 @@ describe("Edge cases - concurrent and complex operations", () => {
 
   it("agent created with mcp_servers generates MCP tools via buildTools", async () => {
     const { buildTools } = await import("../../src/harness/tools");
-    const { StubSandbox } = await import("../../src/runtime/sandbox");
-    const sandbox = new StubSandbox();
+    const { TestSandbox } = await import("../../src/runtime/sandbox");
+    const sandbox = new TestSandbox();
     const tools = await buildTools({
       id: "agent_test_mcp",
       name: "MCP Agent",

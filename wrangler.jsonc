@@ -5,14 +5,18 @@
   "compatibility_date": "2025-04-01",
   "compatibility_flags": ["nodejs_compat"],
 
+  "assets": {
+    "directory": "console/dist",
+    "binding": "ASSETS",
+    "not_found_handling": "single-page-application"
+  },
+
   "rules": [
     { "type": "Text", "globs": ["**/*.html"] }
   ],
 
-  // Create KV namespace: npx wrangler kv namespace create CONFIG_KV
-  // Paste the returned ID below. Local dev uses local storage automatically.
   "kv_namespaces": [
-    { "binding": "CONFIG_KV", "id": "" }
+    { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
   "r2_buckets": [
@@ -41,6 +45,8 @@
       "new_sqlite_classes": ["SessionDO", "Sandbox"]
     }
   ],
+
+  "limits": { "cpu_ms": 300000 },
 
   "observability": { "enabled": true }
 }

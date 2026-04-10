@@ -3,7 +3,7 @@ import { describe, it, expect } from "vitest";
 import { registerHarness } from "../../src/harness/registry";
 import { resolveSkills, registerSkill } from "../../src/harness/skills";
 import { SummarizeCompaction } from "../../src/harness/compaction";
-import { StubSandbox, createSandbox } from "../../src/runtime/sandbox";
+import { TestSandbox, createSandbox } from "../../src/runtime/sandbox";
 import { buildTools, buildMemoryTools } from "../../src/harness/tools";
 import { InMemoryHistory, eventsToMessages } from "../../src/runtime/history";
 import type { AgentConfig, SessionEvent, SessionThreadCreatedEvent, SessionThreadIdleEvent, AgentThreadMessageEvent, AgentMessageEvent, UserMessageEvent } from "../../src/types";
@@ -192,7 +192,7 @@ describe("Multi-agent callable_agents", () => {
     expect(agentConfig.callable_agents![0].type).toBe("agent");
 
     // Verify tools are created from this config
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox, {
       ANTHROPIC_API_KEY: "sk-ant-test",
     });
@@ -214,7 +214,7 @@ describe("Multi-agent callable_agents", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox, {
       ANTHROPIC_API_KEY: "sk-ant-test",
     });
@@ -240,7 +240,7 @@ describe("Multi-agent callable_agents", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     // No env.ANTHROPIC_API_KEY provided
     const tools = await buildTools(agentConfig, sandbox, undefined);
     expect(tools.call_agent_agent_worker1).toBeUndefined();
@@ -282,7 +282,7 @@ describe("Multi-agent callable_agents", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox, {
       ANTHROPIC_API_KEY: "sk-ant-test",
     });
@@ -300,39 +300,36 @@ describe("Multi-agent callable_agents", () => {
 // 4. Sandbox lifecycle
 // ============================================================
 describe("Sandbox lifecycle", () => {
-  it("StubSandbox exec returns stub response with command", async () => {
-    const stub = new StubSandbox();
+  it("TestSandbox exec returns test response with command", async () => {
+    const stub = new TestSandbox();
     const result = await stub.exec("echo hello");
-    expect(result).toContain("local stub");
+    expect(result).toContain("test");
     expect(result).toContain("echo hello");
     expect(result).toContain("exit=0");
   });
 
-  it("StubSandbox readFile returns stub file message", async () => {
-    const stub = new StubSandbox();
+  it("TestSandbox readFile returns test file message", async () => {
+    const stub = new TestSandbox();
     const result = await stub.readFile("/some/path.txt");
-    expect(result).toContain("stub");
+    expect(result).toContain("test");
     expect(result).toContain("/some/path.txt");
   });
 
-  it("StubSandbox writeFile returns ok", async () => {
-    const stub = new StubSandbox();
+  it("TestSandbox writeFile returns ok", async () => {
+    const stub = new TestSandbox();
     const result = await stub.writeFile("/test/file.txt", "content here");
     expect(result).toBe("ok");
   });
 
-  it("createSandbox returns StubSandbox when SANDBOX binding is missing", () => {
-    const fakeEnv = { SANDBOX: undefined } as any;
+  it("createSandbox always returns CloudflareSandbox", () => {
+    const fakeEnv = { SANDBOX: {} } as any;
     const sandbox = createSandbox(fakeEnv, "test-session-id");
-
-    // Verify it behaves like StubSandbox
     expect(sandbox).toBeDefined();
-    // The returned object should be a StubSandbox instance
-    expect(sandbox).toBeInstanceOf(StubSandbox);
+    expect(sandbox).not.toBeInstanceOf(TestSandbox);
   });
 
-  it("StubSandbox exec works with various commands", async () => {
-    const stub = new StubSandbox();
+  it("TestSandbox exec works with various commands", async () => {
+    const stub = new TestSandbox();
 
     const r1 = await stub.exec("ls -la /workspace");
     expect(r1).toContain("exit=0");
@@ -362,7 +359,7 @@ describe("buildTools integration", () => {
       version: 1,
       created_at: new Date().toISOString(),
     };
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox);
 
     expect(tools.bash).toBeDefined();
@@ -394,7 +391,7 @@ describe("buildTools integration", () => {
       version: 1,
       created_at: new Date().toISOString(),
     };
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox);
 
     expect(tools.bash).toBeDefined();
@@ -554,7 +551,7 @@ describe("Thread model — delegateToAgent", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const mockDelegate = async (agentId: string, message: string) => {
       delegateCalls.push({ agentId, message });
       return "sub-agent response from thread";
@@ -591,7 +588,7 @@ describe("Thread model — delegateToAgent", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox, {
       ANTHROPIC_API_KEY: "sk-ant-test",
       // No delegateToAgent
@@ -617,7 +614,7 @@ describe("Thread model — delegateToAgent", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const tools = await buildTools(agentConfig, sandbox, {
       ANTHROPIC_API_KEY: "sk-ant-test",
       delegateToAgent: async () => {
@@ -688,7 +685,7 @@ describe("Thread model — delegateToAgent", () => {
       created_at: new Date().toISOString(),
     };
 
-    const sandbox = new StubSandbox();
+    const sandbox = new TestSandbox();
     const mockDelegate = async (agentId: string, message: string) => {
       delegateCalls.push({ agentId, message });
       return `response from ${agentId}`;

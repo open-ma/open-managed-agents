@@ -5,8 +5,11 @@ import type {
   AgentMessageEvent,
   AgentToolUseEvent,
   AgentToolResultEvent,
+  AgentMcpToolUseEvent,
+  AgentMcpToolResultEvent,
   UserMessageEvent,
 } from "../types";
+import { generateEventId } from "../id";
 
 /**
  * Convert an array of SessionEvents into AI SDK CoreMessage[] format.
@@ -76,6 +79,18 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
         });
         break;
       }
+      case "agent.mcp_tool_use": {
+        const e = event as AgentMcpToolUseEvent;
+        // MCP tools are registered as mcp_{server}_{call|list_tools} in the tool registry
+        const toolName = `mcp_${e.mcp_server_name}_call`;
+        pendingToolCalls.push({
+          type: "tool-call",
+          toolCallId: e.id,
+          toolName,
+          args: e.input,
+        });
+        break;
+      }
       case "agent.tool_result": {
         const e = event as AgentToolResultEvent;
         // Find matching tool call to get toolName
@@ -90,6 +105,19 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
         });
         break;
       }
+      case "agent.mcp_tool_result": {
+        const e = event as AgentMcpToolResultEvent;
+        const matchingCall = pendingToolCalls.find(
+          (c) => c.toolCallId === e.mcp_tool_use_id
+        );
+        pendingToolResults.push({
+          type: "tool-result",
+          toolCallId: e.mcp_tool_use_id,
+          toolName: matchingCall?.toolName ?? "unknown",
+          result: e.content,
+        });
+        break;
+      }
       // session.status_idle, session.error — not part of messages
     }
   }
@@ -98,10 +126,24 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
   return messages;
 }
 
+/**
+ * Stamp an event with id and processed_at if not already set.
+ */
+function stampEvent(event: SessionEvent): SessionEvent {
+  if (!event.id) {
+    event.id = generateEventId();
+  }
+  if (!event.processed_at) {
+    event.processed_at = new Date().toISOString();
+  }
+  return event;
+}
+
 export class SqliteHistory implements HistoryStore {
   constructor(private sql: SqlStorage) {}
 
   append(event: SessionEvent): void {
+    stampEvent(event);
     this.sql.exec(
       "INSERT INTO events (type, data) VALUES (?, ?)",
       event.type,
@@ -142,6 +184,7 @@ export class InMemoryHistory implements HistoryStore {
   private events: SessionEvent[] = [];
 
   append(event: SessionEvent): void {
+    stampEvent(event);
     this.events.push(event);
   }
 

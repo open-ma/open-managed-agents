@@ -1,8 +1,19 @@
 export interface Skill {
   id: string;
   name: string;
+  source?: "anthropic" | "custom";
   system_prompt_addition: string;
   tools?: Record<string, unknown>;
+}
+
+export interface SkillFile {
+  filename: string;
+  content: string;
+}
+
+export interface SkillFilesResult {
+  skillName: string;
+  files: SkillFile[];
 }
 
 const skillRegistry = new Map<string, Skill>();
@@ -11,49 +22,157 @@ export function registerSkill(skill: Skill) {
   skillRegistry.set(skill.id, skill);
 }
 
+/**
+ * Resolve built-in (anthropic pre-registered) skills from the in-memory registry.
+ * Custom skills are NOT resolved here — use resolveCustomSkills() for those.
+ * This function is intentionally kept synchronous for backward compatibility.
+ */
 export function resolveSkills(skillConfigs: Array<{ skill_id: string }>): Skill[] {
   return skillConfigs.map(s => skillRegistry.get(s.skill_id)).filter(Boolean) as Skill[];
 }
 
-// Register built-in skills
+/**
+ * Resolve custom skills by fetching metadata from KV.
+ * Returns Skill objects with a lightweight system_prompt_addition that points
+ * Claude to /home/user/.skills/{id}/SKILL.md for full instructions.
+ *
+ * KV key format: skill:{skill_id} -> { id, name, display_title, description, latest_version, ... }
+ */
+export async function resolveCustomSkills(
+  skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
+  kv: KVNamespace,
+): Promise<Skill[]> {
+  const customConfigs = skillConfigs.filter(
+    s => s.type === "custom" && !skillRegistry.has(s.skill_id),
+  );
+
+  const skills: Skill[] = [];
+  for (const cfg of customConfigs) {
+    try {
+      const raw = await kv.get(`skill:${cfg.skill_id}`);
+      if (!raw) continue;
+
+      const meta = JSON.parse(raw) as {
+        id: string;
+        name?: string;
+        display_title?: string;
+        description?: string;
+      };
+
+      const name = meta.display_title || meta.name || cfg.skill_id;
+      const description = meta.description || "";
+
+      skills.push({
+        id: cfg.skill_id,
+        name,
+        source: "custom",
+        system_prompt_addition: `[Skill: ${name}] ${description}. Read /home/user/.skills/${name}/SKILL.md for instructions.`,
+      });
+    } catch {
+      // Skip skills that can't be resolved from KV
+    }
+  }
+
+  return skills;
+}
+
+/**
+ * Fetch custom skill files from KV for mounting into the sandbox.
+ *
+ * KV key format:
+ *   skill:{skill_id}           -> { ..., latest_version }
+ *   skillver:{skill_id}:{ver}  -> { version, files: [{ filename, content }], ... }
+ *
+ * If a skill config specifies a version, that version is used.
+ * Otherwise, latest_version from the skill metadata is used.
+ */
+export async function getSkillFiles(
+  skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
+  kv: KVNamespace,
+): Promise<SkillFilesResult[]> {
+  const customConfigs = skillConfigs.filter(
+    s => s.type === "custom" && !skillRegistry.has(s.skill_id),
+  );
+
+  const results: SkillFilesResult[] = [];
+  for (const cfg of customConfigs) {
+    try {
+      const metaRaw = await kv.get(`skill:${cfg.skill_id}`);
+      if (!metaRaw) continue;
+
+      const meta = JSON.parse(metaRaw) as {
+        name?: string;
+        latest_version?: string;
+      };
+
+      const version = (cfg.version && cfg.version !== "latest") ? cfg.version : meta.latest_version;
+      if (!version) continue;
+
+      const verRaw = await kv.get(`skillver:${cfg.skill_id}:${version}`);
+      if (!verRaw) continue;
+
+      const verData = JSON.parse(verRaw) as { files?: SkillFile[] };
+
+      if (verData.files?.length) {
+        results.push({
+          skillName: meta.name || cfg.skill_id,
+          files: verData.files,
+        });
+      }
+    } catch {
+      // Skip skills whose files can't be fetched
+    }
+  }
+
+  return results;
+}
+
+// Register built-in (Anthropic pre-built) skills
 registerSkill({
   id: "web_research",
   name: "Web Research",
+  source: "anthropic",
   system_prompt_addition: "You have web research capabilities. Use web_search to find information and web_fetch to read web pages. Always cite your sources.",
 });
 
 registerSkill({
   id: "code_review",
   name: "Code Review",
+  source: "anthropic",
   system_prompt_addition: "You are an expert code reviewer. Focus on: correctness, security vulnerabilities, performance issues, code style, and maintainability. Provide specific line-level feedback.",
 });
 
 registerSkill({
   id: "data_analysis",
   name: "Data Analysis",
+  source: "anthropic",
   system_prompt_addition: "You are a data analyst. Use Python with pandas, numpy, and matplotlib for analysis. Always show your methodology, visualize results, and explain findings clearly.",
 });
 
 registerSkill({
   id: "xlsx_processing",
   name: "Excel Processing",
+  source: "anthropic",
   system_prompt_addition: "You can process Excel (.xlsx) files. Use Python with openpyxl to read, analyze, and create spreadsheets.",
 });
 
 registerSkill({
   id: "pptx_processing",
   name: "PowerPoint Processing",
+  source: "anthropic",
   system_prompt_addition: "You can process PowerPoint (.pptx) files. Use Python with python-pptx to read, analyze, and create presentations.",
 });
 
 registerSkill({
   id: "pdf_processing",
   name: "PDF Processing",
+  source: "anthropic",
   system_prompt_addition: "You can process PDF files. Use Python with PyPDF2 or pdfplumber to read, extract text, and analyze PDFs.",
 });
 
 registerSkill({
   id: "docx_processing",
   name: "Document Processing",
+  source: "anthropic",
   system_prompt_addition: "You can process Word (.docx) files. Use Python with python-docx to read, analyze, and create documents.",
 });
