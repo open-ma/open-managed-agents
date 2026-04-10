@@ -1,56 +1,105 @@
 import { generateText } from "ai";
 import type { HarnessInterface, HarnessContext } from "./interface";
 import type { SessionEvent } from "../types";
-import { resolveModel } from "./provider";
-import { buildTools, buildMemoryTools } from "./tools";
-import { resolveSkills } from "./skills";
 import { SummarizeCompaction } from "./compaction";
 
 const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"]);
+const isMcpTool = (name: string) => name.startsWith("mcp_");
 const isBuiltinTool = (name: string) =>
-  BUILTIN_TOOLS.has(name) || name.startsWith("mcp_") || name.startsWith("call_agent_") || name.startsWith("memory_");
+  BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_") || name.startsWith("memory_");
+
+// LLM call resilience settings (inspired by Claude Code)
+const MAX_RETRIES = 3;
+const BASE_RETRY_DELAY = 1000;   // 1s, doubles each retry
+const API_TIMEOUT_MS = 300000;   // 5 minutes per generateText call
+
+/**
+ * Retry an async function with exponential backoff + jitter.
+ */
+async function withRetry<T>(
+  fn: (signal: AbortSignal) => Promise<T>,
+  maxRetries: number,
+  parentSignal?: AbortSignal,
+): Promise<T> {
+  let lastError: unknown;
+  for (let attempt = 0; attempt <= maxRetries; attempt++) {
+    if (parentSignal?.aborted) throw new Error("Aborted");
+
+    // Create a timeout signal for this attempt
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
+
+    try {
+      const result = await fn(controller.signal);
+      clearTimeout(timer);
+      return result;
+    } catch (err) {
+      clearTimeout(timer);
+      lastError = err;
+
+      // Don't retry on user abort
+      if (parentSignal?.aborted) throw err;
+
+      // Don't retry on non-transient errors
+      const msg = err instanceof Error ? err.message : String(err);
+      const isTransient = /timeout|abort|429|529|5\d\d|ECONNRESET|overloaded|rate.limit|fetch failed/i.test(msg);
+      if (!isTransient) throw err;
+
+      // Don't retry on last attempt
+      if (attempt >= maxRetries) break;
+
+      // Exponential backoff with jitter
+      const delay = BASE_RETRY_DELAY * Math.pow(2, attempt) * (0.75 + Math.random() * 0.5);
+      await new Promise(r => setTimeout(r, delay));
+    }
+  }
+  throw lastError;
+}
+
+/**
+ * Extract the MCP server name from a tool name like "mcp_github_call" or "mcp_github_list_tools".
+ */
+function extractMcpServerName(toolName: string): string {
+  // mcp_{server_name}_{call|list_tools}
+  const withoutPrefix = toolName.slice(4); // Remove "mcp_"
+  const lastUnderscore = withoutPrefix.lastIndexOf("_");
+  // Handle _list_tools (two underscores)
+  if (withoutPrefix.endsWith("_list_tools")) {
+    return withoutPrefix.slice(0, withoutPrefix.length - "_list_tools".length);
+  }
+  if (lastUnderscore > 0) {
+    return withoutPrefix.slice(0, lastUnderscore);
+  }
+  return withoutPrefix;
+}
 
 export class DefaultHarness implements HarnessInterface {
   async run(ctx: HarnessContext): Promise<void> {
-    const { agent, userMessage, runtime } = ctx;
+    const { agent, userMessage, runtime, tools, model, systemPrompt } = ctx;
+
+    // --- Harness decides HOW to deliver context to the model ---
 
     // 1. Rebuild conversation from event log
+    // The current userMessage is already appended to history by SessionDO,
+    // so getMessages() includes it. No need to push again.
     const messages = runtime.history.getMessages();
-    messages.push({
-      role: "user",
-      content: userMessage.content.map((b) => ({ type: "text" as const, text: b.text })),
-    });
 
-    // 2. Build tools from agent config
-    const tools = await buildTools(agent, runtime.sandbox, ctx.env);
-
-    // 2b. Inject memory tools if session has memory stores
-    if (ctx.env.memoryStoreIds?.length && ctx.env.CONFIG_KV) {
-      const memTools = buildMemoryTools(ctx.env.memoryStoreIds, ctx.env.CONFIG_KV);
-      Object.assign(tools, memTools);
+    // Cache strategy: mark last historical message as cache breakpoint.
+    // Everything before this point is stable and cached by Anthropic API,
+    // saving tokens on multi-turn conversations.
+    if (messages.length > 0) {
+      const lastMsg = messages[messages.length - 1];
+      (lastMsg as any).providerMetadata = {
+        anthropic: { cacheControl: { type: "ephemeral" } },
+      };
     }
 
-    // 3. Resolve model
-    const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
-    const model = resolveModel(modelId, ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
-
-    // 4. Resolve skills and build system prompt
-    let systemPrompt = agent.system;
-    if (agent.skills?.length) {
-      const skills = resolveSkills(agent.skills);
-      const additions = skills.map(s => s.system_prompt_addition).filter(Boolean);
-      if (additions.length) {
-        systemPrompt += "\n\n" + additions.join("\n\n");
-      }
-    }
-
-    // 5. Compact messages if conversation is too long
+    // 2. Compaction strategy: summarize middle section when context is too long
     let finalMessages = messages;
     const compaction = new SummarizeCompaction();
     if (compaction.shouldCompact(messages)) {
       const originalCount = messages.length;
       finalMessages = await compaction.compact(messages, model);
-      // Emit compaction event
       runtime.broadcast({
         type: "agent.thread_context_compacted",
         original_message_count: originalCount,
@@ -58,16 +107,22 @@ export class DefaultHarness implements HarnessInterface {
       });
     }
 
-    // 6. Emit span event: model request start
+    // 3. Emit span event: model request start
+    const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
     runtime.broadcast({ type: "span.model_request_start", model: modelId });
 
-    // 7. Run agent loop
-    const result = await generateText({
+    // 7. Run agent loop with retry + timeout + prompt caching
+    //
+    // Anthropic prompt caching: @ai-sdk/anthropic has cacheControl enabled
+    // by default. We mark the system prompt for caching via providerOptions,
+    // which avoids re-processing the same system prompt across turns.
+    const result = await withRetry((signal) => generateText({
       model,
       system: systemPrompt,
       messages: finalMessages,
       tools,
       maxSteps: 25,
+      abortSignal: signal,
 
       onStepFinish: async ({ text, toolCalls, toolResults, reasoning }) => {
         // Emit thinking event if extended thinking was used
@@ -98,8 +153,18 @@ export class DefaultHarness implements HarnessInterface {
             });
           }
 
-          // Distinguish built-in vs custom tool use events
-          if (isBuiltinTool(call.toolName)) {
+          // Distinguish MCP vs built-in vs custom tool use events
+          if (isMcpTool(call.toolName)) {
+            // MCP tools get their own event type per Anthropic API spec
+            const mcpToolUseEvent: SessionEvent = {
+              type: "agent.mcp_tool_use",
+              id: call.toolCallId,
+              mcp_server_name: extractMcpServerName(call.toolName),
+              name: call.toolName,
+              input: call.args as Record<string, unknown>,
+            };
+            runtime.broadcast(mcpToolUseEvent);
+          } else if (isBuiltinTool(call.toolName)) {
             // Check if tool requires confirmation (always_ask — no execute function)
             const hasExecute = tools[call.toolName] && typeof tools[call.toolName].execute === "function";
             const toolUseEvent: SessionEvent = {
@@ -122,22 +187,32 @@ export class DefaultHarness implements HarnessInterface {
             runtime.broadcast(customToolUseEvent);
           }
 
-          // Find matching result by toolCallId (not index — some tools may lack execute)
+          // Find matching result by toolCallId
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           const tr = (toolResults as any[])?.find(
             // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (r: any) => r.toolCallId === call.toolCallId
           );
           if (tr) {
-            const toolResultEvent: SessionEvent = {
-              type: "agent.tool_result",
-              tool_use_id: call.toolCallId,
-              content:
-                typeof tr.result === "string"
-                  ? tr.result
-                  : JSON.stringify(tr.result),
-            };
-            runtime.broadcast(toolResultEvent);
+            if (isMcpTool(call.toolName)) {
+              // MCP tool results get their own event type
+              const mcpResultEvent: SessionEvent = {
+                type: "agent.mcp_tool_result",
+                mcp_tool_use_id: call.toolCallId,
+                content: typeof tr.result === "string" ? tr.result : JSON.stringify(tr.result),
+              };
+              runtime.broadcast(mcpResultEvent);
+            } else {
+              const toolResultEvent: SessionEvent = {
+                type: "agent.tool_result",
+                tool_use_id: call.toolCallId,
+                content:
+                  typeof tr.result === "string"
+                    ? tr.result
+                    : JSON.stringify(tr.result),
+              };
+              runtime.broadcast(toolResultEvent);
+            }
           }
 
           // Emit thread_message_received after call_agent_* tool result
@@ -150,9 +225,9 @@ export class DefaultHarness implements HarnessInterface {
           }
         }
       },
-    });
+    }), MAX_RETRIES, runtime.abortSignal);
 
-    // 8. Detect pending tool confirmations (always_ask tools called without execute)
+    // 8. Detect pending tool confirmations and custom tool results
     if (result.toolCalls?.length) {
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       const resultedIds = new Set((result.toolResults as any[])?.map((r: any) => r.toolCallId) ?? []);

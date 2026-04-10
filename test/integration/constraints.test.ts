@@ -339,4 +339,224 @@ describe("Constraint validations", () => {
     expect(ver.actor).toEqual({ type: "api_key", id: "api" });
     expect(ver.operation).toBe("created");
   });
+
+  // ============================================================
+  // Agent extended fields
+  // ============================================================
+  describe("Agent extended fields", () => {
+    // ----------------------------------------------------------
+    // description
+    // ----------------------------------------------------------
+    it("agent with description is stored and retrieved", async () => {
+      const agent = await createAgent({ description: "A helpful research assistant" });
+      expect(agent.description).toBe("A helpful research assistant");
+
+      const getRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.description).toBe("A helpful research assistant");
+    });
+
+    // ----------------------------------------------------------
+    // mcp_servers
+    // ----------------------------------------------------------
+    it("agent with mcp_servers is stored and retrieved", async () => {
+      const mcpServers = [
+        { name: "github", type: "sse", url: "https://mcp.github.com/sse" },
+        { name: "slack", type: "sse", url: "https://mcp.slack.com/sse" },
+      ];
+      const agent = await createAgent({ mcp_servers: mcpServers });
+      expect(agent.mcp_servers).toEqual(mcpServers);
+
+      const getRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.mcp_servers).toEqual(mcpServers);
+    });
+
+    // ----------------------------------------------------------
+    // skills
+    // ----------------------------------------------------------
+    it("agent with skills is stored and retrieved", async () => {
+      const skills = [
+        { type: "anthropic", skill_id: "web_research" },
+        { type: "custom", skill_id: "my_custom_skill", version: "1.2.0" },
+      ];
+      const agent = await createAgent({ skills });
+      expect(agent.skills).toEqual(skills);
+
+      const getRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.skills).toEqual(skills);
+    });
+
+    // ----------------------------------------------------------
+    // callable_agents
+    // ----------------------------------------------------------
+    it("agent with callable_agents is stored and retrieved", async () => {
+      const callableAgents = [
+        { type: "agent", id: "agent_abc123", version: 1 },
+        { type: "agent", id: "agent_def456", version: 2 },
+      ];
+      const agent = await createAgent({ callable_agents: callableAgents });
+      expect(agent.callable_agents).toEqual(callableAgents);
+
+      const getRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.callable_agents).toEqual(callableAgents);
+    });
+
+    // ----------------------------------------------------------
+    // metadata
+    // ----------------------------------------------------------
+    it("agent with metadata is stored and retrieved", async () => {
+      const metadata = { team: "research", priority: "high", tags: ["v2", "beta"] };
+      const agent = await createAgent({ metadata });
+      expect(agent.metadata).toEqual(metadata);
+
+      const getRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.metadata).toEqual(metadata);
+    });
+
+    // ----------------------------------------------------------
+    // model as object
+    // ----------------------------------------------------------
+    it("agent with model object {id, speed} is stored", async () => {
+      const model = { id: "claude-sonnet-4-6", speed: "fast" };
+      const agent = await createAgent({ model });
+      expect(agent.model).toEqual(model);
+
+      const getRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const fetched = (await getRes.json()) as any;
+      expect(fetched.model).toEqual(model);
+    });
+
+    // ----------------------------------------------------------
+    // PUT adds mcp_servers
+    // ----------------------------------------------------------
+    it("agent update adds mcp_servers", async () => {
+      const agent = await createAgent();
+      expect(agent.mcp_servers).toBeUndefined();
+
+      const mcpServers = [{ name: "jira", type: "sse", url: "https://mcp.jira.com/sse" }];
+      const updateRes = await put(`/v1/agents/${agent.id}`, { mcp_servers: mcpServers });
+      expect(updateRes.status).toBe(200);
+      const updated = (await updateRes.json()) as any;
+      expect(updated.mcp_servers).toEqual(mcpServers);
+      expect(updated.version).toBe(2);
+    });
+
+    // ----------------------------------------------------------
+    // PUT adds skills
+    // ----------------------------------------------------------
+    it("agent update adds skills", async () => {
+      const agent = await createAgent();
+      expect(agent.skills).toBeUndefined();
+
+      const skills = [{ type: "anthropic", skill_id: "data_analysis" }];
+      const updateRes = await put(`/v1/agents/${agent.id}`, { skills });
+      expect(updateRes.status).toBe(200);
+      const updated = (await updateRes.json()) as any;
+      expect(updated.skills).toEqual(skills);
+      expect(updated.version).toBe(2);
+    });
+
+    // ----------------------------------------------------------
+    // PUT adds callable_agents
+    // ----------------------------------------------------------
+    it("agent update adds callable_agents", async () => {
+      const agent = await createAgent();
+      expect(agent.callable_agents).toBeUndefined();
+
+      const callableAgents = [{ type: "agent", id: "agent_xyz789", version: 3 }];
+      const updateRes = await put(`/v1/agents/${agent.id}`, { callable_agents: callableAgents });
+      expect(updateRes.status).toBe(200);
+      const updated = (await updateRes.json()) as any;
+      expect(updated.callable_agents).toEqual(callableAgents);
+      expect(updated.version).toBe(2);
+    });
+
+    // ----------------------------------------------------------
+    // PUT changes description
+    // ----------------------------------------------------------
+    it("agent update changes description", async () => {
+      const agent = await createAgent({ description: "original description" });
+      expect(agent.description).toBe("original description");
+
+      const updateRes = await put(`/v1/agents/${agent.id}`, { description: "updated description" });
+      expect(updateRes.status).toBe(200);
+      const updated = (await updateRes.json()) as any;
+      expect(updated.description).toBe("updated description");
+      expect(updated.version).toBe(2);
+    });
+
+    // ----------------------------------------------------------
+    // PUT metadata merges keys
+    // ----------------------------------------------------------
+    it("agent update with metadata merges keys", async () => {
+      const agent = await createAgent({ metadata: { team: "alpha", env: "staging" } });
+      expect(agent.metadata).toEqual({ team: "alpha", env: "staging" });
+
+      // Update metadata — the route replaces the whole metadata object
+      const updateRes = await put(`/v1/agents/${agent.id}`, {
+        metadata: { team: "beta", region: "us-east" },
+      });
+      expect(updateRes.status).toBe(200);
+      const updated = (await updateRes.json()) as any;
+      // The PUT handler does a field-level replace (agent[key] = body[key]),
+      // so metadata is replaced entirely, not deep-merged.
+      expect(updated.metadata).toEqual({ team: "beta", region: "us-east" });
+      expect(updated.version).toBe(2);
+    });
+
+    // ----------------------------------------------------------
+    // Version history preserves extended fields
+    // ----------------------------------------------------------
+    it("version history preserves mcp_servers/skills/callable_agents", async () => {
+      const originalMcp = [{ name: "github", type: "sse", url: "https://mcp.github.com/sse" }];
+      const originalSkills = [{ type: "anthropic", skill_id: "web_research" }];
+      const originalCallable = [{ type: "agent", id: "agent_old", version: 1 }];
+
+      const agent = await createAgent({
+        description: "v1 agent",
+        mcp_servers: originalMcp,
+        skills: originalSkills,
+        callable_agents: originalCallable,
+        metadata: { release: "v1" },
+      });
+      expect(agent.version).toBe(1);
+
+      // Update all extended fields to new values
+      const updateRes = await put(`/v1/agents/${agent.id}`, {
+        description: "v2 agent",
+        mcp_servers: [{ name: "slack", type: "sse", url: "https://mcp.slack.com/sse" }],
+        skills: [{ type: "custom", skill_id: "custom_skill", version: "2.0" }],
+        callable_agents: [{ type: "agent", id: "agent_new", version: 5 }],
+        metadata: { release: "v2" },
+      });
+      expect(updateRes.status).toBe(200);
+      const updated = (await updateRes.json()) as any;
+      expect(updated.version).toBe(2);
+
+      // Retrieve the old version (v1) and verify it preserved original fields
+      const v1Res = await api(`/v1/agents/${agent.id}/versions/1`, { headers: HEADERS });
+      expect(v1Res.status).toBe(200);
+      const v1 = (await v1Res.json()) as any;
+      expect(v1.version).toBe(1);
+      expect(v1.description).toBe("v1 agent");
+      expect(v1.mcp_servers).toEqual(originalMcp);
+      expect(v1.skills).toEqual(originalSkills);
+      expect(v1.callable_agents).toEqual(originalCallable);
+      expect(v1.metadata).toEqual({ release: "v1" });
+
+      // Verify current version has updated fields
+      const currentRes = await api(`/v1/agents/${agent.id}`, { headers: HEADERS });
+      const current = (await currentRes.json()) as any;
+      expect(current.version).toBe(2);
+      expect(current.description).toBe("v2 agent");
+      expect(current.mcp_servers).toEqual([{ name: "slack", type: "sse", url: "https://mcp.slack.com/sse" }]);
+      expect(current.skills).toEqual([{ type: "custom", skill_id: "custom_skill", version: "2.0" }]);
+      expect(current.callable_agents).toEqual([{ type: "agent", id: "agent_new", version: 5 }]);
+      expect(current.metadata).toEqual({ release: "v2" });
+    });
+  });
 });

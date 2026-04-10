@@ -8,6 +8,7 @@ import sessionsRoutes from "./routes/sessions";
 import vaultsRoutes from "./routes/vaults";
 import memoryRoutes from "./routes/memory";
 import filesRoutes from "./routes/files";
+import skillsRoutes from "./routes/skills";
 
 // --- Composition root: register harnesses here ---
 import { registerHarness } from "./harness/registry";
@@ -27,13 +28,9 @@ export { outbound, outboundByHost } from "./outbound";
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
-app.get("/", (c) => c.redirect("/console"));
 
-// Console GUI — served as static HTML
-import consoleHtml from "./console.html";
-app.get("/console", (c) =>
-  c.html(consoleHtml as unknown as string)
-);
+// Console UI — served by Wrangler Assets (console/dist)
+// SPA fallback handled by assets.not_found_handling = "single-page-application"
 
 app.use("/v1/*", authMiddleware);
 app.use("/v1/*", rateLimitMiddleware);
@@ -43,5 +40,6 @@ app.route("/v1/sessions", sessionsRoutes);
 app.route("/v1/vaults", vaultsRoutes);
 app.route("/v1/memory_stores", memoryRoutes);
 app.route("/v1/files", filesRoutes);
+app.route("/v1/skills", skillsRoutes);
 
 export default app;
