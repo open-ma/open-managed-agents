@@ -73,7 +73,9 @@ export class CloudflareSandbox implements SandboxExecutor {
   async startProcess(command: string): Promise<ProcessHandle | null> {
     const sandbox = await this.getSandbox();
     if (typeof sandbox.startProcess !== "function") return null;
-    const proc = await sandbox.startProcess(command);
+    const proc = await sandbox.startProcess(command, {
+      env: this.getSecretsForCommand(command),
+    });
     return {
       id: proc.id,
       pid: proc.pid,
