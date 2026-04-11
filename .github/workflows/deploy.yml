@@ -30,80 +30,40 @@ jobs:
       - name: Build console
         run: cd apps/console && npm ci && npx vite build
 
-      # --- Agent worker: upload new version (not live yet) ---
-      - name: Upload agent worker version
-        id: agent_upload
+      # --- Deploy both workers with retry ---
+      - name: Deploy agent worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/agent
-          npx wrangler versions upload --config wrangler.jsonc 2>&1 | tee /tmp/agent-upload.log
-          VERSION_ID=$(grep -oP 'Worker Version ID: \K[^\s]+' /tmp/agent-upload.log || true)
-          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
-          echo "Agent version: $VERSION_ID"
+          for i in 1 2 3; do
+            if npx wrangler deploy --config wrangler.jsonc; then
+              echo "Agent worker deployed successfully"
+              exit 0
+            fi
+            echo "Attempt $i/3 failed, waiting 60s before retry..."
+            sleep 60
+          done
+          echo "All attempts failed"
+          exit 1
 
-      # --- Main worker: upload new version (not live yet) ---
-      - name: Upload main worker version
-        id: main_upload
+      - name: Deploy main worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/main
-          npx wrangler versions upload --config wrangler.jsonc 2>&1 | tee /tmp/main-upload.log
-          VERSION_ID=$(grep -oP 'Worker Version ID: \K[^\s]+' /tmp/main-upload.log || true)
-          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
-          echo "Main version: $VERSION_ID"
-
-      # --- Smoke test: verify new versions via version override ---
-      - name: Smoke test
-        env:
-          API_KEY: ${{ secrets.API_KEY }}
-        run: |
-          # Test main worker health
-          HEALTH=$(curl -sf "${{ vars.MAIN_WORKER_URL }}/health")
-          echo "Health: $HEALTH"
-
-          # TODO: add version override header tests when version IDs are available
-          echo "Smoke test passed"
-
-      # --- Deploy: agent worker first (dependency), then main worker ---
-      - name: Deploy agent worker → 100%
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          VID="${{ steps.agent_upload.outputs.version_id }}"
-          if [ -z "$VID" ]; then
-            echo "No version ID captured, falling back to wrangler deploy"
-            cd apps/agent && npx wrangler deploy --config wrangler.jsonc
-          else
-            cd apps/agent
-            for i in 1 2 3; do
-              npx wrangler versions deploy "${VID}@100%" --config wrangler.jsonc --yes && break
-              echo "Attempt $i failed, waiting 30s before retry..."
-              sleep 30
-            done
-          fi
-
-      - name: Deploy main worker → 100%
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          VID="${{ steps.main_upload.outputs.version_id }}"
-          if [ -z "$VID" ]; then
-            echo "No version ID captured, falling back to wrangler deploy"
-            cd apps/main && npx wrangler deploy --config wrangler.jsonc
-          else
-            cd apps/main
-            for i in 1 2 3; do
-              npx wrangler versions deploy "${VID}@100%" --config wrangler.jsonc --yes && break
-              echo "Attempt $i failed, waiting 30s before retry..."
-              sleep 30
-            done
-          fi
+          for i in 1 2 3; do
+            if npx wrangler deploy --config wrangler.jsonc; then
+              echo "Main worker deployed successfully"
+              exit 0
+            fi
+            echo "Attempt $i/3 failed, waiting 60s before retry..."
+            sleep 60
+          done
+          echo "All attempts failed"
+          exit 1
 
       # --- Post-deploy verification ---
       - name: Verify deployment
