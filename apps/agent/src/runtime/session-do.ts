@@ -108,7 +108,7 @@ export class SessionDO extends DurableObject<Env> {
       const userMessage = JSON.parse(pendingJson) as UserMessageEvent;
       await this.processUserMessage(userMessage);
     } catch (err) {
-      // If alarm processing fails, ensure we don't stay stuck in "processing"
+      // If alarm processing fails, ensure we don't stay stuck in "running"
       const errorMsg = err instanceof Error ? err.message : String(err);
       const history = new SqliteHistory(this.ctx.storage.sql);
       const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
@@ -167,7 +167,7 @@ export class SessionDO extends DurableObject<Env> {
 
       if (body.type === "user.message") {
         history.append(body);
-        this.setMeta("status", "processing");
+        this.setMeta("status", "running");
         // Store the message for alarm-based processing.
         // Using alarm() ensures the agent loop runs with full DO lifetime
         // (not limited by waitUntil's 30s after client disconnect).
@@ -196,7 +196,7 @@ export class SessionDO extends DurableObject<Env> {
         this.broadcastEvent(confirmation);
 
         // Resume execution: execute the confirmed tool or inject denial, then re-run harness
-        this.setMeta("status", "processing");
+        this.setMeta("status", "running");
         this.ctx.waitUntil(this.handleToolConfirmation(confirmation, history));
         return new Response(null, { status: 202 });
       }
@@ -216,7 +216,7 @@ export class SessionDO extends DurableObject<Env> {
         this.broadcastEvent(toolResultEvent);
 
         // Re-run harness to continue the conversation
-        this.setMeta("status", "processing");
+        this.setMeta("status", "running");
         const resumeMsg: UserMessageEvent = {
           type: "user.message",
           content: [{ type: "text", text: "" }], // Empty message — history has the tool result
@@ -227,7 +227,7 @@ export class SessionDO extends DurableObject<Env> {
 
       if (body.type === "user.define_outcome") {
         const e = body as UserDefineOutcomeEvent;
-        this.setMeta("outcome", JSON.stringify(e.outcome));
+        this.setMeta("outcome", JSON.stringify({ description: e.description, rubric: e.rubric, max_iterations: e.max_iterations }));
         this.setMeta("outcome_iteration", "1");
         history.append(e);
         this.broadcastEvent(e);
@@ -663,7 +663,7 @@ export class SessionDO extends DurableObject<Env> {
         // Re-trigger harness if session is idle
         const status = this.getMeta("status");
         if (status === "idle") {
-          this.setMeta("status", "processing");
+          this.setMeta("status", "running");
           this.setMeta("pending_user_message", JSON.stringify(notifEvent));
           await this.ctx.storage.setAlarm(Date.now() + 100);
         }
@@ -828,7 +828,7 @@ export class SessionDO extends DurableObject<Env> {
         type: "session.error",
         error: `Sandbox failed to start: ${err instanceof Error ? err.message : String(err)}`,
       });
-      this.setMeta("status", "error");
+      this.setMeta("status", "terminated");
       return;
     }
 
@@ -1119,16 +1119,18 @@ export class SessionDO extends DurableObject<Env> {
       let stopReason: import("@open-managed-agents/shared").SessionStatusEvent["stop_reason"];
       if (hasCustomToolPending) {
         stopReason = {
-          type: "custom_tool_result_required" as const,
+          type: "requires_action" as const,
+          action_type: "custom_tool_result" as const,
           event_ids: pendingConfirmations,
         };
       } else if (pendingConfirmations.length > 0) {
         stopReason = {
-          type: "tool_confirmation_required" as const,
+          type: "requires_action" as const,
+          action_type: "tool_confirmation" as const,
           event_ids: pendingConfirmations,
         };
       } else {
-        stopReason = { type: "user.message_required" as const };
+        stopReason = { type: "end_turn" as const };
       }
 
       const idleEvent: SessionEvent = {

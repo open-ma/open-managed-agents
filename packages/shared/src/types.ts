@@ -72,7 +72,7 @@ export interface EnvironmentConfig {
 
 // --- Session ---
 
-export type SessionStatus = "idle" | "running" | "rescheduling" | "terminated" | "processing" | "error";
+export type SessionStatus = "idle" | "running" | "rescheduled" | "terminated";
 
 export interface SessionMeta {
   id: string;
@@ -195,8 +195,10 @@ export interface SessionTerminatedEvent extends EventBase {
 export interface SessionStatusEvent extends EventBase {
   type: "session.status_idle";
   stop_reason?: {
-    type: "user.message_required" | "tool_confirmation_required" | "custom_tool_result_required";
+    type: "end_turn" | "requires_action";
     event_ids?: string[];
+    // requires_action sub-type for SDK routing
+    action_type?: "tool_confirmation" | "custom_tool_result";
   };
 }
 
@@ -217,11 +219,9 @@ export interface AgentMcpToolResultEvent extends EventBase {
 
 export interface UserDefineOutcomeEvent extends EventBase {
   type: "user.define_outcome";
-  outcome: {
-    description: string;
-    criteria?: string[];
-    max_iterations?: number; // default 3, max 20
-  };
+  description: string;
+  rubric?: string;  // text rubric or file reference
+  max_iterations?: number; // default 3, max 20
 }
 
 export interface OutcomeEvaluationEvent extends EventBase {
