@@ -846,6 +846,7 @@ export class SessionDO extends DurableObject<Env> {
     // Fetch memory store IDs from session resources
     const sessionId = this.getMeta("session_id");
     const memoryStoreIds: string[] = [];
+    const memoryPrompts: string[] = [];
     if (sessionId) {
       const resourceList = await this.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
       for (const k of resourceList.keys) {
@@ -854,6 +855,7 @@ export class SessionDO extends DurableObject<Env> {
           const res = JSON.parse(data);
           if (res.type === "memory_store" && res.memory_store_id) {
             memoryStoreIds.push(res.memory_store_id);
+            if (res.prompt) memoryPrompts.push(res.prompt);
           }
         }
       }
@@ -935,6 +937,11 @@ export class SessionDO extends DurableObject<Env> {
           // Best-effort
         }
       }
+    }
+
+    // Inject memory store prompts into system prompt
+    if (memoryPrompts.length) {
+      systemPrompt += "\n\n" + memoryPrompts.join("\n\n");
     }
 
     // Create an abort controller for this execution

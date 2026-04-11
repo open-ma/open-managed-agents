@@ -5,29 +5,54 @@ import { generateFileId } from "@open-managed-agents/shared";
 
 const app = new Hono<{ Bindings: Env }>();
 
-// POST /v1/files — upload file (JSON body)
+// POST /v1/files — upload file (multipart form or JSON body)
 app.post("/", async (c) => {
-  const body = await c.req.json<{
-    filename: string;
-    content: string;
-    media_type?: string;
-    scope_id?: string;
-  }>();
+  let filename: string;
+  let contentStr: string;
+  let mediaType: string;
+  let scopeId: string | undefined;
 
-  if (!body.filename || body.content === undefined || body.content === null) {
-    return c.json({ error: "filename and content are required" }, 400);
+  const contentType = c.req.header("content-type") || "";
+
+  if (contentType.includes("multipart/form-data")) {
+    // Anthropic-compatible multipart upload
+    const formData = await c.req.formData();
+    const file = formData.get("file") as File | null;
+    if (!file) {
+      return c.json({ error: "file field is required in multipart upload" }, 400);
+    }
+    filename = file.name;
+    mediaType = file.type || "application/octet-stream";
+    contentStr = await file.text();
+  } else {
+    // JSON body upload (legacy)
+    const body = await c.req.json<{
+      filename: string;
+      content: string;
+      media_type?: string;
+      scope_id?: string;
+    }>();
+
+    if (!body.filename || body.content === undefined || body.content === null) {
+      return c.json({ error: "filename and content are required" }, 400);
+    }
+    filename = body.filename;
+    contentStr = body.content;
+    mediaType = body.media_type || "application/octet-stream";
+    scopeId = body.scope_id;
   }
 
   const id = generateFileId();
-  const contentStr = body.content;
   const sizeBytes = new TextEncoder().encode(contentStr).length;
 
   const file: FileRecord = {
     id,
-    filename: body.filename,
-    media_type: body.media_type || "application/octet-stream",
+    type: "file" as const,
+    filename,
+    media_type: mediaType,
     size_bytes: sizeBytes,
-    scope_id: body.scope_id,
+    scope_id: scopeId,
+    downloadable: false,
     created_at: new Date().toISOString(),
   };
 

@@ -728,6 +728,39 @@ export function buildMemoryTools(
     }),
   });
 
+  tools.memory_edit = tool({
+    description: "Edit an existing memory by ID. Can update content and/or path (rename). Supports optimistic concurrency via expected_content_sha256.",
+    parameters: z.object({
+      store_id: z.string(),
+      memory_id: z.string(),
+      content: z.string().optional(),
+      path: z.string().optional(),
+      expected_content_sha256: z.string().optional(),
+    }),
+    execute: safe(async ({ store_id, memory_id, content, path, expected_content_sha256 }) => {
+      const data = await kv.get(`mem:${store_id}:${memory_id}`);
+      if (!data) return "Error: Memory not found";
+      const mem = JSON.parse(data);
+
+      if (expected_content_sha256 && mem.content_sha256 !== expected_content_sha256) {
+        return "Error: Content has been modified (sha256 mismatch)";
+      }
+
+      if (path !== undefined) mem.path = path;
+      if (content !== undefined) {
+        mem.content = content;
+        mem.size_bytes = new TextEncoder().encode(content).length;
+        // Recompute hash
+        const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+        mem.content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+      }
+      mem.updated_at = new Date().toISOString();
+
+      await kv.put(`mem:${store_id}:${memory_id}`, JSON.stringify(mem));
+      return JSON.stringify({ id: mem.id, path: mem.path, size_bytes: mem.size_bytes });
+    }),
+  });
+
   tools.memory_delete = tool({
     description: "Delete a memory from a store.",
     parameters: z.object({
