@@ -76,11 +76,15 @@ jobs:
         env:
           API_KEY: ${{ secrets.API_KEY }}
           CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+          WORKERS_URL: https://managed-agents.${{ vars.CF_SUBDOMAIN }}.workers.dev
         run: |
           sleep 5
-          # Use custom domain if set, fall back to workers.dev
-          BASE_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
-          BASE_URL="${BASE_URL:-${{ vars.MAIN_WORKER_URL }}}"
-          echo "Checking health at: $BASE_URL/health"
-          HEALTH=$(curl -sf "$BASE_URL/health" || curl -sf "${{ vars.MAIN_WORKER_URL }}/health")
+          # Try custom domain first, fall back to workers.dev
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo "Trying custom domain: https://$CUSTOM_DOMAIN/health"
+            HEALTH=$(curl -sf "https://$CUSTOM_DOMAIN/health" 2>/dev/null) && { echo "Post-deploy health (custom): $HEALTH"; exit 0; }
+            echo "Custom domain not ready yet, falling back to workers.dev"
+          fi
+          echo "Checking: $WORKERS_URL/health"
+          HEALTH=$(curl -sf "$WORKERS_URL/health")
           echo "Post-deploy health: $HEALTH"
