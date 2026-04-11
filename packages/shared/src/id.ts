@@ -14,4 +14,4 @@ export const generateMemoryId = () => `mem-${nanoid()}`;
 export const generateMemoryVersionId = () => `memver-${nanoid()}`;
 export const generateFileId = () => `file-${nanoid()}`;
 export const generateResourceId = () => `sesrsc-${nanoid()}`;
-export const generateEventId = () => `evt-${nanoid()}`;
+export const generateEventId = () => `sevt-${nanoid()}`;
