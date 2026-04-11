@@ -162,37 +162,35 @@ export class DefaultHarness implements HarnessInterface {
         for (let i = 0; i < toolCalls.length; i++) {
           const call = toolCalls[i];
 
+          // AI SDK v6 uses `input` instead of `args` for tool call parameters
+          const callInput = (call as any).input as Record<string, unknown> || {};
+
           // Emit thread_message_sent before call_agent_* tool use
           if (call.toolName.startsWith("call_agent_")) {
             runtime.broadcast({
               type: "agent.thread_message_sent",
               to_thread_id: call.toolCallId,
-              content: [{ type: "text", text: String((call.args as Record<string, unknown>).message || "") }],
+              content: [{ type: "text", text: String(callInput.message || "") }],
             });
           }
 
           // Distinguish MCP vs built-in vs custom tool use events
           if (isMcpTool(call.toolName)) {
-            // MCP tools get their own event type per Anthropic API spec
             const mcpToolUseEvent: SessionEvent = {
               type: "agent.mcp_tool_use",
               id: call.toolCallId,
               mcp_server_name: extractMcpServerName(call.toolName),
               name: call.toolName,
-              input: call.args as Record<string, unknown>,
+              input: callInput,
             };
             runtime.broadcast(mcpToolUseEvent);
           } else if (isBuiltinTool(call.toolName)) {
-            // Check if tool requires confirmation (always_ask — no execute function)
             const hasExecute = tools[call.toolName] && typeof tools[call.toolName].execute === "function";
-            // Ensure args is a plain object — AI SDK may return a Proxy or class instance
-            // that doesn't serialize properly in workerd
-            const rawArgs = call.args ? JSON.parse(JSON.stringify(call.args)) : {};
             const toolUseEvent: SessionEvent = {
               type: "agent.tool_use",
               id: call.toolCallId,
               name: call.toolName,
-              input: rawArgs,
+              input: callInput,
             };
             if (!hasExecute) {
               (toolUseEvent as import("@open-managed-agents/shared").AgentToolUseEvent).evaluated_permission = "ask";
@@ -203,24 +201,23 @@ export class DefaultHarness implements HarnessInterface {
               type: "agent.custom_tool_use",
               id: call.toolCallId,
               name: call.toolName,
-              input: call.args as Record<string, unknown>,
+              input: callInput,
             };
             runtime.broadcast(customToolUseEvent);
           }
 
           // Find matching result by toolCallId
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          // AI SDK v6: toolResults use `output` instead of `result`
           const tr = (toolResults as any[])?.find(
-            // eslint-disable-next-line @typescript-eslint/no-explicit-any
             (r: any) => r.toolCallId === call.toolCallId
           );
           if (tr) {
+            const trOutput = tr.output ?? tr.result;
             if (isMcpTool(call.toolName)) {
-              // MCP tool results get their own event type
               const mcpResultEvent: SessionEvent = {
                 type: "agent.mcp_tool_result",
                 mcp_tool_use_id: call.toolCallId,
-                content: typeof tr.result === "string" ? tr.result : JSON.stringify(tr.result),
+                content: typeof trOutput === "string" ? trOutput : JSON.stringify(trOutput),
               };
               runtime.broadcast(mcpResultEvent);
             } else {
@@ -228,20 +225,20 @@ export class DefaultHarness implements HarnessInterface {
                 type: "agent.tool_result",
                 tool_use_id: call.toolCallId,
                 content:
-                  typeof tr.result === "string"
-                    ? tr.result
-                    : JSON.stringify(tr.result),
+                  typeof trOutput === "string"
+                    ? trOutput
+                    : JSON.stringify(trOutput),
               };
               runtime.broadcast(toolResultEvent);
             }
           }
 
-          // Emit thread_message_received after call_agent_* tool result
           if (call.toolName.startsWith("call_agent_") && tr) {
+            const trOutput = tr.output ?? tr.result;
             runtime.broadcast({
               type: "agent.thread_message_received",
               from_thread_id: call.toolCallId,
-              content: [{ type: "text", text: typeof tr.result === "string" ? tr.result : "" }],
+              content: [{ type: "text", text: typeof trOutput === "string" ? trOutput : "" }],
             });
           }
         }
