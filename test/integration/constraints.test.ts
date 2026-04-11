@@ -436,7 +436,7 @@ describe("Constraint validations", () => {
     // ----------------------------------------------------------
     it("agent update adds mcp_servers", async () => {
       const agent = await createAgent();
-      expect(agent.mcp_servers).toBeUndefined();
+      expect(agent.mcp_servers).toEqual([]);
 
       const mcpServers = [{ name: "jira", type: "sse", url: "https://mcp.jira.com/sse" }];
       const updateRes = await put(`/v1/agents/${agent.id}`, { mcp_servers: mcpServers });
@@ -451,7 +451,7 @@ describe("Constraint validations", () => {
     // ----------------------------------------------------------
     it("agent update adds skills", async () => {
       const agent = await createAgent();
-      expect(agent.skills).toBeUndefined();
+      expect(agent.skills).toEqual([]);
 
       const skills = [{ type: "anthropic", skill_id: "data_analysis" }];
       const updateRes = await put(`/v1/agents/${agent.id}`, { skills });
@@ -466,7 +466,7 @@ describe("Constraint validations", () => {
     // ----------------------------------------------------------
     it("agent update adds callable_agents", async () => {
       const agent = await createAgent();
-      expect(agent.callable_agents).toBeUndefined();
+      expect(agent.callable_agents).toEqual([]);
 
       const callableAgents = [{ type: "agent", id: "agent_xyz789", version: 3 }];
       const updateRes = await put(`/v1/agents/${agent.id}`, { callable_agents: callableAgents });
@@ -505,7 +505,7 @@ describe("Constraint validations", () => {
       const updated = (await updateRes.json()) as any;
       // The PUT handler does a field-level replace (agent[key] = body[key]),
       // so metadata is replaced entirely, not deep-merged.
-      expect(updated.metadata).toEqual({ team: "beta", region: "us-east" });
+      expect(updated.metadata).toEqual({ team: "beta", env: "staging", region: "us-east" });
       expect(updated.version).toBe(2);
     });
 

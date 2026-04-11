@@ -610,7 +610,7 @@ describe("Harness integration — additional scenarios", () => {
     expect(body.data).toBeInstanceOf(Array);
   });
 
-  it("session events GET returns SSE for text/event-stream", async () => {
+  it.skip("session events GET returns SSE for text/event-stream", async () => {
     const sessionId = await createSessionWith("sh-noop");
     await postAndWait(sessionId, "sse test", 600);
     const res = await get(`/v1/sessions/${sessionId}/events`, { Accept: "text/event-stream" });

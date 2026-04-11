@@ -54,7 +54,7 @@ describe("Memory stores CRUD", () => {
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as any;
-    expect(body.id).toMatch(/^memstore_/);
+    expect(body.id).toMatch(/^memstore-/);
     expect(body.name).toBe("Research Notes");
     expect(body.description).toBe("Notes from research sessions");
     expect(body.created_at).toBeTruthy();
@@ -187,7 +187,7 @@ describe("Memory stores CRUD", () => {
       });
       expect(res.status).toBe(201);
       const body = (await res.json()) as any;
-      expect(body.id).toMatch(/^mem_/);
+      expect(body.id).toMatch(/^mem-/);
       expect(body.store_id).toBe(storeId);
       expect(body.path).toBe("notes/meeting-2026-04-09.md");
       expect(body.content).toBe("# Meeting Notes\n\nDiscussed project timeline.");
@@ -875,7 +875,7 @@ describe("Memory enhancements", () => {
       expect(body.data[0].operation).toBe("created");
       expect(body.data[0].memory_id).toBe(mem.id);
       expect(body.data[0].store_id).toBe(storeId);
-      expect(body.data[0].id).toMatch(/^memver_/);
+      expect(body.data[0].id).toMatch(/^memver-/);
       // List should not include content
       expect(body.data[0].content).toBeUndefined();
     });

@@ -158,7 +158,7 @@ describe("Vaults CRUD", () => {
     const res = await post("/v1/vaults", { name: "Test Vault" });
     expect(res.status).toBe(201);
     const body = (await res.json()) as any;
-    expect(body.id).toMatch(/^vlt_/);
+    expect(body.id).toMatch(/^vlt-/);
     expect(body.name).toBe("Test Vault");
     expect(body.created_at).toBeTruthy();
   });
@@ -263,7 +263,7 @@ describe("Credentials CRUD", () => {
     });
     expect(res.status).toBe(201);
     const body = (await res.json()) as any;
-    expect(body.id).toMatch(/^cred_/);
+    expect(body.id).toMatch(/^cred-/);
     expect(body.display_name).toBe("Test Cred");
     // Token should NOT be in response
     expect(body.auth.token).toBeUndefined();

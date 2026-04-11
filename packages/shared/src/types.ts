@@ -1,3 +1,18 @@
+// --- Model Card ---
+
+export interface ModelCard {
+  id: string;
+  name: string;
+  provider: "anthropic" | "openai" | "custom";
+  model_id: string;        // e.g. "claude-sonnet-4-6", "gpt-4o"
+  api_key_preview?: string; // last 4 chars only, for display
+  base_url?: string;        // custom base URL
+  is_default?: boolean;
+  created_at: string;
+  updated_at?: string;
+  archived_at?: string;
+}
+
 // --- Agent ---
 
 export interface ToolsetConfig {
@@ -31,6 +46,7 @@ export interface AgentConfig {
   mcp_servers?: Array<{ name: string; type: string; url: string }>;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
+  model_card_id?: string;
   harness?: string;
   description?: string;
   metadata?: Record<string, unknown>;
