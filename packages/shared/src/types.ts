@@ -242,27 +242,27 @@ export interface SessionErrorEvent extends EventBase {
 
 export interface SessionThreadCreatedEvent extends EventBase {
   type: "session.thread_created";
-  thread_id: string;
+  session_thread_id: string;
   agent_id: string;
   agent_name: string;
 }
 
 export interface AgentThreadMessageEvent extends EventBase {
   type: "agent.thread_message";
-  thread_id: string;
+  session_thread_id: string;
   content: ContentBlock[];
 }
 
 // Agent thread events (multi-agent)
 export interface AgentThreadMessageSentEvent extends EventBase {
   type: "agent.thread_message_sent";
-  thread_id: string;
+  to_thread_id: string;
   content: ContentBlock[];
 }
 
 export interface AgentThreadMessageReceivedEvent extends EventBase {
   type: "agent.thread_message_received";
-  thread_id: string;
+  from_thread_id: string;
   content: ContentBlock[];
 }
 
@@ -287,7 +287,7 @@ export interface SessionOutcomeEvaluatedEvent extends EventBase {
 
 export interface SessionThreadIdleEvent extends EventBase {
   type: "session.thread_idle";
-  thread_id: string;
+  session_thread_id: string;
 }
 
 // Span events (observability)
