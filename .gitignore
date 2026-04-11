@@ -2,7 +2,21 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+
+# pnpm
+pnpm-debug.log*
+
+# Build artifacts
 apps/agent/build-*
 wrangler.deploy.jsonc
+
+# Test
 .act.secrets
 .act.vars
+test-heatmap.html
+
+# IDE
+.vscode/
+.idea/
+*.swp
+.DS_Store
