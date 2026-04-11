@@ -175,7 +175,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           await this.processUserMessage(resumeMsg, 0, true);
         }
       } catch (err) {
-        const errorMsg = err instanceof Error ? err.message : String(err);
+        const errorMsg = this.describeError(err);
         const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
         history.append(errorEvent);
         this.broadcastEvent(errorEvent);
@@ -1305,7 +1305,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       history.append(idleEvent);
       this.broadcastEvent(idleEvent);
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : String(err);
+      const errorMessage = this.describeError(err);
 
       // Don't retry if aborted
       if (err instanceof Error && err.name === "AbortError") {
@@ -1354,5 +1354,22 @@ export class SessionDO extends Agent<Env, SessionState> {
       this.currentAbortController = null;
       this.setState({ ...this.state, status: "idle" });
     }
+  }
+
+  /**
+   * Extract a meaningful error description. Handles cases where err.message
+   * is empty (e.g. network failures, non-standard API errors).
+   */
+  private describeError(err: unknown): string {
+    if (err instanceof Error) {
+      if (err.message) return err.message;
+      const parts: string[] = [err.name || "Error"];
+      if ("cause" in err && err.cause) parts.push(`cause: ${String(err.cause)}`);
+      if ("status" in err) parts.push(`status: ${(err as Record<string, unknown>).status}`);
+      if ("statusCode" in err) parts.push(`statusCode: ${(err as Record<string, unknown>).statusCode}`);
+      if ("url" in err) parts.push(`url: ${(err as Record<string, unknown>).url}`);
+      return parts.join(", ");
+    }
+    return String(err) || "Unknown error";
   }
 }

@@ -41,7 +41,7 @@ async function withRetry<T>(
       if (parentSignal?.aborted) throw err;
 
       // Don't retry on non-transient errors
-      const msg = err instanceof Error ? err.message : String(err);
+      const msg = describeError(err);
       const isTransient = /timeout|abort|429|529|5\d\d|ECONNRESET|overloaded|rate.limit|fetch failed/i.test(msg);
       if (!isTransient) throw err;
 
@@ -54,6 +54,24 @@ async function withRetry<T>(
     }
   }
   throw lastError;
+}
+
+/**
+ * Extract a meaningful error description. Handles cases where err.message
+ * is empty (e.g. network failures, non-standard API errors).
+ */
+function describeError(err: unknown): string {
+  if (err instanceof Error) {
+    if (err.message) return err.message;
+    // Empty message — include name, cause, or status code if available
+    const parts: string[] = [err.name || "Error"];
+    if ("cause" in err && err.cause) parts.push(`cause: ${String(err.cause)}`);
+    if ("status" in err) parts.push(`status: ${(err as any).status}`);
+    if ("statusCode" in err) parts.push(`statusCode: ${(err as any).statusCode}`);
+    if ("url" in err) parts.push(`url: ${(err as any).url}`);
+    return parts.join(", ");
+  }
+  return String(err) || "Unknown error";
 }
 
 /**
