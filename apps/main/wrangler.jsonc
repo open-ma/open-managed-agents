@@ -19,6 +19,14 @@
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
+  // Workers AI for generating embeddings
+  "ai": { "binding": "AI" },
+
+  // Vectorize for semantic memory search
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "memory-search" }
+  ],
+
   // Service bindings to agent workers
   "services": [
     { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" }

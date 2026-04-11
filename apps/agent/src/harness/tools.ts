@@ -585,7 +585,9 @@ export async function buildTools(
 // Memory tools — operate directly on KV, no self-fetch
 export function buildMemoryTools(
   storeIds: string[],
-  kv: KVNamespace
+  kv: KVNamespace,
+  ai?: Ai,
+  vectorize?: VectorizeIndex,
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Record<string, any> {
   if (!storeIds.length || !kv) return {};
@@ -670,12 +672,46 @@ export function buildMemoryTools(
   });
 
   tools.memory_search = tool({
-    description: "Search memories by content substring match. Returns matching paths and snippets.",
+    description: "Search memories by semantic similarity or substring match. Returns matching paths and snippets.",
     parameters: z.object({
       store_id: z.string(),
       query: z.string(),
     }),
     execute: safe(async ({ store_id, query }) => {
+      // Try semantic search via Vectorize first
+      if (ai && vectorize) {
+        try {
+          const embedding = await ai.run("@cf/google/embedding-gemma" as any, {
+            text: [query],
+          }) as { data: number[][] };
+          if (embedding.data?.[0]) {
+            const results = await vectorize.query(embedding.data[0], {
+              topK: 10,
+              filter: { store_id },
+              returnMetadata: "all",
+            });
+            if (results.matches?.length) {
+              const matches = await Promise.all(
+                results.matches.map(async (m) => {
+                  const memId = (m.metadata as any)?.memory_id;
+                  const path = (m.metadata as any)?.path || "";
+                  let snippet = "";
+                  if (memId) {
+                    const data = await kv.get(`mem:${store_id}:${memId}`);
+                    if (data) snippet = JSON.parse(data).content?.slice(0, 200) || "";
+                  }
+                  return { path, snippet, score: m.score };
+                })
+              );
+              return JSON.stringify(matches);
+            }
+          }
+        } catch {
+          // Fall through to substring search
+        }
+      }
+
+      // Fallback: substring search
       const list = await kv.list({ prefix: `mem:${store_id}:` });
       const matches: Array<{ path: string; snippet: string }> = [];
       const q = query.toLowerCase();
