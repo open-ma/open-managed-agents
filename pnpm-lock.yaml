@@ -8,9 +8,15 @@ importers:
 
   .:
     dependencies:
+      '@ai-sdk/anthropic':
+        specifier: 3.0.69
+        version: 3.0.69(zod@3.25.76)
       agents:
         specifier: ^0.5.0
         version: 0.5.1(@cloudflare/workers-types@4.20260410.1)(ai@6.0.158(zod@3.25.76))(react@19.2.5)(zod@3.25.76)
+      ai:
+        specifier: 6.0.158
+        version: 6.0.158(zod@3.25.76)
     devDependencies:
       '@cloudflare/vitest-pool-workers':
         specifier: ^0.14.2
