@@ -34,10 +34,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/agent
-          OUTPUT=$(npx wrangler versions upload --config wrangler.jsonc 2>&1)
-          echo "$OUTPUT"
-          VERSION_ID=$(echo "$OUTPUT" | grep -oP 'Worker Version ID: \K[^\s]+')
+          npx wrangler versions upload --config wrangler.jsonc 2>&1 | tee /tmp/agent-upload.log
+          VERSION_ID=$(grep -oP 'Worker Version ID: \K[^\s]+' /tmp/agent-upload.log || true)
           echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+          echo "Agent version: $VERSION_ID"
 
       # --- Main worker: upload new version (not live yet) ---
       - name: Upload main worker version
@@ -47,10 +47,10 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/main
-          OUTPUT=$(npx wrangler versions upload --config wrangler.jsonc 2>&1)
-          echo "$OUTPUT"
-          VERSION_ID=$(echo "$OUTPUT" | grep -oP 'Worker Version ID: \K[^\s]+')
+          npx wrangler versions upload --config wrangler.jsonc 2>&1 | tee /tmp/main-upload.log
+          VERSION_ID=$(grep -oP 'Worker Version ID: \K[^\s]+' /tmp/main-upload.log || true)
           echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+          echo "Main version: $VERSION_ID"
 
       # --- Smoke test: verify new versions via version override ---
       - name: Smoke test
