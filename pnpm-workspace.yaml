@@ -2,3 +2,4 @@ packages:
   - 'packages/*'
   - 'apps/main'
   - 'apps/agent'
+  - 'apps/console'
