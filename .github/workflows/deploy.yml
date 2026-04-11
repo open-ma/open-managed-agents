@@ -28,7 +28,7 @@ jobs:
         run: pnpm install
 
       - name: Build console
-        run: cd apps/console && npm ci && npx vite build
+        run: cd apps/console && pnpm install && npx vite build
 
       # --- Deploy both workers with retry ---
       - name: Deploy agent worker
