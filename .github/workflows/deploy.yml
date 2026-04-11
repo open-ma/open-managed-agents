@@ -24,7 +24,7 @@ jobs:
         run: pnpm install
 
       - name: Build console
-        run: cd apps/console && npx vite build
+        run: cd apps/console && npm ci && npx vite build
 
       # --- Agent worker: upload new version (not live yet) ---
       - name: Upload agent worker version
