@@ -1,5 +1,9 @@
 import type { SandboxExecutor, ProcessHandle } from "../harness/interface";
 import type { Env } from "@open-managed-agents/shared";
+// Static import so vitest's resolve.alias can stub it out.
+// Dynamic import("@cloudflare/sandbox") doesn't get aliased in vitest-pool-workers,
+// causing it to load the real module which depends on @cloudflare/containers native code.
+import { getSandbox as cfGetSandbox } from "@cloudflare/sandbox";
 
 export class CloudflareSandbox implements SandboxExecutor {
   private sandboxPromise: Promise<any>;
@@ -12,8 +16,7 @@ export class CloudflareSandbox implements SandboxExecutor {
   constructor(env: Env, sessionId: string) {
     this.env = env;
     this.sessionId = sessionId;
-    this.sandboxPromise = import("@cloudflare/sandbox")
-      .then((mod) => mod.getSandbox(env.SANDBOX! as any, sessionId));
+    this.sandboxPromise = Promise.resolve(cfGetSandbox(env.SANDBOX! as any, sessionId));
   }
 
   private async getSandbox() {

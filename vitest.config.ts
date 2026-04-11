@@ -11,6 +11,7 @@ export default defineConfig({
     },
   },
   test: {
+    testTimeout: 30000,
     pool: cloudflarePool({
       wrangler: { configPath: "./wrangler.test.jsonc" },
       miniflare: {

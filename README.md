@@ -1,27 +1,54 @@
-# Open Managed Agents on Cloudflare
+<p align="center">
+  <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare Workers" />
+  <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
+  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" />
+  <img src="https://img.shields.io/badge/Tests-501%20passed-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
+</p>
 
-An open-source implementation of the [Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents), running entirely on Cloudflare's infrastructure.
+# Open Managed Agents
 
-Drop-in compatible with Anthropic's API — deploy your own managed agents runtime with full control over harness logic, tool execution, and infrastructure.
+**An open-source implementation of the [Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents), running entirely on Cloudflare.**
+
+Drop-in compatible with Anthropic's API. Deploy your own managed agents runtime with full control over harness logic, tool execution, and infrastructure.
+
+> *"We're opinionated about the shape of interfaces, not what runs behind them."*
+
+---
+
+## Why Open Managed Agents?
+
+- **Full API compatibility** — Works with existing Anthropic SDKs and tooling out of the box
+- **Pluggable harness** — Swap the agent loop without touching infrastructure. Write a research agent, a coding agent, or a data analysis agent — all sharing the same platform primitives
+- **Secure by design** — Credentials never enter sandboxes. Secrets live in vaults, injected via outbound proxy
+- **Zero-config local dev** — `npm run dev` and everything runs locally. No Cloudflare account needed for development
+- **Production-grade** — Durable event sourcing, crash recovery, context compaction, rate limiting, and 501 tests
+
+---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────┐
-│  Config API  (Hono)          /v1/agents, sessions…  │  ← Anthropic-compatible REST
-├─────────────────────────────────────────────────────┤
-│  Harness Layer  (pluggable)  DefaultHarness         │  ← ai-sdk + Claude
-├─────────────────────────────────────────────────────┤
-│  Runtime Primitives          DO · Containers · KV   │  ← Cloudflare infra
-└─────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────┐
+│  Config API (Hono)             /v1/agents, sessions...  │  Anthropic-compatible REST
+├─────────────────────────────────────────────────────────┤
+│  Harness Layer (pluggable)     DefaultHarness           │  ai-sdk + Claude
+├─────────────────────────────────────────────────────────┤
+│  Runtime Primitives            DO · Containers · KV     │  Cloudflare infra
+└─────────────────────────────────────────────────────────┘
 ```
 
 | Primitive | Cloudflare Service | Purpose |
-|-----------|-------------------|---------|
-| Session event log | Durable Object + SQLite | Persistent, per-session event sourcing |
-| Code sandbox | Containers | Isolated bash/python/node execution |
+|---|---|---|
+| Session event log | Durable Objects + SQLite | Persistent, per-session event sourcing |
+| Code sandbox | Containers | Isolated bash / python / node execution |
 | Config storage | KV | Agents, environments, vaults, files, memory |
 | File persistence | R2 | Workspace files across container restarts |
+| Semantic memory | Workers AI + Vectorize | Embedding-based memory search |
+
+> See [`docs/architecture.md`](docs/architecture.md) for the full meta-harness design philosophy.
+
+---
 
 ## Quick Start
 
@@ -29,7 +56,6 @@ Drop-in compatible with Anthropic's API — deploy your own managed agents runti
 
 - [Node.js](https://nodejs.org/) v20+
 - [Wrangler CLI](https://developers.cloudflare.com/workers/wrangler/install-and-update/) v4+
-- A Cloudflare account with Workers Paid plan (Durable Objects + Containers require paid)
 - An [Anthropic API key](https://console.anthropic.com/)
 
 ### 1. Clone & Install
@@ -42,45 +68,36 @@ npm install
 
 ### 2. Local Development
 
-No Cloudflare resources needed — `wrangler dev` simulates everything locally.
+No Cloudflare account needed — everything runs locally in `.wrangler/state/`.
 
 ```bash
-# Set up local environment variables
 cp .dev.vars.example .dev.vars
 # Edit .dev.vars:
 #   API_KEY=dev-test-key
 #   ANTHROPIC_API_KEY=sk-ant-xxx
 
-# Start local dev server
 npm run dev
 # → http://localhost:8787
 ```
 
-That's it. KV, Durable Objects, R2 all run locally in `.wrangler/state/`. Your data never leaves your machine.
-
 ```bash
-# Verify it works
-curl localhost:8787/health                    # → {"status":"ok"}
-curl localhost:8787/v1/agents \
-  -H "x-api-key: dev-test-key" \
-  -H "content-type: application/json" \
-  -d '{"name":"Test","model":"claude-sonnet-4-6"}'
+# Verify
+curl localhost:8787/health
+# → {"status":"ok"}
 ```
 
 ### 3. Deploy to Cloudflare
 
+> Requires a Cloudflare account with Workers Paid plan (Durable Objects + Containers).
+
 ```bash
-# Login
 npx wrangler login
 
 # Create KV namespace
 npx wrangler kv namespace create CONFIG_KV
-# → { binding = "CONFIG_KV", id = "abc123..." }
-
 # Paste the ID into wrangler.jsonc
-# "kv_namespaces": [{ "binding": "CONFIG_KV", "id": "abc123..." }]
 
-# Create R2 bucket (optional, for persistent workspace files)
+# Create R2 bucket (optional, for persistent workspace)
 npx wrangler r2 bucket create managed-agents-workspace
 
 # Set secrets
@@ -92,9 +109,7 @@ npm run deploy
 # → https://managed-agents.<your-subdomain>.workers.dev
 ```
 
-> **Note:** The KV `id` in `wrangler.jsonc` is safe to commit — it's not a secret. Local dev ignores it and uses local storage automatically.
-
-### 4. Verify Deployment
+### 4. Verify
 
 ```bash
 export BASE_URL=https://managed-agents.<your-subdomain>.workers.dev
@@ -114,103 +129,7 @@ curl -s $BASE_URL/v1/agents \
   }'
 ```
 
-## Testing
-
-```bash
-npm test          # 501 tests, ~30s
-npm run typecheck # zero errors
-```
-
-Test suite: 171 unit + 330 integration tests covering API CRUD, cross-resource flows, session harness, event conversion, tools, stress, and edge cases.
-
-## API Reference
-
-All endpoints require the `x-api-key` header. The API is compatible with [Anthropic's Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents).
-
-### Agents
-
-```bash
-# Create agent
-POST /v1/agents
-{ "name": "My Agent", "model": "claude-sonnet-4-6", "system": "...", "tools": [...] }
-
-# List / Get / Update / Delete / Archive
-GET    /v1/agents
-GET    /v1/agents/:id
-PUT    /v1/agents/:id
-DELETE /v1/agents/:id
-POST   /v1/agents/:id/archive
-
-# Version history
-GET    /v1/agents/:id/versions
-GET    /v1/agents/:id/versions/:version
-```
-
-### Environments
-
-```bash
-POST   /v1/environments
-{ "name": "prod-env", "config": { "type": "cloud", "packages": { "pip": ["numpy"] } } }
-
-GET    /v1/environments
-GET    /v1/environments/:id
-PUT    /v1/environments/:id
-DELETE /v1/environments/:id
-```
-
-### Sessions
-
-```bash
-# Create session (binds agent + environment)
-POST /v1/sessions
-{ "agent": "agent_xxx", "environment_id": "env_xxx", "title": "My session" }
-
-# Send events (user messages, interrupts, etc.)
-POST /v1/sessions/:id/events
-{ "events": [{ "type": "user.message", "content": [{"type": "text", "text": "Hello"}] }] }
-
-# Get events (JSON or SSE)
-GET /v1/sessions/:id/events              # Accept: application/json
-GET /v1/sessions/:id/events              # Accept: text/event-stream
-GET /v1/sessions/:id/events/stream       # Always SSE
-
-# Session management
-GET    /v1/sessions
-GET    /v1/sessions/:id
-POST   /v1/sessions/:id                  # Update title/metadata
-DELETE /v1/sessions/:id
-POST   /v1/sessions/:id/archive
-
-# Session resources
-POST   /v1/sessions/:id/resources
-GET    /v1/sessions/:id/resources
-DELETE /v1/sessions/:id/resources/:resId
-```
-
-### Vaults & Credentials
-
-```bash
-POST   /v1/vaults                         # Create vault
-POST   /v1/vaults/:id/credentials         # Add credential
-GET    /v1/vaults/:id/credentials         # List (secrets stripped)
-```
-
-### Memory Stores
-
-```bash
-POST   /v1/memory_stores                  # Create store
-POST   /v1/memory_stores/:id/memories     # Create/update memory
-GET    /v1/memory_stores/:id/memories     # List memories
-GET    /v1/memory_stores/:id/memories/:id # Get with content
-GET    /v1/memory_stores/:id/memory_versions  # Version history
-```
-
-### Files
-
-```bash
-POST   /v1/files                          # Upload file
-GET    /v1/files/:id/content              # Download file
-```
+---
 
 ## End-to-End Example
 
@@ -236,22 +155,164 @@ SESSION_ID=$(curl -s $BASE/v1/sessions \
   -d "{\"agent\":\"$AGENT_ID\",\"environment_id\":\"$ENV_ID\"}" \
   | jq -r '.id')
 
-# 4. Send message
+# 4. Send a message
 curl -s $BASE/v1/sessions/$SESSION_ID/events \
   -H "x-api-key: $KEY" -H "content-type: application/json" \
   -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Write a Python script that fetches HN top stories"}]}]}'
 
-# 5. Stream events
+# 5. Stream events (SSE)
 curl -N $BASE/v1/sessions/$SESSION_ID/events/stream \
   -H "x-api-key: $KEY"
 ```
 
+---
+
+## API Reference
+
+All endpoints require the `x-api-key` header. The API is compatible with [Anthropic's Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents).
+
+<details>
+<summary><strong>Agents</strong> — Create and manage agent configurations</summary>
+
+```http
+POST   /v1/agents                          # Create agent
+GET    /v1/agents                          # List agents
+GET    /v1/agents/:id                      # Get agent
+PUT    /v1/agents/:id                      # Update agent
+DELETE /v1/agents/:id                      # Delete agent
+POST   /v1/agents/:id/archive             # Archive agent
+GET    /v1/agents/:id/versions            # Version history
+GET    /v1/agents/:id/versions/:version   # Get specific version
+```
+
+**Create agent:**
+
+```json
+{
+  "name": "My Agent",
+  "model": "claude-sonnet-4-6",
+  "system": "You are a helpful assistant.",
+  "tools": [{ "type": "agent_toolset_20260401" }]
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Environments</strong> — Configure sandbox execution environments</summary>
+
+```http
+POST   /v1/environments                   # Create environment
+GET    /v1/environments                   # List environments
+GET    /v1/environments/:id               # Get environment
+PUT    /v1/environments/:id               # Update environment
+DELETE /v1/environments/:id               # Delete environment
+```
+
+**Create environment:**
+
+```json
+{
+  "name": "prod-env",
+  "config": {
+    "type": "cloud",
+    "packages": { "pip": ["numpy", "pandas"], "npm": ["lodash"] }
+  }
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Sessions</strong> — Run agent conversations</summary>
+
+```http
+POST   /v1/sessions                        # Create session
+GET    /v1/sessions                        # List sessions
+GET    /v1/sessions/:id                    # Get session
+POST   /v1/sessions/:id                    # Update session
+DELETE /v1/sessions/:id                    # Delete session
+POST   /v1/sessions/:id/archive           # Archive session
+
+# Events
+POST   /v1/sessions/:id/events            # Send events (user messages)
+GET    /v1/sessions/:id/events             # Get events (JSON or SSE)
+GET    /v1/sessions/:id/events/stream      # SSE stream
+
+# Resources
+POST   /v1/sessions/:id/resources          # Attach resource
+GET    /v1/sessions/:id/resources          # List resources
+DELETE /v1/sessions/:id/resources/:resId   # Remove resource
+```
+
+**Create session:**
+
+```json
+{
+  "agent": "agent_xxx",
+  "environment_id": "env_xxx",
+  "title": "My session"
+}
+```
+
+**Send message:**
+
+```json
+{
+  "events": [{
+    "type": "user.message",
+    "content": [{ "type": "text", "text": "Hello!" }]
+  }]
+}
+```
+
+</details>
+
+<details>
+<summary><strong>Vaults & Credentials</strong> — Secure secret management</summary>
+
+```http
+POST   /v1/vaults                          # Create vault
+POST   /v1/vaults/:id/credentials          # Add credential
+GET    /v1/vaults/:id/credentials          # List (secrets stripped)
+```
+
+</details>
+
+<details>
+<summary><strong>Memory Stores</strong> — Persistent semantic memory</summary>
+
+```http
+POST   /v1/memory_stores                   # Create store
+POST   /v1/memory_stores/:id/memories      # Create/update memory
+GET    /v1/memory_stores/:id/memories      # List memories
+GET    /v1/memory_stores/:id/memories/:mid # Get memory
+GET    /v1/memory_stores/:id/memory_versions  # Version history
+```
+
+</details>
+
+<details>
+<summary><strong>Files & Skills</strong></summary>
+
+```http
+POST   /v1/files                           # Upload file
+GET    /v1/files/:id/content               # Download file
+
+POST   /v1/skills                          # Create skill
+GET    /v1/skills                          # List skills
+```
+
+</details>
+
+---
+
 ## Built-in Tools
 
-The `agent_toolset_20260401` provides:
+The `agent_toolset_20260401` provides a standard set of tools for agent interaction:
 
 | Tool | Description |
-|------|-------------|
+|---|---|
 | `bash` | Execute commands in the sandbox |
 | `read` | Read files from sandbox filesystem |
 | `write` | Write/create files (auto-creates directories) |
@@ -261,7 +322,7 @@ The `agent_toolset_20260401` provides:
 | `web_fetch` | HTTP GET with content extraction |
 | `web_search` | Web search via Tavily API |
 
-Selectively enable/disable tools:
+**Selective tool configuration:**
 
 ```json
 {
@@ -276,93 +337,142 @@ Selectively enable/disable tools:
 }
 ```
 
+**Derived tools** are auto-generated based on session config:
+
+| Tool | Source |
+|---|---|
+| `memory_*` | Memory Stores — `list`, `search`, `read`, `write`, `delete` |
+| `call_agent_*` | Callable Agents — multi-agent delegation |
+| `mcp_*` | MCP Servers — custom protocol handlers |
+
+---
+
 ## Custom Harness
 
-Replace the default agent loop with your own:
+Replace the default agent loop with your own strategy:
 
 ```typescript
-// src/my-harness.ts
 import type { HarnessInterface, HarnessContext } from "./harness/interface";
 
-export class MyHarness implements HarnessInterface {
+export class ResearchHarness implements HarnessInterface {
   async run(ctx: HarnessContext): Promise<void> {
-    const { agent, userMessage, runtime } = ctx;
+    const messages = ctx.runtime.history.getMessages();
 
-    // Your custom logic here
-    runtime.broadcast({
-      type: "agent.message",
-      content: [{ type: "text", text: "Custom response" }],
+    // Your custom context engineering, model calls, tool execution
+    const result = await generateText({
+      model: resolveModel(ctx.agent.model, ctx.env.ANTHROPIC_API_KEY),
+      messages: myCustomTransform(messages),
+      tools: ctx.tools,
+      maxSteps: 50,
     });
   }
 }
-
-// src/index.ts — register it
-import { registerHarness } from "./harness/registry";
-import { MyHarness } from "./my-harness";
-registerHarness("my-harness", () => new MyHarness());
 ```
 
-Create agents with your harness:
+Register and use it:
+
+```typescript
+registerHarness("research", () => new ResearchHarness());
+```
 
 ```json
-{ "name": "Custom Agent", "model": "claude-sonnet-4-6", "harness": "my-harness" }
+{ "name": "Research Agent", "model": "claude-sonnet-4-6", "harness": "research" }
 ```
+
+> The platform handles tools, skills, sandbox, history, and crash recovery. Your harness only decides **how** to use them.
+
+---
 
 ## Project Structure
 
 ```
-src/
-├── index.ts                    # Entry point, route registration
-├── env.ts                      # Environment bindings interface
-├── auth.ts                     # API key authentication
-├── rate-limit.ts               # Sliding window rate limiter
-├── types.ts                    # Core type definitions
-├── id.ts                       # ID generation (nanoid)
-├── outbound.ts                 # Credential injection for MCP
-├── harness/
-│   ├── interface.ts            # HarnessInterface contract
-│   ├── registry.ts             # Harness factory registry
-│   ├── default-loop.ts         # Default harness (ai-sdk)
-│   ├── tools.ts                # Tool definitions
-│   ├── provider.ts             # Model resolution
-│   ├── skills.ts               # Skill registry
-│   ├── compaction.ts           # Context window management
-│   └── outcome-evaluator.ts    # Outcome satisfaction
-├── runtime/
-│   ├── session-do.ts           # Session Durable Object
-│   ├── history.ts              # Event-to-message conversion
-│   └── sandbox.ts              # Sandbox executor
-└── routes/
-    ├── agents.ts               # /v1/agents
-    ├── environments.ts         # /v1/environments
-    ├── sessions.ts             # /v1/sessions
-    ├── vaults.ts               # /v1/vaults
-    ├── files.ts                # /v1/files
-    └── memory.ts               # /v1/memory_stores
+open-managed-agents/
+├── apps/
+│   ├── main/                     # Config API worker (Hono routes)
+│   │   └── src/
+│   │       ├── index.ts          # Entry point, route registration
+│   │       ├── auth.ts           # API key authentication
+│   │       ├── rate-limit.ts     # Sliding window rate limiter
+│   │       └── routes/           # /v1/agents, sessions, environments...
+│   ├── agent/                    # Agent worker (SessionDO + harness)
+│   │   └── src/
+│   │       ├── harness/          # Pluggable agent loop
+│   │       │   ├── interface.ts  # HarnessInterface contract
+│   │       │   ├── default-loop.ts  # Default harness (ai-sdk)
+│   │       │   ├── tools.ts      # Built-in tool definitions
+│   │       │   ├── provider.ts   # Model resolution
+│   │       │   ├── compaction.ts # Context window management
+│   │       │   └── skills.ts     # Skill registry
+│   │       └── runtime/
+│   │           ├── session-do.ts # Session Durable Object
+│   │           ├── history.ts    # Event-to-message conversion
+│   │           └── sandbox.ts    # Sandbox executor
+│   └── console/                  # React SPA dashboard
+├── packages/
+│   └── shared/                   # Shared types & utilities
+├── test/                         # 171 unit + 330 integration tests
+├── docs/                         # Architecture & design documents
+└── scripts/                      # Deployment scripts
 ```
 
-## Configuration Reference
+---
 
-### wrangler.jsonc
-
-| Setting | Required | Description |
-|---------|----------|-------------|
-| `kv_namespaces[0].id` | For deploy | KV namespace ID. Local dev uses local storage regardless. |
-| `r2_buckets[0].bucket_name` | No | R2 bucket for persistent workspace files |
-| `containers[0].max_instances` | No | Max concurrent sandbox containers (default: 10) |
-| `containers[0].instance_type` | No | Container size: `lite` or `standard` |
+## Configuration
 
 ### Environment Variables
 
 | Variable | Required | Description |
-|----------|----------|-------------|
+|---|---|---|
 | `API_KEY` | Yes | Authentication key for API access |
 | `ANTHROPIC_API_KEY` | Yes | Anthropic API key for Claude |
-| `ANTHROPIC_BASE_URL` | No | Custom endpoint (for proxies or compatible APIs) |
-| `TAVILY_API_KEY` | No | Tavily API key for web search tool |
+| `ANTHROPIC_BASE_URL` | No | Custom endpoint (proxies, compatible APIs) |
+| `TAVILY_API_KEY` | No | Tavily API key for `web_search` tool |
 | `RATE_LIMIT_WRITE` | No | Write requests/min (default: 60) |
 | `RATE_LIMIT_READ` | No | Read requests/min (default: 600) |
 
+### Cloudflare Bindings (wrangler.jsonc)
+
+| Binding | Required | Description |
+|---|---|---|
+| `CONFIG_KV` | For deploy | KV namespace for config storage |
+| `WORKSPACE_BUCKET` | No | R2 bucket for persistent workspace files |
+| `containers[].max_instances` | No | Max concurrent sandbox containers (default: 10) |
+
+---
+
+## Testing
+
+```bash
+npm test          # 501 tests, ~30s
+npm run typecheck # zero errors
+```
+
+Coverage: API CRUD, cross-resource flows, session harness, event conversion, tool execution, stress tests, and edge cases.
+
+---
+
+## Documentation
+
+| Document | Description |
+|---|---|
+| [`docs/architecture.md`](docs/architecture.md) | Meta-harness design philosophy and key interfaces |
+| [`AGENTS.md`](AGENTS.md) | Agent concepts, lifecycle, and configuration guide |
+| [`docs/gap-analysis.md`](docs/gap-analysis.md) | Compatibility gaps vs Anthropic's API |
+| [`docs/github-pr-flow.md`](docs/github-pr-flow.md) | GitHub integration and PR workflow |
+| [`docs/agent-im-design.md`](docs/agent-im-design.md) | Inter-agent communication design |
+
+---
+
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feat/amazing-feature`)
+3. Run tests (`npm test && npm run typecheck`)
+4. Commit your changes
+5. Open a Pull Request
+
+---
+
 ## License
 
-MIT
+[MIT](LICENSE)
