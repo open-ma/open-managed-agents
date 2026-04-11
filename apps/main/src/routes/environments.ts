@@ -75,7 +75,7 @@ app.post("/", async (c) => {
     name: body.name,
     config: body.config || { type: "cloud" },
     status: canBuild ? "building" : "ready",
-    sandbox_worker_name: canBuild ? undefined : "local",
+    sandbox_worker_name: canBuild ? undefined : "sandbox-default",
     created_at: new Date().toISOString(),
   };
 

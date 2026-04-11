@@ -1,4 +1,4 @@
-import { DurableObject } from "cloudflare:workers";
+import { Agent } from "agents";
 import type { Env } from "@open-managed-agents/shared";
 import type {
   AgentConfig,
@@ -42,6 +42,38 @@ interface PendingToolCall {
 }
 
 /**
+ * Persistent session state managed by Agent's setState/state system.
+ * Automatically persisted to SQLite and broadcast to WebSocket clients.
+ */
+interface SessionState {
+  agent_id: string;
+  environment_id: string;
+  session_id: string;
+  title: string;
+  status: "idle" | "running" | "terminated";
+  input_tokens: number;
+  output_tokens: number;
+  vault_ids: string[];
+  pending_tool_calls: PendingToolCall[];
+  outcome: { description: string; rubric?: string; max_iterations?: number } | null;
+  outcome_iteration: number;
+}
+
+const INITIAL_SESSION_STATE: SessionState = {
+  agent_id: "",
+  environment_id: "",
+  session_id: "",
+  title: "",
+  status: "idle",
+  input_tokens: 0,
+  output_tokens: 0,
+  vault_ids: [],
+  pending_tool_calls: [],
+  outcome: null,
+  outcome_iteration: 0,
+};
+
+/**
  * SessionDO is the "meta-harness" — it owns the event log, WebSocket
  * connections, and runtime primitives. It resolves a concrete harness
  * via the registry and delegates message processing to it, without
@@ -50,7 +82,11 @@ interface PendingToolCall {
  * Sandbox lifecycle: one sandbox per session, created on first event,
  * reused across turns, destroyed on session delete/terminate.
  */
-export class SessionDO extends DurableObject<Env> {
+export class SessionDO extends Agent<Env, SessionState> {
+  initialState = INITIAL_SESSION_STATE;
+  // Disable Agent's observability to avoid SpanParent I/O isolation
+  // errors in vitest-pool-workers (multiple DOs share one isolate).
+  observability = null as unknown as Agent<Env, SessionState>["observability"];
   private initialized = false;
   private sandbox: SandboxExecutor | null = null;
   private sandboxWarmupPromise: Promise<void> | null = null;
@@ -68,56 +104,121 @@ export class SessionDO extends DurableObject<Env> {
         ts TEXT DEFAULT (datetime('now'))
       )
     `);
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS session_meta (
-        key TEXT PRIMARY KEY,
-        value TEXT NOT NULL
-      )
-    `);
     this.initialized = true;
   }
 
-  private getMeta(key: string): string | null {
-    const row = this.ctx.storage.sql
-      .exec<{ value: string }>("SELECT value FROM session_meta WHERE key = ?", key)
-      .toArray();
-    return row.length > 0 ? row[0].value : null;
-  }
-
-  private setMeta(key: string, value: string) {
-    this.ctx.storage.sql.exec(
-      "INSERT OR REPLACE INTO session_meta (key, value) VALUES (?, ?)",
-      key,
-      value
-    );
+  /**
+   * Scheduled recovery callback: called by Agent's schedule system
+   * 5 seconds after an event is received. If the primary waitUntil
+   * path already drained the queue, this is a no-op.
+   */
+  async recoverEventQueue(): Promise<void> {
+    this.ensureSchema();
+    await this.drainEventQueue();
   }
 
   /**
-   * Alarm handler: runs the agent loop with full DO lifetime.
-   * Alarm handlers get 15 minutes wall-clock time (vs waitUntil's 30s).
-   * This is where the actual LLM calls + tool execution happens.
+   * Drain the event queue: check the events table for unprocessed user
+   * events and run the harness for each one.
+   *
+   * The events table IS the queue — no separate pending flag needed.
+   * After the harness completes a turn, we check again for new events
+   * that arrived during execution, looping until the queue is drained.
+   *
+   * Concurrency guard: if status is already "running", skip — another
+   * drainEventQueue is already active.
    */
-  async alarm(): Promise<void> {
-    const pendingJson = this.getMeta("pending_user_message");
-    if (!pendingJson) return;
+  private async drainEventQueue(): Promise<void> {
+    // Concurrency guard — only one drain loop at a time
+    if (this.state.status === "running" || this.state.status === "terminated") return;
 
-    // Clear immediately to prevent re-processing on alarm retry
-    this.setMeta("pending_user_message", "");
+    const history = new SqliteHistory(this.ctx.storage.sql);
 
-    try {
-      const userMessage = JSON.parse(pendingJson) as UserMessageEvent;
-      await this.processUserMessage(userMessage);
-    } catch (err) {
-      // If alarm processing fails, ensure we don't stay stuck in "running"
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      const history = new SqliteHistory(this.ctx.storage.sql);
-      const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
-      history.append(errorEvent);
-      this.broadcastEvent(errorEvent);
-      this.setMeta("status", "idle");
+    while (true) {
+      // Find the latest user event that hasn't been followed by a
+      // session.status_idle (i.e. hasn't been "answered" yet).
+      // An event is "processed" if it's followed by either idle or error.
+      const lastIdleSeq = Math.max(
+        this.getLastEventSeq("session.status_idle"),
+        this.getLastEventSeq("session.error"),
+      );
+      const pendingUserEvent = this.getFirstEventAfter(lastIdleSeq, [
+        "user.message",
+        "user.tool_confirmation",
+        "user.custom_tool_result",
+      ]);
+
+      if (!pendingUserEvent) break; // Queue drained
+
+      this.setState({ ...this.state, status: "running" });
+
+      try {
+        const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
+
+        if (event.type === "user.message") {
+          await this.processUserMessage(event as UserMessageEvent);
+        } else if (event.type === "user.tool_confirmation") {
+          await this.handleToolConfirmation(event as UserToolConfirmationEvent, history);
+        } else if (event.type === "user.custom_tool_result") {
+          const customResult = event as UserCustomToolResultEvent;
+          const toolResultEvent: SessionEvent = {
+            type: "agent.tool_result",
+            tool_use_id: customResult.custom_tool_use_id,
+            content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
+          };
+          history.append(toolResultEvent);
+          this.broadcastEvent(toolResultEvent);
+          const resumeMsg: UserMessageEvent = {
+            type: "user.message",
+            content: [{ type: "text", text: "" }],
+          };
+          await this.processUserMessage(resumeMsg, 0, true);
+        }
+      } catch (err) {
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
+        history.append(errorEvent);
+        this.broadcastEvent(errorEvent);
+        this.setState({ ...this.state, status: "idle" });
+        break; // Stop draining on error — let the client decide what to do
+      }
     }
   }
 
+  /**
+   * Get the sequence number of the last event of a given type.
+   * Returns 0 if no such event exists.
+   */
+  private getLastEventSeq(type: string): number {
+    const result = this.ctx.storage.sql.exec(
+      "SELECT seq FROM events WHERE type = ? ORDER BY seq DESC LIMIT 1",
+      type
+    );
+    for (const row of result) return row.seq as number;
+    return 0;
+  }
+
+  /**
+   * Get the first event after a given sequence number matching any of the given types.
+   * Returns null if no matching event exists.
+   */
+  private getFirstEventAfter(afterSeq: number, types: string[]): { seq: number; data: string } | null {
+    const placeholders = types.map(() => "?").join(", ");
+    const result = this.ctx.storage.sql.exec(
+      `SELECT seq, data FROM events WHERE seq > ? AND type IN (${placeholders}) ORDER BY seq ASC LIMIT 1`,
+      afterSeq,
+      ...types,
+    );
+    for (const row of result) return { seq: row.seq as number, data: row.data as string };
+    return null;
+  }
+
+  /**
+   * Override fetch to keep our custom HTTP routing.
+   * Agent (via partyserver) auto-handles WebSocket upgrades and calls
+   * onRequest() for HTTP — but we have custom routing for both, so we
+   * handle everything here and only delegate alarm() to Agent's scheduler.
+   */
   async fetch(request: Request): Promise<Response> {
     this.ensureSchema();
     const url = new URL(request.url);
@@ -125,11 +226,7 @@ export class SessionDO extends DurableObject<Env> {
     // PUT /init — initialize session
     if (request.method === "PUT" && url.pathname === "/init") {
       const params = (await request.json()) as SessionInitParams;
-      this.setMeta("agent_id", params.agent_id);
-      this.setMeta("environment_id", params.environment_id);
-      this.setMeta("title", params.title);
-      if (params.session_id) this.setMeta("session_id", params.session_id);
-      this.setMeta("status", "idle");
+      this.setState({ ...this.state, agent_id: params.agent_id, environment_id: params.environment_id, title: params.title, session_id: params.session_id || this.state.session_id, status: "idle" });
 
       // Pre-warm sandbox in background (container start + package install)
       // Errors are swallowed — warmup is best-effort
@@ -147,7 +244,7 @@ export class SessionDO extends DurableObject<Env> {
       }
       this.sandbox = null;
       this.sandboxWarmupPromise = null;
-      this.setMeta("status", "terminated");
+      this.setState({ ...this.state, status: "terminated" });
 
       const terminatedEvent: SessionEvent = {
         type: "session.status_terminated",
@@ -167,12 +264,15 @@ export class SessionDO extends DurableObject<Env> {
 
       if (body.type === "user.message") {
         history.append(body);
-        this.setMeta("status", "running");
-        // Store the message for alarm-based processing.
-        // Using alarm() ensures the agent loop runs with full DO lifetime
-        // (not limited by waitUntil's 30s after client disconnect).
-        this.setMeta("pending_user_message", JSON.stringify(body));
-        await this.ctx.storage.setAlarm(Date.now() + 1);
+        this.broadcastEvent(body);
+        // Drain the event queue directly — this blocks the 202 response
+        // until the harness completes, but guarantees execution in all
+        // environments (DO keeps running as long as there's pending I/O).
+        // Schedule as backup for crash recovery.
+        try {
+          await this.schedule(5, "recoverEventQueue");
+        } catch {}
+        await this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
 
@@ -182,7 +282,7 @@ export class SessionDO extends DurableObject<Env> {
           this.currentAbortController.abort();
           this.currentAbortController = null;
         }
-        this.setMeta("status", "idle");
+        this.setState({ ...this.state, status: "idle" });
         const idleEvent: SessionEvent = { type: "session.status_idle" };
         history.append(body as UserInterruptEvent);
         history.append(idleEvent);
@@ -191,13 +291,12 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       if (body.type === "user.tool_confirmation") {
-        const confirmation = body as UserToolConfirmationEvent;
-        history.append(confirmation);
-        this.broadcastEvent(confirmation);
-
-        // Resume execution: execute the confirmed tool or inject denial, then re-run harness
-        this.setMeta("status", "running");
-        this.ctx.waitUntil(this.handleToolConfirmation(confirmation, history));
+        history.append(body as UserToolConfirmationEvent);
+        this.broadcastEvent(body);
+        try {
+          await this.schedule(5, "recoverEventQueue");
+        } catch {}
+        await this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
 
@@ -205,30 +304,16 @@ export class SessionDO extends DurableObject<Env> {
         const customResult = body as UserCustomToolResultEvent;
         history.append(customResult);
         this.broadcastEvent(customResult);
-
-        // Convert custom tool result to agent.tool_result and re-run harness
-        const toolResultEvent: SessionEvent = {
-          type: "agent.tool_result",
-          tool_use_id: customResult.custom_tool_use_id,
-          content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
-        };
-        history.append(toolResultEvent);
-        this.broadcastEvent(toolResultEvent);
-
-        // Re-run harness to continue the conversation
-        this.setMeta("status", "running");
-        const resumeMsg: UserMessageEvent = {
-          type: "user.message",
-          content: [{ type: "text", text: "" }], // Empty message — history has the tool result
-        };
-        this.ctx.waitUntil(this.processUserMessage(resumeMsg, 0, true));
+        try {
+          await this.schedule(5, "recoverEventQueue");
+        } catch {}
+        await this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.define_outcome") {
         const e = body as UserDefineOutcomeEvent;
-        this.setMeta("outcome", JSON.stringify({ description: e.description, rubric: e.rubric, max_iterations: e.max_iterations }));
-        this.setMeta("outcome_iteration", "1");
+        this.setState({ ...this.state, outcome: { description: e.description, rubric: e.rubric, max_iterations: e.max_iterations }, outcome_iteration: 1 });
         history.append(e);
         this.broadcastEvent(e);
         return new Response(null, { status: 202 });
@@ -258,12 +343,12 @@ export class SessionDO extends DurableObject<Env> {
     // GET /status
     if (request.method === "GET" && url.pathname === "/status") {
       return Response.json({
-        status: this.getMeta("status") || "idle",
-        agent_id: this.getMeta("agent_id"),
-        environment_id: this.getMeta("environment_id"),
+        status: this.state.status,
+        agent_id: this.state.agent_id,
+        environment_id: this.state.environment_id,
         usage: {
-          input_tokens: parseInt(this.getMeta("input_tokens") || "0", 10),
-          output_tokens: parseInt(this.getMeta("output_tokens") || "0", 10),
+          input_tokens: this.state.input_tokens,
+          output_tokens: this.state.output_tokens,
         },
       });
     }
@@ -310,15 +395,13 @@ export class SessionDO extends DurableObject<Env> {
         output_tokens: number;
       };
 
-      const currentInput = parseInt(this.getMeta("input_tokens") || "0", 10);
-      const currentOutput = parseInt(this.getMeta("output_tokens") || "0", 10);
-
-      this.setMeta("input_tokens", String(currentInput + (body.input_tokens || 0)));
-      this.setMeta("output_tokens", String(currentOutput + (body.output_tokens || 0)));
+      const newInput = this.state.input_tokens + (body.input_tokens || 0);
+      const newOutput = this.state.output_tokens + (body.output_tokens || 0);
+      this.setState({ ...this.state, input_tokens: newInput, output_tokens: newOutput });
 
       return Response.json({
-        input_tokens: currentInput + (body.input_tokens || 0),
-        output_tokens: currentOutput + (body.output_tokens || 0),
+        input_tokens: newInput,
+        output_tokens: newOutput,
       });
     }
 
@@ -357,10 +440,10 @@ export class SessionDO extends DurableObject<Env> {
         }));
 
       return Response.json({
-        status: this.getMeta("status") || "idle",
+        status: this.state.status,
         usage: {
-          input_tokens: parseInt(this.getMeta("input_tokens") || "0", 10),
-          output_tokens: parseInt(this.getMeta("output_tokens") || "0", 10),
+          input_tokens: this.state.input_tokens,
+          output_tokens: this.state.output_tokens,
         },
         outcome_evaluations: outcomeEvaluations,
       });
@@ -442,7 +525,7 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       // Install environment packages if configured
-      const envId = this.getMeta("environment_id");
+      const envId = this.state.environment_id;
       if (envId) {
         const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
         if (envJson) {
@@ -464,7 +547,7 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       // Mount all session resources (files, git repos, env secrets)
-      const sessionId = this.getMeta("session_id");
+      const sessionId = this.state.session_id;
       if (sessionId) {
         const resourceList = await this.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
         const resources: Array<Record<string, unknown>> = [];
@@ -490,7 +573,7 @@ export class SessionDO extends DurableObject<Env> {
 
       // Register command_secret credentials from vaults
       // These inject env vars only for commands matching specific prefixes
-      const vaultIds: string[] = JSON.parse(this.getMeta("vault_ids") || "[]");
+      const vaultIds = this.state.vault_ids;
       if (vaultIds.length && sandbox.registerCommandSecrets) {
         for (const vaultId of vaultIds) {
           const credList = await this.env.CONFIG_KV.list({ prefix: `cred:${vaultId}:` });
@@ -546,20 +629,19 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     // Retrieve the pending tool call from session metadata
-    const pendingJson = this.getMeta("pending_tool_calls");
-    const pendingCalls: PendingToolCall[] = pendingJson ? JSON.parse(pendingJson) : [];
+    const pendingCalls = this.state.pending_tool_calls;
     const pending = pendingCalls.find(p => p.toolCallId === confirmation.tool_use_id);
 
     if (confirmation.result === "allow" && pending) {
       // Execute the tool
-      const agentId = this.getMeta("agent_id");
+      const agentId = this.state.agent_id;
       const agentJson = agentId ? await this.env.CONFIG_KV.get(`agent:${agentId}`) : null;
 
       if (agentJson) {
         const agent = JSON.parse(agentJson) as AgentConfig;
 
         // Fetch environment config for networking restrictions
-        const envId = this.getMeta("environment_id");
+        const envId = this.state.environment_id;
         let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
         if (envId) {
           const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
@@ -620,11 +702,7 @@ export class SessionDO extends DurableObject<Env> {
 
     // Remove the confirmed/denied call from pending
     const remaining = pendingCalls.filter(p => p.toolCallId !== confirmation.tool_use_id);
-    if (remaining.length > 0) {
-      this.setMeta("pending_tool_calls", JSON.stringify(remaining));
-    } else {
-      this.setMeta("pending_tool_calls", "");
-    }
+    this.setState({ ...this.state, pending_tool_calls: remaining });
 
     // Re-run the harness to continue the conversation
     // Use an empty user message — the history already has the tool result
@@ -640,7 +718,7 @@ export class SessionDO extends DurableObject<Env> {
    */
   private async resolveCredentialToken(credentialId?: string): Promise<string | null> {
     if (!credentialId) return null;
-    const vaultIds: string[] = JSON.parse(this.getMeta("vault_ids") || "[]");
+    const vaultIds = this.state.vault_ids;
     for (const vaultId of vaultIds) {
       const credData = await this.env.CONFIG_KV.get(`cred:${vaultId}:${credentialId}`);
       if (credData) {
@@ -704,13 +782,12 @@ export class SessionDO extends DurableObject<Env> {
         history.append(notifEvent);
         this.broadcastEvent(notifEvent);
 
-        // Re-trigger harness if session is idle
-        const status = this.getMeta("status");
-        if (status === "idle") {
-          this.setMeta("status", "running");
-          this.setMeta("pending_user_message", JSON.stringify(notifEvent));
-          await this.ctx.storage.setAlarm(Date.now() + 100);
-        }
+        // Re-trigger harness if session is idle — the notification
+        // is already in the events table, drainEventQueue will pick it up.
+        this.ctx.waitUntil(this.drainEventQueue());
+        try {
+          await this.schedule(5, "recoverEventQueue");
+        } catch {}
       } catch {
         // Poll failed — will retry next interval
       }
@@ -807,10 +884,7 @@ export class SessionDO extends DurableObject<Env> {
           this.broadcastEvent(taggedEvent);
         },
         reportUsage: async (input_tokens: number, output_tokens: number) => {
-          const currentInput = parseInt(this.getMeta("input_tokens") || "0", 10);
-          const currentOutput = parseInt(this.getMeta("output_tokens") || "0", 10);
-          this.setMeta("input_tokens", String(currentInput + input_tokens));
-          this.setMeta("output_tokens", String(currentOutput + output_tokens));
+          this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
       },
     };
@@ -848,13 +922,16 @@ export class SessionDO extends DurableObject<Env> {
     retryCount: number = 0,
     skipAppend: boolean = false
   ): Promise<void> {
-    const agentId = this.getMeta("agent_id");
+    const agentId = this.state.agent_id;
     if (!agentId) return;
 
     const agentJson = await this.env.CONFIG_KV.get(`agent:${agentId}`);
     if (!agentJson) {
-      this.broadcastEvent({ type: "session.error", error: "Agent not found" });
-      this.setMeta("status", "idle");
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
+      history.append(errorEvent);
+      this.broadcastEvent(errorEvent);
+      this.setState({ ...this.state, status: "idle" });
       return;
     }
 
@@ -868,16 +945,18 @@ export class SessionDO extends DurableObject<Env> {
     try {
       await this.warmUpSandbox();
     } catch (err) {
-      this.broadcastEvent({
+      const errorEvent: SessionEvent = {
         type: "session.error",
         error: `Sandbox failed to start: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      this.setMeta("status", "terminated");
+      };
+      history.append(errorEvent);
+      this.broadcastEvent(errorEvent);
+      this.setState({ ...this.state, status: "terminated" });
       return;
     }
 
     // Fetch environment config for networking restrictions
-    const envId = this.getMeta("environment_id");
+    const envId = this.state.environment_id;
     let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
     if (envId) {
       const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
@@ -888,7 +967,7 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     // Fetch memory store IDs from session resources
-    const sessionId = this.getMeta("session_id");
+    const sessionId = this.state.session_id;
     const memoryStoreIds: string[] = [];
     const memoryPrompts: string[] = [];
     if (sessionId) {
@@ -1062,10 +1141,7 @@ export class SessionDO extends DurableObject<Env> {
           this.broadcastEvent(event);
         },
         reportUsage: async (input_tokens: number, output_tokens: number) => {
-          const currentInput = parseInt(this.getMeta("input_tokens") || "0", 10);
-          const currentOutput = parseInt(this.getMeta("output_tokens") || "0", 10);
-          this.setMeta("input_tokens", String(currentInput + input_tokens));
-          this.setMeta("output_tokens", String(currentOutput + output_tokens));
+          this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
         pendingConfirmations: [],
         abortSignal: abortController.signal,
@@ -1107,15 +1183,14 @@ export class SessionDO extends DurableObject<Env> {
           }
         }
         if (pendingCalls.length) {
-          this.setMeta("pending_tool_calls", JSON.stringify(pendingCalls));
+          this.setState({ ...this.state, pending_tool_calls: pendingCalls });
         }
       }
 
       // Outcome self-evaluation loop (properly loops until satisfied or max iterations)
-      const outcomeJson = this.getMeta("outcome");
-      if (outcomeJson) {
-        const outcome = JSON.parse(outcomeJson);
-        let iteration = parseInt(this.getMeta("outcome_iteration") || "1", 10);
+      const outcome = this.state.outcome;
+      if (outcome) {
+        let iteration = this.state.outcome_iteration || 1;
         const maxIterations = Math.min(outcome.max_iterations || 3, 20);
         const outcomeModelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
         const model = resolveModel(outcomeModelId || ctx.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
@@ -1152,7 +1227,7 @@ export class SessionDO extends DurableObject<Env> {
             };
             history.append(evalEvent);
             this.broadcastEvent(evalEvent);
-            this.setMeta("outcome", "");
+            this.setState({ ...this.state, outcome: null });
             break;
           }
 
@@ -1164,7 +1239,7 @@ export class SessionDO extends DurableObject<Env> {
             };
             history.append(evalEvent);
             this.broadcastEvent(evalEvent);
-            this.setMeta("outcome", "");
+            this.setState({ ...this.state, outcome: null });
             break;
           }
 
@@ -1179,7 +1254,7 @@ export class SessionDO extends DurableObject<Env> {
           this.broadcastEvent(evalEvent);
 
           iteration += 1;
-          this.setMeta("outcome_iteration", String(iteration));
+          this.setState({ ...this.state, outcome_iteration: iteration });
 
           const feedbackMsg: UserMessageEvent = {
             type: "user.message",
@@ -1198,8 +1273,7 @@ export class SessionDO extends DurableObject<Env> {
       const pendingConfirmations = ctx.runtime.pendingConfirmations || [];
 
       // Check if any pending are custom tool uses (no execute function, not always_ask built-in)
-      const pendingToolCallsJson = this.getMeta("pending_tool_calls");
-      const storedPendingCalls: PendingToolCall[] = pendingToolCallsJson ? JSON.parse(pendingToolCallsJson) : [];
+      const storedPendingCalls = this.state.pending_tool_calls;
       const hasCustomToolPending = storedPendingCalls.some(p =>
         !["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"].includes(p.toolName) &&
         !p.toolName.startsWith("mcp_") &&
@@ -1278,7 +1352,7 @@ export class SessionDO extends DurableObject<Env> {
       // Client can send a new user.message to retry.
     } finally {
       this.currentAbortController = null;
-      this.setMeta("status", "idle");
+      this.setState({ ...this.state, status: "idle" });
     }
   }
 }
