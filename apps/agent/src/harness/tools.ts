@@ -5,7 +5,7 @@ import type { AgentConfig, ToolsetConfig, CustomToolConfig } from "@open-managed
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
 
-const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch"];
+const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"];
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
@@ -437,17 +437,16 @@ export async function buildTools(
     });
   }
 
-  // --- Web search tools (configured per-agent via tools array) ---
-  // "web_search_20250305" → Anthropic built-in server-side search (Claude only, no API key)
-  // "web_search_ddg"      → DuckDuckGo scraping (free, no API key, any model)
-  // "web_search_tavily"   → Tavily API search (any model, needs TAVILY_API_KEY)
+  // --- Web search ---
+  // Default: DuckDuckGo (free, no config). Override with explicit tool types:
+  //   "web_search_20250305" → Anthropic built-in server-side (Claude only)
+  //   "web_search_tavily"   → Tavily API (needs TAVILY_API_KEY)
   const toolTypes = new Set((agentConfig.tools || []).map(t => t.type));
 
   if (toolTypes.has("web_search_20250305")) {
     tools.web_search = anthropic.tools.webSearch_20250305();
-  }
-
-  if (toolTypes.has("web_search_ddg")) {
+  } else if (toolTypes.has("web_search_ddg") || enabled.has("web_search")) {
+    // DuckDuckGo — default web search, free, no API key
     tools.web_search = tool({
       description:
         "Search the web using DuckDuckGo. Returns titles, URLs, and descriptions.",
