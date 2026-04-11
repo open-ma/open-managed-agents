@@ -185,11 +185,14 @@ export class DefaultHarness implements HarnessInterface {
           } else if (isBuiltinTool(call.toolName)) {
             // Check if tool requires confirmation (always_ask — no execute function)
             const hasExecute = tools[call.toolName] && typeof tools[call.toolName].execute === "function";
+            // Ensure args is a plain object — AI SDK may return a Proxy or class instance
+            // that doesn't serialize properly in workerd
+            const rawArgs = call.args ? JSON.parse(JSON.stringify(call.args)) : {};
             const toolUseEvent: SessionEvent = {
               type: "agent.tool_use",
               id: call.toolCallId,
               name: call.toolName,
-              input: call.args as Record<string, unknown>,
+              input: rawArgs,
             };
             if (!hasExecute) {
               (toolUseEvent as import("@open-managed-agents/shared").AgentToolUseEvent).evaluated_permission = "ask";
