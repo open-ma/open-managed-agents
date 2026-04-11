@@ -150,9 +150,19 @@ app.post("/:id", async (c) => {
 
   for (const key of fields) {
     if (body[key] !== undefined) {
-      // null clears the field
       if (body[key] === null) {
         (agent as any)[key] = key === "system" || key === "description" ? "" : undefined;
+      } else if (key === "metadata" && typeof body[key] === "object") {
+        // Merge metadata: set value to "" to delete a key
+        const existing = agent.metadata || {};
+        for (const [mk, mv] of Object.entries(body[key] as Record<string, unknown>)) {
+          if (mv === "" || mv === null) {
+            delete existing[mk];
+          } else {
+            existing[mk] = mv;
+          }
+        }
+        agent.metadata = existing;
       } else {
         (agent as any)[key] = body[key];
       }
