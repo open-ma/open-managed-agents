@@ -233,7 +233,11 @@ export interface OutcomeEvaluationEvent extends EventBase {
 
 export interface SessionErrorEvent extends EventBase {
   type: "session.error";
-  error: string;
+  error: string | {
+    type: string;
+    message: string;
+    retry_status?: "retryable" | "non_retryable";
+  };
 }
 
 export interface SessionThreadCreatedEvent extends EventBase {
@@ -430,10 +434,12 @@ export interface MemoryVersion {
 
 export interface FileRecord {
   id: string;
+  type?: "file";
   filename: string;
   media_type: string;
   size_bytes: number;
   scope_id?: string;
+  downloadable?: boolean;
   created_at: string;
 }
 
