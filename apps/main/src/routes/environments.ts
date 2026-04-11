@@ -67,21 +67,27 @@ app.post("/", async (c) => {
     return c.json({ error: "name is required" }, 400);
   }
 
+  // If no build infrastructure (no DinD, no GitHub), default to ready
+  const canBuild = !!(c.env.BUILDER_SANDBOX || (c.env.GITHUB_TOKEN && c.env.GITHUB_REPO));
+
   const env: EnvironmentConfig = {
     id: generateEnvId(),
     name: body.name,
     config: body.config || { type: "cloud" },
-    status: "building",
+    status: canBuild ? "building" : "ready",
+    sandbox_worker_name: canBuild ? undefined : "local",
     created_at: new Date().toISOString(),
   };
 
   await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
 
-  try {
-    await triggerBuild(c.env, env);
-  } catch {
-    env.status = "error";
-    await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
+  if (canBuild) {
+    try {
+      await triggerBuild(c.env, env);
+    } catch {
+      env.status = "error";
+      await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
+    }
   }
 
   return c.json(env, 201);

@@ -10,6 +10,10 @@ interface Agent {
   description?: string; skills?: unknown[]; mcp_servers?: unknown[]; callable_agents?: unknown[];
 }
 
+interface ModelCard {
+  id: string; name: string; provider: string; model_id: string;
+  api_key_preview?: string; base_url?: string; is_default?: boolean;
+}
 interface McpEntry { name: string; type: string; url: string }
 interface SkillEntry { type: "anthropic" | "custom"; skill_id: string; version?: string }
 interface CallableEntry { type: "agent"; id: string; version: number }
@@ -23,6 +27,7 @@ const ANTHROPIC_SKILLS = [
 
 const INITIAL_FORM = {
   name: "", model: "claude-sonnet-4-6", system: "", description: "",
+  modelCardId: "",
   mcpServers: [] as McpEntry[],
   skills: [] as SkillEntry[],
   callableAgents: [] as CallableEntry[],
@@ -34,7 +39,9 @@ export function AgentsList() {
   const [agents, setAgents] = useState<Agent[]>([]);
   const [allAgents, setAllAgents] = useState<Agent[]>([]);
   const [customSkills, setCustomSkills] = useState<Array<{ id: string; name: string; description: string }>>([]);
+  const [modelCards, setModelCards] = useState<ModelCard[]>([]);
   const [loading, setLoading] = useState(true);
+  const [createError, setCreateError] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [createStep, setCreateStep] = useState<"template" | "form">("template");
@@ -55,6 +62,11 @@ export function AgentsList() {
         const sk = await api<{ data: Array<{ id: string; name: string; description: string }> }>("/v1/skills");
         setCustomSkills(sk.data);
       } catch {}
+      // Load model cards
+      try {
+        const mc = await api<{ data: ModelCard[] }>("/v1/model_cards");
+        setModelCards(mc.data);
+      } catch {}
     } catch {}
     setLoading(false);
   };
@@ -62,6 +74,7 @@ export function AgentsList() {
   useEffect(() => { load(); }, [showArchived]);
 
   const create = async () => {
+    setCreateError("");
     try {
       const payload: Record<string, unknown> = {
         name: form.name,
@@ -70,6 +83,7 @@ export function AgentsList() {
         description: form.description || undefined,
         tools: [{ type: "agent_toolset_20260401" }],
       };
+      if (form.modelCardId) payload.model_card_id = form.modelCardId;
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
       if (form.callableAgents.length) payload.callable_agents = form.callableAgents;
@@ -80,7 +94,9 @@ export function AgentsList() {
       });
       closeCreate();
       nav(`/agents/${agent.id}`);
-    } catch {}
+    } catch (e: any) {
+      setCreateError(e?.message || "Failed to create agent");
+    }
   };
 
   const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : m?.id || "";
@@ -127,6 +143,7 @@ export function AgentsList() {
         model: tmpl.model,
         system: tmpl.system,
         description: tmpl.description,
+        modelCardId: "",
         mcpServers: tmpl.mcpServers.map(m => ({ ...m })),
         skills: tmpl.skills.map(s => ({ ...s } as SkillEntry)),
         callableAgents: [],
@@ -142,6 +159,7 @@ export function AgentsList() {
     setTemplateSearch("");
     setForm({ ...INITIAL_FORM });
     setTab("basic");
+    setCreateError("");
   };
 
   const filteredTemplates = templateSearch
@@ -284,18 +302,53 @@ export function AgentsList() {
               {/* Basic tab */}
               {tab === "basic" && (
                 <div className="space-y-3">
+                  {createError && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{createError}</div>}
                   <div>
                     <label className="text-sm text-stone-600 block mb-1">Name *</label>
                     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="Coding Assistant" />
                   </div>
                   <div>
                     <label className="text-sm text-stone-600 block mb-1">Model</label>
-                    <select value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value })} className={inputCls}>
+                    <select value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })} className={inputCls}>
                       <option>claude-sonnet-4-6</option>
                       <option>claude-opus-4-6</option>
                       <option>claude-haiku-4-5</option>
+                      {/* Show unique model_ids from model cards not already in the static list */}
+                      {modelCards
+                        .filter(mc => !["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"].includes(mc.model_id))
+                        .filter((mc, i, arr) => arr.findIndex(m => m.model_id === mc.model_id) === i)
+                        .map(mc => <option key={mc.model_id} value={mc.model_id}>{mc.model_id}</option>)}
                     </select>
                   </div>
+                  {modelCards.length > 0 && (
+                    <div>
+                      <label className="text-sm text-stone-600 block mb-1">Model Card</label>
+                      <select
+                        value={form.modelCardId}
+                        onChange={(e) => {
+                          const cardId = e.target.value;
+                          setForm({ ...form, modelCardId: cardId });
+                          if (cardId) {
+                            const card = modelCards.find(mc => mc.id === cardId);
+                            if (card) setForm(f => ({ ...f, modelCardId: cardId, model: card.model_id }));
+                          }
+                        }}
+                        className={inputCls}
+                      >
+                        <option value="">Auto-detect by model ID</option>
+                        {modelCards.map(mc => (
+                          <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
+                        ))}
+                      </select>
+                      <p className="text-xs text-stone-400 mt-1">Select which API credentials to use for this agent.</p>
+                    </div>
+                  )}
+                  {modelCards.length === 0 && (
+                    <p className="text-xs text-stone-400 bg-stone-50 px-3 py-2 rounded-lg">
+                      No model cards configured. Agents will use the environment API key.{" "}
+                      <a href="/model-cards" className="underline hover:text-stone-600">Add one</a>.
+                    </p>
+                  )}
                   <div>
                     <label className="text-sm text-stone-600 block mb-1">Description</label>
                     <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputCls} placeholder="A coding assistant that writes clean code..." />

@@ -404,7 +404,7 @@ describe("buildTools integration", () => {
     expect(tools.grep).toBeUndefined();
   });
 
-  it("buildMemoryTools creates all 5 memory tools", () => {
+  it("buildMemoryTools creates all 6 memory tools", () => {
     // Mock KV namespace
     const mockKV = { list: async () => ({ keys: [] }), get: async () => null, put: async () => {}, delete: async () => {} } as unknown as KVNamespace;
     const memTools = buildMemoryTools(

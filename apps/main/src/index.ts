@@ -9,6 +9,7 @@ import vaultsRoutes from "./routes/vaults";
 import memoryRoutes from "./routes/memory";
 import filesRoutes from "./routes/files";
 import skillsRoutes from "./routes/skills";
+import modelCardsRoutes from "./routes/model-cards";
 
 // Main worker: CRUD + routing layer.
 // SessionDO and Sandbox are in per-environment sandbox workers.
@@ -31,5 +32,6 @@ app.route("/v1/vaults", vaultsRoutes);
 app.route("/v1/memory_stores", memoryRoutes);
 app.route("/v1/files", filesRoutes);
 app.route("/v1/skills", skillsRoutes);
+app.route("/v1/model_cards", modelCardsRoutes);
 
 export default app;

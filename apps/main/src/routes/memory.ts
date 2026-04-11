@@ -256,8 +256,8 @@ app.get("/:id/memories/:mem_id", async (c) => {
   return c.json(JSON.parse(data));
 });
 
-// PATCH /v1/memory_stores/:id/memories/:mem_id — update memory content/path
-app.patch("/:id/memories/:mem_id", async (c) => {
+// PATCH/POST /v1/memory_stores/:id/memories/:mem_id — update memory content/path
+const updateMemory = async (c: any) => {
   const storeId = c.req.param("id");
   const memId = c.req.param("mem_id");
   const data = await c.env.CONFIG_KV.get(`mem:${storeId}:${memId}`);
@@ -308,7 +308,9 @@ app.patch("/:id/memories/:mem_id", async (c) => {
   });
 
   return c.json(mem);
-});
+};
+app.patch("/:id/memories/:mem_id", updateMemory);
+app.post("/:id/memories/:mem_id", updateMemory);
 
 // DELETE /v1/memory_stores/:id/memories/:mem_id — delete memory
 // Supports conditional delete via ?expected_content_sha256=<hash>

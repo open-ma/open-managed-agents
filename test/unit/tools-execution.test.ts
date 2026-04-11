@@ -594,7 +594,7 @@ describe("MCP tools", () => {
 // 5. Memory tools
 // ============================================================
 describe("Memory tools", () => {
-  it("buildMemoryTools with store IDs creates 5 tools", () => {
+  it("buildMemoryTools with store IDs creates 6 tools", () => {
     const kv = makeMockKV();
     const memTools = buildMemoryTools(["store_abc"], kv);
 
@@ -603,7 +603,7 @@ describe("Memory tools", () => {
     expect(memTools.memory_write).toBeDefined();
     expect(memTools.memory_search).toBeDefined();
     expect(memTools.memory_delete).toBeDefined();
-    expect(Object.keys(memTools)).toHaveLength(5);
+    expect(Object.keys(memTools)).toHaveLength(6);
   });
 
   it("buildMemoryTools with empty array returns empty", () => {
@@ -831,7 +831,7 @@ describe("Event IDs on history", () => {
 
     const events = history.getEvents();
     expect(events[0].id).toBeDefined();
-    expect((events[0] as any).id).toMatch(/^evt_/);
+    expect((events[0] as any).id).toMatch(/^sevt-/);
     expect((events[0] as any).processed_at).toBeDefined();
   });
 

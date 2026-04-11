@@ -935,10 +935,50 @@ export class SessionDO extends DurableObject<Env> {
       Object.assign(allTools, memTools);
     }
 
-    // Resolve model — fall back to ANTHROPIC_MODEL env var if agent doesn't specify one
+    // Resolve model — look up model card credentials, fall back to env vars
     const modelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
     const effectiveModelId = modelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-    const model = resolveModel(effectiveModelId, this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
+    let modelApiKey = this.env.ANTHROPIC_API_KEY;
+    let modelBaseURL = this.env.ANTHROPIC_BASE_URL;
+
+    if (agent.model_card_id && this.env.CONFIG_KV) {
+      try {
+        const [cardData, keyData] = await Promise.all([
+          this.env.CONFIG_KV.get(`modelcard:${agent.model_card_id}`),
+          this.env.CONFIG_KV.get(`modelcard:${agent.model_card_id}:key`),
+        ]);
+        if (cardData && keyData) {
+          const card = JSON.parse(cardData);
+          modelApiKey = keyData;
+          if (card.base_url) modelBaseURL = card.base_url;
+        }
+      } catch {
+        // Fall back to env vars
+      }
+    } else if (this.env.CONFIG_KV) {
+      // No explicit model_card_id — try to find a card by model_id match
+      try {
+        const list = await this.env.CONFIG_KV.list({ prefix: "modelcard:" });
+        for (const k of list.keys) {
+          if (k.name.includes(":key")) continue;
+          const data = await this.env.CONFIG_KV.get(k.name);
+          if (!data) continue;
+          const card = JSON.parse(data);
+          if (card.model_id === effectiveModelId && !card.archived_at) {
+            const key = await this.env.CONFIG_KV.get(`${k.name}:key`);
+            if (key) {
+              modelApiKey = key;
+              if (card.base_url) modelBaseURL = card.base_url;
+            }
+            break;
+          }
+        }
+      } catch {
+        // Fall back to env vars
+      }
+    }
+
+    const model = resolveModel(effectiveModelId, modelApiKey, modelBaseURL);
 
     // Build system prompt: base + skill metadata
     let systemPrompt = agent.system || "";

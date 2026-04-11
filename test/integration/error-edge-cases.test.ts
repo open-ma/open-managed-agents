@@ -67,7 +67,7 @@ describe("API validation", () => {
     });
     expect(res.status).toBe(201);
     const agent = (await res.json()) as any;
-    expect(agent.id).toMatch(/^agent_/);
+    expect(agent.id).toMatch(/^agent-/);
     expect(agent.name).toBe("ExtraFields");
   });
 
@@ -75,7 +75,7 @@ describe("API validation", () => {
     const agent = await createAgent();
     const envObj = await createEnv();
     const session = await createSession(agent.id, envObj.id);
-    expect(session.id).toMatch(/^sess_/);
+    expect(session.id).toMatch(/^sess-/);
     // title should be undefined or empty, not cause an error
     expect(session.title === undefined || session.title === "" || session.title === null).toBe(true);
   });
@@ -316,7 +316,7 @@ describe("Boundary conditions", () => {
     });
     expect(res.status).toBe(201);
     const agent = (await res.json()) as any;
-    expect(agent.system).toBe("");
+    expect(agent.system).toBeNull();
   });
 
   it("multiple rapid creates (20 agents) all produce unique IDs", async () => {

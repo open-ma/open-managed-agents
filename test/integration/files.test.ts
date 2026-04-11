@@ -33,7 +33,7 @@ describe("File upload", () => {
     });
     expect(res.status).toBe(201);
     const file = (await res.json()) as any;
-    expect(file.id).toMatch(/^file_/);
+    expect(file.id).toMatch(/^file-/);
     expect(file.filename).toBe("data.csv");
     expect(file.media_type).toBe("text/csv");
     expect(file.size_bytes).toBe(new TextEncoder().encode("col1,col2\n1,2").length);
@@ -249,7 +249,7 @@ describe("Session resource add/list/delete", () => {
     });
     expect(res.status).toBe(201);
     const resource = (await res.json()) as any;
-    expect(resource.id).toMatch(/^sesrsc_/);
+    expect(resource.id).toMatch(/^sesrsc-/);
     expect(resource.session_id).toBe(sessionId);
     expect(resource.type).toBe("file");
     expect(resource.file_id).toBe(fileId);
@@ -373,14 +373,14 @@ describe("Session creation with resources", () => {
     });
     expect(res.status).toBe(201);
     const session = (await res.json()) as any;
-    expect(session.id).toMatch(/^sess_/);
+    expect(session.id).toMatch(/^sess-/);
     expect(session.resources).toBeInstanceOf(Array);
     expect(session.resources.length).toBe(1);
     expect(session.resources[0].type).toBe("file");
     expect(session.resources[0].mount_path).toBe("/workspace/init-file.txt");
     // The file_id should be a new scoped copy, not the original
     expect(session.resources[0].file_id).not.toBe(fileId);
-    expect(session.resources[0].file_id).toMatch(/^file_/);
+    expect(session.resources[0].file_id).toMatch(/^file-/);
   });
 
   it("scoped file copy has session scope_id", async () => {

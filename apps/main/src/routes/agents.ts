@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { AgentConfig } from "@open-managed-agents/shared";
+import type { AgentConfig, ModelCard } from "@open-managed-agents/shared";
 import { generateAgentId } from "@open-managed-agents/shared";
 
 const app = new Hono<{ Bindings: Env }>();
@@ -25,9 +25,55 @@ function formatAgent(agent: AgentConfig) {
     skills: agent.skills || [],
     mcp_servers: agent.mcp_servers || [],
     callable_agents: agent.callable_agents || [],
+    model_card_id: agent.model_card_id || null,
     metadata: agent.metadata || {},
     archived_at: agent.archived_at || null,
   };
+}
+
+/**
+ * Validate that a model_card_id exists, or that the model string
+ * matches at least one configured model card (by model_id).
+ * If no model cards exist at all, skip validation (env-key fallback).
+ */
+async function validateModel(
+  kv: KVNamespace,
+  model: string | { id: string; speed?: string },
+  modelCardId?: string
+): Promise<{ valid: boolean; error?: string }> {
+  // Load all model cards
+  const list = await kv.list({ prefix: "modelcard:" });
+  const cardKeys = list.keys.filter((k) => !k.name.includes(":key"));
+
+  // No model cards configured — skip validation (uses env fallback)
+  if (cardKeys.length === 0) return { valid: true };
+
+  const cards: ModelCard[] = (
+    await Promise.all(
+      cardKeys.map(async (k) => {
+        const data = await kv.get(k.name);
+        return data ? (JSON.parse(data) as ModelCard) : null;
+      })
+    )
+  ).filter((c): c is ModelCard => c !== null && !c.archived_at);
+
+  // If explicit model_card_id, verify it exists
+  if (modelCardId) {
+    const found = cards.find((c) => c.id === modelCardId);
+    if (!found) return { valid: false, error: `Model card "${modelCardId}" not found` };
+    return { valid: true };
+  }
+
+  // Otherwise, check if the model_id matches any card
+  const modelId = typeof model === "string" ? model : model.id;
+  const match = cards.find((c) => c.model_id === modelId);
+  if (!match) {
+    return {
+      valid: false,
+      error: `No model card configured for model "${modelId}". Create a model card first or use a configured model.`,
+    };
+  }
+  return { valid: true };
 }
 
 // POST /v1/agents — create agent
@@ -43,10 +89,17 @@ app.post("/", async (c) => {
     skills?: AgentConfig["skills"];
     callable_agents?: AgentConfig["callable_agents"];
     metadata?: Record<string, unknown>;
+    model_card_id?: string;
   }>();
 
   if (!body.name || !body.model) {
     return c.json({ error: "name and model are required" }, 400);
+  }
+
+  // Validate model has a configured model card
+  const modelCheck = await validateModel(c.env.CONFIG_KV, body.model, body.model_card_id);
+  if (!modelCheck.valid) {
+    return c.json({ error: modelCheck.error }, 400);
   }
 
   const now = new Date().toISOString();
@@ -61,6 +114,7 @@ app.post("/", async (c) => {
     mcp_servers: body.mcp_servers,
     skills: body.skills,
     callable_agents: body.callable_agents,
+    model_card_id: body.model_card_id,
     metadata: body.metadata,
     version: 1,
     created_at: now,
@@ -104,8 +158,8 @@ app.get("/:id", async (c) => {
   return c.json(formatAgent(JSON.parse(data)));
 });
 
-// POST /v1/agents/:id — update agent (Anthropic uses POST, not PUT)
-app.post("/:id", async (c) => {
+// POST/PUT /v1/agents/:id — update agent (Anthropic uses POST; PUT accepted for compat)
+const updateAgent = async (c: any) => {
   const id = c.req.param("id");
   const data = await c.env.CONFIG_KV.get(`agent:${id}`);
   if (!data) return c.json({ error: "Agent not found" }, 404);
@@ -122,9 +176,20 @@ app.post("/:id", async (c) => {
     mcp_servers?: AgentConfig["mcp_servers"] | null;
     skills?: AgentConfig["skills"] | null;
     callable_agents?: AgentConfig["callable_agents"] | null;
+    model_card_id?: string | null;
     metadata?: Record<string, unknown>;
     version?: number;
   }>();
+
+  // Validate model if model or model_card_id is being changed
+  if (body.model !== undefined || body.model_card_id !== undefined) {
+    const effectiveModel = body.model ?? agent.model;
+    const effectiveCardId = body.model_card_id === null ? undefined : (body.model_card_id ?? agent.model_card_id);
+    const modelCheck = await validateModel(c.env.CONFIG_KV, effectiveModel, effectiveCardId);
+    if (!modelCheck.valid) {
+      return c.json({ error: modelCheck.error }, 400);
+    }
+  }
 
   // Optimistic concurrency: if version provided, check it matches
   if (body.version !== undefined && body.version !== agent.version) {
@@ -133,7 +198,7 @@ app.post("/:id", async (c) => {
 
   // Detect if anything actually changed
   let changed = false;
-  const fields = ["name", "model", "system", "tools", "harness", "description", "mcp_servers", "skills", "callable_agents", "metadata"] as const;
+  const fields = ["name", "model", "system", "tools", "harness", "description", "mcp_servers", "skills", "callable_agents", "model_card_id", "metadata"] as const;
   for (const key of fields) {
     if (body[key] !== undefined && JSON.stringify(body[key]) !== JSON.stringify(agent[key])) {
       changed = true;
@@ -173,7 +238,9 @@ app.post("/:id", async (c) => {
 
   await c.env.CONFIG_KV.put(`agent:${id}`, JSON.stringify(agent));
   return c.json(formatAgent(agent));
-});
+};
+app.post("/:id", updateAgent);
+app.put("/:id", updateAgent);
 
 // GET /v1/agents/:id/versions — list all versions
 app.get("/:id/versions", async (c) => {

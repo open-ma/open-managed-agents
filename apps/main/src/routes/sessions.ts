@@ -31,11 +31,35 @@ async function getSandboxBinding(
   // Binding name derived from worker name: "sandbox-default" → "SANDBOX_sandbox_default"
   const bindingName = `SANDBOX_${envConfig.sandbox_worker_name.replace(/-/g, "_")}`;
   const binding = (env as unknown as Record<string, unknown>)[bindingName] as Fetcher | undefined;
-  if (!binding) {
-    return { binding: null, error: `Service binding ${bindingName} not found`, status: 500 };
+
+  if (binding) {
+    return { binding };
   }
 
-  return { binding };
+  // Fallback: if SessionDO is available locally (test/combined worker mode),
+  // create an inline fetcher that routes directly to the DO
+  if (env.SESSION_DO) {
+    const localFetcher: Fetcher = {
+      fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+        const req = input instanceof Request ? input : new Request(input, init);
+        const url = new URL(req.url);
+        const match = url.pathname.match(/^\/sessions\/([^/]+)\/(.*)/);
+        if (!match) return Promise.resolve(new Response("Not found", { status: 404 }));
+        const [, sessionId, rest] = match;
+        const doId = env.SESSION_DO!.idFromName(sessionId);
+        const stub = env.SESSION_DO!.get(doId);
+        return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
+          method: req.method,
+          headers: req.headers,
+          body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+        }));
+      },
+      connect: () => { throw new Error("not implemented"); },
+    } as unknown as Fetcher;
+    return { binding: localFetcher };
+  }
+
+  return { binding: null, error: `Service binding ${bindingName} not found`, status: 500 };
 }
 
 /**
