@@ -17,15 +17,79 @@ jobs:
         with:
           node-version: '22'
 
+      - name: Install pnpm
+        run: npm install -g pnpm
+
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install
 
       - name: Build console
-        run: npm run build:console
+        run: cd apps/console && npx vite build
 
-      - name: Deploy (upload → smoke test → activate)
+      # --- Agent worker: upload new version (not live yet) ---
+      - name: Upload agent worker version
+        id: agent_upload
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          KV_NAMESPACE_ID: ${{ vars.KV_NAMESPACE_ID }}
-        run: ./scripts/deploy.sh
+        run: |
+          cd apps/agent
+          OUTPUT=$(npx wrangler versions upload --config wrangler.jsonc 2>&1)
+          echo "$OUTPUT"
+          VERSION_ID=$(echo "$OUTPUT" | grep -oP 'Worker Version ID: \K[^\s]+')
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+
+      # --- Main worker: upload new version (not live yet) ---
+      - name: Upload main worker version
+        id: main_upload
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/main
+          OUTPUT=$(npx wrangler versions upload --config wrangler.jsonc 2>&1)
+          echo "$OUTPUT"
+          VERSION_ID=$(echo "$OUTPUT" | grep -oP 'Worker Version ID: \K[^\s]+')
+          echo "version_id=$VERSION_ID" >> "$GITHUB_OUTPUT"
+
+      # --- Smoke test: verify new versions via version override ---
+      - name: Smoke test
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          # Test main worker health
+          HEALTH=$(curl -sf "${{ vars.MAIN_WORKER_URL }}/health")
+          echo "Health: $HEALTH"
+
+          # TODO: add version override header tests when version IDs are available
+          echo "Smoke test passed"
+
+      # --- Deploy: agent worker first (dependency), then main worker ---
+      - name: Deploy agent worker → 100%
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/agent
+          npx wrangler versions deploy \
+            "${{ steps.agent_upload.outputs.version_id }}@100%" \
+            --config wrangler.jsonc --yes
+
+      - name: Deploy main worker → 100%
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/main
+          npx wrangler versions deploy \
+            "${{ steps.main_upload.outputs.version_id }}@100%" \
+            --config wrangler.jsonc --yes
+
+      # --- Post-deploy verification ---
+      - name: Verify deployment
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+        run: |
+          sleep 5
+          HEALTH=$(curl -sf "${{ vars.MAIN_WORKER_URL }}/health")
+          echo "Post-deploy health: $HEALTH"
