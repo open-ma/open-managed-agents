@@ -439,11 +439,61 @@ export async function buildTools(
 
   // --- Web search tools (configured per-agent via tools array) ---
   // "web_search_20250305" → Anthropic built-in server-side search (Claude only, no API key)
+  // "web_search_ddg"      → DuckDuckGo scraping (free, no API key, any model)
   // "web_search_tavily"   → Tavily API search (any model, needs TAVILY_API_KEY)
   const toolTypes = new Set((agentConfig.tools || []).map(t => t.type));
 
   if (toolTypes.has("web_search_20250305")) {
     tools.web_search = anthropic.tools.webSearch_20250305();
+  }
+
+  if (toolTypes.has("web_search_ddg")) {
+    tools.web_search = tool({
+      description:
+        "Search the web using DuckDuckGo. Returns titles, URLs, and descriptions.",
+      parameters: z.object({
+        query: z.string().describe("Search query"),
+        max_results: z.number().optional().describe("Max results (default 5)"),
+      }),
+      execute: safe(async ({ query, max_results }) => {
+        const count = max_results || 5;
+        // Step 1: Get VQD token from DuckDuckGo
+        const vqdRes = await fetch(`https://duckduckgo.com/?${new URLSearchParams({ q: query, ia: "web" })}`);
+        if (!vqdRes.ok) return `DuckDuckGo error: ${vqdRes.status}`;
+        const vqdText = await vqdRes.text();
+        const vqd = /vqd=['"](\d+-\d+(?:-\d+)?)['"]/?.exec(vqdText)?.[1];
+        if (!vqd) return "DuckDuckGo: failed to get search token";
+
+        // Step 2: Fetch search results
+        const params = new URLSearchParams({
+          q: query, l: "en-us", kl: "wt-wt", s: "0", dl: "en",
+          ct: "US", ss_mkt: "us", vqd, sp: "1", bpa: "1",
+        });
+        const searchRes = await fetch(`https://links.duckduckgo.com/d.js?${params}`);
+        if (!searchRes.ok) return `DuckDuckGo search error: ${searchRes.status}`;
+        const body = await searchRes.text();
+
+        if (body.includes("DDG.deep.anomalyDetectionBlock"))
+          return "DuckDuckGo rate limited. Try again in a moment.";
+
+        // Step 3: Parse results from JSONP-like response
+        const match = /DDG\.pageLayout\.load\('d',(\[.+?\])\);DDG\.duckbar\.load/.exec(body);
+        if (!match) return "DuckDuckGo: no results found";
+
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const raw = JSON.parse(match[1].replace(/\t/g, "    ")) as any[];
+        const results = raw
+          .filter((r) => r.u && !("n" in r))
+          .slice(0, count)
+          .map((r) => ({
+            title: r.t,
+            url: r.u,
+            description: (r.a || "").replace(/<\/?b>/g, ""),
+          }));
+
+        return JSON.stringify(results);
+      }),
+    });
   }
 
   if (toolTypes.has("web_search_tavily")) {
@@ -453,10 +503,7 @@ export async function buildTools(
         "Search the web for information. Returns relevant search results.",
       parameters: z.object({
         query: z.string().describe("Search query"),
-        max_results: z
-          .number()
-          .optional()
-          .describe("Max results (default 5)"),
+        max_results: z.number().optional().describe("Max results (default 5)"),
       }),
       execute: safe(async ({ query, max_results }) => {
         if (!tavilyKey)
