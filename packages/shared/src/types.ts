@@ -94,7 +94,29 @@ export interface TextBlock {
   text: string;
 }
 
-export type ContentBlock = TextBlock;
+export interface ImageBlock {
+  type: "image";
+  source: {
+    type: "base64" | "url";
+    media_type?: string; // e.g. "image/jpeg", "image/png"
+    data?: string;       // base64 data (when type=base64)
+    url?: string;        // URL (when type=url)
+  };
+}
+
+export interface FileBlock {
+  type: "file";
+  source: {
+    type: "base64" | "url" | "file";
+    media_type?: string; // e.g. "application/pdf"
+    data?: string;       // base64 data
+    url?: string;        // URL
+    file_id?: string;    // reference to uploaded file (when type=file)
+    filename?: string;
+  };
+}
+
+export type ContentBlock = TextBlock | ImageBlock | FileBlock;
 
 // --- Event Base ---
 

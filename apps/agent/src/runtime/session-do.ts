@@ -210,7 +210,7 @@ export class SessionDO extends DurableObject<Env> {
         const toolResultEvent: SessionEvent = {
           type: "agent.tool_result",
           tool_use_id: customResult.custom_tool_use_id,
-          content: customResult.content.map(b => b.text).join(""),
+          content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
         };
         history.append(toolResultEvent);
         this.broadcastEvent(toolResultEvent);
@@ -780,7 +780,7 @@ export class SessionDO extends DurableObject<Env> {
       .filter((e: SessionEvent) => e.type === "agent.message")
       .map((e: SessionEvent) => {
         const msg = e as AgentMessageEvent;
-        return msg.content?.map((b) => b.text).join("") || "";
+        return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
       })
       .join("\n");
 
@@ -1036,7 +1036,7 @@ export class SessionDO extends DurableObject<Env> {
             .filter((e: SessionEvent) => e.type === "agent.message")
             .map((e: SessionEvent) => {
               const msg = e as AgentMessageEvent;
-              return msg.content?.map((b) => b.text).join("") || "";
+              return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
             })
             .join("\n");
 
