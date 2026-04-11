@@ -1,5 +1,6 @@
 import { tool } from "ai";
 import { z } from "zod";
+import { anthropic } from "@ai-sdk/anthropic";
 import type { AgentConfig, ToolsetConfig, CustomToolConfig } from "@open-managed-agents/shared";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
@@ -437,41 +438,51 @@ export async function buildTools(
   }
 
   if (enabled.has("web_search")) {
-    const tavilyKey = env?.TAVILY_API_KEY;
-    tools.web_search = tool({
-      description:
-        "Search the web for information. Returns relevant search results.",
-      parameters: z.object({
-        query: z.string().describe("Search query"),
-        max_results: z
-          .number()
-          .optional()
-          .describe("Max results (default 5)"),
-      }),
-      execute: safe(async ({ query, max_results }) => {
-        if (!tavilyKey)
-          return "web_search unavailable: TAVILY_API_KEY not configured";
-        const res = await fetch("https://api.tavily.com/search", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            api_key: tavilyKey,
-            query,
-            max_results: max_results || 5,
-          }),
-        });
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const data = (await res.json()) as any;
-        return JSON.stringify(
+    // Prefer Anthropic's built-in server-side web search (no API key needed).
+    // Falls back to Tavily if TAVILY_API_KEY is configured.
+    const isAnthropicProvider = !env?.ANTHROPIC_BASE_URL ||
+      env.ANTHROPIC_BASE_URL.includes("anthropic.com");
+    if (isAnthropicProvider) {
+      // Anthropic server-side web search — executed by Anthropic's infrastructure
+      tools.web_search = anthropic.tools.webSearch_20250305();
+    } else {
+      // Non-Anthropic provider — use Tavily API fallback
+      const tavilyKey = env?.TAVILY_API_KEY;
+      tools.web_search = tool({
+        description:
+          "Search the web for information. Returns relevant search results.",
+        parameters: z.object({
+          query: z.string().describe("Search query"),
+          max_results: z
+            .number()
+            .optional()
+            .describe("Max results (default 5)"),
+        }),
+        execute: safe(async ({ query, max_results }) => {
+          if (!tavilyKey)
+            return "web_search unavailable: TAVILY_API_KEY not configured. Use Anthropic models for built-in web search.";
+          const res = await fetch("https://api.tavily.com/search", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              api_key: tavilyKey,
+              query,
+              max_results: max_results || 5,
+            }),
+          });
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          data.results?.map((r: any) => ({
-            title: r.title,
-            url: r.url,
-            snippet: r.content,
-          })) || data
-        );
-      }),
-    });
+          const data = (await res.json()) as any;
+          return JSON.stringify(
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            data.results?.map((r: any) => ({
+              title: r.title,
+              url: r.url,
+              snippet: r.content,
+            })) || data
+          );
+        }),
+      });
+    }
   }
 
   // Custom tools — convert JSON Schema to Zod for proper parameter definitions
