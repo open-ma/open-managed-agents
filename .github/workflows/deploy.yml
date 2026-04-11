@@ -5,6 +5,10 @@ on:
     branches: [main]
   workflow_dispatch:
 
+concurrency:
+  group: deploy-production
+  cancel-in-progress: true
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -70,20 +74,36 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          cd apps/agent
-          npx wrangler versions deploy \
-            "${{ steps.agent_upload.outputs.version_id }}@100%" \
-            --config wrangler.jsonc --yes
+          VID="${{ steps.agent_upload.outputs.version_id }}"
+          if [ -z "$VID" ]; then
+            echo "No version ID captured, falling back to wrangler deploy"
+            cd apps/agent && npx wrangler deploy --config wrangler.jsonc
+          else
+            cd apps/agent
+            for i in 1 2 3; do
+              npx wrangler versions deploy "${VID}@100%" --config wrangler.jsonc --yes && break
+              echo "Attempt $i failed, waiting 30s before retry..."
+              sleep 30
+            done
+          fi
 
       - name: Deploy main worker → 100%
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          cd apps/main
-          npx wrangler versions deploy \
-            "${{ steps.main_upload.outputs.version_id }}@100%" \
-            --config wrangler.jsonc --yes
+          VID="${{ steps.main_upload.outputs.version_id }}"
+          if [ -z "$VID" ]; then
+            echo "No version ID captured, falling back to wrangler deploy"
+            cd apps/main && npx wrangler deploy --config wrangler.jsonc
+          else
+            cd apps/main
+            for i in 1 2 3; do
+              npx wrangler versions deploy "${VID}@100%" --config wrangler.jsonc --yes && break
+              echo "Attempt $i failed, waiting 30s before retry..."
+              sleep 30
+            done
+          fi
 
       # --- Post-deploy verification ---
       - name: Verify deployment
