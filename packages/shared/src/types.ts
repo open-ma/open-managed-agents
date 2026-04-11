@@ -97,26 +97,29 @@ export interface TextBlock {
 export interface ImageBlock {
   type: "image";
   source: {
-    type: "base64" | "url";
-    media_type?: string; // e.g. "image/jpeg", "image/png"
+    type: "base64" | "url" | "file";
+    media_type?: string; // e.g. "image/jpeg", "image/png", "image/gif", "image/webp"
     data?: string;       // base64 data (when type=base64)
     url?: string;        // URL (when type=url)
-  };
-}
-
-export interface FileBlock {
-  type: "file";
-  source: {
-    type: "base64" | "url" | "file";
-    media_type?: string; // e.g. "application/pdf"
-    data?: string;       // base64 data
-    url?: string;        // URL
     file_id?: string;    // reference to uploaded file (when type=file)
-    filename?: string;
   };
 }
 
-export type ContentBlock = TextBlock | ImageBlock | FileBlock;
+export interface DocumentBlock {
+  type: "document";
+  source: {
+    type: "base64" | "url" | "file" | "text";
+    media_type?: string; // e.g. "application/pdf", "text/plain"
+    data?: string;       // base64 data or plain text content
+    url?: string;        // URL (when type=url)
+    file_id?: string;    // reference to uploaded file (when type=file)
+  };
+  title?: string;        // optional document title
+  context?: string;      // optional context about the document
+  citations?: { enabled: boolean }; // optional citation support
+}
+
+export type ContentBlock = TextBlock | ImageBlock | DocumentBlock;
 
 // --- Event Base ---
 
