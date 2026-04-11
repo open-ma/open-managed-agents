@@ -28,7 +28,7 @@ jobs:
         run: pnpm install
 
       - name: Build console
-        run: cd apps/console && pnpm install && npx vite build
+        run: pnpm --filter managed-agents-console build
 
       # --- Deploy both workers with retry ---
       - name: Deploy agent worker
@@ -52,24 +52,35 @@ jobs:
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
           cd apps/main
           for i in 1 2 3; do
             if npx wrangler deploy --config wrangler.jsonc; then
               echo "Main worker deployed successfully"
-              exit 0
+              break
             fi
             echo "Attempt $i/3 failed, waiting 60s before retry..."
             sleep 60
+            if [ "$i" = "3" ]; then echo "All attempts failed"; exit 1; fi
           done
-          echo "All attempts failed"
-          exit 1
+
+          # Attach custom domain if configured (idempotent — skips if already set)
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            echo "Configuring custom domain: $CUSTOM_DOMAIN"
+            npx wrangler domains attach "$CUSTOM_DOMAIN" --service managed-agents || echo "Custom domain may already be attached"
+          fi
 
       # --- Post-deploy verification ---
       - name: Verify deployment
         env:
           API_KEY: ${{ secrets.API_KEY }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
           sleep 5
-          HEALTH=$(curl -sf "${{ vars.MAIN_WORKER_URL }}/health")
+          # Use custom domain if set, fall back to workers.dev
+          BASE_URL="${CUSTOM_DOMAIN:+https://$CUSTOM_DOMAIN}"
+          BASE_URL="${BASE_URL:-${{ vars.MAIN_WORKER_URL }}}"
+          echo "Checking health at: $BASE_URL/health"
+          HEALTH=$(curl -sf "$BASE_URL/health" || curl -sf "${{ vars.MAIN_WORKER_URL }}/health")
           echo "Post-deploy health: $HEALTH"
