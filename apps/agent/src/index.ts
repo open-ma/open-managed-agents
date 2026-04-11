@@ -24,7 +24,7 @@ export { outbound, outboundByHost } from "./outbound";
 // --- HTTP app: thin router to SessionDO ---
 const app = new Hono<{ Bindings: Env }>();
 
-app.get("/health", (c) => c.json({ status: "ok" }));
+app.get("/health", (c) => c.json({ status: "ok", version: "2" }));
 
 app.all("/sessions/:id/*", async (c) => {
   const sessionId = c.req.param("id");
