@@ -371,7 +371,9 @@ describe("buildTools integration", () => {
     expect(tools.glob).toBeDefined();
     expect(tools.grep).toBeDefined();
     expect(tools.web_fetch).toBeDefined();
-    expect(tools.web_search).toBeDefined();
+    // web_search is NOT in agent_toolset — it's a separate tool type
+    // (web_search_20250305 for Anthropic built-in, web_search_tavily for Tavily)
+    expect(tools.web_search).toBeUndefined();
   });
 
   it("selective tool config disables non-listed tools", async () => {
