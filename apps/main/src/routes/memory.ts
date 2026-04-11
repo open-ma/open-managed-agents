@@ -141,7 +141,7 @@ app.post("/:id/memories", async (c) => {
   const body = await c.req.json<{
     path: string;
     content: string;
-    precondition?: { type: "not_exists" };
+    precondition?: { type: "not_exists" } | { type: "content_sha256"; content_sha256: string };
   }>();
 
   if (!body.path || body.content === undefined) {
@@ -154,15 +154,21 @@ app.post("/:id/memories", async (c) => {
     return c.json({ error: "content exceeds 100KB limit" }, 400);
   }
 
-  // Handle not_exists precondition
-  if (body.precondition?.type === "not_exists") {
+  // Handle preconditions
+  if (body.precondition) {
     const list = await c.env.CONFIG_KV.list({ prefix: `mem:${storeId}:` });
     for (const k of list.keys) {
       const d = await c.env.CONFIG_KV.get(k.name);
       if (d) {
         const existing: MemoryItem = JSON.parse(d);
         if (existing.path === body.path) {
-          return c.json({ error: "memory_precondition_failed" }, 409);
+          if (body.precondition.type === "not_exists") {
+            return c.json({ error: "memory_precondition_failed" }, 409);
+          }
+          if (body.precondition.type === "content_sha256" &&
+              existing.content_sha256 !== body.precondition.content_sha256) {
+            return c.json({ error: "memory_precondition_failed" }, 409);
+          }
         }
       }
     }
@@ -305,6 +311,7 @@ app.post("/:id/memories/:mem_id", async (c) => {
 });
 
 // DELETE /v1/memory_stores/:id/memories/:mem_id — delete memory
+// Supports conditional delete via ?expected_content_sha256=<hash>
 app.delete("/:id/memories/:mem_id", async (c) => {
   const storeId = c.req.param("id");
   const memId = c.req.param("mem_id");
@@ -312,6 +319,12 @@ app.delete("/:id/memories/:mem_id", async (c) => {
   if (!data) return c.json({ error: "Memory not found" }, 404);
 
   const mem: MemoryItem = JSON.parse(data);
+
+  // Conditional delete: only delete if content hash matches
+  const expectedHash = c.req.query("expected_content_sha256");
+  if (expectedHash && mem.content_sha256 !== expectedHash) {
+    return c.json({ error: "memory_precondition_failed" }, 409);
+  }
 
   // Create version record before deleting
   await createVersion(c.env.CONFIG_KV, {

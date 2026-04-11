@@ -65,14 +65,15 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
               if (b.source.type === "url" && b.source.url) {
                 return { type: "image" as const, image: new URL(b.source.url) };
               }
-              // base64
+              // base64 or file reference
               return {
                 type: "image" as const,
                 image: b.source.data || "",
                 mimeType: b.source.media_type,
               };
             }
-            if (b.type === "file") {
+            if (b.type === "document") {
+              // ai-sdk uses "file" type for documents
               if (b.source.type === "url" && b.source.url) {
                 return {
                   type: "file" as const,
@@ -80,11 +81,15 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
                   mimeType: b.source.media_type,
                 };
               }
+              if (b.source.type === "text") {
+                // Plain text document — send as text with context
+                const prefix = b.title ? `[${b.title}]\n` : "";
+                return { type: "text" as const, text: prefix + (b.source.data || "") };
+              }
               return {
                 type: "file" as const,
                 data: b.source.data || "",
-                mimeType: b.source.media_type,
-                filename: b.source.filename,
+                mimeType: b.source.media_type || "application/pdf",
               };
             }
             // fallback
