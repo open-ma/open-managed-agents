@@ -41,6 +41,12 @@ importers:
       hono:
         specifier: ^4.7.0
         version: 4.12.12
+      nanoid:
+        specifier: ^5.1.0
+        version: 5.1.7
+      zod:
+        specifier: ^3.24.0
+        version: 3.25.76
 
   apps/main:
     dependencies:
