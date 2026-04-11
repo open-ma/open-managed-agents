@@ -56,7 +56,40 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
         const e = event as UserMessageEvent;
         messages.push({
           role: "user",
-          content: e.content.map((b) => ({ type: "text" as const, text: b.text })),
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          content: e.content.map((b): any => {
+            if (b.type === "text") {
+              return { type: "text" as const, text: b.text };
+            }
+            if (b.type === "image") {
+              if (b.source.type === "url" && b.source.url) {
+                return { type: "image" as const, image: new URL(b.source.url) };
+              }
+              // base64
+              return {
+                type: "image" as const,
+                image: b.source.data || "",
+                mimeType: b.source.media_type,
+              };
+            }
+            if (b.type === "file") {
+              if (b.source.type === "url" && b.source.url) {
+                return {
+                  type: "file" as const,
+                  data: new URL(b.source.url),
+                  mimeType: b.source.media_type,
+                };
+              }
+              return {
+                type: "file" as const,
+                data: b.source.data || "",
+                mimeType: b.source.media_type,
+                filename: b.source.filename,
+              };
+            }
+            // fallback
+            return { type: "text" as const, text: JSON.stringify(b) };
+          }),
         });
         break;
       }
@@ -65,7 +98,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
         const e = event as AgentMessageEvent;
         messages.push({
           role: "assistant",
-          content: e.content.map((b) => ({ type: "text" as const, text: b.text })),
+          content: e.content.map((b) => ({ type: "text" as const, text: b.type === "text" ? b.text : "" })),
         });
         break;
       }
