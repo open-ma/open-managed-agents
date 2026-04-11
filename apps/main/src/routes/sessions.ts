@@ -240,19 +240,28 @@ app.get("/:id", async (c) => {
 
   const session = JSON.parse(data) as SessionMeta & { agent_snapshot?: AgentConfig };
 
-  // Get live status from sandbox worker
+  // Get live status, usage, and outcome evaluations from sandbox worker
   const { binding } = await getSandboxBinding(c.env, session.environment_id);
+  const response: Record<string, unknown> = { ...session };
+
   if (binding) {
     try {
-      const statusRes = await forwardToSandbox(binding, `/sessions/${id}/status`, c.req.raw, "GET");
-      const status = (await statusRes.json()) as { status: string };
-      session.status = status.status as SessionMeta["status"];
+      const fullStatusRes = await forwardToSandbox(binding, `/sessions/${id}/full-status`, c.req.raw, "GET");
+      const fullStatus = (await fullStatusRes.json()) as {
+        status: string;
+        usage: { input_tokens: number; output_tokens: number };
+        outcome_evaluations: Array<{ result: string; iteration: number; feedback?: string }>;
+      };
+      session.status = fullStatus.status as SessionMeta["status"];
+      response.usage = fullStatus.usage;
+      if (fullStatus.outcome_evaluations?.length) {
+        response.outcome_evaluations = fullStatus.outcome_evaluations;
+      }
     } catch {
       // Sandbox worker unreachable — keep stored status
     }
   }
 
-  const response: Record<string, unknown> = { ...session };
   if (session.agent_snapshot) {
     response.agent = session.agent_snapshot;
     delete response.agent_snapshot;
@@ -431,6 +440,45 @@ app.get("/:id/events", async (c) => {
 app.get("/:id/stream", async (c) => handleSSEStream(c, c.req.param("id")));
 // Legacy alias
 app.get("/:id/events/stream", async (c) => handleSSEStream(c, c.req.param("id")));
+
+// ============================================================
+// Session Threads (multi-agent)
+// ============================================================
+
+// GET /v1/sessions/:id/threads — list threads
+app.get("/:id/threads", async (c) => {
+  const id = c.req.param("id");
+  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  if (!data) return c.json({ error: "Session not found" }, 404);
+
+  const session = JSON.parse(data) as SessionMeta;
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  if (!binding) return c.json({ error }, status ?? 500);
+
+  const res = await forwardToSandbox(binding, `/sessions/${id}/threads`, c.req.raw, "GET");
+  return c.json(await res.json());
+});
+
+// GET /v1/sessions/:id/threads/:thread_id/events — thread events
+app.get("/:id/threads/:thread_id/events", async (c) => {
+  const id = c.req.param("id");
+  const threadId = c.req.param("thread_id");
+  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  if (!data) return c.json({ error: "Session not found" }, 404);
+
+  const session = JSON.parse(data) as SessionMeta;
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  if (!binding) return c.json({ error }, status ?? 500);
+
+  const res = await forwardToSandbox(binding, `/sessions/${id}/threads/${threadId}/events`, c.req.raw, "GET");
+  return c.json(await res.json());
+});
+
+// GET /v1/sessions/:id/threads/:thread_id/stream — SSE stream for thread
+app.get("/:id/threads/:thread_id/stream", async (c) => {
+  // Same as session SSE but filtered by thread_id — for now, use full session stream
+  return handleSSEStream(c, c.req.param("id"));
+});
 
 // ============================================================
 // Session Resources (KV only — stays in main worker)

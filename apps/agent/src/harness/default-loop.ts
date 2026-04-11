@@ -148,7 +148,7 @@ export class DefaultHarness implements HarnessInterface {
           if (call.toolName.startsWith("call_agent_")) {
             runtime.broadcast({
               type: "agent.thread_message_sent",
-              thread_id: call.toolCallId,
+              to_thread_id: call.toolCallId,
               content: [{ type: "text", text: String((call.args as Record<string, unknown>).message || "") }],
             });
           }
@@ -219,7 +219,7 @@ export class DefaultHarness implements HarnessInterface {
           if (call.toolName.startsWith("call_agent_") && tr) {
             runtime.broadcast({
               type: "agent.thread_message_received",
-              thread_id: call.toolCallId,
+              from_thread_id: call.toolCallId,
               content: [{ type: "text", text: typeof tr.result === "string" ? tr.result : "" }],
             });
           }

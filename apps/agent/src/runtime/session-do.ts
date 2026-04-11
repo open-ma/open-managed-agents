@@ -322,6 +322,50 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
+    // GET /threads — list all threads in this session
+    if (request.method === "GET" && url.pathname === "/threads") {
+      const threadList = Array.from(this.threads.entries()).map(([id, t]) => ({
+        session_thread_id: id,
+        agent_id: t.agentId,
+        agent_name: t.agentConfig.name,
+      }));
+      return Response.json({ data: threadList });
+    }
+
+    // GET /threads/:thread_id/events — events for a specific thread
+    const threadEventsMatch = url.pathname.match(/^\/threads\/([^/]+)\/events$/);
+    if (request.method === "GET" && threadEventsMatch) {
+      const threadId = threadEventsMatch[1];
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      const allEvents = history.getEvents();
+      const threadEvents = allEvents.filter((e: any) => e.thread_id === threadId);
+      return Response.json({ data: threadEvents });
+    }
+
+    // GET /full-status — session status with usage and outcome evaluations
+    if (request.method === "GET" && url.pathname === "/full-status") {
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      const allEvents = history.getEvents();
+
+      // Collect outcome evaluations
+      const outcomeEvaluations = allEvents
+        .filter((e) => e.type === "session.outcome_evaluated")
+        .map((e: any) => ({
+          result: e.result,
+          iteration: e.iteration,
+          feedback: e.feedback,
+        }));
+
+      return Response.json({
+        status: this.getMeta("status") || "idle",
+        usage: {
+          input_tokens: parseInt(this.getMeta("input_tokens") || "0", 10),
+          output_tokens: parseInt(this.getMeta("output_tokens") || "0", 10),
+        },
+        outcome_evaluations: outcomeEvaluations,
+      });
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -702,7 +746,7 @@ export class SessionDO extends DurableObject<Env> {
     // Emit thread_created
     const threadCreatedEvent: SessionEvent = {
       type: "session.thread_created",
-      thread_id: threadId,
+      session_thread_id: threadId,
       agent_id: agentId,
       agent_name: subAgent.name,
     };
@@ -758,7 +802,7 @@ export class SessionDO extends DurableObject<Env> {
         sandbox,
         broadcast: (event) => {
           subHistory.append(event);
-          const taggedEvent = { ...event, thread_id: threadId };
+          const taggedEvent = { ...event, session_thread_id: threadId };
           parentHistory.append(taggedEvent);
           this.broadcastEvent(taggedEvent);
         },
@@ -785,7 +829,7 @@ export class SessionDO extends DurableObject<Env> {
       .join("\n");
 
     // Emit thread_idle
-    const threadIdleEvent: SessionEvent = { type: "session.thread_idle", thread_id: threadId };
+    const threadIdleEvent: SessionEvent = { type: "session.thread_idle", session_thread_id: threadId };
     parentHistory.append(threadIdleEvent);
     this.broadcastEvent(threadIdleEvent);
 
