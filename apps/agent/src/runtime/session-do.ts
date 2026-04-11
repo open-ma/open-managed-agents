@@ -885,7 +885,7 @@ export class SessionDO extends DurableObject<Env> {
 
     // Add memory tools if session has memory store resources
     if (memoryStoreIds.length && this.env.CONFIG_KV) {
-      const memTools = buildMemoryTools(memoryStoreIds, this.env.CONFIG_KV);
+      const memTools = buildMemoryTools(memoryStoreIds, this.env.CONFIG_KV, this.env.AI, this.env.VECTORIZE);
       Object.assign(allTools, memTools);
     }
 

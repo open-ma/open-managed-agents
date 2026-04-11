@@ -193,6 +193,24 @@ app.post("/:id/memories", async (c) => {
     size_bytes: mem.size_bytes,
   });
 
+  // Generate embedding and upsert to Vectorize for semantic search
+  if (c.env.AI && c.env.VECTORIZE) {
+    try {
+      const embedding = await c.env.AI.run("@cf/google/embedding-gemma" as any, {
+        text: [body.content],
+      }) as { data: number[][] };
+      if (embedding.data?.[0]) {
+        await c.env.VECTORIZE.upsert([{
+          id: `${storeId}:${mem.id}`,
+          values: embedding.data[0],
+          metadata: { store_id: storeId, memory_id: mem.id, path: mem.path },
+        }]);
+      }
+    } catch {
+      // Best-effort: search falls back to substring if embedding fails
+    }
+  }
+
   return c.json(mem, 201);
 });
 

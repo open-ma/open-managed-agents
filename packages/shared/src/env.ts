@@ -6,6 +6,8 @@ export interface Env {
   SESSION_DO?: DurableObjectNamespace;
   SANDBOX?: DurableObjectNamespace;
   WORKSPACE_BUCKET?: R2Bucket;
+  AI?: Ai;
+  VECTORIZE?: VectorizeIndex;
   ASSETS?: { fetch: (req: Request) => Promise<Response> };
   API_KEY: string;
   ANTHROPIC_API_KEY: string;
