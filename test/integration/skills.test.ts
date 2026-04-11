@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 

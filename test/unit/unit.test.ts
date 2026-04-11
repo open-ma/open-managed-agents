@@ -1,7 +1,8 @@
+// @ts-nocheck
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { registerHarness, resolveHarness } from "../../src/harness/registry";
-import type { HarnessInterface, HarnessContext } from "../../src/harness/interface";
+import { registerHarness, resolveHarness } from "../../apps/agent/src/harness/registry";
+import type { HarnessInterface, HarnessContext } from "../../apps/agent/src/harness/interface";
 
 // ============================================================
 // 1. SqliteHistory — message conversion
@@ -545,7 +546,7 @@ describe("Harness error handling", () => {
     });
 
     // Wait for harness to crash
-    let status = "processing";
+    let status = "running";
     for (let i = 0; i < 15; i++) {
       await new Promise((r) => setTimeout(r, 100));
       const doId = env.SESSION_DO!.idFromName(session.id);

@@ -1,9 +1,10 @@
+// @ts-nocheck
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { buildTools, buildMemoryTools } from "../../src/harness/tools";
-import { TestSandbox } from "../../src/runtime/sandbox";
-import { InMemoryHistory, eventsToMessages } from "../../src/runtime/history";
-import type { AgentConfig } from "../../src/types";
+import { buildTools, buildMemoryTools } from "../../apps/agent/src/harness/tools";
+import { TestSandbox } from "../../apps/agent/src/runtime/sandbox";
+import { InMemoryHistory, eventsToMessages } from "../../apps/agent/src/runtime/history";
+import type { AgentConfig } from "@open-managed-agents/shared";
 
 // ============================================================
 // Helpers

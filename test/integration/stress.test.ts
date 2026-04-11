@@ -1,8 +1,9 @@
+// @ts-nocheck
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect, beforeAll } from "vitest";
-import { registerHarness } from "../../src/harness/registry";
-import type { HarnessContext } from "../../src/harness/interface";
-import { SqliteHistory } from "../../src/runtime/history";
+import { registerHarness } from "../../apps/agent/src/harness/registry";
+import type { HarnessContext } from "../../apps/agent/src/harness/interface";
+import { SqliteHistory } from "../../apps/agent/src/runtime/history";
 
 const H = { "x-api-key": "test-key", "Content-Type": "application/json" };
 

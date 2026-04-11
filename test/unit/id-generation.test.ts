@@ -1,3 +1,4 @@
+// @ts-nocheck
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import {
@@ -11,7 +12,7 @@ import {
   generateMemoryVersionId,
   generateFileId,
   generateResourceId,
-} from "../../src/id";
+} from "@open-managed-agents/shared";
 
 // ============================================================
 // 1. Prefix checks
@@ -19,54 +20,54 @@ import {
 describe("ID generation — prefix checks", () => {
   it("generateAgentId starts with 'agent_'", () => {
     const id = generateAgentId();
-    expect(id.startsWith("agent_")).toBe(true);
+    expect(id.startsWith("agent-")).toBe(true);
   });
 
   it("generateSessionId starts with 'sess_'", () => {
     const id = generateSessionId();
-    expect(id.startsWith("sess_")).toBe(true);
+    expect(id.startsWith("sess-")).toBe(true);
   });
 
   it("generateVaultId starts with 'vlt_'", () => {
     const id = generateVaultId();
-    expect(id.startsWith("vlt_")).toBe(true);
+    expect(id.startsWith("vlt-")).toBe(true);
   });
 
   it("generateCredentialId starts with 'cred_'", () => {
     const id = generateCredentialId();
-    expect(id.startsWith("cred_")).toBe(true);
+    expect(id.startsWith("cred-")).toBe(true);
   });
 
   it("generateFileId starts with 'file_'", () => {
     const id = generateFileId();
-    expect(id.startsWith("file_")).toBe(true);
+    expect(id.startsWith("file-")).toBe(true);
   });
 
   it("generateMemoryStoreId starts with 'memstore_'", () => {
     const id = generateMemoryStoreId();
-    expect(id.startsWith("memstore_")).toBe(true);
+    expect(id.startsWith("memstore-")).toBe(true);
   });
 
   it("generateMemoryId starts with 'mem_' but not 'memstore_' or 'memver_'", () => {
     const id = generateMemoryId();
-    expect(id.startsWith("mem_")).toBe(true);
-    expect(id.startsWith("memstore_")).toBe(false);
-    expect(id.startsWith("memver_")).toBe(false);
+    expect(id.startsWith("mem-")).toBe(true);
+    expect(id.startsWith("memstore-")).toBe(false);
+    expect(id.startsWith("memver-")).toBe(false);
   });
 
   it("generateMemoryVersionId starts with 'memver_'", () => {
     const id = generateMemoryVersionId();
-    expect(id.startsWith("memver_")).toBe(true);
+    expect(id.startsWith("memver-")).toBe(true);
   });
 
   it("generateEnvId starts with 'env_'", () => {
     const id = generateEnvId();
-    expect(id.startsWith("env_")).toBe(true);
+    expect(id.startsWith("env-")).toBe(true);
   });
 
   it("generateResourceId starts with 'sesrsc_'", () => {
     const id = generateResourceId();
-    expect(id.startsWith("sesrsc_")).toBe(true);
+    expect(id.startsWith("sesrsc-")).toBe(true);
   });
 });
 

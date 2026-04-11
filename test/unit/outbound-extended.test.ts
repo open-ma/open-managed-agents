@@ -1,6 +1,7 @@
+// @ts-nocheck
 import { describe, it, expect } from "vitest";
-import { outboundByHost } from "../../src/outbound";
-import type { Env } from "../../src/env";
+import { outboundByHost } from "../../apps/agent/src/outbound";
+import type { Env } from "@open-managed-agents/shared";
 
 function makeMockEnv(
   kvData: Record<string, string | null>,

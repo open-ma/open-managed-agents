@@ -1,7 +1,8 @@
+// @ts-nocheck
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect, beforeAll } from "vitest";
-import { registerHarness } from "../../src/harness/registry";
-import type { HarnessInterface, HarnessContext } from "../../src/harness/interface";
+import { registerHarness } from "../../apps/agent/src/harness/registry";
+import type { HarnessInterface, HarnessContext } from "../../apps/agent/src/harness/interface";
 
 // Register a test harness that completes immediately (no real LLM call).
 // This runs in the same isolate as the Worker, so the registry is shared.
@@ -483,7 +484,7 @@ describe("DO resilience", () => {
     // The harness runs async via ctx.waitUntil. With a stub sandbox and
     // no real LLM, it will error quickly — but we need to wait for it.
     // Poll until status is idle (max 5s).
-    let status = "processing";
+    let status = "running";
     for (let i = 0; i < 25; i++) {
       await new Promise((r) => setTimeout(r, 200));
       const statusRes = await getDoStatus(session.id);

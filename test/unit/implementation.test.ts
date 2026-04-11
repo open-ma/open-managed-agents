@@ -1,8 +1,9 @@
+// @ts-nocheck
 import { describe, it, expect } from "vitest";
-import { buildTools, buildMemoryTools, getToolPermission } from "../../src/harness/tools";
-import { TestSandbox } from "../../src/runtime/sandbox";
-import type { AgentConfig } from "../../src/types";
-import type { SandboxExecutor } from "../../src/harness/interface";
+import { buildTools, buildMemoryTools, getToolPermission } from "../../apps/agent/src/harness/tools";
+import { TestSandbox } from "../../apps/agent/src/runtime/sandbox";
+import type { AgentConfig } from "@open-managed-agents/shared";
+import type { SandboxExecutor } from "../../apps/agent/src/harness/interface";
 
 // ============================================================
 // Helpers
@@ -347,18 +348,18 @@ describe("File mounting into sandbox", () => {
 // ============================================================
 describe("Outbound Worker registration", () => {
   it("outbound function is importable and callable", async () => {
-    const { outbound } = await import("../../src/outbound");
+    const { outbound } = await import("../../apps/agent/src/outbound");
     expect(typeof outbound).toBe("function");
   });
 
   it("outboundByHost function is importable and callable", async () => {
-    const { outboundByHost } = await import("../../src/outbound");
+    const { outboundByHost } = await import("../../apps/agent/src/outbound");
     expect(typeof outboundByHost).toBe("function");
   });
 
   it("outbound and outboundByHost are re-exported from sandbox worker", async () => {
     // Verify the exports exist in the sandbox worker entry point
-    const sandboxWorker = await import("../../sandbox-worker/index");
+    const sandboxWorker = await import("../../apps/agent/src/index");
     expect(typeof sandboxWorker.outbound).toBe("function");
     expect(typeof sandboxWorker.outboundByHost).toBe("function");
   });

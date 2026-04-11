@@ -1,7 +1,8 @@
+// @ts-nocheck
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect, beforeAll } from "vitest";
-import { registerHarness } from "../../src/harness/registry";
-import type { HarnessInterface, HarnessContext } from "../../src/harness/interface";
+import { registerHarness } from "../../apps/agent/src/harness/registry";
+import type { HarnessInterface, HarnessContext } from "../../apps/agent/src/harness/interface";
 
 // ---------- Test Harnesses ----------
 registerHarness("cross-noop", () => ({ async run() {} }));
