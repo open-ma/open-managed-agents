@@ -12,6 +12,7 @@ import { SessionDetail } from "./pages/SessionDetail";
 import { EnvironmentsList } from "./pages/EnvironmentsList";
 import { VaultsList } from "./pages/VaultsList";
 import { SkillsList } from "./pages/SkillsList";
+import { MemoryStoresList } from "./pages/MemoryStoresList";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -27,6 +28,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="environments" element={<EnvironmentsList />} />
             <Route path="skills" element={<SkillsList />} />
             <Route path="vaults" element={<VaultsList />} />
+            <Route path="memory" element={<MemoryStoresList />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Route>
         </Routes>
