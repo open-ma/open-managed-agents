@@ -219,6 +219,7 @@ export interface AgentMcpToolResultEvent extends EventBase {
 
 export interface UserDefineOutcomeEvent extends EventBase {
   type: "user.define_outcome";
+  outcome_id?: string;
   description: string;
   rubric?: string;  // text rubric or file reference
   max_iterations?: number; // default 3, max 20
@@ -280,9 +281,13 @@ export interface SessionRescheduledEvent extends EventBase {
 
 export interface SessionOutcomeEvaluatedEvent extends EventBase {
   type: "session.outcome_evaluated";
-  result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed";
+  outcome_id?: string;
+  result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed" | "interrupted";
   iteration: number;
   feedback?: string;
+  explanation?: string;
+  usage?: { input_tokens: number; output_tokens: number };
+  outcome_evaluation_start_id?: string;
 }
 
 export interface SessionThreadIdleEvent extends EventBase {
