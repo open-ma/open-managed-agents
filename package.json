@@ -2,6 +2,7 @@
   "name": "open-managed-agents",
   "version": "0.1.0",
   "private": true,
+  "type": "module",
   "scripts": {
     "dev": "wrangler dev -c apps/main/wrangler.jsonc -c apps/agent/wrangler.dev.jsonc",
     "dev:main": "wrangler dev -c apps/main/wrangler.jsonc",

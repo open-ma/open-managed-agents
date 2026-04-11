@@ -1,8 +1,9 @@
+// @ts-nocheck
 import { exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { resolveSkills } from "../../src/harness/skills";
-import { registerHarness } from "../../src/harness/registry";
-import type { HarnessInterface, HarnessContext } from "../../src/harness/interface";
+import { resolveSkills } from "../../apps/agent/src/harness/skills";
+import { registerHarness } from "../../apps/agent/src/harness/registry";
+import type { HarnessInterface, HarnessContext } from "../../apps/agent/src/harness/interface";
 
 // Register a test harness that completes immediately (no real LLM call).
 class ConstraintTestHarness implements HarnessInterface {

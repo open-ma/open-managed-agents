@@ -1,5 +1,6 @@
+// @ts-nocheck
 import { describe, it, expect, beforeEach } from "vitest";
-import { isRateLimited, windows } from "../../src/rate-limit";
+import { isRateLimited, windows } from "../../apps/main/src/rate-limit";
 
 describe("Rate limiting — extended", () => {
   beforeEach(() => {

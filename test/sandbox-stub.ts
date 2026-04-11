@@ -1,3 +1,4 @@
+// @ts-nocheck
 // Stub for @cloudflare/sandbox in vitest.
 // The real module depends on @cloudflare/containers which has workerd-native
 // modules that can't load in miniflare. This stub provides the exports

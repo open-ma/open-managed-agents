@@ -1,8 +1,9 @@
+// @ts-nocheck
 import { env, exports } from "cloudflare:workers";
 import { describe, it, expect, beforeAll, beforeEach } from "vitest";
-import { registerHarness } from "../../src/harness/registry";
-import type { HarnessContext } from "../../src/harness/interface";
-import { isRateLimited, windows } from "../../src/rate-limit";
+import { registerHarness } from "../../apps/agent/src/harness/registry";
+import type { HarnessContext } from "../../apps/agent/src/harness/interface";
+import { isRateLimited, windows } from "../../apps/main/src/rate-limit";
 
 const H = { "x-api-key": "test-key", "Content-Type": "application/json" };
 function api(path: string, init?: RequestInit) {

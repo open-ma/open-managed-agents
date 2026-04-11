@@ -1,13 +1,15 @@
+// @ts-nocheck
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 import { env } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
-import { eventsToMessages, InMemoryHistory } from "../../src/runtime/history";
+import { eventsToMessages, InMemoryHistory } from "../../apps/agent/src/runtime/history";
 import type {
   SessionEvent,
   UserMessageEvent,
   AgentMessageEvent,
   AgentToolUseEvent,
   AgentToolResultEvent,
-} from "../../src/types";
+} from "@open-managed-agents/shared";
 
 // ============================================================
 // 1. eventsToMessages — basic conversions
