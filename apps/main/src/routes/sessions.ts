@@ -427,6 +427,9 @@ app.get("/:id/events", async (c) => {
   return handleJSONEvents(c, c.req.param("id"));
 });
 
+// Anthropic-compatible SSE stream path
+app.get("/:id/stream", async (c) => handleSSEStream(c, c.req.param("id")));
+// Legacy alias
 app.get("/:id/events/stream", async (c) => handleSSEStream(c, c.req.param("id")));
 
 // ============================================================

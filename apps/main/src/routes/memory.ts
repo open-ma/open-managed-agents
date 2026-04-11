@@ -256,8 +256,8 @@ app.get("/:id/memories/:mem_id", async (c) => {
   return c.json(JSON.parse(data));
 });
 
-// POST /v1/memory_stores/:id/memories/:mem_id — update memory content
-app.post("/:id/memories/:mem_id", async (c) => {
+// PATCH /v1/memory_stores/:id/memories/:mem_id — update memory content/path
+app.patch("/:id/memories/:mem_id", async (c) => {
   const storeId = c.req.param("id");
   const memId = c.req.param("mem_id");
   const data = await c.env.CONFIG_KV.get(`mem:${storeId}:${memId}`);

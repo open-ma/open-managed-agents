@@ -5,6 +5,31 @@ import { generateAgentId } from "@open-managed-agents/shared";
 
 const app = new Hono<{ Bindings: Env }>();
 
+/**
+ * Normalize agent response to match Anthropic API spec:
+ * - Add type: "agent"
+ * - Normalize model to object form { id, speed }
+ * - Default null for nullable fields
+ */
+function formatAgent(agent: AgentConfig) {
+  const model = typeof agent.model === "string"
+    ? { id: agent.model, speed: "standard" as const }
+    : { id: agent.model.id, speed: agent.model.speed || "standard" as const };
+
+  return {
+    type: "agent" as const,
+    ...agent,
+    model,
+    system: agent.system || null,
+    description: agent.description || null,
+    skills: agent.skills || [],
+    mcp_servers: agent.mcp_servers || [],
+    callable_agents: agent.callable_agents || [],
+    metadata: agent.metadata || {},
+    archived_at: agent.archived_at || null,
+  };
+}
+
 // POST /v1/agents — create agent
 app.post("/", async (c) => {
   const body = await c.req.json<{
@@ -43,7 +68,7 @@ app.post("/", async (c) => {
   };
 
   await c.env.CONFIG_KV.put(`agent:${agent.id}`, JSON.stringify(agent));
-  return c.json(agent, 201);
+  return c.json(formatAgent(agent), 201);
 });
 
 // GET /v1/agents — list agents
@@ -61,15 +86,12 @@ app.get("/", async (c) => {
         .filter((k) => !k.name.includes(":v"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
-          return data ? JSON.parse(data) : null;
+          return data ? formatAgent(JSON.parse(data)) : null;
         })
     )
-  ).filter(Boolean);
+  ).filter((a): a is NonNullable<typeof a> => a !== null);
 
-  agents.sort((a, b) => {
-    const cmp = a.created_at.localeCompare(b.created_at);
-    return order === "asc" ? cmp : -cmp;
-  });
+  agents.sort((a, b) => a.created_at.localeCompare(b.created_at) * (order === "asc" ? 1 : -1));
 
   return c.json({ data: agents.slice(0, limit) });
 });
@@ -79,11 +101,11 @@ app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const data = await c.env.CONFIG_KV.get(`agent:${id}`);
   if (!data) return c.json({ error: "Agent not found" }, 404);
-  return c.json(JSON.parse(data));
+  return c.json(formatAgent(JSON.parse(data)));
 });
 
-// PUT /v1/agents/:id — update agent
-app.put("/:id", async (c) => {
+// POST /v1/agents/:id — update agent (Anthropic uses POST, not PUT)
+app.post("/:id", async (c) => {
   const id = c.req.param("id");
   const data = await c.env.CONFIG_KV.get(`agent:${id}`);
   if (!data) return c.json({ error: "Agent not found" }, 404);
@@ -92,16 +114,22 @@ app.put("/:id", async (c) => {
 
   const body = await c.req.json<{
     name?: string;
-    model?: string | { id: string; speed?: string };
-    system?: string;
+    model?: string | { id: string; speed?: "standard" | "fast" };
+    system?: string | null;
     tools?: AgentConfig["tools"];
     harness?: string;
-    description?: string;
-    mcp_servers?: AgentConfig["mcp_servers"];
-    skills?: AgentConfig["skills"];
-    callable_agents?: AgentConfig["callable_agents"];
+    description?: string | null;
+    mcp_servers?: AgentConfig["mcp_servers"] | null;
+    skills?: AgentConfig["skills"] | null;
+    callable_agents?: AgentConfig["callable_agents"] | null;
     metadata?: Record<string, unknown>;
+    version?: number;
   }>();
+
+  // Optimistic concurrency: if version provided, check it matches
+  if (body.version !== undefined && body.version !== agent.version) {
+    return c.json({ error: "Version mismatch. Agent has been updated since you last read it." }, 409);
+  }
 
   // Detect if anything actually changed
   let changed = false;
@@ -114,27 +142,32 @@ app.put("/:id", async (c) => {
   }
 
   if (!changed) {
-    return c.json(agent);
+    return c.json(formatAgent(agent));
   }
 
   // Save current version to version history before overwriting
   await c.env.CONFIG_KV.put(`agent:${id}:v${agent.version}`, data);
 
   for (const key of fields) {
-    if (body[key] !== undefined) (agent as any)[key] = body[key];
+    if (body[key] !== undefined) {
+      // null clears the field
+      if (body[key] === null) {
+        (agent as any)[key] = key === "system" || key === "description" ? "" : undefined;
+      } else {
+        (agent as any)[key] = body[key];
+      }
+    }
   }
   agent.version += 1;
   agent.updated_at = new Date().toISOString();
 
   await c.env.CONFIG_KV.put(`agent:${id}`, JSON.stringify(agent));
-  return c.json(agent);
+  return c.json(formatAgent(agent));
 });
 
 // GET /v1/agents/:id/versions — list all versions
 app.get("/:id/versions", async (c) => {
   const id = c.req.param("id");
-
-  // Verify agent exists
   const agentData = await c.env.CONFIG_KV.get(`agent:${id}`);
   if (!agentData) return c.json({ error: "Agent not found" }, 404);
 
@@ -143,12 +176,11 @@ app.get("/:id/versions", async (c) => {
     await Promise.all(
       list.keys.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
-        return data ? JSON.parse(data) : null;
+        return data ? formatAgent(JSON.parse(data)) : null;
       })
     )
-  ).filter(Boolean);
+  ).filter((v): v is NonNullable<typeof v> => v !== null);
 
-  // Sort by version number ascending
   versions.sort((a, b) => a.version - b.version);
   return c.json({ data: versions });
 });
@@ -157,11 +189,9 @@ app.get("/:id/versions", async (c) => {
 app.get("/:id/versions/:version", async (c) => {
   const id = c.req.param("id");
   const version = c.req.param("version");
-
   const data = await c.env.CONFIG_KV.get(`agent:${id}:v${version}`);
   if (!data) return c.json({ error: "Version not found" }, 404);
-
-  return c.json(JSON.parse(data));
+  return c.json(formatAgent(JSON.parse(data)));
 });
 
 // POST /v1/agents/:id/archive — archive agent
@@ -173,10 +203,10 @@ app.post("/:id/archive", async (c) => {
   const agent: AgentConfig = JSON.parse(data);
   agent.archived_at = new Date().toISOString();
   await c.env.CONFIG_KV.put(`agent:${id}`, JSON.stringify(agent));
-  return c.json(agent);
+  return c.json(formatAgent(agent));
 });
 
-// DELETE /v1/agents/:id — delete agent
+// DELETE /v1/agents/:id — delete agent (extension, not in Anthropic spec)
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
   const data = await c.env.CONFIG_KV.get(`agent:${id}`);
