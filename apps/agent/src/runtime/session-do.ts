@@ -504,19 +504,20 @@ export class SessionDO extends Agent<Env, SessionState> {
       // 30-60s to start. SDK returns 503 while container port isn't listening.
       // See: https://github.com/cloudflare/containers/issues/155
       let ready = false;
+      let lastError = "";
       for (let attempt = 0; attempt < 10; attempt++) {
         try {
           await sandbox.exec("true");
           ready = true;
           break;
-        } catch {
-          // Container not ready yet — exponential backoff: 3s, 4.5s, 6.75s, ...
+        } catch (err: any) {
+          lastError = err?.message || String(err);
           const delay = 3000 * Math.pow(1.5, attempt);
           await new Promise(r => setTimeout(r, Math.min(delay, 15000)));
         }
       }
       if (!ready) {
-        throw new Error("Sandbox container failed to start after 10 attempts");
+        throw new Error(`Sandbox container failed to start after 10 attempts. Last error: ${lastError}`);
       }
 
       // Mount R2-backed /workspace for persistent file storage
