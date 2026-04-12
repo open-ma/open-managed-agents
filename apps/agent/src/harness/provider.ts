@@ -13,6 +13,10 @@ async function stripMaxTokensFetch(url: RequestInfo | URL, init?: RequestInit): 
     try {
       const body = JSON.parse(init.body);
       delete body.max_tokens;
+      // Debug: log tool schemas sent to API
+      if (body.tools?.length) {
+        console.log("[provider] tool schemas:", JSON.stringify(body.tools.map((t: any) => ({ name: t.name, schema_keys: Object.keys(t.input_schema?.properties || {}) }))));
+      }
       return globalThis.fetch(url, { ...init, body: JSON.stringify(body) });
     } catch {}
   }
