@@ -87,7 +87,7 @@ describe("Built-in tool execution", () => {
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.read.execute(
-      { path: "/workspace/readme.md" },
+      { file_path: "/workspace/readme.md" },
       TOOL_EXEC_OPTS
     );
     expect(result).toContain("/workspace/readme.md");
@@ -99,7 +99,7 @@ describe("Built-in tool execution", () => {
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.write.execute(
-      { path: "/workspace/out.txt", content: "hello world" },
+      { file_path: "/workspace/out.txt", content: "hello world" },
       TOOL_EXEC_OPTS
     );
     expect(result).toBe("ok");
@@ -125,7 +125,7 @@ describe("Built-in tool execution", () => {
 
     const result = await tools.edit.execute(
       {
-        path: "/workspace/file.py",
+        file_path: "/workspace/file.py",
         old_string: "foo",
         new_string: "bar",
       },
@@ -218,15 +218,12 @@ describe("Built-in tool execution", () => {
     expect(capturedCmd).toContain("head -c 1000");
   });
 
-  it("web_search without TAVILY_API_KEY returns error message", async () => {
+  it("web_search default (DDG) is defined in agent_toolset", async () => {
     const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);
-
-    const result = await tools.web_search.execute(
-      { query: "test query" },
-      TOOL_EXEC_OPTS
-    );
-    expect(result).toContain("TAVILY_API_KEY not configured");
+    // Default web_search is DuckDuckGo — always available, no API key needed
+    expect(tools.web_search).toBeDefined();
+    expect(typeof tools.web_search.execute).toBe("function");
   });
 
   it("web_search with TAVILY_API_KEY is defined", async () => {
