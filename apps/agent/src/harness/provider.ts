@@ -22,17 +22,15 @@ export function resolveModel(
     apiKey,
     baseURL: baseURL || undefined,
     headers: baseURL ? { "X-Sub-Module": "managed-agents" } : undefined,
-    // For non-Claude models (MiniMax, etc.): @ai-sdk/anthropic defaults to
-    // max_tokens=4096 for unknown models, which is far too low (thinking
-    // alone can consume 3000+ tokens). Intercept fetch to strip max_tokens
-    // so the provider API uses its own default.
+    // @ai-sdk/anthropic hard-codes max_tokens=4096 for unknown models,
+    // which truncates thinking+tool_use. Strip it for non-Claude providers.
     ...(!isKnownClaude && {
       fetch: async (url: RequestInfo | URL, init?: RequestInit) => {
         if (init?.body && typeof init.body === "string") {
           try {
             const body = JSON.parse(init.body);
             delete body.max_tokens;
-            init = { ...init, body: JSON.stringify(body) };
+            return globalThis.fetch(url, { ...init, body: JSON.stringify(body) });
           } catch {}
         }
         return globalThis.fetch(url, init);
