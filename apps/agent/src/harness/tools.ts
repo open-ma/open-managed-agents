@@ -320,12 +320,8 @@ export async function buildTools(
       description: "Read a file from the sandbox filesystem.",
       parameters: z.object({
         file_path: z.string().describe("The absolute file path to read, e.g. /workspace/index.html"),
-      }).passthrough(),
-      execute: safe(async (args: any) => {
-        const p = args.file_path || args.path || args.filename;
-        if (!p) return "Error: file_path is required";
-        return truncateResult(await sandbox.readFile(p));
       }),
+      execute: safe(async ({ file_path }) => truncateResult(await sandbox.readFile(file_path))),
     });
   }
 
@@ -336,12 +332,8 @@ export async function buildTools(
       parameters: z.object({
         file_path: z.string().describe("The absolute file path to write to, e.g. /workspace/index.html"),
         content: z.string().describe("The complete file content to write"),
-      }).passthrough(),
-      execute: safe(async (args: any) => {
-        const p = args.file_path || args.path || args.filename;
-        if (!p) return "Error: file_path is required";
-        return sandbox.writeFile(p, args.content);
       }),
+      execute: safe(async ({ file_path, content }) => sandbox.writeFile(file_path, content)),
     });
   }
 
@@ -353,16 +345,14 @@ export async function buildTools(
         file_path: z.string().describe("The absolute file path to edit"),
         old_string: z.string().describe("Exact string to find and replace"),
         new_string: z.string().describe("Replacement string"),
-      }).passthrough(),
-      execute: safe(async (args: any) => {
-        const p = args.file_path || args.path || args.filename;
-        if (!p) return "Error: file_path is required";
-        const content = await sandbox.readFile(p);
-        if (!content.includes(args.old_string)) {
+      }),
+      execute: safe(async ({ file_path, old_string, new_string }) => {
+        const content = await sandbox.readFile(file_path);
+        if (!content.includes(old_string)) {
           return "Error: old_string not found in file";
         }
-        const updated = content.replace(args.old_string, args.new_string);
-        return sandbox.writeFile(p, updated);
+        const updated = content.replace(old_string, new_string);
+        return sandbox.writeFile(file_path, updated);
       }),
     });
   }

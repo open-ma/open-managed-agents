@@ -3,6 +3,22 @@ import type { LanguageModelV1 } from "ai";
 
 const KNOWN_CLAUDE_PREFIX = "claude-";
 
+/**
+ * Fetch wrapper that strips max_tokens from request body.
+ * @ai-sdk/anthropic defaults to max_tokens=4096 for models not in its
+ * internal capabilities map. Removing it lets the provider API decide.
+ */
+async function stripMaxTokensFetch(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  if (init?.body && typeof init.body === "string") {
+    try {
+      const body = JSON.parse(init.body);
+      delete body.max_tokens;
+      return globalThis.fetch(url, { ...init, body: JSON.stringify(body) });
+    } catch {}
+  }
+  return globalThis.fetch(url, init);
+}
+
 export function resolveModel(
   model: string | { id: string; speed?: "standard" | "fast" },
   apiKey: string,
@@ -23,19 +39,9 @@ export function resolveModel(
     baseURL: baseURL || undefined,
     headers: baseURL ? { "X-Sub-Module": "managed-agents" } : undefined,
     // @ai-sdk/anthropic hard-codes max_tokens=4096 for unknown models,
-    // which truncates thinking+tool_use. Strip it for non-Claude providers.
-    ...(!isKnownClaude && {
-      fetch: async (url: RequestInfo | URL, init?: RequestInit) => {
-        if (init?.body && typeof init.body === "string") {
-          try {
-            const body = JSON.parse(init.body);
-            delete body.max_tokens;
-            return globalThis.fetch(url, { ...init, body: JSON.stringify(body) });
-          } catch {}
-        }
-        return globalThis.fetch(url, init);
-      },
-    }),
+    // which truncates thinking+tool_use. Strip it for non-Claude providers
+    // so the API uses its own default (MiniMax supports up to 196608).
+    ...(!isKnownClaude && { fetch: stripMaxTokensFetch }),
   });
 
   if (speed === "fast") {
