@@ -263,7 +263,7 @@ export async function buildTools(
         "Execute a bash command in the sandbox. Returns exit code + stdout/stderr. " +
         "For long-running commands (builds, installs, servers), set run_in_background=true " +
         "to get a task ID immediately. Output is written to a file — use the read tool to check progress.",
-      parameters: z.object({
+      inputSchema: z.object({
         command: z.string().describe("The bash command to execute"),
         timeout: z
           .number()
@@ -318,7 +318,7 @@ export async function buildTools(
   if (enabled.has("read")) {
     tools.read = tool({
       description: "Read a file from the sandbox filesystem.",
-      parameters: z.object({
+      inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to read, e.g. /workspace/index.html"),
       }),
       execute: safe(async ({ file_path }) => truncateResult(await sandbox.readFile(file_path))),
@@ -329,7 +329,7 @@ export async function buildTools(
     tools.write = tool({
       description:
         "Write content to a file in the sandbox. Creates parent directories automatically.",
-      parameters: z.object({
+      inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to write to, e.g. /workspace/index.html"),
         content: z.string().describe("The complete file content to write"),
       }),
@@ -341,7 +341,7 @@ export async function buildTools(
     tools.edit = tool({
       description:
         "Edit a file by replacing an exact string match. Use for surgical edits without rewriting the whole file.",
-      parameters: z.object({
+      inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to edit"),
         old_string: z.string().describe("Exact string to find and replace"),
         new_string: z.string().describe("Replacement string"),
@@ -361,7 +361,7 @@ export async function buildTools(
     tools.glob = tool({
       description:
         "Find files matching a glob pattern. Returns matching file paths.",
-      parameters: z.object({
+      inputSchema: z.object({
         pattern: z.string().describe('Glob pattern (e.g. "**/*.ts", "src/**/*.js")'),
         path: z
           .string()
@@ -381,7 +381,7 @@ export async function buildTools(
     tools.grep = tool({
       description:
         "Search file contents using a regex pattern. Returns matching lines with file paths and line numbers.",
-      parameters: z.object({
+      inputSchema: z.object({
         pattern: z.string().describe("Regex pattern to search for"),
         path: z
           .string()
@@ -406,7 +406,7 @@ export async function buildTools(
     tools.web_fetch = tool({
       description:
         "Fetch the content of a URL. Returns the text content of the page.",
-      parameters: z.object({
+      inputSchema: z.object({
         url: z.string().describe("URL to fetch"),
         max_length: z
           .number()
@@ -450,7 +450,7 @@ export async function buildTools(
     tools.web_search = tool({
       description:
         "Search the web using DuckDuckGo. Returns titles, URLs, and descriptions.",
-      parameters: z.object({
+      inputSchema: z.object({
         query: z.string().describe("Search query"),
         max_results: z.number().optional().describe("Max results (default 5)"),
       }),
@@ -500,7 +500,7 @@ export async function buildTools(
     tools.web_search = tool({
       description:
         "Search the web for information. Returns relevant search results.",
-      parameters: z.object({
+      inputSchema: z.object({
         query: z.string().describe("Search query"),
         max_results: z.number().optional().describe("Max results (default 5)"),
       }),
@@ -539,7 +539,7 @@ export async function buildTools(
         : z.object({});
       tools[ct.name] = tool({
         description: ct.description,
-        parameters: params,
+        inputSchema: params,
         // No execute — custom tools are handled by the client
       });
     }
@@ -554,7 +554,7 @@ export async function buildTools(
       // Create a tool that lists available MCP tools from this server
       tools[`mcp_${server.name}_list_tools`] = tool({
         description: `List available tools from MCP server "${server.name}".`,
-        parameters: z.object({}),
+        inputSchema: z.object({}),
         execute: safe(async () => {
           // JSON-RPC request to list tools, routed through sandbox network
           const rpcBody = JSON.stringify({
@@ -575,7 +575,7 @@ export async function buildTools(
       // Create a tool that calls any tool on this MCP server
       tools[`mcp_${server.name}_call`] = tool({
         description: `Call a tool on MCP server "${server.name}". First use mcp_${server.name}_list_tools to see available tools and their input schemas.`,
-        parameters: z.object({
+        inputSchema: z.object({
           tool_name: z.string().describe("Name of the MCP tool to call"),
           arguments: z.record(z.unknown()).optional().describe("Tool arguments as JSON object"),
         }),
@@ -604,7 +604,7 @@ export async function buildTools(
 
       tools[toolName] = tool({
         description: `Delegate a task to sub-agent ${ca.id}. The sub-agent will process the message independently and return its response.`,
-        parameters: z.object({
+        inputSchema: z.object({
           message: z.string().describe("The task to delegate"),
         }),
         execute: safe(async ({ message }) => {
@@ -629,7 +629,7 @@ export async function buildTools(
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
         description: (t as any).description,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        parameters: (t as any).parameters,
+        inputSchema: (t as any).parameters || (t as any).inputSchema,
         // No execute — AI SDK treats this as a pending tool call
       });
     }
@@ -652,7 +652,7 @@ export function buildMemoryTools(
 
   tools.memory_list = tool({
     description: "List memories in a store. Returns paths and metadata (no content).",
-    parameters: z.object({
+    inputSchema: z.object({
       store_id: z.string(),
       prefix: z.string().optional(),
     }),
@@ -673,7 +673,7 @@ export function buildMemoryTools(
 
   tools.memory_read = tool({
     description: "Read the full content of a specific memory.",
-    parameters: z.object({
+    inputSchema: z.object({
       store_id: z.string(),
       memory_id: z.string(),
     }),
@@ -688,7 +688,7 @@ export function buildMemoryTools(
   tools.memory_write = tool({
     description:
       "Write or update a memory. Use to persist learnings, context, or state across sessions.",
-    parameters: z.object({
+    inputSchema: z.object({
       store_id: z.string(),
       path: z.string().describe("Logical path, e.g. 'project/architecture'"),
       content: z.string(),
@@ -729,7 +729,7 @@ export function buildMemoryTools(
 
   tools.memory_search = tool({
     description: "Search memories by semantic similarity or substring match. Returns matching paths and snippets.",
-    parameters: z.object({
+    inputSchema: z.object({
       store_id: z.string(),
       query: z.string(),
     }),
@@ -786,7 +786,7 @@ export function buildMemoryTools(
 
   tools.memory_edit = tool({
     description: "Edit an existing memory by ID. Can update content and/or path (rename). Supports optimistic concurrency via expected_content_sha256.",
-    parameters: z.object({
+    inputSchema: z.object({
       store_id: z.string(),
       memory_id: z.string(),
       content: z.string().optional(),
@@ -819,7 +819,7 @@ export function buildMemoryTools(
 
   tools.memory_delete = tool({
     description: "Delete a memory from a store.",
-    parameters: z.object({
+    inputSchema: z.object({
       store_id: z.string(),
       memory_id: z.string(),
     }),
