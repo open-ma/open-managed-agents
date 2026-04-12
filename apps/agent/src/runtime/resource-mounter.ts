@@ -106,8 +106,6 @@ async function mountGitRepo(
       const secrets = { GITHUB_TOKEN: token, GH_TOKEN: token };
       sandbox.registerCommandSecrets("git", secrets);
       sandbox.registerCommandSecrets("gh", secrets);
-      // Also cover `cd /workspace && git push` patterns
-      sandbox.registerCommandSecrets("cd ", secrets);
     }
   }
 

@@ -402,7 +402,16 @@ async function handleSSEStream(c: Context<{ Bindings: Env }>, id: string) {
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
   if (!binding) return c.json({ error }, status ?? 500);
 
-  const wsRes = await forwardToSandbox(binding, `/sessions/${id}/ws`, c.req.raw, "GET");
+  const wsHeaders = new Headers(c.req.raw.headers);
+  wsHeaders.set("Upgrade", "websocket");
+  wsHeaders.set("Connection", "Upgrade");
+
+  const wsReq = new Request(`https://sandbox/sessions/${id}/ws`, {
+    method: "GET",
+    headers: wsHeaders,
+  });
+
+  const wsRes = await binding.fetch(wsReq);
 
   const ws = (wsRes as any).webSocket;
   if (!ws) {

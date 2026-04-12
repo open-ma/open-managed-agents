@@ -1063,6 +1063,11 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // Build system prompt: base + skill metadata
     let systemPrompt = agent.system || "";
+    const authenticatedCommandGuidance =
+      "For commands that may require authentication, prefer issuing a single command instead of a chained shell command. If an authenticated chained command fails, retry with a simpler single-command form.";
+    systemPrompt = systemPrompt
+      ? `${systemPrompt}\n\n${authenticatedCommandGuidance}`
+      : authenticatedCommandGuidance;
     if (agent.skills?.length) {
       // Built-in (anthropic) skills from the in-memory registry
       const builtinSkills = resolveSkills(agent.skills);

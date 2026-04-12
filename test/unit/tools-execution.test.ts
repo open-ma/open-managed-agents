@@ -82,6 +82,44 @@ describe("Built-in tool execution", () => {
     expect(capturedTimeout).toBe(60000);
   });
 
+  it("bash tool appends a retry hint after chained secret-backed command failure", async () => {
+    const sandbox: any = {
+      exec: async () =>
+        "exit=1\nfatal: could not read Username for 'https://github.com': terminal prompts disabled\n\nHint: This chained shell command includes a secret-backed command (`git`) and failed. Retry with a single authenticated command when possible.",
+      registerCommandSecrets: () => {},
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.bash.execute(
+      { command: "cd /workspace && git push origin main" },
+      TOOL_EXEC_OPTS
+    );
+
+    expect(result).toContain("fatal: could not read Username");
+    expect(result).toContain("Hint:");
+    expect(result).toContain("secret-backed command (`git`)");
+  });
+
+  it("bash tool does not append the retry hint for simple command failures", async () => {
+    const sandbox: any = {
+      exec: async () => "exit=1\nls: missing operand",
+      registerCommandSecrets: () => {},
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.bash.execute(
+      { command: "ls" },
+      TOOL_EXEC_OPTS
+    );
+
+    expect(result).toContain("ls: missing operand");
+    expect(result).not.toContain("secret-backed command");
+  });
+
   it("read tool calls readFile with path", async () => {
     const sandbox = new TestSandbox();
     const tools = await buildTools(makeAgentConfig(), sandbox);

@@ -62,6 +62,15 @@ registerHarness("config-reader", () => ({
   },
 }));
 
+registerHarness("system-prompt-reader", () => ({
+  async run(ctx) {
+    ctx.runtime.broadcast({
+      type: "agent.message",
+      content: [{ type: "text", text: ctx.systemPrompt }],
+    });
+  },
+}));
+
 registerHarness("usage-reporter", () => ({
   async run(ctx) {
     if (ctx.runtime.reportUsage) {
@@ -296,6 +305,18 @@ describe("Harness context access", () => {
     const msg = events.find((e) => e.type === "agent.message");
     expect(msg).toBeTruthy();
     expect(msg.content[0].text).toContain("system=my-custom-system");
+  });
+
+  it("system prompt includes authenticated command guidance", async () => {
+    const sessionId = await createSessionWith("system-prompt-reader", { system: "base-system" });
+    await postAndWait(sessionId, "read prompt", 600);
+    await waitForIdle(sessionId);
+    const events = await collectReplayedEvents(sessionId);
+    const msg = events.find((e) => e.type === "agent.message");
+    expect(msg).toBeTruthy();
+    expect(msg.content[0].text).toContain("base-system");
+    expect(msg.content[0].text).toContain("prefer issuing a single command");
+    expect(msg.content[0].text).toContain("authenticated chained command fails");
   });
 
   it("history-reader first message sees count >= 1, second message sees higher count", async () => {

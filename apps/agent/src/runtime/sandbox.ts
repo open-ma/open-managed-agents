@@ -1,6 +1,15 @@
 import type { SandboxExecutor, ProcessHandle } from "../harness/interface";
 import type { Env } from "@open-managed-agents/shared";
 import { getSandbox as cfGetSandbox } from "@cloudflare/sandbox";
+// `bash-parser` is CJS; the bundler handles interop for worker builds.
+// eslint-disable-next-line @typescript-eslint/ban-ts-comment
+// @ts-ignore
+import parseShell from "bash-parser";
+
+const parseShellCommand = parseShell as (command: string) => {
+  type: string;
+  commands?: Array<Record<string, any>>;
+};
 
 export class CloudflareSandbox implements SandboxExecutor {
   private sandboxPromise: Promise<any>;
@@ -43,14 +52,16 @@ export class CloudflareSandbox implements SandboxExecutor {
   async exec(command: string, timeout?: number): Promise<string> {
     const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;
+    const injectedSecrets = this.getSecretsForCommand(command);
 
     const execPromise = sandbox.exec(command, {
       timeout: timeoutMs,
-      env: this.getSecretsForCommand(command),
+      env: injectedSecrets,
     }).then((result: any) => {
       const out = result.stdout || "";
       const err = result.stderr || "";
-      return `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
+      const combined = `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
+      return this.appendSecretRetryHint(command, combined, injectedSecrets);
     }).catch((err: any) => {
       throw new Error(`exec("${command.slice(0, 80)}") failed: ${err?.message || err}`);
     });
@@ -115,9 +126,61 @@ export class CloudflareSandbox implements SandboxExecutor {
   }
 
   private getSecretsForCommand(command: string): Record<string, string> | undefined {
-    const trimmed = command.trim();
+    const commandName = this.getSimpleCommandName(command);
+    if (!commandName) return undefined;
     for (const [prefix, secrets] of this.commandSecrets) {
-      if (trimmed.startsWith(prefix)) return secrets;
+      if (commandName === prefix) return secrets;
+    }
+    return undefined;
+  }
+
+  private getSimpleCommandName(command: string): string | undefined {
+    try {
+      const ast = parseShellCommand(command);
+      if (ast?.type !== "Script" || !Array.isArray(ast.commands) || ast.commands.length !== 1) return undefined;
+      const [node] = ast.commands;
+      if (node?.type !== "Command") return undefined;
+      if (!node.name || typeof node.name.text !== "string" || !node.name.text) return undefined;
+      if (Array.isArray(node.suffix) && node.suffix.some((part: any) => part?.type === "Redirect")) return undefined;
+      if (Array.isArray(node.prefix) && node.prefix.some((part: any) => part?.type === "Redirect")) return undefined;
+      return node.name.text;
+    } catch {
+      return undefined;
+    }
+  }
+
+  private appendSecretRetryHint(
+    command: string,
+    result: string,
+    injectedSecrets?: Record<string, string>,
+  ): string {
+    if (injectedSecrets) return result;
+    const exitMatch = result.match(/^exit=(\d+)/);
+    if (!exitMatch || exitMatch[1] === "0") return result;
+    if (!this.isCompositeCommand(command)) return result;
+
+    const matchedPrefix = this.findSecretBackedCommandPrefix(command);
+    if (!matchedPrefix) return result;
+
+    return `${result}\n\nHint: This chained shell command includes a secret-backed command (\`${matchedPrefix}\`) and failed. Retry with a single authenticated command when possible.`;
+  }
+
+  private isCompositeCommand(command: string): boolean {
+    return /&&|\|\||;|\||\n/.test(command);
+  }
+
+  private findSecretBackedCommandPrefix(command: string): string | undefined {
+    const atoms = command
+      .split(/&&|\|\||;|\||\n/g)
+      .map((part) => part.trim())
+      .filter(Boolean);
+
+    for (const atom of atoms) {
+      const commandName = this.getSimpleCommandName(atom);
+      if (!commandName) continue;
+      for (const prefix of this.commandSecrets.keys()) {
+        if (commandName === prefix) return prefix;
+      }
     }
     return undefined;
   }
