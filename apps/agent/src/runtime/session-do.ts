@@ -593,6 +593,10 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         }
       }
+      // Configure git credential helper if vault has a GitHub token
+      if (sandbox instanceof CloudflareSandbox) {
+        await (sandbox as any).ensureGitCredentials();
+      }
     } catch (err) {
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
       this.broadcastEvent({
