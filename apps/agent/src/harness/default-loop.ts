@@ -1,4 +1,4 @@
-import { generateText } from "ai";
+import { generateText, stepCountIs } from "ai";
 import type { HarnessInterface, HarnessContext } from "./interface";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import { SummarizeCompaction } from "./compaction";
@@ -139,7 +139,7 @@ export class DefaultHarness implements HarnessInterface {
       system: systemPrompt,
       messages: finalMessages,
       tools,
-      maxSteps: 25,
+      stopWhen: stepCountIs(100),
       abortSignal: signal,
 
       onStepFinish: async ({ text, toolCalls, toolResults, reasoning }) => {
