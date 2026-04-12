@@ -86,11 +86,14 @@ async function mountGitRepo(
     try {
       const url = new URL(repoUrl);
       const credLine = `https://x-access-token:${token}@${url.hostname}${url.pathname}`;
-      await sandbox.exec(`git config --global credential.helper store`, { timeout: 5000 });
-      // Append credential line (supports multiple repos)
-      await sandbox.exec(`echo '${credLine.replace(/'/g, "'\\''")}' >> ~/.git-credentials`, { timeout: 5000 });
-      await sandbox.exec(`chmod 600 ~/.git-credentials`, { timeout: 5000 });
-    } catch {}
+      await sandbox.exec(`git config --global credential.helper store`, 5000);
+      const writeResult = await sandbox.exec(`echo '${credLine.replace(/'/g, "'\\''")}' >> $HOME/.git-credentials && chmod 600 $HOME/.git-credentials && echo CRED_OK`, 5000);
+      if (!writeResult.includes("CRED_OK")) {
+        console.error("[resource-mounter] credential write failed:", writeResult);
+      }
+    } catch (err) {
+      console.error("[resource-mounter] credential setup error:", err);
+    }
   }
 
   // Clone repo
