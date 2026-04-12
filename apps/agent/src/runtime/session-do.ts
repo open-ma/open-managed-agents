@@ -472,8 +472,9 @@ export class SessionDO extends Agent<Env, SessionState> {
    */
   private getOrCreateSandbox(): SandboxExecutor {
     if (!this.sandbox) {
-      const sessionId = this.ctx.id.toString();
-      this.sandbox = createSandbox(this.env, sessionId);
+      // Sandbox ID must be 1-63 chars; DO hex ID is 64 chars — truncate to fit
+      const sandboxId = this.ctx.id.toString().slice(0, 63);
+      this.sandbox = createSandbox(this.env, sandboxId);
     }
     return this.sandbox;
   }
