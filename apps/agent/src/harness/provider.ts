@@ -1,6 +1,8 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
 import type { LanguageModelV1 } from "ai";
 
+const KNOWN_CLAUDE_PREFIX = "claude-";
+
 export function resolveModel(
   model: string | { id: string; speed?: "standard" | "fast" },
   apiKey: string,
@@ -14,14 +16,24 @@ export function resolveModel(
     ? modelString.split("/").slice(1).join("/")
     : modelString;
 
+  const isKnownClaude = modelId.startsWith(KNOWN_CLAUDE_PREFIX);
+
   const anthropic = createAnthropic({
     apiKey,
     baseURL: baseURL || undefined,
     headers: baseURL ? { "X-Sub-Module": "managed-agents" } : undefined,
+    // For non-Claude models (MiniMax, etc.): @ai-sdk/anthropic defaults to
+    // max_tokens=4096 for unknown models, which is far too low (thinking
+    // alone can consume 3000+ tokens). Strip max_tokens from the request
+    // body so the provider API uses its own default.
+    ...(!isKnownClaude && {
+      transformRequestBody: (body: Record<string, unknown>) => {
+        const { max_tokens: _, ...rest } = body;
+        return rest;
+      },
+    }),
   });
 
-  // @ai-sdk/anthropic supports providerOptions for model-level settings
-  // Speed "fast" is passed as a provider-specific option if supported
   if (speed === "fast") {
     return anthropic(modelId, {
       providerOptions: { speed: "fast" },
