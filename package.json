@@ -29,5 +29,18 @@
     "agents": "^0.5.0",
     "ai": "6.0.158",
     "zod": "4.3.6"
+  },
+  "pnpm": {
+    "overrides": {
+      "zod": "4.3.6"
+    },
+    "peerDependencyRules": {
+      "allowAny": [
+        "zod"
+      ]
+    },
+    "patchedDependencies": {
+      "@cloudflare/vitest-pool-workers": "patches/@cloudflare__vitest-pool-workers.patch"
+    }
   }
 }
