@@ -43,8 +43,8 @@ importers:
         specifier: ^3.0.69
         version: 3.0.69(zod@4.3.6)
       '@cloudflare/sandbox':
-        specifier: ^0.1.0
-        version: 0.1.4
+        specifier: ^0.8.9
+        version: 0.8.9
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -256,12 +256,29 @@ packages:
   '@cloudflare/containers@0.0.25':
     resolution: {integrity: sha512-41sCUwGPhMMQI/kwksEZXNWe/GZdQoIy8QlgO4NAF68M4y4NN41IXeQ4n2jn4iJ7tHaV4noe7RI75b7T6h2JGg==}
 
+  '@cloudflare/containers@0.3.0':
+    resolution: {integrity: sha512-8HM1NgXThWCTk7SH28QFxqMNLJwl6RrMkj3qd0KvDA59BALsn3mZXNDT94i1JaGZnP4Bc8sPGs1u9UAl/mVUVg==}
+
   '@cloudflare/kv-asset-handler@0.4.2':
     resolution: {integrity: sha512-SIOD2DxrRRwQ+jgzlXCqoEFiKOFqaPjhnNTGKXSRLvp1HiOvapLaFG2kEr9dYQTYe8rKrd9uvDUzmAITeNyaHQ==}
     engines: {node: '>=18.0.0'}
 
   '@cloudflare/sandbox@0.1.4':
     resolution: {integrity: sha512-aYPW15/e8UNqO9/oc7GVdSepAyk9UNHh1Rcy0NzbnQ4zSL1r1m2Wgq/vbpkuzwyft3gYZFE5FUPIX7mZdn6j7Q==}
+
+  '@cloudflare/sandbox@0.8.9':
+    resolution: {integrity: sha512-4lmMo96fOVck9lcmjJAJYRf2NNspcoGy8pNuEdBTary3WWuFeXBQLmzuid4ay5i6aGu2AeRegPSmjD+Z1K6qJw==}
+    peerDependencies:
+      '@openai/agents': ^0.3.3
+      '@opencode-ai/sdk': ^1.1.40
+      '@xterm/xterm': '>=5.0.0'
+    peerDependenciesMeta:
+      '@openai/agents':
+        optional: true
+      '@opencode-ai/sdk':
+        optional: true
+      '@xterm/xterm':
+        optional: true
 
   '@cloudflare/unenv-preset@2.16.0':
     resolution: {integrity: sha512-8ovsRpwzPoEqPUzoErAYVv8l3FMZNeBVQfJTvtzP4AgLSRGZISRfuChFxHWUQd3n6cnrwkuTGxT+2cGo8EsyYg==}
@@ -1366,6 +1383,9 @@ packages:
     hasBin: true
     peerDependencies:
       postcss: ^8.1.0
+
+  aws4fetch@1.0.20:
+    resolution: {integrity: sha512-/djoAN709iY65ETD6LKCtyyEI04XIBP5xVvfmNxsEP0uJB5tyaGBztSryRr4HqMStr9R06PisQE7m9zDTXKu6g==}
 
   bail@2.0.2:
     resolution: {integrity: sha512-0xO6mYd7JB2YesxDKplafRpsiOzPt9V02ddPCLbY1xYGPOX24NTyN50qnUxgCPcSoYMhKpAuBTjQoRZCAkUDRw==}
@@ -2767,11 +2787,18 @@ snapshots:
 
   '@cloudflare/containers@0.0.25': {}
 
+  '@cloudflare/containers@0.3.0': {}
+
   '@cloudflare/kv-asset-handler@0.4.2': {}
 
   '@cloudflare/sandbox@0.1.4':
     dependencies:
       '@cloudflare/containers': 0.0.25
+
+  '@cloudflare/sandbox@0.8.9':
+    dependencies:
+      '@cloudflare/containers': 0.3.0
+      aws4fetch: 1.0.20
 
   '@cloudflare/unenv-preset@2.16.0(unenv@2.0.0-rc.24)(workerd@1.20260409.1)':
     dependencies:
@@ -3547,6 +3574,8 @@ snapshots:
       picocolors: 1.1.1
       postcss: 8.5.9
       postcss-value-parser: 4.2.0
+
+  aws4fetch@1.0.20: {}
 
   bail@2.0.2: {}
 
