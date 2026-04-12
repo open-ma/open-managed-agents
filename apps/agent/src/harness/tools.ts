@@ -101,8 +101,15 @@ function safe<T>(fn: (args: T) => Promise<string>): (args: T) => Promise<string>
       if (!result || result.trim() === "") return "(completed with no output)";
       return result;
     } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Truncate error messages to avoid context overflow (CC caps at 10K)
+      let msg = err instanceof Error ? err.message : String(err);
+      // Include stack trace for better debugging
+      if (err instanceof Error && err.stack) {
+        msg += "\n" + err.stack.split("\n").slice(1, 5).join("\n");
+      }
+      // Include cause if present
+      if (err instanceof Error && err.cause) {
+        msg += "\ncause: " + String(err.cause);
+      }
       const truncated = msg.length > 10000
         ? msg.slice(0, 5000) + `\n[${msg.length - 10000} characters truncated]\n` + msg.slice(-5000)
         : msg;
