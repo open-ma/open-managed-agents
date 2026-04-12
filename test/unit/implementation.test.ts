@@ -141,7 +141,7 @@ describe("Permission policy enforcement", () => {
     });
     const tools = await buildTools(config, new TestSandbox());
     expect(tools.bash.description).toBeTruthy();
-    expect(tools.bash.parameters).toBeDefined();
+    expect(tools.bash.inputSchema).toBeDefined();
   });
 });
 
