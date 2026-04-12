@@ -147,9 +147,11 @@ export class CloudflareSandbox implements SandboxExecutor {
     const token = gitSecrets.GITHUB_TOKEN;
     try {
       const sandbox = await this.getSandbox();
-      // Write .git-credentials directly — simpler and avoids shell escaping issues
-      await sandbox.exec(`git config --global credential.helper store`, { timeout: 5000 });
-      await sandbox.writeFile("/root/.git-credentials", `https://x-access-token:${token}@github.com\n`);
+      const escaped = token.replace(/'/g, "'\\''");
+      await sandbox.exec(
+        `git config --global credential.helper store && echo 'https://x-access-token:${escaped}@github.com' > ~/.git-credentials && chmod 600 ~/.git-credentials`,
+        { timeout: 5000 }
+      );
     } catch {}
   }
 
