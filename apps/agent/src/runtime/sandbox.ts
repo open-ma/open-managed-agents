@@ -148,11 +148,14 @@ export class CloudflareSandbox implements SandboxExecutor {
     try {
       const sandbox = await this.getSandbox();
       const escaped = token.replace(/'/g, "'\\''");
-      await sandbox.exec(
-        `git config --global credential.helper store && echo 'https://x-access-token:${escaped}@github.com' > ~/.git-credentials && chmod 600 ~/.git-credentials`,
-        { timeout: 5000 }
+      const result = await sandbox.exec(
+        `git config --global credential.helper store && mkdir -p /root && echo 'https://x-access-token:${escaped}@github.com' > /root/.git-credentials && chmod 600 /root/.git-credentials`,
+        { timeout: 10000 }
       );
-    } catch {}
+      console.log("[sandbox] git credential setup result:", result?.slice(0, 200));
+    } catch (err: any) {
+      console.log("[sandbox] git credential setup FAILED:", err?.message || err);
+    }
   }
 
   private getSimpleCommandName(command: string): string | undefined {
