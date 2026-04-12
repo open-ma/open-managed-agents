@@ -6,7 +6,7 @@
   "main": "src/index.ts",
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.69",
-    "@cloudflare/sandbox": "^0.8.9",
+    "@cloudflare/sandbox": "^0.1.4",
     "@open-managed-agents/shared": "workspace:*",
     "ai": "^6.0.158",
     "hono": "^4.7.0",
