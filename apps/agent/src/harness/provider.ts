@@ -8,14 +8,16 @@ const KNOWN_CLAUDE_PREFIX = "claude-";
  * @ai-sdk/anthropic defaults to max_tokens=4096 for models not in its
  * internal capabilities map. Removing it lets the provider API decide.
  */
+// Captures the last tool schemas sent via the provider fetch for diagnostics
+export let _lastToolSchemas: unknown[] | null = null;
+
 async function stripMaxTokensFetch(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   if (init?.body && typeof init.body === "string") {
     try {
       const body = JSON.parse(init.body);
       delete body.max_tokens;
-      // Debug: log tool schemas sent to API
       if (body.tools?.length) {
-        console.log("[provider] tool schemas:", JSON.stringify(body.tools.map((t: any) => ({ name: t.name, schema_keys: Object.keys(t.input_schema?.properties || {}) }))));
+        _lastToolSchemas = body.tools;
       }
       return globalThis.fetch(url, { ...init, body: JSON.stringify(body) });
     } catch {}
