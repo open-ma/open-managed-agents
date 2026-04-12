@@ -9,7 +9,8 @@ import type { SandboxExecutor } from "../harness/interface";
  *
  * Security model:
  * - authorization_token is write-only (never in API responses)
- * - Git token wired into credential store (not visible via `git remote -v`)
+ * - Git credentials stored via `git credential approve` (per-repo, per-host)
+ * - Tokens not visible via `git remote -v`
  */
 export async function mountResources(
   sandbox: SandboxExecutor,
@@ -18,6 +19,7 @@ export async function mountResources(
   secretStore?: Map<string, string>,
 ): Promise<void> {
   let hasGitRepo = false;
+  let lastGitToken: string | null = null;
 
   for (const res of resources) {
     try {
@@ -26,14 +28,23 @@ export async function mountResources(
           await mountFile(sandbox, res, kv);
           break;
         case "github_repository":
-        case "github_repo":
+        case "github_repo": {
           hasGitRepo = true;
-          await mountGitRepo(sandbox, res, secretStore);
+          const resId = res.id as string;
+          const token = resId ? secretStore?.get(resId) || null : null;
+          if (token) lastGitToken = token;
+          await mountGitRepo(sandbox, res, token);
           break;
+        }
       }
     } catch {
       // Best-effort: skip failed resource, don't crash session
     }
+  }
+
+  // Register last token for gh CLI (gh only supports one GH_TOKEN)
+  if (lastGitToken && sandbox.registerCommandSecrets) {
+    sandbox.registerCommandSecrets("gh", { GITHUB_TOKEN: lastGitToken, GH_TOKEN: lastGitToken });
   }
 
   // Install gh CLI when a GitHub repo is mounted
@@ -61,53 +72,47 @@ async function mountFile(
 async function mountGitRepo(
   sandbox: SandboxExecutor,
   res: Record<string, unknown>,
-  secretStore?: Map<string, string>,
+  token: string | null,
 ): Promise<void> {
   const repoUrl = res.url as string || res.repo_url as string;
   if (!repoUrl) return;
 
-  const resId = res.id as string;
-  const token = resId ? secretStore?.get(resId) || null : null;
   const targetDir = (res.mount_path as string) || "/workspace";
 
-  // Clone repo (token in URL for clone only)
+  // Store credential BEFORE clone so git can auth automatically
+  if (token) {
+    // Extract host and path from repo URL for per-repo credential matching
+    // e.g. https://github.com/org/repo → host=github.com, path=org/repo
+    try {
+      const url = new URL(repoUrl);
+      const path = url.pathname.replace(/^\//, "").replace(/\.git$/, "");
+      // git credential approve writes to the credential store
+      // useHttpPath=true enables per-repo matching (not just per-host)
+      await sandbox.exec(
+        `git config --global credential.helper store && ` +
+        `git config --global credential.useHttpPath true && ` +
+        `printf 'protocol=https\\nhost=${url.hostname}\\npath=${path}.git\\nusername=x-access-token\\npassword=${token}\\n\\n' | git credential approve`,
+        { timeout: 10000 }
+      );
+    } catch {}
+  }
+
+  // Clone repo
   if (sandbox.gitCheckout) {
-    const cloneUrl = token ? repoUrl.replace("https://", `https://${token}@`) : repoUrl;
     const checkout = res.checkout as { type?: string; name?: string; sha?: string } | undefined;
-    await sandbox.gitCheckout(cloneUrl, {
+    await sandbox.gitCheckout(repoUrl, {
       branch: checkout?.type === "branch" ? checkout.name : undefined,
       targetDir,
     });
   } else {
-    const cloneUrl = token ? repoUrl.replace("https://", `https://${token}@`) : repoUrl;
-    await sandbox.exec(`git clone ${cloneUrl} ${targetDir} 2>&1`, 120000);
+    await sandbox.exec(`git clone ${repoUrl} ${targetDir} 2>&1`, 120000);
   }
 
-  // Configure git
+  // Configure git user
   await sandbox.exec(
     `cd ${targetDir} && git config user.name "Agent" && git config user.email "agent@managed-agents.dev"`,
     10000
   );
-
-  // Clean remote URL (hide token from `git remote -v`)
-  if (token) {
-    await sandbox.exec(`cd ${targetDir} && git remote set-url origin ${repoUrl}`, 10000);
-
-    // Set up credential helper that reads GITHUB_TOKEN from environment
-    // This makes `git push` work with per-exec env var injection
-    await sandbox.exec(
-      `cd ${targetDir} && git config credential.helper '!f() { echo "username=x-access-token"; echo "password=\${GITHUB_TOKEN}"; }; f'`,
-      10000
-    );
-
-    // Register token as per-command secret for git/gh commands only
-    // Agent running `echo $GITHUB_TOKEN` or `env` sees nothing
-    if (sandbox.registerCommandSecrets) {
-      const secrets = { GITHUB_TOKEN: token, GH_TOKEN: token };
-      sandbox.registerCommandSecrets("git", secrets);
-      sandbox.registerCommandSecrets("gh", secrets);
-    }
-  }
 
   // Handle checkout (commit SHA)
   const checkout = res.checkout as { type?: string; name?: string; sha?: string } | undefined;
