@@ -782,3 +782,75 @@ The interaction model between humans and agents is **agent-driven, human-supervi
 ### Design Guideline
 
 > **Agent IM is not chat software for AI. It's the coordination layer of a workspace where humans set direction, agents execute and self-organize, and the system scales by instantiating capabilities — not by adding headcount.**
+
+---
+
+## Multica Comparison: What We Already Solve, What We Actually Lack
+
+> Added 2026-04-12, after deep analysis of [multica](https://github.com/anthropics/multica) — an open-source managed agents platform with local daemon execution.
+
+### Our Architecture Advantages Over Multica
+
+| Concern | Multica's Approach | Our Approach | Why Ours Is Better |
+|---|---|---|---|
+| **Work context** | `PriorSessionID` + `PriorWorkDir` — store last session/workdir per (agent, issue), resume via CLI `--resume` flag | SessionDO event log — all history persisted in DO SQLite, harness auto-rebuilds from event log | Multica's is a hack: CLI process dies, state is gone, only the session ID lets you "resume". Our event log IS the state — crash recovery is free. |
+| **Agent identity** | Separate `agent` table + `agent_runtime` table + `agent_task_queue` — agent is a DB row, runtime is a separate concept | Session = agent instance. Agent config creates session, session IS the persistent running agent. | No impedance mismatch. Multica needs 3 tables to express what we do with one DO. |
+| **Task routing** | `ClaimTask` — daemon polls for tasks, atomically claims one. Runtime sweeper detects stale claims. | TeamDO → SessionDO HTTP push. Message delivered directly to target session. | Pull vs push. Multica's daemon must poll every 3 seconds. Our messages arrive instantly. |
+| **Coordination** | Flat: user assigns issue → one agent executes. No agent-to-agent communication. | Actor model: agents send messages, create shared tasks, self-organize. | Multica agents are isolated workers. Ours are collaborating teammates. |
+
+### What We Actually Lack (vs Multica)
+
+After removing false gaps (work context, persistent identity, cost attribution — all already solved by SessionDO), the real differences are:
+
+#### 1. External Trigger Mechanism
+
+**Multica has**: Issue assignment → task. @mention → task. Chat message → task. Three natural entry points.
+
+**We lack**: A way for external events (GitHub webhook, Slack message, cron) to automatically create a team task and wake an agent. The TeamDO API endpoints are defined but the "event → task" bridge isn't designed.
+
+**Solution sketch**: A trigger system — webhook endpoint that maps external events to `send_message` or `task_create` calls on a TeamDO. Could be a simple Worker route.
+
+#### 2. Local Agent Execution
+
+**Multica has**: Full daemon — polls server, executes agent CLIs locally, streams output back, session resumption, repo caching. Code never leaves the developer's machine.
+
+**We lack**: Any local execution path. Everything runs in Cloudflare Containers.
+
+**Solution sketch**: A lightweight local daemon (Node.js or Go) that polls our API, runs agent CLIs locally, reports via existing session event API. Mirror multica's daemon architecture but connect to our API instead of theirs.
+
+#### 3. Failure Recovery Strategy
+
+**Multica's approach**: Runtime sweeper every 30s — mark offline runtimes, auto-fail orphaned tasks. This is "give up and let humans retry."
+
+**Our advantage**: SessionDO's event log means we can do better than "fail":
+
+```
+Agent times out or crashes
+  │
+  ├─ Option 1: Restart harness
+  │  SessionDO re-reads event log → rebuilds context → continues
+  │  (already supported: harness crash recovery)
+  │
+  ├─ Option 2: Escalate model
+  │  Same session, switch to stronger model (model card system)
+  │  Agent sees prior work in history, retries with more capability
+  │
+  ├─ Option 3: Decompose
+  │  Agent reviews event log, splits remaining work into sub-tasks
+  │  Sends via TeamDO to other agents
+  │
+  └─ Option 4: Escalate to human
+  │  Send notification (the "escalate" mode from Mixed-Initiative)
+  │
+  Key insight: event log preserves ALL prior work.
+  "Resume from where you failed" is free.
+  Multica can't do this — CLI process death = state loss.
+```
+
+**What to implement**: A recovery policy in SessionDO — configurable per agent. Default: restart harness up to 3 times, then escalate. Not a sweeper, because DOs don't "silently die" like external daemons.
+
+### Summary
+
+The gap between our design and multica is **much smaller than it appears**. Most of multica's complexity (runtime registration, heartbeat, sweeper, session resumption, workdir persistence) exists to compensate for architectural limitations of the daemon model. Our SessionDO eliminates the need for most of it.
+
+The three real gaps (external triggers, local agent, failure recovery) are all additive features, not architectural rework. The coordination layer (TeamDO + agent tools + message routing) is the core, and it's already fully designed.
