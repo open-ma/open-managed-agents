@@ -5,7 +5,7 @@ import { describe, it, expect } from "vitest";
 import { registerHarness } from "../../apps/agent/src/harness/registry";
 import { resolveSkills, registerSkill } from "../../apps/agent/src/harness/skills";
 import { SummarizeCompaction } from "../../apps/agent/src/harness/compaction";
-import { TestSandbox, createSandbox } from "../../apps/agent/src/runtime/sandbox";
+import { TestSandbox, createSandbox, CloudflareSandbox } from "../../apps/agent/src/runtime/sandbox";
 import { buildTools, buildMemoryTools } from "../../apps/agent/src/harness/tools";
 import { InMemoryHistory, eventsToMessages } from "../../apps/agent/src/runtime/history";
 import type { AgentConfig, SessionEvent, SessionThreadCreatedEvent, SessionThreadIdleEvent, AgentThreadMessageEvent, AgentMessageEvent, UserMessageEvent } from "@open-managed-agents/shared";
@@ -328,6 +328,61 @@ describe("Sandbox lifecycle", () => {
     const sandbox = createSandbox(fakeEnv, "test-session-id");
     expect(sandbox).toBeDefined();
     expect(sandbox).not.toBeInstanceOf(TestSandbox);
+  });
+
+  it("CloudflareSandbox injects secrets for direct matching commands only", async () => {
+    const calls: Array<{ command: string; options?: { env?: Record<string, string> } }> = [];
+    const fakeSandbox = {
+      exec: async (command: string, options?: { env?: Record<string, string> }) => {
+        calls.push({ command, options });
+        return { stdout: "ok", stderr: "", exitCode: 0 };
+      },
+    };
+    const sandbox = new CloudflareSandbox({ SANDBOX: {} } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve(fakeSandbox);
+    sandbox.registerCommandSecrets("git", { GITHUB_TOKEN: "gh_test_token" });
+
+    await sandbox.exec("git push origin main");
+    await sandbox.exec("cd /workspace && git push origin main");
+
+    expect(calls[0].options?.env).toEqual({ GITHUB_TOKEN: "gh_test_token" });
+    expect(calls[1].options?.env).toBeUndefined();
+  });
+
+  it("CloudflareSandbox does not inject secrets for prefixed chained commands", async () => {
+    const calls: Array<{ command: string; options?: { env?: Record<string, string> } }> = [];
+    const fakeSandbox = {
+      exec: async (command: string, options?: { env?: Record<string, string> }) => {
+        calls.push({ command, options });
+        return { stdout: "", stderr: "failed", exitCode: 1 };
+      },
+    };
+    const sandbox = new CloudflareSandbox({ SANDBOX: {} } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve(fakeSandbox);
+    sandbox.registerCommandSecrets("git", { GITHUB_TOKEN: "gh_test_token" });
+
+    await sandbox.exec("git push origin main && echo done");
+
+    expect(calls[0].options?.env).toBeUndefined();
+  });
+
+  it("CloudflareSandbox appends a retry hint after chained secret-backed command failure", async () => {
+    const fakeSandbox = {
+      exec: async () => ({
+        stdout: "",
+        stderr: "fatal: could not read Username for 'https://github.com': terminal prompts disabled",
+        exitCode: 1,
+      }),
+    };
+    const sandbox = new CloudflareSandbox({ SANDBOX: {} } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve(fakeSandbox);
+    sandbox.registerCommandSecrets("git", { GITHUB_TOKEN: "gh_test_token" });
+
+    const result = await sandbox.exec("cd /workspace && git push origin main");
+
+    expect(result).toContain("fatal: could not read Username");
+    expect(result).toContain("Hint:");
+    expect(result).toContain("secret-backed command (`git`)");
   });
 
   it("TestSandbox exec works with various commands", async () => {
