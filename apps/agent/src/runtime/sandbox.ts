@@ -16,7 +16,13 @@ export class CloudflareSandbox implements SandboxExecutor {
   constructor(env: Env, sessionId: string) {
     this.env = env;
     this.sessionId = sessionId;
-    this.sandboxPromise = Promise.resolve(cfGetSandbox(env.SANDBOX! as any, sessionId));
+    try {
+      this.sandboxPromise = Promise.resolve(cfGetSandbox(env.SANDBOX! as any, sessionId));
+    } catch (err: any) {
+      this.sandboxPromise = Promise.reject(
+        new Error(`getSandbox failed (SANDBOX binding: ${typeof env.SANDBOX}, sessionId: ${sessionId}): ${err?.stack || err?.message || err}`)
+      );
+    }
   }
 
   private async getSandbox() {
@@ -47,7 +53,12 @@ export class CloudflareSandbox implements SandboxExecutor {
    * No strategy logic — just run and return.
    */
   async exec(command: string, timeout?: number): Promise<string> {
-    const sandbox = await this.getSandbox();
+    let sandbox: any;
+    try {
+      sandbox = await this.getSandbox();
+    } catch (err: any) {
+      throw new Error(`Sandbox init failed (env.SANDBOX=${typeof this.env.SANDBOX}): ${err?.message || err}`);
+    }
     const timeoutMs = timeout || 120000;
 
     const execPromise = sandbox.exec(command, {
@@ -90,14 +101,22 @@ export class CloudflareSandbox implements SandboxExecutor {
 
   async readFile(path: string): Promise<string> {
     const sandbox = await this.getSandbox();
-    const result = await sandbox.readFile(path);
-    return result.content;
+    try {
+      const result = await sandbox.readFile(path);
+      return result.content;
+    } catch (err: any) {
+      throw new Error(`readFile(${path}) failed: ${err?.message || err}`);
+    }
   }
 
   async writeFile(path: string, content: string): Promise<string> {
     const sandbox = await this.getSandbox();
-    await sandbox.writeFile(path, content);
-    return "ok";
+    try {
+      await sandbox.writeFile(path, content);
+      return "ok";
+    } catch (err: any) {
+      throw new Error(`writeFile(${path}) failed: ${err?.message || err}`);
+    }
   }
 
   async setEnvVars(envVars: Record<string, string>): Promise<void> {
