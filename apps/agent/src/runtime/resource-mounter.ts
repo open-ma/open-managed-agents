@@ -81,19 +81,15 @@ async function mountGitRepo(
 
   // Store credential BEFORE clone so git can auth automatically
   if (token) {
-    // Extract host and path from repo URL for per-repo credential matching
-    // e.g. https://github.com/org/repo → host=github.com, path=org/repo
+    // Write credential to .git-credentials (per-repo, per-host)
+    // Format: https://user:token@host/path.git (one per line)
     try {
       const url = new URL(repoUrl);
-      const path = url.pathname.replace(/^\//, "").replace(/\.git$/, "");
-      // git credential approve writes to the credential store
-      // useHttpPath=true enables per-repo matching (not just per-host)
-      await sandbox.exec(
-        `git config --global credential.helper store && ` +
-        `git config --global credential.useHttpPath true && ` +
-        `printf 'protocol=https\\nhost=${url.hostname}\\npath=${path}.git\\nusername=x-access-token\\npassword=${token}\\n\\n' | git credential approve`,
-        { timeout: 10000 }
-      );
+      const credLine = `https://x-access-token:${token}@${url.hostname}${url.pathname}`;
+      await sandbox.exec(`git config --global credential.helper store`, { timeout: 5000 });
+      // Append credential line (supports multiple repos)
+      await sandbox.exec(`echo '${credLine.replace(/'/g, "'\\''")}' >> ~/.git-credentials`, { timeout: 5000 });
+      await sandbox.exec(`chmod 600 ~/.git-credentials`, { timeout: 5000 });
     } catch {}
   }
 
