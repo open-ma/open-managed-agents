@@ -68,6 +68,8 @@ export class CloudflareSandbox implements SandboxExecutor {
       let out = result.stdout || "";
       if (result.stderr) out += (out ? "\n" : "") + "stderr: " + result.stderr;
       return `exit=${result.exitCode}\n${out}`;
+    }).catch((err: any) => {
+      throw new Error(`sandbox.exec("${command.slice(0, 60)}") failed: ${err?.stack || err?.message || err}`);
     });
 
     const timeoutPromise = new Promise<string>((_, reject) =>
