@@ -134,16 +134,12 @@ export class DefaultHarness implements HarnessInterface {
     // Anthropic prompt caching: @ai-sdk/anthropic has cacheControl enabled
     // by default. We mark the system prompt for caching via providerOptions,
     // which avoids re-processing the same system prompt across turns.
-    // @ai-sdk/anthropic defaults to 4096 maxTokens for unknown models.
-    // Non-Claude models (MiniMax, etc.) need a higher limit since their
-    // thinking/reasoning can consume thousands of tokens before tool_use.
     const result = await withRetry((signal) => generateText({
       model,
       system: systemPrompt,
       messages: finalMessages,
       tools,
       maxSteps: 25,
-      maxTokens: 16384,
       abortSignal: signal,
 
       onStepFinish: async ({ text, toolCalls, toolResults, reasoning }) => {
