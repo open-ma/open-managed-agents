@@ -27,6 +27,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.69",
     "agents": "^0.5.0",
-    "ai": "6.0.158"
+    "ai": "6.0.158",
+    "zod": "4.3.6"
   }
 }
