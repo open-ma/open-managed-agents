@@ -319,9 +319,9 @@ export async function buildTools(
     tools.read = tool({
       description: "Read a file from the sandbox filesystem.",
       parameters: z.object({
-        path: z.string().describe("Absolute path to the file to read"),
+        file_path: z.string().describe("The absolute file path to read, e.g. /workspace/index.html"),
       }),
-      execute: safe(async ({ path }) => truncateResult(await sandbox.readFile(path))),
+      execute: safe(async ({ file_path }) => truncateResult(await sandbox.readFile(file_path))),
     });
   }
 
@@ -330,10 +330,10 @@ export async function buildTools(
       description:
         "Write content to a file in the sandbox. Creates parent directories automatically.",
       parameters: z.object({
-        path: z.string().describe("Absolute path to write to"),
-        content: z.string().describe("File content to write"),
+        file_path: z.string().describe("The absolute file path to write to, e.g. /workspace/index.html"),
+        content: z.string().describe("The complete file content to write"),
       }),
-      execute: safe(async ({ path, content }) => sandbox.writeFile(path, content)),
+      execute: safe(async ({ file_path, content }) => sandbox.writeFile(file_path, content)),
     });
   }
 
@@ -342,17 +342,17 @@ export async function buildTools(
       description:
         "Edit a file by replacing an exact string match. Use for surgical edits without rewriting the whole file.",
       parameters: z.object({
-        path: z.string().describe("Absolute path to the file"),
+        file_path: z.string().describe("The absolute file path to edit"),
         old_string: z.string().describe("Exact string to find and replace"),
         new_string: z.string().describe("Replacement string"),
       }),
-      execute: safe(async ({ path, old_string, new_string }) => {
-        const content = await sandbox.readFile(path);
+      execute: safe(async ({ file_path, old_string, new_string }) => {
+        const content = await sandbox.readFile(file_path);
         if (!content.includes(old_string)) {
           return "Error: old_string not found in file";
         }
         const updated = content.replace(old_string, new_string);
-        return sandbox.writeFile(path, updated);
+        return sandbox.writeFile(file_path, updated);
       }),
     });
   }

@@ -228,22 +228,25 @@ describe("Outbound Worker", () => {
 // 3. Outcome evaluator — real model tests
 // ============================================================
 describe("Outcome evaluator", () => {
-  it("returns needs_revision on parse failure", async () => {
-    const fakeModel = {
-      specificationVersion: "v1" as const,
+  // AI SDK v6 (spec v2) requires doGenerate to return `content` array
+  function makeFakeModel(text: string, usage = { promptTokens: 0, completionTokens: 0 }) {
+    return {
+      specificationVersion: "v2" as const,
       provider: "test",
       modelId: "test-model",
       defaultObjectGenerationMode: undefined,
       doGenerate: async () => ({
-        text: "This is not valid JSON",
+        content: [{ type: "text" as const, text }],
         finishReason: "stop" as const,
-        usage: { promptTokens: 0, completionTokens: 0 },
+        usage,
         rawCall: { rawPrompt: "", rawSettings: {} },
       }),
     } as any;
+  }
 
+  it("returns needs_revision on parse failure", async () => {
     const result = await evaluateOutcome(
-      fakeModel,
+      makeFakeModel("This is not valid JSON"),
       { description: "test" },
       "test output"
     );
@@ -252,21 +255,8 @@ describe("Outcome evaluator", () => {
   });
 
   it("returns satisfied when model outputs valid JSON", async () => {
-    const fakeModel = {
-      specificationVersion: "v1" as const,
-      provider: "test",
-      modelId: "test-model",
-      defaultObjectGenerationMode: undefined,
-      doGenerate: async () => ({
-        text: JSON.stringify({ result: "satisfied", feedback: "All criteria met." }),
-        finishReason: "stop" as const,
-        usage: { promptTokens: 10, completionTokens: 20 },
-        rawCall: { rawPrompt: "", rawSettings: {} },
-      }),
-    } as any;
-
     const result = await evaluateOutcome(
-      fakeModel,
+      makeFakeModel(JSON.stringify({ result: "satisfied", feedback: "All criteria met." }), { promptTokens: 10, completionTokens: 20 }),
       { description: "Write hello world", criteria: ["Must print Hello"] },
       "console.log('Hello')"
     );
@@ -275,21 +265,8 @@ describe("Outcome evaluator", () => {
   });
 
   it("returns needs_revision with feedback from model", async () => {
-    const fakeModel = {
-      specificationVersion: "v1" as const,
-      provider: "test",
-      modelId: "test-model",
-      defaultObjectGenerationMode: undefined,
-      doGenerate: async () => ({
-        text: JSON.stringify({ result: "needs_revision", feedback: "Missing error handling" }),
-        finishReason: "stop" as const,
-        usage: { promptTokens: 10, completionTokens: 20 },
-        rawCall: { rawPrompt: "", rawSettings: {} },
-      }),
-    } as any;
-
     const result = await evaluateOutcome(
-      fakeModel,
+      makeFakeModel(JSON.stringify({ result: "needs_revision", feedback: "Missing error handling" }), { promptTokens: 10, completionTokens: 20 }),
       { description: "Build API" },
       "partial code"
     );
@@ -298,20 +275,7 @@ describe("Outcome evaluator", () => {
   });
 
   it("handles model returning empty text", async () => {
-    const fakeModel = {
-      specificationVersion: "v1" as const,
-      provider: "test",
-      modelId: "test-model",
-      defaultObjectGenerationMode: undefined,
-      doGenerate: async () => ({
-        text: "",
-        finishReason: "stop" as const,
-        usage: { promptTokens: 0, completionTokens: 0 },
-        rawCall: { rawPrompt: "", rawSettings: {} },
-      }),
-    } as any;
-
-    const result = await evaluateOutcome(fakeModel, { description: "test" }, "output");
+    const result = await evaluateOutcome(makeFakeModel(""), { description: "test" }, "output");
     expect(result.result).toBe("needs_revision");
   });
 });
