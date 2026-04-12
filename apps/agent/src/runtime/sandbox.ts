@@ -1,8 +1,5 @@
 import type { SandboxExecutor, ProcessHandle } from "../harness/interface";
 import type { Env } from "@open-managed-agents/shared";
-// Static import so vitest's resolve.alias can stub it out.
-// Dynamic import("@cloudflare/sandbox") doesn't get aliased in vitest-pool-workers,
-// causing it to load the real module which depends on @cloudflare/containers native code.
 import { getSandbox as cfGetSandbox } from "@cloudflare/sandbox";
 
 export class CloudflareSandbox implements SandboxExecutor {
@@ -10,7 +7,6 @@ export class CloudflareSandbox implements SandboxExecutor {
   private env: Env;
   private sessionId: string;
   private mounted = false;
-  // Per-command secrets: injected as env vars only for matching commands
   private commandSecrets = new Map<string, Record<string, string>>();
 
   constructor(env: Env, sessionId: string) {
@@ -20,7 +16,7 @@ export class CloudflareSandbox implements SandboxExecutor {
       this.sandboxPromise = Promise.resolve(cfGetSandbox(env.SANDBOX! as any, sessionId));
     } catch (err: any) {
       this.sandboxPromise = Promise.reject(
-        new Error(`getSandbox failed (SANDBOX binding: ${typeof env.SANDBOX}, sessionId: ${sessionId}): ${err?.stack || err?.message || err}`)
+        new Error(`getSandbox failed (SANDBOX: ${typeof env.SANDBOX}, id: ${sessionId}): ${err?.message || err}`)
       );
     }
   }
@@ -29,9 +25,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     return this.sandboxPromise;
   }
 
-  /**
-   * Mount R2 bucket at /workspace for persistent file storage.
-   */
   async mountWorkspace(): Promise<void> {
     if (this.mounted) return;
     this.mounted = true;
@@ -47,29 +40,19 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
   }
 
-  /**
-   * Blocking exec with Promise.race safety net.
-   * Used by read/write/glob/grep/web_fetch tools.
-   * No strategy logic — just run and return.
-   */
   async exec(command: string, timeout?: number): Promise<string> {
-    let sandbox: any;
-    try {
-      sandbox = await this.getSandbox();
-    } catch (err: any) {
-      throw new Error(`Sandbox init failed (env.SANDBOX=${typeof this.env.SANDBOX}): ${err?.message || err}`);
-    }
+    const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;
 
     const execPromise = sandbox.exec(command, {
       timeout: timeoutMs,
       env: this.getSecretsForCommand(command),
     }).then((result: any) => {
-      let out = result.stdout || "";
-      if (result.stderr) out += (out ? "\n" : "") + "stderr: " + result.stderr;
-      return `exit=${result.exitCode}\n${out}`;
+      const out = result.stdout || "";
+      const err = result.stderr || "";
+      return `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
     }).catch((err: any) => {
-      throw new Error(`sandbox.exec("${command.slice(0, 60)}") failed: ${err?.stack || err?.message || err}`);
+      throw new Error(`exec("${command.slice(0, 80)}") failed: ${err?.message || err}`);
     });
 
     const timeoutPromise = new Promise<string>((_, reject) =>
@@ -81,11 +64,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     return Promise.race([execPromise, timeoutPromise]);
   }
 
-  /**
-   * Start a process without blocking. Returns a ProcessHandle for
-   * kill/status/logs — the bash tool uses this for the 3-strategy lifecycle.
-   * Returns null if the container doesn't support startProcess.
-   */
   async startProcess(command: string): Promise<ProcessHandle | null> {
     const sandbox = await this.getSandbox();
     if (typeof sandbox.startProcess !== "function") return null;
@@ -93,7 +71,7 @@ export class CloudflareSandbox implements SandboxExecutor {
       const proc = await sandbox.startProcess(command, {
         env: this.getSecretsForCommand(command),
       });
-      if (!proc?.id) return null; // Container returned incomplete process — fallback to exec
+      if (!proc?.id) return null;
       return {
         id: proc.id,
         pid: proc.pid,
@@ -102,7 +80,7 @@ export class CloudflareSandbox implements SandboxExecutor {
         getStatus: () => proc.getStatus(),
       };
     } catch {
-      return null; // startProcess not available or failed — fallback to exec
+      return null; // fallback to exec
     }
   }
 
@@ -110,7 +88,8 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     try {
       const result = await sandbox.readFile(path);
-      return result.content;
+      // Handle both old ({content: string}) and new (string) return format
+      return typeof result === "string" ? result : result.content;
     } catch (err: any) {
       throw new Error(`readFile(${path}) failed: ${err?.message || err}`);
     }
@@ -131,11 +110,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     await sandbox.setEnvVars(envVars);
   }
 
-  /**
-   * Register secrets that are only injected for commands matching certain prefixes.
-   * e.g. registerCommandSecrets("git", { GITHUB_TOKEN: "ghp_xxx", GH_TOKEN: "ghp_xxx" })
-   * Only `git ...` and `gh ...` commands see the token. `echo $GITHUB_TOKEN` sees nothing.
-   */
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {
     this.commandSecrets.set(commandPrefix, secrets);
   }
@@ -154,9 +128,6 @@ export class CloudflareSandbox implements SandboxExecutor {
   }
 }
 
-/**
- * Test-only sandbox. Used by vitest — not in production builds.
- */
 export class TestSandbox implements SandboxExecutor {
   async exec(command: string): Promise<string> {
     return `exit=0\n(test: ${command})`;
