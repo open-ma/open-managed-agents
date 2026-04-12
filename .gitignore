@@ -20,3 +20,4 @@ test-heatmap.html
 .idea/
 *.swp
 .DS_Store
+.claude/worktrees/
