@@ -134,6 +134,24 @@ export class CloudflareSandbox implements SandboxExecutor {
     return undefined;
   }
 
+  /**
+   * For git commands with GITHUB_TOKEN, configure credential helper
+   * in the sandbox on first use so `git push` works transparently.
+   */
+  private gitCredentialConfigured = false;
+  private async ensureGitCredentials(): Promise<void> {
+    if (this.gitCredentialConfigured) return;
+    const gitSecrets = this.commandSecrets.get("git");
+    if (!gitSecrets?.GITHUB_TOKEN) return;
+    this.gitCredentialConfigured = true;
+    const token = gitSecrets.GITHUB_TOKEN;
+    try {
+      const sandbox = await this.getSandbox();
+      // Store credential + configure helper so any git HTTPS operation auto-auths
+      await sandbox.exec(`git config --global credential.helper store && printf 'protocol=https\\nhost=github.com\\nusername=x-access-token\\npassword=${token}\\n\\n' | git credential approve`, { timeout: 5000 });
+    } catch {}
+  }
+
   private getSimpleCommandName(command: string): string | undefined {
     try {
       const ast = parseShellCommand(command);
