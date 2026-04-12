@@ -147,8 +147,9 @@ export class CloudflareSandbox implements SandboxExecutor {
     const token = gitSecrets.GITHUB_TOKEN;
     try {
       const sandbox = await this.getSandbox();
-      // Store credential + configure helper so any git HTTPS operation auto-auths
-      await sandbox.exec(`git config --global credential.helper store && printf 'protocol=https\\nhost=github.com\\nusername=x-access-token\\npassword=${token}\\n\\n' | git credential approve`, { timeout: 5000 });
+      // Write .git-credentials directly — simpler and avoids shell escaping issues
+      await sandbox.exec(`git config --global credential.helper store`, { timeout: 5000 });
+      await sandbox.writeFile("/root/.git-credentials", `https://x-access-token:${token}@github.com\n`);
     } catch {}
   }
 
