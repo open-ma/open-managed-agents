@@ -2,7 +2,6 @@ import { generateText } from "ai";
 import type { HarnessInterface, HarnessContext } from "./interface";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import { SummarizeCompaction } from "./compaction";
-import { _lastToolSchemas } from "./provider";
 
 const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"]);
 const isMcpTool = (name: string) => name.startsWith("mcp_");
@@ -246,16 +245,6 @@ export class DefaultHarness implements HarnessInterface {
       },
     }), MAX_RETRIES, runtime.abortSignal);
 
-    // DEBUG: emit tool schemas for diagnostics
-    if (_lastToolSchemas) {
-      runtime.broadcast({
-        type: "span.debug_tool_schemas",
-        schemas: (_lastToolSchemas as any[]).map((t: any) => ({
-          name: t.name,
-          properties: Object.keys(t.input_schema?.properties || {}),
-        })),
-      } as any);
-    }
 
     // 8. Detect pending tool confirmations and custom tool results
     if (result.toolCalls?.length) {

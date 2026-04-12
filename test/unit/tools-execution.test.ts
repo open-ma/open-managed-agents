@@ -795,8 +795,8 @@ describe("Custom tool input_schema", () => {
     expect(tools.my_tool).toBeDefined();
     // Custom tools should not have execute (they are client-handled)
     expect(tools.my_tool.execute).toBeUndefined();
-    // The tool should have a parameters schema
-    expect(tools.my_tool.parameters).toBeDefined();
+    // The tool should have an inputSchema (ai@6 renamed parameters → inputSchema)
+    expect(tools.my_tool.inputSchema).toBeDefined();
   });
 
   it("uses empty schema when input_schema is not provided", async () => {
