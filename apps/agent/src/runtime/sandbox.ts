@@ -89,16 +89,21 @@ export class CloudflareSandbox implements SandboxExecutor {
   async startProcess(command: string): Promise<ProcessHandle | null> {
     const sandbox = await this.getSandbox();
     if (typeof sandbox.startProcess !== "function") return null;
-    const proc = await sandbox.startProcess(command, {
-      env: this.getSecretsForCommand(command),
-    });
-    return {
-      id: proc.id,
-      pid: proc.pid,
-      kill: (signal: string) => proc.kill(signal),
-      getLogs: () => proc.getLogs(),
-      getStatus: () => proc.getStatus(),
-    };
+    try {
+      const proc = await sandbox.startProcess(command, {
+        env: this.getSecretsForCommand(command),
+      });
+      if (!proc?.id) return null; // Container returned incomplete process — fallback to exec
+      return {
+        id: proc.id,
+        pid: proc.pid,
+        kill: (signal: string) => proc.kill(signal),
+        getLogs: () => proc.getLogs(),
+        getStatus: () => proc.getStatus(),
+      };
+    } catch {
+      return null; // startProcess not available or failed — fallback to exec
+    }
   }
 
   async readFile(path: string): Promise<string> {
