@@ -5,7 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
-    "@cloudflare/sandbox": "^0.1.0",
+    "@cloudflare/sandbox": "^0.8.9",
     "@open-managed-agents/shared": "workspace:*",
     "hono": "^4.7.0"
   }
