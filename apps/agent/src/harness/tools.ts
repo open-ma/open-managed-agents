@@ -590,9 +590,10 @@ export async function buildTools(
         description: `Call a tool on MCP server "${server.name}". First use mcp_${server.name}_list_tools to see available tools and their input schemas.`,
         inputSchema: z.object({
           tool_name: z.string().describe("Name of the MCP tool to call"),
-          arguments: z.record(z.unknown()).optional().describe("Tool arguments as JSON object"),
+          arguments: z.string().optional().describe("Tool arguments as JSON string"),
         }),
-        execute: safe(async ({ tool_name, arguments: args }) => {
+        execute: safe(async ({ tool_name, arguments: argsStr }) => {
+          const args = argsStr ? JSON.parse(argsStr) : {};
           const rpcBody = JSON.stringify({
             jsonrpc: "2.0",
             id: 1,
