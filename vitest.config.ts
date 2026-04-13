@@ -12,6 +12,7 @@ export default defineConfig({
   },
   test: {
     testTimeout: 30000,
+    exclude: ["**/node_modules/**", "**/.git/**", "**/.claude/worktrees/**"],
     pool: cloudflarePool({
       wrangler: { configPath: "./wrangler.test.jsonc" },
       miniflare: {

@@ -284,27 +284,14 @@ describe("Constraint validations", () => {
   // ----------------------------------------------------------
   // Predefined skills are registered
   // ----------------------------------------------------------
-  it("predefined skills are registered (xlsx, pptx, pdf, docx)", () => {
-    const skillIds = ["xlsx_processing", "pptx_processing", "pdf_processing", "docx_processing"];
-    const resolved = resolveSkills(skillIds.map((id) => ({ skill_id: id })));
-
-    expect(resolved).toHaveLength(4);
-    expect(resolved.map((s) => s.id)).toEqual(skillIds);
-
-    // Verify each skill has required fields
-    for (const skill of resolved) {
-      expect(skill.name).toBeTruthy();
-      expect(skill.system_prompt_addition).toBeTruthy();
-      expect(skill.system_prompt_addition.length).toBeGreaterThan(10);
-    }
-
-    // Also verify original built-in skills still work
-    const builtins = resolveSkills([
+  it("no hardcoded built-in skills — all managed via API/KV", () => {
+    // All skills (pptx, xlsx, etc.) are now in KV, not hardcoded
+    const resolved = resolveSkills([
+      { skill_id: "xlsx_processing" },
+      { skill_id: "pptx" },
       { skill_id: "web_research" },
-      { skill_id: "code_review" },
-      { skill_id: "data_analysis" },
     ]);
-    expect(builtins).toHaveLength(3);
+    expect(resolved).toHaveLength(0);
   });
 
   // ----------------------------------------------------------

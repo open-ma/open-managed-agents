@@ -615,7 +615,7 @@ describe("MCP tools", () => {
     const tools = await buildTools(config, sandbox);
 
     const result = await tools.mcp_testmcp_call.execute(
-      { tool_name: "create_issue", arguments: { title: "Bug fix" } },
+      { tool_name: "create_issue", arguments: JSON.stringify({ title: "Bug fix" }) },
       TOOL_EXEC_OPTS
     );
     expect(capturedCmd).toContain("curl");
