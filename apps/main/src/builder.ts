@@ -103,7 +103,7 @@ export async function buildAndDeploySandboxWorker(
     let ready = false;
     for (let i = 0; i < 3; i++) {
       try {
-        const check = await sandbox.exec("docker version 2>/dev/null && echo READY || echo WAITING", { timeout: 10000 });
+        const check = await sandbox.exec("docker version 2>/dev/null && echo READY || echo WAITING", 10000);
         if (check.stdout?.includes("READY")) { ready = true; break; }
       } catch {}
       await new Promise(r => setTimeout(r, 3000));
@@ -117,7 +117,7 @@ export async function buildAndDeploySandboxWorker(
     // 2. Build image
     const build = await sandbox.exec(
       `docker build --network=host -t ${imageTag} ${workDir} 2>&1`,
-      { timeout: 600000 } // 10 min
+      600000 // 10 min
     );
     if (!build.success) {
       return { success: false, error: `Docker build failed: ${build.stderr || build.stdout}` };
@@ -125,16 +125,16 @@ export async function buildAndDeploySandboxWorker(
 
     // 3. Get temporary push credentials and push
     const credCmd = `CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" npx wrangler containers registries credentials --push 2>/dev/null`;
-    const credResult = await sandbox.exec(credCmd, { timeout: 30000 });
+    const credResult = await sandbox.exec(credCmd, 30000);
     if (credResult.stdout) {
       // Parse credentials JSON and docker login
       await sandbox.exec(
         `echo '${credResult.stdout.trim()}' | docker login --username _json_key --password-stdin registry.cloudflare.com 2>&1`,
-        { timeout: 30000 }
+        30000
       );
     }
 
-    const push = await sandbox.exec(`docker push ${imageTag} 2>&1`, { timeout: 300000 });
+    const push = await sandbox.exec(`docker push ${imageTag} 2>&1`, 300000);
     if (!push.success) {
       return { success: false, error: `Docker push failed: ${push.stderr || push.stdout}` };
     }
@@ -148,7 +148,7 @@ export async function buildAndDeploySandboxWorker(
     const agentDir = `${workDir}/agent`;
     const cloneResult = await sandbox.exec(
       `GIT_TEMPLATE_DIR= git clone --depth 1 ${repoUrl} ${agentDir} 2>&1`,
-      { timeout: 60000 }
+      60000
     );
     if (!cloneResult.success) {
       return { success: false, error: `Git clone failed: ${cloneResult.stderr || cloneResult.stdout}` };
@@ -161,7 +161,7 @@ export async function buildAndDeploySandboxWorker(
     const deploy = await sandbox.exec(
       `cd ${agentDir} && npm install --workspace=apps/agent --workspace=packages/shared 2>&1 && ` +
       `cd apps/agent && CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" CLOUDFLARE_ACCOUNT_ID="${accountId}" npx wrangler deploy --config wrangler.jsonc 2>&1`,
-      { timeout: 600000 } // 10 min — npm install + wrangler deploy
+      600000 // 10 min — npm install + wrangler deploy
     );
     if (!deploy.success) {
       return { success: false, error: `Deploy failed: ${deploy.stderr || deploy.stdout}` };
