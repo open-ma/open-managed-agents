@@ -15,8 +15,13 @@ import modelCardsRoutes from "./routes/model-cards";
 // SessionDO and Sandbox are in per-environment sandbox workers.
 // BuilderSandbox is DinD — builds and deploys sandbox workers.
 
-// Re-export Sandbox as BuilderSandbox for the DinD builder container binding
-export { Sandbox as BuilderSandbox } from "@cloudflare/sandbox";
+// BuilderSandbox: DinD container for building custom env images.
+// Uses Container (not Sandbox) — matches official DinD pattern.
+import { Container } from "@cloudflare/containers";
+export class BuilderSandbox extends Container<Env> {
+  defaultPort = 8080;
+  sleepAfter = "30m";
+}
 
 // --- HTTP app ---
 const app = new Hono<{ Bindings: Env }>();

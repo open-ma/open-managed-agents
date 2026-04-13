@@ -1,17 +1,17 @@
 /**
- * Environment builder — uses DinD builder sandbox to build and deploy
+ * Environment builder — uses DinD builder container to build and deploy
  * per-environment sandbox workers with custom container images.
  *
- * The BuilderSandbox container runs docker:dind-rootless with dockerd
- * pre-started (see builder/Dockerfile). Flow:
- *   1. Generate Dockerfile from packages config
- *   2. docker build inside DinD builder
- *   3. docker push to Cloudflare registry (temp credentials via wrangler)
- *   4. wrangler deploy the sandbox worker with new image
+ * The BuilderSandbox container runs docker:dind-rootless with a Node.js
+ * HTTP server (see builder/). Flow:
+ *   1. POST /build to the builder container with Dockerfile + config
+ *   2. Builder: docker build → docker push → wrangler deploy
+ *   3. Returns result JSON
  */
 
 import type { Env } from "@open-managed-agents/shared";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
+import { getContainer } from "@cloudflare/containers";
 
 interface BuildResult {
   success: boolean;
@@ -51,143 +51,55 @@ function generateDockerfile(packages?: EnvironmentConfig["config"]["packages"]):
 }
 
 /**
- * Generate minimal wrangler.jsonc for a sandbox worker.
- */
-function generateWranglerConfig(envId: string, kvId: string, imageRef: string): string {
-  return JSON.stringify({
-    name: `sandbox-${envId}`,
-    main: "index.ts",
-    compatibility_date: "2025-04-01",
-    compatibility_flags: ["nodejs_compat"],
-    containers: [{
-      class_name: "Sandbox",
-      image: imageRef,
-      instance_type: "lite",
-      max_instances: 10,
-    }],
-    durable_objects: {
-      bindings: [
-        { name: "SESSION_DO", class_name: "SessionDO" },
-        { name: "SANDBOX", class_name: "Sandbox" },
-      ],
-    },
-    kv_namespaces: [{ binding: "CONFIG_KV", id: kvId }],
-    r2_buckets: [{ binding: "WORKSPACE_BUCKET", bucket_name: "managed-agents-workspace" }],
-    migrations: [{ tag: "v1", new_sqlite_classes: ["SessionDO", "Sandbox"] }],
-    limits: { cpu_ms: 300000 },
-    observability: { enabled: true },
-  }, null, 2);
-}
-
-/**
  * Build and deploy a sandbox worker for the given environment.
- * Runs inside a DinD builder sandbox (docker:dind-rootless).
+ * Sends a build request to the DinD builder container.
  */
 export async function buildAndDeploySandboxWorker(
   env: Env,
   envConfig: EnvironmentConfig,
 ): Promise<BuildResult> {
-  console.log(`[builder] starting build for env ${envConfig.id}`);
   if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) {
-    console.log("[builder] missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID");
     return { success: false, error: "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required" };
   }
-
-  const { getSandbox } = await import("@cloudflare/sandbox");
-  console.log("[builder] getSandbox imported, creating stub...");
-  const sandbox = getSandbox(env.BUILDER_SANDBOX as any, `builder-${envConfig.id}`);
 
   const envId = envConfig.id;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
   const imageTag = `registry.cloudflare.com/${accountId}/sandbox-${envId}:latest`;
-  const workDir = `/tmp/build-${envId}`;
 
   try {
-    // Wait for Docker daemon to be ready (boot.sh starts dockerd on container start)
-    console.log("[builder] waiting for docker daemon...");
-    let ready = false;
-    for (let i = 0; i < 10; i++) {
-      try {
-        const check = await sandbox.exec(
-          "docker version >/dev/null 2>&1 && echo READY || echo WAITING",
-          { timeout: 5_000 }
-        );
-        console.log(`[builder] docker check ${i}: stdout=${check.stdout?.trim()}, success=${check.success}`);
-        if (check.stdout?.includes("READY")) { ready = true; break; }
-      } catch (e) {
-        console.log(`[builder] docker check ${i} error: ${e instanceof Error ? e.message : String(e)}`);
-      }
-      await new Promise(r => setTimeout(r, 2_000));
-    }
-    if (!ready) {
-      console.log("[builder] docker daemon not ready after 20s");
-      return { success: false, error: "Docker daemon not ready after 20s. Is BuilderSandbox using the DinD image?" };
-    }
-    console.log("[builder] docker daemon ready");
+    console.log(`[builder] starting build for env ${envId}`);
 
-    // 1. Generate Dockerfile
+    // Get a builder container stub and start it
+    const stub = getContainer(env.BUILDER_SANDBOX as any, `builder-${envId}`);
+    await stub.startAndWaitForPorts();
+    console.log("[builder] container started, sending build request...");
+
+    // Send build request to the container's HTTP server
     const dockerfile = generateDockerfile(envConfig.config.packages);
-    await sandbox.exec(`mkdir -p ${workDir}`, { timeout: 5_000 });
-    await sandbox.writeFile(`${workDir}/Dockerfile`, dockerfile);
+    const res = await stub.containerFetch("http://container/build", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        dockerfile,
+        image_tag: imageTag,
+        cf_api_token: env.CLOUDFLARE_API_TOKEN,
+        cf_account_id: accountId,
+        repo_url: env.GITHUB_REPO || "https://github.com/open-ma/open-managed-agents",
+        env_id: envId,
+        kv_id: env.KV_NAMESPACE_ID || "5e49bdaec1884f5989037c86ece7b462",
+      }),
+    });
 
-    // 2. Build image (--network=host required for DinD in Cloudflare Containers)
-    const build = await sandbox.exec(
-      `docker build --network=host -t ${imageTag} ${workDir} 2>&1`,
-      { timeout: 600_000 }
-    );
-    if (!build.success) {
-      return { success: false, error: `Docker build failed: ${build.stderr || build.stdout}` };
+    const result = await res.json() as { success: boolean; sandbox_worker_name?: string; error?: string; steps?: string[] };
+    console.log(`[builder] build result: success=${result.success}, steps=${result.steps?.join(",")}`);
+
+    if (result.success) {
+      return { success: true, sandbox_worker_name: result.sandbox_worker_name || `sandbox-${envId}` };
+    } else {
+      return { success: false, error: result.error };
     }
-
-    // 3. Get temp push credentials via wrangler and push
-    const login = await sandbox.exec(
-      `CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" ` +
-      `npx wrangler containers registries credentials --push 2>/dev/null | ` +
-      `docker login --username _json_key --password-stdin registry.cloudflare.com 2>&1`,
-      { timeout: 30_000 }
-    );
-    if (!login.success) {
-      return { success: false, error: `Registry login failed: ${login.stderr || login.stdout}` };
-    }
-
-    const push = await sandbox.exec(
-      `docker push ${imageTag} 2>&1`,
-      { timeout: 300_000 }
-    );
-    if (!push.success) {
-      return { success: false, error: `Docker push failed: ${push.stderr || push.stdout}` };
-    }
-
-    // 4. Clone agent source, set custom image, deploy
-    const kvId = env.KV_NAMESPACE_ID || "5e49bdaec1884f5989037c86ece7b462";
-    const wranglerConfig = generateWranglerConfig(envId, kvId, imageTag);
-
-    const repoUrl = env.GITHUB_REPO || "https://github.com/open-ma/open-managed-agents";
-    const agentDir = `${workDir}/agent`;
-    const cloneResult = await sandbox.exec(
-      `GIT_TEMPLATE_DIR= git clone --depth 1 ${repoUrl} ${agentDir} 2>&1`,
-      { timeout: 60_000 }
-    );
-    if (!cloneResult.success) {
-      return { success: false, error: `Git clone failed: ${cloneResult.stderr || cloneResult.stdout}` };
-    }
-
-    await sandbox.writeFile(`${agentDir}/apps/agent/wrangler.jsonc`, wranglerConfig);
-
-    const deploy = await sandbox.exec(
-      `cd ${agentDir} && npm install --workspace=apps/agent --workspace=packages/shared 2>&1 && ` +
-      `cd apps/agent && CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" ` +
-      `CLOUDFLARE_ACCOUNT_ID="${accountId}" npx wrangler deploy --config wrangler.jsonc 2>&1`,
-      { timeout: 600_000 }
-    );
-    if (!deploy.success) {
-      return { success: false, error: `Deploy failed: ${deploy.stderr || deploy.stdout}` };
-    }
-
-    return { success: true, sandbox_worker_name: `sandbox-${envId}` };
-
   } catch (err) {
-    console.log(`[builder] uncaught error: ${err instanceof Error ? err.message : String(err)}`);
+    console.log(`[builder] error: ${err instanceof Error ? err.message : String(err)}`);
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
