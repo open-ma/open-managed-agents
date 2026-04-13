@@ -92,7 +92,6 @@ export class SessionDO extends Agent<Env, SessionState> {
   private sandboxWarmupPromise: Promise<void> | null = null;
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
-  private backgroundTaskPollers = new Map<string, ReturnType<typeof setInterval>>();
 
   private ensureSchema() {
     if (this.initialized) return;
@@ -738,64 +737,102 @@ export class SessionDO extends Agent<Env, SessionState> {
    * Like CC's shellCommand.result.then() — but poll-based since we can't
    * get exit events from container processes.
    */
+  /**
+   * Watch a background task for completion. Uses Agent schedule system
+   * instead of setInterval so it survives DO hibernation.
+   *
+   * Task metadata is stored in SQLite so it persists across hibernation.
+   */
   private watchBackgroundTask(
     taskId: string,
     pid: string,
     outputFile: string,
-    proc: ProcessHandle | null,
-    sandbox: SandboxExecutor,
+    _proc: ProcessHandle | null,
+    _sandbox: SandboxExecutor,
   ): void {
-    // If we have a process handle, poll via getStatus()
-    // Otherwise, poll via kill -0 <pid>
-    const poller = setInterval(async () => {
-      try {
-        let done = false;
-        let exitCode = 0;
+    // Persist task info to SQLite (survives hibernation)
+    this.ctx.storage.sql.exec(
+      `CREATE TABLE IF NOT EXISTS background_tasks (
+        task_id TEXT PRIMARY KEY,
+        pid TEXT NOT NULL,
+        output_file TEXT NOT NULL,
+        created_at TEXT DEFAULT (datetime('now'))
+      )`
+    );
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO background_tasks (task_id, pid, output_file) VALUES (?, ?, ?)`,
+      taskId, pid, outputFile
+    );
 
-        if (proc) {
-          const status = await proc.getStatus();
-          done = status === "completed" || status === "error" || status === "killed";
-          exitCode = status === "error" ? 1 : status === "killed" ? 137 : 0;
-        } else {
-          // Fallback: check PID via kill -0
-          const check = await sandbox.exec(`kill -0 ${pid} 2>/dev/null && echo running || echo done`, 5000);
-          done = check.includes("done");
+    // Schedule first poll in 3 seconds (survives hibernation)
+    try {
+      this.schedule(3, "pollBackgroundTasks");
+    } catch {}
+  }
+
+  /**
+   * Scheduled callback: poll all background tasks for completion.
+   * Called by Agent schedule system — survives DO hibernation.
+   */
+  async pollBackgroundTasks(): Promise<void> {
+    this.ensureSchema();
+    this.ctx.storage.sql.exec(
+      `CREATE TABLE IF NOT EXISTS background_tasks (
+        task_id TEXT PRIMARY KEY, pid TEXT NOT NULL,
+        output_file TEXT NOT NULL, created_at TEXT DEFAULT (datetime('now'))
+      )`
+    );
+
+    const tasks = this.ctx.storage.sql.exec(
+      `SELECT task_id, pid, output_file FROM background_tasks`
+    ).toArray();
+
+    if (!tasks.length) return;
+
+    const sandbox = this.getOrCreateSandbox();
+    let anyPending = false;
+
+    for (const task of tasks) {
+      const { task_id, pid, output_file } = task as { task_id: string; pid: string; output_file: string };
+      try {
+        // Check if process is still running
+        const check = await sandbox.exec(`kill -0 ${pid} 2>/dev/null && echo running || echo done`, 5000);
+        if (!check.includes("done")) {
+          anyPending = true;
+          continue;
         }
 
-        if (!done) return;
-
-        // Task completed — stop polling
-        clearInterval(poller);
-        this.backgroundTaskPollers.delete(taskId);
-
-        // Read output
+        // Task completed — read output and inject notification
         let output = "";
-        try { output = await sandbox.readFile(outputFile); } catch {}
+        try { output = await sandbox.readFile(output_file); } catch {}
 
-        // Inject task_notification event
         const history = new SqliteHistory(this.ctx.storage.sql);
         const notifEvent: SessionEvent = {
           type: "user.message",
           content: [{
             type: "text",
-            text: `<task_notification>\nBackground task ${taskId} completed (exit code: ${exitCode}).\nOutput file: ${outputFile}\n\n${output.slice(0, 3000)}\n</task_notification>`,
+            text: `<task_notification>\nBackground task ${task_id} completed.\nOutput file: ${output_file}\n\n${output.slice(0, 3000)}\n</task_notification>`,
           }],
         };
         history.append(notifEvent);
         this.broadcastEvent(notifEvent);
 
-        // Re-trigger harness if session is idle — the notification
-        // is already in the events table, drainEventQueue will pick it up.
-        this.ctx.waitUntil(this.drainEventQueue());
-        try {
-          await this.schedule(5, "recoverEventQueue");
-        } catch {}
-      } catch {
-        // Poll failed — will retry next interval
-      }
-    }, 2000);
+        // Remove completed task
+        this.ctx.storage.sql.exec(`DELETE FROM background_tasks WHERE task_id = ?`, task_id);
 
-    this.backgroundTaskPollers.set(taskId, poller);
+        // Re-trigger harness
+        await this.drainEventQueue();
+      } catch {
+        anyPending = true;
+      }
+    }
+
+    // Schedule next poll if there are still pending tasks
+    if (anyPending) {
+      try {
+        this.schedule(5, "pollBackgroundTasks");
+      } catch {}
+    }
   }
 
   /**
