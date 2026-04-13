@@ -92,10 +92,13 @@ app.post("/", async (c) => {
 
   await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
 
+  console.log(`[env] canBuild=${canBuild}, BUILDER_SANDBOX=${!!c.env.BUILDER_SANDBOX}, CF_TOKEN=${!!c.env.CLOUDFLARE_API_TOKEN}, executionCtx=${!!c.executionCtx}`);
   if (canBuild) {
     try {
       await triggerBuild(c.env, env, c.executionCtx);
-    } catch {
+      console.log(`[env] triggerBuild returned for ${env.id}`);
+    } catch (e) {
+      console.log(`[env] triggerBuild threw: ${e instanceof Error ? e.message : String(e)}`);
       env.status = "error";
       await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
     }
