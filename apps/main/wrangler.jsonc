@@ -31,7 +31,7 @@
   "containers": [
     {
       "class_name": "BuilderSandbox",
-      "image": "docker.io/cloudflare/sandbox:0.7.20",
+      "image": "./builder/Dockerfile",
       "instance_type": "standard",
       "max_instances": 2
     }
