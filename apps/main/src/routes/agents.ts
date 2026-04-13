@@ -289,6 +289,17 @@ app.delete("/:id", async (c) => {
   const data = await c.env.CONFIG_KV.get(`agent:${id}`);
   if (!data) return c.json({ error: "Agent not found" }, 404);
 
+  // Check if any active sessions reference this agent
+  const sessionList = await c.env.CONFIG_KV.list({ prefix: "session:" });
+  for (const k of sessionList.keys) {
+    const sessData = await c.env.CONFIG_KV.get(k.name);
+    if (!sessData) continue;
+    const sess = JSON.parse(sessData);
+    if (sess.agent_id === id && !sess.archived_at) {
+      return c.json({ error: "Cannot delete agent with active sessions. Archive or delete sessions first." }, 409);
+    }
+  }
+
   await c.env.CONFIG_KV.delete(`agent:${id}`);
   return c.json({ type: "agent_deleted", id });
 });
