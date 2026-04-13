@@ -11,11 +11,11 @@ const app = new Hono<{ Bindings: Env }>();
  * Trigger sandbox worker build via DinD builder (async, updates KV when done).
  * Falls back to GitHub Actions if BUILDER_SANDBOX is not available.
  */
-async function triggerBuild(env: Env, envConfig: EnvironmentConfig): Promise<void> {
+async function triggerBuild(env: Env, envConfig: EnvironmentConfig, ctx: ExecutionContext): Promise<void> {
   // Primary: DinD builder
   if (env.BUILDER_SANDBOX && env.CLOUDFLARE_API_TOKEN) {
-    // Run async — don't block the API response
-    (async () => {
+    // Run via waitUntil so the build survives after the response is sent
+    ctx.waitUntil((async () => {
       try {
         const result = await buildAndDeploySandboxWorker(env, envConfig);
         envConfig.status = result.success ? "ready" : "error";
@@ -39,7 +39,7 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig): Promise<voi
         envConfig.updated_at = new Date().toISOString();
         await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
       }
-    })();
+    })());
     return;
   }
 
@@ -94,7 +94,7 @@ app.post("/", async (c) => {
 
   if (canBuild) {
     try {
-      await triggerBuild(c.env, env);
+      await triggerBuild(c.env, env, c.executionCtx);
     } catch {
       env.status = "error";
       await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
@@ -199,7 +199,7 @@ app.put("/:id", async (c) => {
         env.sandbox_worker_name = undefined;
         await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
         try {
-          await triggerBuild(c.env, env);
+          await triggerBuild(c.env, env, c.executionCtx);
         } catch {
           env.status = "error";
         }
