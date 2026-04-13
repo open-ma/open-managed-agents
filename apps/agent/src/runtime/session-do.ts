@@ -349,6 +349,10 @@ export class SessionDO extends Agent<Env, SessionState> {
           input_tokens: this.state.input_tokens,
           output_tokens: this.state.output_tokens,
         },
+        // Debug: show registered secret prefixes (not the secrets themselves)
+        _debug_secret_prefixes: this.sandbox && "getRegisteredSecretPrefixes" in this.sandbox
+          ? (this.sandbox as any).getRegisteredSecretPrefixes()
+          : null,
       });
     }
 
