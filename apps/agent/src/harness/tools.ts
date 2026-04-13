@@ -799,6 +799,36 @@ export function buildMemoryTools(
     }),
   });
 
+  tools.memory_edit = tool({
+    description: "Edit an existing memory. Safer than memory_write for concurrent updates — use expected_content_sha256 for optimistic locking.",
+    inputSchema: z.object({
+      path: z.string().describe("Path of the memory to edit"),
+      content: z.string().describe("New content"),
+      expected_content_sha256: z.string().optional().describe("Expected SHA-256 of current content for concurrency check"),
+    }),
+    execute: safe(async ({ path, content, expected_content_sha256 }: { path: string; content: string; expected_content_sha256?: string }) => {
+      const list = await kv.list({ prefix: `mem:${sid}:` });
+      for (const k of list.keys) {
+        const data = await kv.get(k.name);
+        if (!data) continue;
+        const mem = JSON.parse(data);
+        if (mem.path === path) {
+          if (expected_content_sha256 && mem.content_sha256 !== expected_content_sha256) {
+            return "Error: content has been modified since last read (sha256 mismatch). Re-read and retry.";
+          }
+          mem.content = content;
+          mem.size_bytes = new TextEncoder().encode(content).length;
+          const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+          mem.content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+          mem.updated_at = new Date().toISOString();
+          await kv.put(k.name, JSON.stringify(mem));
+          return `Edited memory at ${path}`;
+        }
+      }
+      return "Error: memory not found at path: " + path;
+    }),
+  });
+
   tools.memory_delete = tool({
     description: "Delete a memory by path.",
     inputSchema: z.object({
