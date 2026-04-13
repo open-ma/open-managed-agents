@@ -349,10 +349,6 @@ export class SessionDO extends Agent<Env, SessionState> {
           input_tokens: this.state.input_tokens,
           output_tokens: this.state.output_tokens,
         },
-        // Debug: show registered secret prefixes (not the secrets themselves)
-        _debug_secret_prefixes: this.sandbox && "getRegisteredSecretPrefixes" in this.sandbox
-          ? (this.sandbox as any).getRegisteredSecretPrefixes()
-          : null,
       });
     }
 
@@ -578,7 +574,6 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       // Register command_secret credentials from vaults
       const vaultIds = this.state.vault_ids;
-      const registeredPrefixes: string[] = [];
       if (vaultIds.length && sandbox.registerCommandSecrets) {
         for (const vaultId of vaultIds) {
           const credList = await this.env.CONFIG_KV.list({ prefix: `cred:${vaultId}:` });
@@ -590,18 +585,11 @@ export class SessionDO extends Agent<Env, SessionState> {
               if (cred.auth?.type === "command_secret" && cred.auth.command_prefixes?.length && cred.auth.env_var && cred.auth.token) {
                 for (const prefix of cred.auth.command_prefixes) {
                   sandbox.registerCommandSecrets(prefix, { [cred.auth.env_var]: cred.auth.token });
-                  registeredPrefixes.push(`${prefix}:${cred.auth.env_var}`);
                 }
               }
             } catch {}
           }
         }
-      }
-      // Debug: emit registered prefixes as span event
-      if (registeredPrefixes.length) {
-        const history = new SqliteHistory(this.ctx.storage.sql);
-        history.append({ type: "span.vault_secrets_registered", prefixes: registeredPrefixes } as any);
-        this.broadcastEvent({ type: "span.vault_secrets_registered", prefixes: registeredPrefixes } as any);
       }
     } catch (err) {
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
