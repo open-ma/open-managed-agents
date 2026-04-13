@@ -743,13 +743,13 @@ export class SessionDO extends Agent<Env, SessionState> {
    *
    * Task metadata is stored in SQLite so it persists across hibernation.
    */
-  private watchBackgroundTask(
+  private async watchBackgroundTask(
     taskId: string,
     pid: string,
     outputFile: string,
     _proc: ProcessHandle | null,
     _sandbox: SandboxExecutor,
-  ): void {
+  ): Promise<void> {
     // Persist task info to SQLite (survives hibernation)
     this.ctx.storage.sql.exec(
       `CREATE TABLE IF NOT EXISTS background_tasks (
@@ -766,8 +766,16 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // Schedule first poll in 3 seconds (survives hibernation)
     try {
-      this.schedule(3, "pollBackgroundTasks");
-    } catch {}
+      const sched = await this.schedule(3, "pollBackgroundTasks");
+      // Emit debug event so we can verify schedule was set
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      history.append({ type: "span.background_task_scheduled", task_id: taskId, schedule_id: sched?.id } as any);
+      this.broadcastEvent({ type: "span.background_task_scheduled", task_id: taskId, schedule_id: sched?.id } as any);
+    } catch (err) {
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      history.append({ type: "session.error", error: `watchBackgroundTask schedule failed: ${err}` });
+      this.broadcastEvent({ type: "session.error", error: `watchBackgroundTask schedule failed: ${err}` });
+    }
   }
 
   /**
@@ -830,8 +838,10 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Schedule next poll if there are still pending tasks
     if (anyPending) {
       try {
-        this.schedule(5, "pollBackgroundTasks");
-      } catch {}
+        await this.schedule(5, "pollBackgroundTasks");
+      } catch (err) {
+        console.error("[pollBackgroundTasks] reschedule failed:", err);
+      }
     }
   }
 
