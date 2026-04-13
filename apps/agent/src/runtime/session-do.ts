@@ -1150,10 +1150,14 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           const skillFilesResults = await getSkillFiles(agent.skills, this.env.CONFIG_KV);
           for (const sf of skillFilesResults) {
+            const skillDir = `/home/user/.skills/${sf.skillName}`;
+            try {
+              await sandbox.exec(`mkdir -p ${skillDir}`, 5000);
+            } catch {}
             for (const file of sf.files) {
               try {
                 await sandbox.writeFile(
-                  `/home/user/.skills/${sf.skillName}/${file.filename}`,
+                  `${skillDir}/${file.filename}`,
                   file.content,
                 );
               } catch {
