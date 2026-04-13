@@ -67,4 +67,6 @@ export interface SandboxExecutor {
   registerCommandSecrets?(commandPrefix: string, secrets: Record<string, string>): void;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
+  /** Destroy the sandbox container — kills processes, unmounts, stops. */
+  destroy?(): Promise<void>;
 }

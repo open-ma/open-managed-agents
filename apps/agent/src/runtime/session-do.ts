@@ -241,6 +241,10 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.currentAbortController.abort();
         this.currentAbortController = null;
       }
+      // Destroy the sandbox container (kills processes, unmounts, stops container)
+      if (this.sandbox?.destroy) {
+        try { await this.sandbox.destroy(); } catch {}
+      }
       this.sandbox = null;
       this.sandboxWarmupPromise = null;
       this.setState({ ...this.state, status: "terminated" });
