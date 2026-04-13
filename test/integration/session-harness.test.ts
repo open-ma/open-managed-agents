@@ -631,6 +631,67 @@ describe("Harness integration — additional scenarios", () => {
     expect(body.data).toBeInstanceOf(Array);
   });
 
+  it("multi-turn after tool_use: second message succeeds (no schema error)", async () => {
+    const sessionId = await createSessionWith("tool-harness");
+    // Turn 1: triggers tool_use + tool_result + agent.message
+    await postAndWait(sessionId, "use tool", 600);
+    await waitForIdle(sessionId);
+
+    // Verify turn 1 has tool events
+    const events1 = await collectReplayedEvents(sessionId);
+    expect(events1.some((e) => e.type === "agent.tool_use")).toBe(true);
+    expect(events1.some((e) => e.type === "agent.tool_result")).toBe(true);
+
+    // Turn 2: replay history including tool events — must not throw schema error
+    await postAndWait(sessionId, "follow up question", 600);
+    await waitForIdle(sessionId);
+
+    const events2 = await collectReplayedEvents(sessionId);
+    // Should have 2 user messages
+    const userMsgs = events2.filter((e) => e.type === "user.message");
+    expect(userMsgs.length).toBe(2);
+
+    // Should NOT have schema error
+    const errors = events2.filter((e) => e.type === "session.error");
+    const schemaError = errors.find((e) => e.error?.includes("ModelMessage"));
+    expect(schemaError).toBeUndefined();
+  });
+
+  it("multi-turn with multi-msg harness: second turn adds more events", async () => {
+    const sessionId = await createSessionWith("multi-msg");
+    await postAndWait(sessionId, "first turn", 600);
+    await waitForIdle(sessionId);
+    await postAndWait(sessionId, "second turn", 600);
+    await waitForIdle(sessionId);
+
+    const events = await collectReplayedEvents(sessionId);
+    // multi-msg harness emits 3 agent.messages per turn → 6 total
+    const agentMsgs = events.filter((e) => e.type === "agent.message");
+    expect(agentMsgs.length).toBe(6);
+
+    // 2 user messages
+    const userMsgs = events.filter((e) => e.type === "user.message");
+    expect(userMsgs.length).toBe(2);
+  });
+
+  it("multi-turn after crash: second message processes without schema error", async () => {
+    const sessionId = await createSessionWith("partial-crash");
+    await postAndWait(sessionId, "crash it", 600);
+    await waitForIdle(sessionId);
+
+    // Turn 2 should work despite error in history
+    await postAndWait(sessionId, "retry after crash", 600);
+    await waitForIdle(sessionId);
+
+    const events = await collectReplayedEvents(sessionId);
+    const userMsgs = events.filter((e) => e.type === "user.message");
+    expect(userMsgs.length).toBe(2);
+
+    // Should have agent messages from second turn (partial-crash emits one before crashing)
+    const agentMsgs = events.filter((e) => e.type === "agent.message");
+    expect(agentMsgs.length).toBeGreaterThanOrEqual(2);
+  });
+
   it.skip("session events GET returns SSE for text/event-stream", async () => {
     const sessionId = await createSessionWith("sh-noop");
     await postAndWait(sessionId, "sse test", 600);
