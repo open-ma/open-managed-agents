@@ -558,12 +558,16 @@ export async function buildTools(
   // We call MCP endpoints via sandbox.exec(curl) instead of Worker-side fetch.
   if (agentConfig.mcp_servers?.length) {
     for (const server of agentConfig.mcp_servers) {
+      const escapedUrl = server.url.replace(/'/g, "'\\''");
+      const authHeader = server.authorization_token
+        ? `-H 'Authorization: Bearer ${server.authorization_token.replace(/'/g, "'\\''")}'`
+        : "";
+
       // Create a tool that lists available MCP tools from this server
       tools[`mcp_${server.name}_list_tools`] = tool({
         description: `List available tools from MCP server "${server.name}".`,
         inputSchema: z.object({}),
         execute: safe(async () => {
-          // JSON-RPC request to list tools, routed through sandbox network
           const rpcBody = JSON.stringify({
             jsonrpc: "2.0",
             id: 1,
@@ -571,8 +575,10 @@ export async function buildTools(
             params: {},
           });
           return truncateResult(await sandbox.exec(
-            `curl -sS -X POST '${server.url.replace(/'/g, "'\\''")}' ` +
+            `curl -sS -X POST '${escapedUrl}' ` +
             `-H 'Content-Type: application/json' ` +
+            `-H 'Accept: application/json, text/event-stream' ` +
+            `${authHeader} ` +
             `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
             15000
           ));
@@ -594,8 +600,10 @@ export async function buildTools(
             params: { name: tool_name, arguments: args || {} },
           });
           return truncateResult(await sandbox.exec(
-            `curl -sS -X POST '${server.url.replace(/'/g, "'\\''")}' ` +
+            `curl -sS -X POST '${escapedUrl}' ` +
             `-H 'Content-Type: application/json' ` +
+            `-H 'Accept: application/json, text/event-stream' ` +
+            `${authHeader} ` +
             `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
             30000
           ));
