@@ -98,8 +98,8 @@ export class CloudflareSandbox implements SandboxExecutor {
   async readFile(path: string): Promise<string> {
     const sandbox = await this.getSandbox();
     try {
-      const result = await sandbox.readFile(path);
-      // Handle both old ({content: string}) and new (string) return format
+      const result = await sandbox.readFile(path, { encoding: "utf-8" });
+      // Handle both string and {content: string} return formats
       return typeof result === "string" ? result : result.content;
     } catch (err: any) {
       throw new Error(`readFile(${path}) failed: ${err?.message || err}`);
