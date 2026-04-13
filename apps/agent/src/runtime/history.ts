@@ -23,13 +23,13 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
     type: "tool-call";
     toolCallId: string;
     toolName: string;
-    args: Record<string, unknown>;
+    input: Record<string, unknown>;
   }> = [];
   let pendingToolResults: Array<{
     type: "tool-result";
     toolCallId: string;
     toolName: string;
-    result: string;
+    output: string;
   }> = [];
 
   const flushTools = () => {
@@ -113,7 +113,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
           type: "tool-call",
           toolCallId: e.id,
           toolName: e.name,
-          args: e.input,
+          input: e.input,
         });
         break;
       }
@@ -125,7 +125,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
           type: "tool-call",
           toolCallId: e.id,
           toolName,
-          args: e.input,
+          input: e.input,
         });
         break;
       }
@@ -139,7 +139,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
           type: "tool-result",
           toolCallId: e.tool_use_id,
           toolName: matchingCall?.toolName ?? "unknown",
-          result: e.content,
+          output: e.content,
         });
         break;
       }
@@ -152,7 +152,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
           type: "tool-result",
           toolCallId: e.mcp_tool_use_id,
           toolName: matchingCall?.toolName ?? "unknown",
-          result: e.content,
+          output: e.content,
         });
         break;
       }
