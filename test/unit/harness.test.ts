@@ -32,39 +32,28 @@ function post(path: string, body: Record<string, unknown>) {
 // ============================================================
 describe("Skills system", () => {
   it("resolveSkills returns registered skills", () => {
-    const skills = resolveSkills([{ skill_id: "web_research" }]);
+    registerSkill({ id: "test_skill_1", name: "Test Skill", system_prompt_addition: "test prompt" });
+    const skills = resolveSkills([{ skill_id: "test_skill_1" }]);
     expect(skills.length).toBe(1);
-    expect(skills[0].name).toBe("Web Research");
-    expect(skills[0].system_prompt_addition).toContain("web_search");
+    expect(skills[0].name).toBe("Test Skill");
   });
 
   it("resolveSkills ignores unknown skill IDs", () => {
     const skills = resolveSkills([
-      { skill_id: "web_research" },
       { skill_id: "totally_made_up_skill" },
       { skill_id: "another_fake" },
     ]);
-    expect(skills.length).toBe(1);
-    expect(skills[0].id).toBe("web_research");
+    expect(skills.length).toBe(0);
   });
 
-  it("built-in skills are pre-registered (web_research, code_review, data_analysis)", () => {
-    const allBuiltIn = resolveSkills([
+  it("no hardcoded built-in skills — all skills via API/KV", () => {
+    // Built-in skills removed — all skills are managed via /v1/skills API
+    const skills = resolveSkills([
       { skill_id: "web_research" },
-      { skill_id: "code_review" },
-      { skill_id: "data_analysis" },
+      { skill_id: "pptx" },
     ]);
-    expect(allBuiltIn.length).toBe(3);
-
-    const names = allBuiltIn.map((s) => s.name);
-    expect(names).toContain("Web Research");
-    expect(names).toContain("Code Review");
-    expect(names).toContain("Data Analysis");
-
-    // Verify each has a non-empty system_prompt_addition
-    for (const skill of allBuiltIn) {
-      expect(skill.system_prompt_addition.length).toBeGreaterThan(0);
-    }
+    // These should NOT resolve from in-memory registry (they're in KV now)
+    expect(skills.length).toBe(0);
   });
 
   it("registerSkill adds a new skill and resolveSkills finds it", () => {
