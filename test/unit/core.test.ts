@@ -423,19 +423,14 @@ describe("Edge cases - concurrent and complex operations", () => {
     expect(tools.mcp_slack_call).toBeDefined();
   });
 
-  it("agent with skills resolves via resolveSkills", async () => {
+  it("resolveSkills returns empty for non-registered skills (all skills via KV now)", async () => {
     const { resolveSkills } = await import("../../apps/agent/src/harness/skills");
     const skills = resolveSkills([
       { skill_id: "web_research" },
-      { skill_id: "code_review" },
+      { skill_id: "pptx" },
     ]);
-    expect(skills).toHaveLength(2);
-    expect(skills[0].name).toBe("Web Research");
-    expect(skills[1].name).toBe("Code Review");
-    // Each has system_prompt_addition
-    for (const s of skills) {
-      expect(s.system_prompt_addition.length).toBeGreaterThan(0);
-    }
+    // No hardcoded built-in skills — all managed via /v1/skills API
+    expect(skills).toHaveLength(0);
   });
 
   it("agent with custom tools via API is stored", async () => {
