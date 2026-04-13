@@ -1,12 +1,12 @@
 /**
- * Environment builder — uses DinD Sandbox to build and deploy
- * per-environment sandbox workers with custom container images.
+ * Environment builder — deploys per-environment sandbox workers
+ * with custom container images via wrangler.
  *
  * Flow:
- *   1. Generate Dockerfile from packages config
- *   2. docker build inside DinD sandbox
- *   3. docker push to Cloudflare registry (temp credentials)
- *   4. wrangler deploy the sandbox worker with new image
+ *   1. Clone agent source in a builder sandbox
+ *   2. Generate Dockerfile from packages config
+ *   3. Point wrangler.jsonc containers[].image at the Dockerfile
+ *   4. wrangler deploy — Cloudflare builds the image and deploys
  */
 
 import type { Env } from "@open-managed-agents/shared";
@@ -50,9 +50,10 @@ function generateDockerfile(packages?: EnvironmentConfig["config"]["packages"]):
 }
 
 /**
- * Generate minimal wrangler.jsonc for a sandbox worker.
+ * Generate wrangler.jsonc for a sandbox worker.
+ * image points to the Dockerfile path — Cloudflare builds it during deploy.
  */
-function generateWranglerConfig(envId: string, kvId: string, imageRef: string): string {
+function generateWranglerConfig(envId: string, kvId: string, dockerfilePath: string): string {
   return JSON.stringify({
     name: `sandbox-${envId}`,
     main: "index.ts",
@@ -60,7 +61,7 @@ function generateWranglerConfig(envId: string, kvId: string, imageRef: string): 
     compatibility_flags: ["nodejs_compat"],
     containers: [{
       class_name: "Sandbox",
-      image: imageRef,
+      image: dockerfilePath,
       instance_type: "lite",
       max_instances: 10,
     }],
@@ -80,7 +81,8 @@ function generateWranglerConfig(envId: string, kvId: string, imageRef: string): 
 
 /**
  * Build and deploy a sandbox worker for the given environment.
- * Runs inside a DinD Sandbox container.
+ * Runs inside a builder sandbox — no Docker daemon needed.
+ * wrangler deploy handles image building from the Dockerfile.
  */
 export async function buildAndDeploySandboxWorker(
   env: Env,
@@ -95,73 +97,35 @@ export async function buildAndDeploySandboxWorker(
 
   const envId = envConfig.id;
   const accountId = env.CLOUDFLARE_ACCOUNT_ID;
-  const imageTag = `registry.cloudflare.com/${accountId}/sandbox-${envId}:latest`;
   const workDir = `/tmp/build-${envId}`;
 
   try {
-    // Wait for Docker daemon to be ready (10s timeout per check, max 30s total)
-    let ready = false;
-    for (let i = 0; i < 3; i++) {
-      try {
-        const check = await sandbox.exec("docker version 2>/dev/null && echo READY || echo WAITING", 10000);
-        if (check.stdout?.includes("READY")) { ready = true; break; }
-      } catch {}
-      await new Promise(r => setTimeout(r, 3000));
-    }
-    if (!ready) return { success: false, error: "Docker daemon not available in this container. DinD may not be supported." };
-
-    // 1. Generate Dockerfile
-    const dockerfile = generateDockerfile(envConfig.config.packages);
-    await sandbox.writeFile(`${workDir}/Dockerfile`, dockerfile);
-
-    // 2. Build image
-    const build = await sandbox.exec(
-      `docker build --network=host -t ${imageTag} ${workDir} 2>&1`,
-      600000 // 10 min
-    );
-    if (!build.success) {
-      return { success: false, error: `Docker build failed: ${build.stderr || build.stdout}` };
-    }
-
-    // 3. Get temporary push credentials and push
-    const credCmd = `CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" npx wrangler containers registries credentials --push 2>/dev/null`;
-    const credResult = await sandbox.exec(credCmd, 30000);
-    if (credResult.stdout) {
-      // Parse credentials JSON and docker login
-      await sandbox.exec(
-        `echo '${credResult.stdout.trim()}' | docker login --username _json_key --password-stdin registry.cloudflare.com 2>&1`,
-        30000
-      );
-    }
-
-    const push = await sandbox.exec(`docker push ${imageTag} 2>&1`, 300000);
-    if (!push.success) {
-      return { success: false, error: `Docker push failed: ${push.stderr || push.stdout}` };
-    }
-
-    // 4. Clone agent source, generate config with custom image, deploy
-    const kvId = env.KV_NAMESPACE_ID || "5e49bdaec1884f5989037c86ece7b462";
-    const wranglerConfig = generateWranglerConfig(envId, kvId, imageTag);
-
-    // Clone the agent source from the deployed repo
+    // 1. Clone the agent source
     const repoUrl = env.GITHUB_REPO || "https://github.com/open-ma/open-managed-agents";
     const agentDir = `${workDir}/agent`;
     const cloneResult = await sandbox.exec(
       `GIT_TEMPLATE_DIR= git clone --depth 1 ${repoUrl} ${agentDir} 2>&1`,
-      60000
+      { timeout: 60_000 }
     );
     if (!cloneResult.success) {
       return { success: false, error: `Git clone failed: ${cloneResult.stderr || cloneResult.stdout}` };
     }
 
-    // Override wrangler config with custom image
+    // 2. Generate Dockerfile in the agent app directory
+    const dockerfile = generateDockerfile(envConfig.config.packages);
+    const dockerfilePath = `${agentDir}/apps/agent/Dockerfile`;
+    await sandbox.writeFile(dockerfilePath, dockerfile);
+
+    // 3. Generate wrangler.jsonc pointing image at the Dockerfile
+    const kvId = env.KV_NAMESPACE_ID || "5e49bdaec1884f5989037c86ece7b462";
+    const wranglerConfig = generateWranglerConfig(envId, kvId, "./Dockerfile");
     await sandbox.writeFile(`${agentDir}/apps/agent/wrangler.jsonc`, wranglerConfig);
 
-    // Install dependencies and deploy
+    // 4. Install dependencies and deploy — wrangler builds the image from Dockerfile
     const deploy = await sandbox.exec(
       `cd ${agentDir} && npm install --workspace=apps/agent --workspace=packages/shared 2>&1 && ` +
       `cd apps/agent && CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" CLOUDFLARE_ACCOUNT_ID="${accountId}" npx wrangler deploy --config wrangler.jsonc 2>&1`,
-      600000 // 10 min — npm install + wrangler deploy
+      { timeout: 600_000 } // 10 min — npm install + wrangler deploy (includes image build)
     );
     if (!deploy.success) {
       return { success: false, error: `Deploy failed: ${deploy.stderr || deploy.stdout}` };
