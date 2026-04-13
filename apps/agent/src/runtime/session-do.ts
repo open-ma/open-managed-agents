@@ -804,8 +804,20 @@ export class SessionDO extends Agent<Env, SessionState> {
       const { task_id, pid, output_file } = task as { task_id: string; pid: string; output_file: string };
       try {
         // Check if process is still running
-        const check = await sandbox.exec(`kill -0 ${pid} 2>/dev/null && echo running || echo done`, 5000);
-        if (!check.includes("done")) {
+        let taskDone = false;
+        if (!pid || pid === "undefined" || !/^\d+$/.test(pid)) {
+          // Invalid pid — check if output file exists and has content
+          try {
+            const content = await sandbox.readFile(output_file);
+            taskDone = content != null && content.trim().length > 0;
+          } catch {
+            taskDone = false;
+          }
+        } else {
+          const check = await sandbox.exec(`kill -0 ${pid} 2>/dev/null && echo running || echo done`, 5000);
+          taskDone = check.includes("done");
+        }
+        if (!taskDone) {
           anyPending = true;
           continue;
         }
