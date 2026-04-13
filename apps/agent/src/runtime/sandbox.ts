@@ -126,6 +126,13 @@ export class CloudflareSandbox implements SandboxExecutor {
   }
 
 
+  async destroy(): Promise<void> {
+    try {
+      const sandbox = await this.getSandbox();
+      if (typeof sandbox.destroy === "function") await sandbox.destroy();
+    } catch {}
+  }
+
   private getSecretsForCommand(command: string): Record<string, string> | undefined {
     const commandName = this.getSimpleCommandName(command);
     if (!commandName) return undefined;
