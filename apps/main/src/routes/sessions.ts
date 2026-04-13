@@ -127,6 +127,7 @@ app.post("/", async (c) => {
       environment_id: body.environment_id,
       title: body.title || "",
       session_id: sessionId,
+      vault_ids: body.vault_ids || [],
     }),
   );
 

@@ -225,7 +225,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     // PUT /init — initialize session
     if (request.method === "PUT" && url.pathname === "/init") {
       const params = (await request.json()) as SessionInitParams;
-      this.setState({ ...this.state, agent_id: params.agent_id, environment_id: params.environment_id, title: params.title, session_id: params.session_id || this.state.session_id, status: "idle" });
+      this.setState({ ...this.state, agent_id: params.agent_id, environment_id: params.environment_id, title: params.title, session_id: params.session_id || this.state.session_id, vault_ids: (params as any).vault_ids || [], status: "idle" });
 
       // Pre-warm sandbox in background (container start + package install)
       // Errors are swallowed — warmup is best-effort
