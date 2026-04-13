@@ -670,6 +670,12 @@ export function buildMemoryTools(
   const tools: Record<string, any> = {};
   const sid = storeIds[0]; // Auto-bind to first store (Anthropic: one store per session resource)
 
+  // Backfill path→id index for memories created via REST API (which don't have mempath: entries)
+  const ensurePathIndex = async (memId: string, path: string) => {
+    const existing = await kv.get(`mempath:${sid}:${path}`);
+    if (!existing) await kv.put(`mempath:${sid}:${path}`, memId);
+  };
+
   tools.memory_list = tool({
     description: "List memories in the store. Returns paths and metadata (no content). Use path_prefix to filter.",
     inputSchema: z.object({
@@ -683,6 +689,8 @@ export function buildMemoryTools(
           if (!data) return null;
           const mem = JSON.parse(data);
           if (path_prefix && !mem.path?.startsWith(path_prefix)) return null;
+          // Backfill path index for memories created via REST API
+          if (mem.id && mem.path) await ensurePathIndex(mem.id, mem.path);
           return { id: mem.id, path: mem.path, size_bytes: mem.size_bytes, updated_at: mem.updated_at };
         })
       );
@@ -787,6 +795,7 @@ export function buildMemoryTools(
         const mem = JSON.parse(data);
         if (mem.content?.toLowerCase().includes(q) || mem.path?.toLowerCase().includes(q)) {
           matches.push({ path: mem.path, snippet: mem.content.slice(0, 200) });
+          if (mem.id && mem.path) await ensurePathIndex(mem.id, mem.path);
         }
       }
       return JSON.stringify(matches);

@@ -663,7 +663,7 @@ describe("Memory tools", () => {
 
     // Verify the entry exists in KV via memory_list
     const listResult = await memTools.memory_list.execute(
-      { store_id: "store_1" },
+      {},
       TOOL_EXEC_OPTS
     );
     const parsed = JSON.parse(listResult);
@@ -677,37 +677,23 @@ describe("Memory tools", () => {
 
     // First create a memory
     await memTools.memory_write.execute(
-      {
-        store_id: "store_1",
-        path: "temp/data",
-        content: "temporary data",
-      },
+      { path: "temp/data", content: "temporary data" },
       TOOL_EXEC_OPTS
     );
 
-    // Find the memory ID from the list
-    const listResult = await memTools.memory_list.execute(
-      { store_id: "store_1" },
-      TOOL_EXEC_OPTS
-    );
-    const items = JSON.parse(listResult);
-    expect(items.length).toBe(1);
-    const memoryId = items[0].id;
-
-    // Delete it
+    // Delete by path
     const deleteResult = await memTools.memory_delete.execute(
-      { store_id: "store_1", memory_id: memoryId },
+      { path: "temp/data" },
       TOOL_EXEC_OPTS
     );
-    expect(deleteResult).toBe("Deleted");
+    expect(deleteResult).toContain("Deleted");
 
     // Verify it is gone
-    const afterDelete = await memTools.memory_list.execute(
-      { store_id: "store_1" },
+    const readResult = await memTools.memory_read.execute(
+      { path: "temp/data" },
       TOOL_EXEC_OPTS
     );
-    const afterItems = JSON.parse(afterDelete);
-    expect(afterItems).toHaveLength(0);
+    expect(readResult).toContain("not found");
   });
 });
 

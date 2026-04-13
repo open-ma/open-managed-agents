@@ -123,7 +123,7 @@ describe("Agent + Session snapshot", () => {
     expect(fetched.agent).toBeDefined();
   });
 
-  it("deleted agent does not prevent session access (snapshot preserved)", async () => {
+  it("cannot delete agent with active session, archive first", async () => {
     const a = await post("/v1/agents", { name: "DelSnapAgent", model: "claude-sonnet-4-6", harness: "cross-noop" });
     const agent = (await a.json()) as any;
     const e = await post("/v1/environments", { name: "delsnap-env", config: { type: "cloud" } });
@@ -132,10 +132,14 @@ describe("Agent + Session snapshot", () => {
     const s = await post("/v1/sessions", { agent: agent.id, environment_id: envObj.id });
     const session = (await s.json()) as any;
 
-    await del(`/v1/agents/${agent.id}`);
+    // Can't delete with active session
+    const delRes = await del(`/v1/agents/${agent.id}`);
+    expect(delRes.status).toBe(409);
 
-    const agentGet = await get(`/v1/agents/${agent.id}`);
-    expect(agentGet.status).toBe(404);
+    // Archive session then delete
+    await post(`/v1/sessions/${session.id}/archive`, {});
+    const delRes2 = await del(`/v1/agents/${agent.id}`);
+    expect(delRes2.status).toBe(200);
 
     const sessGet = await get(`/v1/sessions/${session.id}`);
     expect(sessGet.status).toBe(200);

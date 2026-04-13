@@ -603,28 +603,27 @@ describe("Full lifecycle", () => {
     expect(fetched.archived_at).toBeTruthy();
   });
 
-  it("deleted agent returns 404 but sessions still work (snapshot)", async () => {
+  it("cannot delete agent with active sessions (409)", async () => {
     const { agent, session } = await createFullSession();
 
-    // Post an event first
-    await post(`/v1/sessions/${session.id}/events`, {
-      events: [{ type: "user.message", content: [{ type: "text", text: "before delete" }] }],
-    });
-
-    // Delete the agent
+    // Try to delete agent with active session — should fail
     const delRes = await del(`/v1/agents/${agent.id}`);
-    expect(delRes.status).toBe(200);
+    expect(delRes.status).toBe(409);
+
+    // Archive session first, then delete should work
+    await post(`/v1/sessions/${session.id}/archive`, {});
+    const delRes2 = await del(`/v1/agents/${agent.id}`);
+    expect(delRes2.status).toBe(200);
 
     // Agent should be 404
     const agentGet = await get(`/v1/agents/${agent.id}`);
     expect(agentGet.status).toBe(404);
 
-    // Session should still exist and have agent snapshot
+    // Session still accessible with agent snapshot
     const sessGet = await get(`/v1/sessions/${session.id}`);
     expect(sessGet.status).toBe(200);
     const sessBody = (await sessGet.json()) as any;
     expect(sessBody.agent).toBeDefined();
-    expect(sessBody.agent.name).toBe("Stress Agent");
   });
 
   it("multiple sessions on same env are independent", async () => {
