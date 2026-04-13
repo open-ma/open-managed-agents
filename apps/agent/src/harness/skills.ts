@@ -127,52 +127,7 @@ export async function getSkillFiles(
   return results;
 }
 
-// Register built-in (Anthropic pre-built) skills
-registerSkill({
-  id: "web_research",
-  name: "Web Research",
-  source: "anthropic",
-  system_prompt_addition: "You have web research capabilities. Use web_search to find information and web_fetch to read web pages. Always cite your sources.",
-});
-
-registerSkill({
-  id: "code_review",
-  name: "Code Review",
-  source: "anthropic",
-  system_prompt_addition: "You are an expert code reviewer. Focus on: correctness, security vulnerabilities, performance issues, code style, and maintainability. Provide specific line-level feedback.",
-});
-
-registerSkill({
-  id: "data_analysis",
-  name: "Data Analysis",
-  source: "anthropic",
-  system_prompt_addition: "You are a data analyst. Use Python with pandas, numpy, and matplotlib for analysis. Always show your methodology, visualize results, and explain findings clearly.",
-});
-
-registerSkill({
-  id: "xlsx_processing",
-  name: "Excel Processing",
-  source: "anthropic",
-  system_prompt_addition: "You can process Excel (.xlsx) files. Use Python with openpyxl to read, analyze, and create spreadsheets.",
-});
-
-registerSkill({
-  id: "pptx_processing",
-  name: "PowerPoint Processing",
-  source: "anthropic",
-  system_prompt_addition: "You can process PowerPoint (.pptx) files. Use Python with python-pptx to read, analyze, and create presentations.",
-});
-
-registerSkill({
-  id: "pdf_processing",
-  name: "PDF Processing",
-  source: "anthropic",
-  system_prompt_addition: "You can process PDF files. Use Python with PyPDF2 or pdfplumber to read, extract text, and analyze PDFs.",
-});
-
-registerSkill({
-  id: "docx_processing",
-  name: "Document Processing",
-  source: "anthropic",
-  system_prompt_addition: "You can process Word (.docx) files. Use Python with python-docx to read, analyze, and create documents.",
-});
+// No hardcoded built-in skills.
+// All skills (including Anthropic's pptx/xlsx/docx/pdf) are managed via the
+// /v1/skills API and stored in KV. Use `scripts/seed-skills.ts` to import
+// skills from github.com/anthropics/skills into your deployment.
