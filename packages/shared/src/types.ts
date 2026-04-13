@@ -79,6 +79,7 @@ export interface EnvironmentConfig {
     };
   };
   status?: "building" | "ready" | "error";
+  build_error?: string;
   sandbox_worker_name?: string;
   metadata?: Record<string, unknown>;
   created_at: string;

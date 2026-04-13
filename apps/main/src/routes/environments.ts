@@ -16,19 +16,30 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig): Promise<voi
   if (env.BUILDER_SANDBOX && env.CLOUDFLARE_API_TOKEN) {
     // Run async — don't block the API response
     (async () => {
-      const result = await buildAndDeploySandboxWorker(env, envConfig);
-      envConfig.status = result.success ? "ready" : "error";
-      envConfig.sandbox_worker_name = result.sandbox_worker_name;
-      envConfig.updated_at = new Date().toISOString();
-      await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
+      try {
+        const result = await buildAndDeploySandboxWorker(env, envConfig);
+        envConfig.status = result.success ? "ready" : "error";
+        envConfig.sandbox_worker_name = result.sandbox_worker_name;
+        if (!result.success) {
+          envConfig.build_error = result.error;
+        }
+        envConfig.updated_at = new Date().toISOString();
+        await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
 
-      // PATCH main worker binding + store in KV
-      if (result.success && result.sandbox_worker_name && env.CLOUDFLARE_API_TOKEN && env.CLOUDFLARE_ACCOUNT_ID) {
-        const bindingName = envIdToBindingName(envConfig.id);
-        await addServiceBinding(env.CLOUDFLARE_ACCOUNT_ID, "managed-agents", env.CLOUDFLARE_API_TOKEN, bindingName, result.sandbox_worker_name);
-        await env.CONFIG_KV.put(`svcbind:${envConfig.id}`, result.sandbox_worker_name);
+        // PATCH main worker binding + store in KV
+        if (result.success && result.sandbox_worker_name && env.CLOUDFLARE_API_TOKEN && env.CLOUDFLARE_ACCOUNT_ID) {
+          const bindingName = envIdToBindingName(envConfig.id);
+          await addServiceBinding(env.CLOUDFLARE_ACCOUNT_ID, "managed-agents", env.CLOUDFLARE_API_TOKEN, bindingName, result.sandbox_worker_name);
+          await env.CONFIG_KV.put(`svcbind:${envConfig.id}`, result.sandbox_worker_name);
+        }
+      } catch (err) {
+        // Always update status even on unexpected errors
+        envConfig.status = "error";
+        envConfig.build_error = err instanceof Error ? err.message : String(err);
+        envConfig.updated_at = new Date().toISOString();
+        await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
       }
-    })().catch(() => {});
+    })();
     return;
   }
 
