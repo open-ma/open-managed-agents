@@ -43,7 +43,7 @@ export interface AgentConfig {
   model: string | { id: string; speed?: "standard" | "fast" };
   system: string;
   tools: ToolConfig[];
-  mcp_servers?: Array<{ name: string; type: string; url: string }>;
+  mcp_servers?: Array<{ name: string; type: string; url: string; authorization_token?: string }>;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   model_card_id?: string;
