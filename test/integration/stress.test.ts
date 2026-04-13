@@ -703,21 +703,16 @@ describe("Full lifecycle", () => {
     expect(status.status).toBe("terminated");
   });
 
-  it("archived session cannot receive new events through API", async () => {
+  it("archived session rejects new events (409)", async () => {
     const { session } = await createFullSession();
-
-    // Archive it
     await post(`/v1/sessions/${session.id}/archive`, {});
 
-    // The session is archived but the API does not currently block events
-    // to archived sessions (it only checks existence in KV). The session
-    // data is still present, so events still go through — this test verifies
-    // the current behavior (events still accepted post-archive).
     const res = await post(`/v1/sessions/${session.id}/events`, {
       events: [{ type: "user.message", content: [{ type: "text", text: "post-archive" }] }],
     });
-    // Current behavior: events are still accepted (session exists in KV)
-    expect(res.status).toBe(202);
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as any;
+    expect(body.error).toContain("archived");
   });
 });
 
