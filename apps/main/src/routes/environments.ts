@@ -182,13 +182,20 @@ app.put("/:id", async (c) => {
     const newConfig = JSON.stringify(body.config);
 
     if (newConfig !== oldConfig) {
-      env.status = "building";
-      env.sandbox_worker_name = undefined;
-      await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
-      try {
-        await triggerBuild(c.env, env);
-      } catch {
-        env.status = "error";
+      const canBuild = !!(c.env.BUILDER_SANDBOX || (c.env.GITHUB_TOKEN && c.env.GITHUB_REPO));
+      if (canBuild) {
+        env.status = "building";
+        env.sandbox_worker_name = undefined;
+        await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
+        try {
+          await triggerBuild(c.env, env);
+        } catch {
+          env.status = "error";
+        }
+      } else {
+        // No build infra — packages will be installed during sandbox warmup
+        env.sandbox_worker_name = env.sandbox_worker_name || "sandbox-default";
+        env.status = "ready";
       }
     }
   }
