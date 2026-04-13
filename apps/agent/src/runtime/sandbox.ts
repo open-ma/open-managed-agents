@@ -125,10 +125,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     this.commandSecrets.set(commandPrefix, secrets);
   }
 
-  // Expose registered prefixes for debugging
-  getRegisteredSecretPrefixes(): string[] {
-    return [...this.commandSecrets.keys()];
-  }
 
   private getSecretsForCommand(command: string): Record<string, string> | undefined {
     const commandName = this.getSimpleCommandName(command);
