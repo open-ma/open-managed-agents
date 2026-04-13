@@ -6,7 +6,7 @@
  *   1. Generate Dockerfile from packages config
  *   2. docker build inside DinD sandbox
  *   3. docker push to Cloudflare registry (temp credentials)
- *   4. wrangler deploy the sandbox worker
+ *   4. wrangler deploy the sandbox worker with new image
  */
 
 import type { Env } from "@open-managed-agents/shared";
@@ -22,9 +22,7 @@ interface BuildResult {
  * Generate a Dockerfile from packages config.
  */
 function generateDockerfile(packages?: EnvironmentConfig["config"]["packages"]): string {
-  // Use local Dockerfile as base on arm64 (Apple Silicon) since cloudflare/sandbox
-  // registry images are amd64-only. On amd64/CI, use the registry image.
-  const baseImage = "docker.io/cloudflare/sandbox:0.7.0";
+  const baseImage = "docker.io/cloudflare/sandbox:0.7.20";
   const lines = [`FROM ${baseImage}`];
 
   if (!packages) return lines.join("\n");
@@ -139,49 +137,32 @@ export async function buildAndDeploySandboxWorker(
       return { success: false, error: `Docker push failed: ${push.stderr || push.stdout}` };
     }
 
-    // 4. Generate wrangler config and sandbox worker code, then deploy
-    const kvId = "5e49bdaec1884f5989037c86ece7b462"; // TODO: make configurable
+    // 4. Clone agent source, generate config with custom image, deploy
+    const kvId = env.KV_NAMESPACE_ID || "5e49bdaec1884f5989037c86ece7b462";
     const wranglerConfig = generateWranglerConfig(envId, kvId, imageTag);
-    await sandbox.writeFile(`${workDir}/wrangler.jsonc`, wranglerConfig);
 
-    // Write minimal sandbox worker entry point
-    const workerCode = `
-import { Sandbox } from "@cloudflare/sandbox";
-export { Sandbox };
+    // Clone the agent source from the deployed repo
+    const repoUrl = env.GITHUB_REPO || "https://github.com/open-ma/open-managed-agents";
+    const agentDir = `${workDir}/agent`;
+    const cloneResult = await sandbox.exec(
+      `GIT_TEMPLATE_DIR= git clone --depth 1 ${repoUrl} ${agentDir} 2>&1`,
+      { timeout: 60000 }
+    );
+    if (!cloneResult.success) {
+      return { success: false, error: `Git clone failed: ${cloneResult.stderr || cloneResult.stdout}` };
+    }
 
-// SessionDO and harness imported from the shared package
-// For now, deploy a minimal proxy that forwards to SessionDO
-import { DurableObject } from "cloudflare:workers";
+    // Override wrangler config with custom image
+    await sandbox.writeFile(`${agentDir}/apps/agent/wrangler.jsonc`, wranglerConfig);
 
-export class SessionDO extends DurableObject {
-  async fetch(request) { return new Response("SessionDO stub", { status: 501 }); }
-}
-
-export default {
-  async fetch(request, env) {
-    const url = new URL(request.url);
-    const match = url.pathname.match(/^\\/sessions\\/([^/]+)\\/(.*)/);
-    if (!match) return new Response("Not found", { status: 404 });
-    const [, sessionId, rest] = match;
-    const doId = env.SESSION_DO.idFromName(sessionId);
-    const stub = env.SESSION_DO.get(doId);
-    return stub.fetch(new Request("http://internal/" + rest, {
-      method: request.method,
-      headers: request.headers,
-      body: request.method !== "GET" && request.method !== "HEAD" ? request.body : undefined,
-    }));
-  }
-};
-`;
-    await sandbox.writeFile(`${workDir}/index.ts`, workerCode);
-
-    // Deploy
+    // Install dependencies and deploy
     const deploy = await sandbox.exec(
-      `cd ${workDir} && CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" CLOUDFLARE_ACCOUNT_ID="${accountId}" npx wrangler deploy --config wrangler.jsonc 2>&1`,
-      { timeout: 120000 }
+      `cd ${agentDir} && npm install --workspace=apps/agent --workspace=packages/shared 2>&1 && ` +
+      `cd apps/agent && CLOUDFLARE_API_TOKEN="${env.CLOUDFLARE_API_TOKEN}" CLOUDFLARE_ACCOUNT_ID="${accountId}" npx wrangler deploy --config wrangler.jsonc 2>&1`,
+      { timeout: 600000 } // 10 min — npm install + wrangler deploy
     );
     if (!deploy.success) {
-      return { success: false, error: `Wrangler deploy failed: ${deploy.stderr || deploy.stdout}` };
+      return { success: false, error: `Deploy failed: ${deploy.stderr || deploy.stdout}` };
     }
 
     return { success: true, sandbox_worker_name: `sandbox-${envId}` };
