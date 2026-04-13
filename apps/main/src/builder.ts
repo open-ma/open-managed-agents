@@ -99,14 +99,16 @@ export async function buildAndDeploySandboxWorker(
   const workDir = `/tmp/build-${envId}`;
 
   try {
-    // Wait for Docker daemon to be ready
+    // Wait for Docker daemon to be ready (10s timeout per check, max 30s total)
     let ready = false;
-    for (let i = 0; i < 15; i++) {
-      const check = await sandbox.exec("docker version 2>/dev/null && echo READY || echo WAITING");
-      if (check.stdout?.includes("READY")) { ready = true; break; }
-      await new Promise(r => setTimeout(r, 2000));
+    for (let i = 0; i < 3; i++) {
+      try {
+        const check = await sandbox.exec("docker version 2>/dev/null && echo READY || echo WAITING", { timeout: 10000 });
+        if (check.stdout?.includes("READY")) { ready = true; break; }
+      } catch {}
+      await new Promise(r => setTimeout(r, 3000));
     }
-    if (!ready) return { success: false, error: "Docker daemon failed to start" };
+    if (!ready) return { success: false, error: "Docker daemon not available in this container. DinD may not be supported." };
 
     // 1. Generate Dockerfile
     const dockerfile = generateDockerfile(envConfig.config.packages);
