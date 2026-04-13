@@ -690,20 +690,22 @@ export function buildMemoryTools(
     }),
   });
 
+  // Helper: resolve path → memory ID via index (strong consistency)
+  const resolvePath = async (path: string): Promise<string | null> => {
+    return await kv.get(`mempath:${sid}:${path}`);
+  };
+
   tools.memory_read = tool({
     description: "Read the full content of a memory by path.",
     inputSchema: z.object({
       path: z.string().describe("Memory path to read"),
     }),
     execute: safe(async ({ path }: { path: string }) => {
-      const list = await kv.list({ prefix: `mem:${sid}:` });
-      for (const k of list.keys) {
-        const data = await kv.get(k.name);
-        if (!data) continue;
-        const mem = JSON.parse(data);
-        if (mem.path === path) return mem.content || "";
-      }
-      return "Error: memory not found at path: " + path;
+      const memId = await resolvePath(path);
+      if (!memId) return "Error: memory not found at path: " + path;
+      const data = await kv.get(`mem:${sid}:${memId}`);
+      if (!data) return "Error: memory data missing for path: " + path;
+      return JSON.parse(data).content || "";
     }),
   });
 
@@ -714,21 +716,12 @@ export function buildMemoryTools(
       content: z.string().describe("Memory content"),
     }),
     execute: safe(async ({ path, content }: { path: string; content: string }) => {
-      const list = await kv.list({ prefix: `mem:${sid}:` });
-      let existingId: string | null = null;
-      for (const k of list.keys) {
-        const data = await kv.get(k.name);
-        if (data) {
-          const mem = JSON.parse(data);
-          if (mem.path === path) { existingId = mem.id; break; }
-        }
-      }
-
       const now = new Date().toISOString();
       const size_bytes = new TextEncoder().encode(content).length;
       const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
       const content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 
+      const existingId = await resolvePath(path);
       if (existingId) {
         const data = await kv.get(`mem:${sid}:${existingId}`);
         if (data) {
@@ -745,6 +738,7 @@ export function buildMemoryTools(
       const id = `mem_${Date.now().toString(36)}`;
       const mem = { id, store_id: sid, path, content, content_sha256, size_bytes, created_at: now };
       await kv.put(`mem:${sid}:${id}`, JSON.stringify(mem));
+      await kv.put(`mempath:${sid}:${path}`, id); // path → id index
       return `Created memory at ${path}`;
     }),
   });
@@ -807,25 +801,21 @@ export function buildMemoryTools(
       expected_content_sha256: z.string().optional().describe("Expected SHA-256 of current content for concurrency check"),
     }),
     execute: safe(async ({ path, content, expected_content_sha256 }: { path: string; content: string; expected_content_sha256?: string }) => {
-      const list = await kv.list({ prefix: `mem:${sid}:` });
-      for (const k of list.keys) {
-        const data = await kv.get(k.name);
-        if (!data) continue;
-        const mem = JSON.parse(data);
-        if (mem.path === path) {
-          if (expected_content_sha256 && mem.content_sha256 !== expected_content_sha256) {
-            return "Error: content has been modified since last read (sha256 mismatch). Re-read and retry.";
-          }
-          mem.content = content;
-          mem.size_bytes = new TextEncoder().encode(content).length;
-          const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-          mem.content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
-          mem.updated_at = new Date().toISOString();
-          await kv.put(k.name, JSON.stringify(mem));
-          return `Edited memory at ${path}`;
-        }
+      const memId = await resolvePath(path);
+      if (!memId) return "Error: memory not found at path: " + path;
+      const data = await kv.get(`mem:${sid}:${memId}`);
+      if (!data) return "Error: memory data missing for path: " + path;
+      const mem = JSON.parse(data);
+      if (expected_content_sha256 && mem.content_sha256 !== expected_content_sha256) {
+        return "Error: content has been modified since last read (sha256 mismatch). Re-read and retry.";
       }
-      return "Error: memory not found at path: " + path;
+      mem.content = content;
+      mem.size_bytes = new TextEncoder().encode(content).length;
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+      mem.content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
+      mem.updated_at = new Date().toISOString();
+      await kv.put(`mem:${sid}:${memId}`, JSON.stringify(mem));
+      return `Edited memory at ${path}`;
     }),
   });
 
@@ -835,17 +825,11 @@ export function buildMemoryTools(
       path: z.string().describe("Memory path to delete"),
     }),
     execute: safe(async ({ path }: { path: string }) => {
-      const list = await kv.list({ prefix: `mem:${sid}:` });
-      for (const k of list.keys) {
-        const data = await kv.get(k.name);
-        if (!data) continue;
-        const mem = JSON.parse(data);
-        if (mem.path === path) {
-          await kv.delete(k.name);
-          return `Deleted memory at ${path}`;
-        }
-      }
-      return "Error: memory not found at path: " + path;
+      const memId = await resolvePath(path);
+      if (!memId) return "Error: memory not found at path: " + path;
+      await kv.delete(`mem:${sid}:${memId}`);
+      await kv.delete(`mempath:${sid}:${path}`);
+      return `Deleted memory at ${path}`;
     }),
   });
 
