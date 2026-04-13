@@ -346,8 +346,16 @@ app.delete("/:id", async (c) => {
 
   const session = JSON.parse(data) as SessionMeta;
 
+  // Check if session is running — cannot delete while active
   const { binding } = await getSandboxBinding(c.env, session.environment_id);
   if (binding) {
+    try {
+      const statusRes = await forwardToSandbox(binding, `/sessions/${id}/status`, c.req.raw, "GET");
+      const statusBody = await statusRes.json() as { status: string };
+      if (statusBody.status === "running") {
+        return c.json({ error: "Cannot delete a running session. Send an interrupt event first." }, 409);
+      }
+    } catch {}
     await forwardToSandbox(binding, `/sessions/${id}/destroy`, c.req.raw, "DELETE").catch(() => {});
   }
 
@@ -362,6 +370,12 @@ app.post("/:id/events", async (c) => {
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
+
+  // Archived sessions are read-only
+  if (session.archived_at) {
+    return c.json({ error: "Session is archived and cannot receive new events" }, 409);
+  }
+
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
   if (!binding) return c.json({ error }, status ?? 500);
 
