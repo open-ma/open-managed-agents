@@ -118,6 +118,9 @@ importers:
 
   apps/main:
     dependencies:
+      '@cloudflare/containers':
+        specifier: ^0.0.25
+        version: 0.0.25
       '@cloudflare/sandbox':
         specifier: ^0.8.9
         version: 0.8.9
@@ -255,6 +258,9 @@ packages:
 
   '@cfworker/json-schema@4.1.1':
     resolution: {integrity: sha512-gAmrUZSGtKc3AiBL71iNWxDsyUC5uMaKKGdvzYsBoTW/xi42JQHl7eKV2OYzCUqvc+D2RCcf7EXY2iCyFIk6og==}
+
+  '@cloudflare/containers@0.0.25':
+    resolution: {integrity: sha512-41sCUwGPhMMQI/kwksEZXNWe/GZdQoIy8QlgO4NAF68M4y4NN41IXeQ4n2jn4iJ7tHaV4noe7RI75b7T6h2JGg==}
 
   '@cloudflare/containers@0.3.0':
     resolution: {integrity: sha512-8HM1NgXThWCTk7SH28QFxqMNLJwl6RrMkj3qd0KvDA59BALsn3mZXNDT94i1JaGZnP4Bc8sPGs1u9UAl/mVUVg==}
@@ -2883,6 +2889,8 @@ snapshots:
       '@babel/helper-validator-identifier': 7.28.5
 
   '@cfworker/json-schema@4.1.1': {}
+
+  '@cloudflare/containers@0.0.25': {}
 
   '@cloudflare/containers@0.3.0': {}
 
