@@ -655,39 +655,34 @@ export async function buildTools(
 }
 
 // Memory tools — operate directly on KV, no self-fetch
+/**
+ * Build memory tools for a session. store_id is auto-bound (Anthropic-aligned).
+ * Model never sees or needs to specify store_id.
+ * For multi-store, first store is default; model uses path prefixes to organize.
+ */
 export function buildMemoryTools(
   storeIds: string[],
   kv: KVNamespace,
   ai?: Ai,
   vectorize?: VectorizeIndex,
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
 ): Record<string, any> {
   if (!storeIds.length || !kv) return {};
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Record<string, any> = {};
-
-  const defaultStoreId = storeIds[0];
-  const storeDesc = storeIds.length === 1
-    ? `Memory store: ${defaultStoreId}`
-    : `Available stores: ${storeIds.join(", ")}`;
+  const sid = storeIds[0]; // Auto-bind to first store (Anthropic: one store per session resource)
 
   tools.memory_list = tool({
-    description: `List memories. Returns paths and metadata (no content). ${storeDesc}`,
+    description: "List memories in the store. Returns paths and metadata (no content). Use path_prefix to filter.",
     inputSchema: z.object({
-      store_id: storeIds.length === 1
-        ? z.string().optional().describe(`Defaults to ${defaultStoreId}`)
-        : z.enum(storeIds as [string, ...string[]]).describe("Which memory store"),
-      prefix: z.string().optional(),
+      path_prefix: z.string().optional().describe("Filter by path prefix, e.g. 'project/'"),
     }),
-    execute: safe(async ({ store_id, prefix }) => {
-      const sid = store_id || defaultStoreId;
+    execute: safe(async ({ path_prefix }: { path_prefix?: string }) => {
       const list = await kv.list({ prefix: `mem:${sid}:` });
       const items = await Promise.all(
         list.keys.map(async (k) => {
           const data = await kv.get(k.name);
           if (!data) return null;
           const mem = JSON.parse(data);
-          if (prefix && !mem.path?.startsWith(prefix)) return null;
+          if (path_prefix && !mem.path?.startsWith(path_prefix)) return null;
           return { id: mem.id, path: mem.path, size_bytes: mem.size_bytes, updated_at: mem.updated_at };
         })
       );
@@ -696,32 +691,29 @@ export function buildMemoryTools(
   });
 
   tools.memory_read = tool({
-    description: `Read the full content of a specific memory. ${storeDesc}`,
+    description: "Read the full content of a memory by path.",
     inputSchema: z.object({
-      store_id: storeIds.length === 1
-        ? z.string().optional().describe(`Defaults to ${defaultStoreId}`)
-        : z.enum(storeIds as [string, ...string[]]),
-      memory_id: z.string(),
+      path: z.string().describe("Memory path to read"),
     }),
-    execute: safe(async ({ store_id, memory_id }) => {
-      const data = await kv.get(`mem:${store_id || defaultStoreId}:${memory_id}`);
-      if (!data) return "Error: memory not found";
-      const mem = JSON.parse(data);
-      return mem.content || "";
+    execute: safe(async ({ path }: { path: string }) => {
+      const list = await kv.list({ prefix: `mem:${sid}:` });
+      for (const k of list.keys) {
+        const data = await kv.get(k.name);
+        if (!data) continue;
+        const mem = JSON.parse(data);
+        if (mem.path === path) return mem.content || "";
+      }
+      return "Error: memory not found at path: " + path;
     }),
   });
 
   tools.memory_write = tool({
-    description: `Write or update a memory. Persist learnings, context, or state across sessions. ${storeDesc}`,
+    description: "Write or update a memory at a path. Creates if not exists, updates if path matches.",
     inputSchema: z.object({
-      store_id: storeIds.length === 1
-        ? z.string().optional().describe(`Defaults to ${defaultStoreId}`)
-        : z.enum(storeIds as [string, ...string[]]),
-      path: z.string().describe("Logical path, e.g. 'project/architecture'"),
-      content: z.string(),
+      path: z.string().describe("Memory path, e.g. 'notes/architecture.md'"),
+      content: z.string().describe("Memory content"),
     }),
-    execute: safe(async ({ store_id, path, content }) => {
-      const sid = store_id || defaultStoreId;
+    execute: safe(async ({ path, content }: { path: string; content: string }) => {
       const list = await kv.list({ prefix: `mem:${sid}:` });
       let existingId: string | null = null;
       for (const k of list.keys) {
@@ -734,78 +726,72 @@ export function buildMemoryTools(
 
       const now = new Date().toISOString();
       const size_bytes = new TextEncoder().encode(content).length;
+      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
+      const content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
 
       if (existingId) {
-        const data = await kv.get(`mem:${store_id || defaultStoreId}:${existingId}`);
+        const data = await kv.get(`mem:${sid}:${existingId}`);
         if (data) {
           const mem = JSON.parse(data);
           mem.content = content;
           mem.size_bytes = size_bytes;
+          mem.content_sha256 = content_sha256;
           mem.updated_at = now;
-          await kv.put(`mem:${store_id || defaultStoreId}:${existingId}`, JSON.stringify(mem));
+          await kv.put(`mem:${sid}:${existingId}`, JSON.stringify(mem));
           return `Updated memory at ${path}`;
         }
       }
 
       const id = `mem_${Date.now().toString(36)}`;
-      const mem = { id, store_id, path, content, size_bytes, created_at: now };
-      await kv.put(`mem:${store_id || defaultStoreId}:${id}`, JSON.stringify(mem));
+      const mem = { id, store_id: sid, path, content, content_sha256, size_bytes, created_at: now };
+      await kv.put(`mem:${sid}:${id}`, JSON.stringify(mem));
       return `Created memory at ${path}`;
     }),
   });
 
   tools.memory_search = tool({
-    description: "Search memories by semantic similarity or substring match. Returns matching paths and snippets.",
+    description: "Search memories by keyword. Returns matching paths and content snippets.",
     inputSchema: z.object({
-      store_id: storeIds.length === 1
-        ? z.string().optional().describe(`Defaults to ${defaultStoreId}`)
-        : z.enum(storeIds as [string, ...string[]]),
-      query: z.string(),
+      query: z.string().describe("Search query"),
     }),
-    execute: safe(async ({ store_id, query }) => {
+    execute: safe(async ({ query }: { query: string }) => {
       // Try semantic search via Vectorize first
       if (ai && vectorize) {
         try {
-          const embedding = await ai.run("@cf/google/embedding-gemma" as any, {
-            text: [query],
-          }) as { data: number[][] };
+          const embedding = await ai.run("@cf/google/embedding-gemma" as any, { text: [query] }) as { data: number[][] };
           if (embedding.data?.[0]) {
             const results = await vectorize.query(embedding.data[0], {
               topK: 10,
-              filter: { store_id },
+              filter: { store_id: sid },
               returnMetadata: "all",
             });
             if (results.matches?.length) {
               const matches = await Promise.all(
                 results.matches.map(async (m) => {
                   const memId = (m.metadata as any)?.memory_id;
-                  const path = (m.metadata as any)?.path || "";
                   let snippet = "";
                   if (memId) {
-                    const data = await kv.get(`mem:${store_id || defaultStoreId}:${memId}`);
+                    const data = await kv.get(`mem:${sid}:${memId}`);
                     if (data) snippet = JSON.parse(data).content?.slice(0, 200) || "";
                   }
-                  return { path, snippet, score: m.score };
+                  return { path: (m.metadata as any)?.path || "", snippet, score: m.score };
                 })
               );
               return JSON.stringify(matches);
             }
           }
-        } catch {
-          // Fall through to substring search
-        }
+        } catch { /* Fall through to substring search */ }
       }
 
       // Fallback: substring search
-      const list = await kv.list({ prefix: `mem:${store_id || defaultStoreId}:` });
+      const list = await kv.list({ prefix: `mem:${sid}:` });
       const matches: Array<{ path: string; snippet: string }> = [];
       const q = query.toLowerCase();
-
       for (const k of list.keys) {
         const data = await kv.get(k.name);
         if (!data) continue;
         const mem = JSON.parse(data);
-        if (mem.content?.toLowerCase().includes(q)) {
+        if (mem.content?.toLowerCase().includes(q) || mem.path?.toLowerCase().includes(q)) {
           matches.push({ path: mem.path, snippet: mem.content.slice(0, 200) });
         }
       }
@@ -813,52 +799,23 @@ export function buildMemoryTools(
     }),
   });
 
-  tools.memory_edit = tool({
-    description: "Edit an existing memory by ID. Can update content and/or path (rename). Supports optimistic concurrency via expected_content_sha256.",
-    inputSchema: z.object({
-      store_id: storeIds.length === 1
-        ? z.string().optional().describe(`Defaults to ${defaultStoreId}`)
-        : z.enum(storeIds as [string, ...string[]]),
-      memory_id: z.string(),
-      content: z.string().optional(),
-      path: z.string().optional(),
-      expected_content_sha256: z.string().optional(),
-    }),
-    execute: safe(async ({ store_id, memory_id, content, path, expected_content_sha256 }) => {
-      const data = await kv.get(`mem:${store_id || defaultStoreId}:${memory_id}`);
-      if (!data) return "Error: Memory not found";
-      const mem = JSON.parse(data);
-
-      if (expected_content_sha256 && mem.content_sha256 !== expected_content_sha256) {
-        return "Error: Content has been modified (sha256 mismatch)";
-      }
-
-      if (path !== undefined) mem.path = path;
-      if (content !== undefined) {
-        mem.content = content;
-        mem.size_bytes = new TextEncoder().encode(content).length;
-        // Recompute hash
-        const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-        mem.content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
-      }
-      mem.updated_at = new Date().toISOString();
-
-      await kv.put(`mem:${store_id || defaultStoreId}:${memory_id}`, JSON.stringify(mem));
-      return JSON.stringify({ id: mem.id, path: mem.path, size_bytes: mem.size_bytes });
-    }),
-  });
-
   tools.memory_delete = tool({
-    description: "Delete a memory from a store.",
+    description: "Delete a memory by path.",
     inputSchema: z.object({
-      store_id: storeIds.length === 1
-        ? z.string().optional().describe(`Defaults to ${defaultStoreId}`)
-        : z.enum(storeIds as [string, ...string[]]),
-      memory_id: z.string(),
+      path: z.string().describe("Memory path to delete"),
     }),
-    execute: safe(async ({ store_id, memory_id }) => {
-      await kv.delete(`mem:${store_id || defaultStoreId}:${memory_id}`);
-      return "Deleted";
+    execute: safe(async ({ path }: { path: string }) => {
+      const list = await kv.list({ prefix: `mem:${sid}:` });
+      for (const k of list.keys) {
+        const data = await kv.get(k.name);
+        if (!data) continue;
+        const mem = JSON.parse(data);
+        if (mem.path === path) {
+          await kv.delete(k.name);
+          return `Deleted memory at ${path}`;
+        }
+      }
+      return "Error: memory not found at path: " + path;
     }),
   });
 
