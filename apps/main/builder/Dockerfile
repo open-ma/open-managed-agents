@@ -1,31 +1,20 @@
-# DinD builder: builds and deploys per-environment sandbox workers.
-# Based on rootless Docker + Cloudflare Sandbox binary + Node.js + Wrangler.
+# DinD builder: builds and pushes custom sandbox images.
+# Pattern: docker:dind-rootless + Node.js HTTP server on port 8080.
 
 FROM docker:dind-rootless
-
 USER root
 
-# Copy sandbox binary and dependencies (musl build for Alpine)
-COPY --from=docker.io/cloudflare/sandbox:0.7.4-musl /container-server/sandbox /sandbox
-COPY --from=docker.io/cloudflare/sandbox:0.7.4-musl /usr/lib/libstdc++.so.6 /usr/lib/libstdc++.so.6
-COPY --from=docker.io/cloudflare/sandbox:0.7.4-musl /usr/lib/libgcc_s.so.1 /usr/lib/libgcc_s.so.1
-COPY --from=docker.io/cloudflare/sandbox:0.7.4-musl /bin/bash /bin/bash
-COPY --from=docker.io/cloudflare/sandbox:0.7.4-musl /usr/lib/libreadline.so.8 /usr/lib/libreadline.so.8
-COPY --from=docker.io/cloudflare/sandbox:0.7.4-musl /usr/lib/libreadline.so.8.2 /usr/lib/libreadline.so.8.2
-
-# Install Node.js + npm (for wrangler)
-RUN apk add --no-cache nodejs npm jq
+# Node.js + npm + git (for wrangler + cloning)
+RUN apk add --no-cache nodejs npm git jq bash
 
 # Install wrangler globally
 RUN npm install -g wrangler
 
-# Startup script: init Docker daemon then wait
-RUN printf '#!/bin/sh\n\
-set -eu\n\
-dockerd-entrypoint.sh dockerd --iptables=false --ip6tables=false &\n\
-until docker version >/dev/null 2>&1; do sleep 0.2; done\n\
-echo "Docker is ready"\n\
-wait\n' > /home/rootless/boot.sh && chmod +x /home/rootless/boot.sh
+# Builder HTTP server
+COPY server.js /opt/builder/server.js
 
-ENTRYPOINT ["/sandbox"]
-CMD ["/home/rootless/boot.sh"]
+# Entrypoint: start dockerd in background, wait for it, then start server
+COPY entrypoint.sh /opt/builder/entrypoint.sh
+RUN chmod +x /opt/builder/entrypoint.sh
+
+ENTRYPOINT ["sh", "-c", "dockerd-entrypoint.sh dockerd --iptables=false --ip6tables=false & exec /opt/builder/entrypoint.sh"]
