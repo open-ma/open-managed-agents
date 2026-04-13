@@ -87,11 +87,14 @@ export async function buildAndDeploySandboxWorker(
   env: Env,
   envConfig: EnvironmentConfig,
 ): Promise<BuildResult> {
+  console.log(`[builder] starting build for env ${envConfig.id}`);
   if (!env.CLOUDFLARE_API_TOKEN || !env.CLOUDFLARE_ACCOUNT_ID) {
+    console.log("[builder] missing CLOUDFLARE_API_TOKEN or CLOUDFLARE_ACCOUNT_ID");
     return { success: false, error: "CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID are required" };
   }
 
   const { getSandbox } = await import("@cloudflare/sandbox");
+  console.log("[builder] getSandbox imported, creating stub...");
   const sandbox = getSandbox(env.BUILDER_SANDBOX as any, `builder-${envConfig.id}`);
 
   const envId = envConfig.id;
@@ -101,6 +104,7 @@ export async function buildAndDeploySandboxWorker(
 
   try {
     // Wait for Docker daemon to be ready (boot.sh starts dockerd on container start)
+    console.log("[builder] waiting for docker daemon...");
     let ready = false;
     for (let i = 0; i < 10; i++) {
       try {
@@ -108,13 +112,18 @@ export async function buildAndDeploySandboxWorker(
           "docker version >/dev/null 2>&1 && echo READY || echo WAITING",
           { timeout: 5_000 }
         );
+        console.log(`[builder] docker check ${i}: stdout=${check.stdout?.trim()}, success=${check.success}`);
         if (check.stdout?.includes("READY")) { ready = true; break; }
-      } catch {}
+      } catch (e) {
+        console.log(`[builder] docker check ${i} error: ${e instanceof Error ? e.message : String(e)}`);
+      }
       await new Promise(r => setTimeout(r, 2_000));
     }
     if (!ready) {
+      console.log("[builder] docker daemon not ready after 20s");
       return { success: false, error: "Docker daemon not ready after 20s. Is BuilderSandbox using the DinD image?" };
     }
+    console.log("[builder] docker daemon ready");
 
     // 1. Generate Dockerfile
     const dockerfile = generateDockerfile(envConfig.config.packages);
@@ -178,6 +187,7 @@ export async function buildAndDeploySandboxWorker(
     return { success: true, sandbox_worker_name: `sandbox-${envId}` };
 
   } catch (err) {
+    console.log(`[builder] uncaught error: ${err instanceof Error ? err.message : String(err)}`);
     return { success: false, error: err instanceof Error ? err.message : String(err) };
   }
 }
