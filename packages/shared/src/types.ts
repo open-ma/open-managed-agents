@@ -61,6 +61,7 @@ export interface AgentConfig {
 export interface EnvironmentConfig {
   id: string;
   name: string;
+  description?: string;
   config: {
     type: string; // "cloud"
     packages?: {
@@ -470,7 +471,7 @@ export interface FileRecord {
 export interface SessionResource {
   id: string;
   session_id: string;
-  type: "file" | "memory_store" | "github_repository" | "github_repo";
+  type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
   file_id?: string;
   memory_store_id?: string;
   url?: string;

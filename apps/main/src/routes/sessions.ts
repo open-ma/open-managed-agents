@@ -22,7 +22,7 @@ async function getSandboxBinding(
     return { binding: null, error: "Environment is still building", status: 503 };
   }
   if (envConfig.status === "error") {
-    return { binding: null, error: "Environment build failed", status: 500 };
+    return { binding: null, error: `Environment build failed: ${envConfig.build_error || "unknown error"}`, status: 500 };
   }
   if (!envConfig.sandbox_worker_name) {
     return { binding: null, error: "No sandbox worker configured for this environment", status: 500 };
@@ -90,7 +90,7 @@ app.post("/", async (c) => {
     title?: string;
     vault_ids?: string[];
     resources?: Array<{
-      type: "file" | "memory_store" | "github_repository" | "github_repo";
+      type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
       file_id?: string;
       memory_store_id?: string;
       mount_path?: string;
@@ -99,6 +99,8 @@ app.post("/", async (c) => {
       repo_url?: string;
       authorization_token?: string;
       checkout?: { type?: string; name?: string; sha?: string };
+      name?: string;
+      value?: string;
     }>;
   }>();
 
@@ -207,6 +209,18 @@ app.post("/", async (c) => {
         if (res.authorization_token) {
           await c.env.CONFIG_KV.put(`secret:${sessionId}:${resourceId}`, res.authorization_token);
         }
+        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        createdResources.push(resource);
+      } else if (res.type === "env_secret" && res.name && res.value) {
+        const resourceId = generateResourceId();
+        const resource: SessionResource = {
+          id: resourceId,
+          session_id: sessionId,
+          type: "env_secret",
+          name: res.name,
+          created_at: new Date().toISOString(),
+        };
+        await c.env.CONFIG_KV.put(`secret:${sessionId}:${resourceId}`, res.value);
         await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
         createdResources.push(resource);
       }
