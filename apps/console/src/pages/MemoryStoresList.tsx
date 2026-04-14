@@ -66,70 +66,72 @@ export function MemoryStoresList() {
     setSelectedStore(null); setMemories([]); load();
   };
 
-  // Back to list
+  // Store detail view
   if (selectedStore) {
     return (
-      <div>
+      <div className="flex-1 overflow-y-auto p-8 lg:p-10">
         <button onClick={() => { setSelectedStore(null); setSelectedMemory(null); }}
-          style={{ marginBottom: 16, cursor: "pointer", background: "none", border: "1px solid #666", padding: "4px 12px", borderRadius: 4, color: "#ccc" }}>
+          className="mb-4 px-3 py-1.5 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">
           &larr; Back
         </button>
-        <h2>{selectedStore.name}</h2>
-        {selectedStore.description && <p style={{ color: "#999" }}>{selectedStore.description}</p>}
-        <p style={{ color: "#666", fontSize: 12 }}>ID: {selectedStore.id}</p>
+        <h2 className="font-display text-xl font-semibold tracking-tight">{selectedStore.name}</h2>
+        {selectedStore.description && <p className="text-fg-muted mt-1">{selectedStore.description}</p>}
+        <p className="text-fg-subtle text-xs font-mono mt-1">ID: {selectedStore.id}</p>
 
-        <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+        <div className="flex gap-2 my-4">
           <button onClick={() => setShowWrite(true)}
-            style={{ padding: "6px 16px", background: "#2563eb", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+            className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">
             Write Memory
           </button>
           <button onClick={() => deleteStore(selectedStore.id)}
-            style={{ padding: "6px 16px", background: "#dc2626", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>
+            className="px-4 py-2 bg-danger text-brand-fg rounded-lg text-sm font-medium hover:opacity-90 transition-colors">
             Delete Store
           </button>
         </div>
 
         {showWrite && (
-          <div style={{ background: "#1e1e1e", padding: 16, borderRadius: 8, marginBottom: 16 }}>
-            <h3>Write Memory</h3>
+          <div className="bg-bg-surface border border-border rounded-lg p-4 mb-4">
+            <h3 className="font-semibold mb-3">Write Memory</h3>
             <input placeholder="Path (e.g. project/notes)" value={writePath} onChange={e => setWritePath(e.target.value)}
-              style={{ width: "100%", padding: 8, marginBottom: 8, background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4 }} />
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg outline-none focus:border-border-strong" />
             <textarea placeholder="Content" value={writeContent} onChange={e => setWriteContent(e.target.value)} rows={6}
-              style={{ width: "100%", padding: 8, marginBottom: 8, background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4, fontFamily: "monospace" }} />
-            <div style={{ display: "flex", gap: 8 }}>
-              <button onClick={writeMemory} style={{ padding: "6px 16px", background: "#2563eb", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Save</button>
-              <button onClick={() => setShowWrite(false)} style={{ padding: "6px 16px", background: "#444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Cancel</button>
+              className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg font-mono outline-none focus:border-border-strong" />
+            <div className="flex gap-2">
+              <button onClick={writeMemory} className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">Save</button>
+              <button onClick={() => setShowWrite(false)} className="px-4 py-2 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">Cancel</button>
             </div>
           </div>
         )}
 
-        {memsLoading ? <p>Loading...</p> : (
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
-              <tr style={{ borderBottom: "1px solid #333" }}>
-                <th style={{ textAlign: "left", padding: 8 }}>Path</th>
-                <th style={{ textAlign: "left", padding: 8 }}>Size</th>
-                <th style={{ textAlign: "left", padding: 8 }}>Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {memories.map(m => (
-                <tr key={m.id} onClick={() => setSelectedMemory(selectedMemory?.id === m.id ? null : m)}
-                  style={{ borderBottom: "1px solid #222", cursor: "pointer", background: selectedMemory?.id === m.id ? "#1a1a2e" : "transparent" }}>
-                  <td style={{ padding: 8, fontFamily: "monospace" }}>{m.path}</td>
-                  <td style={{ padding: 8 }}>{m.size_bytes} B</td>
-                  <td style={{ padding: 8, color: "#999" }}>{new Date(m.created_at).toLocaleString()}</td>
+        {memsLoading ? <p className="text-fg-subtle text-sm py-4">Loading...</p> : (
+          <div className="border border-border rounded-lg overflow-hidden">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
+                  <th className="text-left px-4 py-2.5">Path</th>
+                  <th className="text-left px-4 py-2.5">Size</th>
+                  <th className="text-left px-4 py-2.5">Created</th>
                 </tr>
-              ))}
-              {!memories.length && <tr><td colSpan={3} style={{ padding: 16, textAlign: "center", color: "#666" }}>No memories yet</td></tr>}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {memories.map(m => (
+                  <tr key={m.id} onClick={() => setSelectedMemory(selectedMemory?.id === m.id ? null : m)}
+                    className={`border-t border-border cursor-pointer hover:bg-bg-surface transition-colors ${selectedMemory?.id === m.id ? "bg-brand-subtle" : ""}`}>
+                    <td className="px-4 py-3 font-mono text-xs">{m.path}</td>
+                    <td className="px-4 py-3">{m.size_bytes} B</td>
+                    <td className="px-4 py-3 text-fg-muted">{new Date(m.created_at).toLocaleString()}</td>
+                  </tr>
+                ))}
+                {!memories.length && <tr><td colSpan={3} className="px-4 py-8 text-center text-fg-subtle">No memories yet</td></tr>}
+              </tbody>
+            </table>
+          </div>
         )}
 
         {selectedMemory && (
-          <div style={{ marginTop: 16, background: "#1e1e1e", padding: 16, borderRadius: 8 }}>
-            <h3 style={{ fontFamily: "monospace" }}>{selectedMemory.path}</h3>
-            <pre style={{ whiteSpace: "pre-wrap", background: "#0d0d0d", padding: 12, borderRadius: 4, maxHeight: 400, overflow: "auto" }}>
+          <div className="mt-4 bg-bg-surface border border-border rounded-lg p-4">
+            <h3 className="font-mono text-sm font-semibold mb-2">{selectedMemory.path}</h3>
+            <pre className="whitespace-pre-wrap bg-bg border border-border rounded-lg p-3 max-h-96 overflow-auto text-sm font-mono text-fg-muted">
               {selectedMemory.content}
             </pre>
           </div>
@@ -139,49 +141,54 @@ export function MemoryStoresList() {
   }
 
   return (
-    <div>
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 16 }}>
-        <h1>Memory Stores</h1>
+    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="font-display text-xl font-semibold tracking-tight">Memory Stores</h1>
+          <p className="text-fg-muted text-sm">Manage persistent memory stores for your agents.</p>
+        </div>
         <button onClick={() => setShowCreate(true)}
-          style={{ padding: "8px 20px", background: "#2563eb", color: "#fff", border: "none", borderRadius: 6, cursor: "pointer" }}>
-          Create Store
+          className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">
+          + New store
         </button>
       </div>
 
       {showCreate && (
-        <div style={{ background: "#1e1e1e", padding: 16, borderRadius: 8, marginBottom: 16 }}>
+        <div className="bg-bg-surface border border-border rounded-lg p-4 mb-4">
           <input placeholder="Store name" value={formName} onChange={e => setFormName(e.target.value)}
-            style={{ width: "100%", padding: 8, marginBottom: 8, background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4 }} />
+            className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg outline-none focus:border-border-strong" />
           <input placeholder="Description (optional)" value={formDesc} onChange={e => setFormDesc(e.target.value)}
-            style={{ width: "100%", padding: 8, marginBottom: 8, background: "#2a2a2a", color: "#fff", border: "1px solid #444", borderRadius: 4 }} />
-          <div style={{ display: "flex", gap: 8 }}>
-            <button onClick={createStore} style={{ padding: "6px 16px", background: "#2563eb", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Create</button>
-            <button onClick={() => setShowCreate(false)} style={{ padding: "6px 16px", background: "#444", color: "#fff", border: "none", borderRadius: 4, cursor: "pointer" }}>Cancel</button>
+            className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg outline-none focus:border-border-strong" />
+          <div className="flex gap-2">
+            <button onClick={createStore} className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">Create</button>
+            <button onClick={() => setShowCreate(false)} className="px-4 py-2 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">Cancel</button>
           </div>
         </div>
       )}
 
-      {loading ? <p>Loading...</p> : (
-        <table style={{ width: "100%", borderCollapse: "collapse" }}>
-          <thead>
-            <tr style={{ borderBottom: "1px solid #333" }}>
-              <th style={{ textAlign: "left", padding: 8 }}>Name</th>
-              <th style={{ textAlign: "left", padding: 8 }}>ID</th>
-              <th style={{ textAlign: "left", padding: 8 }}>Created</th>
-            </tr>
-          </thead>
-          <tbody>
-            {stores.map(s => (
-              <tr key={s.id} onClick={() => openStore(s)}
-                style={{ borderBottom: "1px solid #222", cursor: "pointer" }}>
-                <td style={{ padding: 8 }}>{s.name}</td>
-                <td style={{ padding: 8, fontFamily: "monospace", color: "#999", fontSize: 12 }}>{s.id}</td>
-                <td style={{ padding: 8, color: "#999" }}>{new Date(s.created_at).toLocaleString()}</td>
+      {loading ? <p className="text-fg-subtle text-sm py-8 text-center">Loading...</p> : (
+        <div className="border border-border rounded-lg overflow-hidden">
+          <table className="w-full text-sm">
+            <thead>
+              <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
+                <th className="text-left px-4 py-2.5">Name</th>
+                <th className="text-left px-4 py-2.5">ID</th>
+                <th className="text-left px-4 py-2.5">Created</th>
               </tr>
-            ))}
-            {!stores.length && <tr><td colSpan={3} style={{ padding: 16, textAlign: "center", color: "#666" }}>No memory stores</td></tr>}
-          </tbody>
-        </table>
+            </thead>
+            <tbody>
+              {stores.map(s => (
+                <tr key={s.id} onClick={() => openStore(s)}
+                  className="border-t border-border cursor-pointer hover:bg-bg-surface transition-colors">
+                  <td className="px-4 py-3 font-medium">{s.name}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-fg-muted">{s.id}</td>
+                  <td className="px-4 py-3 text-fg-muted">{new Date(s.created_at).toLocaleString()}</td>
+                </tr>
+              ))}
+              {!stores.length && <tr><td colSpan={3} className="px-4 py-8 text-center text-fg-subtle">No memory stores</td></tr>}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

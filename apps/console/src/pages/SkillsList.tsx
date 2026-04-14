@@ -1,5 +1,7 @@
 import { useEffect, useState } from "react";
 import { useApi } from "../lib/api";
+import { Modal } from "../components/Modal";
+import { Button } from "../components/Button";
 
 /* ---------- types ---------- */
 
@@ -195,7 +197,7 @@ export function SkillsList() {
   /* ---- helpers ---- */
 
   const inputCls =
-    "w-full border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-stone-400 transition-colors";
+    "w-full border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-border-strong transition-colors bg-bg text-fg";
 
   const anthropicSkills = skills.filter((s) => s.source === "anthropic");
   const customSkills = skills.filter((s) => s.source === "custom");
@@ -207,27 +209,24 @@ export function SkillsList() {
       {/* header */}
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="font-[family-name:var(--font-display)] text-2xl font-semibold tracking-tight">
+          <h1 className="font-display text-xl font-semibold tracking-tight">
             Skills
           </h1>
-          <p className="text-stone-500 text-sm">
+          <p className="text-fg-muted text-sm">
             Manage pre-built and custom skills for your agents.
           </p>
         </div>
-        <button
-          onClick={() => setShowCreate(true)}
-          className="px-4 py-2 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800 transition-colors"
-        >
+        <Button onClick={() => setShowCreate(true)}>
           + New skill
-        </button>
+        </Button>
       </div>
 
       {loading ? (
-        <div className="text-stone-400 text-sm py-8 text-center">
+        <div className="text-fg-subtle text-sm py-8 text-center">
           Loading...
         </div>
       ) : skills.length === 0 ? (
-        <div className="text-center py-16 text-stone-400 border border-dashed border-stone-200 rounded-xl">
+        <div className="text-center py-16 text-fg-subtle border border-dashed border-border rounded-lg">
           <p className="text-lg mb-1">No skills yet</p>
           <p className="text-sm">
             Create a skill to give your agents domain expertise.
@@ -238,13 +237,13 @@ export function SkillsList() {
           {/* Anthropic built-in skills */}
           {anthropicSkills.length > 0 && (
             <>
-              <h3 className="text-sm font-medium text-stone-700 mb-3">
+              <h3 className="text-sm font-medium text-fg mb-3">
                 Anthropic Pre-built Skills
               </h3>
-              <div className="border border-stone-200 rounded-xl overflow-hidden mb-6">
+              <div className="border border-border rounded-lg overflow-hidden mb-6">
                 <table className="w-full text-sm">
                   <thead>
-                    <tr className="bg-stone-100/60 text-stone-500 text-xs uppercase tracking-wider">
+                    <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
                       <th className="text-left px-4 py-2.5">Name</th>
                       <th className="text-left px-4 py-2.5">Description</th>
                       <th className="text-left px-4 py-2.5">Source</th>
@@ -254,21 +253,21 @@ export function SkillsList() {
                     {anthropicSkills.map((s) => (
                       <tr
                         key={s.id}
-                        className="border-t border-stone-100"
+                        className="border-t border-border"
                       >
                         <td className="px-4 py-3">
                           <div className="font-medium">
                             {s.display_title || s.name}
                           </div>
-                          <div className="text-xs text-stone-400 font-[family-name:var(--font-mono)]">
+                          <div className="text-xs text-fg-subtle font-mono">
                             {s.name}
                           </div>
                         </td>
-                        <td className="px-4 py-3 text-stone-600">
+                        <td className="px-4 py-3 text-fg-muted">
                           {s.description}
                         </td>
                         <td className="px-4 py-3">
-                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-amber-50 text-amber-700 border border-amber-200">
+                          <span className="inline-flex items-center px-2 py-0.5 rounded-full text-xs font-medium bg-warning-subtle text-warning">
                             built-in
                           </span>
                         </td>
@@ -281,11 +280,11 @@ export function SkillsList() {
           )}
 
           {/* Custom skills */}
-          <h3 className="text-sm font-medium text-stone-700 mb-3">
+          <h3 className="text-sm font-medium text-fg mb-3">
             Custom Skills
           </h3>
           {customSkills.length === 0 ? (
-            <div className="text-center py-12 text-stone-400 border border-dashed border-stone-200 rounded-xl">
+            <div className="text-center py-12 text-fg-subtle border border-dashed border-border rounded-lg">
               <p className="text-sm mb-1">No custom skills yet</p>
               <p className="text-xs">
                 Create a skill with a SKILL.md file to give your agents domain
@@ -293,10 +292,10 @@ export function SkillsList() {
               </p>
             </div>
           ) : (
-            <div className="border border-stone-200 rounded-xl overflow-hidden">
+            <div className="border border-border rounded-lg overflow-hidden">
               <table className="w-full text-sm">
                 <thead>
-                  <tr className="bg-stone-100/60 text-stone-500 text-xs uppercase tracking-wider">
+                  <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
                     <th className="text-left px-4 py-2.5">Name</th>
                     <th className="text-left px-4 py-2.5">Description</th>
                     <th className="text-left px-4 py-2.5">Version</th>
@@ -308,23 +307,23 @@ export function SkillsList() {
                     <tr
                       key={s.id}
                       onClick={() => openDetail(s)}
-                      className="border-t border-stone-100 hover:bg-stone-50 cursor-pointer transition-colors"
+                      className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors"
                     >
                       <td className="px-4 py-3">
                         <div className="font-medium">
                           {s.display_title || s.name}
                         </div>
-                        <div className="text-xs text-stone-400 font-[family-name:var(--font-mono)]">
+                        <div className="text-xs text-fg-subtle font-mono">
                           {s.id}
                         </div>
                       </td>
-                      <td className="px-4 py-3 text-stone-600 max-w-xs truncate">
+                      <td className="px-4 py-3 text-fg-muted max-w-xs truncate">
                         {s.description}
                       </td>
-                      <td className="px-4 py-3 text-stone-600">
+                      <td className="px-4 py-3 text-fg-muted">
                         v{s.latest_version}
                       </td>
-                      <td className="px-4 py-3 text-stone-500">
+                      <td className="px-4 py-3 text-fg-muted">
                         {new Date(s.created_at).toLocaleDateString()}
                       </td>
                     </tr>
@@ -337,431 +336,390 @@ export function SkillsList() {
       )}
 
       {/* ===== Create Dialog ===== */}
-      {showCreate && (
-        <div
-          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
-          onClick={() => {
-            setShowCreate(false);
-            resetCreate();
-          }}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* header */}
-            <div className="px-6 pt-6 pb-4 border-b border-stone-100">
-              <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold">
-                New Custom Skill
-              </h2>
-              <p className="text-xs text-stone-400 mt-1">
-                Create a SKILL.md with YAML frontmatter and optional resource
-                files.
-              </p>
+      <Modal
+        open={showCreate}
+        onClose={() => {
+          setShowCreate(false);
+          resetCreate();
+        }}
+        title="New Custom Skill"
+        subtitle="Create a SKILL.md with YAML frontmatter and optional resource files."
+        maxWidth="max-w-2xl"
+        footer={
+          <>
+            <Button
+              variant="ghost"
+              onClick={() => {
+                setShowCreate(false);
+                resetCreate();
+              }}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={doCreate}
+              disabled={!createTitle || !createSkillMd.trim()}
+            >
+              Create Skill
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-4">
+          {createError && (
+            <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
+              {createError}
             </div>
+          )}
 
-            {/* body */}
-            <div className="flex-1 overflow-y-auto px-6 py-4 space-y-4">
-              {createError && (
-                <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                  {createError}
-                </div>
-              )}
+          {/* Display Title */}
+          <div>
+            <label className="text-sm text-fg-muted block mb-1">
+              Display Title
+            </label>
+            <input
+              value={createTitle}
+              onChange={(e) => setCreateTitle(e.target.value)}
+              className={inputCls}
+              placeholder="My Custom Skill"
+            />
+          </div>
 
-              {/* Display Title */}
-              <div>
-                <label className="text-sm text-stone-600 block mb-1">
-                  Display Title
-                </label>
-                <input
-                  value={createTitle}
-                  onChange={(e) => setCreateTitle(e.target.value)}
-                  className={inputCls}
-                  placeholder="My Custom Skill"
-                />
-              </div>
+          {/* SKILL.md */}
+          <div>
+            <label className="text-sm text-fg-muted block mb-1">
+              SKILL.md{" "}
+              <span className="text-fg-subtle">
+                (YAML frontmatter with name and description)
+              </span>
+            </label>
+            <textarea
+              value={createSkillMd}
+              onChange={(e) => setCreateSkillMd(e.target.value)}
+              rows={14}
+              className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+            />
+          </div>
 
-              {/* SKILL.md */}
-              <div>
-                <label className="text-sm text-stone-600 block mb-1">
-                  SKILL.md{" "}
-                  <span className="text-stone-400">
-                    (YAML frontmatter with name and description)
-                  </span>
-                </label>
-                <textarea
-                  value={createSkillMd}
-                  onChange={(e) => setCreateSkillMd(e.target.value)}
-                  rows={14}
-                  className={`${inputCls} resize-none font-[family-name:var(--font-mono)] text-xs leading-relaxed`}
-                />
-              </div>
-
-              {/* Additional files */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-sm text-stone-600">
-                    Additional Files{" "}
-                    <span className="text-stone-400">
-                      ({createFiles.length})
-                    </span>
-                  </label>
+          {/* Additional files */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-sm text-fg-muted">
+                Additional Files{" "}
+                <span className="text-fg-subtle">
+                  ({createFiles.length})
+                </span>
+              </label>
+              <button
+                onClick={() =>
+                  setCreateFiles([
+                    ...createFiles,
+                    { filename: "", content: "" },
+                  ])
+                }
+                className="text-xs text-fg-muted hover:text-fg transition-colors"
+              >
+                + Add file
+              </button>
+            </div>
+            {createFiles.map((f, i) => (
+              <div
+                key={i}
+                className="border border-border rounded-lg p-3 mb-2"
+              >
+                <div className="flex items-center gap-2 mb-2">
+                  <input
+                    value={f.filename}
+                    onChange={(e) => {
+                      const updated = [...createFiles];
+                      updated[i] = { ...updated[i], filename: e.target.value };
+                      setCreateFiles(updated);
+                    }}
+                    className={`${inputCls} flex-1`}
+                    placeholder="filename.txt"
+                  />
                   <button
                     onClick={() =>
-                      setCreateFiles([
-                        ...createFiles,
-                        { filename: "", content: "" },
-                      ])
+                      setCreateFiles(createFiles.filter((_, j) => j !== i))
                     }
-                    className="text-xs text-stone-500 hover:text-stone-900 transition-colors"
+                    className="px-2 py-2 text-fg-subtle hover:text-danger transition-colors text-lg leading-none"
                   >
-                    + Add file
+                    ×
                   </button>
                 </div>
-                {createFiles.map((f, i) => (
-                  <div
-                    key={i}
-                    className="border border-stone-200 rounded-lg p-3 mb-2"
-                  >
-                    <div className="flex items-center gap-2 mb-2">
-                      <input
-                        value={f.filename}
-                        onChange={(e) => {
-                          const updated = [...createFiles];
-                          updated[i] = { ...updated[i], filename: e.target.value };
-                          setCreateFiles(updated);
-                        }}
-                        className={`${inputCls} flex-1`}
-                        placeholder="filename.txt"
-                      />
-                      <button
-                        onClick={() =>
-                          setCreateFiles(createFiles.filter((_, j) => j !== i))
-                        }
-                        className="px-2 py-2 text-stone-400 hover:text-red-500 transition-colors text-lg leading-none"
-                      >
-                        ×
-                      </button>
-                    </div>
-                    <textarea
-                      value={f.content}
-                      onChange={(e) => {
-                        const updated = [...createFiles];
-                        updated[i] = { ...updated[i], content: e.target.value };
-                        setCreateFiles(updated);
-                      }}
-                      rows={4}
-                      className={`${inputCls} resize-none font-[family-name:var(--font-mono)] text-xs leading-relaxed`}
-                      placeholder="File content..."
-                    />
-                  </div>
-                ))}
+                <textarea
+                  value={f.content}
+                  onChange={(e) => {
+                    const updated = [...createFiles];
+                    updated[i] = { ...updated[i], content: e.target.value };
+                    setCreateFiles(updated);
+                  }}
+                  rows={4}
+                  className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+                  placeholder="File content..."
+                />
               </div>
-            </div>
-
-            {/* footer */}
-            <div className="px-6 py-4 border-t border-stone-100 flex justify-end gap-2">
-              <button
-                onClick={() => {
-                  setShowCreate(false);
-                  resetCreate();
-                }}
-                className="px-4 py-2 text-sm text-stone-600 hover:text-stone-900"
-              >
-                Cancel
-              </button>
-              <button
-                onClick={doCreate}
-                disabled={!createTitle || !createSkillMd.trim()}
-                className="px-5 py-2 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800 disabled:opacity-40 transition-colors"
-              >
-                Create Skill
-              </button>
-            </div>
+            ))}
           </div>
         </div>
-      )}
+      </Modal>
 
       {/* ===== Detail Dialog ===== */}
-      {detail && (
-        <div
-          className="fixed inset-0 bg-black/30 flex items-center justify-center z-50"
-          onClick={closeDetail}
-        >
-          <div
-            className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col"
-            onClick={(e) => e.stopPropagation()}
-          >
-            {/* header */}
-            <div className="px-6 pt-6 pb-4 border-b border-stone-100 flex items-start justify-between">
-              <div>
-                <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold">
-                  {detail.display_title || detail.name}
-                </h2>
-                <p className="text-xs text-stone-400 font-[family-name:var(--font-mono)] mt-0.5">
-                  {detail.id} · v{detail.latest_version}
-                </p>
-              </div>
-              <button
-                onClick={deleteSkill}
-                className="px-3 py-1.5 border border-red-200 text-red-600 rounded-lg text-xs hover:bg-red-50 transition-colors"
-              >
+      <Modal
+        open={!!detail}
+        onClose={closeDetail}
+        title={detail?.display_title || detail?.name || ""}
+        subtitle={detail ? `${detail.id} · v${detail.latest_version}` : ""}
+        maxWidth="max-w-2xl"
+        footer={
+          <Button variant="ghost" onClick={closeDetail}>
+            Close
+          </Button>
+        }
+      >
+        {detailLoading ? (
+          <div className="text-fg-subtle text-sm py-8 text-center">
+            Loading...
+          </div>
+        ) : detail ? (
+          <div className="space-y-5">
+            {/* Actions */}
+            <div className="flex justify-end">
+              <Button variant="danger" size="sm" onClick={deleteSkill}>
                 Delete
-              </button>
+              </Button>
             </div>
 
-            {/* body */}
-            <div className="flex-1 overflow-y-auto px-6 py-4">
-              {detailLoading ? (
-                <div className="text-stone-400 text-sm py-8 text-center">
-                  Loading...
-                </div>
-              ) : (
-                <div className="space-y-5">
-                  {/* Metadata */}
-                  <div className="grid grid-cols-2 gap-4">
-                    <div>
-                      <label className="text-xs text-stone-500 block mb-0.5">
-                        Display Title
-                      </label>
-                      <p className="text-sm font-medium">
-                        {detail.display_title}
-                      </p>
-                    </div>
-                    <div>
-                      <label className="text-xs text-stone-500 block mb-0.5">
-                        Name
-                      </label>
-                      <p className="text-sm font-[family-name:var(--font-mono)]">
-                        {detail.name}
-                      </p>
-                    </div>
-                    <div>
-                      <label className="text-xs text-stone-500 block mb-0.5">
-                        Description
-                      </label>
-                      <p className="text-sm text-stone-600">
-                        {detail.description}
-                      </p>
-                    </div>
-                    <div>
-                      <label className="text-xs text-stone-500 block mb-0.5">
-                        Created
-                      </label>
-                      <p className="text-sm text-stone-600">
-                        {new Date(detail.created_at).toLocaleString()}
-                      </p>
-                    </div>
-                  </div>
+            {/* Metadata */}
+            <div className="grid grid-cols-2 gap-4">
+              <div>
+                <label className="text-xs text-fg-muted block mb-0.5">
+                  Display Title
+                </label>
+                <p className="text-sm font-medium">
+                  {detail.display_title}
+                </p>
+              </div>
+              <div>
+                <label className="text-xs text-fg-muted block mb-0.5">
+                  Name
+                </label>
+                <p className="text-sm font-mono">
+                  {detail.name}
+                </p>
+              </div>
+              <div>
+                <label className="text-xs text-fg-muted block mb-0.5">
+                  Description
+                </label>
+                <p className="text-sm text-fg-muted">
+                  {detail.description}
+                </p>
+              </div>
+              <div>
+                <label className="text-xs text-fg-muted block mb-0.5">
+                  Created
+                </label>
+                <p className="text-sm text-fg-muted">
+                  {new Date(detail.created_at).toLocaleString()}
+                </p>
+              </div>
+            </div>
 
-                  {/* Usage hint */}
-                  <div>
-                    <label className="text-xs text-stone-500 block mb-1">
-                      Usage in Agent Config
-                    </label>
-                    <pre className="bg-stone-50 border border-stone-200 rounded-lg p-3 text-xs font-[family-name:var(--font-mono)] text-stone-600">
+            {/* Usage hint */}
+            <div>
+              <label className="text-xs text-fg-muted block mb-1">
+                Usage in Agent Config
+              </label>
+              <pre className="bg-bg-surface border border-border rounded-lg p-3 text-xs font-mono text-fg-muted">
 {`"skills": [{ "type": "custom", "skill_id": "${detail.id}", "version": "latest" }]`}
-                    </pre>
-                  </div>
+              </pre>
+            </div>
 
-                  {/* Files */}
-                  <div>
-                    <div className="flex items-center justify-between mb-2">
-                      <label className="text-xs text-stone-500">
-                        Files (v{detail.latest_version})
-                      </label>
-                      <button
-                        onClick={startNewVersion}
-                        className="text-xs text-stone-500 hover:text-stone-900 transition-colors"
-                      >
-                        + New version
-                      </button>
+            {/* Files */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <label className="text-xs text-fg-muted">
+                  Files (v{detail.latest_version})
+                </label>
+                <button
+                  onClick={startNewVersion}
+                  className="text-xs text-fg-muted hover:text-fg transition-colors"
+                >
+                  + New version
+                </button>
+              </div>
+              {detailFiles.length === 0 ? (
+                <p className="text-xs text-fg-subtle">
+                  No files in this version.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {detailFiles.map((f, i) => (
+                    <div
+                      key={i}
+                      className="border border-border rounded-lg overflow-hidden"
+                    >
+                      <div className="bg-bg-surface px-3 py-1.5 border-b border-border text-xs font-mono text-fg-muted">
+                        {f.filename}
+                      </div>
+                      <pre className="px-3 py-2 text-xs font-mono text-fg-muted whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
+                        {f.content}
+                      </pre>
                     </div>
-                    {detailFiles.length === 0 ? (
-                      <p className="text-xs text-stone-400">
-                        No files in this version.
-                      </p>
-                    ) : (
-                      <div className="space-y-2">
-                        {detailFiles.map((f, i) => (
-                          <div
-                            key={i}
-                            className="border border-stone-200 rounded-lg overflow-hidden"
-                          >
-                            <div className="bg-stone-50 px-3 py-1.5 border-b border-stone-200 text-xs font-[family-name:var(--font-mono)] text-stone-600">
-                              {f.filename}
-                            </div>
-                            <pre className="px-3 py-2 text-xs font-[family-name:var(--font-mono)] text-stone-600 whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
-                              {f.content}
-                            </pre>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
-
-                  {/* New Version sub-form */}
-                  {showNewVersion && (
-                    <div className="border border-stone-300 rounded-xl p-4 bg-stone-50/50 space-y-3">
-                      <h3 className="text-sm font-medium text-stone-700">
-                        Create New Version
-                      </h3>
-                      {nvError && (
-                        <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">
-                          {nvError}
-                        </div>
-                      )}
-                      <div>
-                        <label className="text-xs text-stone-500 block mb-1">
-                          SKILL.md
-                        </label>
-                        <textarea
-                          value={nvSkillMd}
-                          onChange={(e) => setNvSkillMd(e.target.value)}
-                          rows={10}
-                          className={`${inputCls} resize-none font-[family-name:var(--font-mono)] text-xs leading-relaxed`}
-                        />
-                      </div>
-                      <div>
-                        <div className="flex items-center justify-between mb-2">
-                          <label className="text-xs text-stone-500">
-                            Additional Files ({nvFiles.length})
-                          </label>
-                          <button
-                            onClick={() =>
-                              setNvFiles([
-                                ...nvFiles,
-                                { filename: "", content: "" },
-                              ])
-                            }
-                            className="text-xs text-stone-500 hover:text-stone-900 transition-colors"
-                          >
-                            + Add file
-                          </button>
-                        </div>
-                        {nvFiles.map((f, i) => (
-                          <div
-                            key={i}
-                            className="border border-stone-200 rounded-lg p-3 mb-2 bg-white"
-                          >
-                            <div className="flex items-center gap-2 mb-2">
-                              <input
-                                value={f.filename}
-                                onChange={(e) => {
-                                  const updated = [...nvFiles];
-                                  updated[i] = {
-                                    ...updated[i],
-                                    filename: e.target.value,
-                                  };
-                                  setNvFiles(updated);
-                                }}
-                                className={`${inputCls} flex-1`}
-                                placeholder="filename.txt"
-                              />
-                              <button
-                                onClick={() =>
-                                  setNvFiles(
-                                    nvFiles.filter((_, j) => j !== i)
-                                  )
-                                }
-                                className="px-2 py-2 text-stone-400 hover:text-red-500 transition-colors text-lg leading-none"
-                              >
-                                ×
-                              </button>
-                            </div>
-                            <textarea
-                              value={f.content}
-                              onChange={(e) => {
-                                const updated = [...nvFiles];
-                                updated[i] = {
-                                  ...updated[i],
-                                  content: e.target.value,
-                                };
-                                setNvFiles(updated);
-                              }}
-                              rows={4}
-                              className={`${inputCls} resize-none font-[family-name:var(--font-mono)] text-xs leading-relaxed`}
-                              placeholder="File content..."
-                            />
-                          </div>
-                        ))}
-                      </div>
-                      <div className="flex justify-end gap-2">
-                        <button
-                          onClick={() => setShowNewVersion(false)}
-                          className="px-4 py-2 text-sm text-stone-600 hover:text-stone-900"
-                        >
-                          Cancel
-                        </button>
-                        <button
-                          onClick={doNewVersion}
-                          disabled={!nvSkillMd.trim()}
-                          className="px-4 py-2 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800 disabled:opacity-40 transition-colors"
-                        >
-                          Publish Version
-                        </button>
-                      </div>
-                    </div>
-                  )}
-
-                  {/* Versions list */}
-                  <div>
-                    <label className="text-xs text-stone-500 block mb-2">
-                      Version History
-                    </label>
-                    {detailVersions.length === 0 ? (
-                      <p className="text-xs text-stone-400">
-                        No version history available.
-                      </p>
-                    ) : (
-                      <div className="border border-stone-200 rounded-lg overflow-hidden">
-                        <table className="w-full text-sm">
-                          <thead>
-                            <tr className="bg-stone-100/60 text-stone-500 text-xs uppercase tracking-wider">
-                              <th className="text-left px-4 py-2">Version</th>
-                              <th className="text-left px-4 py-2">Created</th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {detailVersions.map((v) => (
-                              <tr
-                                key={v.version}
-                                className="border-t border-stone-100"
-                              >
-                                <td className="px-4 py-2 font-[family-name:var(--font-mono)] text-xs">
-                                  v{v.version}
-                                  {v.version === detail.latest_version && (
-                                    <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-green-50 text-green-700 border border-green-200">
-                                      latest
-                                    </span>
-                                  )}
-                                </td>
-                                <td className="px-4 py-2 text-stone-500 text-xs">
-                                  {new Date(v.created_at).toLocaleString()}
-                                </td>
-                              </tr>
-                            ))}
-                          </tbody>
-                        </table>
-                      </div>
-                    )}
-                  </div>
+                  ))}
                 </div>
               )}
             </div>
 
-            {/* footer */}
-            <div className="px-6 py-4 border-t border-stone-100 flex justify-end">
-              <button
-                onClick={closeDetail}
-                className="px-4 py-2 text-sm text-stone-600 hover:text-stone-900"
-              >
-                Close
-              </button>
+            {/* New Version sub-form */}
+            {showNewVersion && (
+              <div className="border border-border-strong rounded-lg p-4 bg-bg-surface/50 space-y-3">
+                <h3 className="text-sm font-medium text-fg">
+                  Create New Version
+                </h3>
+                {nvError && (
+                  <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
+                    {nvError}
+                  </div>
+                )}
+                <div>
+                  <label className="text-xs text-fg-muted block mb-1">
+                    SKILL.md
+                  </label>
+                  <textarea
+                    value={nvSkillMd}
+                    onChange={(e) => setNvSkillMd(e.target.value)}
+                    rows={10}
+                    className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+                  />
+                </div>
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <label className="text-xs text-fg-muted">
+                      Additional Files ({nvFiles.length})
+                    </label>
+                    <button
+                      onClick={() =>
+                        setNvFiles([
+                          ...nvFiles,
+                          { filename: "", content: "" },
+                        ])
+                      }
+                      className="text-xs text-fg-muted hover:text-fg transition-colors"
+                    >
+                      + Add file
+                    </button>
+                  </div>
+                  {nvFiles.map((f, i) => (
+                    <div
+                      key={i}
+                      className="border border-border rounded-lg p-3 mb-2 bg-bg"
+                    >
+                      <div className="flex items-center gap-2 mb-2">
+                        <input
+                          value={f.filename}
+                          onChange={(e) => {
+                            const updated = [...nvFiles];
+                            updated[i] = {
+                              ...updated[i],
+                              filename: e.target.value,
+                            };
+                            setNvFiles(updated);
+                          }}
+                          className={`${inputCls} flex-1`}
+                          placeholder="filename.txt"
+                        />
+                        <button
+                          onClick={() =>
+                            setNvFiles(
+                              nvFiles.filter((_, j) => j !== i)
+                            )
+                          }
+                          className="px-2 py-2 text-fg-subtle hover:text-danger transition-colors text-lg leading-none"
+                        >
+                          ×
+                        </button>
+                      </div>
+                      <textarea
+                        value={f.content}
+                        onChange={(e) => {
+                          const updated = [...nvFiles];
+                          updated[i] = {
+                            ...updated[i],
+                            content: e.target.value,
+                          };
+                          setNvFiles(updated);
+                        }}
+                        rows={4}
+                        className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
+                        placeholder="File content..."
+                      />
+                    </div>
+                  ))}
+                </div>
+                <div className="flex justify-end gap-2">
+                  <Button
+                    variant="ghost"
+                    onClick={() => setShowNewVersion(false)}
+                  >
+                    Cancel
+                  </Button>
+                  <Button
+                    onClick={doNewVersion}
+                    disabled={!nvSkillMd.trim()}
+                  >
+                    Publish Version
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Versions list */}
+            <div>
+              <label className="text-xs text-fg-muted block mb-2">
+                Version History
+              </label>
+              {detailVersions.length === 0 ? (
+                <p className="text-xs text-fg-subtle">
+                  No version history available.
+                </p>
+              ) : (
+                <div className="border border-border rounded-lg overflow-hidden">
+                  <table className="w-full text-sm">
+                    <thead>
+                      <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
+                        <th className="text-left px-4 py-2">Version</th>
+                        <th className="text-left px-4 py-2">Created</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {detailVersions.map((v) => (
+                        <tr
+                          key={v.version}
+                          className="border-t border-border"
+                        >
+                          <td className="px-4 py-2 font-mono text-xs">
+                            v{v.version}
+                            {v.version === detail.latest_version && (
+                              <span className="ml-2 inline-flex items-center px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-success-subtle text-success">
+                                latest
+                              </span>
+                            )}
+                          </td>
+                          <td className="px-4 py-2 text-fg-muted text-xs">
+                            {new Date(v.created_at).toLocaleString()}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )}
             </div>
           </div>
-        </div>
-      )}
+        ) : null}
+      </Modal>
     </div>
   );
 }

@@ -87,17 +87,17 @@ export function SessionDetail() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-8 py-4 border-b border-stone-200/60 flex items-center gap-3 shrink-0">
-        <Link to="/sessions" className="text-stone-400 hover:text-stone-600 text-sm">&larr; Sessions</Link>
-        <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold flex-1">{title}</h2>
+      <div className="px-8 py-4 border-b border-border flex items-center gap-3 shrink-0">
+        <Link to="/sessions" className="text-fg-subtle hover:text-fg-muted text-sm">&larr; Sessions</Link>
+        <h2 className="font-display text-lg font-semibold flex-1">{title}</h2>
         <div className="flex items-center gap-2">
           {status === "running" && (
-            <span className="flex items-center gap-1.5 text-xs text-blue-600">
-              <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+            <span className="flex items-center gap-1.5 text-xs text-info">
+              <span className="w-2 h-2 rounded-full bg-info animate-pulse" />
               Running
             </span>
           )}
-          <span className="text-xs text-stone-400 font-mono">{agentId}</span>
+          <span className="text-xs text-fg-subtle font-mono">{agentId}</span>
         </div>
       </div>
 
@@ -108,27 +108,27 @@ export function SessionDetail() {
         ))}
         {status === "running" && (
           <div className="flex gap-1 py-2">
-            <span className="w-1.5 h-1.5 bg-stone-400 rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-            <span className="w-1.5 h-1.5 bg-stone-400 rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-            <span className="w-1.5 h-1.5 bg-stone-400 rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+            <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+            <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+            <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
           </div>
         )}
       </div>
 
       {/* Input */}
-      <div className="px-8 py-4 border-t border-stone-200/60 flex gap-2 shrink-0">
+      <div className="px-8 py-4 border-t border-border flex gap-2 shrink-0">
         <input
           value={input}
           onChange={(e) => setInput(e.target.value)}
           onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
           placeholder="Send a message..."
-          className="flex-1 border border-stone-200 rounded-xl px-4 py-2.5 text-sm outline-none focus:border-stone-400 transition-colors"
+          className="flex-1 border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-border-strong transition-colors bg-bg text-fg"
           disabled={sending}
         />
         <button
           onClick={send}
           disabled={sending || !input.trim()}
-          className="px-5 py-2.5 bg-stone-900 text-white rounded-xl text-sm font-medium hover:bg-stone-800 disabled:opacity-40 transition-colors"
+          className="px-5 py-2.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover disabled:opacity-40 transition-colors"
         >
           Send
         </button>
@@ -145,8 +145,8 @@ function EventBubble({ event }: { event: Event }) {
       return (
         <div className="flex justify-end">
           <div className="max-w-lg">
-            <div className="text-xs text-stone-400 text-right mb-1">You</div>
-            <div className="bg-stone-900 text-stone-50 rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
+            <div className="text-xs text-fg-subtle text-right mb-1">You</div>
+            <div className="bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
               {event.content?.[0]?.text}
             </div>
           </div>
@@ -156,8 +156,8 @@ function EventBubble({ event }: { event: Event }) {
     case "agent.message":
       return (
         <div className="max-w-2xl">
-          <div className="text-xs text-stone-400 mb-1">Agent</div>
-          <div className="bg-stone-100 rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
+          <div className="text-xs text-fg-subtle mb-1">Agent</div>
+          <div className="bg-bg-surface rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
             <Markdown>{(event.content || []).map((b) => b.text).join("")}</Markdown>
           </div>
         </div>
@@ -168,18 +168,18 @@ function EventBubble({ event }: { event: Event }) {
         <div className="max-w-2xl">
           <button
             onClick={() => setToolOpen(!toolOpen)}
-            className="flex items-center gap-2 px-3 py-2 border border-stone-200 rounded-lg text-sm hover:bg-stone-50 transition-colors w-full text-left"
+            className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors w-full text-left"
           >
-            <svg className="w-3.5 h-3.5 text-blue-500 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5 text-info shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
             </svg>
             <span className="font-medium">{event.name}</span>
-            <svg className={`w-3 h-3 ml-auto text-stone-400 transition-transform ${toolOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <svg className={`w-3 h-3 ml-auto text-fg-subtle transition-transform ${toolOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
           {toolOpen && (
-            <pre className="mt-1 bg-stone-50 border border-stone-200 rounded-lg p-3 text-xs font-[family-name:var(--font-mono)] overflow-x-auto max-h-48 overflow-y-auto text-stone-600">
+            <pre className="mt-1 bg-bg-surface border border-border rounded-lg p-3 text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto text-fg-muted">
               {JSON.stringify(event.input, null, 2)}
             </pre>
           )}
@@ -189,7 +189,7 @@ function EventBubble({ event }: { event: Event }) {
     case "agent.tool_result":
       return (
         <div className="max-w-2xl">
-          <div className="border-l-3 border-green-500 bg-stone-50 rounded-r-lg px-3 py-2 text-xs font-[family-name:var(--font-mono)] max-h-40 overflow-y-auto text-stone-600 whitespace-pre-wrap">
+          <div className="border-l-3 border-success bg-bg-surface rounded-r-lg px-3 py-2 text-xs font-mono max-h-40 overflow-y-auto text-fg-muted whitespace-pre-wrap">
             {typeof event.content === "string" ? event.content : JSON.stringify(event.content)}
           </div>
         </div>
@@ -197,7 +197,7 @@ function EventBubble({ event }: { event: Event }) {
 
     case "session.error":
       return (
-        <div className="max-w-2xl bg-red-50 border border-red-200 rounded-lg px-4 py-2.5 text-sm text-red-700">
+        <div className="max-w-2xl bg-danger-subtle border border-danger/30 rounded-lg px-4 py-2.5 text-sm text-danger">
           Error: {event.error}
         </div>
       );
