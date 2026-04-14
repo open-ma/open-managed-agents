@@ -20,6 +20,8 @@ export function Dashboard() {
   const [templateSearch, setTemplateSearch] = useState("");
   const [describeText, setDescribeText] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [selectedTemplate, setSelectedTemplate] = useState<(typeof AGENT_TEMPLATES)[number] | null>(null);
+  const [creating, setCreating] = useState(false);
 
   const filteredTemplates = templateSearch
     ? AGENT_TEMPLATES.filter(
@@ -51,20 +53,26 @@ export function Dashboard() {
     setGenerating(false);
   };
 
-  const handleTemplateClick = async (tmpl: (typeof AGENT_TEMPLATES)[number]) => {
+  const handleTemplateClick = (tmpl: (typeof AGENT_TEMPLATES)[number]) => {
     if (tmpl.id === "blank") {
       nav("/agents");
       return;
     }
+    setSelectedTemplate(tmpl);
+  };
+
+  const handleCreateFromTemplate = async () => {
+    if (!selectedTemplate) return;
+    setCreating(true);
     try {
       const payload: Record<string, unknown> = {
-        name: tmpl.name,
-        model: tmpl.model,
-        system: tmpl.system,
+        name: selectedTemplate.name,
+        model: selectedTemplate.model,
+        system: selectedTemplate.system,
         tools: [{ type: "agent_toolset_20260401" }],
       };
-      if (tmpl.mcpServers.length) payload.mcp_servers = tmpl.mcpServers;
-      if (tmpl.skills.length) payload.skills = tmpl.skills;
+      if (selectedTemplate.mcpServers.length) payload.mcp_servers = selectedTemplate.mcpServers;
+      if (selectedTemplate.skills.length) payload.skills = selectedTemplate.skills;
       const agent = await api<{ id: string }>("/v1/agents", {
         method: "POST",
         body: JSON.stringify(payload),
@@ -73,22 +81,23 @@ export function Dashboard() {
     } catch {
       nav("/agents");
     }
+    setCreating(false);
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
+    <div className="flex-1 overflow-y-auto p-4 md:p-8 lg:p-10">
       <h1 className="font-display text-xl font-semibold tracking-tight text-fg mb-1">
         Quickstart
       </h1>
       <p className="text-fg-muted text-sm mb-6">Get up and running with managed agents in minutes.</p>
 
       {/* Step tabs */}
-      <div className="flex border-b border-border mb-6">
+      <div className="flex overflow-x-auto border-b border-border mb-6 -mx-4 px-4 md:mx-0 md:px-0">
         {STEPS.map((s) => (
           <button
             key={s.id}
             onClick={() => setStep(s.id)}
-            className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px ${
+            className={`px-4 py-2.5 text-sm font-medium transition-colors border-b-2 -mb-px whitespace-nowrap ${
               step === s.id
                 ? "border-brand text-brand"
                 : "border-transparent text-fg-muted hover:text-fg hover:border-border-strong"
@@ -142,7 +151,11 @@ export function Dashboard() {
                 <button
                   key={tmpl.id}
                   onClick={() => handleTemplateClick(tmpl)}
-                  className="text-left border border-border rounded-lg p-4 hover:border-brand hover:bg-bg-surface transition-all"
+                  className={`text-left border rounded-lg p-4 transition-all ${
+                    selectedTemplate?.id === tmpl.id
+                      ? "border-brand bg-brand-subtle"
+                      : "border-border hover:border-brand hover:bg-bg-surface"
+                  }`}
                 >
                   <div className="font-medium text-sm text-fg">{tmpl.name}</div>
                   <div className="text-xs text-fg-muted mt-1 line-clamp-2">{tmpl.description}</div>
@@ -160,6 +173,65 @@ export function Dashboard() {
             </div>
             {filteredTemplates.length === 0 && (
               <div className="text-center py-8 text-fg-subtle text-sm">No templates match your search.</div>
+            )}
+
+            {/* Template preview panel */}
+            {selectedTemplate && (
+              <div className="mt-4 border border-border rounded-lg bg-bg overflow-hidden">
+                <div className="flex items-center justify-between px-5 py-3 border-b border-border bg-bg-surface">
+                  <div>
+                    <h3 className="font-medium text-fg">{selectedTemplate.name}</h3>
+                    <p className="text-xs text-fg-muted mt-0.5">{selectedTemplate.description}</p>
+                  </div>
+                  <div className="flex items-center gap-2">
+                    <button
+                      onClick={() => setSelectedTemplate(null)}
+                      className="px-3 py-1.5 text-sm text-fg-muted hover:text-fg border border-border rounded-md transition-colors"
+                    >
+                      Cancel
+                    </button>
+                    <button
+                      onClick={handleCreateFromTemplate}
+                      disabled={creating}
+                      className="px-4 py-1.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
+                    >
+                      {creating ? "Creating..." : "Create agent"}
+                    </button>
+                  </div>
+                </div>
+                <div className="p-5 space-y-4">
+                  <div>
+                    <label className="text-xs font-medium text-fg-subtle uppercase tracking-wider">Model</label>
+                    <p className="text-sm text-fg mt-1 font-mono">{selectedTemplate.model}</p>
+                  </div>
+                  <div>
+                    <label className="text-xs font-medium text-fg-subtle uppercase tracking-wider">System prompt</label>
+                    <pre className="mt-1 text-sm text-fg-muted bg-bg-surface rounded-lg p-4 whitespace-pre-wrap font-mono leading-relaxed max-h-64 overflow-y-auto">{selectedTemplate.system}</pre>
+                  </div>
+                  {selectedTemplate.mcpServers.length > 0 && (
+                    <div>
+                      <label className="text-xs font-medium text-fg-subtle uppercase tracking-wider">MCP Servers</label>
+                      <div className="mt-1 flex flex-wrap gap-2">
+                        {selectedTemplate.mcpServers.map((s) => (
+                          <span key={s.name} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-bg-surface text-fg-muted rounded-md text-xs font-mono">
+                            {s.name}
+                          </span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {selectedTemplate.tags.length > 0 && (
+                    <div>
+                      <label className="text-xs font-medium text-fg-subtle uppercase tracking-wider">Tags</label>
+                      <div className="mt-1 flex flex-wrap gap-1.5">
+                        {selectedTemplate.tags.map((tag) => (
+                          <span key={tag} className="px-2 py-0.5 bg-bg-surface text-fg-muted rounded text-xs">{tag}</span>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </div>
             )}
           </div>
         </div>
