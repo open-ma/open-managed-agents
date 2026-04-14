@@ -263,11 +263,11 @@ const updateMemory = async (c: any) => {
   const data = await c.env.CONFIG_KV.get(`mem:${storeId}:${memId}`);
   if (!data) return c.json({ error: "Memory not found" }, 404);
 
-  const body = await c.req.json<{
+  const body = await c.req.json() as {
     path?: string;
     content?: string;
     precondition?: { type: "content_sha256"; content_sha256: string };
-  }>();
+  };
 
   const mem: MemoryItem = JSON.parse(data);
 

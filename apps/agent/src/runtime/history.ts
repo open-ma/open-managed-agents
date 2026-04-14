@@ -1,4 +1,4 @@
-import type { CoreMessage, CoreToolMessage, CoreAssistantMessage } from "ai";
+import type { ModelMessage, ToolModelMessage, AssistantModelMessage } from "ai";
 import type { HistoryStore } from "../harness/interface";
 import type {
   SessionEvent,
@@ -12,12 +12,12 @@ import type {
 import { generateEventId } from "@open-managed-agents/shared";
 
 /**
- * Convert an array of SessionEvents into AI SDK CoreMessage[] format.
+ * Convert an array of SessionEvents into AI SDK ModelMessage[] format.
  * Shared by SqliteHistory and InMemoryHistory to avoid duplication.
  * Groups tool_use + tool_result into proper assistant/tool message pairs.
  */
-export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
-  const messages: CoreMessage[] = [];
+export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
+  const messages: ModelMessage[] = [];
 
   let pendingToolCalls: Array<{
     type: "tool-call";
@@ -29,16 +29,16 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
     type: "tool-result";
     toolCallId: string;
     toolName: string;
-    output: string;
+    output: { type: "text"; value: string };
   }> = [];
 
   const flushTools = () => {
     if (pendingToolCalls.length > 0) {
-      const assistantMsg: CoreAssistantMessage = {
+      const assistantMsg: AssistantModelMessage = {
         role: "assistant",
         content: pendingToolCalls,
       };
-      const toolMsg: CoreToolMessage = {
+      const toolMsg: ToolModelMessage = {
         role: "tool",
         content: pendingToolResults,
       };
@@ -139,7 +139,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
           type: "tool-result",
           toolCallId: e.tool_use_id,
           toolName: matchingCall?.toolName ?? "unknown",
-          output: e.content,
+          output: { type: "text", value: e.content },
         });
         break;
       }
@@ -152,7 +152,7 @@ export function eventsToMessages(events: SessionEvent[]): CoreMessage[] {
           type: "tool-result",
           toolCallId: e.mcp_tool_use_id,
           toolName: matchingCall?.toolName ?? "unknown",
-          output: e.content,
+          output: { type: "text", value: e.content },
         });
         break;
       }
@@ -208,7 +208,7 @@ export class SqliteHistory implements HistoryStore {
     return results;
   }
 
-  getMessages(): CoreMessage[] {
+  getMessages(): ModelMessage[] {
     return eventsToMessages(this.getEvents());
   }
 }
@@ -230,7 +230,7 @@ export class InMemoryHistory implements HistoryStore {
     return afterSeq ? this.events.slice(afterSeq) : [...this.events];
   }
 
-  getMessages(): CoreMessage[] {
+  getMessages(): ModelMessage[] {
     return eventsToMessages(this.events);
   }
 }

@@ -265,16 +265,16 @@ export class DefaultHarness implements HarnessInterface {
       type: "span.model_request_end",
       model: modelId,
       model_usage: result.usage ? {
-        input_tokens: result.usage.promptTokens,
-        output_tokens: result.usage.completionTokens,
+        input_tokens: result.usage.inputTokens ?? 0,
+        output_tokens: result.usage.outputTokens ?? 0,
       } : undefined,
     });
 
     // 10. Report token usage
     if (result.usage && runtime.reportUsage) {
       await runtime.reportUsage(
-        result.usage.promptTokens,
-        result.usage.completionTokens
+        result.usage.inputTokens ?? 0,
+        result.usage.outputTokens ?? 0
       );
     }
   }

@@ -1,5 +1,5 @@
 import { generateText } from "ai";
-import type { LanguageModelV1 } from "ai";
+import type { LanguageModel } from "ai";
 
 export interface EvaluationResult {
   result: "satisfied" | "needs_revision";
@@ -7,7 +7,7 @@ export interface EvaluationResult {
 }
 
 export async function evaluateOutcome(
-  model: LanguageModelV1,
+  model: LanguageModel,
   rubric: { description: string; criteria?: string[] },
   agentOutput: string
 ): Promise<EvaluationResult> {
@@ -31,7 +31,7 @@ ${agentOutput}
 
 Evaluate and respond with JSON only.`
     }],
-    maxTokens: 500,
+    maxOutputTokens: 500,
   });
 
   try {
