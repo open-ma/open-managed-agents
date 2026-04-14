@@ -55,8 +55,13 @@ jobs:
           CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
         run: |
           cd apps/main
+          DOMAIN_FLAG=""
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            DOMAIN_FLAG="--domain $CUSTOM_DOMAIN"
+            echo "Deploying with custom domain: $CUSTOM_DOMAIN"
+          fi
           for i in 1 2 3; do
-            if npx wrangler deploy --config wrangler.jsonc; then
+            if npx wrangler deploy --config wrangler.jsonc $DOMAIN_FLAG; then
               echo "Main worker deployed successfully"
               break
             fi
@@ -64,12 +69,6 @@ jobs:
             sleep 60
             if [ "$i" = "3" ]; then echo "All attempts failed"; exit 1; fi
           done
-
-          # Attach custom domain if configured (idempotent — skips if already set)
-          if [ -n "$CUSTOM_DOMAIN" ]; then
-            echo "Configuring custom domain: $CUSTOM_DOMAIN"
-            npx wrangler domains attach "$CUSTOM_DOMAIN" --service managed-agents || echo "Custom domain may already be attached"
-          fi
 
       # --- Post-deploy verification ---
       - name: Verify deployment
