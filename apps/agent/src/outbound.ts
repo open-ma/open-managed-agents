@@ -31,6 +31,7 @@ export async function outboundByHost(
 /**
  * Intercept and modify outbound requests from the container.
  * Injects vault credentials (OAuth tokens, bearer tokens) for MCP servers.
+ * On 401 from mcp_oauth credentials, attempts token refresh and retries.
  */
 export async function outbound(
   request: Request,
@@ -51,10 +52,82 @@ export async function outbound(
       headers.set("Authorization", `Bearer ${credential.access_token}`);
     }
 
-    return fetch(new Request(request, { headers }));
+    const response = await fetch(new Request(request, { headers }));
+
+    // Token refresh: if mcp_oauth and got 401, try refreshing
+    if (response.status === 401 && credential.type === "mcp_oauth" && credential.credential_id) {
+      const refreshed = await tryRefreshToken(env, credential.vault_id, credential.credential_id);
+      if (refreshed) {
+        const retryHeaders = new Headers(request.headers);
+        retryHeaders.set("Authorization", `Bearer ${refreshed}`);
+        return fetch(new Request(request, { headers: retryHeaders }));
+      }
+    }
+
+    return response;
   }
 
   return fetch(request);
+}
+
+/**
+ * Attempt to refresh an OAuth token via the main worker's refresh endpoint.
+ * Returns the new access_token on success, null on failure.
+ */
+async function tryRefreshToken(
+  env: Env,
+  vaultId: string,
+  credentialId: string,
+): Promise<string | null> {
+  try {
+    // Call the main worker's refresh endpoint via service binding
+    // The main worker is accessible via internal service binding
+    const credKey = `cred:${vaultId}:${credentialId}`;
+    const credData = await env.CONFIG_KV.get(credKey);
+    if (!credData) return null;
+
+    const cred = JSON.parse(credData);
+    const auth = cred.auth;
+    if (!auth?.refresh_token || !auth?.token_endpoint) return null;
+
+    // Direct token refresh (we have KV access, no need for HTTP call)
+    const tokenBody = new URLSearchParams({
+      grant_type: "refresh_token",
+      refresh_token: auth.refresh_token,
+      client_id: auth.client_id || "open-managed-agents",
+    });
+    if (auth.client_secret) {
+      tokenBody.set("client_secret", auth.client_secret);
+    }
+
+    const tokenRes = await fetch(auth.token_endpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: tokenBody.toString(),
+    });
+
+    if (!tokenRes.ok) return null;
+
+    const tokens = (await tokenRes.json()) as {
+      access_token: string;
+      refresh_token?: string;
+      expires_in?: number;
+    };
+
+    // Update credential in KV
+    auth.access_token = tokens.access_token;
+    if (tokens.refresh_token) auth.refresh_token = tokens.refresh_token;
+    auth.expires_at = tokens.expires_in
+      ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
+      : undefined;
+    cred.updated_at = new Date().toISOString();
+
+    await env.CONFIG_KV.put(credKey, JSON.stringify(cred));
+
+    return tokens.access_token;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -64,7 +137,13 @@ async function findCredentialForHost(
   env: Env,
   sessionId: string,
   hostname: string
-): Promise<{ type: string; token?: string; access_token?: string } | null> {
+): Promise<{
+  type: string;
+  token?: string;
+  access_token?: string;
+  credential_id?: string;
+  vault_id: string;
+} | null> {
   try {
     // Get session to find vault_ids
     const sessionData = await env.CONFIG_KV.get(`session:${sessionId}`);
@@ -92,6 +171,8 @@ async function findCredentialForHost(
               type: cred.auth.type,
               token: cred.auth.token,
               access_token: cred.auth.access_token,
+              credential_id: cred.id,
+              vault_id: vaultId,
             };
           }
         } catch {
