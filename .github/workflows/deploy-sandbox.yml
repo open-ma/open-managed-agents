@@ -14,9 +14,8 @@ on:
         default: '{}'
       callback_url:
         description: 'Callback URL for build result (passed by Worker)'
-        required: false
+        required: true
         type: string
-        default: ''
 
 jobs:
   deploy:
@@ -70,3 +69,23 @@ jobs:
           if [ -n "${{ secrets.ANTHROPIC_MODEL }}" ]; then
             echo "${{ secrets.ANTHROPIC_MODEL }}" | npx wrangler secret put ANTHROPIC_MODEL --name "$WORKER_NAME"
           fi
+
+      - name: Notify main worker
+        if: always()
+        run: |
+          STATUS="ready"
+          ERROR=""
+          if [ "${{ job.status }}" != "success" ]; then
+            STATUS="error"
+            ERROR="GitHub Actions build failed"
+          fi
+
+          curl -fsS -X POST \
+            "${{ inputs.callback_url }}" \
+            -H "Content-Type: application/json" \
+            -H "x-api-key: ${{ secrets.API_KEY }}" \
+            -d "{
+              \"status\": \"${STATUS}\",
+              \"sandbox_worker_name\": \"sandbox-${{ inputs.env_id }}\",
+              \"error\": \"${ERROR}\"
+            }" || echo "Callback failed (non-fatal)"
