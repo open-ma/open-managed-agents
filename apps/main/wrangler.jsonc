@@ -27,22 +27,6 @@
     { "binding": "VECTORIZE", "index_name": "memory-search" }
   ],
 
-  // DinD builder container for building custom environment images
-  "containers": [
-    {
-      "class_name": "BuilderSandbox",
-      "image": "./builder/Dockerfile",
-      "instance_type": "standard",
-      "max_instances": 2
-    }
-  ],
-
-  "durable_objects": {
-    "bindings": [
-      { "name": "BUILDER_SANDBOX", "class_name": "BuilderSandbox" }
-    ]
-  },
-
   // Service bindings to agent workers
   "services": [
     { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" }
@@ -60,6 +44,10 @@
     {
       "tag": "v3",
       "new_sqlite_classes": ["BuilderSandbox"]
+    },
+    {
+      "tag": "v4",
+      "deleted_classes": ["BuilderSandbox"]
     }
   ],
 

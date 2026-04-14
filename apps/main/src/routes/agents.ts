@@ -166,7 +166,7 @@ const updateAgent = async (c: any) => {
 
   const agent: AgentConfig = JSON.parse(data);
 
-  const body = await c.req.json<{
+  const body = await c.req.json() as {
     name?: string;
     model?: string | { id: string; speed?: "standard" | "fast" };
     system?: string | null;
@@ -179,7 +179,7 @@ const updateAgent = async (c: any) => {
     model_card_id?: string | null;
     metadata?: Record<string, unknown>;
     version?: number;
-  }>();
+  };
 
   // Validate model if model or model_card_id is being changed
   if (body.model !== undefined || body.model_card_id !== undefined) {

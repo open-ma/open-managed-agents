@@ -1,5 +1,5 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
-import type { LanguageModelV1 } from "ai";
+import type { LanguageModel } from "ai";
 
 const KNOWN_CLAUDE_PREFIX = "claude-";
 
@@ -23,7 +23,7 @@ export function resolveModel(
   model: string | { id: string; speed?: "standard" | "fast" },
   apiKey: string,
   baseURL?: string
-): LanguageModelV1 {
+): LanguageModel {
   const modelString = typeof model === "string" ? model : model.id;
   const speed = typeof model === "object" ? model.speed : undefined;
 
@@ -45,9 +45,8 @@ export function resolveModel(
   });
 
   if (speed === "fast") {
-    return anthropic(modelId, {
-      providerOptions: { speed: "fast" },
-    } as Record<string, unknown>);
+    // Speed is passed as providerOptions in generateText calls, not at model creation
+    return anthropic(modelId);
   }
 
   return anthropic(modelId);

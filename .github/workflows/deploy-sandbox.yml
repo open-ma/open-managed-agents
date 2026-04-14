@@ -12,6 +12,11 @@ on:
         required: false
         type: string
         default: '{}'
+      callback_url:
+        description: 'Callback URL for build result (passed by Worker)'
+        required: false
+        type: string
+        default: ''
 
 jobs:
   deploy:
@@ -20,42 +25,36 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '22'
+          cache: 'pnpm'
 
       - name: Install dependencies
-        run: npm ci
+        run: pnpm install --frozen-lockfile
 
       - name: Generate Dockerfile and wrangler config
         run: |
-          cd sandbox-worker
+          cd apps/agent
           bash generate.sh \
             "${{ inputs.env_id }}" \
             "${{ vars.KV_NAMESPACE_ID }}" \
             '${{ inputs.packages_json }}'
-
-      - name: Copy sandbox worker source
-        run: |
-          BUILD_DIR="sandbox-worker/build-${{ inputs.env_id }}"
-          # Copy the sandbox worker entry point
-          cp sandbox-worker/index.ts "$BUILD_DIR/index.ts"
-          # Copy source code that sandbox worker imports
-          cp -r src "$BUILD_DIR/src"
 
       - name: Deploy sandbox worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
-          BUILD_DIR="sandbox-worker/build-${{ inputs.env_id }}"
+          BUILD_DIR="apps/agent/build-${{ inputs.env_id }}"
           cd "$BUILD_DIR"
           npx wrangler deploy --config wrangler.jsonc
-
-          # Get the worker URL
-          WORKER_URL="https://sandbox-${{ inputs.env_id }}.${{ vars.CF_SUBDOMAIN }}.workers.dev"
-          echo "WORKER_URL=$WORKER_URL" >> "$GITHUB_ENV"
 
       - name: Set sandbox worker secrets
         env:
@@ -71,20 +70,3 @@ jobs:
           if [ -n "${{ secrets.ANTHROPIC_MODEL }}" ]; then
             echo "${{ secrets.ANTHROPIC_MODEL }}" | npx wrangler secret put ANTHROPIC_MODEL --name "$WORKER_NAME"
           fi
-
-      - name: Notify main worker
-        if: always()
-        run: |
-          STATUS="ready"
-          if [ "${{ job.status }}" != "success" ]; then
-            STATUS="error"
-          fi
-
-          curl -fsS -X POST \
-            "${{ vars.MAIN_WORKER_URL }}/v1/environments/${{ inputs.env_id }}/build-complete" \
-            -H "Content-Type: application/json" \
-            -H "x-build-secret: ${{ secrets.BUILD_CALLBACK_SECRET }}" \
-            -d "{
-              \"status\": \"${STATUS}\",
-              \"sandbox_worker_url\": \"${WORKER_URL}\"
-            }" || echo "Callback failed (non-fatal)"

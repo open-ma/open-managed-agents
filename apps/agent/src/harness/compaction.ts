@@ -1,13 +1,13 @@
 import { generateText } from "ai";
-import type { CoreMessage, LanguageModelV1 } from "ai";
+import type { ModelMessage, LanguageModel } from "ai";
 
 export interface CompactionStrategy {
-  shouldCompact(messages: CoreMessage[], maxTokens?: number): boolean;
-  compact(messages: CoreMessage[], model: LanguageModelV1): Promise<CoreMessage[]>;
+  shouldCompact(messages: ModelMessage[], maxTokens?: number): boolean;
+  compact(messages: ModelMessage[], model: LanguageModel): Promise<ModelMessage[]>;
 }
 
 // Estimate tokens (rough: 4 chars per token)
-function estimateTokens(messages: CoreMessage[]): number {
+function estimateTokens(messages: ModelMessage[]): number {
   return messages.reduce((sum, m) => {
     const content = typeof m.content === "string" ? m.content : JSON.stringify(m.content);
     return sum + Math.ceil(content.length / 4);
@@ -15,11 +15,11 @@ function estimateTokens(messages: CoreMessage[]): number {
 }
 
 export class SummarizeCompaction implements CompactionStrategy {
-  shouldCompact(messages: CoreMessage[], maxTokens: number = 100000): boolean {
+  shouldCompact(messages: ModelMessage[], maxTokens: number = 100000): boolean {
     return estimateTokens(messages) > maxTokens * 0.85;
   }
 
-  async compact(messages: CoreMessage[], model: LanguageModelV1): Promise<CoreMessage[]> {
+  async compact(messages: ModelMessage[], model: LanguageModel): Promise<ModelMessage[]> {
     if (messages.length <= 4) return messages; // Too few to compact
 
     // Keep first 2 messages (initial context) and last 4 messages (recent context)
@@ -39,10 +39,10 @@ export class SummarizeCompaction implements CompactionStrategy {
       model,
       system: "Summarize this conversation excerpt concisely. Preserve key decisions, tool results, and file paths. Be brief.",
       messages: [{ role: "user", content: summaryContent }],
-      maxTokens: 1000,
+      maxOutputTokens: 1000,
     });
 
-    const summaryMessage: CoreMessage = {
+    const summaryMessage: ModelMessage = {
       role: "assistant",
       content: `[Conversation summary of ${to_summarize.length} messages]: ${result.text}`,
     };

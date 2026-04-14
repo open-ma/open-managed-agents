@@ -8,6 +8,8 @@ export default defineConfig({
       // @cloudflare/containers which has workerd-native code that miniflare
       // can't load. Production builds use wrangler bundling which handles this.
       "@cloudflare/sandbox": "./test/sandbox-stub.ts",
+      // Resolve workspace package for miniflare/workerd runtime
+      "@open-managed-agents/shared": "./packages/shared/src/index.ts",
     },
   },
   test: {

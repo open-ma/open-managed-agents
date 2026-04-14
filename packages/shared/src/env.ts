@@ -1,7 +1,5 @@
 export interface Env {
   CONFIG_KV: KVNamespace;
-  // DinD builder — builds per-environment sandbox workers
-  BUILDER_SANDBOX: DurableObjectNamespace;
   // SESSION_DO and SANDBOX are only in sandbox workers
   SESSION_DO?: DurableObjectNamespace;
   SANDBOX?: DurableObjectNamespace;
@@ -18,7 +16,7 @@ export interface Env {
   CLOUDFLARE_ACCOUNT_ID?: string;
   GITHUB_TOKEN?: string;
   GITHUB_REPO?: string;
-  BUILD_CALLBACK_SECRET?: string;
+  KV_NAMESPACE_ID?: string;
   RATE_LIMIT_WRITE?: number;
   RATE_LIMIT_READ?: number;
 }

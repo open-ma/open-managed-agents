@@ -140,7 +140,7 @@ function jsonSchemaToZod(schema: Record<string, unknown>): z.ZodTypeAny {
   const required = (schema.required as string[]) || [];
 
   if (!properties || typeof properties !== "object") {
-    return z.record(z.unknown());
+    return z.record(z.string(), z.unknown());
   }
 
   const shape: Record<string, z.ZodTypeAny> = {};
@@ -185,7 +185,7 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
       if (prop.properties) {
         return jsonSchemaToZod(prop as Record<string, unknown>);
       }
-      return z.record(z.unknown());
+      return z.record(z.string(), z.unknown());
     }
     default:
       return z.unknown();

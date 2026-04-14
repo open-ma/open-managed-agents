@@ -1,4 +1,4 @@
-import type { CoreMessage, LanguageModelV1 } from "ai";
+import type { ModelMessage, LanguageModel } from "ai";
 import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 
 export interface HarnessInterface {
@@ -14,7 +14,7 @@ export interface HarnessContext {
   tools: Record<string, any>;
 
   /** Platform-prepared model: resolved from agent config with API key. */
-  model: LanguageModelV1;
+  model: LanguageModel;
 
   /** System prompt: base from agent.system + skill metadata additions. */
   systemPrompt: string;
@@ -42,7 +42,7 @@ export interface HarnessContext {
 }
 
 export interface HistoryStore {
-  getMessages(): CoreMessage[];
+  getMessages(): ModelMessage[];
   append(event: SessionEvent): void;
   getEvents(afterSeq?: number): SessionEvent[];
 }

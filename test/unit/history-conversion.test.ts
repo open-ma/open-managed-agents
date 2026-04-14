@@ -124,7 +124,7 @@ describe("eventsToMessages — tool call chains", () => {
     const toolContent = messages[2].content as any[];
     expect(toolContent[0].type).toBe("tool-result");
     expect(toolContent[0].toolCallId).toBe("tc_1");
-    expect(toolContent[0].output).toBe("file1.txt\nfile2.txt");
+    expect(toolContent[0].output).toEqual({ type: "text", value: "file1.txt\nfile2.txt" });
   });
 
   it("multiple tool calls batched: user -> tool_use x2 -> tool_result x2 -> agent.message", () => {
@@ -173,8 +173,8 @@ describe("eventsToMessages — tool call chains", () => {
 
     const toolResults = messages[2].content as any[];
     expect(toolResults).toHaveLength(2);
-    expect(toolResults[0].output).toBe("files");
-    expect(toolResults[1].output).toBe("matches");
+    expect(toolResults[0].output).toEqual({ type: "text", value: "files" });
+    expect(toolResults[1].output).toEqual({ type: "text", value: "matches" });
   });
 
   it("tool_result without matching tool_use uses toolName='unknown'", () => {

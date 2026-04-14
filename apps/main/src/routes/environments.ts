@@ -2,84 +2,124 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
 import { generateEnvId } from "@open-managed-agents/shared";
-import { buildAndDeploySandboxWorker } from "../builder";
 import { addServiceBinding, envIdToBindingName } from "@open-managed-agents/shared";
 
 const app = new Hono<{ Bindings: Env }>();
 
 /**
- * Trigger sandbox worker build via DinD builder (async, updates KV when done).
- * Falls back to GitHub Actions if BUILDER_SANDBOX is not available.
+ * Trigger sandbox worker build via GitHub Actions.
+ * Dispatches deploy-sandbox.yml → CI builds image + deploys worker.
+ * Status is checked lazily via GitHub API on GET.
  */
-async function triggerBuild(env: Env, envConfig: EnvironmentConfig, ctx: ExecutionContext): Promise<void> {
-  // Primary: DinD builder
-  if (env.BUILDER_SANDBOX && env.CLOUDFLARE_API_TOKEN) {
-    // Run via waitUntil so the build survives after the response is sent
-    ctx.waitUntil((async () => {
-      try {
-        const result = await buildAndDeploySandboxWorker(env, envConfig);
-        envConfig.status = result.success ? "ready" : "error";
-        envConfig.sandbox_worker_name = result.sandbox_worker_name;
-        if (!result.success) {
-          envConfig.build_error = result.error;
-        }
-        envConfig.updated_at = new Date().toISOString();
-        await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
+async function triggerBuild(env: Env, envConfig: EnvironmentConfig): Promise<void> {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) return;
 
-        // PATCH main worker binding + store in KV
-        if (result.success && result.sandbox_worker_name && env.CLOUDFLARE_API_TOKEN && env.CLOUDFLARE_ACCOUNT_ID) {
-          const bindingName = envIdToBindingName(envConfig.id);
-          await addServiceBinding(env.CLOUDFLARE_ACCOUNT_ID, "managed-agents", env.CLOUDFLARE_API_TOKEN, bindingName, result.sandbox_worker_name);
-          await env.CONFIG_KV.put(`svcbind:${envConfig.id}`, result.sandbox_worker_name);
-        }
-      } catch (err) {
-        // Always update status even on unexpected errors
-        envConfig.status = "error";
-        envConfig.build_error = err instanceof Error ? err.message : String(err);
-        envConfig.updated_at = new Date().toISOString();
-        await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
-      }
-    })());
-    return;
-  }
-
-  // Fallback: GitHub Actions
-  if (env.GITHUB_TOKEN && env.GITHUB_REPO) {
-    const [owner, repo] = env.GITHUB_REPO.split("/");
-    await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/deploy-sandbox.yml/dispatches`,
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-          Accept: "application/vnd.github.v3+json",
-          "Content-Type": "application/json",
+  const [owner, repo] = env.GITHUB_REPO.split("/");
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/deploy-sandbox.yml/dispatches`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ref: "main",
+        inputs: {
+          env_id: envConfig.id,
+          packages_json: JSON.stringify(envConfig.config.packages || {}),
         },
-        body: JSON.stringify({
-          ref: "main",
-          inputs: {
-            env_id: envConfig.id,
-            packages_json: JSON.stringify(envConfig.config.packages || {}),
-          },
-        }),
-      }
-    );
+      }),
+    }
+  );
+
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`GitHub dispatch failed (${res.status}): ${text}`);
   }
+
+  // Store dispatch time to find the run later
+  envConfig.build_dispatched_at = new Date().toISOString();
+}
+
+/**
+ * Check GitHub Actions workflow run status for a building environment.
+ * Finds the run by matching workflow + dispatch time, updates env status.
+ */
+async function checkBuildStatus(env: Env, envConfig: EnvironmentConfig): Promise<void> {
+  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO || envConfig.status !== "building") return;
+
+  const [owner, repo] = env.GITHUB_REPO.split("/");
+  const since = envConfig.build_dispatched_at || envConfig.created_at;
+
+  // Find recent runs for the deploy-sandbox workflow
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/deploy-sandbox.yml/runs?created=%3E%3D${since}&per_page=10`,
+    {
+      headers: {
+        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
+        Accept: "application/vnd.github.v3+json",
+      },
+    }
+  );
+
+  if (!res.ok) return; // silently skip on API error
+
+  const data = (await res.json()) as {
+    workflow_runs: Array<{
+      id: number;
+      status: string;
+      conclusion: string | null;
+      created_at: string;
+    }>;
+  };
+
+  // Find the most recent run created after our dispatch
+  const run = data.workflow_runs.find(r => r.created_at >= since);
+  if (!run) return; // run not started yet
+
+  if (run.status !== "completed") return; // still running
+
+  if (run.conclusion === "success") {
+    envConfig.status = "ready";
+    envConfig.sandbox_worker_name = `sandbox-${envConfig.id}`;
+    delete envConfig.build_error;
+
+    // Add service binding
+    if (env.CLOUDFLARE_API_TOKEN && env.CLOUDFLARE_ACCOUNT_ID) {
+      try {
+        const bindingName = envIdToBindingName(envConfig.id);
+        await addServiceBinding(
+          env.CLOUDFLARE_ACCOUNT_ID, "managed-agents", env.CLOUDFLARE_API_TOKEN,
+          bindingName, envConfig.sandbox_worker_name,
+        );
+      } catch (err) {
+        console.log(`[env] addServiceBinding failed: ${err instanceof Error ? err.message : String(err)}`);
+      }
+    }
+    await env.CONFIG_KV.put(`svcbind:${envConfig.id}`, envConfig.sandbox_worker_name);
+  } else {
+    envConfig.status = "error";
+    envConfig.build_error = `GitHub Actions run failed: ${run.conclusion}`;
+  }
+
+  envConfig.updated_at = new Date().toISOString();
+  await env.CONFIG_KV.put(`env:${envConfig.id}`, JSON.stringify(envConfig));
 }
 
 // POST /v1/environments — create environment
 app.post("/", async (c) => {
-  const body = await c.req.json<{
+  const body = (await c.req.json()) as {
     name: string;
     config: EnvironmentConfig["config"];
-  }>();
+  };
 
   if (!body.name) {
     return c.json({ error: "name is required" }, 400);
   }
 
-  // If no build infrastructure (no DinD, no GitHub), default to ready
-  const canBuild = !!(c.env.BUILDER_SANDBOX || (c.env.GITHUB_TOKEN && c.env.GITHUB_REPO));
+  const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
 
   const env: EnvironmentConfig = {
     id: generateEnvId(),
@@ -92,68 +132,19 @@ app.post("/", async (c) => {
 
   await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
 
-  console.log(`[env] canBuild=${canBuild}, BUILDER_SANDBOX=${!!c.env.BUILDER_SANDBOX}, CF_TOKEN=${!!c.env.CLOUDFLARE_API_TOKEN}, executionCtx=${!!c.executionCtx}`);
   if (canBuild) {
     try {
-      await triggerBuild(c.env, env, c.executionCtx);
-      console.log(`[env] triggerBuild returned for ${env.id}`);
+      await triggerBuild(c.env, env);
+      await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
     } catch (e) {
-      console.log(`[env] triggerBuild threw: ${e instanceof Error ? e.message : String(e)}`);
+      console.log(`[env] triggerBuild failed: ${e instanceof Error ? e.message : String(e)}`);
       env.status = "error";
+      env.build_error = e instanceof Error ? e.message : String(e);
       await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
     }
   }
 
   return c.json(env, 201);
-});
-
-// POST /v1/environments/:id/build-complete — callback from DinD builder or GitHub Actions
-app.post("/:id/build-complete", async (c) => {
-  const id = c.req.param("id");
-
-  const secret = c.req.header("x-build-secret");
-  if (!secret || secret !== c.env.BUILD_CALLBACK_SECRET) {
-    return c.json({ error: "Unauthorized" }, 401);
-  }
-
-  const data = await c.env.CONFIG_KV.get(`env:${id}`);
-  if (!data) return c.json({ error: "Environment not found" }, 404);
-
-  const body = await c.req.json<{
-    status: "ready" | "error";
-    sandbox_worker_name?: string;
-    error?: string;
-  }>();
-
-  const env: EnvironmentConfig = JSON.parse(data);
-  env.status = body.status;
-
-  if (body.status === "ready" && body.sandbox_worker_name) {
-    env.sandbox_worker_name = body.sandbox_worker_name;
-
-    // PATCH main worker to add service binding
-    if (c.env.CLOUDFLARE_API_TOKEN && c.env.CLOUDFLARE_ACCOUNT_ID) {
-      try {
-        const bindingName = envIdToBindingName(id);
-        await addServiceBinding(
-          c.env.CLOUDFLARE_ACCOUNT_ID,
-          "managed-agents",
-          c.env.CLOUDFLARE_API_TOKEN,
-          bindingName,
-          body.sandbox_worker_name,
-        );
-      } catch (err) {
-        // PATCH failed — still mark ready, deploy.sh will fix bindings
-      }
-    }
-
-    // Store binding info in KV for deploy.sh to rebuild on redeploy
-    await c.env.CONFIG_KV.put(`svcbind:${id}`, body.sandbox_worker_name);
-  }
-
-  env.updated_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
-  return c.json(env);
 });
 
 // GET /v1/environments — list environments
@@ -168,25 +159,33 @@ app.get("/", async (c) => {
   return c.json({ data: envs.filter(Boolean) });
 });
 
-// GET /v1/environments/:id — get environment
+// GET /v1/environments/:id — get environment (lazy-checks build status)
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const data = await c.env.CONFIG_KV.get(`env:${id}`);
   if (!data) return c.json({ error: "Environment not found" }, 404);
-  return c.json(JSON.parse(data));
+
+  const env: EnvironmentConfig = JSON.parse(data);
+
+  // Lazy check: if building, poll GitHub API for run status
+  if (env.status === "building") {
+    await checkBuildStatus(c.env, env);
+  }
+
+  return c.json(env);
 });
 
-// PUT /v1/environments/:id — update environment
+// PUT /v1/environments/:id — update environment (re-triggers build if config changed)
 app.put("/:id", async (c) => {
   const id = c.req.param("id");
   const data = await c.env.CONFIG_KV.get(`env:${id}`);
   if (!data) return c.json({ error: "Environment not found" }, 404);
 
   const env: EnvironmentConfig = JSON.parse(data);
-  const body = await c.req.json<{
+  const body = (await c.req.json()) as {
     name?: string;
     config?: EnvironmentConfig["config"];
-  }>();
+  };
 
   if (body.name !== undefined) env.name = body.name;
 
@@ -196,18 +195,19 @@ app.put("/:id", async (c) => {
     const newConfig = JSON.stringify(body.config);
 
     if (newConfig !== oldConfig) {
-      const canBuild = !!(c.env.BUILDER_SANDBOX || (c.env.GITHUB_TOKEN && c.env.GITHUB_REPO));
+      const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
       if (canBuild) {
         env.status = "building";
         env.sandbox_worker_name = undefined;
+        delete env.build_error;
         await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
         try {
-          await triggerBuild(c.env, env, c.executionCtx);
+          await triggerBuild(c.env, env);
+          await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
         } catch {
           env.status = "error";
         }
       } else {
-        // No build infra — packages will be installed during sandbox warmup
         env.sandbox_worker_name = env.sandbox_worker_name || "sandbox-default";
         env.status = "ready";
       }
