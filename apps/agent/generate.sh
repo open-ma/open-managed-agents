@@ -37,7 +37,7 @@ GO_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.go // [] | join(" ")' 2>/dev/null || e
   echo ""
   echo "# --- Custom packages ---"
   [ -n "$APT_PKGS" ] && echo "RUN apt-get update && apt-get install -y $APT_PKGS && rm -rf /var/lib/apt/lists/*"
-  [ -n "$PIP_PKGS" ] && echo "RUN pip install --no-cache-dir $PIP_PKGS"
+  [ -n "$PIP_PKGS" ] && echo "RUN pip install uv && uv pip install --system $PIP_PKGS"
   [ -n "$NPM_PKGS" ] && echo "RUN npm install -g $NPM_PKGS"
   [ -n "$CARGO_PKGS" ] && echo "RUN cargo install $CARGO_PKGS"
   [ -n "$GEM_PKGS" ] && echo "RUN gem install $GEM_PKGS"
