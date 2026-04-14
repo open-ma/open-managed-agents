@@ -52,11 +52,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           BUILD_DIR="apps/agent/build-${{ inputs.env_id }}"
-          # Link source + deps so wrangler resolves from build dir (not parent)
-          ln -s ../src "$BUILD_DIR/src"
-          ln -s ../../../node_modules "$BUILD_DIR/node_modules"
-          ln -s ../../../packages "$BUILD_DIR/packages"
-          ln -s ../tsconfig.json "$BUILD_DIR/tsconfig.json"
           cd "$BUILD_DIR"
           npx wrangler deploy --config wrangler.jsonc
 
