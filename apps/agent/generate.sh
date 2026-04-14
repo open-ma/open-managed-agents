@@ -1,5 +1,5 @@
 #!/bin/bash
-# Generate Dockerfile and wrangler.jsonc for a sandbox worker.
+# Generate Dockerfile and wrangler.jsonc for a per-environment sandbox worker.
 #
 # Usage: ./generate.sh <env_id> <kv_id> [packages_json]
 
@@ -14,18 +14,12 @@ OUT_DIR="${SCRIPT_DIR}/build-${ENV_ID}"
 
 mkdir -p "$OUT_DIR"
 
-# --- Generate Dockerfile ---
-# Start from the npm package Dockerfile (works on both arm64 and amd64)
-# Find @cloudflare/sandbox — could be in root or local node_modules
-SANDBOX_PKG="$SCRIPT_DIR/../../node_modules/@cloudflare/sandbox"
-if [ ! -d "$SANDBOX_PKG" ]; then
-  SANDBOX_PKG="$SCRIPT_DIR/node_modules/@cloudflare/sandbox"
-fi
-BASE_DOCKERFILE="$SANDBOX_PKG/Dockerfile"
-cp "$BASE_DOCKERFILE" "$OUT_DIR/Dockerfile"
-cp -r "$SANDBOX_PKG/container_src" "$OUT_DIR/container_src" 2>/dev/null || true
+# --- Generate Dockerfile from published sandbox image ---
+cat > "$OUT_DIR/Dockerfile" <<'DOCKERFILE'
+FROM docker.io/cloudflare/sandbox:0.7.20
+DOCKERFILE
 
-# Append package install commands to the Dockerfile
+# Parse packages and append install commands
 APT_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.apt // [] | join(" ")' 2>/dev/null || echo "")
 PIP_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.pip // [] | join(" ")' 2>/dev/null || echo "")
 NPM_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.npm // [] | join(" ")' 2>/dev/null || echo "")
@@ -33,10 +27,17 @@ CARGO_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.cargo // [] | join(" ")' 2>/dev/nul
 GEM_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.gem // [] | join(" ")' 2>/dev/null || echo "")
 GO_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.go // [] | join(" ")' 2>/dev/null || echo "")
 
+# Collect apt prerequisites for package managers
+APT_DEPS=""
+[ -n "$PIP_PKGS" ] && APT_DEPS="$APT_DEPS python3-pip"
+[ -n "$CARGO_PKGS" ] && APT_DEPS="$APT_DEPS cargo"
+[ -n "$GEM_PKGS" ] && APT_DEPS="$APT_DEPS ruby-full"
+[ -n "$GO_PKGS" ] && APT_DEPS="$APT_DEPS golang"
+
+ALL_APT="$(echo "$APT_DEPS $APT_PKGS" | xargs)"
+
 {
-  echo ""
-  echo "# --- Custom packages ---"
-  [ -n "$APT_PKGS" ] && echo "RUN apt-get update && apt-get install -y $APT_PKGS && rm -rf /var/lib/apt/lists/*"
+  [ -n "$ALL_APT" ] && echo "RUN apt-get update && apt-get install -y $ALL_APT && rm -rf /var/lib/apt/lists/*"
   [ -n "$PIP_PKGS" ] && echo "RUN pip install uv && uv pip install --system $PIP_PKGS"
   [ -n "$NPM_PKGS" ] && echo "RUN npm install -g $NPM_PKGS"
   [ -n "$CARGO_PKGS" ] && echo "RUN cargo install $CARGO_PKGS"
@@ -49,6 +50,12 @@ sed -e "s/__ENV_ID__/${ENV_ID}/g" \
     -e "s/__KV_ID__/${KV_ID}/g" \
     "$SCRIPT_DIR/wrangler.template.jsonc" > "$OUT_DIR/wrangler.jsonc"
 
+# --- Symlink source so wrangler can bundle the worker ---
+ln -sf ../src "$OUT_DIR/src"
+ln -sf ../../../node_modules "$OUT_DIR/node_modules"
+ln -sf ../../../packages "$OUT_DIR/packages"
+
 echo "Generated files in $OUT_DIR:"
 echo "  - Dockerfile"
 echo "  - wrangler.jsonc"
+echo "  - src/ -> ../src"
