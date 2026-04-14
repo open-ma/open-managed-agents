@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
+import yaml from "js-yaml";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
@@ -48,21 +49,20 @@ export function AgentsList() {
   const [templateSearch, setTemplateSearch] = useState("");
   const [form, setForm] = useState({ ...INITIAL_FORM });
   const [tab, setTab] = useState<"basic" | "skills" | "mcp" | "agents">("basic");
+  const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
+  const [codeValue, setCodeValue] = useState("");
 
   const load = async () => {
     setLoading(true);
     try {
       const data = await api<{ data: Agent[] }>(`/v1/agents?limit=200${showArchived ? "&include_archived=true" : ""}`);
       setAgents(data.data);
-      // Load all agents for callable_agents picker
       const all = await api<{ data: Agent[] }>("/v1/agents?limit=200");
       setAllAgents(all.data);
-      // Load custom skills
       try {
         const sk = await api<{ data: Array<{ id: string; name: string; description: string }> }>("/v1/skills");
         setCustomSkills(sk.data);
       } catch {}
-      // Load model cards
       try {
         const mc = await api<{ data: ModelCard[] }>("/v1/model_cards");
         setModelCards(mc.data);
@@ -101,7 +101,6 @@ export function AgentsList() {
 
   const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : m?.id || "";
 
-  // --- MCP helpers ---
   const addMcp = () => setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "sse", url: "" }] });
   const updateMcp = (i: number, field: keyof McpEntry, val: string) => {
     const updated = [...form.mcpServers];
@@ -110,7 +109,6 @@ export function AgentsList() {
   };
   const removeMcp = (i: number) => setForm({ ...form, mcpServers: form.mcpServers.filter((_, j) => j !== i) });
 
-  // --- Skill helpers ---
   const toggleAnthropicSkill = (skillId: string) => {
     const exists = form.skills.find(s => s.type === "anthropic" && s.skill_id === skillId);
     if (exists) {
@@ -127,7 +125,6 @@ export function AgentsList() {
   };
   const removeSkill = (i: number) => setForm({ ...form, skills: form.skills.filter((_, j) => j !== i) });
 
-  // --- Callable agent helpers ---
   const addCallable = (agentId: string) => {
     if (form.callableAgents.find(c => c.id === agentId)) return;
     setForm({ ...form, callableAgents: [...form.callableAgents, { type: "agent", id: agentId, version: 1 }] });
@@ -160,6 +157,76 @@ export function AgentsList() {
     setForm({ ...INITIAL_FORM });
     setTab("basic");
     setCreateError("");
+    setCreateMode("form");
+    setCodeValue("");
+  };
+
+  // Convert current form state to a config object
+  const formToConfig = () => {
+    const config: Record<string, unknown> = {
+      name: form.name,
+      model: form.model,
+    };
+    if (form.system) config.system = form.system;
+    if (form.description) config.description = form.description;
+    config.tools = [{ type: "agent_toolset_20260401" }];
+    if (form.mcpServers.length) config.mcp_servers = form.mcpServers;
+    if (form.skills.length) config.skills = form.skills;
+    if (form.callableAgents.length) config.callable_agents = form.callableAgents;
+    return config;
+  };
+
+  // Switch between form/yaml/json modes
+  const switchMode = (mode: "form" | "yaml" | "json") => {
+    if (mode === createMode) return;
+    if (createMode === "form") {
+      // form → code: serialize current form
+      const config = formToConfig();
+      setCodeValue(mode === "yaml" ? yaml.dump(config, { lineWidth: -1 }) : JSON.stringify(config, null, 2));
+    } else if (mode === "form") {
+      // code → form: try to parse back (best-effort, may lose data)
+      try {
+        const parsed = createMode === "yaml" ? yaml.load(codeValue) as Record<string, unknown> : JSON.parse(codeValue);
+        setForm({
+          name: String(parsed.name || ""),
+          model: String(parsed.model || "claude-sonnet-4-6"),
+          system: String(parsed.system || ""),
+          description: String(parsed.description || ""),
+          modelCardId: "",
+          mcpServers: Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [],
+          skills: Array.isArray(parsed.skills) ? parsed.skills : [],
+          callableAgents: Array.isArray(parsed.callable_agents) ? parsed.callable_agents : [],
+        });
+      } catch { /* keep current form if parse fails */ }
+    } else {
+      // yaml ↔ json: convert between formats
+      try {
+        const parsed = createMode === "yaml" ? yaml.load(codeValue) : JSON.parse(codeValue);
+        setCodeValue(mode === "yaml" ? yaml.dump(parsed, { lineWidth: -1 }) : JSON.stringify(parsed, null, 2));
+      } catch { /* keep current value if parse fails */ }
+    }
+    setCreateMode(mode);
+  };
+
+  // Create agent from code editor
+  const createFromCode = async () => {
+    setCreateError("");
+    try {
+      const parsed = createMode === "yaml"
+        ? yaml.load(codeValue) as Record<string, unknown>
+        : JSON.parse(codeValue);
+      if (!parsed.name) { setCreateError("name is required"); return; }
+      if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
+      const agent = await api<Agent>("/v1/agents", {
+        method: "POST",
+        body: JSON.stringify(parsed),
+      });
+      closeCreate();
+      nav(`/agents/${agent.id}`);
+    } catch (e: unknown) {
+      const msg = e instanceof Error ? e.message : "Invalid config";
+      setCreateError(msg);
+    }
   };
 
   const filteredTemplates = templateSearch
@@ -170,57 +237,79 @@ export function AgentsList() {
       )
     : AGENT_TEMPLATES;
 
-  const inputCls = "w-full border border-stone-200 rounded-lg px-3 py-2 text-sm outline-none focus:border-stone-400 transition-colors";
-  const tabCls = (t: string) => `px-3 py-1.5 text-sm rounded-lg transition-colors ${tab === t ? "bg-stone-900 text-white" : "text-stone-500 hover:bg-stone-100"}`;
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  const tabCls = (t: string) => `px-3 py-1.5 text-sm rounded-md transition-colors ${tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`;
+
+  const [search, setSearch] = useState("");
+
+  const displayed = agents.filter((a) => {
+    if (!search) return true;
+    const q = search.toLowerCase();
+    return a.id.toLowerCase().includes(q) || a.name.toLowerCase().includes(q);
+  });
 
   return (
     <div className="flex-1 overflow-y-auto p-8 lg:p-10">
       <div className="flex items-start justify-between mb-6">
         <div>
-          <h1 className="font-[family-name:var(--font-display)] text-2xl font-semibold tracking-tight">Agents</h1>
-          <p className="text-stone-500 text-sm">Create and manage autonomous agents.</p>
+          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Agents</h1>
+          <p className="text-fg-muted text-sm">Create and manage autonomous agents.</p>
         </div>
-        <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800 transition-colors">
+        <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover transition-colors">
           + New agent
         </button>
       </div>
 
-      <div className="flex items-center gap-3 mb-4">
-        <label className="flex items-center gap-2 text-sm text-stone-500 cursor-pointer">
-          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} className="rounded" />
+      <div className="flex items-center gap-4 mb-4">
+        <div className="relative">
+          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+          <input
+            type="text"
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Go to agent ID..."
+            className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-56"
+          />
+        </div>
+        <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer select-none">
+          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} className="rounded accent-brand" />
           Show archived
         </label>
       </div>
 
       {loading ? (
-        <div className="text-stone-400 text-sm py-8 text-center">Loading...</div>
-      ) : agents.length === 0 ? (
-        <div className="text-center py-16 text-stone-400">
-          <p className="text-lg mb-1">No agents yet</p>
-          <p className="text-sm">Create your first agent to get started.</p>
+        <div className="flex items-center justify-center py-16"><svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg></div>
+      ) : displayed.length === 0 ? (
+        <div className="text-center py-16 text-fg-subtle">
+          <p className="text-lg mb-1">{search ? "No matching agents" : "No agents yet"}</p>
+          <p className="text-sm">{search ? "Try a different search term." : "Create your first agent to get started."}</p>
+          {!search && <button onClick={() => nav("/")} className="mt-3 text-sm text-brand hover:underline">Get started with the quickstart guide →</button>}
         </div>
       ) : (
-        <div className="border border-stone-200 rounded-xl overflow-hidden">
+        <div className="border border-border rounded-lg overflow-hidden">
           <table className="w-full text-sm">
             <thead>
-              <tr className="bg-stone-100/60 text-stone-500 text-xs uppercase tracking-wider">
+              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
+                <th className="text-left px-4 py-2.5">ID</th>
                 <th className="text-left px-4 py-2.5">Name</th>
                 <th className="text-left px-4 py-2.5">Model</th>
-                <th className="text-left px-4 py-2.5">Version</th>
+                <th className="text-left px-4 py-2.5">Status</th>
                 <th className="text-left px-4 py-2.5">Created</th>
               </tr>
             </thead>
             <tbody>
-              {agents.map((a) => (
+              {displayed.map((a) => (
                 <tr key={a.id} onClick={() => nav(`/agents/${a.id}`)}
-                  className="border-t border-stone-100 hover:bg-stone-50 cursor-pointer transition-colors">
+                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
+                  <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[180px]" title={a.id}>{a.id}</td>
+                  <td className="px-4 py-3 font-medium text-fg">{a.name}</td>
+                  <td className="px-4 py-3 text-fg-muted">{modelStr(a.model)}</td>
                   <td className="px-4 py-3">
-                    <div className="font-medium">{a.name}</div>
-                    <div className="text-xs text-stone-400 font-mono">{a.id}</div>
+                    <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full ${a.archived_at ? "bg-bg-surface text-fg-subtle" : "bg-success-subtle text-success"}`}>
+                      {a.archived_at ? "archived" : "active"}
+                    </span>
                   </td>
-                  <td className="px-4 py-3 text-stone-600">{modelStr(a.model)}</td>
-                  <td className="px-4 py-3 text-stone-600">v{a.version}</td>
-                  <td className="px-4 py-3 text-stone-500">{new Date(a.created_at).toLocaleDateString()}</td>
+                  <td className="px-4 py-3 text-fg-muted">{new Date(a.created_at).toLocaleDateString()}</td>
                 </tr>
               ))}
             </tbody>
@@ -230,15 +319,15 @@ export function AgentsList() {
 
       {/* Create dialog */}
       {showCreate && (
-        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={closeCreate}>
-          <div className="bg-white rounded-xl shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
+        <div className="fixed inset-0 bg-bg-overlay flex items-center justify-center z-50" onClick={closeCreate}>
+          <div className="bg-bg rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
 
             {/* Template selection step */}
             {createStep === "template" && (
               <>
-                <div className="px-6 pt-6 pb-4 border-b border-stone-100">
-                  <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold">New Agent</h2>
-                  <p className="text-sm text-stone-500 mt-1">Start from a template or build from scratch.</p>
+                <div className="px-6 pt-6 pb-4 border-b border-border">
+                  <h2 className="font-display text-lg font-semibold text-fg">New Agent</h2>
+                  <p className="text-sm text-fg-muted mt-1">Start from a template or build from scratch.</p>
                   <input
                     value={templateSearch}
                     onChange={(e) => setTemplateSearch(e.target.value)}
@@ -252,14 +341,14 @@ export function AgentsList() {
                       <button
                         key={tmpl.id}
                         onClick={() => selectTemplate(tmpl)}
-                        className="text-left border border-stone-200 rounded-lg p-4 hover:border-stone-400 hover:bg-stone-50 transition-all"
+                        className="text-left border border-border rounded-lg p-4 hover:border-brand hover:bg-bg-surface transition-all"
                       >
-                        <div className="font-medium text-sm">{tmpl.name}</div>
-                        <div className="text-xs text-stone-500 mt-1 line-clamp-2">{tmpl.description}</div>
+                        <div className="font-medium text-sm text-fg">{tmpl.name}</div>
+                        <div className="text-xs text-fg-muted mt-1 line-clamp-2">{tmpl.description}</div>
                         {tmpl.tags.length > 0 && (
                           <div className="flex flex-wrap gap-1 mt-2">
                             {tmpl.tags.map((tag) => (
-                              <span key={tag} className="px-1.5 py-0.5 bg-stone-100 text-stone-500 rounded text-[10px]">{tag}</span>
+                              <span key={tag} className="px-1.5 py-0.5 bg-bg-surface text-fg-muted rounded text-[10px]">{tag}</span>
                             ))}
                           </div>
                         )}
@@ -267,11 +356,11 @@ export function AgentsList() {
                     ))}
                   </div>
                   {filteredTemplates.length === 0 && (
-                    <div className="text-center py-8 text-stone-400 text-sm">No templates match your search.</div>
+                    <div className="text-center py-8 text-fg-subtle text-sm">No templates match your search.</div>
                   )}
                 </div>
-                <div className="px-6 py-4 border-t border-stone-100 flex justify-end">
-                  <button onClick={closeCreate} className="px-4 py-2 text-sm text-stone-600 hover:text-stone-900">Cancel</button>
+                <div className="px-6 py-4 border-t border-border flex justify-end">
+                  <button onClick={closeCreate} className="px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
                 </div>
               </>
             )}
@@ -279,11 +368,20 @@ export function AgentsList() {
             {/* Form step */}
             {createStep === "form" && (
               <>
-            <div className="px-6 pt-6 pb-4 border-b border-stone-100">
-              <div className="flex items-center gap-2 mb-1">
-                <button onClick={() => { setCreateStep("template"); setTemplateSearch(""); }} className="text-sm text-stone-400 hover:text-stone-700 transition-colors">&larr; Templates</button>
+            <div className="px-6 pt-6 pb-4 border-b border-border">
+              <div className="flex items-center justify-between mb-1">
+                <button onClick={() => { setCreateStep("template"); setTemplateSearch(""); setCreateMode("form"); }} className="text-sm text-fg-subtle hover:text-fg transition-colors">&larr; Templates</button>
+                <div className="flex items-center gap-0.5 bg-bg-surface rounded-md p-0.5">
+                  {(["form", "yaml", "json"] as const).map((m) => (
+                    <button key={m} onClick={() => switchMode(m)}
+                      className={`px-2 py-1 text-xs rounded transition-colors ${createMode === m ? "bg-bg text-fg font-medium shadow-sm" : "text-fg-muted hover:text-fg"}`}>
+                      {m === "form" ? "Form" : m.toUpperCase()}
+                    </button>
+                  ))}
+                </div>
               </div>
-              <h2 className="font-[family-name:var(--font-display)] text-lg font-semibold">New Agent</h2>
+              <h2 className="font-display text-lg font-semibold text-fg">New Agent</h2>
+              {createMode === "form" && (
               <div className="flex gap-1 mt-3">
                 <button onClick={() => setTab("basic")} className={tabCls("basic")}>Basic</button>
                 <button onClick={() => setTab("skills")} className={tabCls("skills")}>
@@ -296,24 +394,36 @@ export function AgentsList() {
                   Multi-Agent {form.callableAgents.length > 0 && <span className="ml-1 text-xs opacity-60">({form.callableAgents.length})</span>}
                 </button>
               </div>
+              )}
             </div>
 
             <div className="flex-1 overflow-y-auto px-6 py-4">
-              {/* Basic tab */}
-              {tab === "basic" && (
+              {/* Code editor mode (YAML/JSON) */}
+              {createMode !== "form" && (
+                <div className="space-y-3 h-full flex flex-col">
+                  {createError && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{createError}</div>}
+                  <textarea
+                    value={codeValue}
+                    onChange={(e) => setCodeValue(e.target.value)}
+                    className={`${inputCls} flex-1 resize-none font-mono text-xs leading-relaxed min-h-[300px]`}
+                    spellCheck={false}
+                  />
+                </div>
+              )}
+              {/* Form mode */}
+              {createMode === "form" && tab === "basic" && (
                 <div className="space-y-3">
-                  {createError && <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded-lg px-3 py-2">{createError}</div>}
+                  {createError && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{createError}</div>}
                   <div>
-                    <label className="text-sm text-stone-600 block mb-1">Name *</label>
+                    <label className="text-sm text-fg-muted block mb-1">Name *</label>
                     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="Coding Assistant" />
                   </div>
                   <div>
-                    <label className="text-sm text-stone-600 block mb-1">Model</label>
+                    <label className="text-sm text-fg-muted block mb-1">Model</label>
                     <select value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })} className={inputCls}>
                       <option>claude-sonnet-4-6</option>
                       <option>claude-opus-4-6</option>
                       <option>claude-haiku-4-5</option>
-                      {/* Show unique model_ids from model cards not already in the static list */}
                       {modelCards
                         .filter(mc => !["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"].includes(mc.model_id))
                         .filter((mc, i, arr) => arr.findIndex(m => m.model_id === mc.model_id) === i)
@@ -322,7 +432,7 @@ export function AgentsList() {
                   </div>
                   {modelCards.length > 0 && (
                     <div>
-                      <label className="text-sm text-stone-600 block mb-1">Model Card</label>
+                      <label className="text-sm text-fg-muted block mb-1">Model Card</label>
                       <select
                         value={form.modelCardId}
                         onChange={(e) => {
@@ -340,38 +450,38 @@ export function AgentsList() {
                           <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
                         ))}
                       </select>
-                      <p className="text-xs text-stone-400 mt-1">Select which API credentials to use for this agent.</p>
+                      <p className="text-xs text-fg-subtle mt-1">Select which API credentials to use for this agent.</p>
                     </div>
                   )}
                   {modelCards.length === 0 && (
-                    <p className="text-xs text-stone-400 bg-stone-50 px-3 py-2 rounded-lg">
+                    <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
                       No model cards configured. Agents will use the environment API key.{" "}
-                      <a href="/model-cards" className="underline hover:text-stone-600">Add one</a>.
+                      <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
                     </p>
                   )}
                   <div>
-                    <label className="text-sm text-stone-600 block mb-1">Description</label>
+                    <label className="text-sm text-fg-muted block mb-1">Description</label>
                     <input value={form.description} onChange={(e) => setForm({ ...form, description: e.target.value })} className={inputCls} placeholder="A coding assistant that writes clean code..." />
                   </div>
                   <div>
-                    <label className="text-sm text-stone-600 block mb-1">System Prompt</label>
-                    <textarea value={form.system} onChange={(e) => setForm({ ...form, system: e.target.value })} rows={5} className={`${inputCls} resize-none font-[family-name:var(--font-mono)] text-xs leading-relaxed`} placeholder="You are a helpful assistant..." />
+                    <label className="text-sm text-fg-muted block mb-1">System Prompt</label>
+                    <textarea value={form.system} onChange={(e) => setForm({ ...form, system: e.target.value })} rows={5} className={`${inputCls} resize-none font-mono text-xs leading-relaxed`} placeholder="You are a helpful assistant..." />
                   </div>
                 </div>
               )}
 
               {/* Skills tab */}
-              {tab === "skills" && (
+              {createMode === "form" && tab === "skills" && (
                 <div className="space-y-4">
                   <div>
-                    <label className="text-sm font-medium text-stone-700 block mb-2">Anthropic Skills</label>
+                    <label className="text-sm font-medium text-fg block mb-2">Anthropic Skills</label>
                     <div className="grid grid-cols-2 gap-2">
                       {ANTHROPIC_SKILLS.map((s) => {
                         const active = form.skills.some(sk => sk.type === "anthropic" && sk.skill_id === s.id);
                         return (
                           <button key={s.id} onClick={() => toggleAnthropicSkill(s.id)}
-                            className={`flex items-center gap-2 px-3 py-2.5 rounded-lg border text-sm text-left transition-all ${active ? "border-stone-900 bg-stone-900 text-white" : "border-stone-200 hover:border-stone-300"}`}>
-                            <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${active ? "bg-white text-stone-900 border-white" : "border-stone-300"}`}>
+                            className={`flex items-center gap-2 px-3 py-2.5 rounded-md border text-sm text-left transition-all ${active ? "border-brand bg-brand text-brand-fg" : "border-border hover:border-border-strong"}`}>
+                            <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${active ? "bg-brand-fg text-brand border-brand-fg" : "border-border-strong"}`}>
                               {active && "✓"}
                             </span>
                             {s.label}
@@ -382,7 +492,7 @@ export function AgentsList() {
                   </div>
 
                   <div>
-                    <label className="text-sm font-medium text-stone-700 block mb-2">Custom Skills</label>
+                    <label className="text-sm font-medium text-fg block mb-2">Custom Skills</label>
                     {customSkills.length > 0 ? (
                       <div className="space-y-2">
                         {customSkills.map((cs) => {
@@ -396,57 +506,57 @@ export function AgentsList() {
                                   setForm({ ...form, skills: [...form.skills, { type: "custom", skill_id: cs.id, version: "latest" }] });
                                 }
                               }}
-                              className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-lg border text-sm text-left transition-all ${active ? "border-stone-900 bg-stone-900 text-white" : "border-stone-200 hover:border-stone-300"}`}>
-                              <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0 ${active ? "bg-white text-stone-900 border-white" : "border-stone-300"}`}>
+                              className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-md border text-sm text-left transition-all ${active ? "border-brand bg-brand text-brand-fg" : "border-border hover:border-border-strong"}`}>
+                              <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0 ${active ? "bg-brand-fg text-brand border-brand-fg" : "border-border-strong"}`}>
                                 {active && "✓"}
                               </span>
                               <div className="flex-1 min-w-0">
                                 <div className="font-medium">{cs.name}</div>
-                                <div className={`text-xs truncate ${active ? "text-stone-300" : "text-stone-400"}`}>{cs.description}</div>
+                                <div className={`text-xs truncate ${active ? "text-brand-fg/70" : "text-fg-subtle"}`}>{cs.description}</div>
                               </div>
-                              <span className={`text-xs font-mono shrink-0 ${active ? "text-stone-400" : "text-stone-300"}`}>{cs.id}</span>
+                              <span className={`text-xs font-mono shrink-0 ${active ? "text-brand-fg/60" : "text-fg-subtle"}`}>{cs.id}</span>
                             </button>
                           );
                         })}
                       </div>
                     ) : (
-                      <p className="text-xs text-stone-400">No custom skills registered. <a href="/skills" className="underline hover:text-stone-600">Create one</a>.</p>
+                      <p className="text-xs text-fg-subtle">No custom skills registered. <a href="/skills" className="underline hover:text-fg-muted">Create one</a>.</p>
                     )}
                   </div>
                 </div>
               )}
 
               {/* MCP tab */}
-              {tab === "mcp" && (
+              {createMode === "form" && tab === "mcp" && (
                 <div className="space-y-3">
                   <div className="flex items-center justify-between mb-1">
-                    <label className="text-sm font-medium text-stone-700">MCP Servers</label>
-                    <button onClick={addMcp} className="text-xs text-stone-500 hover:text-stone-900 transition-colors">+ Add server</button>
+                    <label className="text-sm font-medium text-fg">MCP Servers</label>
+                    <button onClick={addMcp} className="text-xs text-fg-muted hover:text-fg transition-colors">+ Add server</button>
                   </div>
                   {form.mcpServers.map((mcp, i) => (
-                    <div key={i} className="border border-stone-200 rounded-lg p-3 space-y-2">
+                    <div key={i} className="border border-border rounded-lg p-3 space-y-2">
                       <div className="flex gap-2">
                         <div className="flex-1">
-                          <label className="text-xs text-stone-500 block mb-0.5">Name</label>
+                          <label className="text-xs text-fg-muted block mb-0.5">Name</label>
                           <input value={mcp.name} onChange={(e) => updateMcp(i, "name", e.target.value)} className={inputCls} placeholder="github" />
                         </div>
                         <div className="w-24">
-                          <label className="text-xs text-stone-500 block mb-0.5">Type</label>
+                          <label className="text-xs text-fg-muted block mb-0.5">Type</label>
                           <select value={mcp.type} onChange={(e) => updateMcp(i, "type", e.target.value)} className={inputCls}>
                             <option>sse</option>
                             <option>stdio</option>
                           </select>
                         </div>
-                        <button onClick={() => removeMcp(i)} className="self-end px-2 py-2 text-stone-400 hover:text-red-500 transition-colors">×</button>
+                        <button onClick={() => removeMcp(i)} className="self-end px-2 py-2 text-fg-subtle hover:text-danger transition-colors">×</button>
                       </div>
                       <div>
-                        <label className="text-xs text-stone-500 block mb-0.5">URL</label>
+                        <label className="text-xs text-fg-muted block mb-0.5">URL</label>
                         <input value={mcp.url} onChange={(e) => updateMcp(i, "url", e.target.value)} className={inputCls} placeholder="https://mcp.github.com/sse" />
                       </div>
                     </div>
                   ))}
                   {form.mcpServers.length === 0 && (
-                    <div className="text-center py-8 text-stone-400">
+                    <div className="text-center py-8 text-fg-subtle">
                       <p className="text-sm">No MCP servers configured.</p>
                       <p className="text-xs mt-1">MCP servers provide external tools via the Model Context Protocol.</p>
                     </div>
@@ -455,26 +565,26 @@ export function AgentsList() {
               )}
 
               {/* Multi-agent tab */}
-              {tab === "agents" && (
+              {createMode === "form" && tab === "agents" && (
                 <div className="space-y-3">
-                  <label className="text-sm font-medium text-stone-700 block">Callable Agents</label>
-                  <p className="text-xs text-stone-400 mb-2">Select agents that this agent can delegate tasks to.</p>
+                  <label className="text-sm font-medium text-fg block">Callable Agents</label>
+                  <p className="text-xs text-fg-subtle mb-2">Select agents that this agent can delegate tasks to.</p>
 
                   {form.callableAgents.map((ca, i) => {
                     const agentInfo = allAgents.find(a => a.id === ca.id);
                     return (
-                      <div key={i} className="flex items-center gap-2 px-3 py-2 border border-stone-200 rounded-lg">
+                      <div key={i} className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg">
                         <div className="flex-1">
-                          <div className="text-sm font-medium">{agentInfo?.name || ca.id}</div>
-                          <div className="text-xs text-stone-400 font-mono">{ca.id}</div>
+                          <div className="text-sm font-medium text-fg">{agentInfo?.name || ca.id}</div>
+                          <div className="text-xs text-fg-subtle font-mono">{ca.id}</div>
                         </div>
-                        <button onClick={() => removeCallable(i)} className="px-2 text-stone-400 hover:text-red-500 transition-colors">×</button>
+                        <button onClick={() => removeCallable(i)} className="px-2 text-fg-subtle hover:text-danger transition-colors">×</button>
                       </div>
                     );
                   })}
 
                   <div>
-                    <label className="text-xs text-stone-500 block mb-1">Add agent</label>
+                    <label className="text-xs text-fg-muted block mb-1">Add agent</label>
                     <select onChange={(e) => { if (e.target.value) addCallable(e.target.value); e.target.value = ""; }} className={inputCls}>
                       <option value="">Select an agent...</option>
                       {allAgents
@@ -484,21 +594,30 @@ export function AgentsList() {
                   </div>
 
                   {form.callableAgents.length === 0 && allAgents.length === 0 && (
-                    <p className="text-xs text-stone-400">Create other agents first to enable multi-agent delegation.</p>
+                    <p className="text-xs text-fg-subtle">Create other agents first to enable multi-agent delegation.</p>
                   )}
                 </div>
               )}
             </div>
 
-            <div className="px-6 py-4 border-t border-stone-100 flex justify-between items-center">
-              <div className="text-xs text-stone-400">
-                {form.skills.length > 0 && <span className="mr-3">{form.skills.length} skills</span>}
-                {form.mcpServers.length > 0 && <span className="mr-3">{form.mcpServers.length} MCP</span>}
-                {form.callableAgents.length > 0 && <span>{form.callableAgents.length} agents</span>}
+            <div className="px-6 py-4 border-t border-border flex justify-between items-center">
+              <div className="text-xs text-fg-subtle">
+                {createMode === "form" && (
+                  <>
+                    {form.skills.length > 0 && <span className="mr-3">{form.skills.length} skills</span>}
+                    {form.mcpServers.length > 0 && <span className="mr-3">{form.mcpServers.length} MCP</span>}
+                    {form.callableAgents.length > 0 && <span>{form.callableAgents.length} agents</span>}
+                  </>
+                )}
+                {createMode !== "form" && <span>{createMode.toUpperCase()} editor</span>}
               </div>
               <div className="flex gap-2">
-                <button onClick={closeCreate} className="px-4 py-2 text-sm text-stone-600 hover:text-stone-900">Cancel</button>
-                <button onClick={create} disabled={!form.name} className="px-5 py-2 bg-stone-900 text-white rounded-lg text-sm font-medium hover:bg-stone-800 disabled:opacity-40 transition-colors">Create Agent</button>
+                <button onClick={closeCreate} className="px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
+                {createMode === "form" ? (
+                  <button onClick={create} disabled={!form.name} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors">Create Agent</button>
+                ) : (
+                  <button onClick={createFromCode} disabled={!codeValue.trim()} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors">Create Agent</button>
+                )}
               </div>
             </div>
               </>

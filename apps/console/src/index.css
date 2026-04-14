@@ -1,12 +1,145 @@
 @import "tailwindcss";
 
-/* Code highlight theme */
+/* Code highlight theme — light by default */
 @import "highlight.js/styles/github.css";
 
+/* ---------- Dark mode: class-based ---------- */
+@custom-variant dark (&:where(.dark, .dark *));
+
+/* ---------- Light theme (default) ---------- */
+:root {
+  --brand: oklch(0.68 0.19 25);        /* #FF6B50 in oklch */
+  --brand-hover: oklch(0.62 0.19 25);  /* darker coral */
+  --brand-subtle: oklch(0.96 0.03 25); /* barely-there coral tint */
+  --brand-fg: #fff;
+
+  --bg: #fefefe;
+  --bg-sidebar: #f8f8f7;
+  --bg-surface: #f3f3f1;
+  --bg-overlay: oklch(0 0 0 / 0.3);
+
+  --fg: #1a1a1a;
+  --fg-muted: #6b6b6b;
+  --fg-subtle: #a1a1a1;
+
+  --border: #e4e4e2;
+  --border-strong: #d0d0ce;
+
+  --success: oklch(0.6 0.18 145);
+  --success-subtle: oklch(0.96 0.04 145);
+  --warning: oklch(0.7 0.16 75);
+  --warning-subtle: oklch(0.96 0.04 75);
+  --danger: oklch(0.58 0.22 25);
+  --danger-subtle: oklch(0.96 0.04 25);
+  --info: oklch(0.58 0.16 260);
+  --info-subtle: oklch(0.96 0.03 260);
+
+  --ring: var(--brand);
+  color-scheme: light;
+}
+
+/* ---------- Dark theme ---------- */
+.dark {
+  --brand: oklch(0.7 0.18 25);         /* slightly brighter coral for dark bg */
+  --brand-hover: oklch(0.76 0.16 25);
+  --brand-subtle: oklch(0.25 0.06 25);
+  --brand-fg: #fff;
+
+  --bg: #151515;
+  --bg-sidebar: #1a1a1a;
+  --bg-surface: #222220;
+  --bg-overlay: oklch(0 0 0 / 0.6);
+
+  --fg: #ececec;
+  --fg-muted: #a0a0a0;
+  --fg-subtle: #888;
+
+  --border: #2e2e2c;
+  --border-strong: #404040;
+
+  --success: oklch(0.76 0.16 145);
+  --success-subtle: oklch(0.22 0.05 145);
+  --warning: oklch(0.8 0.14 75);
+  --warning-subtle: oklch(0.22 0.05 75);
+  --danger: oklch(0.72 0.18 25);
+  --danger-subtle: oklch(0.22 0.05 25);
+  --info: oklch(0.72 0.14 260);
+  --info-subtle: oklch(0.22 0.04 260);
+
+  --ring: var(--brand);
+  color-scheme: dark;
+}
+
+/* ---------- Tailwind theme tokens ---------- */
 @theme {
-  --font-display: "Source Serif 4", Georgia, serif;
-  --font-sans: "DM Sans", -apple-system, sans-serif;
-  --font-mono: "SF Mono", Menlo, Consolas, monospace;
-  --color-accent: #c4703b;
-  --color-accent-hover: #b3622f;
+  /* Fonts */
+  --font-display: "Source Serif 4", Georgia, "Times New Roman", serif;
+  --font-sans: "DM Sans", -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+
+  /* Color palette — resolves dynamically via :root / .dark vars */
+  --color-brand: var(--brand);
+  --color-brand-hover: var(--brand-hover);
+  --color-brand-subtle: var(--brand-subtle);
+  --color-brand-fg: var(--brand-fg);
+
+  --color-bg: var(--bg);
+  --color-bg-sidebar: var(--bg-sidebar);
+  --color-bg-surface: var(--bg-surface);
+  --color-bg-overlay: var(--bg-overlay);
+
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+
+  --color-success: var(--success);
+  --color-success-subtle: var(--success-subtle);
+  --color-warning: var(--warning);
+  --color-warning-subtle: var(--warning-subtle);
+  --color-danger: var(--danger);
+  --color-danger-subtle: var(--danger-subtle);
+  --color-info: var(--info);
+  --color-info-subtle: var(--info-subtle);
+
+  --color-ring: var(--ring);
+}
+
+/* ---------- Base typography ---------- */
+body {
+  font-family: var(--font-sans);
+  font-size: 0.875rem; /* 14px base for app UI */
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Focus ring — brand-colored */
+*:focus-visible {
+  outline: 2px solid var(--ring);
+  outline-offset: 2px;
+}
+
+/* Scrollbar subtle styling */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--border-strong);
+  border-radius: 3px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--fg-subtle);
+}
+
+/* Dark mode code highlights */
+.dark pre code.hljs {
+  background: var(--bg-surface);
+  color: var(--fg);
 }

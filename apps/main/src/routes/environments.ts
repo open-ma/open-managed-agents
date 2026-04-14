@@ -49,6 +49,7 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
 app.post("/", async (c) => {
   const body = (await c.req.json()) as {
     name: string;
+    description?: string;
     config: EnvironmentConfig["config"];
   };
 
@@ -61,6 +62,7 @@ app.post("/", async (c) => {
   const env: EnvironmentConfig = {
     id: generateEnvId(),
     name: body.name,
+    description: body.description,
     config: body.config || { type: "cloud" },
     status: canBuild ? "building" : "ready",
     sandbox_worker_name: canBuild ? undefined : "sandbox-default",
@@ -153,10 +155,12 @@ app.put("/:id", async (c) => {
   const env: EnvironmentConfig = JSON.parse(data);
   const body = (await c.req.json()) as {
     name?: string;
+    description?: string;
     config?: EnvironmentConfig["config"];
   };
 
   if (body.name !== undefined) env.name = body.name;
+  if (body.description !== undefined) env.description = body.description;
 
   if (body.config !== undefined) {
     const oldConfig = JSON.stringify(env.config);
