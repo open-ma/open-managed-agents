@@ -15,6 +15,9 @@ wrangler.deploy.jsonc
 .act.vars
 test-heatmap.html
 
+# Internal docs (screenshots, design notes, TODOs)
+.docs/
+
 # IDE
 .vscode/
 .idea/
