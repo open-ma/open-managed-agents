@@ -1,0 +1,19 @@
+{
+  "name": "@open-managed-agents/cli",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "oma": "./dist/index.js"
+  },
+  "scripts": {
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --banner:js='#!/usr/bin/env node'",
+    "dev": "tsx src/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*"
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "tsx": "^4.19.0"
+  }
+}

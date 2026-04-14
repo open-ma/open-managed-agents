@@ -220,7 +220,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 
       {/* Bottom section */}
       <div className="p-3 space-y-3 border-t border-border">
-        <a href="https://docs.anthropic.com/en/docs/agents/managed-agents" target="_blank" rel="noopener noreferrer"
+        <a href="https://github.com/open-ma/open-managed-agents" target="_blank" rel="noopener noreferrer"
           className="flex items-center gap-2 px-3 py-1.5 text-sm text-fg-muted hover:text-fg hover:bg-bg-surface rounded-md transition-colors">
           <svg className="w-4 h-4 opacity-60" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
           Documentation
@@ -241,9 +241,51 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   );
 }
 
+/* ── Auth gate — shown when no API key is set ── */
+function AuthGate() {
+  const { apiKey, setApiKey } = useAuth();
+  const [key, setKey] = useState("");
+
+  if (apiKey) return null;
+
+  return (
+    <div className="flex-1 flex items-center justify-center p-8">
+      <div className="max-w-sm w-full space-y-4">
+        <div className="text-center">
+          <LogoMark />
+          <h2 className="font-display text-lg font-semibold text-fg mt-4">Welcome to openma</h2>
+          <p className="text-sm text-fg-muted mt-1">Enter your API key to get started.</p>
+        </div>
+        <div>
+          <input
+            type="password"
+            value={key}
+            onChange={(e) => setKey(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && key.trim()) setApiKey(key.trim()); }}
+            placeholder="API key"
+            autoFocus
+            className="w-full border border-border rounded-md px-3 py-2.5 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle"
+          />
+        </div>
+        <button
+          onClick={() => key.trim() && setApiKey(key.trim())}
+          disabled={!key.trim()}
+          className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
+        >
+          Continue
+        </button>
+        <p className="text-xs text-fg-subtle text-center">
+          Set <code className="font-mono bg-bg-surface px-1 py-0.5 rounded">API_KEY</code> in your deployment's environment variables.
+        </p>
+      </div>
+    </div>
+  );
+}
+
 /* ── Layout ── */
 export function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const { apiKey } = useAuth();
 
   return (
     <div className="flex h-screen bg-bg">
@@ -291,7 +333,7 @@ export function Layout() {
         </div>
 
         <div className="flex-1 flex flex-col overflow-hidden bg-bg md:rounded-lg md:border md:border-border">
-          <Outlet />
+          {apiKey ? <Outlet /> : <AuthGate />}
         </div>
       </main>
     </div>

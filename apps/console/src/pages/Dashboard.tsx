@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect, useCallback } from "react";
 import { useNavigate } from "react-router";
 import { AGENT_TEMPLATES } from "../data/templates";
 import { useApi } from "../lib/api";
@@ -22,6 +22,41 @@ export function Dashboard() {
   const [generating, setGenerating] = useState(false);
   const [selectedTemplate, setSelectedTemplate] = useState<(typeof AGENT_TEMPLATES)[number] | null>(null);
   const [creating, setCreating] = useState(false);
+  const [connectedServers, setConnectedServers] = useState<Set<string>>(new Set());
+  const [connectingServer, setConnectingServer] = useState<string | null>(null);
+
+  // Listen for OAuth popup completion
+  const handleOAuthMessage = useCallback((event: MessageEvent) => {
+    if (event.data?.type === "oauth_complete" && event.data.service) {
+      setConnectedServers((prev) => new Set([...prev, event.data.service]));
+      setConnectingServer(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    window.addEventListener("message", handleOAuthMessage);
+    return () => window.removeEventListener("message", handleOAuthMessage);
+  }, [handleOAuthMessage]);
+
+  const handleConnect = async (mcpServerUrl: string, serverName: string) => {
+    setConnectingServer(serverName);
+    // Create a vault for this template if we don't have one
+    let vaultId: string;
+    try {
+      const vault = await api<{ id: string }>("/v1/vaults", {
+        method: "POST",
+        body: JSON.stringify({ name: `${selectedTemplate?.name || "agent"} credentials` }),
+      });
+      vaultId = vault.id;
+    } catch {
+      setConnectingServer(null);
+      return;
+    }
+
+    // Open OAuth flow in popup
+    const authUrl = `/v1/oauth/authorize?mcp_server_url=${encodeURIComponent(mcpServerUrl)}&vault_id=${encodeURIComponent(vaultId)}&redirect_uri=${encodeURIComponent(window.location.href)}`;
+    window.open(authUrl, "oauth", "width=600,height=700,popup=yes");
+  };
 
   const filteredTemplates = templateSearch
     ? AGENT_TEMPLATES.filter(
@@ -211,12 +246,33 @@ export function Dashboard() {
                   {selectedTemplate.mcpServers.length > 0 && (
                     <div>
                       <label className="text-xs font-medium text-fg-subtle uppercase tracking-wider">MCP Servers</label>
-                      <div className="mt-1 flex flex-wrap gap-2">
-                        {selectedTemplate.mcpServers.map((s) => (
-                          <span key={s.name} className="inline-flex items-center gap-1.5 px-2.5 py-1 bg-bg-surface text-fg-muted rounded-md text-xs font-mono">
-                            {s.name}
-                          </span>
-                        ))}
+                      <div className="mt-2 space-y-2">
+                        {selectedTemplate.mcpServers.map((s) => {
+                          const serverName = s.url.replace(/^https?:\/\/mcp\./, "").replace(/\.(com|app|dev|io)\/.*$/, "");
+                          const isConnected = connectedServers.has(serverName);
+                          const isConnecting = connectingServer === s.name;
+                          return (
+                            <div key={s.name} className="flex items-center justify-between px-3 py-2 bg-bg-surface rounded-md">
+                              <span className="text-sm font-mono text-fg-muted">{s.name}</span>
+                              {isConnected ? (
+                                <span className="inline-flex items-center gap-1 text-xs text-success font-medium">
+                                  <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" strokeWidth={2.5} viewBox="0 0 24 24">
+                                    <path strokeLinecap="round" strokeLinejoin="round" d="M5 13l4 4L19 7" />
+                                  </svg>
+                                  Connected
+                                </span>
+                              ) : (
+                                <button
+                                  onClick={() => handleConnect(s.url, s.name)}
+                                  disabled={isConnecting}
+                                  className="px-2.5 py-1 text-xs font-medium text-brand border border-brand rounded-md hover:bg-brand hover:text-brand-fg disabled:opacity-50 transition-colors"
+                                >
+                                  {isConnecting ? "Connecting..." : "Connect"}
+                                </button>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     </div>
                   )}

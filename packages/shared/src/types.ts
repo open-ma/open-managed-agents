@@ -400,6 +400,8 @@ export interface CredentialAuth {
   token_endpoint?: string;
   client_id?: string;
   client_secret?: string;
+  expires_at?: string;           // ISO 8601, when access_token expires
+  authorization_server?: string; // cached OAuth authorization server URL
   // static_bearer fields
   token?: string;
   // command_secret: inject env var only for matching command prefixes
