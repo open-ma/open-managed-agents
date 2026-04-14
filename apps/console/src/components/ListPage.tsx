@@ -47,16 +47,16 @@ export function ListPage<T>({
   children,
 }: ListPageProps<T>) {
   return (
-    <div className="flex-1 overflow-y-auto px-8 py-6">
+    <div className="flex-1 overflow-y-auto px-4 py-4 md:px-8 md:py-6">
       {/* Header */}
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold text-fg">{title}</h1>
+      <div className="flex items-start justify-between mb-6 gap-3">
+        <div className="min-w-0">
+          <h1 className="font-display text-lg md:text-xl font-semibold text-fg truncate">{title}</h1>
           <p className="text-sm text-fg-muted mt-0.5">{subtitle}</p>
         </div>
         <button
           onClick={onCreate}
-          className="px-4 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover transition-colors"
+          className="px-3 py-2 md:px-4 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover transition-colors shrink-0"
         >
           {createLabel}
         </button>
@@ -64,9 +64,9 @@ export function ListPage<T>({
 
       {/* Controls */}
       {(onSearchChange || onShowArchivedChange) && (
-        <div className="flex items-center gap-4 mb-4">
+        <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 mb-4">
           {onSearchChange && (
-            <div className="relative">
+            <div className="relative w-full sm:w-auto">
               <svg
                 className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle"
                 xmlns="http://www.w3.org/2000/svg"
@@ -87,7 +87,7 @@ export function ListPage<T>({
                 value={searchValue ?? ""}
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder={searchPlaceholder ?? "Search..."}
-                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-64"
+                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-full sm:w-64"
               />
             </div>
           )}
@@ -138,7 +138,7 @@ export function ListPage<T>({
           )}
         </div>
       ) : (
-        <div className="border border-border rounded-lg overflow-hidden mt-4">
+        <div className="border border-border rounded-lg overflow-x-auto mt-4">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
