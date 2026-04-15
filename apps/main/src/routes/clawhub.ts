@@ -7,79 +7,145 @@ const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 const CLAWHUB_BASE = "https://clawhub.ai/api/v1";
 
-// GET /v1/clawhub/search?q=xxx — search ClawHub skills
+interface ClawHubPackage {
+  name: string;
+  displayName: string;
+  summary: string;
+  family: string;
+  latestVersion: string;
+  ownerHandle: string;
+}
+
+// GET /v1/clawhub/search?q=xxx — search ClawHub registry
 app.get("/search", async (c) => {
   const q = c.req.query("q") || "";
-  if (!q) return c.json({ data: [] });
-
-  const res = await fetch(`${CLAWHUB_BASE}/skills/search?q=${encodeURIComponent(q)}`);
+  const res = await fetch(`${CLAWHUB_BASE}/packages${q ? `?q=${encodeURIComponent(q)}` : ""}`);
   if (!res.ok) return c.json({ error: `ClawHub search failed: ${res.status}` }, 502);
-  return c.json(await res.json());
+  const body = (await res.json()) as { items: ClawHubPackage[] };
+  // Filter to skills only
+  const skills = (body.items || [])
+    .filter((p) => p.family === "skill")
+    .map((p) => ({
+      slug: p.name,
+      name: p.displayName || p.name,
+      description: p.summary || "",
+      version: p.latestVersion,
+      owner: p.ownerHandle,
+    }));
+  return c.json({ data: skills });
 });
 
-// POST /v1/clawhub/install — install a skill from ClawHub into this tenant
+// POST /v1/clawhub/install — install a skill from ClawHub
 app.post("/install", async (c) => {
   const t = c.get("tenant_id");
   const body = await c.req.json<{ slug: string }>();
   if (!body.slug) return c.json({ error: "slug is required" }, 400);
 
-  // 1. Resolve skill metadata
-  const resolveRes = await fetch(`${CLAWHUB_BASE}/skills/resolve?slug=${encodeURIComponent(body.slug)}`);
-  if (!resolveRes.ok) return c.json({ error: `Skill "${body.slug}" not found on ClawHub` }, 404);
-  const resolved = (await resolveRes.json()) as {
-    skill?: { slug: string; name: string; description: string; version: string };
-    files?: Array<{ filename: string; content: string }>;
-  };
+  // 1. Get package metadata
+  const metaRes = await fetch(`${CLAWHUB_BASE}/packages/${encodeURIComponent(body.slug)}`);
+  if (!metaRes.ok) return c.json({ error: `Skill "${body.slug}" not found on ClawHub` }, 404);
+  const meta = (await metaRes.json()) as { package: ClawHubPackage };
 
-  // 2. If resolve doesn't include files, download the zip
-  let files = resolved.files;
-  if (!files || files.length === 0) {
-    const dlRes = await fetch(`${CLAWHUB_BASE}/download?slug=${encodeURIComponent(body.slug)}`);
-    if (!dlRes.ok) return c.json({ error: "Failed to download skill from ClawHub" }, 502);
+  // 2. Download zip
+  const dlRes = await fetch(`${CLAWHUB_BASE}/download?slug=${encodeURIComponent(body.slug)}`);
+  if (!dlRes.ok) return c.json({ error: `Failed to download skill: ${dlRes.status}` }, 502);
 
-    // Parse zip — simple approach: if it's a zip we can't parse in Workers easily,
-    // so we try to get the raw text content
-    const contentType = dlRes.headers.get("content-type") || "";
-    if (contentType.includes("application/json")) {
-      const jsonBody = (await dlRes.json()) as { files?: Array<{ filename: string; content: string }> };
-      files = jsonBody.files;
-    }
+  // 3. Extract files from zip
+  const files = await extractZipFiles(dlRes);
+
+  if (files.length === 0) {
+    return c.json({ error: "Downloaded zip contains no files" }, 502);
   }
 
-  if (!files || files.length === 0) {
-    return c.json({ error: "Could not extract skill files from ClawHub" }, 502);
-  }
-
-  // 3. Create skill in our KV
-  const meta = resolved.skill || { name: body.slug, description: "", slug: body.slug, version: "1" };
-  const name = meta.name || meta.slug;
+  // 4. Save to KV
+  const pkg = meta.package;
+  const skillName = (pkg.displayName || pkg.name).toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64);
   const id = `skill_${generateId()}`;
   const versionId = Date.now().toString();
   const now = new Date().toISOString();
 
   const skill = {
     id,
-    display_title: name,
-    name: name.toLowerCase().replace(/[^a-z0-9-]/g, "-").slice(0, 64),
-    description: meta.description || "",
+    display_title: pkg.displayName || pkg.name,
+    name: skillName,
+    description: pkg.summary || "",
     source: "custom" as const,
     latest_version: versionId,
     created_at: now,
-    clawhub_slug: meta.slug,
+    clawhub_slug: body.slug,
   };
 
-  const version = {
-    version: versionId,
-    files,
-    created_at: now,
-  };
+  const version = { version: versionId, files, created_at: now };
 
   await Promise.all([
     c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
     c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
-  return c.json({ ...skill, files: version.files }, 201);
+  return c.json({ ...skill, files }, 201);
 });
+
+/**
+ * Extract text files from a zip Response using DecompressionStream.
+ * Workers support zip via the standard Web APIs.
+ */
+async function extractZipFiles(res: Response): Promise<Array<{ filename: string; content: string }>> {
+  const buf = await res.arrayBuffer();
+  const view = new DataView(buf);
+  const files: Array<{ filename: string; content: string }> = [];
+  let offset = 0;
+
+  while (offset < buf.byteLength - 4) {
+    const sig = view.getUint32(offset, true);
+    if (sig !== 0x04034b50) break; // Local file header signature
+
+    const compressionMethod = view.getUint16(offset + 8, true);
+    const compressedSize = view.getUint32(offset + 18, true);
+    const uncompressedSize = view.getUint32(offset + 22, true);
+    const nameLen = view.getUint16(offset + 26, true);
+    const extraLen = view.getUint16(offset + 28, true);
+
+    const nameBytes = new Uint8Array(buf, offset + 30, nameLen);
+    const filename = new TextDecoder().decode(nameBytes);
+
+    const dataStart = offset + 30 + nameLen + extraLen;
+    const rawData = new Uint8Array(buf, dataStart, compressedSize);
+
+    // Skip directories and meta files
+    if (!filename.endsWith("/") && !filename.startsWith("__MACOSX")) {
+      let content: string;
+      if (compressionMethod === 8) {
+        // Deflate — use DecompressionStream
+        const ds = new DecompressionStream("raw");
+        const writer = ds.writable.getWriter();
+        writer.write(rawData);
+        writer.close();
+        const reader = ds.readable.getReader();
+        const chunks: Uint8Array[] = [];
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          chunks.push(value);
+        }
+        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
+        const merged = new Uint8Array(totalLen);
+        let pos = 0;
+        for (const chunk of chunks) {
+          merged.set(chunk, pos);
+          pos += chunk.length;
+        }
+        content = new TextDecoder().decode(merged);
+      } else {
+        // Stored (no compression)
+        content = new TextDecoder().decode(rawData);
+      }
+      files.push({ filename, content });
+    }
+
+    offset = dataStart + compressedSize;
+  }
+
+  return files;
+}
 
 export default app;
