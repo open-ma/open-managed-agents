@@ -86,8 +86,8 @@ app.post("/install", async (c) => {
 });
 
 /**
- * Extract text files from a zip Response using DecompressionStream.
- * Workers support zip via the standard Web APIs.
+ * Extract text files from a zip ArrayBuffer.
+ * Minimal zip parser — handles Store (0) and Deflate (8) methods.
  */
 async function extractZipFiles(res: Response): Promise<Array<{ filename: string; content: string }>> {
   const buf = await res.arrayBuffer();
@@ -101,7 +101,6 @@ async function extractZipFiles(res: Response): Promise<Array<{ filename: string;
 
     const compressionMethod = view.getUint16(offset + 8, true);
     const compressedSize = view.getUint32(offset + 18, true);
-    const uncompressedSize = view.getUint32(offset + 22, true);
     const nameLen = view.getUint16(offset + 26, true);
     const extraLen = view.getUint16(offset + 28, true);
 
@@ -111,35 +110,24 @@ async function extractZipFiles(res: Response): Promise<Array<{ filename: string;
     const dataStart = offset + 30 + nameLen + extraLen;
     const rawData = new Uint8Array(buf, dataStart, compressedSize);
 
-    // Skip directories and meta files
     if (!filename.endsWith("/") && !filename.startsWith("__MACOSX")) {
-      let content: string;
-      if (compressionMethod === 8) {
-        // Deflate — use DecompressionStream
-        const ds = new DecompressionStream("raw");
-        const writer = ds.writable.getWriter();
-        writer.write(rawData);
-        writer.close();
-        const reader = ds.readable.getReader();
-        const chunks: Uint8Array[] = [];
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          chunks.push(value);
+      try {
+        let content: string;
+        if (compressionMethod === 8) {
+          // Deflate
+          const ds = new DecompressionStream("deflate-raw");
+          const writer = ds.writable.getWriter();
+          writer.write(rawData).catch(() => {});
+          writer.close().catch(() => {});
+          const decompressed = new Response(ds.readable);
+          content = await decompressed.text();
+        } else {
+          content = new TextDecoder().decode(rawData);
         }
-        const totalLen = chunks.reduce((s, c) => s + c.length, 0);
-        const merged = new Uint8Array(totalLen);
-        let pos = 0;
-        for (const chunk of chunks) {
-          merged.set(chunk, pos);
-          pos += chunk.length;
-        }
-        content = new TextDecoder().decode(merged);
-      } else {
-        // Stored (no compression)
-        content = new TextDecoder().decode(rawData);
+        files.push({ filename, content });
+      } catch {
+        // Skip files that fail to decompress
       }
-      files.push({ filename, content });
     }
 
     offset = dataStart + compressedSize;
