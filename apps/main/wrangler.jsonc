@@ -20,7 +20,7 @@
   ],
 
   "d1_databases": [
-    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "local" }
+    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
   ],
 
   // Workers AI for generating embeddings
