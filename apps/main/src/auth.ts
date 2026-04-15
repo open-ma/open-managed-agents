@@ -1,6 +1,5 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "@open-managed-agents/shared";
-import { createAuth, getTenantId } from "./auth-config";
 
 async function sha256(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -34,22 +33,26 @@ export const authMiddleware = createMiddleware<{
   }
 
   // 2. Try session cookie authentication (for Console)
-  try {
-    const auth = createAuth(c.env);
-    const session = await auth.api.getSession({
-      headers: c.req.raw.headers,
-    });
-    if (session?.user) {
-      // Resolve user → tenant
-      const tenantId = await getTenantId(c.env.AUTH_DB, session.user.id);
-      if (!tenantId) {
-        return c.json({ error: "User has no workspace. Please contact support." }, 403);
+  // Lazy import to avoid crashing workerd in test environments
+  // where better-auth's Node.js deps aren't available
+  if (c.env.AUTH_DB) {
+    try {
+      const { createAuth, getTenantId } = await import("./auth-config");
+      const auth = createAuth(c.env);
+      const session = await auth.api.getSession({
+        headers: c.req.raw.headers,
+      });
+      if (session?.user) {
+        const tenantId = await getTenantId(c.env.AUTH_DB, session.user.id);
+        if (!tenantId) {
+          return c.json({ error: "User has no workspace. Please contact support." }, 403);
+        }
+        c.set("tenant_id", tenantId);
+        return next();
       }
-      c.set("tenant_id", tenantId);
-      return next();
+    } catch {
+      // fall through to 401
     }
-  } catch {
-    // fall through to 401
   }
 
   return c.json({ error: "Unauthorized" }, 401);
