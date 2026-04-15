@@ -268,6 +268,62 @@ describe("provider resolution", () => {
 });
 
 // ============================================================
+// Models list endpoint
+// ============================================================
+
+describe("models list endpoint", () => {
+  it("rejects when no api_key provided", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "ant" }),
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toContain("api_key");
+  });
+
+  it("returns 502 for invalid Anthropic key", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "ant", api_key: "sk-ant-invalid-key" }),
+    });
+    // External API call will fail with auth error
+    expect(res.status).toBe(502);
+  });
+
+  it("returns 502 for invalid OpenAI key", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "oai", api_key: "sk-invalid-key" }),
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it("returns empty array for unknown provider", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "unknown", api_key: "some-key" }),
+    });
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.data).toEqual([]);
+  });
+
+  it("returns 404 for nonexistent model_card_id", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ model_card_id: "mdl-nonexistent" }),
+    });
+    expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================
 // KV helper functions
 // ============================================================
 
