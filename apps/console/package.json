@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "better-auth": "^1.6.3",
     "highlight.js": "^11.11.1",
     "js-yaml": "^4.1.1",
     "react": "^19.1.0",

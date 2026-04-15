@@ -1,5 +1,15 @@
 import { createAnthropic } from "@ai-sdk/anthropic";
+import { createOpenAI } from "@ai-sdk/openai";
 import type { LanguageModel } from "ai";
+
+/**
+ * API compatibility types:
+ * - "ant"            — Anthropic official API
+ * - "ant-compatible" — Third-party Anthropic-compatible API
+ * - "oai"            — OpenAI official API
+ * - "oai-compatible" — Third-party OpenAI-compatible API (DeepSeek, Groq, etc.)
+ */
+export type ApiCompat = "ant" | "ant-compatible" | "oai" | "oai-compatible";
 
 const KNOWN_CLAUDE_PREFIX = "claude-";
 
@@ -19,35 +29,42 @@ async function stripMaxTokensFetch(url: RequestInfo | URL, init?: RequestInit): 
   return globalThis.fetch(url, init);
 }
 
+function useOpenAI(compat: ApiCompat): boolean {
+  return compat === "oai" || compat === "oai-compatible";
+}
+
 export function resolveModel(
   model: string | { id: string; speed?: "standard" | "fast" },
   apiKey: string,
-  baseURL?: string
+  baseURL?: string,
+  compat?: ApiCompat,
 ): LanguageModel {
   const modelString = typeof model === "string" ? model : model.id;
-  const speed = typeof model === "object" ? model.speed : undefined;
 
   // Strip provider prefix if present: "anthropic/claude-sonnet-4-6" → "claude-sonnet-4-6"
   const modelId = modelString.includes("/")
     ? modelString.split("/").slice(1).join("/")
     : modelString;
 
+  const effectiveCompat = compat || "ant";
+
+  if (useOpenAI(effectiveCompat)) {
+    const openai = createOpenAI({
+      apiKey,
+      baseURL: baseURL || undefined,
+    });
+    return openai(modelId);
+  }
+
+  // ant / ant-compatible
   const isKnownClaude = modelId.startsWith(KNOWN_CLAUDE_PREFIX);
 
   const anthropic = createAnthropic({
     apiKey,
     baseURL: baseURL || undefined,
     headers: baseURL ? { "X-Sub-Module": "managed-agents" } : undefined,
-    // @ai-sdk/anthropic hard-codes max_tokens=4096 for unknown models,
-    // which truncates thinking+tool_use. Strip it for non-Claude providers
-    // so the API uses its own default (MiniMax supports up to 196608).
     ...(!isKnownClaude && { fetch: stripMaxTokensFetch }),
   });
-
-  if (speed === "fast") {
-    // Speed is passed as providerOptions in generateText calls, not at model creation
-    return anthropic(modelId);
-  }
 
   return anthropic(modelId);
 }

@@ -1,18 +1,14 @@
-import { useAuth } from "./auth";
-
 const BASE = "";
 
 export function useApi() {
-  const { apiKey } = useAuth();
-
   async function api<T = unknown>(
     path: string,
     init?: RequestInit
   ): Promise<T> {
     const res = await fetch(`${BASE}${path}`, {
       ...init,
+      credentials: "include",
       headers: {
-        "x-api-key": apiKey,
         ...(init?.body ? { "content-type": "application/json" } : {}),
         ...init?.headers,
       },
@@ -32,7 +28,7 @@ export function useApi() {
     signal?: AbortSignal
   ) {
     fetch(`/v1/sessions/${sessionId}/events/stream`, {
-      headers: { "x-api-key": apiKey },
+      credentials: "include",
       signal,
     }).then(async (res) => {
       const reader = res.body?.getReader();

@@ -1,24 +1,45 @@
-import { createContext, useContext, useState, type ReactNode } from "react";
+import { createContext, useContext, type ReactNode } from "react";
+import { authClient } from "./auth-client";
 
-interface AuthCtx {
-  apiKey: string;
-  setApiKey: (key: string) => void;
+interface User {
+  id: string;
+  name: string;
+  email: string;
+  image?: string | null;
 }
 
-const AuthContext = createContext<AuthCtx>({ apiKey: "", setApiKey: () => {} });
+interface AuthCtx {
+  user: User | null;
+  isLoading: boolean;
+  isAuthenticated: boolean;
+}
+
+const AuthContext = createContext<AuthCtx>({
+  user: null,
+  isLoading: true,
+  isAuthenticated: false,
+});
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [apiKey, setApiKey] = useState(
-    () => localStorage.getItem("api_key") || ""
-  );
+  const { data: session, isPending } = authClient.useSession();
 
-  const set = (key: string) => {
-    setApiKey(key);
-    localStorage.setItem("api_key", key);
-  };
+  const user = session?.user
+    ? {
+        id: session.user.id,
+        name: session.user.name,
+        email: session.user.email,
+        image: session.user.image,
+      }
+    : null;
 
   return (
-    <AuthContext.Provider value={{ apiKey, setApiKey: set }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isLoading: isPending,
+        isAuthenticated: !!user,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );
