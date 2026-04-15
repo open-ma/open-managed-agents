@@ -36,28 +36,18 @@ export function ModelCardsList() {
   const [form, setForm] = useState({ ...INITIAL_FORM });
   const [error, setError] = useState("");
   const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string }>>([]);
-  const [modelsLoading, setModelsLoading] = useState(false);
-  const [modelsError, setModelsError] = useState("");
 
-  // Fetch models when API key changes for official providers
-  const fetchModels = useCallback(async (provider: string, apiKey: string) => {
-    if (!OFFICIAL_PROVIDERS.has(provider) || !apiKey || apiKey.length < 8) {
+  // Fetch known models when provider changes
+  const fetchModels = useCallback(async (provider: string) => {
+    if (!OFFICIAL_PROVIDERS.has(provider)) {
       setAvailableModels([]);
       return;
     }
-    setModelsLoading(true);
-    setModelsError("");
     try {
-      const result = await api<{ data: Array<{ id: string; name: string }> }>("/v1/models/list", {
-        method: "POST",
-        body: JSON.stringify({ provider, api_key: apiKey }),
-      });
+      const result = await api<{ data: Array<{ id: string; name: string }> }>(`/v1/models/list?provider=${provider}`);
       setAvailableModels(result.data);
-    } catch (e: any) {
-      setModelsError("Failed to load models. Check your API key.");
+    } catch {
       setAvailableModels([]);
-    } finally {
-      setModelsLoading(false);
     }
   }, [api]);
 
@@ -200,7 +190,7 @@ export function ModelCardsList() {
                 <button
                   key={p.value}
                   type="button"
-                  onClick={() => { setForm({ ...form, provider: p.value, model_id: "", base_url: "" }); setAvailableModels([]); setModelsError(""); }}
+                  onClick={() => { setForm({ ...form, provider: p.value, model_id: "", base_url: "" }); setAvailableModels([]); fetchModels(p.value); }}
                   className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
                     form.provider === p.value
                       ? "border-brand bg-brand-subtle text-fg"
@@ -217,14 +207,7 @@ export function ModelCardsList() {
             <label className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
             <input type="password" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
               placeholder={editingId ? "Leave blank to keep current key" : "sk-..."}
-              autoComplete="new-password" name="model-api-key-field"
-              onBlur={() => { if (OFFICIAL_PROVIDERS.has(form.provider) && form.api_key) fetchModels(form.provider, form.api_key); }} />
-            {OFFICIAL_PROVIDERS.has(form.provider) && form.api_key && (
-              <button type="button" onClick={() => fetchModels(form.provider, form.api_key)}
-                className="text-xs text-brand hover:underline mt-1">
-                {modelsLoading ? "Loading models..." : "Refresh model list"}
-              </button>
-            )}
+              autoComplete="new-password" name="model-api-key-field" />
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">Model ID *</label>
@@ -233,14 +216,6 @@ export function ModelCardsList() {
                 <option value="">Select model...</option>
                 {availableModels.map((m) => <option key={m.id} value={m.id}>{m.name !== m.id ? `${m.name} (${m.id})` : m.id}</option>)}
               </select>
-            ) : OFFICIAL_PROVIDERS.has(form.provider) ? (
-              <div>
-                <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
-                  placeholder={form.provider === "ant" ? "claude-sonnet-4-6" : "gpt-4o"} autoComplete="off" name="model-id-field" />
-                <p className="text-xs text-fg-subtle mt-1">
-                  {modelsLoading ? "Loading models..." : modelsError ? modelsError : "Enter API key above to load available models."}
-                </p>
-              </div>
             ) : (
               <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
                 placeholder="e.g. deepseek-chat, llama-3.1-70b, ..." autoComplete="off" name="model-id-field" />
