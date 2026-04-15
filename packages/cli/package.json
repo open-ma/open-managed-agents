@@ -1,6 +1,7 @@
 {
-  "name": "@open-managed-agents/cli",
+  "name": "open-managed-agents",
   "version": "0.1.0",
+  "description": "CLI for the openma managed agents platform",
   "type": "module",
   "bin": {
     "oma": "./dist/index.js"
@@ -9,9 +10,13 @@
     "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --banner:js='#!/usr/bin/env node'",
     "dev": "tsx src/index.ts"
   },
-  "dependencies": {
-    "@open-managed-agents/shared": "workspace:*"
+  "keywords": ["ai", "agents", "managed-agents", "openma", "cli", "llm"],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/open-ma/open-managed-agents"
   },
+  "files": ["dist"],
   "devDependencies": {
     "esbuild": "^0.25.0",
     "tsx": "^4.19.0"
