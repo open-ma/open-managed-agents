@@ -1084,6 +1084,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     let modelApiKey = this.env.ANTHROPIC_API_KEY;
     let modelBaseURL = this.env.ANTHROPIC_BASE_URL;
     let modelProvider: string | undefined;
+    let modelCustomHeaders: Record<string, string> | undefined;
 
     if (agent.model_card_id && this.env.CONFIG_KV) {
       try {
@@ -1096,6 +1097,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           modelApiKey = keyData;
           modelProvider = card.provider;
           if (card.base_url) modelBaseURL = card.base_url;
+          if (card.custom_headers) modelCustomHeaders = card.custom_headers;
         }
       } catch {
         // Fall back to env vars
@@ -1115,6 +1117,7 @@ export class SessionDO extends Agent<Env, SessionState> {
               modelApiKey = key;
               modelProvider = card.provider;
               if (card.base_url) modelBaseURL = card.base_url;
+              if (card.custom_headers) modelCustomHeaders = card.custom_headers;
             }
             break;
           }
@@ -1132,7 +1135,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       apiCompat = modelProvider as typeof apiCompat;
     }
 
-    const model = resolveModel(effectiveModelId, modelApiKey, modelBaseURL, apiCompat);
+    const model = resolveModel(effectiveModelId, modelApiKey, modelBaseURL, apiCompat, modelCustomHeaders);
 
     // Build system prompt: base + skill metadata
     let systemPrompt = agent.system || "";

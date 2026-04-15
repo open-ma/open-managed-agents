@@ -7,7 +7,8 @@ interface ModelCard {
   id: string; name: string;
   provider: string;
   model_id: string; api_key_preview?: string;
-  base_url?: string; is_default?: boolean;
+  base_url?: string; custom_headers?: Record<string, string>;
+  is_default?: boolean;
   created_at: string; updated_at?: string;
 }
 
@@ -23,6 +24,7 @@ const OFFICIAL_PROVIDERS = new Set(["ant", "oai"]);
 const INITIAL_FORM = {
   name: "", provider: "ant",
   model_id: "", api_key: "", base_url: "", is_default: false,
+  custom_headers: [{ key: "", value: "" }] as Array<{ key: string; value: string }>,
 };
 
 export function ModelCardsList() {
@@ -79,6 +81,12 @@ export function ModelCardsList() {
         api_key: form.api_key, is_default: form.is_default,
       };
       if (form.base_url) payload.base_url = form.base_url;
+      // Serialize custom headers from array to object
+      const hdrs: Record<string, string> = {};
+      for (const h of form.custom_headers) {
+        if (h.key && h.value) hdrs[h.key] = h.value;
+      }
+      if (Object.keys(hdrs).length > 0) payload.custom_headers = hdrs;
       if (editingId) {
         if (!form.api_key) delete payload.api_key;
         await api(`/v1/model_cards/${editingId}`, { method: "POST", body: JSON.stringify(payload) });
@@ -94,9 +102,14 @@ export function ModelCardsList() {
   };
 
   const startEdit = (card: ModelCard) => {
+    const hdrs = card.custom_headers
+      ? Object.entries(card.custom_headers).map(([key, value]) => ({ key, value }))
+      : [{ key: "", value: "" }];
+    if (hdrs.length === 0) hdrs.push({ key: "", value: "" });
     setForm({
       name: card.name, provider: card.provider, model_id: card.model_id,
       api_key: "", base_url: card.base_url || "", is_default: card.is_default || false,
+      custom_headers: hdrs,
     });
     setEditingId(card.id); setShowCreate(true); setError("");
   };
@@ -238,7 +251,33 @@ export function ModelCardsList() {
               <label className="text-sm text-fg-muted block mb-1">Base URL *</label>
               <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
                 placeholder={form.provider === "ant-compatible" ? "https://your-proxy.com/v1" : "https://api.deepseek.com/v1"} autoComplete="off" />
-              <p className="text-xs text-fg-subtle mt-1">The API endpoint for your provider.</p>
+            </div>
+          )}
+          {!OFFICIAL_PROVIDERS.has(form.provider) && (
+            <div>
+              <label className="text-sm text-fg-muted block mb-1">Custom Headers <span className="text-fg-subtle">(optional)</span></label>
+              <div className="space-y-1.5">
+                {form.custom_headers.map((h, i) => (
+                  <div key={i} className="flex gap-2 items-center">
+                    <input value={h.key} onChange={(e) => {
+                      const hdrs = [...form.custom_headers];
+                      hdrs[i] = { ...hdrs[i], key: e.target.value };
+                      setForm({ ...form, custom_headers: hdrs });
+                    }} className={inputCls} placeholder="Header-Name" autoComplete="off" />
+                    <input value={h.value} onChange={(e) => {
+                      const hdrs = [...form.custom_headers];
+                      hdrs[i] = { ...hdrs[i], value: e.target.value };
+                      setForm({ ...form, custom_headers: hdrs });
+                    }} className={inputCls} placeholder="value" autoComplete="off" />
+                    {form.custom_headers.length > 1 && (
+                      <button type="button" onClick={() => setForm({ ...form, custom_headers: form.custom_headers.filter((_, j) => j !== i) })}
+                        className="text-fg-subtle hover:text-danger text-xs shrink-0">Remove</button>
+                    )}
+                  </div>
+                ))}
+                <button type="button" onClick={() => setForm({ ...form, custom_headers: [...form.custom_headers, { key: "", value: "" }] })}
+                  className="text-xs text-fg-muted hover:text-fg">+ Add header</button>
+              </div>
             </div>
           )}
           <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer">
