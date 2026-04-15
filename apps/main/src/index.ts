@@ -2,7 +2,6 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { authMiddleware } from "./auth";
 import { rateLimitMiddleware } from "./rate-limit";
-import { createAuth } from "./auth-config";
 import agentsRoutes from "./routes/agents";
 import environmentsRoutes from "./routes/environments";
 import sessionsRoutes from "./routes/sessions";
@@ -25,7 +24,10 @@ const app = new Hono<{ Bindings: Env }>();
 app.get("/health", (c) => c.json({ status: "ok" }));
 
 // Auth routes (public — no authMiddleware)
-app.on(["GET", "POST"], "/auth/*", (c) => {
+// Lazy import to avoid crashing workerd in test environments
+app.on(["GET", "POST"], "/auth/*", async (c) => {
+  if (!c.env.AUTH_DB) return c.json({ error: "Auth not configured" }, 503);
+  const { createAuth } = await import("./auth-config");
   return createAuth(c.env).handler(c.req.raw);
 });
 

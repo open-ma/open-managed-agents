@@ -132,6 +132,7 @@ app.post("/", async (c) => {
       environment_id: body.environment_id,
       title: body.title || "",
       session_id: sessionId,
+      tenant_id: t,
       vault_ids: body.vault_ids || [],
     }),
   );
@@ -248,7 +249,7 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await c.env.CONFIG_KV.list({ prefix: "session:" });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "session") });
   let sessions = (
     await Promise.all(
       list.keys.map(async (k) => {

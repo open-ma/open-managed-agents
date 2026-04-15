@@ -21,6 +21,7 @@ export default defineConfig({
         bindings: {
           API_KEY: "test-key",
           ANTHROPIC_API_KEY: "sk-ant-test-key",
+          BETTER_AUTH_SECRET: "test-auth-secret-for-vitest",
           RATE_LIMIT_WRITE: 10000,
           RATE_LIMIT_READ: 10000,
         },
