@@ -5,6 +5,7 @@ import "./index.css";
 import { AuthProvider } from "./lib/auth";
 import { Layout } from "./components/Layout";
 import { Login } from "./pages/Login";
+import { Dashboard } from "./pages/Dashboard";
 import { AgentsList } from "./pages/AgentsList";
 import { AgentDetail } from "./pages/AgentDetail";
 import { SessionsList } from "./pages/SessionsList";
@@ -23,7 +24,7 @@ createRoot(document.getElementById("root")!).render(
         <Routes>
           <Route path="login" element={<Login />} />
           <Route element={<Layout />}>
-            <Route index element={<Navigate to="/agents" replace />} />
+            <Route index element={<Dashboard />} />
             <Route path="agents" element={<AgentsList />} />
             <Route path="agents/:id" element={<AgentDetail />} />
             <Route path="sessions" element={<SessionsList />} />
