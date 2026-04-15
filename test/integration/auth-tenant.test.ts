@@ -272,37 +272,44 @@ describe("provider resolution", () => {
 // ============================================================
 
 describe("models list endpoint", () => {
-  it("returns Anthropic models", async () => {
-    const res = await api("/v1/models/list?provider=ant", { headers: HEADERS });
-    expect(res.status).toBe(200);
+  it("rejects when no api_key provided", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "ant" }),
+    });
+    expect(res.status).toBe(400);
     const body = await res.json();
-    expect(body.data.length).toBeGreaterThan(0);
-    expect(body.data[0].id).toMatch(/^claude-/);
-    expect(body.data[0].name).toBeTruthy();
+    expect(body.error).toContain("api_key");
   });
 
-  it("returns OpenAI models", async () => {
-    const res = await api("/v1/models/list?provider=oai", { headers: HEADERS });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.data.length).toBeGreaterThan(0);
-    const ids = body.data.map((m: any) => m.id);
-    expect(ids).toContain("gpt-4o");
-    expect(ids).toContain("o3");
+  it("returns 502 for invalid Anthropic key", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "ant", api_key: "sk-ant-invalid" }),
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it("returns 502 for invalid OpenAI key", async () => {
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "oai", api_key: "sk-invalid" }),
+    });
+    expect(res.status).toBe(502);
   });
 
   it("returns empty array for unknown provider", async () => {
-    const res = await api("/v1/models/list?provider=unknown", { headers: HEADERS });
+    const res = await api("/v1/models/list", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({ provider: "unknown", api_key: "some-key" }),
+    });
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.data).toEqual([]);
-  });
-
-  it("defaults to Anthropic when no provider specified", async () => {
-    const res = await api("/v1/models/list", { headers: HEADERS });
-    expect(res.status).toBe(200);
-    const body = await res.json();
-    expect(body.data[0].id).toMatch(/^claude-/);
   });
 });
 

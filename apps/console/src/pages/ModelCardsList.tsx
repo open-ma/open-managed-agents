@@ -36,18 +36,26 @@ export function ModelCardsList() {
   const [form, setForm] = useState({ ...INITIAL_FORM });
   const [error, setError] = useState("");
   const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [showModelSuggestions, setShowModelSuggestions] = useState(false);
 
-  // Fetch known models when provider changes
-  const fetchModels = useCallback(async (provider: string) => {
-    if (!OFFICIAL_PROVIDERS.has(provider)) {
+  // Fetch models from official API using the user's key
+  const fetchModels = useCallback(async (provider: string, apiKey: string) => {
+    if (!OFFICIAL_PROVIDERS.has(provider) || !apiKey || apiKey.length < 8) {
       setAvailableModels([]);
       return;
     }
+    setModelsLoading(true);
     try {
-      const result = await api<{ data: Array<{ id: string; name: string }> }>(`/v1/models/list?provider=${provider}`);
+      const result = await api<{ data: Array<{ id: string; name: string }> }>("/v1/models/list", {
+        method: "POST",
+        body: JSON.stringify({ provider, api_key: apiKey }),
+      });
       setAvailableModels(result.data);
     } catch {
       setAvailableModels([]);
+    } finally {
+      setModelsLoading(false);
     }
   }, [api]);
 
@@ -190,7 +198,7 @@ export function ModelCardsList() {
                 <button
                   key={p.value}
                   type="button"
-                  onClick={() => { setForm({ ...form, provider: p.value, model_id: "", base_url: "" }); setAvailableModels([]); fetchModels(p.value); }}
+                  onClick={() => { setForm({ ...form, provider: p.value, model_id: "", base_url: "" }); setAvailableModels([]); }}
                   className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
                     form.provider === p.value
                       ? "border-brand bg-brand-subtle text-fg"
@@ -207,18 +215,39 @@ export function ModelCardsList() {
             <label className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
             <input type="password" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
               placeholder={editingId ? "Leave blank to keep current key" : "sk-..."}
-              autoComplete="new-password" name="model-api-key-field" />
+              autoComplete="new-password" name="model-api-key-field"
+              onBlur={() => { if (OFFICIAL_PROVIDERS.has(form.provider) && form.api_key) fetchModels(form.provider, form.api_key); }} />
+            {OFFICIAL_PROVIDERS.has(form.provider) && modelsLoading && (
+              <p className="text-xs text-fg-subtle mt-1">Loading models...</p>
+            )}
           </div>
-          <div>
+          <div className="relative">
             <label className="text-sm text-fg-muted block mb-1">Model ID *</label>
-            {OFFICIAL_PROVIDERS.has(form.provider) && availableModels.length > 0 ? (
-              <select value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}>
-                <option value="">Select model...</option>
-                {availableModels.map((m) => <option key={m.id} value={m.id}>{m.name !== m.id ? `${m.name} (${m.id})` : m.id}</option>)}
-              </select>
-            ) : (
-              <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
-                placeholder="e.g. deepseek-chat, llama-3.1-70b, ..." autoComplete="off" name="model-id-field" />
+            <input value={form.model_id}
+              onChange={(e) => { setForm({ ...form, model_id: e.target.value }); setShowModelSuggestions(true); }}
+              onFocus={() => setShowModelSuggestions(true)}
+              onBlur={() => setTimeout(() => setShowModelSuggestions(false), 150)}
+              className={inputCls}
+              placeholder={OFFICIAL_PROVIDERS.has(form.provider)
+                ? (form.provider === "ant" ? "claude-sonnet-4-6" : "gpt-4o")
+                : "e.g. deepseek-chat, llama-3.1-70b, ..."}
+              autoComplete="off" name="model-id-field" />
+            {showModelSuggestions && availableModels.length > 0 && (
+              <div className="absolute z-10 w-full mt-1 bg-bg border border-border rounded-md shadow-lg py-1 max-h-48 overflow-y-auto">
+                {availableModels
+                  .filter((m) => !form.model_id || m.id.includes(form.model_id) || m.name.toLowerCase().includes(form.model_id.toLowerCase()))
+                  .map((m) => (
+                    <button key={m.id} type="button"
+                      onMouseDown={() => { setForm({ ...form, model_id: m.id }); setShowModelSuggestions(false); }}
+                      className="w-full text-left px-3 py-1.5 text-sm hover:bg-bg-surface">
+                      <span className="text-fg">{m.name !== m.id ? m.name : m.id}</span>
+                      {m.name !== m.id && <span className="text-fg-subtle text-xs ml-2">{m.id}</span>}
+                    </button>
+                  ))}
+              </div>
+            )}
+            {OFFICIAL_PROVIDERS.has(form.provider) && !availableModels.length && !modelsLoading && form.api_key && (
+              <p className="text-xs text-fg-subtle mt-1">Enter a valid API key to load available models</p>
             )}
           </div>
           {!OFFICIAL_PROVIDERS.has(form.provider) && (
