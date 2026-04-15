@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
@@ -18,6 +18,8 @@ const PROVIDERS = [
   { value: "oai-compatible", label: "OpenAI-compatible", desc: "DeepSeek, Groq, Together, Ollama, etc." },
 ] as const;
 
+const OFFICIAL_PROVIDERS = new Set(["ant", "oai"]);
+
 const INITIAL_FORM = {
   name: "", provider: "ant",
   model_id: "", api_key: "", base_url: "", is_default: false,
@@ -31,6 +33,31 @@ export function ModelCardsList() {
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ ...INITIAL_FORM });
   const [error, setError] = useState("");
+  const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string }>>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsError, setModelsError] = useState("");
+
+  // Fetch models when API key changes for official providers
+  const fetchModels = useCallback(async (provider: string, apiKey: string) => {
+    if (!OFFICIAL_PROVIDERS.has(provider) || !apiKey || apiKey.length < 8) {
+      setAvailableModels([]);
+      return;
+    }
+    setModelsLoading(true);
+    setModelsError("");
+    try {
+      const result = await api<{ data: Array<{ id: string; name: string }> }>("/v1/models/list", {
+        method: "POST",
+        body: JSON.stringify({ provider, api_key: apiKey }),
+      });
+      setAvailableModels(result.data);
+    } catch (e: any) {
+      setModelsError("Failed to load models. Check your API key.");
+      setAvailableModels([]);
+    } finally {
+      setModelsLoading(false);
+    }
+  }, [api]);
 
   const load = async () => {
     setLoading(true);
@@ -147,11 +174,11 @@ export function ModelCardsList() {
 
       <Modal open={showCreate} onClose={closeDialog} title={editingId ? "Edit Model Card" : "New Model Card"}
         footer={<><Button variant="ghost" onClick={closeDialog}>Cancel</Button><Button onClick={save} disabled={!form.name || !form.model_id || (!editingId && !form.api_key)}>{editingId ? "Save" : "Create"}</Button></>}>
-        <div className="space-y-3">
+        <form autoComplete="off" onSubmit={(e) => e.preventDefault()} className="space-y-3">
           {error && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{error}</div>}
           <div>
             <label className="text-sm text-fg-muted block mb-1">Name *</label>
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="My API Key" />
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="My API Key" autoComplete="off" />
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">API Format *</label>
@@ -160,7 +187,7 @@ export function ModelCardsList() {
                 <button
                   key={p.value}
                   type="button"
-                  onClick={() => setForm({ ...form, provider: p.value })}
+                  onClick={() => { setForm({ ...form, provider: p.value, model_id: "", base_url: "" }); setAvailableModels([]); setModelsError(""); }}
                   className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
                     form.provider === p.value
                       ? "border-brand bg-brand-subtle text-fg"
@@ -174,26 +201,51 @@ export function ModelCardsList() {
             </div>
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Model ID *</label>
-            <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
-              placeholder={form.provider.startsWith("ant") ? "claude-sonnet-4-6" : "gpt-4o, deepseek-chat, ..."} />
-          </div>
-          <div>
             <label className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
             <input type="password" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
-              placeholder={editingId ? "Leave blank to keep current key" : "sk-..."} />
+              placeholder={editingId ? "Leave blank to keep current key" : "sk-..."}
+              autoComplete="new-password" name="model-api-key-field"
+              onBlur={() => { if (OFFICIAL_PROVIDERS.has(form.provider) && form.api_key) fetchModels(form.provider, form.api_key); }} />
+            {OFFICIAL_PROVIDERS.has(form.provider) && form.api_key && (
+              <button type="button" onClick={() => fetchModels(form.provider, form.api_key)}
+                className="text-xs text-brand hover:underline mt-1">
+                {modelsLoading ? "Loading models..." : "Refresh model list"}
+              </button>
+            )}
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Base URL</label>
-            <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
-              placeholder={form.provider.startsWith("ant") ? "https://api.anthropic.com" : "https://api.openai.com/v1"} />
-            <p className="text-xs text-fg-subtle mt-1">Optional. Override the default API endpoint.</p>
+            <label className="text-sm text-fg-muted block mb-1">Model ID *</label>
+            {OFFICIAL_PROVIDERS.has(form.provider) && availableModels.length > 0 ? (
+              <select value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}>
+                <option value="">Select model...</option>
+                {availableModels.map((m) => <option key={m.id} value={m.id}>{m.name !== m.id ? `${m.name} (${m.id})` : m.id}</option>)}
+              </select>
+            ) : OFFICIAL_PROVIDERS.has(form.provider) ? (
+              <div>
+                <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
+                  placeholder={form.provider === "ant" ? "claude-sonnet-4-6" : "gpt-4o"} autoComplete="off" name="model-id-field" />
+                <p className="text-xs text-fg-subtle mt-1">
+                  {modelsLoading ? "Loading models..." : modelsError ? modelsError : "Enter API key above to load available models."}
+                </p>
+              </div>
+            ) : (
+              <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
+                placeholder="e.g. deepseek-chat, llama-3.1-70b, ..." autoComplete="off" name="model-id-field" />
+            )}
           </div>
+          {!OFFICIAL_PROVIDERS.has(form.provider) && (
+            <div>
+              <label className="text-sm text-fg-muted block mb-1">Base URL *</label>
+              <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
+                placeholder={form.provider === "ant-compatible" ? "https://your-proxy.com/v1" : "https://api.deepseek.com/v1"} autoComplete="off" />
+              <p className="text-xs text-fg-subtle mt-1">The API endpoint for your provider.</p>
+            </div>
+          )}
           <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer">
             <input type="checkbox" checked={form.is_default} onChange={(e) => setForm({ ...form, is_default: e.target.checked })} className="rounded accent-brand" />
             Set as default model card
           </label>
-        </div>
+        </form>
       </Modal>
     </div>
   );

@@ -12,6 +12,7 @@ import memoryRoutes from "./routes/memory";
 import filesRoutes from "./routes/files";
 import skillsRoutes from "./routes/skills";
 import modelCardsRoutes from "./routes/model-cards";
+import modelsRoutes from "./routes/models";
 import apiKeysRoutes from "./routes/api-keys";
 
 // Main worker: CRUD + routing layer.
@@ -49,6 +50,7 @@ app.route("/v1/memory_stores", memoryRoutes);
 app.route("/v1/files", filesRoutes);
 app.route("/v1/skills", skillsRoutes);
 app.route("/v1/model_cards", modelCardsRoutes);
+app.route("/v1/models", modelsRoutes);
 app.route("/v1/api_keys", apiKeysRoutes);
 
 export default app;
