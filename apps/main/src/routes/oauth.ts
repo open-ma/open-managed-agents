@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { CredentialConfig, CredentialAuth } from "@open-managed-agents/shared";
 import { generateCredentialId } from "@open-managed-agents/shared";
+import { kvKey } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 // ─── Helpers ───
 
@@ -115,6 +116,7 @@ async function dynamicClientRegistration(
 // ─── OAuth State (stored in KV, TTL 10 minutes) ───
 
 interface OAuthState {
+  tenant_id: string;
   vault_id: string;
   credential_id?: string;
   mcp_server_url: string;
@@ -152,7 +154,8 @@ app.get("/authorize", async (c) => {
   }
 
   // Verify vault exists
-  const vaultData = await c.env.CONFIG_KV.get(`vault:${vaultId}`);
+  const t = c.get("tenant_id");
+  const vaultData = await c.env.CONFIG_KV.get(kvKey(t, "vault", vaultId));
   if (!vaultData) {
     return c.json({ error: "Vault not found" }, 404);
   }
@@ -192,6 +195,7 @@ app.get("/authorize", async (c) => {
 
   // Store state in KV (10 minute TTL)
   const oauthState: OAuthState = {
+    tenant_id: t,
     vault_id: vaultId,
     credential_id: credentialId,
     mcp_server_url: mcpServerUrl,
@@ -312,7 +316,7 @@ app.get("/callback", async (c) => {
 
   if (oauthState.credential_id) {
     // Update existing credential
-    const credKey = `cred:${oauthState.vault_id}:${oauthState.credential_id}`;
+    const credKey = kvKey(oauthState.tenant_id, "cred", oauthState.vault_id, oauthState.credential_id);
     const existingData = await c.env.CONFIG_KV.get(credKey);
     if (existingData) {
       const existing: CredentialConfig = JSON.parse(existingData);
@@ -330,7 +334,7 @@ app.get("/callback", async (c) => {
       created_at: new Date().toISOString(),
     };
     await c.env.CONFIG_KV.put(
-      `cred:${oauthState.vault_id}:${cred.id}`,
+      kvKey(oauthState.tenant_id, "cred", oauthState.vault_id, cred.id),
       JSON.stringify(cred),
     );
   }
@@ -373,7 +377,8 @@ app.post("/refresh", async (c) => {
     return c.json({ error: "vault_id and credential_id are required" }, 400);
   }
 
-  const credKey = `cred:${body.vault_id}:${body.credential_id}`;
+  const t = c.get("tenant_id");
+  const credKey = kvKey(t, "cred", body.vault_id, body.credential_id);
   const credData = await c.env.CONFIG_KV.get(credKey);
   if (!credData) {
     return c.json({ error: "Credential not found" }, 404);

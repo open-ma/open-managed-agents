@@ -2,11 +2,13 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { FileRecord } from "@open-managed-agents/shared";
 import { generateFileId } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 // POST /v1/files — upload file (multipart form or JSON body)
 app.post("/", async (c) => {
+  const t = c.get("tenant_id");
   let filename: string;
   let contentStr: string;
   let mediaType: string;
@@ -56,14 +58,15 @@ app.post("/", async (c) => {
     created_at: new Date().toISOString(),
   };
 
-  await c.env.CONFIG_KV.put(`file:${id}`, JSON.stringify(file));
-  await c.env.CONFIG_KV.put(`filecontent:${id}`, contentStr);
+  await c.env.CONFIG_KV.put(kvKey(t, "file", id), JSON.stringify(file));
+  await c.env.CONFIG_KV.put(kvKey(t, "filecontent", id), contentStr);
 
   return c.json(file, 201);
 });
 
 // GET /v1/files — list files
 app.get("/", async (c) => {
+  const t = c.get("tenant_id");
   const scopeId = c.req.query("scope_id");
   const limitParam = c.req.query("limit");
   const order = c.req.query("order") === "asc" ? "asc" : "desc";
@@ -71,11 +74,11 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await c.env.CONFIG_KV.list({ prefix: "file:" });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "file") });
   let files = (
     await Promise.all(
       list.keys
-        .filter((k) => !k.name.startsWith("filecontent:"))
+        .filter((k) => !k.name.includes(":filecontent:"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
           return data ? (JSON.parse(data) as FileRecord) : null;
@@ -97,20 +100,22 @@ app.get("/", async (c) => {
 
 // GET /v1/files/:id — get file metadata
 app.get("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`file:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
   if (!data) return c.json({ error: "File not found" }, 404);
   return c.json(JSON.parse(data));
 });
 
 // GET /v1/files/:id/content — download file content
 app.get("/:id/content", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const metaData = await c.env.CONFIG_KV.get(`file:${id}`);
+  const metaData = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
   if (!metaData) return c.json({ error: "File not found" }, 404);
 
   const meta = JSON.parse(metaData) as FileRecord;
-  const content = await c.env.CONFIG_KV.get(`filecontent:${id}`);
+  const content = await c.env.CONFIG_KV.get(kvKey(t, "filecontent", id));
   if (content === null) return c.json({ error: "File content not found" }, 404);
 
   return new Response(content, {
@@ -122,12 +127,13 @@ app.get("/:id/content", async (c) => {
 
 // DELETE /v1/files/:id — delete file + content
 app.delete("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`file:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
   if (!data) return c.json({ error: "File not found" }, 404);
 
-  await c.env.CONFIG_KV.delete(`file:${id}`);
-  await c.env.CONFIG_KV.delete(`filecontent:${id}`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "file", id));
+  await c.env.CONFIG_KV.delete(kvKey(t, "filecontent", id));
 
   return c.json({ type: "file_deleted", id });
 });

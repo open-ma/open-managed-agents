@@ -5,20 +5,21 @@ import { Button } from "../components/Button";
 
 interface ModelCard {
   id: string; name: string;
-  provider: "anthropic" | "openai" | "custom";
+  provider: string;
   model_id: string; api_key_preview?: string;
   base_url?: string; is_default?: boolean;
   created_at: string; updated_at?: string;
 }
 
 const PROVIDERS = [
-  { value: "anthropic", label: "Anthropic" },
-  { value: "openai", label: "OpenAI" },
-  { value: "custom", label: "Custom" },
+  { value: "ant", label: "Anthropic", desc: "Claude models" },
+  { value: "ant-compatible", label: "Anthropic-compatible", desc: "Proxies speaking Anthropic API" },
+  { value: "oai", label: "OpenAI", desc: "GPT models" },
+  { value: "oai-compatible", label: "OpenAI-compatible", desc: "DeepSeek, Groq, Together, Ollama, etc." },
 ] as const;
 
 const INITIAL_FORM = {
-  name: "", provider: "anthropic" as "anthropic" | "openai" | "custom",
+  name: "", provider: "ant",
   model_id: "", api_key: "", base_url: "", is_default: false,
 };
 
@@ -41,7 +42,7 @@ export function ModelCardsList() {
 
   const save = async () => {
     setError("");
-    if (!form.name || !form.model_id || !form.api_key) {
+    if (!form.name || !form.model_id || (!editingId && !form.api_key)) {
       setError("Name, Model ID, and API Key are required.");
       return;
     }
@@ -52,6 +53,7 @@ export function ModelCardsList() {
       };
       if (form.base_url) payload.base_url = form.base_url;
       if (editingId) {
+        if (!form.api_key) delete payload.api_key;
         await api(`/v1/model_cards/${editingId}`, { method: "POST", body: JSON.stringify(payload) });
       } else {
         await api("/v1/model_cards", { method: "POST", body: JSON.stringify(payload) });
@@ -78,12 +80,12 @@ export function ModelCardsList() {
 
   const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
 
+  const providerLabel = (p: string) => PROVIDERS.find((x) => x.value === p)?.label || p;
+
   const providerBadge = (provider: string) => {
-    switch (provider) {
-      case "anthropic": return "bg-warning-subtle text-warning";
-      case "openai": return "bg-success-subtle text-success";
-      default: return "bg-bg-surface text-fg-muted";
-    }
+    if (provider === "ant" || provider === "ant-compatible") return "bg-warning-subtle text-warning";
+    if (provider === "oai" || provider === "oai-compatible") return "bg-success-subtle text-success";
+    return "bg-bg-surface text-fg-muted";
   };
 
   return (
@@ -91,7 +93,7 @@ export function ModelCardsList() {
       <div className="flex items-start justify-between mb-6">
         <div>
           <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Model Cards</h1>
-          <p className="text-fg-muted text-sm">Configure model providers, API keys, and base URLs.</p>
+          <p className="text-fg-muted text-sm">Configure model providers, API keys, and endpoints.</p>
         </div>
         <Button onClick={() => { setShowCreate(true); setError(""); }}>+ New model card</Button>
       </div>
@@ -110,7 +112,7 @@ export function ModelCardsList() {
             <thead>
               <tr className="bg-bg-surface text-fg-subtle text-xs uppercase tracking-wider">
                 <th className="text-left px-4 py-2.5">Name</th>
-                <th className="text-left px-4 py-2.5">Provider</th>
+                <th className="text-left px-4 py-2.5">API Format</th>
                 <th className="text-left px-4 py-2.5">Model ID</th>
                 <th className="text-left px-4 py-2.5">API Key</th>
                 <th className="text-left px-4 py-2.5">Base URL</th>
@@ -126,11 +128,11 @@ export function ModelCardsList() {
                     <div className="text-xs text-fg-subtle font-mono">{c.id}</div>
                   </td>
                   <td className="px-4 py-3">
-                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${providerBadge(c.provider)}`}>{c.provider}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${providerBadge(c.provider)}`}>{providerLabel(c.provider)}</span>
                   </td>
                   <td className="px-4 py-3 text-fg-muted font-mono text-xs">{c.model_id}</td>
                   <td className="px-4 py-3 text-fg-subtle font-mono text-xs">****{c.api_key_preview}</td>
-                  <td className="px-4 py-3 text-fg-muted text-xs truncate max-w-[200px]">{c.base_url || "—"}</td>
+                  <td className="px-4 py-3 text-fg-muted text-xs truncate max-w-[200px]">{c.base_url || "\u2014"}</td>
                   <td className="px-4 py-3">{c.is_default && <span className="text-xs text-fg-muted bg-bg-surface px-1.5 py-0.5 rounded">default</span>}</td>
                   <td className="px-4 py-3 text-right">
                     <button onClick={() => startEdit(c)} className="text-xs text-fg-muted hover:text-fg mr-3">Edit</button>
@@ -149,27 +151,42 @@ export function ModelCardsList() {
           {error && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{error}</div>}
           <div>
             <label className="text-sm text-fg-muted block mb-1">Name *</label>
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="My Anthropic Key" />
+            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="My API Key" />
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Provider</label>
-            <select value={form.provider} onChange={(e) => setForm({ ...form, provider: e.target.value as typeof form.provider })} className={inputCls}>
-              {PROVIDERS.map(p => <option key={p.value} value={p.value}>{p.label}</option>)}
-            </select>
+            <label className="text-sm text-fg-muted block mb-1">API Format *</label>
+            <div className="grid grid-cols-2 gap-2">
+              {PROVIDERS.map((p) => (
+                <button
+                  key={p.value}
+                  type="button"
+                  onClick={() => setForm({ ...form, provider: p.value })}
+                  className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
+                    form.provider === p.value
+                      ? "border-brand bg-brand-subtle text-fg"
+                      : "border-border text-fg-muted hover:border-fg-subtle"
+                  }`}
+                >
+                  <div className="font-medium">{p.label}</div>
+                  <div className="text-xs text-fg-subtle mt-0.5">{p.desc}</div>
+                </button>
+              ))}
+            </div>
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">Model ID *</label>
-            <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls} placeholder="claude-sonnet-4-6" />
-            <p className="text-xs text-fg-subtle mt-1">The model identifier used in agent configs.</p>
+            <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
+              placeholder={form.provider.startsWith("ant") ? "claude-sonnet-4-6" : "gpt-4o, deepseek-chat, ..."} />
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">API Key *</label>
+            <label className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
             <input type="password" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
-              placeholder={editingId ? "Leave blank to keep current key" : "sk-ant-..."} />
+              placeholder={editingId ? "Leave blank to keep current key" : "sk-..."} />
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">Base URL</label>
-            <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls} placeholder="https://api.anthropic.com" />
+            <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
+              placeholder={form.provider.startsWith("ant") ? "https://api.anthropic.com" : "https://api.openai.com/v1"} />
             <p className="text-xs text-fg-subtle mt-1">Optional. Override the default API endpoint.</p>
           </div>
           <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer">

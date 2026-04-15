@@ -3,8 +3,9 @@ import type { Env } from "@open-managed-agents/shared";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
 import { generateEnvId } from "@open-managed-agents/shared";
 import { addServiceBinding, envIdToBindingName } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 /**
  * Trigger sandbox worker build via GitHub Actions.
@@ -47,6 +48,7 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
 
 // POST /v1/environments — create environment
 app.post("/", async (c) => {
+  const t = c.get("tenant_id");
   const body = (await c.req.json()) as {
     name: string;
     description?: string;
@@ -69,7 +71,7 @@ app.post("/", async (c) => {
     created_at: new Date().toISOString(),
   };
 
-  await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
+  await c.env.CONFIG_KV.put(kvKey(t, "env", env.id), JSON.stringify(env));
 
   if (canBuild) {
     try {
@@ -78,7 +80,7 @@ app.post("/", async (c) => {
       console.log(`[env] triggerBuild failed: ${e instanceof Error ? e.message : String(e)}`);
       env.status = "error";
       env.build_error = e instanceof Error ? e.message : String(e);
-      await c.env.CONFIG_KV.put(`env:${env.id}`, JSON.stringify(env));
+      await c.env.CONFIG_KV.put(kvKey(t, "env", env.id), JSON.stringify(env));
     }
   }
 
@@ -88,9 +90,10 @@ app.post("/", async (c) => {
 // POST /v1/environments/:id/build-complete — callback from GitHub Actions
 // Authenticated by the same x-api-key as all other endpoints (via authMiddleware)
 app.post("/:id/build-complete", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
 
-  const data = await c.env.CONFIG_KV.get(`env:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "env", id));
   if (!data) return c.json({ error: "Environment not found" }, 404);
 
   const body = (await c.req.json()) as {
@@ -117,18 +120,19 @@ app.post("/:id/build-complete", async (c) => {
         console.log(`[env] addServiceBinding failed: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
-    await c.env.CONFIG_KV.put(`svcbind:${id}`, env.sandbox_worker_name);
+    await c.env.CONFIG_KV.put(kvKey(t, "svcbind", id), env.sandbox_worker_name);
   }
 
   env.updated_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
+  await c.env.CONFIG_KV.put(kvKey(t, "env", id), JSON.stringify(env));
   console.log(`[env] build-complete for ${id}: status=${body.status} worker=${env.sandbox_worker_name}`);
   return c.json(env);
 });
 
 // GET /v1/environments — list environments
 app.get("/", async (c) => {
-  const list = await c.env.CONFIG_KV.list({ prefix: "env:" });
+  const t = c.get("tenant_id");
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "env") });
   const envs = await Promise.all(
     list.keys.map(async (k) => {
       const data = await c.env.CONFIG_KV.get(k.name);
@@ -140,16 +144,18 @@ app.get("/", async (c) => {
 
 // GET /v1/environments/:id — get environment
 app.get("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`env:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "env", id));
   if (!data) return c.json({ error: "Environment not found" }, 404);
   return c.json(JSON.parse(data));
 });
 
 // PUT /v1/environments/:id — update environment (re-triggers build if config changed)
 app.put("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`env:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "env", id));
   if (!data) return c.json({ error: "Environment not found" }, 404);
 
   const env: EnvironmentConfig = JSON.parse(data);
@@ -172,7 +178,7 @@ app.put("/:id", async (c) => {
         env.status = "building";
         env.sandbox_worker_name = undefined;
         delete env.build_error;
-        await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
+        await c.env.CONFIG_KV.put(kvKey(t, "env", id), JSON.stringify(env));
         try {
           await triggerBuild(c.env, env, c.req.url);
         } catch {
@@ -186,29 +192,31 @@ app.put("/:id", async (c) => {
   }
 
   env.updated_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
+  await c.env.CONFIG_KV.put(kvKey(t, "env", id), JSON.stringify(env));
   return c.json(env);
 });
 
 // POST /v1/environments/:id/archive
 app.post("/:id/archive", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`env:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "env", id));
   if (!data) return c.json({ error: "Environment not found" }, 404);
 
   const env: EnvironmentConfig = JSON.parse(data);
   env.archived_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(`env:${id}`, JSON.stringify(env));
+  await c.env.CONFIG_KV.put(kvKey(t, "env", id), JSON.stringify(env));
   return c.json(env);
 });
 
 // DELETE /v1/environments/:id
 app.delete("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`env:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "env", id));
   if (!data) return c.json({ error: "Environment not found" }, 404);
 
-  const sessionList = await c.env.CONFIG_KV.list({ prefix: "session:" });
+  const sessionList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "session") });
   for (const k of sessionList.keys) {
     const sessionData = await c.env.CONFIG_KV.get(k.name);
     if (sessionData) {
@@ -219,7 +227,7 @@ app.delete("/:id", async (c) => {
     }
   }
 
-  await c.env.CONFIG_KV.delete(`env:${id}`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "env", id));
   return c.json({ type: "environment_deleted", id });
 });
 

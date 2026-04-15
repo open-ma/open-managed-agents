@@ -11,6 +11,8 @@ export default defineConfig({
   server: {
     proxy: {
       "/v1": "http://localhost:8787",
+      "/auth": "http://localhost:8787",
+      "/auth-info": "http://localhost:8787",
       "/health": "http://localhost:8787",
     },
   },

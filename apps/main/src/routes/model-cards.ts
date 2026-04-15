@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { Env, ModelCard } from "@open-managed-agents/shared";
 import { generateModelCardId } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 function formatModelCard(card: ModelCard) {
   return {
@@ -13,9 +14,10 @@ function formatModelCard(card: ModelCard) {
 
 // POST /v1/model_cards — create
 app.post("/", async (c) => {
+  const t = c.get("tenant_id");
   const body = await c.req.json<{
     name: string;
-    provider: "anthropic" | "openai" | "custom";
+    provider: string;
     model_id: string;
     api_key: string;
     base_url?: string;
@@ -31,7 +33,7 @@ app.post("/", async (c) => {
 
   // If marking as default, unset other defaults
   if (body.is_default) {
-    await clearDefaults(c.env.CONFIG_KV);
+    await clearDefaults(c.env.CONFIG_KV, t);
   }
 
   const card: ModelCard = {
@@ -46,16 +48,16 @@ app.post("/", async (c) => {
     updated_at: now,
   };
 
-  await c.env.CONFIG_KV.put(`modelcard:${id}`, JSON.stringify(card));
-  // Store the actual API key separately — never returned in list/get
-  await c.env.CONFIG_KV.put(`modelcard:${id}:key`, body.api_key);
+  await c.env.CONFIG_KV.put(kvKey(t, "modelcard", id), JSON.stringify(card));
+  await c.env.CONFIG_KV.put(kvKey(t, "modelcard", `${id}:key`), body.api_key);
 
   return c.json(formatModelCard(card), 201);
 });
 
 // GET /v1/model_cards — list
 app.get("/", async (c) => {
-  const list = await c.env.CONFIG_KV.list({ prefix: "modelcard:" });
+  const t = c.get("tenant_id");
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "modelcard") });
   const cards = (
     await Promise.all(
       list.keys
@@ -73,22 +75,24 @@ app.get("/", async (c) => {
 
 // GET /v1/model_cards/:id — get single
 app.get("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`modelcard:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "modelcard", id));
   if (!data) return c.json({ error: "Model card not found" }, 404);
   return c.json(formatModelCard(JSON.parse(data)));
 });
 
 // POST /v1/model_cards/:id — update
 app.post("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`modelcard:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "modelcard", id));
   if (!data) return c.json({ error: "Model card not found" }, 404);
 
   const card: ModelCard = JSON.parse(data);
   const body = await c.req.json<{
     name?: string;
-    provider?: "anthropic" | "openai" | "custom";
+    provider?: string;
     model_id?: string;
     api_key?: string;
     base_url?: string | null;
@@ -96,7 +100,7 @@ app.post("/:id", async (c) => {
   }>();
 
   if (body.is_default) {
-    await clearDefaults(c.env.CONFIG_KV);
+    await clearDefaults(c.env.CONFIG_KV, t);
   }
 
   if (body.name !== undefined) card.name = body.name;
@@ -106,35 +110,37 @@ app.post("/:id", async (c) => {
   if (body.is_default !== undefined) card.is_default = body.is_default;
   if (body.api_key) {
     card.api_key_preview = body.api_key.slice(-4);
-    await c.env.CONFIG_KV.put(`modelcard:${id}:key`, body.api_key);
+    await c.env.CONFIG_KV.put(kvKey(t, "modelcard", `${id}:key`), body.api_key);
   }
   card.updated_at = new Date().toISOString();
 
-  await c.env.CONFIG_KV.put(`modelcard:${id}`, JSON.stringify(card));
+  await c.env.CONFIG_KV.put(kvKey(t, "modelcard", id), JSON.stringify(card));
   return c.json(formatModelCard(card));
 });
 
 // DELETE /v1/model_cards/:id — delete
 app.delete("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`modelcard:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "modelcard", id));
   if (!data) return c.json({ error: "Model card not found" }, 404);
 
-  await c.env.CONFIG_KV.delete(`modelcard:${id}`);
-  await c.env.CONFIG_KV.delete(`modelcard:${id}:key`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "modelcard", id));
+  await c.env.CONFIG_KV.delete(kvKey(t, "modelcard", `${id}:key`));
   return c.json({ type: "model_card_deleted", id });
 });
 
 // GET /v1/model_cards/:id/key — internal: get actual API key (used by agent worker)
 app.get("/:id/key", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const key = await c.env.CONFIG_KV.get(`modelcard:${id}:key`);
+  const key = await c.env.CONFIG_KV.get(kvKey(t, "modelcard", `${id}:key`));
   if (!key) return c.json({ error: "Key not found" }, 404);
   return c.json({ api_key: key });
 });
 
-async function clearDefaults(kv: KVNamespace) {
-  const list = await kv.list({ prefix: "modelcard:" });
+async function clearDefaults(kv: KVNamespace, tenantId: string) {
+  const list = await kv.list({ prefix: kvPrefix(tenantId, "modelcard") });
   for (const k of list.keys) {
     if (k.name.includes(":key")) continue;
     const data = await kv.get(k.name);

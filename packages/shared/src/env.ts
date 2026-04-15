@@ -1,5 +1,6 @@
 export interface Env {
   CONFIG_KV: KVNamespace;
+  AUTH_DB: D1Database;
   // SESSION_DO and SANDBOX are only in sandbox workers
   SESSION_DO?: DurableObjectNamespace;
   SANDBOX?: DurableObjectNamespace;
@@ -8,6 +9,9 @@ export interface Env {
   VECTORIZE?: VectorizeIndex;
   ASSETS?: { fetch: (req: Request) => Promise<Response> };
   API_KEY: string;
+  BETTER_AUTH_SECRET: string;
+  GOOGLE_CLIENT_ID?: string;
+  GOOGLE_CLIENT_SECRET?: string;
   ANTHROPIC_API_KEY: string;
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_MODEL?: string;

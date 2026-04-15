@@ -1083,6 +1083,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const effectiveModelId = modelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
     let modelApiKey = this.env.ANTHROPIC_API_KEY;
     let modelBaseURL = this.env.ANTHROPIC_BASE_URL;
+    let modelProvider: string | undefined;
 
     if (agent.model_card_id && this.env.CONFIG_KV) {
       try {
@@ -1093,6 +1094,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         if (cardData && keyData) {
           const card = JSON.parse(cardData);
           modelApiKey = keyData;
+          modelProvider = card.provider;
           if (card.base_url) modelBaseURL = card.base_url;
         }
       } catch {
@@ -1111,6 +1113,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             const key = await this.env.CONFIG_KV.get(`${k.name}:key`);
             if (key) {
               modelApiKey = key;
+              modelProvider = card.provider;
               if (card.base_url) modelBaseURL = card.base_url;
             }
             break;
@@ -1121,7 +1124,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    const model = resolveModel(effectiveModelId, modelApiKey, modelBaseURL);
+    // Determine API compat from provider field
+    const OAI_PROVIDERS = new Set(["oai", "oai-compatible"]);
+    const ANT_PROVIDERS = new Set(["ant", "ant-compatible"]);
+    let apiCompat: "ant" | "ant-compatible" | "oai" | "oai-compatible" = "ant";
+    if (modelProvider && (OAI_PROVIDERS.has(modelProvider) || ANT_PROVIDERS.has(modelProvider))) {
+      apiCompat = modelProvider as typeof apiCompat;
+    }
+
+    const model = resolveModel(effectiveModelId, modelApiKey, modelBaseURL, apiCompat);
 
     // Build system prompt: base + skill metadata
     let systemPrompt = agent.system || "";

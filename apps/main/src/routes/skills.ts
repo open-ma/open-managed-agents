@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -190,12 +191,10 @@ app.post("/", async (c) => {
     created_at: now,
   };
 
+  const t = c.get("tenant_id");
   await Promise.all([
-    c.env.CONFIG_KV.put(`skill:${id}`, JSON.stringify(skill)),
-    c.env.CONFIG_KV.put(
-      `skillver:${id}:${versionId}`,
-      JSON.stringify(version)
-    ),
+    c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
+    c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
   return c.json({ ...skill, files: version.files }, 201);
@@ -210,7 +209,8 @@ app.get("/", async (c) => {
 
   let customs: SkillMeta[] = [];
   if (source !== "builtin") {
-    const list = await c.env.CONFIG_KV.list({ prefix: "skill:" });
+    const t = c.get("tenant_id");
+    const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "skill") });
     customs = (
       await Promise.all(
         list.keys.map(async (k) => {
@@ -245,7 +245,7 @@ app.get("/:id", async (c) => {
   const builtin = BUILTIN_SKILLS.find((s) => s.id === id);
   if (builtin) return c.json(builtin);
 
-  const data = await c.env.CONFIG_KV.get(`skill:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
 
   return c.json(JSON.parse(data) as SkillMeta);
@@ -262,16 +262,16 @@ app.delete("/:id", async (c) => {
     return c.json({ error: "Cannot delete built-in skills" }, 403);
   }
 
-  const data = await c.env.CONFIG_KV.get(`skill:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
 
   // Cascade-delete all versions
   const versionKeys = await c.env.CONFIG_KV.list({
-    prefix: `skillver:${id}:`,
+    prefix: kvPrefix(c.get("tenant_id"), "skillver", id),
   });
 
   await Promise.all([
-    c.env.CONFIG_KV.delete(`skill:${id}`),
+    c.env.CONFIG_KV.delete(kvKey(c.get("tenant_id"), "skill", id)),
     ...versionKeys.keys.map((k) => c.env.CONFIG_KV.delete(k.name)),
   ]);
 
@@ -284,7 +284,7 @@ app.delete("/:id", async (c) => {
 
 app.post("/:id/versions", async (c) => {
   const id = c.req.param("id");
-  const raw = await c.env.CONFIG_KV.get(`skill:${id}`);
+  const raw = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!raw) return c.json({ error: "Skill not found" }, 404);
 
   const skill: SkillMeta = JSON.parse(raw);
@@ -335,12 +335,10 @@ app.post("/:id/versions", async (c) => {
     skill.description = extracted.description;
   }
 
+  const t = c.get("tenant_id");
   await Promise.all([
-    c.env.CONFIG_KV.put(`skill:${id}`, JSON.stringify(skill)),
-    c.env.CONFIG_KV.put(
-      `skillver:${id}:${versionId}`,
-      JSON.stringify(version)
-    ),
+    c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
+    c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
   return c.json(version, 201);
@@ -352,10 +350,10 @@ app.post("/:id/versions", async (c) => {
 
 app.get("/:id/versions", async (c) => {
   const id = c.req.param("id");
-  const skillData = await c.env.CONFIG_KV.get(`skill:${id}`);
+  const skillData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!skillData) return c.json({ error: "Skill not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: `skillver:${id}:` });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "skillver", id) });
 
   const versions = (
     await Promise.all(
@@ -395,7 +393,7 @@ app.get("/:id/versions/:version", async (c) => {
   const id = c.req.param("id");
   const version = c.req.param("version");
 
-  const data = await c.env.CONFIG_KV.get(`skillver:${id}:${version}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skillver", id, version));
   if (!data) return c.json({ error: "Version not found" }, 404);
 
   return c.json(JSON.parse(data) as SkillVersion);
@@ -409,10 +407,10 @@ app.delete("/:id/versions/:version", async (c) => {
   const id = c.req.param("id");
   const version = c.req.param("version");
 
-  const skillRaw = await c.env.CONFIG_KV.get(`skill:${id}`);
+  const skillRaw = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!skillRaw) return c.json({ error: "Skill not found" }, 404);
 
-  const key = `skillver:${id}:${version}`;
+  const key = kvKey(c.get("tenant_id"), "skillver", id, version);
   const data = await c.env.CONFIG_KV.get(key);
   if (!data) return c.json({ error: "Version not found" }, 404);
 
@@ -439,7 +437,7 @@ app.delete("/:id/versions/:version", async (c) => {
     }
 
     skill.latest_version = remaining[0];
-    await c.env.CONFIG_KV.put(`skill:${id}`, JSON.stringify(skill));
+    await c.env.CONFIG_KV.put(kvKey(c.get("tenant_id"), "skill", id), JSON.stringify(skill));
   }
 
   await c.env.CONFIG_KV.delete(key);

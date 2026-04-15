@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { AgentConfig, ModelCard } from "@open-managed-agents/shared";
 import { generateAgentId } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 /**
  * Normalize agent response to match Anthropic API spec:
@@ -38,11 +39,12 @@ function formatAgent(agent: AgentConfig) {
  */
 async function validateModel(
   kv: KVNamespace,
+  tenantId: string,
   model: string | { id: string; speed?: string },
   modelCardId?: string
 ): Promise<{ valid: boolean; error?: string }> {
   // Load all model cards
-  const list = await kv.list({ prefix: "modelcard:" });
+  const list = await kv.list({ prefix: kvPrefix(tenantId, "modelcard") });
   const cardKeys = list.keys.filter((k) => !k.name.includes(":key"));
 
   // No model cards configured — skip validation (uses env fallback)
@@ -97,7 +99,8 @@ app.post("/", async (c) => {
   }
 
   // Validate model has a configured model card
-  const modelCheck = await validateModel(c.env.CONFIG_KV, body.model, body.model_card_id);
+  const tenantId = c.get("tenant_id");
+  const modelCheck = await validateModel(c.env.CONFIG_KV, tenantId, body.model, body.model_card_id);
   if (!modelCheck.valid) {
     return c.json({ error: modelCheck.error }, 400);
   }
@@ -121,7 +124,7 @@ app.post("/", async (c) => {
     updated_at: now,
   };
 
-  await c.env.CONFIG_KV.put(`agent:${agent.id}`, JSON.stringify(agent));
+  await c.env.CONFIG_KV.put(kvKey(tenantId, "agent", agent.id), JSON.stringify(agent));
   return c.json(formatAgent(agent), 201);
 });
 
@@ -133,7 +136,7 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await c.env.CONFIG_KV.list({ prefix: "agent:" });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "agent") });
   const agents = (
     await Promise.all(
       list.keys
@@ -153,7 +156,8 @@ app.get("/", async (c) => {
 // GET /v1/agents/:id — get agent
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`agent:${id}`);
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!data) return c.json({ error: "Agent not found" }, 404);
   return c.json(formatAgent(JSON.parse(data)));
 });
@@ -161,7 +165,8 @@ app.get("/:id", async (c) => {
 // POST/PUT /v1/agents/:id — update agent (Anthropic uses POST; PUT accepted for compat)
 const updateAgent = async (c: any) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`agent:${id}`);
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!data) return c.json({ error: "Agent not found" }, 404);
 
   const agent: AgentConfig = JSON.parse(data);
@@ -185,7 +190,7 @@ const updateAgent = async (c: any) => {
   if (body.model !== undefined || body.model_card_id !== undefined) {
     const effectiveModel = body.model ?? agent.model;
     const effectiveCardId = body.model_card_id === null ? undefined : (body.model_card_id ?? agent.model_card_id);
-    const modelCheck = await validateModel(c.env.CONFIG_KV, effectiveModel, effectiveCardId);
+    const modelCheck = await validateModel(c.env.CONFIG_KV, t, effectiveModel, effectiveCardId);
     if (!modelCheck.valid) {
       return c.json({ error: modelCheck.error }, 400);
     }
@@ -211,7 +216,7 @@ const updateAgent = async (c: any) => {
   }
 
   // Save current version to version history before overwriting
-  await c.env.CONFIG_KV.put(`agent:${id}:v${agent.version}`, data);
+  await c.env.CONFIG_KV.put(kvKey(t, "agent", `${id}:v${agent.version}`), data);
 
   for (const key of fields) {
     if (body[key] !== undefined) {
@@ -236,7 +241,7 @@ const updateAgent = async (c: any) => {
   agent.version += 1;
   agent.updated_at = new Date().toISOString();
 
-  await c.env.CONFIG_KV.put(`agent:${id}`, JSON.stringify(agent));
+  await c.env.CONFIG_KV.put(kvKey(t, "agent", id), JSON.stringify(agent));
   return c.json(formatAgent(agent));
 };
 app.post("/:id", updateAgent);
@@ -245,10 +250,11 @@ app.put("/:id", updateAgent);
 // GET /v1/agents/:id/versions — list all versions
 app.get("/:id/versions", async (c) => {
   const id = c.req.param("id");
-  const agentData = await c.env.CONFIG_KV.get(`agent:${id}`);
+  const t = c.get("tenant_id");
+  const agentData = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!agentData) return c.json({ error: "Agent not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: `agent:${id}:v` });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvKey(t, "agent", `${id}:v`) });
   const versions = (
     await Promise.all(
       list.keys.map(async (k) => {
@@ -265,8 +271,9 @@ app.get("/:id/versions", async (c) => {
 // GET /v1/agents/:id/versions/:version — get specific version
 app.get("/:id/versions/:version", async (c) => {
   const id = c.req.param("id");
+  const t = c.get("tenant_id");
   const version = c.req.param("version");
-  const data = await c.env.CONFIG_KV.get(`agent:${id}:v${version}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "agent", `${id}:v${version}`));
   if (!data) return c.json({ error: "Version not found" }, 404);
   return c.json(formatAgent(JSON.parse(data)));
 });
@@ -274,23 +281,25 @@ app.get("/:id/versions/:version", async (c) => {
 // POST /v1/agents/:id/archive — archive agent
 app.post("/:id/archive", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`agent:${id}`);
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!data) return c.json({ error: "Agent not found" }, 404);
 
   const agent: AgentConfig = JSON.parse(data);
   agent.archived_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(`agent:${id}`, JSON.stringify(agent));
+  await c.env.CONFIG_KV.put(kvKey(t, "agent", id), JSON.stringify(agent));
   return c.json(formatAgent(agent));
 });
 
 // DELETE /v1/agents/:id — delete agent (extension, not in Anthropic spec)
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`agent:${id}`);
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!data) return c.json({ error: "Agent not found" }, 404);
 
   // Check if any active sessions reference this agent
-  const sessionList = await c.env.CONFIG_KV.list({ prefix: "session:" });
+  const sessionList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "session") });
   for (const k of sessionList.keys) {
     const sessData = await c.env.CONFIG_KV.get(k.name);
     if (!sessData) continue;
@@ -300,7 +309,7 @@ app.delete("/:id", async (c) => {
     }
   }
 
-  await c.env.CONFIG_KV.delete(`agent:${id}`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "agent", id));
   return c.json({ type: "agent_deleted", id });
 });
 

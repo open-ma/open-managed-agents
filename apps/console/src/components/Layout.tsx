@@ -1,7 +1,8 @@
 import { useState } from "react";
-import { NavLink, Outlet } from "react-router";
+import { NavLink, Outlet, Navigate } from "react-router";
 import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
+import { authClient } from "../lib/auth-client";
 
 /* ── Navigation groups ── */
 const navGroups = [
@@ -63,6 +64,11 @@ const navGroups = [
         to: "/model-cards",
         label: "Model Cards",
         icon: "M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z",
+      },
+      {
+        to: "/api-keys",
+        label: "API Keys",
+        icon: "M15 7a2 2 0 012 2m4 0a6 6 0 01-7.743 5.743L11 17H9v2H7v2H4a1 1 0 01-1-1v-2.586a1 1 0 01.293-.707l5.964-5.964A6 6 0 1121 9z",
       },
     ],
   },
@@ -195,10 +201,41 @@ function CloseIcon() {
   );
 }
 
+/* ── User menu ── */
+function UserMenu() {
+  const { user } = useAuth();
+
+  const handleSignOut = async () => {
+    await authClient.signOut();
+    window.location.href = "/login";
+  };
+
+  if (!user) return null;
+
+  return (
+    <div className="flex items-center gap-2 px-3 py-2">
+      <div className="w-7 h-7 rounded-full bg-brand-subtle text-brand text-xs font-medium flex items-center justify-center shrink-0">
+        {user.name?.[0]?.toUpperCase() || user.email[0].toUpperCase()}
+      </div>
+      <div className="flex-1 min-w-0">
+        <div className="text-sm text-fg truncate">{user.name}</div>
+        <div className="text-xs text-fg-subtle truncate">{user.email}</div>
+      </div>
+      <button
+        onClick={handleSignOut}
+        title="Sign out"
+        className="p-1 text-fg-subtle hover:text-fg rounded transition-colors shrink-0"
+      >
+        <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
+        </svg>
+      </button>
+    </div>
+  );
+}
+
 /* ── Sidebar content (shared between desktop & mobile) ── */
 function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
-  const { apiKey, setApiKey } = useAuth();
-
   return (
     <>
       {/* Logo */}
@@ -226,66 +263,28 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           Documentation
         </a>
         <ThemeToggle />
-        <div>
-          <label className="text-xs text-fg-subtle block mb-1">API Key</label>
-          <input
-            type="password"
-            value={apiKey}
-            onChange={(e) => setApiKey(e.target.value)}
-            placeholder="Enter API key..."
-            className="w-full bg-bg border border-border text-fg px-2.5 py-1.5 rounded-md text-sm outline-none focus-visible:outline-2 focus-visible:outline-brand focus-visible:outline-offset-0 transition-colors placeholder:text-fg-subtle"
-          />
-        </div>
+        <UserMenu />
       </div>
     </>
-  );
-}
-
-/* ── Auth gate — shown when no API key is set ── */
-function AuthGate() {
-  const { apiKey, setApiKey } = useAuth();
-  const [key, setKey] = useState("");
-
-  if (apiKey) return null;
-
-  return (
-    <div className="flex-1 flex items-center justify-center p-8">
-      <div className="max-w-sm w-full space-y-4">
-        <div className="text-center">
-          <LogoMark />
-          <h2 className="font-display text-lg font-semibold text-fg mt-4">Welcome to openma</h2>
-          <p className="text-sm text-fg-muted mt-1">Enter your API key to get started.</p>
-        </div>
-        <div>
-          <input
-            type="password"
-            value={key}
-            onChange={(e) => setKey(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && key.trim()) setApiKey(key.trim()); }}
-            placeholder="API key"
-            autoFocus
-            className="w-full border border-border rounded-md px-3 py-2.5 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle"
-          />
-        </div>
-        <button
-          onClick={() => key.trim() && setApiKey(key.trim())}
-          disabled={!key.trim()}
-          className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
-        >
-          Continue
-        </button>
-        <p className="text-xs text-fg-subtle text-center">
-          Set <code className="font-mono bg-bg-surface px-1 py-0.5 rounded">API_KEY</code> in your deployment's environment variables.
-        </p>
-      </div>
-    </div>
   );
 }
 
 /* ── Layout ── */
 export function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
-  const { apiKey } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return (
+      <div className="flex h-screen items-center justify-center bg-bg">
+        <div className="text-fg-subtle text-sm">Loading...</div>
+      </div>
+    );
+  }
+
+  if (!isAuthenticated) {
+    return <Navigate to="/login" replace />;
+  }
 
   return (
     <div className="flex h-screen bg-bg">
@@ -333,7 +332,7 @@ export function Layout() {
         </div>
 
         <div className="flex-1 flex flex-col overflow-hidden bg-bg md:rounded-lg md:border md:border-border">
-          {apiKey ? <Outlet /> : <AuthGate />}
+          <Outlet />
         </div>
       </main>
     </div>

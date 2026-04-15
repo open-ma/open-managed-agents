@@ -2,8 +2,9 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { MemoryStoreConfig, MemoryItem, MemoryVersion } from "@open-managed-agents/shared";
 import { generateMemoryStoreId, generateMemoryId, generateMemoryVersionId } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 // --- Helpers ---
 
@@ -18,6 +19,7 @@ async function sha256(content: string): Promise<string> {
 
 async function createVersion(
   kv: KVNamespace,
+  tenantId: string,
   opts: {
     memoryId: string;
     storeId: string;
@@ -40,12 +42,13 @@ async function createVersion(
     actor: { type: "api_key", id: "api" },
     created_at: new Date().toISOString(),
   };
-  await kv.put(`memver:${opts.storeId}:${version.id}`, JSON.stringify(version));
+  await kv.put(kvKey(tenantId, "memver", opts.storeId, version.id), JSON.stringify(version));
   return version;
 }
 
 // POST /v1/memory_stores — create store
 app.post("/", async (c) => {
+  const t = c.get("tenant_id");
   const body = await c.req.json<{
     name: string;
     description?: string;
@@ -62,15 +65,16 @@ app.post("/", async (c) => {
     created_at: new Date().toISOString(),
   };
 
-  await c.env.CONFIG_KV.put(`memstore:${store.id}`, JSON.stringify(store));
+  await c.env.CONFIG_KV.put(kvKey(t, "memstore", store.id), JSON.stringify(store));
   return c.json(store, 201);
 });
 
 // GET /v1/memory_stores — list stores
 app.get("/", async (c) => {
+  const t = c.get("tenant_id");
   const includeArchived = c.req.query("include_archived") === "true";
 
-  const list = await c.env.CONFIG_KV.list({ prefix: "memstore:" });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "memstore") });
   const stores = (
     await Promise.all(
       list.keys
@@ -95,47 +99,51 @@ app.get("/", async (c) => {
 
 // GET /v1/memory_stores/:id — get store
 app.get("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`memstore:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "memstore", id));
   if (!data) return c.json({ error: "Memory store not found" }, 404);
   return c.json(JSON.parse(data));
 });
 
 // POST /v1/memory_stores/:id/archive — archive store
 app.post("/:id/archive", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`memstore:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "memstore", id));
   if (!data) return c.json({ error: "Memory store not found" }, 404);
 
   const store: MemoryStoreConfig = JSON.parse(data);
   store.archived_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(`memstore:${id}`, JSON.stringify(store));
+  await c.env.CONFIG_KV.put(kvKey(t, "memstore", id), JSON.stringify(store));
   return c.json(store);
 });
 
 // DELETE /v1/memory_stores/:id — delete store + all its memories + versions
 app.delete("/:id", async (c) => {
+  const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`memstore:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "memstore", id));
   if (!data) return c.json({ error: "Memory store not found" }, 404);
 
   // Delete all memories in this store
-  const memList = await c.env.CONFIG_KV.list({ prefix: `mem:${id}:` });
+  const memList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "mem", id) });
   await Promise.all(memList.keys.map((k) => c.env.CONFIG_KV.delete(k.name)));
 
   // Delete all versions in this store
-  const verList = await c.env.CONFIG_KV.list({ prefix: `memver:${id}:` });
+  const verList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "memver", id) });
   await Promise.all(verList.keys.map((k) => c.env.CONFIG_KV.delete(k.name)));
 
   // Delete the store itself
-  await c.env.CONFIG_KV.delete(`memstore:${id}`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "memstore", id));
   return c.json({ type: "memory_store_deleted", id });
 });
 
 // POST /v1/memory_stores/:id/memories — create/write memory
 app.post("/:id/memories", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
-  const storeData = await c.env.CONFIG_KV.get(`memstore:${storeId}`);
+  const storeData = await c.env.CONFIG_KV.get(kvKey(t, "memstore", storeId));
   if (!storeData) return c.json({ error: "Memory store not found" }, 404);
 
   const body = await c.req.json<{
@@ -156,7 +164,7 @@ app.post("/:id/memories", async (c) => {
 
   // Handle preconditions
   if (body.precondition) {
-    const list = await c.env.CONFIG_KV.list({ prefix: `mem:${storeId}:` });
+    const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "mem", storeId) });
     for (const k of list.keys) {
       const d = await c.env.CONFIG_KV.get(k.name);
       if (d) {
@@ -186,10 +194,10 @@ app.post("/:id/memories", async (c) => {
     created_at: new Date().toISOString(),
   };
 
-  await c.env.CONFIG_KV.put(`mem:${storeId}:${mem.id}`, JSON.stringify(mem));
+  await c.env.CONFIG_KV.put(kvKey(t, "mem", storeId, mem.id), JSON.stringify(mem));
 
   // Create version record
-  await createVersion(c.env.CONFIG_KV, {
+  await createVersion(c.env.CONFIG_KV, t, {
     memoryId: mem.id,
     storeId,
     operation: "created",
@@ -222,13 +230,14 @@ app.post("/:id/memories", async (c) => {
 
 // GET /v1/memory_stores/:id/memories — list memories (metadata only)
 app.get("/:id/memories", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
-  const storeData = await c.env.CONFIG_KV.get(`memstore:${storeId}`);
+  const storeData = await c.env.CONFIG_KV.get(kvKey(t, "memstore", storeId));
   if (!storeData) return c.json({ error: "Memory store not found" }, 404);
 
   const prefix = c.req.query("prefix");
 
-  const list = await c.env.CONFIG_KV.list({ prefix: `mem:${storeId}:` });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "mem", storeId) });
   const memories = (
     await Promise.all(
       list.keys.map(async (k) => {
@@ -249,18 +258,20 @@ app.get("/:id/memories", async (c) => {
 
 // GET /v1/memory_stores/:id/memories/:mem_id — get full memory with content
 app.get("/:id/memories/:mem_id", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const memId = c.req.param("mem_id");
-  const data = await c.env.CONFIG_KV.get(`mem:${storeId}:${memId}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "mem", storeId, memId));
   if (!data) return c.json({ error: "Memory not found" }, 404);
   return c.json(JSON.parse(data));
 });
 
 // PATCH/POST /v1/memory_stores/:id/memories/:mem_id — update memory content/path
 const updateMemory = async (c: any) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const memId = c.req.param("mem_id");
-  const data = await c.env.CONFIG_KV.get(`mem:${storeId}:${memId}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "mem", storeId, memId));
   if (!data) return c.json({ error: "Memory not found" }, 404);
 
   const body = await c.req.json() as {
@@ -294,10 +305,10 @@ const updateMemory = async (c: any) => {
   }
   mem.updated_at = new Date().toISOString();
 
-  await c.env.CONFIG_KV.put(`mem:${storeId}:${memId}`, JSON.stringify(mem));
+  await c.env.CONFIG_KV.put(kvKey(t, "mem", storeId, memId), JSON.stringify(mem));
 
   // Create version record
-  await createVersion(c.env.CONFIG_KV, {
+  await createVersion(c.env.CONFIG_KV, t, {
     memoryId: memId,
     storeId,
     operation: "modified",
@@ -315,9 +326,10 @@ app.post("/:id/memories/:mem_id", updateMemory);
 // DELETE /v1/memory_stores/:id/memories/:mem_id — delete memory
 // Supports conditional delete via ?expected_content_sha256=<hash>
 app.delete("/:id/memories/:mem_id", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const memId = c.req.param("mem_id");
-  const data = await c.env.CONFIG_KV.get(`mem:${storeId}:${memId}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "mem", storeId, memId));
   if (!data) return c.json({ error: "Memory not found" }, 404);
 
   const mem: MemoryItem = JSON.parse(data);
@@ -329,7 +341,7 @@ app.delete("/:id/memories/:mem_id", async (c) => {
   }
 
   // Create version record before deleting
-  await createVersion(c.env.CONFIG_KV, {
+  await createVersion(c.env.CONFIG_KV, t, {
     memoryId: memId,
     storeId,
     operation: "deleted",
@@ -339,7 +351,7 @@ app.delete("/:id/memories/:mem_id", async (c) => {
     size_bytes: mem.size_bytes,
   });
 
-  await c.env.CONFIG_KV.delete(`mem:${storeId}:${memId}`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "mem", storeId, memId));
   return c.json({ type: "memory_deleted", id: memId });
 });
 
@@ -349,13 +361,14 @@ app.delete("/:id/memories/:mem_id", async (c) => {
 
 // GET /v1/memory_stores/:id/memory_versions — list versions
 app.get("/:id/memory_versions", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
-  const storeData = await c.env.CONFIG_KV.get(`memstore:${storeId}`);
+  const storeData = await c.env.CONFIG_KV.get(kvKey(t, "memstore", storeId));
   if (!storeData) return c.json({ error: "Memory store not found" }, 404);
 
   const memoryIdFilter = c.req.query("memory_id");
 
-  const list = await c.env.CONFIG_KV.list({ prefix: `memver:${storeId}:` });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "memver", storeId) });
   const versions = (
     await Promise.all(
       list.keys.map(async (k) => {
@@ -379,18 +392,20 @@ app.get("/:id/memory_versions", async (c) => {
 
 // GET /v1/memory_stores/:id/memory_versions/:ver_id — get version with full content
 app.get("/:id/memory_versions/:ver_id", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const verId = c.req.param("ver_id");
-  const data = await c.env.CONFIG_KV.get(`memver:${storeId}:${verId}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "memver", storeId, verId));
   if (!data) return c.json({ error: "Memory version not found" }, 404);
   return c.json(JSON.parse(data));
 });
 
 // POST /v1/memory_stores/:id/memory_versions/:ver_id/redact — redact version
 app.post("/:id/memory_versions/:ver_id/redact", async (c) => {
+  const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const verId = c.req.param("ver_id");
-  const data = await c.env.CONFIG_KV.get(`memver:${storeId}:${verId}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "memver", storeId, verId));
   if (!data) return c.json({ error: "Memory version not found" }, 404);
 
   const ver: MemoryVersion = JSON.parse(data);
@@ -401,7 +416,7 @@ app.post("/:id/memory_versions/:ver_id/redact", async (c) => {
   delete (ver as any).path;
   ver.redacted = true;
 
-  await c.env.CONFIG_KV.put(`memver:${storeId}:${verId}`, JSON.stringify(ver));
+  await c.env.CONFIG_KV.put(kvKey(t, "memver", storeId, verId), JSON.stringify(ver));
   return c.json(ver);
 });
 

@@ -3,8 +3,9 @@ import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource } from "@open-managed-agents/shared";
 import { generateSessionId, generateFileId, generateResourceId } from "@open-managed-agents/shared";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
 /**
  * Resolve the sandbox worker service binding for a given environment.
@@ -12,8 +13,9 @@ const app = new Hono<{ Bindings: Env }>();
 async function getSandboxBinding(
   env: Env,
   environmentId: string,
+  tenantId: string,
 ): Promise<{ binding: Fetcher | null; error?: string; status?: 404 | 500 | 503 }> {
-  const envData = await env.CONFIG_KV.get(`env:${environmentId}`);
+  const envData = await env.CONFIG_KV.get(kvKey(tenantId, "env", environmentId));
   if (!envData) return { binding: null, error: "Environment not found", status: 404 };
 
   const envConfig = JSON.parse(envData) as EnvironmentConfig;
@@ -84,6 +86,7 @@ function forwardToSandbox(
 
 // POST /v1/sessions — create session
 app.post("/", async (c) => {
+  const t = c.get("tenant_id");
   const body = await c.req.json<{
     agent: string;
     environment_id: string;
@@ -109,11 +112,11 @@ app.post("/", async (c) => {
   }
 
   // Verify agent exists
-  const agentData = await c.env.CONFIG_KV.get(`agent:${body.agent}`);
+  const agentData = await c.env.CONFIG_KV.get(kvKey(t, "agent", body.agent));
   if (!agentData) return c.json({ error: "Agent not found" }, 404);
 
   // Resolve sandbox worker binding
-  const { binding, error, status } = await getSandboxBinding(c.env, body.environment_id);
+  const { binding, error, status } = await getSandboxBinding(c.env, body.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
   const sessionId = generateSessionId();
@@ -146,18 +149,18 @@ app.post("/", async (c) => {
   // Store session with agent snapshot
   const agentSnapshot = JSON.parse(agentData) as AgentConfig;
   const sessionRecord = { ...session, agent_snapshot: agentSnapshot };
-  await c.env.CONFIG_KV.put(`session:${sessionId}`, JSON.stringify(sessionRecord));
+  await c.env.CONFIG_KV.put(kvKey(t, "session", sessionId), JSON.stringify(sessionRecord));
 
   // Process resources if provided
   const createdResources: SessionResource[] = [];
   if (body.resources && Array.isArray(body.resources)) {
     for (const res of body.resources) {
       if (res.type === "file" && res.file_id) {
-        const fileData = await c.env.CONFIG_KV.get(`file:${res.file_id}`);
+        const fileData = await c.env.CONFIG_KV.get(kvKey(t, "file", res.file_id));
         if (!fileData) continue;
 
         const sourceFile = JSON.parse(fileData) as FileRecord;
-        const sourceContent = await c.env.CONFIG_KV.get(`filecontent:${res.file_id}`);
+        const sourceContent = await c.env.CONFIG_KV.get(kvKey(t, "filecontent", res.file_id));
 
         const scopedFileId = generateFileId();
         const scopedFile: FileRecord = {
@@ -166,9 +169,9 @@ app.post("/", async (c) => {
           scope_id: sessionId,
           created_at: new Date().toISOString(),
         };
-        await c.env.CONFIG_KV.put(`file:${scopedFileId}`, JSON.stringify(scopedFile));
+        await c.env.CONFIG_KV.put(kvKey(t, "file", scopedFileId), JSON.stringify(scopedFile));
         if (sourceContent !== null) {
-          await c.env.CONFIG_KV.put(`filecontent:${scopedFileId}`, sourceContent);
+          await c.env.CONFIG_KV.put(kvKey(t, "filecontent", scopedFileId), sourceContent);
         }
 
         const resourceId = generateResourceId();
@@ -180,7 +183,7 @@ app.post("/", async (c) => {
           mount_path: res.mount_path,
           created_at: new Date().toISOString(),
         };
-        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
         createdResources.push(resource);
       } else if (res.type === "memory_store" && res.memory_store_id) {
         const resourceId = generateResourceId();
@@ -192,7 +195,7 @@ app.post("/", async (c) => {
           mount_path: res.mount_path,
           created_at: new Date().toISOString(),
         };
-        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
         createdResources.push(resource);
       } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
         const resourceId = generateResourceId();
@@ -207,9 +210,9 @@ app.post("/", async (c) => {
           created_at: new Date().toISOString(),
         };
         if (res.authorization_token) {
-          await c.env.CONFIG_KV.put(`secret:${sessionId}:${resourceId}`, res.authorization_token);
+          await c.env.CONFIG_KV.put(kvKey(t, "secret", sessionId, resourceId), res.authorization_token);
         }
-        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
         createdResources.push(resource);
       } else if (res.type === "env_secret" && res.name && res.value) {
         const resourceId = generateResourceId();
@@ -220,8 +223,8 @@ app.post("/", async (c) => {
           name: res.name,
           created_at: new Date().toISOString(),
         };
-        await c.env.CONFIG_KV.put(`secret:${sessionId}:${resourceId}`, res.value);
-        await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+        await c.env.CONFIG_KV.put(kvKey(t, "secret", sessionId, resourceId), res.value);
+        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
         createdResources.push(resource);
       }
     }
@@ -274,13 +277,13 @@ app.get("/", async (c) => {
 // GET /v1/sessions/:id — get session (status from sandbox worker)
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta & { agent_snapshot?: AgentConfig };
 
   // Get live status, usage, and outcome evaluations from sandbox worker
-  const { binding } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   const response: Record<string, unknown> = { ...session };
 
   if (binding) {
@@ -311,21 +314,21 @@ app.get("/:id", async (c) => {
 // POST /v1/sessions/:id/archive
 app.post("/:id/archive", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
   session.archived_at = new Date().toISOString();
   session.updated_at = session.archived_at;
 
-  await c.env.CONFIG_KV.put(`session:${id}`, JSON.stringify(session));
+  await c.env.CONFIG_KV.put(kvKey(c.get("tenant_id"), "session", id), JSON.stringify(session));
   return c.json(session);
 });
 
 // POST /v1/sessions/:id — update session
 app.post("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
@@ -348,20 +351,20 @@ app.post("/:id", async (c) => {
   }
   session.updated_at = new Date().toISOString();
 
-  await c.env.CONFIG_KV.put(`session:${id}`, JSON.stringify(session));
+  await c.env.CONFIG_KV.put(kvKey(c.get("tenant_id"), "session", id), JSON.stringify(session));
   return c.json(session);
 });
 
 // DELETE /v1/sessions/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
 
   // Check if session is running — cannot delete while active
-  const { binding } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   if (binding) {
     try {
       const statusRes = await forwardToSandbox(binding, `/sessions/${id}/status`, c.req.raw, "GET");
@@ -373,14 +376,14 @@ app.delete("/:id", async (c) => {
     await forwardToSandbox(binding, `/sessions/${id}/destroy`, c.req.raw, "DELETE").catch(() => {});
   }
 
-  await c.env.CONFIG_KV.delete(`session:${id}`);
+  await c.env.CONFIG_KV.delete(kvKey(c.get("tenant_id"), "session", id));
   return c.json({ type: "session_deleted", id });
 });
 
 // POST /v1/sessions/:id/events — send user events
 app.post("/:id/events", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
@@ -390,7 +393,7 @@ app.post("/:id/events", async (c) => {
     return c.json({ error: "Session is archived and cannot receive new events" }, 409);
   }
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   if (!binding) return c.json({ error }, status ?? 500);
 
   const body = await c.req.json<{ events: UserMessageEvent[] }>();
@@ -423,12 +426,13 @@ app.post("/:id/events", async (c) => {
 });
 
 // SSE stream
-async function handleSSEStream(c: Context<{ Bindings: Env }>, id: string) {
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_id: string } }>, id: string) {
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
   const wsHeaders = new Headers(c.req.raw.headers);
@@ -476,12 +480,13 @@ async function handleSSEStream(c: Context<{ Bindings: Env }>, id: string) {
 }
 
 // JSON events
-async function handleJSONEvents(c: Context<{ Bindings: Env }>, id: string) {
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_id: string } }>, id: string) {
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
   const url = new URL(c.req.url);
@@ -510,11 +515,11 @@ app.get("/:id/events/stream", async (c) => handleSSEStream(c, c.req.param("id"))
 // GET /v1/sessions/:id/threads — list threads
 app.get("/:id/threads", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   if (!binding) return c.json({ error }, status ?? 500);
 
   const res = await forwardToSandbox(binding, `/sessions/${id}/threads`, c.req.raw, "GET");
@@ -525,11 +530,11 @@ app.get("/:id/threads", async (c) => {
 app.get("/:id/threads/:thread_id/events", async (c) => {
   const id = c.req.param("id");
   const threadId = c.req.param("thread_id");
-  const data = await c.env.CONFIG_KV.get(`session:${id}`);
+  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id);
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   if (!binding) return c.json({ error }, status ?? 500);
 
   const res = await forwardToSandbox(binding, `/sessions/${id}/threads/${threadId}/events`, c.req.raw, "GET");
@@ -548,7 +553,7 @@ app.get("/:id/threads/:thread_id/stream", async (c) => {
 
 app.post("/:id/resources", async (c) => {
   const sessionId = c.req.param("id");
-  const sessionData = await c.env.CONFIG_KV.get(`session:${sessionId}`);
+  const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
   if (!sessionData) return c.json({ error: "Session not found" }, 404);
 
   const body = await c.req.json<{
@@ -562,7 +567,8 @@ app.post("/:id/resources", async (c) => {
     return c.json({ error: "type is required" }, 400);
   }
 
-  const existingResources = await c.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
+  const t = c.get("tenant_id");
+  const existingResources = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "sesrsc", sessionId) });
   if (existingResources.keys.length >= 100) {
     return c.json({ error: "Maximum 100 resources per session" }, 400);
   }
@@ -571,7 +577,7 @@ app.post("/:id/resources", async (c) => {
     if (!body.file_id) {
       return c.json({ error: "file_id is required for file resources" }, 400);
     }
-    const fileData = await c.env.CONFIG_KV.get(`file:${body.file_id}`);
+    const fileData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "file", body.file_id));
     if (!fileData) return c.json({ error: "File not found" }, 404);
   }
 
@@ -592,16 +598,16 @@ app.post("/:id/resources", async (c) => {
     created_at: new Date().toISOString(),
   };
 
-  await c.env.CONFIG_KV.put(`sesrsc:${sessionId}:${resourceId}`, JSON.stringify(resource));
+  await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
   return c.json(resource, 201);
 });
 
 app.get("/:id/resources", async (c) => {
   const sessionId = c.req.param("id");
-  const sessionData = await c.env.CONFIG_KV.get(`session:${sessionId}`);
+  const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
   if (!sessionData) return c.json({ error: "Session not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "sesrsc", sessionId) });
   const resources = (
     await Promise.all(
       list.keys.map(async (k) => {
@@ -618,13 +624,14 @@ app.delete("/:id/resources/:resource_id", async (c) => {
   const sessionId = c.req.param("id");
   const resourceId = c.req.param("resource_id");
 
-  const sessionData = await c.env.CONFIG_KV.get(`session:${sessionId}`);
+  const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
   if (!sessionData) return c.json({ error: "Session not found" }, 404);
 
-  const resourceData = await c.env.CONFIG_KV.get(`sesrsc:${sessionId}:${resourceId}`);
+  const t = c.get("tenant_id");
+  const resourceData = await c.env.CONFIG_KV.get(kvKey(t, "sesrsc", sessionId, resourceId));
   if (!resourceData) return c.json({ error: "Resource not found" }, 404);
 
-  await c.env.CONFIG_KV.delete(`sesrsc:${sessionId}:${resourceId}`);
+  await c.env.CONFIG_KV.delete(kvKey(t, "sesrsc", sessionId, resourceId));
   return c.json({ type: "resource_deleted", id: resourceId });
 });
 

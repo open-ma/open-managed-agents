@@ -3,8 +3,8 @@
 export interface ModelCard {
   id: string;
   name: string;
-  provider: "anthropic" | "openai" | "custom";
-  model_id: string;        // e.g. "claude-sonnet-4-6", "gpt-4o"
+  provider: string;             // determines API compat: "anthropic" | "openai" | "deepseek" | "groq" | "together" | "mistral" | ...
+  model_id: string;        // e.g. "claude-sonnet-4-6", "gpt-4o", "deepseek-chat"
   api_key_preview?: string; // last 4 chars only, for display
   base_url?: string;        // custom base URL
   is_default?: boolean;
