@@ -38,6 +38,7 @@ export function resolveModel(
   apiKey: string,
   baseURL?: string,
   compat?: ApiCompat,
+  customHeaders?: Record<string, string>,
 ): LanguageModel {
   const modelString = typeof model === "string" ? model : model.id;
 
@@ -52,6 +53,7 @@ export function resolveModel(
     const openai = createOpenAI({
       apiKey,
       baseURL: baseURL || undefined,
+      headers: customHeaders,
     });
     return openai(modelId);
   }
@@ -59,10 +61,14 @@ export function resolveModel(
   // ant / ant-compatible
   const isKnownClaude = modelId.startsWith(KNOWN_CLAUDE_PREFIX);
 
+  const headers: Record<string, string> = {};
+  if (baseURL) headers["X-Sub-Module"] = "managed-agents";
+  if (customHeaders) Object.assign(headers, customHeaders);
+
   const anthropic = createAnthropic({
     apiKey,
     baseURL: baseURL || undefined,
-    headers: baseURL ? { "X-Sub-Module": "managed-agents" } : undefined,
+    headers: Object.keys(headers).length > 0 ? headers : undefined,
     ...(!isKnownClaude && { fetch: stripMaxTokensFetch }),
   });
 

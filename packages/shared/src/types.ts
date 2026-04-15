@@ -3,10 +3,11 @@
 export interface ModelCard {
   id: string;
   name: string;
-  provider: string;             // determines API compat: "anthropic" | "openai" | "deepseek" | "groq" | "together" | "mistral" | ...
+  provider: string;             // API compat: "ant" | "oai" | "ant-compatible" | "oai-compatible"
   model_id: string;        // e.g. "claude-sonnet-4-6", "gpt-4o", "deepseek-chat"
   api_key_preview?: string; // last 4 chars only, for display
-  base_url?: string;        // custom base URL
+  base_url?: string;        // custom base URL (compatible providers)
+  custom_headers?: Record<string, string>; // custom HTTP headers (compatible providers)
   is_default?: boolean;
   created_at: string;
   updated_at?: string;

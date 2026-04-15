@@ -21,6 +21,7 @@ app.post("/", async (c) => {
     model_id: string;
     api_key: string;
     base_url?: string;
+    custom_headers?: Record<string, string>;
     is_default?: boolean;
   }>();
 
@@ -43,6 +44,7 @@ app.post("/", async (c) => {
     model_id: body.model_id,
     api_key_preview: body.api_key.slice(-4),
     base_url: body.base_url,
+    custom_headers: body.custom_headers,
     is_default: body.is_default || false,
     created_at: now,
     updated_at: now,
@@ -96,6 +98,7 @@ app.post("/:id", async (c) => {
     model_id?: string;
     api_key?: string;
     base_url?: string | null;
+    custom_headers?: Record<string, string> | null;
     is_default?: boolean;
   }>();
 
@@ -107,6 +110,7 @@ app.post("/:id", async (c) => {
   if (body.provider !== undefined) card.provider = body.provider;
   if (body.model_id !== undefined) card.model_id = body.model_id;
   if (body.base_url !== undefined) card.base_url = body.base_url || undefined;
+  if (body.custom_headers !== undefined) card.custom_headers = body.custom_headers || undefined;
   if (body.is_default !== undefined) card.is_default = body.is_default;
   if (body.api_key) {
     card.api_key_preview = body.api_key.slice(-4);
