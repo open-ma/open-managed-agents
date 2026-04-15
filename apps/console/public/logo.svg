@@ -1,21 +1,16 @@
-<svg width="190" height="122" viewBox="193 50 190 122" role="img" xmlns="http://www.w3.org/2000/svg"><defs><mask id="imagine-text-gaps-cgrp2b" maskUnits="userSpaceOnUse"><rect x="0" y="0" width="680" height="700" fill="white"/><rect x="-4" y="-23.444503784179688" width="68.19395446777344" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="140.41490173339844" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="122.35965728759766" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="164.49099731445312" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="152.4492645263672" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="122.35965728759766" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="134.3940200805664" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/><rect x="96" y="16.416149139404297" width="62.18783187866211" height="108.83399200439453" fill="black" rx="2"/><rect x="-4" y="-23.444503784179688" width="158.47012329101562" height="15.80562973022461" fill="black" rx="2"/><rect x="-4" y="16.416149139404297" width="62.18783950805664" height="108.83399200439453" fill="black" rx="2"/></mask></defs>
-
-
-
-
-<g transform="translate(200, 40)" style="fill:rgb(0, 0, 0);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-
-<text font-size="90" font-weight="800" fill="#FF6B50" x="0" y="102" style="fill:rgb(255, 107, 80);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;JetBrains Mono&quot;, monospace;font-size:90px;font-weight:800;text-anchor:start;dominant-baseline:auto">[</text>
-<g transform="translate(52, 10)" fill="none" stroke="#FF6B50" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round" style="fill:none;stroke:rgb(255, 107, 80);color:rgb(0, 0, 0);stroke-width:4.5px;stroke-linecap:round;stroke-linejoin:round;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto">
-<!-- Single ear: tilted forward, leaf shape -->
-<path d="M30,50 Q28,30 22,8 Q35,20 40,45" mask="url(#imagine-text-gaps-cgrp2b)" style="fill:none;stroke:rgb(255, 107, 80);color:rgb(0, 0, 0);stroke-width:4.5px;stroke-linecap:round;stroke-linejoin:round;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<!-- Forehead hint -->
-<path d="M30,50 Q28,58 30,65" stroke-width="3" mask="url(#imagine-text-gaps-cgrp2b)" style="fill:none;stroke:rgb(255, 107, 80);color:rgb(0, 0, 0);stroke-width:3px;stroke-linecap:round;stroke-linejoin:round;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<!-- Eye -->
-<circle cx="34" cy="52" r="3.5" fill="#FF6B50" stroke="none" style="fill:rgb(255, 107, 80);stroke:none;color:rgb(0, 0, 0);stroke-width:4.5px;stroke-linecap:round;stroke-linejoin:round;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-<!-- Muzzle -->
-<polyline points="18,78 34,95 50,78" mask="url(#imagine-text-gaps-cgrp2b)" style="fill:none;stroke:rgb(255, 107, 80);color:rgb(0, 0, 0);stroke-width:4.5px;stroke-linecap:round;stroke-linejoin:round;opacity:1;font-family:&quot;Anthropic Sans&quot;, -apple-system, &quot;system-ui&quot;, &quot;Segoe UI&quot;, sans-serif;font-size:16px;font-weight:400;text-anchor:start;dominant-baseline:auto"/>
-</g>
-<text font-size="90" font-weight="800" fill="#FF6B50" x="100" y="102" style="fill:rgb(255, 107, 80);stroke:none;color:rgb(0, 0, 0);stroke-width:1px;stroke-linecap:butt;stroke-linejoin:miter;opacity:1;font-family:&quot;JetBrains Mono&quot;, monospace;font-size:90px;font-weight:800;text-anchor:start;dominant-baseline:auto">]</text>
+<svg width="162" height="113" viewBox="196 55 162 113" role="img" xmlns="http://www.w3.org/2000/svg">
+<defs><mask id="m" maskUnits="userSpaceOnUse">
+  <rect x="-200" y="-200" width="900" height="900" fill="white"/>
+  <rect x="-4" y="16.4" width="62.2" height="108.8" fill="black" rx="2"/>
+  <rect x="96" y="16.4" width="62.2" height="108.8" fill="black" rx="2"/>
+</mask></defs>
+<g transform="translate(200, 40)" fill="none" stroke="#FF6B50" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+  <text font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="90" font-weight="800" fill="#FF6B50" stroke="none" x="0" y="102">[</text>
+  <g transform="translate(52, 10)">
+    <path d="M30,50 Q28,30 22,8 Q35,20 40,45" mask="url(#m)"/>
+    <path d="M30,50 Q28,58 30,65" stroke-width="3" mask="url(#m)"/>
+    <circle cx="34" cy="52" r="3.5" fill="#FF6B50" stroke="none"/>
+  </g>
+  <text font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="90" font-weight="800" fill="#FF6B50" stroke="none" x="100" y="102">]</text>
 </g>
 </svg>
