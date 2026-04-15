@@ -153,10 +153,6 @@ importers:
         version: 4.12.12
 
   packages/cli:
-    dependencies:
-      '@open-managed-agents/shared':
-        specifier: workspace:*
-        version: link:../shared
     devDependencies:
       esbuild:
         specifier: ^0.25.0
