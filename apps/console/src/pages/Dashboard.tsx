@@ -28,6 +28,8 @@ export function Dashboard() {
   const [stats, setStats] = useState<Stats | null>(null);
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [loading, setLoading] = useState(true);
+  const [agentPrompt, setAgentPrompt] = useState("");
+  const [creatingWithAI, setCreatingWithAI] = useState(false);
 
   useEffect(() => {
     (async () => {
@@ -56,6 +58,56 @@ export function Dashboard() {
     })();
   }, []);
 
+  const createWithAI = async () => {
+    if (!agentPrompt.trim()) return;
+    setCreatingWithAI(true);
+    try {
+      // Create a helper agent that has the create-agent skill
+      const agent = await api<{ id: string }>("/v1/agents", {
+        method: "POST",
+        body: JSON.stringify({
+          name: "Agent Creator",
+          model: "claude-sonnet-4-6",
+          system: "You are an agent creation assistant for the openma platform. Help the user create and configure a managed agent based on their description. Ask clarifying questions if needed, then create the agent via the API.",
+          tools: [{ type: "agent_toolset_20260401" }],
+          skills: [{ type: "custom", skill_id: "create-agent", version: "latest" }],
+        }),
+      });
+      // Find or use default environment
+      const envs = await api<{ data: Array<{ id: string }> }>("/v1/environments");
+      const envId = envs.data[0]?.id;
+      if (!envId) {
+        // Create default env
+        const env = await api<{ id: string }>("/v1/environments", {
+          method: "POST",
+          body: JSON.stringify({ name: "default", config: { type: "cloud" } }),
+        });
+        const session = await api<{ id: string }>("/v1/sessions", {
+          method: "POST",
+          body: JSON.stringify({ agent: agent.id, environment_id: env.id, title: "Create Agent: " + agentPrompt.slice(0, 50) }),
+        });
+        // Send initial message
+        await api(`/v1/sessions/${session.id}/events`, {
+          method: "POST",
+          body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text: agentPrompt }] }] }),
+        });
+        nav(`/sessions/${session.id}`);
+      } else {
+        const session = await api<{ id: string }>("/v1/sessions", {
+          method: "POST",
+          body: JSON.stringify({ agent: agent.id, environment_id: envId, title: "Create Agent: " + agentPrompt.slice(0, 50) }),
+        });
+        await api(`/v1/sessions/${session.id}/events`, {
+          method: "POST",
+          body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text: agentPrompt }] }] }),
+        });
+        nav(`/sessions/${session.id}`);
+      }
+    } catch {
+      setCreatingWithAI(false);
+    }
+  };
+
   const cards = [
     { label: "Agents", value: stats?.agents, to: "/agents", icon: "M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" },
     { label: "Sessions", value: stats?.sessions, to: "/sessions", icon: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" },
@@ -83,6 +135,29 @@ export function Dashboard() {
           {user?.name ? `Welcome, ${user.name}` : "Dashboard"}
         </h1>
         <p className="text-fg-muted text-sm mt-1">Your workspace at a glance.</p>
+      </div>
+
+      {/* Create with AI */}
+      <div className="mb-8 border border-border rounded-lg p-5 bg-bg-surface/30">
+        <h2 className="text-sm font-medium text-fg mb-2">Create with AI</h2>
+        <p className="text-xs text-fg-muted mb-3">Describe what you want your agent to do. An AI assistant will help you configure it.</p>
+        <div className="flex gap-2">
+          <input
+            value={agentPrompt}
+            onChange={(e) => setAgentPrompt(e.target.value)}
+            onKeyDown={(e) => { if (e.key === "Enter" && agentPrompt.trim()) createWithAI(); }}
+            className="flex-1 border border-border rounded-md px-3 py-2.5 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle"
+            placeholder="e.g. A research agent that finds papers and writes summaries..."
+            disabled={creatingWithAI}
+          />
+          <button
+            onClick={createWithAI}
+            disabled={!agentPrompt.trim() || creatingWithAI}
+            className="px-5 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors shrink-0"
+          >
+            {creatingWithAI ? "Starting..." : "Create"}
+          </button>
+        </div>
       </div>
 
       {/* Stats grid */}
