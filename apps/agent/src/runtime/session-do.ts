@@ -49,6 +49,7 @@ interface SessionState {
   agent_id: string;
   environment_id: string;
   session_id: string;
+  tenant_id: string;
   title: string;
   status: "idle" | "running" | "terminated";
   input_tokens: number;
@@ -63,6 +64,7 @@ const INITIAL_SESSION_STATE: SessionState = {
   agent_id: "",
   environment_id: "",
   session_id: "",
+  tenant_id: "default",
   title: "",
   status: "idle",
   input_tokens: 0,
@@ -84,6 +86,12 @@ const INITIAL_SESSION_STATE: SessionState = {
  */
 export class SessionDO extends Agent<Env, SessionState> {
   initialState = INITIAL_SESSION_STATE;
+
+  /** Build a tenant-scoped KV key */
+  private tk(...parts: string[]): string {
+    return `t:${this.state.tenant_id}:${parts.join(":")}`;
+  }
+
   // Disable Agent's observability to avoid SpanParent I/O isolation
   // errors in vitest-pool-workers (multiple DOs share one isolate).
   observability = null as unknown as Agent<Env, SessionState>["observability"];
@@ -225,7 +233,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     // PUT /init — initialize session
     if (request.method === "PUT" && url.pathname === "/init") {
       const params = (await request.json()) as SessionInitParams;
-      this.setState({ ...this.state, agent_id: params.agent_id, environment_id: params.environment_id, title: params.title, session_id: params.session_id || this.state.session_id, vault_ids: (params as any).vault_ids || [], status: "idle" });
+      this.setState({ ...this.state, agent_id: params.agent_id, environment_id: params.environment_id, title: params.title, session_id: params.session_id || this.state.session_id, tenant_id: (params as any).tenant_id || "default", vault_ids: (params as any).vault_ids || [], status: "idle" });
 
       // Pre-warm sandbox in background (container start + package install)
       // Errors are swallowed — warmup is best-effort
@@ -532,7 +540,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Install environment packages if configured
       const envId = this.state.environment_id;
       if (envId) {
-        const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
+        const envJson = await this.env.CONFIG_KV.get(this.tk("env", envId));
         if (envJson) {
           const envConfig = JSON.parse(envJson) as EnvironmentConfig;
           const pkgs = envConfig.config?.packages;
@@ -554,7 +562,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Mount all session resources (files, git repos, env secrets)
       const sessionId = this.state.session_id;
       if (sessionId) {
-        const resourceList = await this.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
+        const resourceList = await this.env.CONFIG_KV.list({ prefix: this.tk("sesrsc", sessionId) + ":" });
         const resources: Array<Record<string, unknown>> = [];
         const secretStore = new Map<string, string>();
 
@@ -566,7 +574,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
           // Load write-only secrets from separate KV keys
           if (res.id) {
-            const secretData = await this.env.CONFIG_KV.get(`secret:${sessionId}:${res.id}`);
+            const secretData = await this.env.CONFIG_KV.get(this.tk("secret", sessionId, res.id));
             if (secretData) secretStore.set(res.id, secretData);
           }
         }
@@ -580,7 +588,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       const vaultIds = this.state.vault_ids;
       if (vaultIds.length && sandbox.registerCommandSecrets) {
         for (const vaultId of vaultIds) {
-          const credList = await this.env.CONFIG_KV.list({ prefix: `cred:${vaultId}:` });
+          const credList = await this.env.CONFIG_KV.list({ prefix: this.tk("cred", vaultId) + ":" });
           for (const k of credList.keys) {
             const credData = await this.env.CONFIG_KV.get(k.name);
             if (!credData) continue;
@@ -639,7 +647,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (confirmation.result === "allow" && pending) {
       // Execute the tool
       const agentId = this.state.agent_id;
-      const agentJson = agentId ? await this.env.CONFIG_KV.get(`agent:${agentId}`) : null;
+      const agentJson = agentId ? await this.env.CONFIG_KV.get(this.tk("agent", agentId)) : null;
 
       if (agentJson) {
         const agent = JSON.parse(agentJson) as AgentConfig;
@@ -648,7 +656,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         const envId = this.state.environment_id;
         let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
         if (envId) {
-          const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
+          const envJson = await this.env.CONFIG_KV.get(this.tk("env", envId));
           if (envJson) {
             const envCfg = JSON.parse(envJson) as EnvironmentConfig;
             environmentConfig = envCfg.config;
@@ -724,7 +732,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (!credentialId) return null;
     const vaultIds = this.state.vault_ids;
     for (const vaultId of vaultIds) {
-      const credData = await this.env.CONFIG_KV.get(`cred:${vaultId}:${credentialId}`);
+      const credData = await this.env.CONFIG_KV.get(this.tk("cred", vaultId, credentialId));
       if (credData) {
         const cred = JSON.parse(credData);
         return cred.auth?.token || cred.auth?.access_token || null;
@@ -875,7 +883,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const threadId = `thread_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
     // Fetch sub-agent config from KV
-    const agentJson = await this.env.CONFIG_KV.get(`agent:${agentId}`);
+    const agentJson = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
     if (!agentJson) {
       return `Sub-agent error: agent "${agentId}" not found`;
     }
@@ -989,7 +997,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const agentId = this.state.agent_id;
     if (!agentId) return;
 
-    const agentJson = await this.env.CONFIG_KV.get(`agent:${agentId}`);
+    const agentJson = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
     if (!agentJson) {
       const history = new SqliteHistory(this.ctx.storage.sql);
       const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
@@ -1023,7 +1031,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const envId = this.state.environment_id;
     let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
     if (envId) {
-      const envJson = await this.env.CONFIG_KV.get(`env:${envId}`);
+      const envJson = await this.env.CONFIG_KV.get(this.tk("env", envId));
       if (envJson) {
         const envCfg = JSON.parse(envJson) as EnvironmentConfig;
         environmentConfig = envCfg.config;
@@ -1089,8 +1097,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (agent.model_card_id && this.env.CONFIG_KV) {
       try {
         const [cardData, keyData] = await Promise.all([
-          this.env.CONFIG_KV.get(`modelcard:${agent.model_card_id}`),
-          this.env.CONFIG_KV.get(`modelcard:${agent.model_card_id}:key`),
+          this.env.CONFIG_KV.get(this.tk("modelcard", agent.model_card_id)),
+          this.env.CONFIG_KV.get(this.tk("modelcard", `${agent.model_card_id}:key`)),
         ]);
         if (cardData && keyData) {
           const card = JSON.parse(cardData);
@@ -1105,7 +1113,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     } else if (this.env.CONFIG_KV) {
       // No explicit model_card_id — try to find a card by model_id match
       try {
-        const list = await this.env.CONFIG_KV.list({ prefix: "modelcard:" });
+        const list = await this.env.CONFIG_KV.list({ prefix: this.tk("modelcard") + ":" });
         for (const k of list.keys) {
           if (k.name.includes(":key")) continue;
           const data = await this.env.CONFIG_KV.get(k.name);
