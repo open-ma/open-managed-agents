@@ -29,13 +29,17 @@ describe("Background task schedule polling", () => {
     await post(`/v1/sessions/${session.id}/events`, {
       events: [{ type: "user.message", content: [{ type: "text", text: "test" }] }],
     });
-    await new Promise(r => setTimeout(r, 500));
 
-    // Session should process and return to idle
+    // Session processes asynchronously — poll until idle
     const doId = env.SESSION_DO.idFromName(session.id);
     const stub = env.SESSION_DO.get(doId);
-    const statusRes = await stub.fetch(new Request("http://internal/status"));
-    const status = await statusRes.json();
+    let status;
+    for (let i = 0; i < 20; i++) {
+      await new Promise(r => setTimeout(r, 200));
+      const statusRes = await stub.fetch(new Request("http://internal/status"));
+      status = await statusRes.json();
+      if (status.status === "idle") break;
+    }
     expect(status.status).toBe("idle");
   });
 

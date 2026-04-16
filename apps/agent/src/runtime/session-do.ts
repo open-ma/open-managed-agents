@@ -276,14 +276,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       if (body.type === "user.message") {
         history.append(body);
         this.broadcastEvent(body);
-        // Drain the event queue directly — this blocks the 202 response
-        // until the harness completes, but guarantees execution in all
-        // environments (DO keeps running as long as there's pending I/O).
-        // Schedule as backup for crash recovery.
+        // Schedule alarm as crash recovery backup, then kick off harness
+        // in the background. The DO stays alive as long as the drain
+        // promise has pending I/O — no need to await before responding.
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        await this.drainEventQueue();
+        this.drainEventQueue().catch((err) => {
+          console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
+        });
         return new Response(null, { status: 202 });
       }
 
@@ -307,7 +308,9 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        await this.drainEventQueue();
+        this.drainEventQueue().catch((err) => {
+          console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
+        });
         return new Response(null, { status: 202 });
       }
 
@@ -318,7 +321,9 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        await this.drainEventQueue();
+        this.drainEventQueue().catch((err) => {
+          console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
+        });
         return new Response(null, { status: 202 });
       }
 
