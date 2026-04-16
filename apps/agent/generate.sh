@@ -14,10 +14,9 @@ OUT_DIR="${SCRIPT_DIR}/build-${ENV_ID}"
 
 mkdir -p "$OUT_DIR"
 
-# --- Generate Dockerfile from published sandbox image ---
-cat > "$OUT_DIR/Dockerfile" <<'DOCKERFILE'
-FROM docker.io/cloudflare/sandbox:0.7.20
-DOCKERFILE
+# --- Generate Dockerfile from our custom base image ---
+# Start with the project's Dockerfile (has Python, Node, Go, Rust, tools)
+cp "$SCRIPT_DIR/Dockerfile" "$OUT_DIR/Dockerfile"
 
 # Parse packages and append install commands
 APT_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.apt // [] | join(" ")' 2>/dev/null || echo "")
@@ -29,7 +28,6 @@ GO_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.go // [] | join(" ")' 2>/dev/null || e
 
 # Collect apt prerequisites for package managers
 APT_DEPS=""
-[ -n "$PIP_PKGS" ] && APT_DEPS="$APT_DEPS python3-pip"
 [ -n "$CARGO_PKGS" ] && APT_DEPS="$APT_DEPS cargo"
 [ -n "$GEM_PKGS" ] && APT_DEPS="$APT_DEPS ruby-full"
 [ -n "$GO_PKGS" ] && APT_DEPS="$APT_DEPS golang"
@@ -38,7 +36,7 @@ ALL_APT="$(echo "$APT_DEPS $APT_PKGS" | xargs)"
 
 {
   [ -n "$ALL_APT" ] && echo "RUN apt-get update && apt-get install -y $ALL_APT && rm -rf /var/lib/apt/lists/*"
-  [ -n "$PIP_PKGS" ] && echo "RUN pip install uv && uv pip install --system $PIP_PKGS"
+  [ -n "$PIP_PKGS" ] && echo "RUN uv pip install $PIP_PKGS"
   [ -n "$NPM_PKGS" ] && echo "RUN npm install -g $NPM_PKGS"
   [ -n "$CARGO_PKGS" ] && echo "RUN cargo install $CARGO_PKGS"
   [ -n "$GEM_PKGS" ] && echo "RUN gem install $GEM_PKGS"

@@ -162,13 +162,12 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       error: msg,
     };
   } finally {
-    // Only cleanup on success — keep failed sessions for debugging
-    if (turnResults.every((r) => r.status === "pass")) {
+    // Only cleanup on success — keep everything for debugging failures
+    if (turnResults.length > 0 && turnResults.every((r) => r.status === "pass")) {
       for (const sid of sessionIds) await deleteSession(sid);
       for (const aid of agentIds) await deleteAgent(aid);
     } else {
-      console.log(`    [cleanup] Keeping session(s) for debugging: ${sessionIds.join(", ")}`);
-      for (const aid of agentIds) await deleteAgent(aid);
+      console.log(`    [cleanup] Keeping for debugging: agents=${agentIds.join(",")} sessions=${sessionIds.join(",")}`);
     }
   }
 }
