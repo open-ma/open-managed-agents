@@ -1,0 +1,69 @@
+# OMA Default Sandbox Image
+# Parity target: Anthropic Managed Agents Cloud Container Reference
+# Base: Ubuntu 24.04 LTS
+
+FROM ubuntu:24.04
+
+ENV DEBIAN_FRONTEND=noninteractive
+ENV LANG=C.UTF-8
+ENV LC_ALL=C.UTF-8
+
+# System packages + tools + build essentials
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Core
+    ca-certificates curl wget gnupg2 software-properties-common \
+    # Build essentials
+    build-essential gcc g++ make cmake \
+    # VCS & archive
+    git tar zip unzip xz-utils \
+    # Network
+    openssh-client \
+    # Text processing
+    sed gawk grep diffutils patch \
+    # Editors & terminal
+    vim nano tmux screen \
+    # Utilities
+    jq tree htop procps less file \
+    # Database clients
+    sqlite3 libsqlite3-dev postgresql-client redis-tools \
+    && rm -rf /var/lib/apt/lists/*
+
+# uv — manages Python + packages, no pip needed
+RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+ENV PATH="/root/.local/bin:${PATH}"
+
+# Python 3.12 via uv — create a default venv so pip/uv install just works
+RUN uv python install 3.12 && \
+    uv venv /opt/venv --python 3.12 --seed
+ENV VIRTUAL_ENV=/opt/venv
+ENV PATH="/opt/venv/bin:${PATH}"
+
+# Common Python packages
+RUN uv pip install --no-cache \
+    requests httpx pyyaml toml \
+    pandas numpy \
+    pytest black ruff mypy
+
+# Node.js 20
+RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
+    apt-get install -y --no-install-recommends nodejs && \
+    npm install -g yarn pnpm && \
+    rm -rf /var/lib/apt/lists/*
+
+# Go 1.22
+RUN curl -fsSL https://go.dev/dl/go1.22.5.linux-$(dpkg --print-architecture).tar.gz | tar -xz -C /usr/local
+ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
+
+# Rust (latest stable)
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+ENV PATH="/root/.cargo/bin:${PATH}"
+
+# ripgrep
+RUN cargo install ripgrep && cp /root/.cargo/bin/rg /usr/local/bin/
+
+# Workspace
+RUN mkdir -p /home/user/workspace
+WORKDIR /home/user/workspace
+
+ENV SHELL=/bin/bash
+CMD ["/bin/bash"]

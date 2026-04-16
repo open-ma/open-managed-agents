@@ -8,7 +8,7 @@
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "docker.io/cloudflare/sandbox:0.7.20",
+      "image": "docker.io/cloudflare/sandbox:latest-python",
       "instance_type": "lite",
       "max_instances": 10
     }
