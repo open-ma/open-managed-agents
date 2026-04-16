@@ -33,11 +33,18 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     sqlite3 libsqlite3-dev postgresql-client redis-tools \
     && rm -rf /var/lib/apt/lists/*
 
-# uv — manages Python + packages, no pip needed
+# ripgrep — pre-built binary (not cargo install, which takes 10+ min to compile)
+RUN ARCH=$(dpkg --print-architecture) && \
+    RG_VERSION="14.1.1" && \
+    if [ "$ARCH" = "amd64" ]; then RG_ARCH="x86_64"; else RG_ARCH="aarch64"; fi && \
+    curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl.tar.gz" \
+    | tar xz --strip-components=1 -C /usr/local/bin "ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl/rg"
+
+# uv — manages Python + packages
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 
-# Python 3.12 via uv — create a default venv so pip/uv install just works
+# Python 3.12 via uv
 RUN uv python install 3.12 && \
     uv venv /opt/venv --python 3.12 --seed
 ENV VIRTUAL_ENV=/opt/venv
@@ -59,12 +66,9 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 RUN curl -fsSL https://go.dev/dl/go1.22.5.linux-$(dpkg --print-architecture).tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
-# Rust (latest stable)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+# Rust (latest stable) — installed last, largest layer
+RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
-
-# ripgrep
-RUN cargo install ripgrep && cp /root/.cargo/bin/rg /usr/local/bin/
 
 # Workspace
 RUN mkdir -p /home/user/workspace
