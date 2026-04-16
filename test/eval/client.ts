@@ -212,11 +212,12 @@ export async function getEvents(sessionId: string, afterSeq?: number): Promise<S
 
 export async function waitForIdle(
   sessionId: string,
-  timeoutMs: number = 300_000,
+  timeoutMs: number = 600_000,
   pollIntervalMs: number = 3_000,
+  afterSeq: number = 0,
 ): Promise<SSEEvent[]> {
   const start = Date.now();
-  let lastSeq = 0;
+  let lastSeq = afterSeq;
   const allEvents: SSEEvent[] = [];
 
   while (Date.now() - start < timeoutMs) {
@@ -257,24 +258,27 @@ export async function sendAndWait(
   message: string,
   timeoutMs?: number,
 ): Promise<SSEEvent[]> {
-  // Fire the POST but don't wait for it to complete — the server processes
-  // the turn synchronously, which can take minutes for cold starts + complex tasks.
-  // Instead, poll for events in parallel.
+  // Snapshot current event count so we only look at NEW events after our message
+  let beforeEvents: SSEEvent[] = [];
+  try {
+    beforeEvents = await getEvents(sessionId);
+  } catch {}
+  const lastSeqBefore = beforeEvents.length > 0
+    ? Math.max(...beforeEvents.map((e) => (e as any)._seq || 0))
+    : 0;
+
+  // Fire the POST but don't wait for it to complete
   const postPromise = postMessage(sessionId, message).catch((err) => {
-    // POST may time out or fail after the server already started processing.
-    // This is fine — we'll detect completion via event polling.
     console.log(`    [post] POST returned error (may still be processing): ${err.message?.slice(0, 100)}`);
   });
 
-  // Give the server a moment to accept the event before polling
+  // Give the server a moment to accept the event
   await sleep(2000);
 
-  // Poll for idle/error/terminated
-  const events = await waitForIdle(sessionId, timeoutMs || 300_000);
+  // Poll for idle/error/terminated — only looking at events AFTER our message
+  const events = await waitForIdle(sessionId, timeoutMs || 600_000, 3_000, lastSeqBefore);
 
-  // Wait for POST to finish (it usually already has by now)
   await postPromise;
-
   return events;
 }
 
