@@ -1,6 +1,11 @@
-# OMA Default Sandbox Image
+# OMA Default Sandbox Base Image
+# Build once, push to GHCR, reuse everywhere.
+#
+# Build & push:
+#   docker build -t ghcr.io/open-ma/sandbox-base:latest apps/agent/
+#   docker push ghcr.io/open-ma/sandbox-base:latest
+#
 # Parity target: Anthropic Managed Agents Cloud Container Reference
-# Base: Ubuntu 24.04 LTS
 
 FROM ubuntu:24.04
 

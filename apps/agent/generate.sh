@@ -14,9 +14,14 @@ OUT_DIR="${SCRIPT_DIR}/build-${ENV_ID}"
 
 mkdir -p "$OUT_DIR"
 
-# --- Generate Dockerfile from our custom base image ---
-# Start with the project's Dockerfile (has Python, Node, Go, Rust, tools)
-cp "$SCRIPT_DIR/Dockerfile" "$OUT_DIR/Dockerfile"
+# --- Generate Dockerfile from pre-built base image ---
+# Base image includes: Python 3.12 (uv), Node 20, Go 1.22, Rust, GCC 13,
+# ripgrep, jq, git, tmux, vim, pandas, numpy, pytest, ruff, etc.
+# Only per-environment packages are added on top.
+BASE_IMAGE="${OMA_SANDBOX_BASE_IMAGE:-ghcr.io/open-ma/sandbox-base:latest}"
+cat > "$OUT_DIR/Dockerfile" <<DOCKERFILE
+FROM ${BASE_IMAGE}
+DOCKERFILE
 
 # Parse packages and append install commands
 APT_PKGS=$(echo "$PACKAGES_JSON" | jq -r '.apt // [] | join(" ")' 2>/dev/null || echo "")
