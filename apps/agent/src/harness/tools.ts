@@ -154,13 +154,18 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
 
-/** File extensions that Read returns as image content blocks. */
+/** File extensions that Read returns as IMAGE content blocks (Claude/GPT-4o/Grok native). */
 const IMAGE_EXTENSIONS: Record<string, string> = {
   png: "image/png",
   jpg: "image/jpeg",
   jpeg: "image/jpeg",
   gif: "image/gif",
   webp: "image/webp",
+};
+
+/** File extensions that Read returns as DOCUMENT content blocks (PDF only — Claude native). */
+const DOCUMENT_EXTENSIONS: Record<string, string> = {
+  pdf: "application/pdf",
 };
 
 /**
@@ -377,8 +382,8 @@ export async function buildTools(
     tools.read = tool({
       description:
         "Read a file from the sandbox filesystem. Supports text files (with optional " +
-        "offset/limit for chunked reads), and image files (PNG, JPG, JPEG, GIF, WEBP) " +
-        "which are returned as visual content for multimodal models. " +
+        "offset/limit for chunked reads), image files (PNG, JPG, JPEG, GIF, WEBP), and " +
+        "PDF documents — all returned as visual/document content blocks for multimodal models. " +
         "By default reads the entire file. Use offset (1-based line number) and limit " +
         "(number of lines) to read large text files in chunks.",
       inputSchema: z.object({
@@ -388,27 +393,33 @@ export async function buildTools(
       }),
       execute: safe(async ({ file_path, offset, limit }) => {
         const ext = file_path.split(".").pop()?.toLowerCase() || "";
-        const mediaType = IMAGE_EXTENSIONS[ext];
+        const imageMedia = IMAGE_EXTENSIONS[ext];
+        const docMedia = DOCUMENT_EXTENSIONS[ext];
 
-        if (mediaType) {
-          // Image: base64-encode via shell and return as Anthropic-shape ImageBlock.
-          // toModelOutput below converts this to AI SDK content shape for the model.
-          // -w0 prevents line wrapping (GNU base64); fall back to tr -d '\n' if BSD.
+        if (imageMedia || docMedia) {
+          // Binary file (image or PDF): base64-encode via shell, return as
+          // Anthropic-shape ContentBlock (image or document). toModelOutput below
+          // converts to AI SDK content shape for the model.
           const raw = await sandbox.exec(
             `(base64 -w0 ${shellQuote(file_path)} 2>/dev/null || base64 ${shellQuote(file_path)} | tr -d '\\n')`,
           );
           const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
           if (!m) return raw;
           const code = parseInt(m[1], 10);
-          if (code !== 0) return `Error reading image (exit=${code}): ${m[2].slice(0, 200)}`;
+          if (code !== 0) return `Error reading file (exit=${code}): ${m[2].slice(0, 200)}`;
           const data = m[2].trimEnd();
-          if (!data) return "Error: image file is empty or unreadable";
-          // Return as a marker object that toModelOutput recognizes.
-          // default-loop also recognizes this shape and broadcasts a multimodal
-          // agent.tool_result event so the trajectory preserves the image.
+          if (!data) return "Error: file is empty or unreadable";
+
+          if (imageMedia) {
+            return {
+              type: "image" as const,
+              source: { type: "base64" as const, media_type: imageMedia, data },
+            };
+          }
+          // PDF/document
           return {
-            type: "image" as const,
-            source: { type: "base64" as const, media_type: mediaType, data },
+            type: "document" as const,
+            source: { type: "base64" as const, media_type: docMedia!, data },
           };
         }
 
@@ -427,21 +438,19 @@ export async function buildTools(
         );
       }),
       // AI SDK 6 hook: convert tool execute output to the shape the model receives.
-      // For images, emit a `content` array with `file-data` parts (base64 + mediaType);
-      // the @ai-sdk/anthropic provider translates this into a tool_result with an
-      // image content block, which Claude (and any vision-capable model) renders natively.
+      // For images/documents, emit a `content` array with `file-data` parts;
+      // the @ai-sdk/anthropic provider translates this into a tool_result with the
+      // appropriate image/document content block.
       toModelOutput: ({ output }) => {
-        if (
-          output &&
-          typeof output === "object" &&
-          "type" in output &&
-          (output as { type?: string }).type === "image"
-        ) {
-          const src = (output as unknown as { source: { data: string; media_type: string } }).source;
-          return {
-            type: "content",
-            value: [{ type: "file-data", data: src.data, mediaType: src.media_type }],
-          };
+        if (output && typeof output === "object" && "type" in output) {
+          const t = (output as { type?: string }).type;
+          if (t === "image" || t === "document") {
+            const src = (output as unknown as { source: { data: string; media_type: string } }).source;
+            return {
+              type: "content",
+              value: [{ type: "file-data", data: src.data, mediaType: src.media_type }],
+            };
+          }
         }
         return { type: "text", value: typeof output === "string" ? output : JSON.stringify(output) };
       },
