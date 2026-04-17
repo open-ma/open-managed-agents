@@ -5,20 +5,23 @@ import { kvKey, kvPrefix } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
-// ---------- Types (Phase 1 — pre-Scorer) ----------
+// ---------- Types (Phase 1 + P0a server-side trials) ----------
 
 export interface EvalTaskSpec {
   id: string;
   setup_files?: { path: string; content: string }[];
   messages: string[]; // sequence of user message texts to send
   timeout_ms?: number; // per-message wait timeout
+  // P0a — number of independent trials of this task to run.
+  // Default 1. When > 1, server spawns N sessions per task and stores N
+  // trajectory_ids; pass@k / pass^k computed by downstream scorer layer.
+  trials?: number;
 }
 
 export type EvalRunStatus = "pending" | "running" | "completed" | "failed";
 
-export interface EvalTaskResult {
-  id: string;
-  spec: EvalTaskSpec;
+export interface EvalTrialResult {
+  trial_index: number;
   status: EvalRunStatus;
   session_id?: string;
   trajectory_id?: string;
@@ -26,6 +29,17 @@ export interface EvalTaskResult {
   error?: string;
   started_at?: string;
   ended_at?: string;
+}
+
+export interface EvalTaskResult {
+  id: string;
+  spec: EvalTaskSpec;
+  status: EvalRunStatus;
+  trials: EvalTrialResult[]; // length = spec.trials || 1
+  // Aggregated convenience metadata (computed when all trials terminal):
+  trial_pass_count?: number; // # of trials that reached "completed"
+  trial_total?: number;      // = trials.length
+  error?: string;            // populated only if every trial failed (run-level error)
 }
 
 export interface EvalRunRecord {
@@ -87,7 +101,14 @@ app.post("/runs", async (c) => {
     task_count: body.tasks.length,
     completed_count: 0,
     failed_count: 0,
-    tasks: body.tasks.map((spec) => ({ id: spec.id, spec, status: "pending" })),
+    tasks: body.tasks.map((spec) => {
+      const trialCount = Math.max(1, spec.trials || 1);
+      const trials: EvalTrialResult[] = [];
+      for (let i = 0; i < trialCount; i++) {
+        trials.push({ trial_index: i, status: "pending" });
+      }
+      return { id: spec.id, spec, status: "pending", trials, trial_total: trialCount };
+    }),
   };
 
   await Promise.all([
