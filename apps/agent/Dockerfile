@@ -10,8 +10,9 @@ FROM docker.io/cloudflare/sandbox:0.8.11
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System tools (some may already be in sandbox base — apt handles dupes)
-RUN apt-get update && apt-get install -y --no-install-recommends \
+# System tools (retry apt if mirror is syncing)
+RUN apt-get update || (sleep 30 && apt-get update) && \
+    apt-get install -y --no-install-recommends \
     build-essential gcc g++ make cmake \
     git curl wget jq tree htop procps less file \
     vim nano tmux screen \
