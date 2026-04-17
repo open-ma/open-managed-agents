@@ -1,8 +1,9 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource } from "@open-managed-agents/shared";
-import { generateSessionId, generateFileId, generateResourceId } from "@open-managed-agents/shared";
+import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent } from "@open-managed-agents/shared";
+import { generateSessionId, generateFileId, generateResourceId, buildTrajectory } from "@open-managed-agents/shared";
+import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import { kvKey, kvPrefix } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
@@ -50,6 +51,8 @@ async function getSandboxBinding(
         const [, sessionId, rest] = match;
         const doId = env.SESSION_DO!.idFromName(sessionId);
         const stub = env.SESSION_DO!.get(doId);
+        // Workaround for cloudflare/workerd#2240
+        (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
         return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
           method: req.method,
           headers: req.headers,
@@ -147,9 +150,11 @@ app.post("/", async (c) => {
     created_at: new Date().toISOString(),
   };
 
-  // Store session with agent snapshot
+  // Store session with agent + environment snapshot (frozen at session start for replay/trajectory)
   const agentSnapshot = JSON.parse(agentData) as AgentConfig;
-  const sessionRecord = { ...session, agent_snapshot: agentSnapshot };
+  const envSnapshotData = await c.env.CONFIG_KV.get(kvKey(t, "env", body.environment_id));
+  const environmentSnapshot = envSnapshotData ? (JSON.parse(envSnapshotData) as EnvironmentConfig) : undefined;
+  const sessionRecord = { ...session, agent_snapshot: agentSnapshot, environment_snapshot: environmentSnapshot };
   await c.env.CONFIG_KV.put(kvKey(t, "session", sessionId), JSON.stringify(sessionRecord));
 
   // Process resources if provided
@@ -502,6 +507,63 @@ app.get("/:id/events", async (c) => {
     return handleSSEStream(c, c.req.param("id"));
   }
   return handleJSONEvents(c, c.req.param("id"));
+});
+
+// GET /v1/sessions/:id/trajectory — full Trajectory v1 envelope
+app.get("/:id/trajectory", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const sessionData = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
+  if (!sessionData) return c.json({ error: "Session not found" }, 404);
+
+  const session = JSON.parse(sessionData) as SessionRecord;
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
+  if (!binding) return c.json({ error }, status ?? 500);
+
+  // Paginate through all events from sandbox /events (max 1000 per page)
+  async function fetchAllEvents(): Promise<StoredEvent[]> {
+    const all: StoredEvent[] = [];
+    let afterSeq = 0;
+    while (true) {
+      const res = await forwardToSandbox(
+        binding!,
+        `/sessions/${id}/events?limit=1000&order=asc&after_seq=${afterSeq}`,
+        c.req.raw,
+        "GET",
+      );
+      if (!res.ok) break;
+      const body = (await res.json()) as { data?: StoredEvent[]; has_more?: boolean };
+      const batch = body.data || [];
+      all.push(...batch);
+      if (!body.has_more || batch.length === 0) break;
+      const last = batch[batch.length - 1];
+      afterSeq = last.seq;
+    }
+    return all;
+  }
+
+  async function fetchFullStatus(): Promise<FullStatus | null> {
+    const res = await forwardToSandbox(binding!, `/sessions/${id}/full-status`, c.req.raw, "GET");
+    if (!res.ok) return null;
+    return (await res.json()) as FullStatus;
+  }
+
+  async function fetchEnvironmentConfig(): Promise<EnvironmentConfig | null> {
+    const data = await c.env.CONFIG_KV.get(kvKey(t, "env", session.environment_id));
+    return data ? (JSON.parse(data) as EnvironmentConfig) : null;
+  }
+
+  try {
+    const trajectory = await buildTrajectory(session, {
+      fetchAllEvents,
+      fetchFullStatus,
+      fetchEnvironmentConfig,
+    });
+    return c.json(trajectory);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: msg }, 500);
+  }
 });
 
 // Anthropic-compatible SSE stream path

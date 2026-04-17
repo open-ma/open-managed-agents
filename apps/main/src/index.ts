@@ -14,6 +14,9 @@ import modelCardsRoutes from "./routes/model-cards";
 import modelsRoutes from "./routes/models";
 import clawhubRoutes from "./routes/clawhub";
 import apiKeysRoutes from "./routes/api-keys";
+import evalsRoutes from "./routes/evals";
+import { tickEvalRuns } from "./eval-runner";
+import { log, logError } from "@open-managed-agents/shared";
 
 // Main worker: CRUD + routing layer.
 // SessionDO and Sandbox are in per-environment sandbox workers.
@@ -56,5 +59,16 @@ app.route("/v1/model_cards", modelCardsRoutes);
 app.route("/v1/models", modelsRoutes);
 app.route("/v1/clawhub", clawhubRoutes);
 app.route("/v1/api_keys", apiKeysRoutes);
+app.route("/v1/evals", evalsRoutes);
 
-export default app;
+export default {
+  fetch: app.fetch,
+  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
+    ctx.waitUntil(
+      tickEvalRuns(env).then(
+        (result) => log({}, `[cron] tickEvalRuns advanced=${result.advanced} total=${result.total}`),
+        (err) => logError({}, `[cron] tickEvalRuns failed: ${err instanceof Error ? err.message : String(err)}`),
+      ),
+    );
+  },
+};

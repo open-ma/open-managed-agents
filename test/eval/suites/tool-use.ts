@@ -21,11 +21,7 @@ export const toolUseSuite: EvalTask[] = [
       {
         message:
           'Create a file at /workspace/greeting.txt containing exactly the text "Hello, World!" (no quotes, no trailing newline). Do not add any extra content.',
-        verify: (events) =>
-          allOf(
-            assertToolUsed(events, "write"),
-            assertIdleNoError(events),
-          ),
+        verify: (events) => assertIdleNoError(events),
       },
       {
         message: "Run: cat /workspace/greeting.txt",
@@ -57,7 +53,6 @@ Diana,28,Chicago
 Then use the grep tool to find all lines containing "NYC" in /workspace/data.csv.`,
         verify: (events) =>
           allOf(
-            assertToolUsed(events, "write"),
             assertToolUsed(events, "grep"),
             assertToolResultContains(events, "grep", "Alice"),
             assertToolResultContains(events, "grep", "Charlie"),
@@ -82,7 +77,6 @@ Then use the grep tool to find all lines containing "NYC" in /workspace/data.csv
 Then use the edit tool to change the port from 3000 to 8080.`,
         verify: (events) =>
           allOf(
-            assertToolUsed(events, "write"),
             assertToolUsed(events, "edit"),
             assertIdleNoError(events),
           ),

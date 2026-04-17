@@ -16,3 +16,4 @@ export const generateFileId = () => `file-${nanoid()}`;
 export const generateResourceId = () => `sesrsc-${nanoid()}`;
 export const generateEventId = () => `sevt-${nanoid()}`;
 export const generateModelCardId = () => `mdl-${nanoid()}`;
+export const generateEvalRunId = () => `evrun-${nanoid()}`;

@@ -18,7 +18,7 @@
     "test": "vitest run"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.14.2",
+    "@cloudflare/vitest-pool-workers": "^0.14.7",
     "@cloudflare/workers-types": "^4.20250410.0",
     "@playwright/test": "^1.59.1",
     "typescript": "^5.8.0",
@@ -28,7 +28,7 @@
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.69",
     "@ai-sdk/openai": "^3.0.53",
-    "agents": "^0.7.0",
+    "agents": "^0.11.2",
     "ai": "6.0.158",
     "better-auth": "^1.6.3",
     "drizzle-orm": "^0.45.2",

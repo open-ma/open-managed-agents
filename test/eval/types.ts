@@ -1,4 +1,5 @@
 // ---- Eval Framework Types ----
+import type { Scorer } from "@open-managed-agents/shared";
 
 export type Difficulty = "easy" | "medium" | "hard";
 export type Category = "tool-use" | "coding" | "multi-step" | "error-recovery" | "multi-agent";
@@ -66,6 +67,11 @@ export interface EvalTask {
 
   // Overall verification after all turns complete
   finalVerify?: (allEvents: SSEEvent[]) => VerifyResult;
+
+  // NEW (Phase 2): Scorer runs against a synthesized Trajectory after all turns.
+  // If provided, replaces per-turn verify + outcome judge. Other fields stay for
+  // backward compat with existing tests.
+  scorer?: Scorer;
 
   // Per-turn timeout (default 300_000 ms = 5 min)
   timeoutMs?: number;
