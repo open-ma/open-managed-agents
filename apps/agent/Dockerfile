@@ -6,7 +6,7 @@
 #   docker build -t openma/sandbox-base:latest apps/agent/
 #   docker push openma/sandbox-base:latest
 
-FROM docker.io/cloudflare/sandbox:latest
+FROM docker.io/cloudflare/sandbox:0.8.11
 
 ENV DEBIAN_FRONTEND=noninteractive
 

@@ -655,3 +655,32 @@ The platform will:
 4. Repeat until `satisfied` or `max_iterations_reached`
 
 Events emitted: `span.outcome_evaluation_start`, `session.outcome_evaluated`.
+
+---
+
+## Debugging & Observability
+
+When investigating platform or agent issues, follow this loop. **Do not skip steps.**
+
+```
+1. Define Observation
+   - What exactly needs to be observed to confirm or deny the hypothesis?
+   - Add logs (console.log) at specific points BEFORE deploying
+   - Decide what metrics to check: response time, event count, error messages, container status
+
+2. Measure
+   - Deploy with logs
+   - Collect actual data: wrangler tail, curl, observation scripts
+   - Record exact timestamps, counts, error messages
+
+3. Diagnose
+   - Compare observation with expectation
+   - Match → hypothesis confirmed, proceed with fix
+   - Mismatch → new hypothesis, back to step 1
+```
+
+**Rules:**
+- One change per deploy. Verify before stacking changes.
+- Never assume the cause — observe first.
+- `wrangler tail <worker-name>` shows real-time Durable Object logs. Use it.
+- Read dependency source code (`node_modules/agents/`, `@cloudflare/sandbox`) instead of guessing behavior.
