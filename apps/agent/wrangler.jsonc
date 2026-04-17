@@ -8,7 +8,7 @@
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "docker.io/openma/sandbox-base:latest",
+      "image": "./Dockerfile.sandbox",
       "instance_type": "basic",
       "max_instances": 10
     }
