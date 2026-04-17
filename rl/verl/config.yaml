@@ -1,0 +1,47 @@
+# veRL training config for OMA agent RL
+# Reference: https://verl.readthedocs.io/
+
+model:
+  name: Qwen/Qwen2.5-7B
+  dtype: bfloat16
+
+training:
+  algorithm: grpo
+  num_epochs: 10
+  batch_size: 64
+  learning_rate: 1.0e-5
+  max_grad_norm: 1.0
+  warmup_ratio: 0.1
+
+grpo:
+  group_size: 4          # trajectories per task for relative baseline
+  kl_coeff: 0.01         # KL penalty coefficient
+  clip_range: 0.2        # PPO-style clipping
+  normalize_advantages: true
+
+lora:
+  enabled: true
+  r: 16
+  alpha: 32
+  dropout: 0.05
+  target_modules:
+    - q_proj
+    - v_proj
+    - k_proj
+    - o_proj
+
+rollout:
+  concurrency: 8         # parallel OMA sessions
+  timeout_ms: 300000     # 5 min per task
+  max_turns: 5           # max agent turns per task
+
+environment:
+  type: oma
+  api_url: ${OMA_API_URL:-http://localhost:8787}
+  api_key: ${OMA_API_KEY:-test-key}
+  task_path: rl/tasks/
+
+vllm:
+  tensor_parallel_size: 1
+  gpu_memory_utilization: 0.85
+  max_model_len: 8192

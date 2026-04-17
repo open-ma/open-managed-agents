@@ -18,7 +18,7 @@ mkdir -p "$OUT_DIR"
 # Base image includes: Python 3.12 (uv), Node 20, Go 1.22, Rust, GCC 13,
 # ripgrep, jq, git, tmux, vim, pandas, numpy, pytest, ruff, etc.
 # Only per-environment packages are added on top.
-BASE_IMAGE="${OMA_SANDBOX_BASE_IMAGE:-docker.io/hrhrngxy/sandbox-base:latest}"
+BASE_IMAGE="${OMA_SANDBOX_BASE_IMAGE:-docker.io/openma/sandbox-base:latest}"
 cat > "$OUT_DIR/Dockerfile" <<DOCKERFILE
 FROM ${BASE_IMAGE}
 DOCKERFILE

@@ -8,7 +8,7 @@ on:
     branches: [main]
 
 env:
-  IMAGE_NAME: hrhrngxy/sandbox-base
+  IMAGE_NAME: openma/sandbox-base
 
 jobs:
   build:
