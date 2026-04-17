@@ -1,0 +1,32 @@
+[
+  {
+    "loss": 0.08218730241060257,
+    "pg_loss": 0.08218730241060257,
+    "n_samples": 8,
+    "version": 1,
+    "epoch": 0,
+    "mean_reward": 0.625,
+    "mean_advantage": -2.2351741790771484e-08,
+    "duration_s": 3.811518907546997
+  },
+  {
+    "loss": -0.00900028645992279,
+    "pg_loss": -0.00900028645992279,
+    "n_samples": 8,
+    "version": 2,
+    "epoch": 1,
+    "mean_reward": 0.625,
+    "mean_advantage": -1.4901161193847656e-08,
+    "duration_s": 0.7973408699035645
+  },
+  {
+    "loss": -0.021783851087093353,
+    "pg_loss": -0.021783851087093353,
+    "n_samples": 8,
+    "version": 3,
+    "epoch": 2,
+    "mean_reward": 0.625,
+    "mean_advantage": -1.4901161193847656e-08,
+    "duration_s": 1.0150179862976074
+  }
+]

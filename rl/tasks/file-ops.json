@@ -7,10 +7,19 @@
       "description": "Create a plain text file with specific content",
       "message": "Create a file at /workspace/hello.txt containing exactly: Hello, World!",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/hello.txt", "score": 0.3 },
-          { "check": "file_contains", "path": "/workspace/hello.txt", "expected": "Hello, World!", "score": 0.7 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/hello.txt",
+            "score": 0.3,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/hello.txt",
+            "expected": "Hello, World!",
+            "score": 0.7,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -19,11 +28,25 @@
       "description": "Create a JSON config file",
       "message": "Create a file at /workspace/config.json with this exact JSON content: {\"host\": \"localhost\", \"port\": 8080, \"debug\": false}",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/config.json", "score": 0.2 },
-          { "check": "file_contains", "path": "/workspace/config.json", "expected": "\"port\": 8080", "score": 0.4 },
-          { "check": "file_contains", "path": "/workspace/config.json", "expected": "\"debug\": false", "score": 0.4 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/config.json",
+            "score": 0.2,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/config.json",
+            "expected": "\"port\": 8080",
+            "score": 0.4,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/config.json",
+            "expected": "\"debug\": false",
+            "score": 0.4,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -32,11 +55,25 @@
       "description": "Create a CSV data file",
       "message": "Create a file at /workspace/data.csv with this content:\nname,age,city\nAlice,30,NYC\nBob,25,LA\nCharlie,35,Chicago",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/data.csv", "score": 0.2 },
-          { "check": "file_contains", "path": "/workspace/data.csv", "expected": "Alice,30,NYC", "score": 0.4 },
-          { "check": "file_contains", "path": "/workspace/data.csv", "expected": "Charlie,35,Chicago", "score": 0.4 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/data.csv",
+            "score": 0.2,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/data.csv",
+            "expected": "Alice,30,NYC",
+            "score": 0.4,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/data.csv",
+            "expected": "Charlie,35,Chicago",
+            "score": 0.4,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -45,13 +82,26 @@
       "description": "Edit a file to replace a value",
       "message": "Read the file /workspace/config.json, then change the port from 8080 to 3000 using the edit tool.",
       "setup_files": [
-        { "path": "/workspace/config.json", "content": "{\"host\": \"localhost\", \"port\": 8080, \"debug\": false}" }
+        {
+          "path": "/workspace/config.json",
+          "content": "{\"host\": \"localhost\", \"port\": 8080, \"debug\": false}"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_contains", "path": "/workspace/config.json", "expected": "3000", "score": 0.6 },
-          { "check": "file_contains", "path": "/workspace/config.json", "expected": "localhost", "score": 0.4 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/config.json",
+            "expected": "3000",
+            "score": 0.6,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/config.json",
+            "expected": "localhost",
+            "score": 0.4,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -60,12 +110,30 @@
       "description": "Create files in nested directories",
       "message": "Create the following files:\n/workspace/src/index.ts with content: export const main = () => console.log('hello');\n/workspace/src/utils/helper.ts with content: export const add = (a: number, b: number) => a + b;",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/src/index.ts", "score": 0.25 },
-          { "check": "file_contains", "path": "/workspace/src/index.ts", "expected": "main", "score": 0.25 },
-          { "check": "file_exists", "path": "/workspace/src/utils/helper.ts", "score": 0.25 },
-          { "check": "file_contains", "path": "/workspace/src/utils/helper.ts", "expected": "add", "score": 0.25 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/src/index.ts",
+            "score": 0.25,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/src/index.ts",
+            "expected": "main",
+            "score": 0.25,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/src/utils/helper.ts",
+            "score": 0.25,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/src/utils/helper.ts",
+            "expected": "add",
+            "score": 0.25,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -74,13 +142,24 @@
       "description": "Use grep to find matching lines in a file",
       "message": "Use the grep tool to find all lines containing 'error' (case-insensitive) in /workspace/app.log. Report the matching lines.",
       "setup_files": [
-        { "path": "/workspace/app.log", "content": "2024-01-01 INFO: Server started\n2024-01-01 ERROR: Connection failed\n2024-01-01 INFO: Retrying...\n2024-01-01 ERROR: Timeout exceeded\n2024-01-01 INFO: Server stopped" }
+        {
+          "path": "/workspace/app.log",
+          "content": "2024-01-01 INFO: Server started\n2024-01-01 ERROR: Connection failed\n2024-01-01 INFO: Retrying...\n2024-01-01 ERROR: Timeout exceeded\n2024-01-01 INFO: Server stopped"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "bash_output_contains", "expected": "Connection failed", "score": 0.5 },
-          { "check": "bash_output_contains", "expected": "Timeout exceeded", "score": 0.5 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "expected": "Connection failed",
+            "score": 0.5,
+            "type": "bash_output_contains"
+          },
+          {
+            "expected": "Timeout exceeded",
+            "score": 0.5,
+            "type": "bash_output_contains"
+          }
         ]
       }
     },
@@ -89,17 +168,41 @@
       "description": "Use glob to find files by pattern",
       "message": "Use the glob tool to find all .ts files under /workspace/src/. List all matches.",
       "setup_files": [
-        { "path": "/workspace/src/index.ts", "content": "// entry" },
-        { "path": "/workspace/src/utils.ts", "content": "// utils" },
-        { "path": "/workspace/src/tests/test.ts", "content": "// test" },
-        { "path": "/workspace/src/readme.md", "content": "# readme" }
+        {
+          "path": "/workspace/src/index.ts",
+          "content": "// entry"
+        },
+        {
+          "path": "/workspace/src/utils.ts",
+          "content": "// utils"
+        },
+        {
+          "path": "/workspace/src/tests/test.ts",
+          "content": "// test"
+        },
+        {
+          "path": "/workspace/src/readme.md",
+          "content": "# readme"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "bash_output_contains", "expected": "index.ts", "score": 0.33 },
-          { "check": "bash_output_contains", "expected": "utils.ts", "score": 0.33 },
-          { "check": "bash_output_contains", "expected": "test.ts", "score": 0.34 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "expected": "index.ts",
+            "score": 0.33,
+            "type": "bash_output_contains"
+          },
+          {
+            "expected": "utils.ts",
+            "score": 0.33,
+            "type": "bash_output_contains"
+          },
+          {
+            "expected": "test.ts",
+            "score": 0.34,
+            "type": "bash_output_contains"
+          }
         ]
       }
     },
@@ -108,15 +211,37 @@
       "description": "Read a file and write a transformed version",
       "message": "Read /workspace/names.txt. Create /workspace/names_upper.txt with all names converted to uppercase, one per line.",
       "setup_files": [
-        { "path": "/workspace/names.txt", "content": "alice\nbob\ncharlie" }
+        {
+          "path": "/workspace/names.txt",
+          "content": "alice\nbob\ncharlie"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/names_upper.txt", "score": 0.2 },
-          { "check": "file_contains", "path": "/workspace/names_upper.txt", "expected": "ALICE", "score": 0.3 },
-          { "check": "file_contains", "path": "/workspace/names_upper.txt", "expected": "BOB", "score": 0.2 },
-          { "check": "file_contains", "path": "/workspace/names_upper.txt", "expected": "CHARLIE", "score": 0.3 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/names_upper.txt",
+            "score": 0.2,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/names_upper.txt",
+            "expected": "ALICE",
+            "score": 0.3,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/names_upper.txt",
+            "expected": "BOB",
+            "score": 0.2,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/names_upper.txt",
+            "expected": "CHARLIE",
+            "score": 0.3,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -125,14 +250,32 @@
       "description": "Make multiple edits to a file",
       "message": "Edit /workspace/config.yaml: change 'debug: true' to 'debug: false' and change 'port: 3000' to 'port: 9090'.",
       "setup_files": [
-        { "path": "/workspace/config.yaml", "content": "server:\n  host: localhost\n  port: 3000\n  debug: true\n  workers: 4" }
+        {
+          "path": "/workspace/config.yaml",
+          "content": "server:\n  host: localhost\n  port: 3000\n  debug: true\n  workers: 4"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_contains", "path": "/workspace/config.yaml", "expected": "debug: false", "score": 0.4 },
-          { "check": "file_contains", "path": "/workspace/config.yaml", "expected": "port: 9090", "score": 0.4 },
-          { "check": "file_contains", "path": "/workspace/config.yaml", "expected": "workers: 4", "score": 0.2 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/config.yaml",
+            "expected": "debug: false",
+            "score": 0.4,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/config.yaml",
+            "expected": "port: 9090",
+            "score": 0.4,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/config.yaml",
+            "expected": "workers: 4",
+            "score": 0.2,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -141,11 +284,23 @@
       "description": "Create a Python script and verify it runs",
       "message": "Create a Python script at /workspace/greet.py that takes a name as a command-line argument and prints 'Hello, {name}!'. Then run it with: python3 /workspace/greet.py World",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/greet.py", "score": 0.3 },
-          { "check": "bash_output_contains", "expected": "Hello, World!", "score": 0.5 },
-          { "check": "exit_code", "expected": "0", "score": 0.2 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/greet.py",
+            "score": 0.3,
+            "type": "file_exists"
+          },
+          {
+            "expected": "Hello, World!",
+            "score": 0.5,
+            "type": "bash_output_contains"
+          },
+          {
+            "expected": "0",
+            "score": 0.2,
+            "type": "exit_code"
+          }
         ]
       }
     }
