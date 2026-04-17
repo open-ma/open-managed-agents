@@ -170,69 +170,108 @@ async function buildAndStoreTrajectory(env: Env, run: EvalRunRecord, sessionId: 
   return trajectory.trajectory_id;
 }
 
-// ---------- Single-tick advance ----------
+// ---------- Single-tick advance (per-trial) ----------
 
-async function advanceTask(env: Env, run: EvalRunRecord, task: EvalTaskResult): Promise<boolean> {
+async function advanceTrial(
+  env: Env,
+  run: EvalRunRecord,
+  task: EvalTaskResult,
+  trial: import("./routes/evals").EvalTrialResult,
+): Promise<boolean> {
   // Returns true if any progress was made (caller should save).
-  if (task.status === "completed" || task.status === "failed") return false;
+  if (trial.status === "completed" || trial.status === "failed") return false;
 
   // Bootstrap: create session + send first message
-  if (task.status === "pending") {
+  if (trial.status === "pending") {
     try {
       const sessionId = await createTaskSession(env, run, task);
-      task.session_id = sessionId;
-      task.status = "running";
-      task.started_at = new Date().toISOString();
-      task.current_message_index = 0;
+      trial.session_id = sessionId;
+      trial.status = "running";
+      trial.started_at = new Date().toISOString();
+      trial.current_message_index = 0;
       // Send first message immediately
       await postUserMessage(env, run, sessionId, task.spec.messages[0]);
       return true;
     } catch (err: unknown) {
-      task.status = "failed";
-      task.error = err instanceof Error ? err.message : String(err);
-      task.ended_at = new Date().toISOString();
+      trial.status = "failed";
+      trial.error = err instanceof Error ? err.message : String(err);
+      trial.ended_at = new Date().toISOString();
       return true;
     }
   }
 
-  // task.status === "running" — check current message progress
-  if (!task.session_id) {
-    task.status = "failed";
-    task.error = "running task missing session_id";
+  // trial.status === "running" — check current message progress
+  if (!trial.session_id) {
+    trial.status = "failed";
+    trial.error = "running trial missing session_id";
     return true;
   }
 
-  const status = await getSessionStatus(env, run, task.session_id);
+  const status = await getSessionStatus(env, run, trial.session_id);
   if (status !== "idle") return false; // still running, wait
 
   // Session is idle; either send next message or finalize trajectory
-  const nextIndex = (task.current_message_index ?? 0) + 1;
+  const nextIndex = (trial.current_message_index ?? 0) + 1;
   if (nextIndex < task.spec.messages.length) {
     try {
-      await postUserMessage(env, run, task.session_id, task.spec.messages[nextIndex]);
-      task.current_message_index = nextIndex;
+      await postUserMessage(env, run, trial.session_id, task.spec.messages[nextIndex]);
+      trial.current_message_index = nextIndex;
       return true;
     } catch (err: unknown) {
-      task.status = "failed";
-      task.error = err instanceof Error ? err.message : String(err);
-      task.ended_at = new Date().toISOString();
+      trial.status = "failed";
+      trial.error = err instanceof Error ? err.message : String(err);
+      trial.ended_at = new Date().toISOString();
       return true;
     }
   }
 
   // All messages sent and session idle → build trajectory and finalize
   try {
-    const trajectoryId = await buildAndStoreTrajectory(env, run, task.session_id);
-    task.trajectory_id = trajectoryId;
-    task.status = "completed";
-    task.ended_at = new Date().toISOString();
+    const trajectoryId = await buildAndStoreTrajectory(env, run, trial.session_id);
+    trial.trajectory_id = trajectoryId;
+    trial.status = "completed";
+    trial.ended_at = new Date().toISOString();
     return true;
   } catch (err: unknown) {
-    task.status = "failed";
-    task.error = err instanceof Error ? err.message : String(err);
-    task.ended_at = new Date().toISOString();
+    trial.status = "failed";
+    trial.error = err instanceof Error ? err.message : String(err);
+    trial.ended_at = new Date().toISOString();
     return true;
   }
+}
+
+async function advanceTask(env: Env, run: EvalRunRecord, task: EvalTaskResult): Promise<boolean> {
+  if (task.status === "completed" || task.status === "failed") return false;
+
+  // Advance every trial that's not terminal. Trials are independent — server
+  // could parallelize, but we go sequentially within a tick to keep KV writes
+  // serialized and respect bandwidth on shared sandbox.
+  let progressed = false;
+  for (const trial of task.trials) {
+    if (trial.status === "pending" || trial.status === "running") {
+      const changed = await advanceTrial(env, run, task, trial);
+      if (changed) progressed = true;
+    }
+  }
+
+  // Roll up trial states to task status
+  const completed = task.trials.filter((t) => t.status === "completed").length;
+  const failed = task.trials.filter((t) => t.status === "failed").length;
+  task.trial_pass_count = completed;
+  task.trial_total = task.trials.length;
+  if (completed + failed === task.trials.length) {
+    // All trials terminal. Aggregate as pass^k semantics: completed only when
+    // every trial completed. Otherwise failed (downstream scorer can re-grade).
+    if (completed === task.trials.length) {
+      task.status = "completed";
+    } else {
+      task.status = "failed";
+      task.error = task.trials.find((t) => t.error)?.error;
+    }
+  } else {
+    task.status = "running";
+  }
+  return progressed;
 }
 
 async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {

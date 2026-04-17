@@ -124,6 +124,9 @@ describe("POST /v1/evals/runs", () => {
     expect(run.task_count).toBe(2);
     expect(run.tasks).toHaveLength(2);
     expect(run.tasks[0].status).toBe("pending");
+    expect(run.tasks[0].trials).toHaveLength(1);
+    expect(run.tasks[0].trial_total).toBe(1);
+    expect(run.tasks[0].trials[0].status).toBe("pending");
     expect(run.completed_count).toBe(0);
   });
 });
@@ -186,7 +189,8 @@ describe("tickEvalRuns advances state", () => {
     run = (await runRes.json()) as any;
     expect(run.status).toBe("running");
     expect(run.tasks[0].status).toBe("running");
-    expect(run.tasks[0].session_id).toMatch(/^sess-/);
+    expect(run.tasks[0].trials[0].status).toBe("running");
+    expect(run.tasks[0].trials[0].session_id).toMatch(/^sess-/);
 
     // Wait for harness to complete + go idle
     await new Promise((r) => setTimeout(r, 500));
@@ -197,7 +201,8 @@ describe("tickEvalRuns advances state", () => {
     run = (await runRes.json()) as any;
     expect(run.status).toBe("completed");
     expect(run.tasks[0].status).toBe("completed");
-    expect(run.tasks[0].trajectory_id).toMatch(/^tr-/);
+    expect(run.tasks[0].trials[0].trajectory_id).toMatch(/^tr-/);
+    expect(run.tasks[0].trial_pass_count).toBe(1);
     expect(run.completed_count).toBe(1);
     expect(run.failed_count).toBe(0);
     expect(run.ended_at).toBeDefined();
@@ -235,7 +240,7 @@ describe("tickEvalRuns advances state", () => {
     expect(final.completed_count).toBe(3);
     for (const task of final.tasks) {
       expect(task.status).toBe("completed");
-      expect(task.trajectory_id).toMatch(/^tr-/);
+      expect(task.trials[0].trajectory_id).toMatch(/^tr-/);
     }
   });
 
@@ -263,11 +268,11 @@ describe("tickEvalRuns advances state", () => {
     const finalRes = await api(`/v1/evals/runs/${run_id}`, { headers: HEADERS });
     const final = (await finalRes.json()) as any;
     expect(final.status).toBe("completed");
-    expect(final.tasks[0].trajectory_id).toMatch(/^tr-/);
+    expect(final.tasks[0].trials[0].trajectory_id).toMatch(/^tr-/);
 
     // The trajectory should record exactly 3 user messages (one per spec.messages)
     // Fetch trajectory via session GET
-    const sessionId = final.tasks[0].session_id;
+    const sessionId = final.tasks[0].trials[0].session_id;
     const trajRes = await api(`/v1/sessions/${sessionId}/trajectory`, { headers: HEADERS });
     const traj = (await trajRes.json()) as any;
     const userMsgs = traj.events.filter((e: any) => e.type === "user.message");
@@ -303,5 +308,48 @@ describe("tickEvalRuns advances state", () => {
     // Active index should be cleared
     const activeAfter = await env.CONFIG_KV.get(`evalrun_active:${run_id}`);
     expect(activeAfter).toBeNull();
+  });
+
+  it("trials > 1: spawns N independent sessions per task and stores N trajectories", async () => {
+    const { agent, environment } = await setupAgentAndEnv();
+    const createRes = await api("/v1/evals/runs", {
+      method: "POST",
+      headers: HEADERS,
+      body: JSON.stringify({
+        agent_id: agent.id,
+        environment_id: environment.id,
+        tasks: [{ id: "trial-task", messages: ["hello"], trials: 3 }],
+      }),
+    });
+    const { run_id } = (await createRes.json()) as any;
+
+    // Initial state: 3 pending trials, no session_ids yet
+    let initial = (await (await api(`/v1/evals/runs/${run_id}`, { headers: HEADERS })).json()) as any;
+    expect(initial.tasks[0].trials).toHaveLength(3);
+    expect(initial.tasks[0].trial_total).toBe(3);
+    expect(initial.tasks[0].trials.every((t: any) => t.status === "pending")).toBe(true);
+
+    // Drive to completion
+    for (let i = 0; i < 8; i++) {
+      await tickEvalRuns(env);
+      await new Promise((r) => setTimeout(r, 400));
+      const r = await api(`/v1/evals/runs/${run_id}`, { headers: HEADERS });
+      const body = (await r.json()) as any;
+      if (body.status === "completed" || body.status === "failed") break;
+    }
+
+    const final = (await (await api(`/v1/evals/runs/${run_id}`, { headers: HEADERS })).json()) as any;
+    expect(final.status).toBe("completed");
+    expect(final.tasks[0].status).toBe("completed");
+    expect(final.tasks[0].trials).toHaveLength(3);
+    expect(final.tasks[0].trial_pass_count).toBe(3);
+
+    // Each trial got its own session and its own trajectory
+    const sessionIds = final.tasks[0].trials.map((t: any) => t.session_id);
+    const trajectoryIds = final.tasks[0].trials.map((t: any) => t.trajectory_id);
+    expect(new Set(sessionIds).size).toBe(3); // all unique
+    expect(new Set(trajectoryIds).size).toBe(3); // all unique
+    expect(sessionIds.every((s: string) => s.startsWith("sess-"))).toBe(true);
+    expect(trajectoryIds.every((t: string) => t.startsWith("tr-"))).toBe(true);
   });
 });
