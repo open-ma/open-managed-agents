@@ -137,14 +137,15 @@ export class SessionDO extends Agent<Env, SessionState> {
    */
   private async drainEventQueue(): Promise<void> {
     // Concurrency guard — only one drain loop at a time
-    if (this.state.status === "running" || this.state.status === "terminated") return;
+    if (this.state.status === "running" || this.state.status === "terminated") {
+      console.log(`[drain] skipped: status=${this.state.status}`);
+      return;
+    }
 
+    console.log("[drain] starting");
     const history = new SqliteHistory(this.ctx.storage.sql);
 
     while (true) {
-      // Find the latest user event that hasn't been followed by a
-      // session.status_idle (i.e. hasn't been "answered" yet).
-      // An event is "processed" if it's followed by either idle or error.
       const lastIdleSeq = Math.max(
         this.getLastEventSeq("session.status_idle"),
         this.getLastEventSeq("session.error"),
@@ -155,8 +156,12 @@ export class SessionDO extends Agent<Env, SessionState> {
         "user.custom_tool_result",
       ]);
 
-      if (!pendingUserEvent) break; // Queue drained
+      if (!pendingUserEvent) {
+        console.log("[drain] queue empty, done");
+        break;
+      }
 
+      console.log(`[drain] processing event seq=${pendingUserEvent.seq} type=${pendingUserEvent.type}`);
       this.setState({ ...this.state, status: "running" });
 
       try {
@@ -276,14 +281,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       if (body.type === "user.message") {
         history.append(body);
         this.broadcastEvent(body);
-        // DO stays alive ~60s after last client disconnects, so unawaited
-        // promises keep running. No need for waitUntil or alarm — just
-        // fire and let the event loop drain naturally.
-        // Alarm at 5s is crash-recovery backup only.
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
+        console.log("[post /event] user.message appended, firing drainEventQueue (no await)");
         this.drainEventQueue();
+        console.log("[post /event] returning 202");
         return new Response(null, { status: 202 });
       }
 
@@ -307,6 +310,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
+        console.log("[post /event] tool_confirmation appended, firing drainEventQueue (no await)");
         this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
@@ -318,6 +322,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
+        console.log("[post /event] custom_tool_result appended, firing drainEventQueue (no await)");
         this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
