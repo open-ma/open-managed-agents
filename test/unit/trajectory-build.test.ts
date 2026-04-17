@@ -108,6 +108,25 @@ describe("buildTrajectory", () => {
     expect(t.ended_at).toBeUndefined();
   });
 
+  it("derives outcome from LAST status event, not just any (warmup bug)", async () => {
+    // Simulates: warmup turn (idle) → eval turn (still running)
+    const events = [
+      ev(1, "user.message"),
+      ev(2, "session.status_running"),
+      ev(3, "agent.message"),
+      ev(4, "session.status_idle"), // warmup done
+      ev(5, "user.message"),
+      ev(6, "session.status_running"), // eval starts
+      ev(7, "agent.tool_use", { name: "bash" }),
+    ];
+    const t = await buildTrajectory(makeSession(), {
+      fetchAllEvents: async () => events,
+      fetchFullStatus: async () => ({ status: "running" }),
+    });
+    // Last status event is status_running, NOT status_idle from warmup
+    expect(t.outcome).toBe("running");
+  });
+
   it("counts tool errors via is_error flag", async () => {
     const events = [
       ev(1, "user.message"),
@@ -179,5 +198,34 @@ describe("buildTrajectory", () => {
       fetchFullStatus: async () => null,
     });
     expect(t.model.id).toBe("claude-opus-4-7");
+  });
+
+  it("token_usage uses max(state, span sum) — mid-flight state may lag span", async () => {
+    // Simulates: 2 model_request_end spans report usage, but DO state usage
+    // hasn't been incremented yet (or only partially).
+    const events = [
+      ev(1, "user.message"),
+      ev(2, "span.model_request_end", { model_usage: { input_tokens: 100, output_tokens: 50 } }),
+      ev(3, "span.model_request_end", { model_usage: { input_tokens: 200, output_tokens: 80 } }),
+      ev(4, "session.status_idle"),
+    ];
+    const t = await buildTrajectory(makeSession(), {
+      fetchAllEvents: async () => events,
+      // /full-status reports stale 0 because reportUsage was async + lagged
+      fetchFullStatus: async () => ({ status: "idle", usage: { input_tokens: 0, output_tokens: 0 } }),
+    });
+    // Should fall back to span sum (300/130) instead of stale 0/0
+    expect(t.summary.token_usage.input_tokens).toBe(300);
+    expect(t.summary.token_usage.output_tokens).toBe(130);
+  });
+
+  it("token_usage prefers state when state > span sum (handles state-reported but no spans yet)", async () => {
+    const events = [ev(1, "user.message"), ev(2, "session.status_idle")];
+    const t = await buildTrajectory(makeSession(), {
+      fetchAllEvents: async () => events,
+      fetchFullStatus: async () => ({ status: "idle", usage: { input_tokens: 500, output_tokens: 200 } }),
+    });
+    expect(t.summary.token_usage.input_tokens).toBe(500);
+    expect(t.summary.token_usage.output_tokens).toBe(200);
   });
 });
