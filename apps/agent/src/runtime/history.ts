@@ -135,11 +135,31 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
         const matchingCall = pendingToolCalls.find(
           (c) => c.toolCallId === e.tool_use_id
         );
+        // content may be string OR ContentBlock[] (multimodal). Convert to AI SDK
+        // ToolResultOutput shape accordingly.
+        let output: { type: "text"; value: string } | { type: "content"; value: Array<{ type: "text"; text: string } | { type: "media" | "file-data"; data: string; mediaType: string }> };
+        if (typeof e.content === "string") {
+          output = { type: "text", value: e.content };
+        } else if (Array.isArray(e.content)) {
+          // Translate Anthropic-shape ContentBlock[] → AI SDK content parts
+          const parts = e.content.map((b) => {
+            if (b.type === "text") return { type: "text" as const, text: b.text };
+            if (b.type === "image" && b.source.type === "base64") {
+              return { type: "file-data" as const, data: b.source.data || "", mediaType: b.source.media_type || "image/png" };
+            }
+            return { type: "text" as const, text: JSON.stringify(b) };
+          });
+          output = { type: "content", value: parts };
+        } else {
+          output = { type: "text", value: JSON.stringify(e.content) };
+        }
         pendingToolResults.push({
           type: "tool-result",
           toolCallId: e.tool_use_id,
           toolName: matchingCall?.toolName ?? "unknown",
-          output: { type: "text", value: e.content },
+          // @ts-expect-error AI SDK ToolResultPart.output union doesn't expose 'content' in our generated types,
+          // but the provider does accept it. See ToolResultOutput in @ai-sdk/provider-utils.
+          output,
         });
         break;
       }

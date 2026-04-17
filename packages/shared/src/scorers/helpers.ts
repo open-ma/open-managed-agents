@@ -57,8 +57,30 @@ export function getToolResults(trajectory: Trajectory): ToolResultEvent[] {
       const data = parseData(e);
       if (!data) continue;
       const content = data.content;
-      const contentStr =
-        typeof content === "string" ? content : JSON.stringify(content ?? "");
+      // content may be string OR ContentBlock[] (multimodal). For text-based
+      // scorers, extract the text portions; binary parts (image/document) are
+      // summarized as "[image:mediaType]" so scorers can detect their presence.
+      let contentStr: string;
+      if (typeof content === "string") {
+        contentStr = content;
+      } else if (Array.isArray(content)) {
+        contentStr = (content as Array<Record<string, unknown>>)
+          .map((b) => {
+            if (b?.type === "text") return (b.text as string) || "";
+            if (b?.type === "image") {
+              const src = b.source as { media_type?: string } | undefined;
+              return `[image:${src?.media_type || "?"}]`;
+            }
+            if (b?.type === "document") {
+              const src = b.source as { media_type?: string } | undefined;
+              return `[document:${src?.media_type || "?"}]`;
+            }
+            return JSON.stringify(b);
+          })
+          .join("\n");
+      } else {
+        contentStr = JSON.stringify(content ?? "");
+      }
       result.push({
         seq: e.seq,
         tool_use_id:
