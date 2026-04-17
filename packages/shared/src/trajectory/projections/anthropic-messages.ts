@@ -84,10 +84,17 @@ export function toAnthropicMessages(trajectory: Trajectory): AnthropicMessage[] 
       case "agent.mcp_tool_result": {
         // tool_result belongs in a USER message per Anthropic spec
         flushAssistant(assistantBuf, messages);
+        const rawContent = data.content;
+        const toolResultContent: string | unknown[] =
+          typeof rawContent === "string"
+            ? rawContent
+            : Array.isArray(rawContent)
+              ? (rawContent as unknown[]) // Anthropic spec accepts ContentBlock[] for tool_result content
+              : JSON.stringify(rawContent ?? "");
         userBuf.push({
           type: "tool_result",
           tool_use_id: (data.tool_use_id as string) || (data.mcp_tool_use_id as string) || "",
-          content: typeof data.content === "string" ? data.content : JSON.stringify(data.content ?? ""),
+          content: toolResultContent as string,
           is_error: data.is_error as boolean | undefined,
         });
         flushUser(userBuf, messages);

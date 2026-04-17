@@ -106,13 +106,18 @@ async function pollWithStrategies(
  * Wrap a tool execute function so errors are returned as strings to the LLM
  * instead of crashing the entire harness (matching Claude Code's behavior).
  * The LLM sees the error and can retry, try a different approach, or inform the user.
+ *
+ * Result type is `string | object`: most tools return text, but multimodal tools
+ * (e.g. Read returning an image block) return structured objects that toModelOutput
+ * converts for the AI SDK.
  */
-function safe<T>(fn: (args: T) => Promise<string>): (args: T) => Promise<string> {
+type ToolResultValue = string | Record<string, unknown>;
+function safe<T>(fn: (args: T) => Promise<ToolResultValue>): (args: T) => Promise<ToolResultValue> {
   return async (args: T) => {
     try {
       const result = await fn(args);
-      // Handle empty results (CC pattern: prevent model stop sequence issues)
-      if (!result || result.trim() === "") return "(completed with no output)";
+      // Handle empty string results (CC pattern: prevent model stop sequence issues)
+      if (typeof result === "string" && result.trim() === "") return "(completed with no output)";
       return result;
     } catch (err) {
       let msg = err instanceof Error ? err.message : String(err);
@@ -148,6 +153,15 @@ function truncateResult(result: string): string {
 function shellQuote(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
+
+/** File extensions that Read returns as image content blocks. */
+const IMAGE_EXTENSIONS: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+};
 
 /**
  * Convert a JSON Schema properties object to a Zod schema.
@@ -362,14 +376,43 @@ export async function buildTools(
   if (enabled.has("read")) {
     tools.read = tool({
       description:
-        "Read a file from the sandbox filesystem. By default reads the entire file. " +
-        "Use offset (1-based line number) and limit (number of lines) to read large files in chunks.",
+        "Read a file from the sandbox filesystem. Supports text files (with optional " +
+        "offset/limit for chunked reads), and image files (PNG, JPG, JPEG, GIF, WEBP) " +
+        "which are returned as visual content for multimodal models. " +
+        "By default reads the entire file. Use offset (1-based line number) and limit " +
+        "(number of lines) to read large text files in chunks.",
       inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to read, e.g. /workspace/index.html"),
-        offset: z.number().optional().describe("1-based line number to start reading from"),
-        limit: z.number().optional().describe("Number of lines to read"),
+        offset: z.number().optional().describe("1-based line number to start reading from (text only)"),
+        limit: z.number().optional().describe("Number of lines to read (text only)"),
       }),
       execute: safe(async ({ file_path, offset, limit }) => {
+        const ext = file_path.split(".").pop()?.toLowerCase() || "";
+        const mediaType = IMAGE_EXTENSIONS[ext];
+
+        if (mediaType) {
+          // Image: base64-encode via shell and return as Anthropic-shape ImageBlock.
+          // toModelOutput below converts this to AI SDK content shape for the model.
+          // -w0 prevents line wrapping (GNU base64); fall back to tr -d '\n' if BSD.
+          const raw = await sandbox.exec(
+            `(base64 -w0 ${shellQuote(file_path)} 2>/dev/null || base64 ${shellQuote(file_path)} | tr -d '\\n')`,
+          );
+          const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+          if (!m) return raw;
+          const code = parseInt(m[1], 10);
+          if (code !== 0) return `Error reading image (exit=${code}): ${m[2].slice(0, 200)}`;
+          const data = m[2].trimEnd();
+          if (!data) return "Error: image file is empty or unreadable";
+          // Return as a marker object that toModelOutput recognizes.
+          // default-loop also recognizes this shape and broadcasts a multimodal
+          // agent.tool_result event so the trajectory preserves the image.
+          return {
+            type: "image" as const,
+            source: { type: "base64" as const, media_type: mediaType, data },
+          };
+        }
+
+        // Text path
         const content = await sandbox.readFile(file_path);
         if (offset === undefined && limit === undefined) {
           return truncateResult(content);
@@ -383,6 +426,25 @@ export async function buildTools(
             (end < lines.length ? `\n...(file has ${lines.length} total lines)` : ""),
         );
       }),
+      // AI SDK 6 hook: convert tool execute output to the shape the model receives.
+      // For images, emit a `content` array with `file-data` parts (base64 + mediaType);
+      // the @ai-sdk/anthropic provider translates this into a tool_result with an
+      // image content block, which Claude (and any vision-capable model) renders natively.
+      toModelOutput: ({ output }) => {
+        if (
+          output &&
+          typeof output === "object" &&
+          "type" in output &&
+          (output as { type?: string }).type === "image"
+        ) {
+          const src = (output as unknown as { source: { data: string; media_type: string } }).source;
+          return {
+            type: "content",
+            value: [{ type: "file-data", data: src.data, mediaType: src.media_type }],
+          };
+        }
+        return { type: "text", value: typeof output === "string" ? output : JSON.stringify(output) };
+      },
     });
   }
 

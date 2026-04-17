@@ -355,6 +355,75 @@ describe("Built-in tool execution", () => {
     expect(result).not.toContain("line4");
   });
 
+  it("read tool returns image content block for .png", async () => {
+    const fakeBase64 = "iVBORw0KGgo=";
+    let capturedCmd = "";
+    const sandbox: any = {
+      exec: async (cmd: string) => {
+        capturedCmd = cmd;
+        return `exit=0\n${fakeBase64}`;
+      },
+      readFile: async () => "should-not-be-called",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/cat.png" },
+      TOOL_EXEC_OPTS,
+    );
+    expect(capturedCmd).toContain("base64");
+    expect(capturedCmd).toContain("/workspace/cat.png");
+    expect(typeof result).toBe("object");
+    expect((result as any).type).toBe("image");
+    expect((result as any).source.type).toBe("base64");
+    expect((result as any).source.media_type).toBe("image/png");
+    expect((result as any).source.data).toBe(fakeBase64);
+  });
+
+  it("read tool toModelOutput converts image block → AI SDK content shape", async () => {
+    const fakeBase64 = "abc";
+    const sandbox: any = {
+      exec: async () => `exit=0\n${fakeBase64}`,
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/x.jpeg" },
+      TOOL_EXEC_OPTS,
+    );
+    const modelOutput = (tools.read as any).toModelOutput({
+      toolCallId: "tu1",
+      input: { file_path: "/workspace/x.jpeg" },
+      output: result,
+    });
+    expect(modelOutput.type).toBe("content");
+    expect(modelOutput.value).toHaveLength(1);
+    expect(modelOutput.value[0].type).toBe("file-data");
+    expect(modelOutput.value[0].mediaType).toBe("image/jpeg");
+    expect(modelOutput.value[0].data).toBe(fakeBase64);
+  });
+
+  it("read tool toModelOutput passes string outputs as text", async () => {
+    const sandbox: any = {
+      exec: async () => "exit=0\n",
+      readFile: async () => "hello world",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/notes.txt" },
+      TOOL_EXEC_OPTS,
+    );
+    const modelOutput = (tools.read as any).toModelOutput({
+      toolCallId: "tu1",
+      input: { file_path: "/workspace/notes.txt" },
+      output: result,
+    });
+    expect(modelOutput.type).toBe("text");
+    expect(modelOutput.value).toBe("hello world");
+  });
+
   it("web_fetch tool constructs curl with URL", async () => {
     let capturedCmd = "";
     const sandbox: any = {
@@ -878,7 +947,7 @@ describe("Tool result truncation", () => {
     const tools = await buildTools(makeAgentConfig(), sandbox);
 
     const result = await tools.read.execute(
-      { path: "/big.txt" },
+      { file_path: "/big.txt" },
       TOOL_EXEC_OPTS
     );
     expect(result.length).toBeLessThan(60000);
