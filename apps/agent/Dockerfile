@@ -1,50 +1,34 @@
 # OMA Default Sandbox Base Image
-# Build once, push to GHCR, reuse everywhere.
+# Based on cloudflare/sandbox (has correct entrypoint + port setup)
+# Adds: Python 3.12, Node.js 20, Go, Rust, common dev tools
 #
 # Build & push:
 #   docker build -t openma/sandbox-base:latest apps/agent/
 #   docker push openma/sandbox-base:latest
-#
-# Parity target: Anthropic Managed Agents Cloud Container Reference
 
-FROM ubuntu:24.04
+FROM docker.io/cloudflare/sandbox:latest
 
 ENV DEBIAN_FRONTEND=noninteractive
-ENV LANG=C.UTF-8
-ENV LC_ALL=C.UTF-8
 
-# System packages + tools + build essentials
+# System tools (some may already be in sandbox base — apt handles dupes)
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    # Core
-    ca-certificates curl wget gnupg2 software-properties-common \
-    # Build essentials
     build-essential gcc g++ make cmake \
-    # VCS & archive
-    git tar zip unzip xz-utils \
-    # Network
-    openssh-client \
-    # Text processing
-    sed gawk grep diffutils patch \
-    # Editors & terminal
+    git curl wget jq tree htop procps less file \
     vim nano tmux screen \
-    # Utilities
-    jq tree htop procps less file \
-    # Database clients
-    sqlite3 libsqlite3-dev postgresql-client redis-tools \
+    zip unzip xz-utils \
+    sqlite3 libsqlite3-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# ripgrep — pre-built binary (not cargo install, which takes 10+ min to compile)
+# ripgrep — pre-built binary
 RUN ARCH=$(dpkg --print-architecture) && \
     RG_VERSION="14.1.1" && \
     if [ "$ARCH" = "amd64" ]; then RG_ARCH="x86_64"; else RG_ARCH="aarch64"; fi && \
     curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl.tar.gz" \
     | tar xz --strip-components=1 -C /usr/local/bin "ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl/rg"
 
-# uv — manages Python + packages
+# uv + Python 3.12
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
-
-# Python 3.12 via uv
 RUN uv python install 3.12 && \
     uv venv /opt/venv --python 3.12 --seed
 ENV VIRTUAL_ENV=/opt/venv
@@ -66,13 +50,6 @@ RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
 RUN curl -fsSL https://go.dev/dl/go1.22.5.linux-$(dpkg --print-architecture).tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
-# Rust (latest stable) — installed last, largest layer
+# Rust (minimal profile)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
-
-# Workspace
-RUN mkdir -p /home/user/workspace
-WORKDIR /home/user/workspace
-
-ENV SHELL=/bin/bash
-CMD ["/bin/bash"]

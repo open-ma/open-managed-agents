@@ -7,15 +7,46 @@
       "description": "Initialize a Node.js project structure",
       "message": "Create a minimal Node.js project at /workspace/myapp with: package.json (name: myapp, version: 1.0.0), src/index.js that exports a function 'greet(name)' returning 'Hello, {name}!', and a test.js that requires src/index.js and logs the result of greet('World').",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/myapp/package.json", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/myapp/package.json", "expected": "myapp", "score": 0.1 },
-          { "check": "file_exists", "path": "/workspace/myapp/src/index.js", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/myapp/src/index.js", "expected": "greet", "score": 0.2 },
-          { "check": "file_exists", "path": "/workspace/myapp/test.js", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/myapp/test.js", "expected": "greet", "score": 0.1 },
-          { "check": "exit_code", "expected": "0", "score": 0.15 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/myapp/package.json",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/myapp/package.json",
+            "expected": "myapp",
+            "score": 0.1,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/myapp/src/index.js",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/myapp/src/index.js",
+            "expected": "greet",
+            "score": 0.2,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/myapp/test.js",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/myapp/test.js",
+            "expected": "greet",
+            "score": 0.1,
+            "type": "file_contains"
+          },
+          {
+            "expected": "0",
+            "score": 0.15,
+            "type": "exit_code"
+          }
         ]
       }
     },
@@ -24,15 +55,36 @@
       "description": "Read CSV, compute stats, write report",
       "message": "Read /workspace/sales.csv. Calculate the total revenue (sum of the 'amount' column) and the number of rows. Write a report to /workspace/report.txt with lines: 'Total rows: N' and 'Total revenue: X'.",
       "setup_files": [
-        { "path": "/workspace/sales.csv", "content": "date,product,amount\n2024-01-01,Widget,100\n2024-01-02,Gadget,250\n2024-01-03,Widget,150\n2024-01-04,Doohickey,300\n2024-01-05,Gadget,200" }
+        {
+          "path": "/workspace/sales.csv",
+          "content": "date,product,amount\n2024-01-01,Widget,100\n2024-01-02,Gadget,250\n2024-01-03,Widget,150\n2024-01-04,Doohickey,300\n2024-01-05,Gadget,200"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/report.txt", "score": 0.2 },
-          { "check": "file_contains", "path": "/workspace/report.txt", "expected": "5", "score": 0.3 },
-          { "check": "file_contains", "path": "/workspace/report.txt", "expected": "1000", "score": 0.3 },
-          { "check": "exit_code", "expected": "0", "score": 0.2 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/report.txt",
+            "score": 0.2,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/report.txt",
+            "expected": "5",
+            "score": 0.3,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/report.txt",
+            "expected": "1000",
+            "score": 0.3,
+            "type": "file_contains"
+          },
+          {
+            "expected": "0",
+            "score": 0.2,
+            "type": "exit_code"
+          }
         ]
       }
     },
@@ -41,14 +93,41 @@
       "description": "Create a Python module with tests and run them",
       "message": "Create a Python module at /workspace/mathlib/calc.py with functions: add(a,b), subtract(a,b), multiply(a,b). Then create /workspace/mathlib/test_calc.py using assert statements to test all three functions. Run the tests with: python3 /workspace/mathlib/test_calc.py",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/mathlib/calc.py", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/mathlib/calc.py", "expected": "def add", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/mathlib/calc.py", "expected": "def multiply", "score": 0.1 },
-          { "check": "file_exists", "path": "/workspace/mathlib/test_calc.py", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/mathlib/test_calc.py", "expected": "assert", "score": 0.15 },
-          { "check": "exit_code", "expected": "0", "score": 0.3 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/mathlib/calc.py",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/mathlib/calc.py",
+            "expected": "def add",
+            "score": 0.15,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/mathlib/calc.py",
+            "expected": "def multiply",
+            "score": 0.1,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/mathlib/test_calc.py",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/mathlib/test_calc.py",
+            "expected": "assert",
+            "score": 0.15,
+            "type": "file_contains"
+          },
+          {
+            "expected": "0",
+            "score": 0.3,
+            "type": "exit_code"
+          }
         ]
       }
     },
@@ -57,17 +136,49 @@
       "description": "Process log files and generate summary",
       "message": "Analyze /workspace/app.log: count occurrences of each log level (INFO, WARN, ERROR). Write /workspace/summary.json with format: {\"INFO\": N, \"WARN\": N, \"ERROR\": N}.",
       "setup_files": [
-        { "path": "/workspace/app.log", "content": "2024-01-01 INFO: Server started\n2024-01-01 INFO: Connection accepted\n2024-01-01 WARN: High memory usage\n2024-01-01 ERROR: Database timeout\n2024-01-01 INFO: Retry successful\n2024-01-01 WARN: Disk space low\n2024-01-01 ERROR: Connection refused\n2024-01-01 INFO: Graceful shutdown" }
+        {
+          "path": "/workspace/app.log",
+          "content": "2024-01-01 INFO: Server started\n2024-01-01 INFO: Connection accepted\n2024-01-01 WARN: High memory usage\n2024-01-01 ERROR: Database timeout\n2024-01-01 INFO: Retry successful\n2024-01-01 WARN: Disk space low\n2024-01-01 ERROR: Connection refused\n2024-01-01 INFO: Graceful shutdown"
+        }
       ],
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/summary.json", "score": 0.1 },
-          { "check": "file_contains", "path": "/workspace/summary.json", "expected": "\"INFO\"", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/summary.json", "expected": "4", "score": 0.25 },
-          { "check": "file_contains", "path": "/workspace/summary.json", "expected": "\"WARN\"", "score": 0.1 },
-          { "check": "file_contains", "path": "/workspace/summary.json", "expected": "2", "score": 0.2 },
-          { "check": "file_contains", "path": "/workspace/summary.json", "expected": "\"ERROR\"", "score": 0.2 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/summary.json",
+            "score": 0.1,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/summary.json",
+            "expected": "\"INFO\"",
+            "score": 0.15,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/summary.json",
+            "expected": "4",
+            "score": 0.25,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/summary.json",
+            "expected": "\"WARN\"",
+            "score": 0.1,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/summary.json",
+            "expected": "2",
+            "score": 0.2,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/summary.json",
+            "expected": "\"ERROR\"",
+            "score": 0.2,
+            "type": "file_contains"
+          }
         ]
       }
     },
@@ -76,15 +187,45 @@
       "description": "Initialize a git repo with proper structure",
       "message": "Create a project at /workspace/project: initialize a git repo, create a .gitignore (ignore node_modules/ and .env), create a README.md with '# My Project', create src/main.py with 'print(\"hello\")', then make an initial commit with message 'Initial commit'.",
       "reward": {
-        "type": "rule",
-        "rules": [
-          { "check": "file_exists", "path": "/workspace/project/.gitignore", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/project/.gitignore", "expected": "node_modules", "score": 0.1 },
-          { "check": "file_exists", "path": "/workspace/project/README.md", "score": 0.1 },
-          { "check": "file_exists", "path": "/workspace/project/src/main.py", "score": 0.15 },
-          { "check": "file_contains", "path": "/workspace/project/src/main.py", "expected": "hello", "score": 0.1 },
-          { "check": "bash_output_contains", "expected": "Initial commit", "score": 0.2 },
-          { "check": "exit_code", "expected": "0", "score": 0.2 }
+        "type": "verifiable",
+        "checks": [
+          {
+            "path": "/workspace/project/.gitignore",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/project/.gitignore",
+            "expected": "node_modules",
+            "score": 0.1,
+            "type": "file_contains"
+          },
+          {
+            "path": "/workspace/project/README.md",
+            "score": 0.1,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/project/src/main.py",
+            "score": 0.15,
+            "type": "file_exists"
+          },
+          {
+            "path": "/workspace/project/src/main.py",
+            "expected": "hello",
+            "score": 0.1,
+            "type": "file_contains"
+          },
+          {
+            "expected": "Initial commit",
+            "score": 0.2,
+            "type": "bash_output_contains"
+          },
+          {
+            "expected": "0",
+            "score": 0.2,
+            "type": "exit_code"
+          }
         ]
       }
     }

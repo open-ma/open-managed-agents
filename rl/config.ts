@@ -10,5 +10,6 @@ export function loadConfig(overrides?: Partial<RolloutConfig>): RolloutConfig {
     concurrency: overrides?.concurrency || parseInt(process.env.RL_CONCURRENCY || "8", 10),
     timeout_ms: overrides?.timeout_ms || parseInt(process.env.RL_TIMEOUT_MS || "300000", 10),
     max_turns: overrides?.max_turns || parseInt(process.env.RL_MAX_TURNS || "5", 10),
+    group_size: overrides?.group_size || parseInt(process.env.RL_GROUP_SIZE || "4", 10),
   };
 }
