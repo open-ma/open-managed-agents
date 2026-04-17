@@ -380,6 +380,59 @@ describe("Built-in tool execution", () => {
     expect((result as any).source.data).toBe(fakeBase64);
   });
 
+  it("read tool returns document content block for .pdf", async () => {
+    const fakePdfB64 = "JVBERi0xLjQK";
+    const sandbox: any = {
+      exec: async () => `exit=0\n${fakePdfB64}`,
+      readFile: async () => "should-not-be-called",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/report.pdf" },
+      TOOL_EXEC_OPTS,
+    );
+    expect((result as any).type).toBe("document");
+    expect((result as any).source.media_type).toBe("application/pdf");
+    expect((result as any).source.data).toBe(fakePdfB64);
+  });
+
+  it("read tool case-insensitive extension (.PNG → image)", async () => {
+    const sandbox: any = {
+      exec: async () => `exit=0\nabc`,
+      readFile: async () => "should-not-be-called",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/SCREENSHOT.PNG" },
+      TOOL_EXEC_OPTS,
+    );
+    expect((result as any).type).toBe("image");
+    expect((result as any).source.media_type).toBe("image/png");
+  });
+
+  it("read tool toModelOutput converts document to file-data", async () => {
+    const sandbox: any = {
+      exec: async () => `exit=0\nXYZ`,
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/x.pdf" },
+      TOOL_EXEC_OPTS,
+    );
+    const modelOutput = (tools.read as any).toModelOutput({
+      toolCallId: "tu1",
+      input: { file_path: "/workspace/x.pdf" },
+      output: result,
+    });
+    expect(modelOutput.type).toBe("content");
+    expect(modelOutput.value[0].type).toBe("file-data");
+    expect(modelOutput.value[0].mediaType).toBe("application/pdf");
+  });
+
   it("read tool toModelOutput converts image block → AI SDK content shape", async () => {
     const fakeBase64 = "abc";
     const sandbox: any = {

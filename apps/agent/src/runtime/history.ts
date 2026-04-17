@@ -147,6 +147,9 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
             if (b.type === "image" && b.source.type === "base64") {
               return { type: "file-data" as const, data: b.source.data || "", mediaType: b.source.media_type || "image/png" };
             }
+            if (b.type === "document" && b.source.type === "base64") {
+              return { type: "file-data" as const, data: b.source.data || "", mediaType: b.source.media_type || "application/pdf" };
+            }
             return { type: "text" as const, text: JSON.stringify(b) };
           });
           output = { type: "content", value: parts };
