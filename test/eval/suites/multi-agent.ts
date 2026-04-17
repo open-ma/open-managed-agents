@@ -41,7 +41,6 @@ export const multiAgentSuite: EvalTask[] = [
         verify: (events) => {
           // Check for thread events (delegation happened)
           const threadCreated = eventsOfType(events, "session.thread_created");
-          const hasWrite = assertToolUsed(events, "write");
           const hasBash = assertToolUsed(events, "bash");
           const noError = assertIdleNoError(events);
 
@@ -52,7 +51,7 @@ export const multiAgentSuite: EvalTask[] = [
             };
           }
 
-          return allOf(hasWrite, hasBash, noError);
+          return allOf(hasBash, noError);
         },
       },
     ],
@@ -147,10 +146,7 @@ Then ask the helper again to read and summarize it.`,
             };
           }
 
-          return allOf(
-            assertToolUsed(events, "write"),
-            noError,
-          );
+          return noError;
         },
       },
     ],

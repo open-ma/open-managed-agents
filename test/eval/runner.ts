@@ -6,6 +6,7 @@ import type {
   VerifyResult,
   SSEEvent,
 } from "./types.js";
+import type { Trajectory, StoredEvent } from "@open-managed-agents/shared";
 import { DEFAULT_MODEL, DEFAULT_TIMEOUT } from "./types.js";
 import {
   createAgent,
@@ -141,7 +142,7 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       }
     }
 
-    // Layer 2: judge evaluation (if rubric defined)
+    // Layer 2: judge evaluation (if rubric defined) — legacy path
     if (task.outcome && allEvents.length > 0) {
       log(task.id, "Running Layer 2 judge...");
       const verdict = await judge(allEvents, task.outcome.rubric);
@@ -160,6 +161,30 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
           durationMs: Date.now() - start,
           turnResults,
           error: verdict.reasoning,
+        };
+      }
+    }
+
+    // Phase 2: Scorer evaluation (new — runs against synthesized Trajectory)
+    if (task.scorer) {
+      log(task.id, "Running scorer...");
+      const traj = synthesizeTrajectory(task.id, allEvents);
+      const score = await task.scorer(traj);
+      log(task.id, `Scorer: ${score.pass ? "PASS" : "FAIL"} — ${score.reason}`);
+      const scoreResult: VerifyResult = score.pass
+        ? { status: "pass", message: `Scorer: ${score.reason}` }
+        : { status: "fail", message: `Scorer: ${score.reason}` };
+      turnResults.push(scoreResult);
+      if (!score.pass) {
+        return {
+          taskId: task.id,
+          category: task.category,
+          difficulty: task.difficulty,
+          status: "fail",
+          message: `Scorer failed: ${score.reason}`,
+          durationMs: Date.now() - start,
+          turnResults,
+          error: score.reason,
         };
       }
     }
@@ -265,6 +290,50 @@ function printReport(report: EvalReport): void {
 
 function log(taskId: string, msg: string): void {
   console.log(`    [${taskId}] ${msg}`);
+}
+
+// ---- Trajectory synthesis (for in-process scorer) ----
+//
+// The runner today returns SSEEvent[] from sendAndWait. New scorers consume a
+// full Trajectory envelope. We synthesize a minimal Trajectory from events so
+// scorers can be developed/used immediately, before the eval CLI is rewritten
+// to fetch the canonical /v1/sessions/:id/trajectory endpoint (Phase 1d).
+
+function synthesizeTrajectory(taskId: string, events: SSEEvent[]): Trajectory {
+  const stored: StoredEvent[] = events.map((e, i) => ({
+    seq: ((e as { _seq?: number })._seq as number) || i + 1,
+    type: e.type,
+    data: JSON.stringify(e),
+    ts: (e as { ts?: string }).ts || new Date().toISOString(),
+  }));
+  let numTurns = 0;
+  let numToolCalls = 0;
+  let numToolErrors = 0;
+  for (const e of events) {
+    if (e.type === "agent.message") numTurns++;
+    if (e.type === "agent.tool_use" || e.type === "agent.custom_tool_use" || e.type === "agent.mcp_tool_use") numToolCalls++;
+    if ((e.type === "agent.tool_result" || e.type === "agent.mcp_tool_result") && (e as { is_error?: boolean }).is_error) numToolErrors++;
+  }
+  return {
+    schema_version: "oma.trajectory.v1",
+    trajectory_id: `tr-synth-${taskId}-${Date.now()}`,
+    session_id: `synth-${taskId}`,
+    agent_config: {} as never,
+    environment_config: {} as never,
+    model: { id: "synthetic", provider: "" },
+    started_at: new Date().toISOString(),
+    outcome: events.some((e) => e.type === "session.error") ? "failure" : "success",
+    events: stored,
+    summary: {
+      num_events: stored.length,
+      num_turns: numTurns,
+      num_tool_calls: numToolCalls,
+      num_tool_errors: numToolErrors,
+      num_threads: 0,
+      duration_ms: 0,
+      token_usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
+    },
+  };
 }
 
 // ---- Main ----

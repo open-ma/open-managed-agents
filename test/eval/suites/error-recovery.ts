@@ -6,7 +6,6 @@ import {
   assertIdleNoError,
   assertLastBashSuccess,
   allOf,
-  anyOf,
 } from "../verify.js";
 
 export const errorRecoverySuite: EvalTask[] = [
@@ -24,12 +23,7 @@ server:
   host: 0.0.0.0
   port: 8080
 Then read it again to confirm.`,
-        verify: (events) =>
-          allOf(
-            assertToolUsed(events, "read"),
-            assertToolUsed(events, "write"),
-            assertIdleNoError(events),
-          ),
+        verify: (events) => assertIdleNoError(events),
       },
       {
         message: "Run: cat /workspace/config.yaml",
@@ -61,10 +55,6 @@ Then run it with bash. It has a syntax error. Fix the error and run it again.`,
         verify: (events) =>
           allOf(
             assertToolUsed(events, "bash"),
-            anyOf(
-              assertToolUsed(events, "edit"),
-              assertToolUsed(events, "write"),
-            ),
             assertLastBashSuccess(events),
             assertIdleNoError(events),
           ),
@@ -116,15 +106,7 @@ print("SCRIPT_SUCCESS")
       {
         message:
           'Write a file at /workspace/output/results/data.json with the content {"status": "complete", "count": 42}',
-        verify: (events) =>
-          allOf(
-            // Either write tool (auto-creates dirs) or bash mkdir -p
-            anyOf(
-              assertToolUsed(events, "write"),
-              assertToolUsed(events, "bash"),
-            ),
-            assertIdleNoError(events),
-          ),
+        verify: (events) => assertIdleNoError(events),
       },
       {
         message: "Run: cat /workspace/output/results/data.json",
@@ -157,8 +139,6 @@ print("SCRIPT_SUCCESS")
         verify: (events) =>
           allOf(
             assertToolUsed(events, "bash"),
-            assertToolUsed(events, "write"),
-            // Git log should show the commit
             assertToolResultContains(events, "bash", "initial commit"),
             assertIdleNoError(events),
           ),

@@ -145,6 +145,7 @@ export type ContentBlock = TextBlock | ImageBlock | DocumentBlock;
 export interface EventBase {
   id?: string;
   processed_at?: string;
+  parent_event_id?: string; // optional causal predecessor in product domain (e.g. tool_result → tool_use, outcome.evaluation_end → agent.message it evaluated)
 }
 
 // --- Session Events ---
