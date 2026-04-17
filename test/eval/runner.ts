@@ -15,6 +15,7 @@ import {
   getOrCreateEnvironment,
   sendAndWait,
   setupFiles,
+  judge,
 } from "./client.js";
 
 // ---- Import suites ----
@@ -140,12 +141,35 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       }
     }
 
+    // Layer 2: judge evaluation (if rubric defined)
+    if (task.outcome && allEvents.length > 0) {
+      log(task.id, "Running Layer 2 judge...");
+      const verdict = await judge(allEvents, task.outcome.rubric);
+      log(task.id, `Judge: ${verdict.result} — ${verdict.reasoning}`);
+      const judgeResult: VerifyResult = verdict.result === "pass"
+        ? { status: "pass", message: `Judge: ${verdict.reasoning}` }
+        : { status: "fail", message: `Judge: ${verdict.reasoning}` };
+      turnResults.push(judgeResult);
+      if (judgeResult.status === "fail") {
+        return {
+          taskId: task.id,
+          category: task.category,
+          difficulty: task.difficulty,
+          status: "fail",
+          message: `Judge failed: ${verdict.reasoning}`,
+          durationMs: Date.now() - start,
+          turnResults,
+          error: verdict.reasoning,
+        };
+      }
+    }
+
     return {
       taskId: task.id,
       category: task.category,
       difficulty: task.difficulty,
       status: "pass",
-      message: "All turns passed",
+      message: task.outcome ? "All turns + outcome passed" : "All turns passed",
       durationMs: Date.now() - start,
       turnResults,
     };

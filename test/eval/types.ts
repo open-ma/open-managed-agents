@@ -69,6 +69,12 @@ export interface EvalTask {
 
   // Per-turn timeout (default 300_000 ms = 5 min)
   timeoutMs?: number;
+
+  // Layer 2: outcome evaluation (optional, runs after all turns pass)
+  outcome?: {
+    description: string;
+    rubric: string;
+  };
 }
 
 export interface EvalTaskResult {
