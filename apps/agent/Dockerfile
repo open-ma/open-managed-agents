@@ -1,23 +1,18 @@
 # OMA Default Sandbox Base Image
-# Based on cloudflare/sandbox (has correct entrypoint + port setup)
-# Adds: Python 3.12, Node.js 20, Go, Rust, common dev tools
-#
-# Build & push:
-#   docker build -t openma/sandbox-base:latest apps/agent/
-#   docker push openma/sandbox-base:latest
+# Based on cloudflare/sandbox:0.8.11 which already has: Node.js 20, npm, git, jq, curl
+# We add: Python 3.12, Go, Rust, build tools, ripgrep
 
 FROM docker.io/cloudflare/sandbox:0.8.11
 
 ENV DEBIAN_FRONTEND=noninteractive
 
-# System tools (retry apt if mirror is syncing)
-RUN apt-get update || (sleep 30 && apt-get update) && \
-    apt-get install -y --no-install-recommends \
-    build-essential gcc g++ make cmake \
-    git curl wget jq tree htop procps less file \
-    vim nano tmux screen \
-    zip unzip xz-utils \
-    sqlite3 libsqlite3-dev \
+# Only install what's missing from the base image
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential make cmake \
+    vim nano tmux \
+    tree htop less file \
+    zip unzip \
+    sqlite3 \
     && rm -rf /var/lib/apt/lists/*
 
 # ripgrep — pre-built binary
@@ -41,16 +36,10 @@ RUN uv pip install --no-cache \
     pandas numpy \
     pytest black ruff mypy
 
-# Node.js 20
-RUN curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y --no-install-recommends nodejs && \
-    npm install -g yarn pnpm && \
-    rm -rf /var/lib/apt/lists/*
-
 # Go 1.22
 RUN curl -fsSL https://go.dev/dl/go1.22.5.linux-$(dpkg --print-architecture).tar.gz | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
-# Rust (minimal profile)
+# Rust (minimal)
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
