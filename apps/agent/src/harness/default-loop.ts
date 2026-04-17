@@ -43,6 +43,9 @@ async function withRetry<T>(
       // Don't retry on non-transient errors
       const msg = describeError(err);
       const isTransient = /timeout|abort|429|529|5\d\d|ECONNRESET|overloaded|rate.limit|fetch failed/i.test(msg);
+
+      console.log(`[retry] attempt ${attempt + 1}/${maxRetries + 1} failed: ${msg.slice(0, 150)} transient=${isTransient}`);
+
       if (!isTransient) throw err;
 
       // Don't retry on last attempt
@@ -50,6 +53,7 @@ async function withRetry<T>(
 
       // Exponential backoff with jitter, capped at 30s
       const delay = Math.min(30000, BASE_RETRY_DELAY * Math.pow(2, attempt)) * (0.75 + Math.random() * 0.5);
+      console.log(`[retry] waiting ${Math.round(delay)}ms before attempt ${attempt + 2}`);
       await new Promise(r => setTimeout(r, delay));
     }
   }
