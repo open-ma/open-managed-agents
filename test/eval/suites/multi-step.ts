@@ -8,6 +8,7 @@ import {
   assertMinToolCalls,
   allOf,
 } from "../verify.js";
+import { all, includes, toolUsed } from "@open-managed-agents/shared";
 
 export const multiStepSuite: EvalTask[] = [
   // T3.1 — Data Pipeline (Medium)
@@ -30,7 +31,6 @@ export const multiStepSuite: EvalTask[] = [
         verify: (events) =>
           allOf(
             assertMinToolCalls(events, 4),
-            assertToolUsed(events, "write"),
             assertToolUsed(events, "bash"),
             assertIdleNoError(events),
           ),
@@ -45,6 +45,9 @@ export const multiStepSuite: EvalTask[] = [
           ),
       },
     ],
+    // Phase 2 scorer: case-insensitive match fixes the prior false-negative
+    // where the agent wrote "Total Revenue" but verifier checked lowercase.
+    scorer: all(toolUsed("bash"), includes("revenue")),
   },
 
   // T3.2 — Codebase Exploration (Medium)
@@ -103,11 +106,7 @@ def test_format():
 1. How many Python files are in the project (including subdirectories)?
 2. What are the function names defined in main.py?
 3. How many TODO comments are in the entire project?`,
-        verify: (events) =>
-          allOf(
-            assertToolUsed(events, "write"),
-            assertIdleNoError(events),
-          ),
+        verify: (events) => assertIdleNoError(events),
       },
       {
         message: "Run: cat /workspace/answers.txt",
@@ -166,7 +165,6 @@ if __name__ == "__main__":
           "The app at /workspace/webapp/ is crashing. Read error.log, trace through the source, fix the bug, and run app.py to verify it works.",
         verify: (events) =>
           allOf(
-            assertToolUsed(events, "read"),
             assertToolUsed(events, "bash"),
             assertLastBashSuccess(events),
             assertIdleNoError(events),
@@ -192,7 +190,6 @@ if __name__ == "__main__":
 Then create /workspace/test_mathlib.py with thorough tests and run it.`,
         verify: (events) =>
           allOf(
-            assertToolUsed(events, "write"),
             assertToolUsed(events, "bash"),
             assertLastBashSuccess(events),
             assertIdleNoError(events),

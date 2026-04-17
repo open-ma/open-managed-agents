@@ -12,30 +12,60 @@ const headers: Record<string, string> = {
 
 // ---- HTTP helpers ----
 
+const API_MAX_RETRIES = 10;
+const API_BASE_DELAY = 2000;
+
+function isTransientApiError(err: any, status?: number): boolean {
+  if (status !== undefined) {
+    return status === 429 || status === 529 || (status >= 500 && status < 600);
+  }
+  const msg = (err?.message || String(err) || "").toLowerCase();
+  return /timeout|abort|econnreset|fetch failed|network|socket hang up/.test(msg);
+}
+
 async function api(path: string, init?: RequestInit): Promise<Response> {
   const url = `${API_URL}${path}`;
-  const controller = new AbortController();
-  const timeoutMs = init?.method === "POST" ? 120_000 : 30_000; // POST needs more time (container cold start)
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const res = await fetch(url, {
-      ...init,
-      headers: { ...headers, ...init?.headers },
-      signal: controller.signal,
-    });
-    if (!res.ok && res.status !== 409) {
-      const body = await res.text().catch(() => "");
-      throw new Error(`API ${init?.method || "GET"} ${path} → ${res.status}: ${body.slice(0, 500)}`);
+  const method = init?.method || "GET";
+  const timeoutMs = method === "POST" ? 120_000 : 30_000;
+  let lastErr: any;
+
+  for (let attempt = 0; attempt <= API_MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(url, {
+        ...init,
+        headers: { ...headers, ...init?.headers },
+        signal: controller.signal,
+      });
+      clearTimeout(timeout);
+      if (!res.ok && res.status !== 409) {
+        const body = await res.text().catch(() => "");
+        const err = new Error(`API ${method} ${path} → ${res.status}: ${body.slice(0, 500)}`) as Error & { status?: number };
+        err.status = res.status;
+        if (isTransientApiError(err, res.status) && attempt < API_MAX_RETRIES) {
+          lastErr = err;
+        } else {
+          throw err;
+        }
+      } else {
+        return res;
+      }
+    } catch (err: any) {
+      clearTimeout(timeout);
+      const isTimeout = err.name === "AbortError";
+      const wrapped = isTimeout
+        ? new Error(`API ${method} ${path} → timeout (${timeoutMs}ms)`)
+        : err;
+      if (!isTransientApiError(wrapped, (err as any).status) || attempt >= API_MAX_RETRIES) throw wrapped;
+      lastErr = wrapped;
     }
-    return res;
-  } catch (err: any) {
-    if (err.name === "AbortError") {
-      throw new Error(`API ${init?.method || "GET"} ${path} → timeout (30s)`);
-    }
-    throw err;
-  } finally {
-    clearTimeout(timeout);
+
+    const delay = Math.min(30_000, API_BASE_DELAY * Math.pow(2, attempt) * (0.75 + Math.random() * 0.5));
+    console.log(`    [api:retry] ${method} ${path} attempt ${attempt + 1}/${API_MAX_RETRIES + 1} failed: ${(lastErr?.message || "").slice(0, 150)}; waiting ${Math.round(delay)}ms`);
+    await new Promise(r => setTimeout(r, delay));
   }
+  throw lastErr;
 }
 
 async function post(path: string, body: unknown): Promise<any> {
@@ -324,6 +354,62 @@ export async function cleanup(handle: CleanupHandle): Promise<void> {
 const JUDGE_API_URL = process.env.OMA_JUDGE_API_URL || "https://api.example.com/anthropic/v1";
 const JUDGE_API_KEY = process.env.OMA_JUDGE_API_KEY || process.env.OMA_API_KEY || "";
 const JUDGE_MODEL = process.env.OMA_JUDGE_MODEL || "MiniMax-M2.7";
+const JUDGE_MAX_RETRIES = 10;
+const JUDGE_BASE_DELAY = 2000;
+const JUDGE_TIMEOUT_MS = 60_000;
+
+/** Wrapped fetch + parse with retry. Returns null only after all attempts exhausted. */
+async function callJudgeWithRetry(prompt: string): Promise<string | null> {
+  let lastErr = "";
+  for (let attempt = 0; attempt <= JUDGE_MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), JUDGE_TIMEOUT_MS);
+    try {
+      const res = await fetch(`${JUDGE_API_URL}/messages`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "x-api-key": JUDGE_API_KEY,
+          "anthropic-version": "2023-06-01",
+        },
+        body: JSON.stringify({
+          model: JUDGE_MODEL,
+          messages: [{ role: "user", content: prompt }],
+        }),
+        signal: controller.signal,
+      });
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        lastErr = `HTTP ${res.status}: ${body.slice(0, 200)}`;
+        const transient = res.status === 429 || res.status === 529 || (res.status >= 500 && res.status < 600);
+        if (!transient) return null;
+      } else {
+        const data = (await res.json()) as any;
+        // Thinking models return [{thinking}, {text}] — must filter to text blocks
+        const blocks = Array.isArray(data?.content) ? data.content : [];
+        const text = blocks
+          .filter((b: any) => b?.type === "text")
+          .map((b: any) => b?.text || "")
+          .join("")
+          .trim();
+        if (text) return text;
+        lastErr = `empty response body (model=${data?.model || "?"} stop=${data?.stop_reason || "?"} blocks=${blocks.map((b: any) => b?.type).join(",") || "[]"})`;
+      }
+    } catch (err: any) {
+      clearTimeout(timer);
+      lastErr = err?.name === "AbortError" ? `timeout (${JUDGE_TIMEOUT_MS}ms)` : (err?.message || String(err));
+    }
+
+    if (attempt >= JUDGE_MAX_RETRIES) break;
+    const delay = Math.min(30_000, JUDGE_BASE_DELAY * Math.pow(2, attempt) * (0.75 + Math.random() * 0.5));
+    console.log(`    [judge:retry] attempt ${attempt + 1}/${JUDGE_MAX_RETRIES + 1} failed: ${lastErr.slice(0, 150)}; waiting ${Math.round(delay)}ms`);
+    await new Promise(r => setTimeout(r, delay));
+  }
+  console.log(`    [judge:retry] exhausted ${JUDGE_MAX_RETRIES + 1} attempts: ${lastErr.slice(0, 200)}`);
+  return null;
+}
 
 export async function judge(
   events: SSEEvent[],
@@ -369,30 +455,34 @@ or
 {"result": "fail", "reasoning": "..."}`;
 
   try {
-    const res = await fetch(`${JUDGE_API_URL}/messages`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": JUDGE_API_KEY,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: JUDGE_MODEL,
-        max_tokens: 300,
-        messages: [{ role: "user", content: prompt }],
-      }),
-    });
-    const data = (await res.json()) as any;
-    const text = data.content?.[0]?.text || "";
-    const match = text.match(/\{[\s\S]*?\}/);
-    if (match) {
-      const parsed = JSON.parse(match[0]);
-      return {
-        result: parsed.result === "pass" ? "pass" : "fail",
-        reasoning: parsed.reasoning || "",
-      };
+    const text = await callJudgeWithRetry(prompt);
+    if (text === null) {
+      return { result: "fail", reasoning: "Judge call failed after retries" };
     }
-    return { result: "fail", reasoning: `Could not parse judge response: ${text.slice(0, 200)}` };
+    // Retry on parse failure too — LLM sometimes wraps JSON in prose
+    let parseAttempts = 3;
+    let lastText = text;
+    while (parseAttempts > 0) {
+      const match = lastText.match(/\{[\s\S]*?\}/);
+      if (match) {
+        try {
+          const parsed = JSON.parse(match[0]);
+          return {
+            result: parsed.result === "pass" ? "pass" : "fail",
+            reasoning: parsed.reasoning || "",
+          };
+        } catch {
+          // fall through to retry
+        }
+      }
+      parseAttempts--;
+      if (parseAttempts === 0) break;
+      console.log(`    [judge:parse-retry] response not parseable, re-asking (${parseAttempts} parse attempts left)`);
+      const retryText = await callJudgeWithRetry(prompt + "\n\nIMPORTANT: respond with ONLY valid JSON, no prose.");
+      if (retryText === null) break;
+      lastText = retryText;
+    }
+    return { result: "fail", reasoning: `Could not parse judge response after retries: ${lastText.slice(0, 200)}` };
   } catch (err: any) {
     return { result: "fail", reasoning: `Judge call failed: ${err.message?.slice(0, 100)}` };
   }

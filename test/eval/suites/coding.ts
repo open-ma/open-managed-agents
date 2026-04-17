@@ -6,10 +6,9 @@ import {
   assertIdleNoError,
   assertLastBashSuccess,
   assertMinToolCalls,
-  assertFileWritten,
   allOf,
-  anyOf,
 } from "../verify.js";
+import { all, bashOutputMarker, idleNoError, toolUsed } from "@open-managed-agents/shared";
 
 // Production-grade coding eval tasks based on real-world agent use cases
 // References: Anthropic "Demystifying Evals for AI Agents", SWE-bench patterns
@@ -76,6 +75,11 @@ Run the test. It will fail on edge cases. Fix auth.py to handle empty/None passw
       description: "The agent should fix the authentication bypass vulnerability where empty/None passwords are accepted",
       rubric: "1. The divide function raises ValueError on zero division\n2. Empty string passwords are rejected\n3. None passwords are handled without crashing\n4. The fix is minimal — only the necessary validation was added\n5. All tests pass",
     },
+    // Phase 2 scorer: replaces the legacy outcome judge with a deterministic
+    // marker check (the test harness prints ALL_SECURITY_TESTS_PASSED on
+    // success, so an LLM judge is overkill — and was the source of the T2.1
+    // thinking-model bug in the prior run).
+    scorer: all(toolUsed("bash"), bashOutputMarker("ALL_SECURITY_TESTS_PASSED"), idleNoError()),
   },
 
   // ---- Build a CLI tool from spec with argument parsing ----

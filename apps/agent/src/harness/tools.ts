@@ -50,8 +50,22 @@ async function pollWithStrategies(
         } catch {}
         // Register watcher for completion notification
         env?.watchBackgroundTask?.(taskId, String(proc.pid), outFile, proc);
+        const seconds = Math.round(timeoutMs / 1000);
         resolve(truncateResult(
-          `exit=0\nCommand auto-backgrounded after ${Math.round(timeoutMs / 1000)}s (pid: ${proc.pid})\nPartial output: ${outFile}`.trim()
+          [
+            `Command exceeded the ${seconds}s timeout and was moved to the background.`,
+            `  task_id: ${taskId}`,
+            `  pid: ${proc.pid}`,
+            `  output_path: ${outFile}`,
+            ``,
+            `Next steps:`,
+            `  - Check progress: read(file_path="${outFile}")`,
+            `  - Wait longer next time: re-invoke bash with timeout=<ms, max ${MAX_BASH_TIMEOUT}>`,
+            `  - Stop it: bash(command="kill ${proc.pid}")`,
+            ``,
+            `Partial output so far:`,
+            partial || "(no output yet)",
+          ].join("\n").trim()
         ));
       } else {
         // Strategy 3: kill — SIGTERM
@@ -295,7 +309,16 @@ export async function buildTools(
             const proc = await sandbox.startProcess(`bash -c '(${command.replace(/'/g, "'\\''")}) > ${outFile} 2>&1'`);
             if (proc) {
               env?.watchBackgroundTask?.(taskId, String(proc.pid), outFile, proc);
-              return `Background task started (pid: ${proc.pid})\nOutput: ${outFile}`;
+              return [
+                `Background task started.`,
+                `  task_id: ${taskId}`,
+                `  pid: ${proc.pid}`,
+                `  output_path: ${outFile}`,
+                ``,
+                `Next steps:`,
+                `  - Check progress: read(file_path="${outFile}")`,
+                `  - Stop it: bash(command="kill ${proc.pid}")`,
+              ].join("\n");
             }
           }
 
@@ -305,7 +328,16 @@ export async function buildTools(
           const pidMatch = result.match(/pid=(\d+)/);
           const pid = pidMatch ? pidMatch[1] : "unknown";
           env?.watchBackgroundTask?.(taskId, pid, outFile, null);
-          return `Background task started (pid: ${pid})\nOutput: ${outFile}`;
+          return [
+            `Background task started.`,
+            `  task_id: ${taskId}`,
+            `  pid: ${pid}`,
+            `  output_path: ${outFile}`,
+            ``,
+            `Next steps:`,
+            `  - Check progress: read(file_path="${outFile}")`,
+            `  - Stop it: bash(command="kill ${pid}")`,
+          ].join("\n");
         }
 
         // If startProcess available, use it for strategies 2/3

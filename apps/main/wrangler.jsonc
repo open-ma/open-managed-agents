@@ -56,5 +56,9 @@
   ],
 
   "limits": { "cpu_ms": 300000 },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+
+  "triggers": {
+    "crons": ["* * * * *"]
+  }
 }
