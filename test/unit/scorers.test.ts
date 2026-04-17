@@ -12,6 +12,7 @@ import {
   fileWritten,
   idleNoError,
   agentMessageContains,
+  threadCreated,
   all,
   any,
   weighted,
@@ -252,6 +253,33 @@ describe("agentMessageContains", () => {
       ev(1, "agent.message", { content: [{ type: "text", text: "Done!" }] }),
     ]);
     expect((await agentMessageContains("done")(t)).pass).toBe(true);
+  });
+});
+
+// ---------- threadCreated ----------
+
+describe("threadCreated", () => {
+  it("passes when minimum threads created", async () => {
+    const t = trajectory([
+      ev(1, "session.thread_created", { session_thread_id: "thr-1" }),
+      ev(2, "session.thread_created", { session_thread_id: "thr-2" }),
+    ]);
+    expect((await threadCreated(2)(t)).pass).toBe(true);
+  });
+
+  it("fails when below threshold", async () => {
+    const t = trajectory([ev(1, "session.thread_created", { session_thread_id: "thr-1" })]);
+    expect((await threadCreated(2)(t)).pass).toBe(false);
+  });
+
+  it("default threshold is 1", async () => {
+    const t = trajectory([ev(1, "session.thread_created", {})]);
+    expect((await threadCreated()(t)).pass).toBe(true);
+  });
+
+  it("fails when no threads", async () => {
+    const t = trajectory([ev(1, "agent.message", { content: [] })]);
+    expect((await threadCreated()(t)).pass).toBe(false);
   });
 });
 
