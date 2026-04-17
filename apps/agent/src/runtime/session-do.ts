@@ -277,14 +277,16 @@ export class SessionDO extends Agent<Env, SessionState> {
         history.append(body);
         this.broadcastEvent(body);
         // Schedule alarm as crash recovery backup, then kick off harness
-        // in the background. The DO stays alive as long as the drain
-        // promise has pending I/O — no need to await before responding.
+        // in the background via ctx.waitUntil — this keeps the DO alive
+        // after the HTTP response is sent.
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        this.drainEventQueue().catch((err) => {
-          console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
-        });
+        this.ctx.waitUntil(
+          this.drainEventQueue().catch((err) => {
+            console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
+          })
+        );
         return new Response(null, { status: 202 });
       }
 
@@ -308,9 +310,11 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        this.drainEventQueue().catch((err) => {
-          console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
-        });
+        this.ctx.waitUntil(
+          this.drainEventQueue().catch((err) => {
+            console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
+          })
+        );
         return new Response(null, { status: 202 });
       }
 
@@ -321,9 +325,11 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        this.drainEventQueue().catch((err) => {
-          console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
-        });
+        this.ctx.waitUntil(
+          this.drainEventQueue().catch((err) => {
+            console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
+          })
+        );
         return new Response(null, { status: 202 });
       }
 
