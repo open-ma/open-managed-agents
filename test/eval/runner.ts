@@ -28,6 +28,7 @@ import { codingSuite } from "./suites/coding.js";
 import { multiStepSuite } from "./suites/multi-step.js";
 import { errorRecoverySuite } from "./suites/error-recovery.js";
 import { multiAgentSuite } from "./suites/multi-agent.js";
+import { multimodalSuite } from "./suites/multimodal.js";
 
 const ALL_SUITES: Record<string, EvalTask[]> = {
   "tool-use": toolUseSuite,
@@ -35,6 +36,7 @@ const ALL_SUITES: Record<string, EvalTask[]> = {
   "multi-step": multiStepSuite,
   "error-recovery": errorRecoverySuite,
   "multi-agent": multiAgentSuite,
+  multimodal: multimodalSuite,
 };
 
 // ---- CLI arg parsing ----
