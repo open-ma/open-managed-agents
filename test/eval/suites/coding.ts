@@ -72,6 +72,10 @@ Run the test. It will fail on edge cases. Fix auth.py to handle empty/None passw
           ),
       },
     ],
+    outcome: {
+      description: "The agent should fix the authentication bypass vulnerability where empty/None passwords are accepted",
+      rubric: "1. The divide function raises ValueError on zero division\n2. Empty string passwords are rejected\n3. None passwords are handled without crashing\n4. The fix is minimal — only the necessary validation was added\n5. All tests pass",
+    },
   },
 
   // ---- Build a CLI tool from spec with argument parsing ----
