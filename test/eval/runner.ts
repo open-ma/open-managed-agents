@@ -121,7 +121,12 @@ async function runOneTrial(task: EvalTask, trialIndex: number): Promise<EvalTria
       turnResults.push(result);
       log(task.id, `${trialLabel} Turn ${i + 1} → ${result.status}: ${result.message}`);
 
-      if (result.status === "fail") {
+      // When task.scorer is defined, the scorer is the authoritative judge.
+      // Legacy turn-level verify is kept advisory (we still log failures) but
+      // does NOT short-circuit. Without this, brittle legacy verify (e.g.
+      // case-sensitive substring match) prevents the scorer (case-insensitive)
+      // from ever being asked.
+      if (result.status === "fail" && !task.scorer) {
         return {
           trialIndex,
           status: "fail",
@@ -147,11 +152,11 @@ async function runOneTrial(task: EvalTask, trialIndex: number): Promise<EvalTria
       }
     }
 
-    // Final verification (legacy)
+    // Final verification (legacy) — also advisory when scorer present
     if (task.finalVerify) {
       const finalResult = task.finalVerify(allEvents);
       turnResults.push(finalResult);
-      if (finalResult.status === "fail") {
+      if (finalResult.status === "fail" && !task.scorer) {
         return {
           trialIndex,
           status: "fail",

@@ -144,6 +144,11 @@ function truncateResult(result: string): string {
   return result;
 }
 
+/** Shell-quote an argument safely (POSIX single-quote escaping). */
+function shellQuote(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
+}
+
 /**
  * Convert a JSON Schema properties object to a Zod schema.
  * Supports basic types: string, number, integer, boolean, object, array, enum.
@@ -356,18 +361,36 @@ export async function buildTools(
 
   if (enabled.has("read")) {
     tools.read = tool({
-      description: "Read a file from the sandbox filesystem.",
+      description:
+        "Read a file from the sandbox filesystem. By default reads the entire file. " +
+        "Use offset (1-based line number) and limit (number of lines) to read large files in chunks.",
       inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to read, e.g. /workspace/index.html"),
+        offset: z.number().optional().describe("1-based line number to start reading from"),
+        limit: z.number().optional().describe("Number of lines to read"),
       }),
-      execute: safe(async ({ file_path }) => truncateResult(await sandbox.readFile(file_path))),
+      execute: safe(async ({ file_path, offset, limit }) => {
+        const content = await sandbox.readFile(file_path);
+        if (offset === undefined && limit === undefined) {
+          return truncateResult(content);
+        }
+        const lines = content.split("\n");
+        const start = Math.max(0, (offset ?? 1) - 1);
+        const end = limit !== undefined ? start + limit : lines.length;
+        const slice = lines.slice(start, end);
+        return truncateResult(
+          slice.map((l, i) => `${start + i + 1}\t${l}`).join("\n") +
+            (end < lines.length ? `\n...(file has ${lines.length} total lines)` : ""),
+        );
+      }),
     });
   }
 
   if (enabled.has("write")) {
     tools.write = tool({
       description:
-        "Write content to a file in the sandbox. Creates parent directories automatically.",
+        "Write content to a file in the sandbox. Creates parent directories automatically. " +
+        "Overwrites the file if it already exists.",
       inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to write to, e.g. /workspace/index.html"),
         content: z.string().describe("The complete file content to write"),
@@ -379,18 +402,31 @@ export async function buildTools(
   if (enabled.has("edit")) {
     tools.edit = tool({
       description:
-        "Edit a file by replacing an exact string match. Use for surgical edits without rewriting the whole file.",
+        "Performs exact string replacements in files. " +
+        "old_string must be unique in the file unless replace_all is true. " +
+        "Use replace_all when you want to rename a variable or replace every occurrence.",
       inputSchema: z.object({
         file_path: z.string().describe("The absolute file path to edit"),
         old_string: z.string().describe("Exact string to find and replace"),
         new_string: z.string().describe("Replacement string"),
+        replace_all: z.boolean().optional().describe("Replace all occurrences (default false)"),
       }),
-      execute: safe(async ({ file_path, old_string, new_string }) => {
+      execute: safe(async ({ file_path, old_string, new_string, replace_all }) => {
         const content = await sandbox.readFile(file_path);
         if (!content.includes(old_string)) {
           return "Error: old_string not found in file";
         }
-        const updated = content.replace(old_string, new_string);
+        // Default behavior: require uniqueness (matches Anthropic Edit semantics)
+        if (!replace_all) {
+          const occurrences = content.split(old_string).length - 1;
+          if (occurrences > 1) {
+            return `Error: old_string appears ${occurrences} times in file. ` +
+              `Provide more surrounding context to make it unique, or pass replace_all=true.`;
+          }
+        }
+        const updated = replace_all
+          ? content.split(old_string).join(new_string)
+          : content.replace(old_string, new_string);
         return sandbox.writeFile(file_path, updated);
       }),
     });
@@ -399,19 +435,30 @@ export async function buildTools(
   if (enabled.has("glob")) {
     tools.glob = tool({
       description:
-        "Find files matching a glob pattern. Returns matching file paths.",
+        "Fast file pattern matching tool. Supports glob patterns like \"**/*.js\" or \"src/**/*.ts\". " +
+        "Returns matching file paths sorted by modification time (most recent first).",
       inputSchema: z.object({
         pattern: z.string().describe('Glob pattern (e.g. "**/*.ts", "src/**/*.js")'),
         path: z
           .string()
           .optional()
-          .describe("Directory to search in (default: /workspace)"),
+          .describe("Directory to search in (defaults to /workspace)"),
       }),
       execute: safe(async ({ pattern, path }) => {
         const dir = path || "/workspace";
-        return truncateResult(await sandbox.exec(
-          `bash -c 'shopt -s globstar nullglob && cd "${dir}" && printf "%s\\n" ${pattern} | head -100'`
-        ));
+        // Walk dir + match glob via bash, then sort by mtime desc, take head 250
+        const cmd =
+          `cd ${shellQuote(dir)} 2>/dev/null && ` +
+          `bash -O globstar -O nullglob -c ${shellQuote(`for f in ${pattern}; do printf '%s\\t%s\\n' "$(stat -c %Y "$f" 2>/dev/null || stat -f %m "$f" 2>/dev/null || echo 0)" "$f"; done | sort -rn | head -n 250 | cut -f2-`)}`;
+        const raw = await sandbox.exec(cmd);
+        const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+        if (!m) return raw;
+        const code = parseInt(m[1], 10);
+        const out = m[2].trimEnd();
+        if (code !== 0) return truncateResult(`Error: glob exited with code ${code}\n${out}`);
+        if (!out) return "No files matched the pattern";
+        const files = out.split("\n").filter(Boolean);
+        return truncateResult(`Found ${files.length} file${files.length === 1 ? "" : "s"}\n${files.join("\n")}`);
       }),
     });
   }
@@ -419,27 +466,114 @@ export async function buildTools(
   if (enabled.has("grep")) {
     tools.grep = tool({
       description:
-        "Search file contents using a regex pattern. Returns matching lines with file paths and line numbers.",
+        "A powerful search tool built on ripgrep (falls back to grep if rg unavailable). " +
+        "Supports full regex syntax, file type / glob filters, three output modes, multiline matching, and context lines. " +
+        "Output modes: " +
+        '"files_with_matches" (default) shows file paths; ' +
+        '"content" shows matching lines (supports -A/-B/-C context, -n line numbers, head_limit); ' +
+        '"count" shows match counts per file.',
       inputSchema: z.object({
-        pattern: z.string().describe("Regex pattern to search for"),
-        path: z
-          .string()
+        pattern: z.string().describe("The regular expression pattern to search for in file contents"),
+        path: z.string().optional().describe("File or directory to search (defaults to /workspace)"),
+        output_mode: z
+          .enum(["content", "files_with_matches", "count"])
           .optional()
-          .describe("File or directory to search (default: /workspace)"),
-        include: z
-          .string()
-          .optional()
-          .describe('File pattern to include (e.g. "*.ts")'),
+          .describe('Output mode (default: "files_with_matches")'),
+        glob: z.string().optional().describe('Glob pattern to filter files (e.g. "*.js", "*.{ts,tsx}")'),
+        type: z.string().optional().describe("File type to search (rg --type, e.g. js, py, rust)"),
+        "-i": z.boolean().optional().describe("Case insensitive search"),
+        "-n": z.boolean().optional().describe('Show line numbers (defaults true for output_mode="content")'),
+        "-A": z.number().optional().describe("Lines to show after each match (content mode)"),
+        "-B": z.number().optional().describe("Lines to show before each match (content mode)"),
+        "-C": z.number().optional().describe("Lines to show before AND after each match (content mode)"),
+        multiline: z.boolean().optional().describe("Enable multiline mode (. matches newlines, patterns can span lines)"),
+        head_limit: z.number().optional().describe("Limit output to first N lines/entries (default 250; pass 0 for unlimited)"),
       }),
-      execute: safe(async ({ pattern, path, include }) => {
-        const dir = path || "/workspace";
-        const includeFlag = include ? `--include='${include}'` : "";
-        return truncateResult(await sandbox.exec(
-          `grep -rn ${includeFlag} '${pattern.replace(/'/g, "'\\''")}' ${dir} 2>/dev/null | head -100`
-        ));
+      execute: safe(async (args) => {
+        const pattern = args.pattern;
+        const dir = args.path || "/workspace";
+        const mode = args.output_mode || "files_with_matches";
+        const headLimit = args.head_limit === 0 ? 0 : (args.head_limit ?? 250);
+        const showLineNumbers = args["-n"] !== false && mode === "content";
+
+        // Detect ripgrep availability once per session is fine; cheap probe.
+        const rgProbe = await sandbox.exec(`command -v rg >/dev/null 2>&1 && echo rg || echo grep`).catch(() => "exit=0\ngrep");
+        const useRg = /\brg\b/.test(rgProbe);
+
+        // Build flags
+        const flags: string[] = [];
+        if (useRg) {
+          if (mode === "files_with_matches") flags.push("-l");
+          else if (mode === "count") flags.push("-c");
+          else if (showLineNumbers) flags.push("-n");
+          if (args["-i"]) flags.push("-i");
+          if (args.multiline) flags.push("-U", "--multiline-dotall");
+          if (args["-A"] !== undefined) flags.push(`-A${args["-A"]}`);
+          if (args["-B"] !== undefined) flags.push(`-B${args["-B"]}`);
+          if (args["-C"] !== undefined) flags.push(`-C${args["-C"]}`);
+          if (args.glob) flags.push(`--glob=${shellQuote(args.glob)}`);
+          if (args.type) flags.push(`--type=${shellQuote(args.type)}`);
+        } else {
+          // grep fallback
+          if (mode === "files_with_matches") flags.push("-l");
+          else if (mode === "count") flags.push("-c");
+          else if (showLineNumbers) flags.push("-n");
+          if (args["-i"]) flags.push("-i");
+          if (args["-A"] !== undefined) flags.push(`-A${args["-A"]}`);
+          if (args["-B"] !== undefined) flags.push(`-B${args["-B"]}`);
+          if (args["-C"] !== undefined) flags.push(`-C${args["-C"]}`);
+          if (args.glob) flags.push(`--include=${shellQuote(args.glob)}`);
+          flags.push("-r"); // grep needs explicit recursive
+        }
+
+        const limitPipe = headLimit > 0 ? ` | head -n ${headLimit}` : "";
+        const cmd = useRg
+          ? `set -o pipefail; rg ${flags.join(" ")} ${shellQuote(pattern)} ${shellQuote(dir)}${limitPipe}`
+          : `set -o pipefail; grep ${flags.join(" ")} ${shellQuote(pattern)} ${shellQuote(dir)}${limitPipe}`;
+
+        const raw = await sandbox.exec(cmd);
+        // raw format: "exit=N\n<stdout>"
+        const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+        if (!m) return raw;
+        const code = parseInt(m[1], 10);
+        const out = m[2].trimEnd();
+
+        // Semantic translation aligned with Agent SDK Grep:
+        //   exit 0  → matches found (rg/grep convention)
+        //   exit 1  → no matches found (a normal "empty" result, NOT an error)
+        //   exit 2+ → error (file not found, bad regex, IO)
+        // SIGPIPE from `head` cutting off rg/grep early shows up as 141 — treat as success.
+        if (code === 0 || code === 141) {
+          if (!out) {
+            // exit 0 with empty body is rare but possible (binary files, --quiet etc.)
+            return mode === "count" ? "0\n" : "(matches found, but result body is empty)";
+          }
+          if (mode === "files_with_matches") {
+            const files = out.split("\n").filter(Boolean);
+            return truncateResult(`Found ${files.length} file${files.length === 1 ? "" : "s"}\n${files.join("\n")}`);
+          }
+          if (mode === "count") {
+            // rg -c / grep -c output is "path:N" per file; sum total
+            const lines = out.split("\n").filter(Boolean);
+            let total = 0;
+            for (const line of lines) {
+              const cm = line.match(/:(\d+)$/);
+              if (cm) total += parseInt(cm[1], 10);
+            }
+            return truncateResult(`${out}\n\nFound ${total} total occurrences across ${lines.length} file${lines.length === 1 ? "" : "s"}.`);
+          }
+          // content mode
+          return truncateResult(out);
+        }
+        if (code === 1) {
+          return "No matches found";
+        }
+        // Real error
+        return truncateResult(`Error: grep exited with code ${code}\n${out}`);
       }),
     });
   }
+
 
   if (enabled.has("web_fetch")) {
     tools.web_fetch = tool({
