@@ -1,5 +1,5 @@
 // ---- Eval Framework Types ----
-import type { Scorer } from "@open-managed-agents/shared";
+import type { Scorer } from "../../packages/shared/src/index.js";
 
 export type Difficulty = "easy" | "medium" | "hard";
 export type Category = "tool-use" | "coding" | "multi-step" | "error-recovery" | "multi-agent";
