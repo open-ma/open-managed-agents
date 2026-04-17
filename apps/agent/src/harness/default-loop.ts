@@ -217,21 +217,38 @@ export class DefaultHarness implements HarnessInterface {
           );
           if (tr) {
             const trOutput = tr.output ?? tr.result;
+            // Multimodal pass-through: if a tool returned a single ContentBlock
+            // (e.g. Read tool returning an image), wrap it in an array so the
+            // event content is ContentBlock[] rather than JSON-stringified.
+            const isContentBlock =
+              trOutput && typeof trOutput === "object" && "type" in trOutput &&
+              ((trOutput.type === "image" && "source" in trOutput) ||
+               (trOutput.type === "text" && "text" in trOutput) ||
+               (trOutput.type === "document" && "source" in trOutput));
+            const isContentBlockArray =
+              Array.isArray(trOutput) && trOutput.every(
+                (b) => b && typeof b === "object" && "type" in b,
+              );
+            const eventContent = isContentBlock
+              ? [trOutput]
+              : isContentBlockArray
+                ? trOutput
+                : typeof trOutput === "string"
+                  ? trOutput
+                  : JSON.stringify(trOutput);
+
             if (isMcpTool(call.toolName)) {
               const mcpResultEvent: SessionEvent = {
                 type: "agent.mcp_tool_result",
                 mcp_tool_use_id: call.toolCallId,
-                content: typeof trOutput === "string" ? trOutput : JSON.stringify(trOutput),
+                content: typeof eventContent === "string" ? eventContent : JSON.stringify(eventContent),
               };
               runtime.broadcast(mcpResultEvent);
             } else {
               const toolResultEvent: SessionEvent = {
                 type: "agent.tool_result",
                 tool_use_id: call.toolCallId,
-                content:
-                  typeof trOutput === "string"
-                    ? trOutput
-                    : JSON.stringify(trOutput),
+                content: eventContent,
               };
               runtime.broadcast(toolResultEvent);
             }

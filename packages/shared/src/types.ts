@@ -200,7 +200,11 @@ export interface AgentToolUseEvent extends EventBase {
 export interface AgentToolResultEvent extends EventBase {
   type: "agent.tool_result";
   tool_use_id: string;
-  content: string;
+  // string for text/JSON results; ContentBlock[] for multimodal results
+  // (e.g. Read tool returning an image). When ContentBlock[] is used,
+  // downstream consumers (UI, scorers, projections) should extract a
+  // text representation if they only need text.
+  content: string | ContentBlock[];
 }
 
 export interface SessionRunningEvent extends EventBase {
