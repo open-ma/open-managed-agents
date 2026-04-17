@@ -319,6 +319,85 @@ export async function cleanup(handle: CleanupHandle): Promise<void> {
   }
 }
 
+// ---- Eval Judge (Layer 2) — independent LLM judgment, NOT platform outcome ----
+
+const JUDGE_API_URL = process.env.OMA_JUDGE_API_URL || "https://api.example.com/anthropic/v1";
+const JUDGE_API_KEY = process.env.OMA_JUDGE_API_KEY || process.env.OMA_API_KEY || "";
+const JUDGE_MODEL = process.env.OMA_JUDGE_MODEL || "MiniMax-M2.7";
+
+export async function judge(
+  events: SSEEvent[],
+  rubric: string,
+): Promise<{ result: "pass" | "fail"; reasoning: string }> {
+  // Build transcript from session events
+  const transcript = events
+    .filter((e) =>
+      ["agent.tool_use", "agent.tool_result", "agent.message", "session.error"].includes(e.type),
+    )
+    .map((e) => {
+      if (e.type === "agent.tool_use")
+        return `[tool] ${e.name}(${JSON.stringify(e.input).slice(0, 300)})`;
+      if (e.type === "agent.tool_result")
+        return `[result] ${String(e.content).slice(0, 500)}`;
+      if (e.type === "agent.message") {
+        const text = Array.isArray(e.content)
+          ? (e.content as any[])
+              .filter((b: any) => b.type === "text")
+              .map((b: any) => b.text)
+              .join("")
+          : String(e.content);
+        return `[agent] ${text.slice(0, 300)}`;
+      }
+      if (e.type === "session.error") return `[error] ${(e as any).error}`;
+      return "";
+    })
+    .filter(Boolean)
+    .join("\n");
+
+  const prompt = `You are a test suite judge evaluating whether an AI agent completed a task correctly.
+
+## Rubric
+${rubric}
+
+## Session Transcript
+${transcript}
+
+## Instructions
+Evaluate whether ALL rubric criteria are satisfied. Respond with ONLY a JSON object, no other text:
+{"result": "pass", "reasoning": "..."}
+or
+{"result": "fail", "reasoning": "..."}`;
+
+  try {
+    const res = await fetch(`${JUDGE_API_URL}/messages`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "x-api-key": JUDGE_API_KEY,
+        "anthropic-version": "2023-06-01",
+      },
+      body: JSON.stringify({
+        model: JUDGE_MODEL,
+        max_tokens: 300,
+        messages: [{ role: "user", content: prompt }],
+      }),
+    });
+    const data = (await res.json()) as any;
+    const text = data.content?.[0]?.text || "";
+    const match = text.match(/\{[\s\S]*?\}/);
+    if (match) {
+      const parsed = JSON.parse(match[0]);
+      return {
+        result: parsed.result === "pass" ? "pass" : "fail",
+        reasoning: parsed.reasoning || "",
+      };
+    }
+    return { result: "fail", reasoning: `Could not parse judge response: ${text.slice(0, 200)}` };
+  } catch (err: any) {
+    return { result: "fail", reasoning: `Judge call failed: ${err.message?.slice(0, 100)}` };
+  }
+}
+
 // ---- Utility ----
 
 function sleep(ms: number): Promise<void> {
