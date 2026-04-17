@@ -14,7 +14,7 @@ import {
   idleNoError,
   includes,
   toolUsed,
-} from "@open-managed-agents/shared";
+} from "../../../packages/shared/src/index.js";
 
 export const errorRecoverySuite: EvalTask[] = [
   // T4.1 — File Not Found Recovery (Easy)
