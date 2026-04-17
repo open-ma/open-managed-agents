@@ -1,0 +1,22 @@
+resources:
+  accelerators: A100:1
+  cloud: aws    # aws | gcp | azure | lambda | runpod
+  disk_size: 100
+
+setup: |
+  pip install verl vllm torch transformers
+  pip install -r rl/verl/requirements.txt
+  # Clone repo if needed
+  # git clone https://github.com/your-org/open-managed-agents.git
+
+run: |
+  python rl/verl/grpo_loop.py \
+    --model Qwen/Qwen2.5-7B \
+    --model-url http://localhost:8000/v1 \
+    --oma-url ${OMA_API_URL:-https://your-oma.workers.dev} \
+    --oma-key ${OMA_API_KEY} \
+    --tasks rl/tasks/ \
+    --batch-size 16 \
+    --concurrency 8 \
+    --epochs 10 \
+    --output-dir /output/rl
