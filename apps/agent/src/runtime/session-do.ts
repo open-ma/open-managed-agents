@@ -276,17 +276,14 @@ export class SessionDO extends Agent<Env, SessionState> {
       if (body.type === "user.message") {
         history.append(body);
         this.broadcastEvent(body);
-        // Schedule alarm as crash recovery backup, then kick off harness
-        // in the background via ctx.waitUntil — this keeps the DO alive
-        // after the HTTP response is sent.
+        // DO stays alive ~60s after last client disconnects, so unawaited
+        // promises keep running. No need for waitUntil or alarm — just
+        // fire and let the event loop drain naturally.
+        // Alarm at 5s is crash-recovery backup only.
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        this.ctx.waitUntil(
-          this.drainEventQueue().catch((err) => {
-            console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
-          })
-        );
+        this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
 
@@ -310,11 +307,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        this.ctx.waitUntil(
-          this.drainEventQueue().catch((err) => {
-            console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
-          })
-        );
+        this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
 
@@ -325,11 +318,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        this.ctx.waitUntil(
-          this.drainEventQueue().catch((err) => {
-            console.error("[session-do] drainEventQueue error:", err instanceof Error ? err.message : err);
-          })
-        );
+        this.drainEventQueue();
         return new Response(null, { status: 202 });
       }
 
