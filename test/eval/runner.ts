@@ -8,7 +8,7 @@ import type {
   VerifyStatus,
   SSEEvent,
 } from "./types.js";
-import type { Trajectory, StoredEvent } from "@open-managed-agents/shared";
+import type { Trajectory, StoredEvent } from "../../packages/shared/src/index.js";
 import { DEFAULT_MODEL, DEFAULT_TIMEOUT } from "./types.js";
 import {
   createAgent,

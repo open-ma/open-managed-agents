@@ -8,7 +8,7 @@ import {
   assertMinToolCalls,
   allOf,
 } from "../verify.js";
-import { all, bashOutputMarker, idleNoError, toolUsed } from "@open-managed-agents/shared";
+import { all, bashOutputMarker, idleNoError, toolUsed } from "../../../packages/shared/src/index.js";
 
 // Production-grade coding eval tasks based on real-world agent use cases
 // References: Anthropic "Demystifying Evals for AI Agents", SWE-bench patterns

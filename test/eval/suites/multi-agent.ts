@@ -9,7 +9,7 @@ import {
   eventsOfType,
   allOf,
 } from "../verify.js";
-import { all, idleNoError, threadCreated, toolUsed } from "@open-managed-agents/shared";
+import { all, idleNoError, threadCreated, toolUsed } from "../../../packages/shared/src/index.js";
 
 // Note: Multi-agent evals require creating sub-agents at runtime.
 // The `subAgents` field is used by the runner to create these agents
