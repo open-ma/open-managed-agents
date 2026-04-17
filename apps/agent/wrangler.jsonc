@@ -9,7 +9,7 @@
     {
       "class_name": "Sandbox",
       "image": "docker.io/openma/sandbox-base:latest",
-      "instance_type": "lite",
+      "instance_type": "basic",
       "max_instances": 10
     }
   ],
