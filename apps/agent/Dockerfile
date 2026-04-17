@@ -2,8 +2,8 @@
 # Build once, push to GHCR, reuse everywhere.
 #
 # Build & push:
-#   docker build -t ghcr.io/open-ma/sandbox-base:latest apps/agent/
-#   docker push ghcr.io/open-ma/sandbox-base:latest
+#   docker build -t hrhrngxy/sandbox-base:latest apps/agent/
+#   docker push hrhrngxy/sandbox-base:latest
 #
 # Parity target: Anthropic Managed Agents Cloud Container Reference
 
