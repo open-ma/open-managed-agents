@@ -106,5 +106,5 @@ export const DEFAULT_TOOLS = [
 ];
 
 export const DEFAULT_SYSTEM = "You are a helpful coding assistant. Complete tasks precisely and verify your work.";
-export const DEFAULT_MODEL = "claude-sonnet-4-6";
+export const DEFAULT_MODEL = process.env.OMA_MODEL || "MiniMax-M2.7";
 export const DEFAULT_TIMEOUT = 600_000; // 10 min for production tasks

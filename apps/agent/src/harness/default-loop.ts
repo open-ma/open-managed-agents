@@ -9,8 +9,8 @@ const isBuiltinTool = (name: string) =>
   BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_") || name.startsWith("memory_");
 
 // LLM call resilience settings (inspired by Claude Code)
-const MAX_RETRIES = 3;
-const BASE_RETRY_DELAY = 1000;   // 1s, doubles each retry
+const MAX_RETRIES = 10;
+const BASE_RETRY_DELAY = 2000;   // 2s, doubles each retry (capped at 30s)
 const API_TIMEOUT_MS = 300000;   // 5 minutes per generateText call
 
 /**
@@ -48,8 +48,8 @@ async function withRetry<T>(
       // Don't retry on last attempt
       if (attempt >= maxRetries) break;
 
-      // Exponential backoff with jitter
-      const delay = BASE_RETRY_DELAY * Math.pow(2, attempt) * (0.75 + Math.random() * 0.5);
+      // Exponential backoff with jitter, capped at 30s
+      const delay = Math.min(30000, BASE_RETRY_DELAY * Math.pow(2, attempt)) * (0.75 + Math.random() * 0.5);
       await new Promise(r => setTimeout(r, delay));
     }
   }

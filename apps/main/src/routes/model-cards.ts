@@ -29,6 +29,19 @@ app.post("/", async (c) => {
     return c.json({ error: "name, provider, model_id, and api_key are required" }, 400);
   }
 
+  // Unique model_id check
+  const existing = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "modelcard") });
+  for (const k of existing.keys) {
+    if (k.name.includes(":key")) continue;
+    const data = await c.env.CONFIG_KV.get(k.name);
+    if (data) {
+      const card = JSON.parse(data) as ModelCard;
+      if (!card.archived_at && card.model_id === body.model_id) {
+        return c.json({ error: `model_id "${body.model_id}" is already used by model card "${card.name}" (${card.id})` }, 409);
+      }
+    }
+  }
+
   const now = new Date().toISOString();
   const id = generateModelCardId();
 

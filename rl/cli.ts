@@ -1,6 +1,7 @@
 import { batchRollout, loadTaskSet } from "./rollout.js";
 import { trajectoryToJsonl, parseTrajectoryJsonl } from "./trajectory.js";
 import { computeReward, batchRewardStats } from "./reward.js";
+import { collectProductionTrajectories } from "./collector.js";
 import { loadConfig } from "./config.js";
 import { readFileSync, writeFileSync, readdirSync } from "fs";
 import { join, resolve } from "path";
@@ -99,14 +100,47 @@ async function cmdCollect(args: Record<string, string>) {
   await cmdRollout({ ...args, output: args.output || "training_data.jsonl" });
 }
 
+async function cmdCollectProduction(args: Record<string, string>) {
+  const config = loadConfig();
+  const sinceHours = args.since ? parseInt(args.since) : 24;
+  const sessionIds = args["session-ids"]?.split(",").filter(Boolean);
+
+  const trajectories = await collectProductionTrajectories({
+    api_url: config.api_url,
+    api_key: config.api_key,
+    since_hours: sessionIds ? undefined : sinceHours,
+    session_ids: sessionIds,
+    min_turns: args["min-turns"] ? parseInt(args["min-turns"]) : 2,
+    exclude_errors: args["exclude-errors"] === "true",
+    reward_mode: (args["reward-mode"] as any) || "both",
+  });
+
+  if (args.output) {
+    writeFileSync(args.output, trajectoryToJsonl(trajectories));
+    console.log(`[collect-production] Wrote ${trajectories.length} trajectories to ${args.output}`);
+  }
+
+  // Print summary
+  const rewards = trajectories.map((t) => t.reward.final_reward);
+  const good = rewards.filter((r) => r >= 0.7).length;
+  const mid = rewards.filter((r) => r >= 0.3 && r < 0.7).length;
+  const bad = rewards.filter((r) => r < 0.3).length;
+  console.log(`\n--- Production Data Summary ---`);
+  console.log(`Total: ${trajectories.length}`);
+  console.log(`Good (≥0.7): ${good} | Mid (0.3-0.7): ${mid} | Low (<0.3): ${bad}`);
+  console.log(`\nUsage: feed to training with:`);
+  console.log(`  python rl/verl/verl_trainer.py --from-file ${args.output || "prod.jsonl"} --epochs 5`);
+}
+
 function usage() {
   console.log(`
 OMA RL Pipeline CLI
 
 Commands:
-  rollout    Collect trajectories from OMA
-  reward     Score existing trajectories
-  collect    Full pipeline: rollout → reward → export
+  rollout              Collect trajectories from OMA (synthetic tasks)
+  reward               Score existing trajectories
+  collect              Full pipeline: rollout → reward → export
+  collect-production   Extract training data from production sessions
 
 Options:
   --tasks <path>         Path to task file or directory (default: rl/tasks)
@@ -116,6 +150,13 @@ Options:
   --model-compat <type>  API compat: ant | oai-compatible (default: ant)
   --output <path>        Output JSONL file
   --trajectories <path>  Input trajectories for reward scoring
+
+collect-production options:
+  --since <hours>        Collect sessions from last N hours (default: 24)
+  --session-ids <ids>    Comma-separated session IDs to collect
+  --min-turns <n>        Minimum assistant turns to include (default: 2)
+  --exclude-errors       Skip sessions that ended in error
+  --reward-mode <mode>   feedback | heuristic | both (default: both)
 
 Environment:
   OMA_API_URL            OMA API endpoint (default: http://localhost:8787)
@@ -139,6 +180,9 @@ async function main() {
       break;
     case "collect":
       await cmdCollect(args);
+      break;
+    case "collect-production":
+      await cmdCollectProduction(args);
       break;
     default:
       usage();
