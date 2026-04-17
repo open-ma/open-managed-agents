@@ -8,7 +8,7 @@
   "containers": [
     {
       "class_name": "Sandbox",
-      "image": "ghcr.io/open-ma/sandbox-base:latest",
+      "image": "docker.io/hrhrngxy/sandbox-base:latest",
       "instance_type": "lite",
       "max_instances": 10
     }

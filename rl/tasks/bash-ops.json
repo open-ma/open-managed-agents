@@ -1,0 +1,83 @@
+{
+  "name": "bash-ops",
+  "version": "0.1.0",
+  "tasks": [
+    {
+      "id": "bash-01-simple-command",
+      "description": "Run a simple bash command and capture output",
+      "message": "Run the command: echo 'Hello from bash' && echo 'Second line'",
+      "reward": {
+        "type": "rule",
+        "rules": [
+          { "check": "bash_output_contains", "expected": "Hello from bash", "score": 0.5 },
+          { "check": "bash_output_contains", "expected": "Second line", "score": 0.3 },
+          { "check": "exit_code", "expected": "0", "score": 0.2 }
+        ]
+      }
+    },
+    {
+      "id": "bash-02-pipe-filter",
+      "description": "Use pipes to filter and transform data",
+      "message": "Create a file /workspace/numbers.txt with the numbers 1 through 10, one per line. Then use bash to find all even numbers (hint: use grep or awk) and save them to /workspace/even.txt.",
+      "reward": {
+        "type": "rule",
+        "rules": [
+          { "check": "file_exists", "path": "/workspace/even.txt", "score": 0.2 },
+          { "check": "file_contains", "path": "/workspace/even.txt", "expected": "2", "score": 0.2 },
+          { "check": "file_contains", "path": "/workspace/even.txt", "expected": "8", "score": 0.2 },
+          { "check": "file_contains", "path": "/workspace/even.txt", "expected": "10", "score": 0.2 },
+          { "check": "exit_code", "expected": "0", "score": 0.2 }
+        ]
+      }
+    },
+    {
+      "id": "bash-03-word-count",
+      "description": "Count words and lines in a file",
+      "message": "Count the number of lines in /workspace/poem.txt and report the exact number.",
+      "setup_files": [
+        { "path": "/workspace/poem.txt", "content": "Roses are red\nViolets are blue\nSugar is sweet\nAnd so are you\nThis poem has five lines" }
+      ],
+      "reward": {
+        "type": "rule",
+        "rules": [
+          { "check": "bash_output_contains", "expected": "5", "score": 0.8 },
+          { "check": "exit_code", "expected": "0", "score": 0.2 }
+        ]
+      }
+    },
+    {
+      "id": "bash-04-json-parse",
+      "description": "Parse JSON with command-line tools",
+      "message": "Read /workspace/data.json and extract all the 'name' values. Print each name on a separate line.",
+      "setup_files": [
+        { "path": "/workspace/data.json", "content": "[{\"name\": \"Alice\", \"age\": 30}, {\"name\": \"Bob\", \"age\": 25}, {\"name\": \"Charlie\", \"age\": 35}]" }
+      ],
+      "reward": {
+        "type": "rule",
+        "rules": [
+          { "check": "bash_output_contains", "expected": "Alice", "score": 0.3 },
+          { "check": "bash_output_contains", "expected": "Bob", "score": 0.3 },
+          { "check": "bash_output_contains", "expected": "Charlie", "score": 0.3 },
+          { "check": "exit_code", "expected": "0", "score": 0.1 }
+        ]
+      }
+    },
+    {
+      "id": "bash-05-find-replace",
+      "description": "Use sed to find and replace text in a file",
+      "message": "In /workspace/template.txt, replace all occurrences of '{{NAME}}' with 'World' and '{{DATE}}' with '2026-04-17'. Save the result to /workspace/output.txt.",
+      "setup_files": [
+        { "path": "/workspace/template.txt", "content": "Hello {{NAME}}!\nToday is {{DATE}}.\nGoodbye {{NAME}}, see you tomorrow." }
+      ],
+      "reward": {
+        "type": "rule",
+        "rules": [
+          { "check": "file_exists", "path": "/workspace/output.txt", "score": 0.1 },
+          { "check": "file_contains", "path": "/workspace/output.txt", "expected": "Hello World!", "score": 0.3 },
+          { "check": "file_contains", "path": "/workspace/output.txt", "expected": "2026-04-17", "score": 0.3 },
+          { "check": "file_contains", "path": "/workspace/output.txt", "expected": "Goodbye World", "score": 0.3 }
+        ]
+      }
+    }
+  ]
+}
