@@ -44,13 +44,16 @@ export interface BuildTrajectoryDeps {
 const SCHEMA_VERSION = "oma.trajectory.v1" as const;
 
 function deriveOutcome(events: StoredEvent[], status: string | undefined): TrajectoryOutcome {
-  // Walk events backward looking for terminal signal.
+  // Find the LAST status / terminal event. Avoid bug where an early
+  // status_idle (e.g. from a warmup turn) was treated as the trajectory's
+  // outcome even though later turns are still in flight.
   for (let i = events.length - 1; i >= 0; i--) {
     const t = events[i].type;
     if (t === "session.error") return "failure";
     if (t === "user.interrupt") return "interrupted";
     if (t === "session.status_terminated") return "failure";
     if (t === "session.status_idle") return "success";
+    if (t === "session.status_running") return "running";
   }
   if (status === "running") return "running";
   return "running";
@@ -61,6 +64,12 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
   let numToolCalls = 0;
   let numToolErrors = 0;
   const threadIds = new Set<string>();
+  // Sum per-call usage from span.model_request_end events. Used as a fallback
+  // when /full-status reports 0 (session mid-flight: generateText loop hasn't
+  // returned yet → reportUsage hasn't been called → DO state still 0).
+  let spanInTokens = 0;
+  let spanOutTokens = 0;
+  let spanCacheRead = 0;
 
   for (const e of events) {
     const data = parseEventData(e);
@@ -82,12 +91,28 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
         if (tid) threadIds.add(tid);
         break;
       }
+      case "span.model_request_end": {
+        const u = (data as { model_usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number } })?.model_usage;
+        if (u) {
+          spanInTokens += u.input_tokens || 0;
+          spanOutTokens += u.output_tokens || 0;
+          spanCacheRead += u.cache_read_input_tokens || 0;
+        }
+        break;
+      }
     }
   }
 
   const duration = endedAt
     ? Math.max(0, new Date(endedAt).getTime() - new Date(startedAt).getTime())
     : 0;
+
+  // Prefer the larger of: state-reported usage (cumulative, from /full-status)
+  // and span sum (per-call). They should match at end-of-session; mid-flight,
+  // span sum lags by the in-progress generateText call's usage.
+  const reportedIn = usage?.input_tokens || 0;
+  const reportedOut = usage?.output_tokens || 0;
+  const reportedCache = usage?.cache_read_input_tokens || 0;
 
   return {
     num_events: events.length,
@@ -97,9 +122,9 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
     num_threads: threadIds.size,
     duration_ms: duration,
     token_usage: {
-      input_tokens: usage?.input_tokens || 0,
-      output_tokens: usage?.output_tokens || 0,
-      cache_read_input_tokens: usage?.cache_read_input_tokens || 0,
+      input_tokens: Math.max(reportedIn, spanInTokens),
+      output_tokens: Math.max(reportedOut, spanOutTokens),
+      cache_read_input_tokens: Math.max(reportedCache, spanCacheRead),
     },
   };
 }
