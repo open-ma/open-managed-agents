@@ -217,6 +217,144 @@ describe("Built-in tool execution", () => {
     expect(capturedCmd).toContain("/workspace");
   });
 
+  it("grep tool returns 'No matches found' on exit=1 (no match, not error)", async () => {
+    let callCount = 0;
+    const sandbox: any = {
+      exec: async () => {
+        callCount++;
+        if (callCount === 1) return "exit=0\ngrep"; // probe: returns 'grep' (no rg)
+        return "exit=1\n"; // grep no match
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.grep.execute({ pattern: "missing", path: "/workspace" }, TOOL_EXEC_OPTS);
+    expect(result).toBe("No matches found");
+  });
+
+  it("grep tool surfaces error on exit=2 (file not found / bad regex)", async () => {
+    let callCount = 0;
+    const sandbox: any = {
+      exec: async () => {
+        callCount++;
+        if (callCount === 1) return "exit=0\ngrep";
+        return "exit=2\nNo such file or directory";
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.grep.execute({ pattern: "x", path: "/missing" }, TOOL_EXEC_OPTS);
+    expect(result).toContain("Error");
+    expect(result).toContain("code 2");
+  });
+
+  it("grep tool output_mode files_with_matches returns 'Found N file' header", async () => {
+    let callCount = 0;
+    const sandbox: any = {
+      exec: async () => {
+        callCount++;
+        if (callCount === 1) return "exit=0\ngrep";
+        return "exit=0\n/workspace/a.py\n/workspace/b.py\n/workspace/c.py";
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.grep.execute(
+      { pattern: "x", output_mode: "files_with_matches" },
+      TOOL_EXEC_OPTS,
+    );
+    expect(result).toContain("Found 3 files");
+    expect(result).toContain("/workspace/a.py");
+  });
+
+  it("grep tool output_mode count returns aggregate", async () => {
+    let callCount = 0;
+    const sandbox: any = {
+      exec: async () => {
+        callCount++;
+        if (callCount === 1) return "exit=0\ngrep";
+        return "exit=0\n/workspace/a.py:5\n/workspace/b.py:3";
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.grep.execute(
+      { pattern: "x", output_mode: "count" },
+      TOOL_EXEC_OPTS,
+    );
+    expect(result).toContain("Found 8 total occurrences across 2 files");
+  });
+
+  it("grep tool case-insensitive flag adds -i", async () => {
+    let capturedCmd = "";
+    const sandbox: any = {
+      exec: async (cmd: string) => {
+        capturedCmd = cmd;
+        return "exit=0\n";
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    await tools.grep.execute({ pattern: "x", "-i": true }, TOOL_EXEC_OPTS);
+    expect(capturedCmd).toMatch(/\s-i\s/);
+  });
+
+  it("edit tool refuses ambiguous old_string by default", async () => {
+    const sandbox: any = {
+      exec: async () => "exit=0\n",
+      readFile: async () => "foo bar foo",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.edit.execute(
+      { file_path: "/workspace/x", old_string: "foo", new_string: "baz" },
+      TOOL_EXEC_OPTS,
+    );
+    expect(result).toContain("appears 2 times");
+    expect(result).toContain("replace_all=true");
+  });
+
+  it("edit tool replace_all=true substitutes all occurrences", async () => {
+    let written = "";
+    const sandbox: any = {
+      exec: async () => "exit=0\n",
+      readFile: async () => "foo bar foo baz foo",
+      writeFile: async (_p: string, c: string) => {
+        written = c;
+        return "ok";
+      },
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.edit.execute(
+      { file_path: "/workspace/x", old_string: "foo", new_string: "QUX", replace_all: true },
+      TOOL_EXEC_OPTS,
+    );
+    expect(result).toBe("ok");
+    expect(written).toBe("QUX bar QUX baz QUX");
+  });
+
+  it("read tool offset+limit slices file", async () => {
+    const sandbox: any = {
+      exec: async () => "exit=0\n",
+      readFile: async () => "line1\nline2\nline3\nline4\nline5",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+    const result = await tools.read.execute(
+      { file_path: "/workspace/x", offset: 2, limit: 2 },
+      TOOL_EXEC_OPTS,
+    );
+    expect(result).toContain("2\tline2");
+    expect(result).toContain("3\tline3");
+    expect(result).not.toContain("line1");
+    expect(result).not.toContain("line4");
+  });
+
   it("web_fetch tool constructs curl with URL", async () => {
     let capturedCmd = "";
     const sandbox: any = {
