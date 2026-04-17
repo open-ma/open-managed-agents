@@ -8,6 +8,13 @@ import {
   assertLastBashSuccess,
   allOf,
 } from "../verify.js";
+import {
+  all,
+  idleNoError,
+  includes,
+  toolOutcome,
+  toolUsed,
+} from "@open-managed-agents/shared";
 
 export const toolUseSuite: EvalTask[] = [
   // T1.1 — File Write and Verify (Easy)
@@ -32,6 +39,11 @@ export const toolUseSuite: EvalTask[] = [
           ),
       },
     ],
+    scorer: all(
+      idleNoError(),
+      // Tool agnostic: any tool result that includes the literal string is fine
+      includes("Hello, World!", { caseInsensitive: false }),
+    ),
   },
 
   // T1.2 — Grep Search (Medium)
@@ -60,6 +72,12 @@ Then use the grep tool to find all lines containing "NYC" in /workspace/data.csv
           ),
       },
     ],
+    scorer: all(
+      toolUsed("grep"),
+      // grep tool result must contain both NYC matches
+      toolOutcome("grep", (c) => c.includes("Alice") && c.includes("Charlie")),
+      idleNoError(),
+    ),
   },
 
   // T1.3 — Edit Tool Precision (Medium)
@@ -90,6 +108,12 @@ Then use the edit tool to change the port from 3000 to 8080.`,
           ),
       },
     ],
+    scorer: all(
+      toolUsed("edit"),
+      includes("8080"),
+      includes("debug"),
+      idleNoError(),
+    ),
   },
 
   // T1.4 — Glob Pattern Matching (Easy)
@@ -117,6 +141,11 @@ Then use the glob tool with pattern "**/*.ts" to find all TypeScript files under
           ),
       },
     ],
+    scorer: all(
+      toolUsed("glob"),
+      toolOutcome("glob", (c) => c.includes("main.ts") && c.includes("test1.ts")),
+      idleNoError(),
+    ),
   },
 
   // T1.5 — Bash Background Task (Hard)
@@ -141,5 +170,10 @@ Then use the glob tool with pattern "**/*.ts" to find all TypeScript files under
           ),
       },
     ],
+    scorer: all(
+      toolUsed("bash"),
+      includes("Hello"),
+      idleNoError(),
+    ),
   },
 ];

@@ -73,6 +73,19 @@ export interface EvalTask {
   // backward compat with existing tests.
   scorer?: Scorer;
 
+  // NEW (P0a, blog-aligned): how many independent trials of this task to run.
+  // Default 1. When > 1, the report computes pass@1, pass@k, pass^k.
+  // pass@k = at least one trial passed (creativity benchmark).
+  // pass^k = all trials passed (consistency / determinism benchmark).
+  trials?: number;
+
+  // NEW (P0b): bash commands sent as the final turn AFTER the agent's last
+  // user message, asking the agent to run end-state verification commands.
+  // Their outputs land in the trajectory and can be checked by the scorer
+  // (typically via bashOutputMarker or includes). Inspired by Anthropic's
+  // "state_check" pattern in their evals blog.
+  verifyCommands?: string[];
+
   // Per-turn timeout (default 300_000 ms = 5 min)
   timeoutMs?: number;
 
@@ -83,15 +96,32 @@ export interface EvalTask {
   };
 }
 
-export interface EvalTaskResult {
-  taskId: string;
-  category: Category;
-  difficulty: Difficulty;
+export interface EvalTrialResult {
+  trialIndex: number;
   status: VerifyStatus;
   message: string;
   durationMs: number;
   turnResults: VerifyResult[];
   error?: string;
+}
+
+export interface EvalTaskResult {
+  taskId: string;
+  category: Category;
+  difficulty: Difficulty;
+  status: VerifyStatus;       // pass if pass^k, fail if any failed (legacy aggregation)
+  message: string;
+  durationMs: number;
+  turnResults: VerifyResult[]; // first trial's per-turn results (legacy)
+  error?: string;
+  // NEW (P0a): per-trial breakdown when trials > 1
+  trials?: EvalTrialResult[];
+  // Computed metrics (only populated when trials > 1)
+  passAt1?: boolean;     // first trial passed
+  passAtK?: boolean;     // any trial passed
+  passPowK?: boolean;    // all trials passed
+  trialPassCount?: number;
+  trialTotal?: number;
 }
 
 export interface EvalSuiteResult {

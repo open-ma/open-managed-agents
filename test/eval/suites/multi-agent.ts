@@ -9,6 +9,7 @@ import {
   eventsOfType,
   allOf,
 } from "../verify.js";
+import { all, idleNoError, threadCreated, toolUsed } from "@open-managed-agents/shared";
 
 // Note: Multi-agent evals require creating sub-agents at runtime.
 // The `subAgents` field is used by the runner to create these agents
@@ -55,6 +56,7 @@ export const multiAgentSuite: EvalTask[] = [
         },
       },
     ],
+    scorer: all(threadCreated(1), toolUsed("bash"), idleNoError()),
   },
 
   // T5.2 — Multi-Agent Coordination (Hard)
@@ -106,6 +108,7 @@ Delegate appropriately, then verify the work yourself by running the tests.`,
         },
       },
     ],
+    scorer: all(threadCreated(2), toolUsed("bash"), idleNoError()),
     timeoutMs: 600_000, // 10 min — multi-agent takes longer
   },
 
@@ -150,6 +153,7 @@ Then ask the helper again to read and summarize it.`,
         },
       },
     ],
+    scorer: all(threadCreated(1), idleNoError()),
     timeoutMs: 600_000,
   },
 ];

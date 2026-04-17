@@ -3,7 +3,9 @@ import type {
   EvalTaskResult,
   EvalSuiteResult,
   EvalReport,
+  EvalTrialResult,
   VerifyResult,
+  VerifyStatus,
   SSEEvent,
 } from "./types.js";
 import type { Trajectory, StoredEvent } from "@open-managed-agents/shared";
@@ -37,28 +39,36 @@ const ALL_SUITES: Record<string, EvalTask[]> = {
 
 // ---- CLI arg parsing ----
 
-function parseArgs(): { suite?: string; task?: string; concurrency: number } {
+function parseArgs(): { suite?: string; task?: string; concurrency: number; trials?: number } {
   const args = process.argv.slice(2);
   let suite: string | undefined;
   let task: string | undefined;
   let concurrency = 1;
+  let trials: number | undefined;
 
   for (let i = 0; i < args.length; i++) {
     if (args[i] === "--suite" && args[i + 1]) suite = args[++i];
     if (args[i] === "--task" && args[i + 1]) task = args[++i];
     if (args[i] === "--concurrency" && args[i + 1]) concurrency = parseInt(args[++i], 10);
+    if (args[i] === "--trials" && args[i + 1]) trials = parseInt(args[++i], 10);
   }
 
-  return { suite, task, concurrency };
+  return { suite, task, concurrency, trials };
 }
 
 // ---- Task execution ----
 
-async function runTask(task: EvalTask): Promise<EvalTaskResult> {
+/**
+ * Run a single trial of a task (one independent agent + session).
+ * runTask wraps this for multi-trial pass@k / pass^k support.
+ */
+async function runOneTrial(task: EvalTask, trialIndex: number): Promise<EvalTrialResult> {
   const start = Date.now();
   const turnResults: VerifyResult[] = [];
   const agentIds: string[] = [];
   const sessionIds: string[] = [];
+
+  const trialLabel = (task.trials || 1) > 1 ? ` trial ${trialIndex + 1}/${task.trials}` : "";
 
   try {
     const envId = await getOrCreateEnvironment();
@@ -68,7 +78,7 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
     if (task.subAgents) {
       for (const sub of task.subAgents) {
         const subId = await createAgent({
-          name: `eval-sub-${sub.name}-${Date.now()}`,
+          name: `eval-sub-${sub.name}-${Date.now()}-${trialIndex}`,
           system: sub.system,
           model: sub.model || DEFAULT_MODEL,
           tools: sub.tools,
@@ -80,7 +90,7 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
 
     // Create main agent
     const agentId = await createAgent({
-      name: `eval-${task.id}-${Date.now()}`,
+      name: `eval-${task.id}-${Date.now()}-${trialIndex}`,
       system: task.agentConfig.system,
       model: task.agentConfig.model || DEFAULT_MODEL,
       tools: task.agentConfig.tools,
@@ -94,7 +104,7 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
 
     // Setup fixture files
     if (task.setupFiles && task.setupFiles.length > 0) {
-      log(task.id, "Setting up fixture files...");
+      log(task.id, `${trialLabel} Setting up fixture files...`);
       await setupFiles(sessionId, task.setupFiles);
     }
 
@@ -102,20 +112,18 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
     const allEvents: SSEEvent[] = [];
     for (let i = 0; i < task.turns.length; i++) {
       const turn = task.turns[i];
-      log(task.id, `Turn ${i + 1}/${task.turns.length}: sending message...`);
+      log(task.id, `${trialLabel} Turn ${i + 1}/${task.turns.length}: sending message...`);
 
       const events = await sendAndWait(sessionId, turn.message, task.timeoutMs || DEFAULT_TIMEOUT);
       allEvents.push(...events);
 
       const result = turn.verify(events);
       turnResults.push(result);
-      log(task.id, `Turn ${i + 1} → ${result.status}: ${result.message}`);
+      log(task.id, `${trialLabel} Turn ${i + 1} → ${result.status}: ${result.message}`);
 
       if (result.status === "fail") {
         return {
-          taskId: task.id,
-          category: task.category,
-          difficulty: task.difficulty,
+          trialIndex,
           status: "fail",
           message: `Turn ${i + 1} failed: ${result.message}`,
           durationMs: Date.now() - start,
@@ -125,15 +133,27 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       }
     }
 
-    // Final verification
+    // P0b: end-state sandbox verification commands. Asks the agent to run them
+    // (one per turn) so their outputs land in the trajectory for scorer review.
+    if (task.verifyCommands && task.verifyCommands.length > 0) {
+      for (const cmd of task.verifyCommands) {
+        log(task.id, `${trialLabel} Verify cmd: ${cmd.slice(0, 80)}`);
+        const events = await sendAndWait(
+          sessionId,
+          `Run: ${cmd}`,
+          task.timeoutMs || DEFAULT_TIMEOUT,
+        );
+        allEvents.push(...events);
+      }
+    }
+
+    // Final verification (legacy)
     if (task.finalVerify) {
       const finalResult = task.finalVerify(allEvents);
       turnResults.push(finalResult);
       if (finalResult.status === "fail") {
         return {
-          taskId: task.id,
-          category: task.category,
-          difficulty: task.difficulty,
+          trialIndex,
           status: "fail",
           message: `Final verification failed: ${finalResult.message}`,
           durationMs: Date.now() - start,
@@ -142,20 +162,18 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       }
     }
 
-    // Layer 2: judge evaluation (if rubric defined) — legacy path
-    if (task.outcome && allEvents.length > 0) {
-      log(task.id, "Running Layer 2 judge...");
+    // Layer 2: judge evaluation (legacy path; only used if no scorer)
+    if (!task.scorer && task.outcome && allEvents.length > 0) {
+      log(task.id, `${trialLabel} Running Layer 2 judge...`);
       const verdict = await judge(allEvents, task.outcome.rubric);
-      log(task.id, `Judge: ${verdict.result} — ${verdict.reasoning}`);
+      log(task.id, `${trialLabel} Judge: ${verdict.result} — ${verdict.reasoning}`);
       const judgeResult: VerifyResult = verdict.result === "pass"
         ? { status: "pass", message: `Judge: ${verdict.reasoning}` }
         : { status: "fail", message: `Judge: ${verdict.reasoning}` };
       turnResults.push(judgeResult);
       if (judgeResult.status === "fail") {
         return {
-          taskId: task.id,
-          category: task.category,
-          difficulty: task.difficulty,
+          trialIndex,
           status: "fail",
           message: `Judge failed: ${verdict.reasoning}`,
           durationMs: Date.now() - start,
@@ -165,21 +183,19 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       }
     }
 
-    // Phase 2: Scorer evaluation (new — runs against synthesized Trajectory)
+    // Phase 2: Scorer evaluation (canonical path going forward)
     if (task.scorer) {
-      log(task.id, "Running scorer...");
+      log(task.id, `${trialLabel} Running scorer...`);
       const traj = synthesizeTrajectory(task.id, allEvents);
       const score = await task.scorer(traj);
-      log(task.id, `Scorer: ${score.pass ? "PASS" : "FAIL"} — ${score.reason}`);
+      log(task.id, `${trialLabel} Scorer: ${score.pass ? "PASS" : "FAIL"} — ${score.reason}`);
       const scoreResult: VerifyResult = score.pass
         ? { status: "pass", message: `Scorer: ${score.reason}` }
         : { status: "fail", message: `Scorer: ${score.reason}` };
       turnResults.push(scoreResult);
       if (!score.pass) {
         return {
-          taskId: task.id,
-          category: task.category,
-          difficulty: task.difficulty,
+          trialIndex,
           status: "fail",
           message: `Scorer failed: ${score.reason}`,
           durationMs: Date.now() - start,
@@ -190,20 +206,20 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
     }
 
     return {
-      taskId: task.id,
-      category: task.category,
-      difficulty: task.difficulty,
+      trialIndex,
       status: "pass",
-      message: task.outcome ? "All turns + outcome passed" : "All turns passed",
+      message: task.scorer
+        ? "Scorer passed"
+        : task.outcome
+          ? "All turns + outcome passed"
+          : "All turns passed",
       durationMs: Date.now() - start,
       turnResults,
     };
   } catch (error) {
     const msg = error instanceof Error ? error.message : String(error);
     return {
-      taskId: task.id,
-      category: task.category,
-      difficulty: task.difficulty,
+      trialIndex,
       status: "fail",
       message: `Error: ${msg}`,
       durationMs: Date.now() - start,
@@ -211,7 +227,7 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       error: msg,
     };
   } finally {
-    // Only cleanup on success — keep everything for debugging failures
+    // Cleanup on success; keep on failure for debugging
     if (turnResults.length > 0 && turnResults.every((r) => r.status === "pass")) {
       for (const sid of sessionIds) await deleteSession(sid);
       for (const aid of agentIds) await deleteAgent(aid);
@@ -219,6 +235,59 @@ async function runTask(task: EvalTask): Promise<EvalTaskResult> {
       console.log(`    [cleanup] Keeping for debugging: agents=${agentIds.join(",")} sessions=${sessionIds.join(",")}`);
     }
   }
+}
+
+/**
+ * Run a task. If task.trials > 1, runs N independent trials and aggregates
+ * pass@1, pass@k (any), pass^k (all) — per Anthropic eval blog recommendation.
+ */
+async function runTask(task: EvalTask): Promise<EvalTaskResult> {
+  const trials = Math.max(1, task.trials || 1);
+  const start = Date.now();
+  const trialResults: EvalTrialResult[] = [];
+
+  for (let i = 0; i < trials; i++) {
+    const trial = await runOneTrial(task, i);
+    trialResults.push(trial);
+    if (trials > 1) {
+      log(task.id, `Trial ${i + 1}/${trials} → ${trial.status}: ${trial.message}`);
+    }
+  }
+
+  const passCount = trialResults.filter((t) => t.status === "pass").length;
+  const passAt1 = trialResults[0]?.status === "pass";
+  const passAtK = passCount > 0;
+  const passPowK = passCount === trials;
+  // Aggregate: pass = pass^k (all trials passed). Mirrors blog's pass^k for
+  // tools where consistency matters; flip to passAtK if you only need one.
+  const aggregateStatus: VerifyStatus =
+    trials === 1
+      ? (trialResults[0]?.status ?? "fail")
+      : passPowK
+        ? "pass"
+        : "fail";
+
+  return {
+    taskId: task.id,
+    category: task.category,
+    difficulty: task.difficulty,
+    status: aggregateStatus,
+    message:
+      trials === 1
+        ? trialResults[0]?.message || "no trials"
+        : `${passCount}/${trials} trials passed (pass^k=${passPowK})`,
+    durationMs: Date.now() - start,
+    turnResults: trialResults[0]?.turnResults || [],
+    error: trialResults.find((t) => t.error)?.error,
+    ...(trials > 1 && {
+      trials: trialResults,
+      passAt1,
+      passAtK,
+      passPowK,
+      trialPassCount: passCount,
+      trialTotal: trials,
+    }),
+  };
 }
 
 // ---- Suite execution ----
@@ -274,6 +343,23 @@ function printReport(report: EvalReport): void {
     `${"Total".padEnd(22)} ${String(report.totalPass).padStart(5)} ${String(report.totalFail).padStart(5)} ${String(report.totalSkip).padStart(5)} ${String(report.totalTasks).padStart(6)}`,
   );
   console.log(`\nDuration: ${(report.durationMs / 1000).toFixed(1)}s`);
+
+  // Print pass@k / pass^k for tasks that ran multiple trials
+  const multiTrial = report.suites.flatMap((s) =>
+    s.tasks.filter((t) => t.trials && t.trialTotal && t.trialTotal > 1),
+  );
+  if (multiTrial.length > 0) {
+    console.log(`\nMulti-trial breakdown (pass@k / pass^k):`);
+    console.log(
+      `${"Task".padEnd(34)} ${"trials".padStart(6)} ${"pass@1".padStart(7)} ${"pass@k".padStart(7)} ${"pass^k".padStart(7)}`,
+    );
+    console.log("-".repeat(64));
+    for (const t of multiTrial) {
+      console.log(
+        `${t.taskId.padEnd(34)} ${String(t.trialTotal).padStart(6)} ${String(t.passAt1 ? "✓" : "✗").padStart(7)} ${String(t.passAtK ? "✓" : "✗").padStart(7)} ${String(t.passPowK ? "✓" : "✗").padStart(7)}`,
+      );
+    }
+  }
 
   // Print failures
   const failures = report.suites.flatMap((s) => s.tasks.filter((t) => t.status === "fail"));
@@ -339,11 +425,12 @@ function synthesizeTrajectory(taskId: string, events: SSEEvent[]): Trajectory {
 // ---- Main ----
 
 async function main() {
-  const { suite, task, concurrency } = parseArgs();
+  const { suite, task, trials } = parseArgs();
 
   console.log("OMA Eval Runner");
   console.log(`API: ${process.env.OMA_API_URL || "http://localhost:8787"}`);
   console.log(`Filter: ${suite ? `suite=${suite}` : task ? `task=${task}` : "all"}`);
+  if (trials !== undefined) console.log(`Trials override: ${trials}`);
 
   const start = Date.now();
   const suiteResults: EvalSuiteResult[] = [];
@@ -364,6 +451,11 @@ async function main() {
       filteredTasks = tasks.filter((t) => t.id === task);
     }
     if (filteredTasks.length === 0) continue;
+
+    // Apply CLI trials override if set
+    if (trials !== undefined) {
+      filteredTasks = filteredTasks.map((t) => ({ ...t, trials }));
+    }
 
     const result = await runSuite(name, filteredTasks);
     suiteResults.push(result);

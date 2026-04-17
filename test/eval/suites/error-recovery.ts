@@ -7,6 +7,14 @@ import {
   assertLastBashSuccess,
   allOf,
 } from "../verify.js";
+import {
+  all,
+  bashOutputMarker,
+  bashSuccess,
+  idleNoError,
+  includes,
+  toolUsed,
+} from "@open-managed-agents/shared";
 
 export const errorRecoverySuite: EvalTask[] = [
   // T4.1 — File Not Found Recovery (Easy)
@@ -31,6 +39,7 @@ Then read it again to confirm.`,
           assertToolResultContains(events, "bash", "0.0.0.0"),
       },
     ],
+    scorer: all(idleNoError(), includes("0.0.0.0", { caseInsensitive: false })),
   },
 
   // T4.2 — Syntax Error Fix (Medium)
@@ -60,6 +69,7 @@ Then run it with bash. It has a syntax error. Fix the error and run it again.`,
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashSuccess(), idleNoError()),
   },
 
   // T4.3 — Missing Dependency (Medium)
@@ -93,6 +103,7 @@ print("SCRIPT_SUCCESS")
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashOutputMarker("SCRIPT_SUCCESS"), idleNoError()),
   },
 
   // T4.4 — Directory Creation (Medium)
@@ -117,6 +128,7 @@ print("SCRIPT_SUCCESS")
           ),
       },
     ],
+    scorer: all(idleNoError(), includes("complete"), includes("42")),
   },
 
   // T4.5 — Cascading Error Recovery (Hard)
@@ -144,5 +156,6 @@ print("SCRIPT_SUCCESS")
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), includes("initial commit"), idleNoError()),
   },
 ];

@@ -196,6 +196,16 @@ export function agentMessageContains(target: string, opts?: { caseInsensitive?: 
   };
 }
 
+/** At least N session.thread_created events (multi-agent delegation occurred). */
+export function threadCreated(minCount = 1): Scorer {
+  return (trajectory) => {
+    const count = trajectory.events.filter((e) => e.type === "session.thread_created").length;
+    return count >= minCount
+      ? pass(`${count} sub-agent thread(s) created (>= ${minCount})`)
+      : fail(`Only ${count} sub-agent threads, expected >= ${minCount}`);
+  };
+}
+
 // ---------- Combinators ----------
 
 /** All scorers must pass. Aggregated value = average. */
