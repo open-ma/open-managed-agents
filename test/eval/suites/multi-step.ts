@@ -8,7 +8,7 @@ import {
   assertMinToolCalls,
   allOf,
 } from "../verify.js";
-import { all, includes, toolUsed } from "@open-managed-agents/shared";
+import { all, bashSuccess, idleNoError, includes, toolUsed } from "@open-managed-agents/shared";
 
 export const multiStepSuite: EvalTask[] = [
   // T3.1 — Data Pipeline (Medium)
@@ -119,6 +119,12 @@ def test_format():
           ),
       },
     ],
+    scorer: all(
+      toolUsed("bash"),
+      includes("4"),
+      includes("2"),
+      idleNoError(),
+    ),
   },
 
   // T3.3 — Debug from Error Log (Hard)
@@ -171,6 +177,7 @@ if __name__ == "__main__":
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashSuccess(), idleNoError()),
   },
 
   // T3.4 — Multi-Turn Iteration (Hard)
@@ -205,5 +212,6 @@ Then create /workspace/test_mathlib.py with thorough tests and run it.`,
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashSuccess(), idleNoError()),
   },
 ];

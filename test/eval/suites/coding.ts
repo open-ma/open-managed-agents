@@ -142,6 +142,7 @@ Create all files, then run: bash /workspace/test_csvstats.sh`,
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashOutputMarker("ALL_CLI_TESTS_PASSED"), idleNoError()),
   },
 
   // ---- Data analysis pipeline ----
@@ -192,6 +193,12 @@ Run the analysis script.`,
           ),
       },
     ],
+    scorer: all(
+      toolUsed("bash"),
+      bashOutputMarker("ANALYSIS_COMPLETE"),
+      bashOutputMarker("REPORT_VALID"),
+      idleNoError(),
+    ),
   },
 
   // ---- Debugging a multi-file application from error traces ----
@@ -297,6 +304,7 @@ Run the tests. They will fail. Read the error, trace through the code, fix the b
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashOutputMarker("ALL_WEBAPP_TESTS_PASSED"), idleNoError()),
   },
 
   // ---- Refactor + extend existing codebase ----
@@ -405,5 +413,6 @@ Create both files. Run the tests (they will fail). Fix the priority bug, impleme
           ),
       },
     ],
+    scorer: all(toolUsed("bash"), bashOutputMarker("ALL_QUEUE_TESTS_PASSED"), idleNoError()),
   },
 ];
