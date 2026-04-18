@@ -1,4 +1,5 @@
 import type { SandboxExecutor } from "../harness/interface";
+import { fileR2Key } from "@open-managed-agents/shared";
 
 /**
  * Mount session resources into the sandbox during warmup.
@@ -17,6 +18,8 @@ export async function mountResources(
   resources: Array<Record<string, unknown>>,
   kv: KVNamespace,
   secretStore?: Map<string, string>,
+  filesBucket?: R2Bucket,
+  tenantId?: string,
 ): Promise<void> {
   let hasGitRepo = false;
   let lastGitToken: string | null = null;
@@ -25,7 +28,7 @@ export async function mountResources(
     try {
       switch (res.type) {
         case "file":
-          await mountFile(sandbox, res, kv);
+          await mountFile(sandbox, res, filesBucket, tenantId);
           break;
         case "github_repository":
         case "github_repo": {
@@ -41,6 +44,9 @@ export async function mountResources(
       // Best-effort: skip failed resource, don't crash session
     }
   }
+
+  // kv reserved for future use (memory_store, etc.); intentionally unused for files now.
+  void kv;
 
   // Register last token for gh CLI (gh only supports one GH_TOKEN)
   if (lastGitToken && sandbox.registerCommandSecrets) {
@@ -60,13 +66,22 @@ export async function mountResources(
 async function mountFile(
   sandbox: SandboxExecutor,
   res: Record<string, unknown>,
-  kv: KVNamespace,
+  filesBucket: R2Bucket | undefined,
+  tenantId: string | undefined,
 ): Promise<void> {
-  if (!res.file_id) return;
-  const content = await kv.get(`filecontent:${res.file_id}`);
-  if (!content) return;
-  const path = (res.mount_path as string) || `/workspace/${res.file_id}`;
-  await sandbox.writeFile(path, content);
+  if (!res.file_id || !filesBucket || !tenantId) return;
+  const obj = await filesBucket.get(fileR2Key(tenantId, res.file_id as string));
+  if (!obj) return;
+  // Default mount path matches Anthropic Managed Agents convention.
+  const path = (res.mount_path as string) || `/mnt/session/uploads/${res.file_id}`;
+  const buf = await obj.arrayBuffer();
+  const bytes = new Uint8Array(buf);
+  if (sandbox.writeFileBytes) {
+    await sandbox.writeFileBytes(path, bytes);
+  } else {
+    // Legacy fallback: best-effort UTF-8 decode. Will corrupt binary.
+    await sandbox.writeFile(path, new TextDecoder("utf-8").decode(bytes));
+  }
 }
 
 async function mountGitRepo(

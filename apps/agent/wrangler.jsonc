@@ -34,7 +34,8 @@
   ],
 
   "r2_buckets": [
-    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" }
+    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
   ],
 
   "migrations": [

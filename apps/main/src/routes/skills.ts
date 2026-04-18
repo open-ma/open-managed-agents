@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import { generateId } from "@open-managed-agents/shared";
+import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 import { kvKey, kvPrefix } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
@@ -9,9 +9,18 @@ const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 // Types
 // ---------------------------------------------------------------------------
 
-interface SkillFile {
+interface SkillFileInput {
   filename: string;
   content: string;
+  /** "utf8" (default) for text, "base64" for binary (images, fonts, archives) */
+  encoding?: "utf8" | "base64";
+}
+
+interface SkillFileEntry {
+  filename: string;
+  size_bytes: number;
+  /** Encoding used when this file is returned in API responses. */
+  encoding: "utf8" | "base64";
 }
 
 interface SkillMeta {
@@ -26,7 +35,8 @@ interface SkillMeta {
 
 interface SkillVersion {
   version: string;
-  files: SkillFile[];
+  /** Manifest of files. Bytes live in R2 at skillFileKey(t, id, ver, filename). */
+  files: SkillFileEntry[];
   created_at: string;
 }
 
@@ -83,12 +93,99 @@ const BUILTIN_SKILLS: SkillMeta[] = [
 
 const NAME_RE = /^[a-z0-9-]{1,64}$/;
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK) as unknown as number[],
+    );
+  }
+  return btoa(bin);
+}
+
+function base64ToBytes(b64: string): Uint8Array {
+  const bin = atob(b64);
+  const bytes = new Uint8Array(bin.length);
+  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+  return bytes;
+}
+
+function inputToBytes(file: SkillFileInput): Uint8Array {
+  if (file.encoding === "base64") return base64ToBytes(file.content);
+  return new TextEncoder().encode(file.content);
+}
+
+/**
+ * Persist all files for a skill version to R2. Throws if FILES_BUCKET is
+ * unbound.
+ */
+async function writeFilesToR2(
+  bucket: R2Bucket,
+  tenantId: string,
+  skillId: string,
+  version: string,
+  files: SkillFileInput[],
+): Promise<SkillFileEntry[]> {
+  const manifest: SkillFileEntry[] = [];
+  for (const f of files) {
+    const bytes = inputToBytes(f);
+    await bucket.put(skillFileR2Key(tenantId, skillId, version, f.filename), bytes);
+    manifest.push({
+      filename: f.filename,
+      size_bytes: bytes.byteLength,
+      encoding: f.encoding === "base64" ? "base64" : "utf8",
+    });
+  }
+  return manifest;
+}
+
+async function readFilesFromR2(
+  bucket: R2Bucket,
+  tenantId: string,
+  skillId: string,
+  version: string,
+  manifest: SkillFileEntry[],
+): Promise<Array<{ filename: string; content: string; encoding: "utf8" | "base64" }>> {
+  const out: Array<{ filename: string; content: string; encoding: "utf8" | "base64" }> = [];
+  for (const entry of manifest) {
+    const obj = await bucket.get(skillFileR2Key(tenantId, skillId, version, entry.filename));
+    if (!obj) continue;
+    const buf = await obj.arrayBuffer();
+    const bytes = new Uint8Array(buf);
+    const content = entry.encoding === "base64"
+      ? bytesToBase64(bytes)
+      : new TextDecoder("utf-8").decode(bytes);
+    out.push({ filename: entry.filename, content, encoding: entry.encoding });
+  }
+  return out;
+}
+
+async function deleteFilesFromR2(
+  bucket: R2Bucket,
+  tenantId: string,
+  skillId: string,
+  version: string,
+  manifest: SkillFileEntry[],
+): Promise<void> {
+  await Promise.all(
+    manifest.map((f) =>
+      bucket.delete(skillFileR2Key(tenantId, skillId, version, f.filename)),
+    ),
+  );
+}
+
+function ensureBucket(c: { env: Env }): R2Bucket | null {
+  return c.env.FILES_BUCKET || null;
+}
+
 /**
  * Attempt to extract `name` and `description` from YAML frontmatter in a
- * SKILL.md file.  Frontmatter is delimited by leading `---` lines.
+ * SKILL.md file.
  */
 function parseFrontmatter(
-  content: string
+  content: string,
 ): { name?: string; description?: string } {
   const match = content.match(/^---\r?\n([\s\S]*?)\r?\n---/);
   if (!match) return {};
@@ -103,18 +200,26 @@ function parseFrontmatter(
   return { name: result.name, description: result.description };
 }
 
-/**
- * Try to auto-detect name/description from the files array by looking for a
- * SKILL.md with frontmatter.
- */
 function extractFromFiles(
-  files: SkillFile[]
+  files: SkillFileInput[],
 ): { name?: string; description?: string } {
   const skillMd = files.find(
-    (f) => f.filename.toLowerCase() === "skill.md"
+    (f) => f.filename.toLowerCase() === "skill.md" && (f.encoding ?? "utf8") === "utf8",
   );
   if (!skillMd) return {};
   return parseFrontmatter(skillMd.content);
+}
+
+function validateFiles(files: SkillFileInput[]): string | null {
+  for (const f of files) {
+    if (!f.filename || typeof f.content !== "string") {
+      return "each file must have a filename and content string";
+    }
+    if (f.encoding && f.encoding !== "utf8" && f.encoding !== "base64") {
+      return `unsupported encoding: ${f.encoding}`;
+    }
+  }
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -122,28 +227,23 @@ function extractFromFiles(
 // ---------------------------------------------------------------------------
 
 app.post("/", async (c) => {
+  const bucket = ensureBucket(c);
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
   const body = await c.req.json<{
     display_title?: string;
     name?: string;
     description?: string;
-    files: SkillFile[];
+    files: SkillFileInput[];
   }>();
 
   if (!body.files || !Array.isArray(body.files) || body.files.length === 0) {
     return c.json({ error: "files array is required and must not be empty" }, 400);
   }
 
-  // Validate each file entry
-  for (const f of body.files) {
-    if (!f.filename || typeof f.content !== "string") {
-      return c.json(
-        { error: "each file must have a filename and content string" },
-        400
-      );
-    }
-  }
+  const validateErr = validateFiles(body.files);
+  if (validateErr) return c.json({ error: validateErr }, 400);
 
-  // Auto-extract from SKILL.md frontmatter if fields not provided explicitly
   const extracted = extractFromFiles(body.files);
   const name = body.name || extracted.name;
   const description = body.description || extracted.description || "";
@@ -151,29 +251,24 @@ app.post("/", async (c) => {
 
   if (!name) {
     return c.json(
-      {
-        error:
-          "name is required (provide it explicitly or via SKILL.md frontmatter)",
-      },
-      400
+      { error: "name is required (provide it explicitly or via SKILL.md frontmatter)" },
+      400,
     );
   }
-
   if (!NAME_RE.test(name)) {
     return c.json(
-      {
-        error:
-          "name must be lowercase letters, numbers, and hyphens only (max 64 chars)",
-      },
-      400
+      { error: "name must be lowercase letters, numbers, and hyphens only (max 64 chars)" },
+      400,
     );
   }
 
   const now = new Date().toISOString();
   const id = `skill_${generateId()}`;
   const versionId = Date.now().toString();
+  const t = c.get("tenant_id");
 
-  // Store skill metadata (no file content)
+  const manifest = await writeFilesToR2(bucket, t, id, versionId, body.files);
+
   const skill: SkillMeta = {
     id,
     display_title: displayTitle,
@@ -183,21 +278,17 @@ app.post("/", async (c) => {
     latest_version: versionId,
     created_at: now,
   };
+  const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
 
-  // Store first version with files
-  const version: SkillVersion = {
-    version: versionId,
-    files: body.files,
-    created_at: now,
-  };
-
-  const t = c.get("tenant_id");
   await Promise.all([
     c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
     c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
-  return c.json({ ...skill, files: version.files }, 201);
+  // Return the same shape the previous API returned: skill metadata + files
+  // with content (so existing CLI tooling keeps working).
+  const filesOut = await readFilesFromR2(bucket, t, id, versionId, manifest);
+  return c.json({ ...skill, files: filesOut }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -205,8 +296,7 @@ app.post("/", async (c) => {
 // ---------------------------------------------------------------------------
 
 app.get("/", async (c) => {
-  const source = c.req.query("source"); // optional: "custom" | "builtin"
-
+  const source = c.req.query("source");
   let customs: SkillMeta[] = [];
   if (source !== "builtin") {
     const t = c.get("tenant_id");
@@ -221,57 +311,56 @@ app.get("/", async (c) => {
           } catch {
             return null;
           }
-        })
+        }),
       )
     ).filter((s): s is SkillMeta => s !== null);
   }
-
-  let builtins: SkillMeta[] = [];
-  if (source !== "custom") {
-    builtins = BUILTIN_SKILLS;
-  }
-
+  const builtins = source === "custom" ? [] : BUILTIN_SKILLS;
   return c.json({ data: [...builtins, ...customs] });
 });
 
 // ---------------------------------------------------------------------------
-// GET /v1/skills/:id — get skill metadata (no file content)
+// GET /v1/skills/:id — metadata only
 // ---------------------------------------------------------------------------
 
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-
-  // Check builtins first
   const builtin = BUILTIN_SKILLS.find((s) => s.id === id);
   if (builtin) return c.json(builtin);
-
   const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
-
   return c.json(JSON.parse(data) as SkillMeta);
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /v1/skills/:id — delete skill and all its versions
+// DELETE /v1/skills/:id — delete skill, all versions, and all R2 objects
 // ---------------------------------------------------------------------------
 
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-
   if (id.startsWith("builtin_")) {
     return c.json({ error: "Cannot delete built-in skills" }, 403);
   }
-
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
 
-  // Cascade-delete all versions
-  const versionKeys = await c.env.CONFIG_KV.list({
-    prefix: kvPrefix(c.get("tenant_id"), "skillver", id),
-  });
+  const versionKeys = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "skillver", id) });
+
+  const bucket = ensureBucket(c);
+  if (bucket) {
+    for (const k of versionKeys.keys) {
+      const verData = await c.env.CONFIG_KV.get(k.name);
+      if (!verData) continue;
+      try {
+        const v = JSON.parse(verData) as SkillVersion;
+        await deleteFilesFromR2(bucket, t, id, v.version, v.files);
+      } catch {}
+    }
+  }
 
   await Promise.all([
-    c.env.CONFIG_KV.delete(kvKey(c.get("tenant_id"), "skill", id)),
+    c.env.CONFIG_KV.delete(kvKey(t, "skill", id)),
     ...versionKeys.keys.map((k) => c.env.CONFIG_KV.delete(k.name)),
   ]);
 
@@ -283,18 +372,21 @@ app.delete("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 
 app.post("/:id/versions", async (c) => {
+  const bucket = ensureBucket(c);
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
   const id = c.req.param("id");
-  const raw = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
+  const t = c.get("tenant_id");
+  const raw = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!raw) return c.json({ error: "Skill not found" }, 404);
 
   const skill: SkillMeta = JSON.parse(raw);
-
   if (skill.source !== "custom") {
     return c.json({ error: "Cannot create versions for built-in skills" }, 403);
   }
 
   const body = await c.req.json<{
-    files: SkillFile[];
+    files: SkillFileInput[];
     display_title?: string;
     description?: string;
   }>();
@@ -302,40 +394,23 @@ app.post("/:id/versions", async (c) => {
   if (!body.files || !Array.isArray(body.files) || body.files.length === 0) {
     return c.json({ error: "files array is required and must not be empty" }, 400);
   }
-
-  for (const f of body.files) {
-    if (!f.filename || typeof f.content !== "string") {
-      return c.json(
-        { error: "each file must have a filename and content string" },
-        400
-      );
-    }
-  }
+  const validateErr = validateFiles(body.files);
+  if (validateErr) return c.json({ error: validateErr }, 400);
 
   const now = new Date().toISOString();
   const versionId = Date.now().toString();
 
-  const version: SkillVersion = {
-    version: versionId,
-    files: body.files,
-    created_at: now,
-  };
+  const manifest = await writeFilesToR2(bucket, t, id, versionId, body.files);
+  const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
 
-  // Update skill metadata
   skill.latest_version = versionId;
   if (body.display_title !== undefined) skill.display_title = body.display_title;
   if (body.description !== undefined) skill.description = body.description;
 
-  // Auto-extract from SKILL.md if present in new files
   const extracted = extractFromFiles(body.files);
-  if (!body.display_title && extracted.name) {
-    skill.display_title = extracted.name;
-  }
-  if (!body.description && extracted.description) {
-    skill.description = extracted.description;
-  }
+  if (!body.display_title && extracted.name) skill.display_title = extracted.name;
+  if (!body.description && extracted.description) skill.description = extracted.description;
 
-  const t = c.get("tenant_id");
   await Promise.all([
     c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
     c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
@@ -345,15 +420,16 @@ app.post("/:id/versions", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// GET /v1/skills/:id/versions — list all versions
+// GET /v1/skills/:id/versions — list all versions (manifests only)
 // ---------------------------------------------------------------------------
 
 app.get("/:id/versions", async (c) => {
   const id = c.req.param("id");
-  const skillData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
+  const t = c.get("tenant_id");
+  const skillData = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!skillData) return c.json({ error: "Skill not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "skillver", id) });
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "skillver", id) });
 
   const versions = (
     await Promise.all(
@@ -362,7 +438,6 @@ app.get("/:id/versions", async (c) => {
         if (!data) return null;
         try {
           const v = JSON.parse(data) as SkillVersion;
-          // Return summary only (no file content in list)
           return {
             version: v.version,
             file_count: v.files.length,
@@ -371,11 +446,10 @@ app.get("/:id/versions", async (c) => {
         } catch {
           return null;
         }
-      })
+      }),
     )
   ).filter(Boolean);
 
-  // Sort newest first
   versions.sort((a, b) => {
     const ta = parseInt((a as { version: string }).version, 10);
     const tb = parseInt((b as { version: string }).version, 10);
@@ -392,34 +466,41 @@ app.get("/:id/versions", async (c) => {
 app.get("/:id/versions/:version", async (c) => {
   const id = c.req.param("id");
   const version = c.req.param("version");
+  const t = c.get("tenant_id");
 
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skillver", id, version));
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "skillver", id, version));
   if (!data) return c.json({ error: "Version not found" }, 404);
 
-  return c.json(JSON.parse(data) as SkillVersion);
+  const v = JSON.parse(data) as SkillVersion;
+  const bucket = ensureBucket(c);
+  if (!bucket) return c.json(v); // metadata-only fallback when no bucket
+
+  const filesOut = await readFilesFromR2(bucket, t, id, version, v.files);
+  return c.json({ ...v, files: filesOut });
 });
 
 // ---------------------------------------------------------------------------
-// DELETE /v1/skills/:id/versions/:version — delete a specific version
+// DELETE /v1/skills/:id/versions/:version
 // ---------------------------------------------------------------------------
 
 app.delete("/:id/versions/:version", async (c) => {
   const id = c.req.param("id");
   const version = c.req.param("version");
+  const t = c.get("tenant_id");
 
-  const skillRaw = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
+  const skillRaw = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!skillRaw) return c.json({ error: "Skill not found" }, 404);
 
-  const key = kvKey(c.get("tenant_id"), "skillver", id, version);
+  const key = kvKey(t, "skillver", id, version);
   const data = await c.env.CONFIG_KV.get(key);
   if (!data) return c.json({ error: "Version not found" }, 404);
 
   const skill: SkillMeta = JSON.parse(skillRaw);
+  const v = JSON.parse(data) as SkillVersion;
 
-  // If deleting the latest version, find the next most recent one
   if (skill.latest_version === version) {
     const allVersions = await c.env.CONFIG_KV.list({
-      prefix: `skillver:${id}:`,
+      prefix: kvPrefix(t, "skillver", id),
     });
     const remaining = allVersions.keys
       .filter((k) => k.name !== key)
@@ -428,17 +509,16 @@ app.delete("/:id/versions/:version", async (c) => {
 
     if (remaining.length === 0) {
       return c.json(
-        {
-          error:
-            "Cannot delete the last version. Delete the skill instead.",
-        },
-        400
+        { error: "Cannot delete the last version. Delete the skill instead." },
+        400,
       );
     }
-
     skill.latest_version = remaining[0];
-    await c.env.CONFIG_KV.put(kvKey(c.get("tenant_id"), "skill", id), JSON.stringify(skill));
+    await c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill));
   }
+
+  const bucket = ensureBucket(c);
+  if (bucket) await deleteFilesFromR2(bucket, t, id, version, v.files);
 
   await c.env.CONFIG_KV.delete(key);
 

@@ -1,8 +1,8 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent } from "@open-managed-agents/shared";
-import { generateSessionId, generateFileId, generateResourceId, buildTrajectory } from "@open-managed-agents/shared";
+import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock } from "@open-managed-agents/shared";
+import { generateSessionId, generateFileId, generateResourceId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import { kvKey, kvPrefix } from "../kv-helpers";
 
@@ -87,6 +87,70 @@ function forwardToSandbox(
   );
 }
 
+function bytesToBase64(bytes: Uint8Array): string {
+  let bin = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK) as unknown as number[],
+    );
+  }
+  return btoa(bin);
+}
+
+/**
+ * Walk a ContentBlock[] and replace any {source:{type:"file", file_id}}
+ * with {source:{type:"base64", media_type, data}} by fetching bytes from R2.
+ * Also returns the list of file_ids that were resolved so the sandbox can
+ * mount them at /mnt/session/uploads/{file_id} (Anthropic-style dual path).
+ *
+ * Mirrors the Anthropic Files-API ↔ Messages-API binding: a file_id from
+ * POST /v1/files becomes inline base64 the model can read, with no client
+ * re-encoding.
+ */
+async function resolveFileIds(
+  env: Env,
+  tenantId: string,
+  content: ContentBlock[],
+): Promise<{ content: ContentBlock[]; mountFileIds: string[] }> {
+  const bucket = env.FILES_BUCKET;
+  if (!bucket) return { content, mountFileIds: [] };
+  const out: ContentBlock[] = [];
+  const mountFileIds: string[] = [];
+  for (const block of content) {
+    if (
+      (block.type === "document" || block.type === "image") &&
+      block.source?.type === "file" &&
+      block.source.file_id
+    ) {
+      const fileId = block.source.file_id;
+      const [metaJson, obj] = await Promise.all([
+        env.CONFIG_KV.get(kvKey(tenantId, "file", fileId)),
+        bucket.get(fileR2Key(tenantId, fileId)),
+      ]);
+      if (!metaJson || !obj) {
+        throw new Error(`file_id ${fileId} not found`);
+      }
+      const meta = JSON.parse(metaJson) as FileRecord;
+      const buf = await obj.arrayBuffer();
+      const data = bytesToBase64(new Uint8Array(buf));
+      out.push({
+        ...block,
+        source: {
+          type: "base64",
+          media_type: block.source.media_type || meta.media_type,
+          data,
+        },
+      } as ContentBlock);
+      mountFileIds.push(fileId);
+      continue;
+    }
+    out.push(block);
+  }
+  return { content: out, mountFileIds };
+}
+
 // POST /v1/sessions — create session
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
@@ -166,8 +230,6 @@ app.post("/", async (c) => {
         if (!fileData) continue;
 
         const sourceFile = JSON.parse(fileData) as FileRecord;
-        const sourceContent = await c.env.CONFIG_KV.get(kvKey(t, "filecontent", res.file_id));
-
         const scopedFileId = generateFileId();
         const scopedFile: FileRecord = {
           ...sourceFile,
@@ -176,8 +238,19 @@ app.post("/", async (c) => {
           created_at: new Date().toISOString(),
         };
         await c.env.CONFIG_KV.put(kvKey(t, "file", scopedFileId), JSON.stringify(scopedFile));
-        if (sourceContent !== null) {
-          await c.env.CONFIG_KV.put(kvKey(t, "filecontent", scopedFileId), sourceContent);
+
+        // Copy R2 object to scoped key so the resource is independent of the
+        // source file's lifecycle. Best-effort: if the source object isn't in
+        // R2 (e.g. legacy file with no bytes), still create the metadata.
+        if (c.env.FILES_BUCKET) {
+          const obj = await c.env.FILES_BUCKET.get(fileR2Key(t, res.file_id));
+          if (obj) {
+            await c.env.FILES_BUCKET.put(
+              fileR2Key(t, scopedFileId),
+              obj.body,
+              { httpMetadata: { contentType: sourceFile.media_type } },
+            );
+          }
         }
 
         const resourceId = generateResourceId();
@@ -389,7 +462,8 @@ app.delete("/:id", async (c) => {
 // POST /v1/sessions/:id/events — send user events
 app.post("/:id/events", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
+  const t = c.get("tenant_id");
+  const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
 
   const session = JSON.parse(data) as SessionMeta;
@@ -399,7 +473,7 @@ app.post("/:id/events", async (c) => {
     return c.json({ error: "Session is archived and cannot receive new events" }, 409);
   }
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
   const body = await c.req.json<{ events: UserMessageEvent[] }>();
@@ -419,16 +493,105 @@ app.post("/:id/events", async (c) => {
     if (!ALLOWED_EVENT_TYPES.includes(event.type)) {
       return c.json({ error: `Unsupported event type: ${event.type}` }, 400);
     }
+    let outgoing: unknown = event;
+    if (event.type === "user.message" || event.type === "user.custom_tool_result") {
+      const e = event as { content?: ContentBlock[] };
+      if (Array.isArray(e.content)) {
+        try {
+          const { content: resolved, mountFileIds } = await resolveFileIds(c.env, t, e.content);
+          outgoing = {
+            ...event,
+            content: resolved,
+            // Sidecar field consumed by SessionDO POST /event handler:
+            // sandbox writes each file to /mnt/session/uploads/{file_id} so
+            // the agent's bash/read tools can also see them. Stripped before
+            // the event is persisted.
+            ...(mountFileIds.length > 0 ? { _mount_file_ids: mountFileIds } : {}),
+          };
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return c.json({ error: `file_id resolution failed: ${msg}` }, 400);
+        }
+      }
+    }
     await forwardToSandbox(
       binding,
       `/sessions/${id}/event`,
       c.req.raw,
       "POST",
-      JSON.stringify(event),
+      JSON.stringify(outgoing),
     );
   }
 
   return c.body(null, 202);
+});
+
+// POST /v1/sessions/:id/files — container_upload: promote a sandbox file to
+// a first-class file_id. Mirrors Anthropic's pattern where code-execution
+// outputs become re-referenceable file_ids. The created file is scope_id-tagged
+// to the session and `downloadable: true` by default.
+app.post("/:id/files", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const sessionData = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
+  if (!sessionData) return c.json({ error: "Session not found" }, 404);
+
+  const bucket = c.env.FILES_BUCKET;
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  const session = JSON.parse(sessionData) as SessionMeta;
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
+  if (!binding) return c.json({ error }, status ?? 500);
+
+  const body = await c.req.json<{
+    path: string;
+    filename?: string;
+    media_type?: string;
+    downloadable?: boolean;
+  }>();
+  if (!body.path || typeof body.path !== "string") {
+    return c.json({ error: "path is required" }, 400);
+  }
+
+  const fileRes = await forwardToSandbox(
+    binding,
+    `/sessions/${id}/file?path=${encodeURIComponent(body.path)}`,
+    c.req.raw,
+    "GET",
+  );
+  if (!fileRes.ok) {
+    const msg = await fileRes.text().catch(() => "sandbox read failed");
+    return c.json({ error: `Cannot read sandbox path: ${msg}` }, 400);
+  }
+  const buf = await fileRes.arrayBuffer();
+
+  const filename = body.filename || body.path.split("/").pop() || "file";
+  const ext = filename.toLowerCase().split(".").pop() || "";
+  const guessed: Record<string, string> = {
+    pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+    gif: "image/gif", webp: "image/webp", txt: "text/plain", md: "text/markdown",
+    csv: "text/csv", json: "application/json",
+  };
+  const mediaType = body.media_type || guessed[ext] || "application/octet-stream";
+  const downloadable = body.downloadable === undefined ? true : body.downloadable === true;
+
+  const newFileId = generateFileId();
+  await bucket.put(fileR2Key(t, newFileId), buf, { httpMetadata: { contentType: mediaType } });
+
+  const record: FileRecord = {
+    id: newFileId,
+    type: "file" as const,
+    filename,
+    media_type: mediaType,
+    size_bytes: buf.byteLength,
+    scope_id: id,
+    downloadable,
+    created_at: new Date().toISOString(),
+  };
+  await c.env.CONFIG_KV.put(kvKey(t, "file", newFileId), JSON.stringify(record));
+  await c.env.CONFIG_KV.put(kvKey(t, "filebyscope", id, newFileId), "1");
+
+  return c.json(record, 201);
 });
 
 // SSE stream

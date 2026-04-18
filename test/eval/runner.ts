@@ -17,7 +17,9 @@ import {
   deleteSession,
   getOrCreateEnvironment,
   sendAndWait,
+  sendBlocksAndWait,
   setupFiles,
+  uploadFile,
   judge,
 } from "./client.js";
 
@@ -110,13 +112,36 @@ async function runOneTrial(task: EvalTask, trialIndex: number): Promise<EvalTria
       await setupFiles(sessionId, task.setupFiles);
     }
 
+    // Setup uploaded files (POST /v1/files) — file_ids passed to dynamic
+    // turn.message functions. Used by file_id resolver tests (T6.3).
+    const uploadedFileIds: string[] = [];
+    if (task.setupUploads && task.setupUploads.length > 0) {
+      log(task.id, `${trialLabel} Uploading ${task.setupUploads.length} file(s)...`);
+      for (const upload of task.setupUploads) {
+        const fid = await uploadFile(
+          upload.filename,
+          upload.content,
+          upload.media_type,
+          upload.encoding ?? "base64",
+        );
+        uploadedFileIds.push(fid);
+        log(task.id, `${trialLabel} → uploaded ${upload.filename} as ${fid}`);
+      }
+    }
+
     // Execute turns
     const allEvents: SSEEvent[] = [];
     for (let i = 0; i < task.turns.length; i++) {
       const turn = task.turns[i];
       log(task.id, `${trialLabel} Turn ${i + 1}/${task.turns.length}: sending message...`);
 
-      const events = await sendAndWait(sessionId, turn.message, task.timeoutMs || DEFAULT_TIMEOUT);
+      const messageInput = typeof turn.message === "function"
+        ? turn.message({ fileIds: uploadedFileIds })
+        : turn.message;
+
+      const events = typeof messageInput === "string"
+        ? await sendAndWait(sessionId, messageInput, task.timeoutMs || DEFAULT_TIMEOUT)
+        : await sendBlocksAndWait(sessionId, messageInput, task.timeoutMs || DEFAULT_TIMEOUT);
       allEvents.push(...events);
 
       const result = turn.verify(events);
