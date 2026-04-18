@@ -35,14 +35,19 @@ async function waitForPort(
   timeoutMs: number,
 ): Promise<boolean> {
   const deadline = Date.now() + timeoutMs;
+  // Read /proc/net/tcp directly — works even when ss/netstat aren't installed
+  // and bash /dev/tcp redirection isn't enabled. /proc/net/tcp lists listening
+  // sockets in hex; we look for "<port_hex>" with state 0A (LISTEN) bound to
+  // 127.0.0.1 (loopback hex 0100007F).
+  const portHex = port.toString(16).toUpperCase().padStart(4, "0");
   while (Date.now() < deadline) {
     const out = await sandbox
       .exec(
-        `bash -c 'exec 3<>/dev/tcp/127.0.0.1/${port} 2>/dev/null && echo OK || echo NO'`,
+        `awk '$2 ~ /:${portHex}$/ && $4 == "0A" {print "FOUND"; exit}' /proc/net/tcp 2>/dev/null || true`,
         5000,
       )
-      .catch(() => "NO");
-    if (out.includes("OK")) return true;
+      .catch(() => "");
+    if (out.includes("FOUND")) return true;
     await new Promise((r) => setTimeout(r, 1500));
   }
   return false;
