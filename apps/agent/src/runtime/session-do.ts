@@ -20,6 +20,7 @@ import { resolveModel } from "../harness/provider";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
+import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
 import { mountResources } from "./resource-mounter";
@@ -98,6 +99,12 @@ export class SessionDO extends Agent<Env, SessionState> {
   private initialized = false;
   private sandbox: SandboxExecutor | null = null;
   private sandboxWarmupPromise: Promise<void> | null = null;
+  /**
+   * Browser session backed by Cloudflare Browser Rendering binding. Lazy-created
+   * on first browser_* tool call (in-memory only — recreated if DO hibernates).
+   * Closed on /destroy.
+   */
+  private browserSession: BrowserSession | null = null;
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
 
@@ -260,6 +267,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
       this.sandbox = null;
       this.sandboxWarmupPromise = null;
+      // Close the browser session if one was created
+      if (this.browserSession) {
+        try { await this.browserSession.close(); } catch {}
+        this.browserSession = null;
+      }
       this.setState({ ...this.state, status: "terminated" });
 
       const terminatedEvent: SessionEvent = {
@@ -566,6 +578,18 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Lazy-create a single BrowserSession for this DO. Returns null if the
+   * BROWSER binding isn't configured (no-op for non-browser environments).
+   */
+  private getBrowserSession(): BrowserSession | null {
+    if (!this.env.BROWSER) return null;
+    if (!this.browserSession) {
+      this.browserSession = createBrowserSession(this.env.BROWSER as unknown as { fetch: typeof fetch });
+    }
+    return this.browserSession;
+  }
+
+  /**
    * Pre-warm the sandbox: run a no-op command to trigger container startup,
    * then install environment packages if configured.
    * Returns a promise that resolves when warmup is complete.
@@ -751,6 +775,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
           environmentConfig,
+          browser: this.getBrowserSession() ?? undefined,
         });
 
         // Find the original tool definition (before always_ask stripping)
@@ -1005,6 +1030,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      browser: this.getBrowserSession() ?? undefined,
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
       },
@@ -1154,6 +1180,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
       environmentConfig,
+      browser: this.getBrowserSession() ?? undefined,
       delegateToAgent: async (agentId: string, message: string) => {
         return this.runSubAgent(agentId, message, history, sandbox);
       },
