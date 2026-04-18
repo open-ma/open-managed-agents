@@ -19,6 +19,10 @@
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
+  "r2_buckets": [
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+  ],
+
   "d1_databases": [
     { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
   ],

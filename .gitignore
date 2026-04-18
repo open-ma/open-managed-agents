@@ -9,6 +9,7 @@ pnpm-debug.log*
 # Build artifacts
 apps/agent/build-*
 wrangler.deploy.jsonc
+**/tsconfig.tsbuildinfo
 
 # Test
 .act.secrets

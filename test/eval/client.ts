@@ -191,22 +191,23 @@ export async function deleteSession(sessionId: string): Promise<void> {
 // ---- Message posting ----
 
 export async function postMessage(sessionId: string, text: string): Promise<void> {
-  // POST may take a long time (container cold start + LLM inference).
-  // Use a generous timeout — the server responds only after the full turn completes.
+  return postBlocks(sessionId, [{ type: "text", text }]);
+}
+
+/**
+ * Post a user.message containing arbitrary ContentBlock[] (text + document +
+ * image). Lets tests exercise file_id references and multimodal payloads.
+ */
+export async function postBlocks(sessionId: string, content: unknown[]): Promise<void> {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 300_000); // 5 min
+  const timeout = setTimeout(() => controller.abort(), 300_000);
   try {
     const url = `${API_URL}/v1/sessions/${sessionId}/events`;
     const res = await fetch(url, {
       method: "POST",
       headers,
       body: JSON.stringify({
-        events: [
-          {
-            type: "user.message",
-            content: [{ type: "text", text }],
-          },
-        ],
+        events: [{ type: "user.message", content }],
       }),
       signal: controller.signal,
     });
@@ -217,6 +218,26 @@ export async function postMessage(sessionId: string, text: string): Promise<void
   } finally {
     clearTimeout(timeout);
   }
+}
+
+/**
+ * Upload a file via POST /v1/files (JSON body). Returns the new file_id.
+ * Used by EvalTask.setupUploads.
+ */
+export async function uploadFile(
+  filename: string,
+  content: string,
+  media_type: string,
+  encoding: "base64" | "utf8" = "base64",
+): Promise<string> {
+  const data = await post("/v1/files", {
+    filename,
+    content,
+    media_type,
+    encoding,
+  });
+  if (!data.id) throw new Error(`upload: no id in response: ${JSON.stringify(data).slice(0, 200)}`);
+  return data.id as string;
 }
 
 // ---- Event collection ----
@@ -288,6 +309,14 @@ export async function sendAndWait(
   message: string,
   timeoutMs?: number,
 ): Promise<SSEEvent[]> {
+  return sendBlocksAndWait(sessionId, [{ type: "text", text: message }], timeoutMs);
+}
+
+export async function sendBlocksAndWait(
+  sessionId: string,
+  content: unknown[],
+  timeoutMs?: number,
+): Promise<SSEEvent[]> {
   // Snapshot current event count so we only look at NEW events after our message
   let beforeEvents: SSEEvent[] = [];
   try {
@@ -297,15 +326,12 @@ export async function sendAndWait(
     ? Math.max(...beforeEvents.map((e) => (e as any)._seq || 0))
     : 0;
 
-  // Fire the POST but don't wait for it to complete
-  const postPromise = postMessage(sessionId, message).catch((err) => {
+  const postPromise = postBlocks(sessionId, content).catch((err) => {
     console.log(`    [post] POST returned error (may still be processing): ${err.message?.slice(0, 100)}`);
   });
 
-  // Give the server a moment to accept the event
   await sleep(2000);
 
-  // Poll for idle/error/terminated — only looking at events AFTER our message
   const events = await waitForIdle(sessionId, timeoutMs || 600_000, 3_000, lastSeqBefore);
 
   await postPromise;
