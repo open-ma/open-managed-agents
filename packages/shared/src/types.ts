@@ -44,7 +44,27 @@ export interface AgentConfig {
   model: string | { id: string; speed?: "standard" | "fast" };
   system: string;
   tools: ToolConfig[];
-  mcp_servers?: Array<{ name: string; type: string; url: string; authorization_token?: string }>;
+  mcp_servers?: Array<{
+    name: string;
+    type: string;
+    /** Required for remote (HTTP/SSE) servers. Optional when `stdio` is set —
+     *  in that case the URL is derived from the spawned process's localhost port. */
+    url?: string;
+    authorization_token?: string;
+    /** Spawn this MCP server in the sandbox container. The process binds to
+     *  127.0.0.1:port using its built-in SSE transport, and OMA routes the
+     *  existing HTTP-based MCP tool wiring at it. Lets us host stdio-only
+     *  third-party MCP servers (e.g. MiniMax Token Plan MCP) without a
+     *  separate gateway. */
+    stdio?: {
+      command: string;             // e.g. "uvx"
+      args?: string[];             // e.g. ["minimax-coding-plan-mcp", "--transport", "sse", "--port", "8765"]
+      env?: Record<string, string>;
+      port: number;                // port the server listens on inside the sandbox
+      sse_path?: string;           // default "/sse"
+      ready_timeout_ms?: number;   // default 60000 — how long to wait for the port to bind
+    };
+  }>;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   model_card_id?: string;
