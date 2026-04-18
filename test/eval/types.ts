@@ -89,6 +89,10 @@ export interface EvalTask {
   // file_id → inline base64 + sandbox auto-mount path.
   setupUploads?: SetupUpload[];
 
+  // Free-form metadata attached to the task. Surfaces in reports + lets
+  // downstream graders pick task-specific dimensions (e.g. GAIA level).
+  metadata?: Record<string, unknown>;
+
   // One or more turns; each is sent sequentially and verified independently
   turns: EvalTurn[];
 
