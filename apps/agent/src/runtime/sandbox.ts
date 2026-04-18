@@ -116,6 +116,28 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
   }
 
+  async writeFileBytes(path: string, bytes: Uint8Array): Promise<string> {
+    const sandbox = await this.getSandbox();
+    // Encode to base64 client-side and ask the sandbox to decode. Avoids any
+    // UTF-8 reinterpretation of the bytes in flight. The SDK's encoding hint
+    // tells the sandbox how to interpret the string we send.
+    let bin = "";
+    const CHUNK = 8192;
+    for (let i = 0; i < bytes.length; i += CHUNK) {
+      bin += String.fromCharCode.apply(
+        null,
+        bytes.subarray(i, i + CHUNK) as unknown as number[],
+      );
+    }
+    const b64 = btoa(bin);
+    try {
+      await sandbox.writeFile(path, b64, { encoding: "base64" });
+      return "ok";
+    } catch (err: any) {
+      throw new Error(`writeFileBytes(${path}) failed: ${err?.message || err}`);
+    }
+  }
+
   async setEnvVars(envVars: Record<string, string>): Promise<void> {
     const sandbox = await this.getSandbox();
     await sandbox.setEnvVars(envVars);
@@ -208,6 +230,9 @@ export class TestSandbox implements SandboxExecutor {
     return `(test: file ${path})`;
   }
   async writeFile(_path: string, _content: string): Promise<string> {
+    return "ok";
+  }
+  async writeFileBytes(_path: string, _bytes: Uint8Array): Promise<string> {
     return "ok";
   }
 }

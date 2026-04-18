@@ -4,6 +4,7 @@ declare namespace Cloudflare {
     SESSION_DO?: DurableObjectNamespace;
     SANDBOX?: DurableObjectNamespace;
     WORKSPACE_BUCKET?: R2Bucket;
+    FILES_BUCKET?: R2Bucket;
     ASSETS?: { fetch: (req: Request) => Promise<Response> };
     API_KEY: string;
     ANTHROPIC_API_KEY: string;

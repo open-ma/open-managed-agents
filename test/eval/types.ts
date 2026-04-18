@@ -1,5 +1,5 @@
 // ---- Eval Framework Types ----
-import type { Scorer } from "../../packages/shared/src/index.js";
+import type { Scorer, ContentBlock } from "../../packages/shared/src/index.js";
 
 export type Difficulty = "easy" | "medium" | "hard";
 export type Category = "tool-use" | "coding" | "multi-step" | "error-recovery" | "multi-agent";
@@ -31,8 +31,30 @@ export interface SetupFile {
   content: string;
 }
 
+/**
+ * Files uploaded via POST /v1/files BEFORE the turns run.
+ * The resulting file_ids (in upload order) are passed to turn.message when
+ * message is a function — used by T6.3 to test the file_id resolver path.
+ */
+export interface SetupUpload {
+  filename: string;
+  /** Either base64 (for binary) or raw text (for text/*). */
+  content: string;
+  encoding?: "base64" | "utf8";
+  media_type: string;
+}
+
+export interface EvalTurnContext {
+  fileIds: string[];
+}
+
 export interface EvalTurn {
-  message: string;
+  /**
+   * Either a string (legacy) or a function that receives the uploaded
+   * file_ids and returns a string OR ContentBlock[]. ContentBlock[] lets a
+   * test send {type:"document", source:{type:"file", file_id}} blocks.
+   */
+  message: string | ((ctx: EvalTurnContext) => string | ContentBlock[]);
   verify: (events: SSEEvent[]) => VerifyResult;
 }
 
@@ -61,6 +83,11 @@ export interface EvalTask {
 
   // Files written to sandbox in a setup turn before the eval starts
   setupFiles?: SetupFile[];
+
+  // Files uploaded via POST /v1/files before the turns. Their file_ids are
+  // passed to turn.message when it's a function. Use this to test the
+  // file_id → inline base64 + sandbox auto-mount path.
+  setupUploads?: SetupUpload[];
 
   // One or more turns; each is sent sequentially and verified independently
   turns: EvalTurn[];

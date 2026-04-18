@@ -275,8 +275,44 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // POST /event — receive user event, kick off harness
     if (request.method === "POST" && url.pathname === "/event") {
-      const body = (await request.json()) as SessionEvent;
+      const raw = (await request.json()) as SessionEvent & { _mount_file_ids?: string[] };
+      // Sidecar field set by main worker's events POST resolver. Strip it
+      // before persisting — it is delivery metadata, not part of the canonical
+      // event schema.
+      const mountFileIds = raw._mount_file_ids;
+      delete (raw as { _mount_file_ids?: string[] })._mount_file_ids;
+      const body = raw as SessionEvent;
       const history = new SqliteHistory(this.ctx.storage.sql);
+
+      // Auto-mount referenced files into the sandbox FS so agent's bash/read
+      // tools see them at /mnt/session/uploads/{file_id}, while the model
+      // already sees the inline base64 from the resolver. Mirrors Anthropic
+      // managed-agents dual path. Best-effort — failure does not block the
+      // event from being processed.
+      if (mountFileIds && mountFileIds.length > 0 && this.env.FILES_BUCKET) {
+        const sandbox = this.getOrCreateSandbox();
+        try { await this.warmUpSandbox(); } catch {}
+        const tenantId = this.state.tenant_id;
+        try { await sandbox.exec("mkdir -p /mnt/session/uploads", 5000); } catch {}
+        for (const fid of mountFileIds) {
+          try {
+            const obj = await this.env.FILES_BUCKET.get(`t/${tenantId}/files/${fid}`);
+            if (!obj) continue;
+            const buf = await obj.arrayBuffer();
+            const path = `/mnt/session/uploads/${fid}`;
+            if (sandbox.writeFileBytes) {
+              await sandbox.writeFileBytes(path, new Uint8Array(buf));
+            } else {
+              await sandbox.writeFile(
+                path,
+                new TextDecoder("utf-8").decode(new Uint8Array(buf)),
+              );
+            }
+          } catch (err) {
+            console.warn(`[auto-mount] file_id=${fid} failed:`, err);
+          }
+        }
+      }
 
       if (body.type === "user.message") {
         history.append(body);
@@ -465,6 +501,40 @@ export class SessionDO extends Agent<Env, SessionState> {
       });
     }
 
+    // GET /file?path=... — read a file from the sandbox FS as raw bytes.
+    // Used by main worker's POST /v1/sessions/:id/files (container_upload):
+    // promotes an agent-emitted artefact to a first-class file_id.
+    if (request.method === "GET" && url.pathname === "/file") {
+      const path = url.searchParams.get("path");
+      if (!path) return new Response("path query param required", { status: 400 });
+      try {
+        const sandbox = this.getOrCreateSandbox();
+        // SandboxExecutor.readFile returns string (UTF-8 decoded). For binary
+        // safety we call the underlying SDK's base64 read directly.
+        // Workaround until we widen SandboxExecutor with readFileBytes:
+        // ask sandbox to base64 the file via shell, then decode here.
+        const out = await sandbox.exec(
+          `base64 -w0 -- '${path.replace(/'/g, "'\\''")}' 2>&1`,
+          15000,
+        );
+        // exec returns "exit=N\n<stdout>"
+        const m = out.match(/^exit=(\d+)\n([\s\S]*)$/);
+        if (!m || m[1] !== "0") {
+          return new Response(`read failed: ${out.slice(0, 300)}`, { status: 404 });
+        }
+        const b64 = m[2].trim();
+        const bin = atob(b64);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        return new Response(bytes, {
+          headers: { "Content-Type": "application/octet-stream" },
+        });
+      } catch (err: unknown) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return new Response(`read error: ${msg}`, { status: 500 });
+      }
+    }
+
     return new Response("Not found", { status: 404 });
   }
 
@@ -585,7 +655,14 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
 
         if (resources.length) {
-          await mountResources(sandbox, resources, this.env.CONFIG_KV, secretStore);
+          await mountResources(
+            sandbox,
+            resources,
+            this.env.CONFIG_KV,
+            secretStore,
+            this.env.FILES_BUCKET,
+            this.state.tenant_id,
+          );
         }
       }
 
@@ -1165,7 +1242,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Custom skills from KV — lightweight metadata for system prompt
       if (this.env.CONFIG_KV) {
         try {
-          const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV);
+          const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV, this.state.tenant_id);
           additions.push(...customSkills.map(s => s.system_prompt_addition).filter(Boolean));
         } catch {
           // Best-effort
@@ -1179,7 +1256,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Mount custom skill files into sandbox (progressive disclosure)
       if (this.env.CONFIG_KV) {
         try {
-          const skillFilesResults = await getSkillFiles(agent.skills, this.env.CONFIG_KV);
+          const skillFilesResults = await getSkillFiles(
+            agent.skills,
+            this.env.CONFIG_KV,
+            this.env.FILES_BUCKET,
+            this.state.tenant_id,
+          );
           for (const sf of skillFilesResults) {
             const skillDir = `/home/user/.skills/${sf.skillName}`;
             try {
@@ -1187,10 +1269,17 @@ export class SessionDO extends Agent<Env, SessionState> {
             } catch {}
             for (const file of sf.files) {
               try {
-                await sandbox.writeFile(
-                  `${skillDir}/${file.filename}`,
-                  file.content,
-                );
+                if (sandbox.writeFileBytes) {
+                  await sandbox.writeFileBytes(
+                    `${skillDir}/${file.filename}`,
+                    file.bytes,
+                  );
+                } else {
+                  await sandbox.writeFile(
+                    `${skillDir}/${file.filename}`,
+                    new TextDecoder("utf-8").decode(file.bytes),
+                  );
+                }
               } catch {
                 // Best-effort: skip individual file write failures
               }

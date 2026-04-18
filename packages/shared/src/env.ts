@@ -5,6 +5,7 @@ export interface Env {
   SESSION_DO?: DurableObjectNamespace;
   SANDBOX?: DurableObjectNamespace;
   WORKSPACE_BUCKET?: R2Bucket;
+  FILES_BUCKET?: R2Bucket;
   AI?: Ai;
   VECTORIZE?: VectorizeIndex;
   ASSETS?: { fetch: (req: Request) => Promise<Response> };

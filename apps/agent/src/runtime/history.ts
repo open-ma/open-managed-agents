@@ -73,12 +73,25 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
               };
             }
             if (b.type === "document") {
+              // Pass citations + title through as ai-sdk providerOptions so
+              // Anthropic's per-page citation anchors fire when the source PDF
+              // was uploaded with citations:{enabled:true}.
+              const providerOptions = (b.citations || b.title || b.context)
+                ? {
+                    anthropic: {
+                      ...(b.citations ? { citations: b.citations } : {}),
+                      ...(b.title ? { title: b.title } : {}),
+                      ...(b.context ? { context: b.context } : {}),
+                    },
+                  }
+                : undefined;
               // ai-sdk uses "file" type for documents
               if (b.source.type === "url" && b.source.url) {
                 return {
                   type: "file" as const,
                   data: new URL(b.source.url),
                   mimeType: b.source.media_type,
+                  ...(providerOptions ? { providerOptions } : {}),
                 };
               }
               if (b.source.type === "text") {
@@ -90,6 +103,7 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
                 type: "file" as const,
                 data: b.source.data || "",
                 mimeType: b.source.media_type || "application/pdf",
+                ...(providerOptions ? { providerOptions } : {}),
               };
             }
             // fallback

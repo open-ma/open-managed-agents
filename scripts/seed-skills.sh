@@ -1,5 +1,7 @@
 #!/bin/bash
-# Import skills from github.com/anthropics/skills into open-managed-agents
+# Import skills from github.com/anthropics/skills into open-managed-agents.
+# Now uploads binary files too (PNG, fonts, archives) using base64 encoding —
+# the storage layer is R2, no longer KV-string.
 # Usage: BASE=https://your-api.workers.dev KEY=your-api-key ./scripts/seed-skills.sh
 
 set -e
@@ -16,31 +18,36 @@ for skill_dir in "$SKILLS_DIR"/*/; do
   name=$(basename "$skill_dir")
   echo "=== Importing skill: $name ==="
 
-  # Collect all files in the skill directory
-  files="["
-  first=true
-  find "$skill_dir" -type f | while read -r filepath; do
-    relpath="${filepath#$skill_dir}"
-    # Skip binary files (PDFs, images)
-    if file "$filepath" | grep -qE 'text|ASCII|UTF-8|JSON'; then
-      content=$(python3 -c "
-import json, sys
-with open(sys.argv[1], 'r', errors='replace') as f:
-    print(json.dumps(f.read()))
-" "$filepath")
-      if [ "$first" = true ]; then first=false; else files="$files,"; fi
-      files="$files{\"filename\":\"$relpath\",\"content\":$content}"
-    fi
-  done
-  files="$files]"
+  # Build a JSON files array. Text files use utf8 encoding (raw content).
+  # Binary files use base64 so bytes survive intact through R2.
+  payload=$(python3 - "$skill_dir" <<'PY'
+import os, sys, json, base64
+root = sys.argv[1].rstrip('/')
+files = []
+TEXT_EXT = {'.md', '.txt', '.json', '.yaml', '.yml', '.py', '.js', '.ts', '.html',
+            '.css', '.csv', '.xml', '.toml', '.ini', '.sh', '.bash'}
+for cur, _, names in os.walk(root):
+    for fn in names:
+        path = os.path.join(cur, fn)
+        rel = os.path.relpath(path, root)
+        ext = os.path.splitext(fn)[1].lower()
+        with open(path, 'rb') as f:
+            data = f.read()
+        if ext in TEXT_EXT:
+            try:
+                files.append({"filename": rel, "content": data.decode('utf-8'), "encoding": "utf8"})
+                continue
+            except UnicodeDecodeError:
+                pass
+        files.append({"filename": rel, "content": base64.b64encode(data).decode('ascii'), "encoding": "base64"})
+print(json.dumps({"files": files}))
+PY
+)
 
-  # Create skill via API
-  response=$(curl -sf "$BASE/v1/skills" \
+  if response=$(curl -sf "$BASE/v1/skills" \
     -H "x-api-key: $KEY" \
     -H "Content-Type: application/json" \
-    -d "{\"files\": $files}" 2>/dev/null)
-
-  if [ $? -eq 0 ]; then
+    -d "$payload" 2>/dev/null); then
     echo "  Created: $(echo "$response" | python3 -c "import sys,json; d=json.load(sys.stdin); print(d.get('id','?'), d.get('name','?'))" 2>/dev/null)"
   else
     echo "  Failed"

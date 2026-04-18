@@ -67,6 +67,12 @@ export interface SandboxExecutor {
   registerCommandSecrets?(commandPrefix: string, secrets: Record<string, string>): void;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
+  /**
+   * Write raw bytes to a sandbox path. Use this for binary files (PDFs,
+   * images, archives) — the string-based writeFile would corrupt them via
+   * UTF-8 round-tripping.
+   */
+  writeFileBytes?(path: string, bytes: Uint8Array): Promise<string>;
   /** Destroy the sandbox container — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
 }

@@ -8,13 +8,16 @@ export interface Skill {
 
 export interface SkillFile {
   filename: string;
-  content: string;
+  /** Raw bytes ready for writeFileBytes(). */
+  bytes: Uint8Array;
 }
 
 export interface SkillFilesResult {
   skillName: string;
   files: SkillFile[];
 }
+
+import { skillFileR2Key } from "@open-managed-agents/shared";
 
 const skillRegistry = new Map<string, Skill>();
 
@@ -36,11 +39,12 @@ export function resolveSkills(skillConfigs: Array<{ skill_id: string }>): Skill[
  * Returns Skill objects with a lightweight system_prompt_addition that points
  * Claude to /home/user/.skills/{id}/SKILL.md for full instructions.
  *
- * KV key format: skill:{skill_id} -> { id, name, display_title, description, latest_version, ... }
+ * KV key format: t:{tenant}:skill:{skill_id} -> { id, name, display_title, description, latest_version, ... }
  */
 export async function resolveCustomSkills(
   skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
   kv: KVNamespace,
+  tenantId: string,
 ): Promise<Skill[]> {
   const customConfigs = skillConfigs.filter(
     s => s.type === "custom" && !skillRegistry.has(s.skill_id),
@@ -49,7 +53,7 @@ export async function resolveCustomSkills(
   const skills: Skill[] = [];
   for (const cfg of customConfigs) {
     try {
-      const raw = await kv.get(`skill:${cfg.skill_id}`);
+      const raw = await kv.get(`t:${tenantId}:skill:${cfg.skill_id}`);
       if (!raw) continue;
 
       const meta = JSON.parse(raw) as {
@@ -77,19 +81,20 @@ export async function resolveCustomSkills(
 }
 
 /**
- * Fetch custom skill files from KV for mounting into the sandbox.
+ * Fetch custom skill files from R2 for mounting into the sandbox.
  *
- * KV key format:
- *   skill:{skill_id}           -> { ..., latest_version }
- *   skillver:{skill_id}:{ver}  -> { version, files: [{ filename, content }], ... }
- *
- * If a skill config specifies a version, that version is used.
- * Otherwise, latest_version from the skill metadata is used.
+ * KV stores only the manifest (filename + size + encoding). Bytes live in
+ * R2 at `t/{tenant}/skills/{id}/{ver}/{filename}` so binary assets (images,
+ * fonts, model files) survive round-tripping. Caller writes bytes verbatim
+ * via SandboxExecutor.writeFileBytes.
  */
 export async function getSkillFiles(
   skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
   kv: KVNamespace,
+  filesBucket: R2Bucket | undefined,
+  tenantId: string,
 ): Promise<SkillFilesResult[]> {
+  if (!filesBucket) return [];
   const customConfigs = skillConfigs.filter(
     s => s.type === "custom" && !skillRegistry.has(s.skill_id),
   );
@@ -97,7 +102,7 @@ export async function getSkillFiles(
   const results: SkillFilesResult[] = [];
   for (const cfg of customConfigs) {
     try {
-      const metaRaw = await kv.get(`skill:${cfg.skill_id}`);
+      const metaRaw = await kv.get(`t:${tenantId}:skill:${cfg.skill_id}`);
       if (!metaRaw) continue;
 
       const meta = JSON.parse(metaRaw) as {
@@ -108,15 +113,29 @@ export async function getSkillFiles(
       const version = (cfg.version && cfg.version !== "latest") ? cfg.version : meta.latest_version;
       if (!version) continue;
 
-      const verRaw = await kv.get(`skillver:${cfg.skill_id}:${version}`);
+      const verRaw = await kv.get(`t:${tenantId}:skillver:${cfg.skill_id}:${version}`);
       if (!verRaw) continue;
 
-      const verData = JSON.parse(verRaw) as { files?: SkillFile[] };
+      const verData = JSON.parse(verRaw) as {
+        files?: Array<{ filename: string; size_bytes?: number; encoding?: string }>;
+      };
 
-      if (verData.files?.length) {
+      if (!verData.files?.length) continue;
+
+      const files: SkillFile[] = [];
+      for (const entry of verData.files) {
+        const obj = await filesBucket.get(
+          skillFileR2Key(tenantId, cfg.skill_id, version, entry.filename),
+        );
+        if (!obj) continue;
+        const buf = await obj.arrayBuffer();
+        files.push({ filename: entry.filename, bytes: new Uint8Array(buf) });
+      }
+
+      if (files.length > 0) {
         results.push({
           skillName: meta.name || cfg.skill_id,
-          files: verData.files,
+          files,
         });
       }
     } catch {
