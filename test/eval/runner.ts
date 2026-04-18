@@ -31,6 +31,7 @@ import { multiStepSuite } from "./suites/multi-step.js";
 import { errorRecoverySuite } from "./suites/error-recovery.js";
 import { multiAgentSuite } from "./suites/multi-agent.js";
 import { multimodalSuite } from "./suites/multimodal.js";
+import { gaiaSuite } from "./suites/gaia.js";
 
 const ALL_SUITES: Record<string, EvalTask[]> = {
   "tool-use": toolUseSuite,
@@ -39,6 +40,7 @@ const ALL_SUITES: Record<string, EvalTask[]> = {
   "error-recovery": errorRecoverySuite,
   "multi-agent": multiAgentSuite,
   multimodal: multimodalSuite,
+  gaia: gaiaSuite,
 };
 
 // ---- CLI arg parsing ----
