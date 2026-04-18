@@ -180,6 +180,15 @@ export interface AgentMessageEvent extends EventBase {
 
 export interface AgentThinkingEvent extends EventBase {
   type: "agent.thinking";
+  /** Reasoning text emitted by the model. Must be preserved verbatim when
+   *  reconstructing assistant turns — Claude extended thinking validates a
+   *  cryptographic signature and rejects modified blocks; MiniMax requires
+   *  thinking_blocks in history to keep planning context. */
+  text?: string;
+  /** Provider-specific metadata round-tripped with the reasoning. For
+   *  Anthropic: { anthropic: { signature: "...", redactedData: "..." } }.
+   *  For MiniMax: opaque token IDs if any. Pass through verbatim. */
+  providerOptions?: Record<string, unknown>;
 }
 
 export interface AgentCustomToolUseEvent extends EventBase {

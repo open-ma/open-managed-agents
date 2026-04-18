@@ -3,6 +3,7 @@ import type { HistoryStore } from "../harness/interface";
 import type {
   SessionEvent,
   AgentMessageEvent,
+  AgentThinkingEvent,
   AgentToolUseEvent,
   AgentToolResultEvent,
   AgentMcpToolUseEvent,
@@ -31,12 +32,27 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
     toolName: string;
     output: { type: "text"; value: string };
   }> = [];
+  // Reasoning parts emitted between the previous user/tool message and the
+  // upcoming assistant turn. Replayed as `{ type: "reasoning" }` parts so the
+  // model sees its own prior chain-of-thought (Claude requires this for
+  // signature verification; MiniMax requires it for context preservation).
+  let pendingReasoning: Array<{
+    type: "reasoning";
+    text: string;
+    providerOptions?: Record<string, unknown>;
+  }> = [];
 
   const flushTools = () => {
     if (pendingToolCalls.length > 0) {
+      // Reasoning blocks emitted alongside the tool calls go in the SAME
+      // assistant message, BEFORE the tool calls — Anthropic schema requires
+      // thinking → tool_use ordering, and signature verification depends on
+      // it.
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const content: any[] = [...pendingReasoning, ...pendingToolCalls];
       const assistantMsg: AssistantModelMessage = {
         role: "assistant",
-        content: pendingToolCalls,
+        content,
       };
       const toolMsg: ToolModelMessage = {
         role: "tool",
@@ -46,6 +62,7 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
       messages.push(toolMsg);
       pendingToolCalls = [];
       pendingToolResults = [];
+      pendingReasoning = [];
     }
   };
 
@@ -114,12 +131,32 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
         break;
       }
       case "agent.message": {
-        flushTools();
         const e = event as AgentMessageEvent;
-        messages.push({
-          role: "assistant",
-          content: e.content.map((b) => ({ type: "text" as const, text: b.type === "text" ? b.text : "" })),
-        });
+        // Reasoning that preceded this final assistant message must ride
+        // with it (Anthropic schema: thinking → text). Don't flushTools()
+        // first if there were no tool calls — drop reasoning into the
+        // assistant content directly.
+        if (pendingToolCalls.length > 0) {
+          flushTools();
+        }
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        const content: any[] = [
+          ...pendingReasoning,
+          ...e.content.map((b) => ({ type: "text" as const, text: b.type === "text" ? b.text : "" })),
+        ];
+        messages.push({ role: "assistant", content });
+        pendingReasoning = [];
+        break;
+      }
+      case "agent.thinking": {
+        const e = event as AgentThinkingEvent;
+        if (e.text) {
+          pendingReasoning.push({
+            type: "reasoning",
+            text: e.text,
+            ...(e.providerOptions ? { providerOptions: e.providerOptions } : {}),
+          });
+        }
         break;
       }
       case "agent.tool_use": {
