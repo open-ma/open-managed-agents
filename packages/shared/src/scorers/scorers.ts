@@ -206,6 +206,59 @@ export function threadCreated(minCount = 1): Scorer {
   };
 }
 
+// ---------- GAIA-style normalized exact match ----------
+
+/**
+ * Normalize a free-form answer string the way the GAIA benchmark scorer does:
+ * lower-case, strip articles + most punctuation, collapse whitespace, treat
+ * numbers as numbers (so "1,234" == "1234"). Used by gaiaMatch().
+ */
+export function normalizeGaiaAnswer(s: string): string {
+  let out = String(s).trim().toLowerCase();
+  // Strip a leading "answer: " prefix the model often adds.
+  out = out.replace(/^(?:final\s+answer|answer)[:\s]+/i, "");
+  // Drop surrounding quotes.
+  out = out.replace(/^["'`]+|["'`]+$/g, "");
+  // Numeric form: drop commas/$/spaces from numbers ("1,234" → "1234"; "$5.00" → "5.00").
+  if (/^[\$\£\€]?[\d,]+(\.\d+)?\s*[%]?$/.test(out)) {
+    out = out.replace(/[\$\£\€,\s%]/g, "");
+  }
+  // Strip surrounding articles + punctuation
+  out = out
+    .replace(/\b(a|an|the)\s+/g, "")
+    .replace(/[.,;:!?]/g, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  return out;
+}
+
+/**
+ * GAIA-style scorer: takes the agent's last message, normalizes it the same
+ * way as the expected answer, and checks for normalized exact-match. The
+ * agent is asked to end with "Final answer: X" by the suite prompt; we look
+ * at the last line first, falling back to the whole final message.
+ */
+export function gaiaMatch(expected: string): Scorer {
+  const expectedNorm = normalizeGaiaAnswer(expected);
+  return (trajectory) => {
+    const messages = getAgentMessageTexts(trajectory);
+    if (messages.length === 0) return fail("No agent message");
+    const last = messages[messages.length - 1].trim();
+    // Prefer the last non-empty line — agents often write reasoning then a
+    // single-line final answer.
+    const lastLine = last.split(/\r?\n/).reverse().find((l) => l.trim().length > 0) || last;
+    const candidates = [lastLine, last];
+    for (const c of candidates) {
+      const norm = normalizeGaiaAnswer(c);
+      if (norm === expectedNorm) {
+        return pass(`Match: "${expectedNorm}"`);
+      }
+    }
+    const seen = normalizeGaiaAnswer(lastLine);
+    return fail(`Expected "${expectedNorm}", got "${seen.slice(0, 100)}"`);
+  };
+}
+
 // ---------- Combinators ----------
 
 /** All scorers must pass. Aggregated value = average. */

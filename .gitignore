@@ -15,6 +15,7 @@ wrangler.deploy.jsonc
 .act.secrets
 .act.vars
 test-heatmap.html
+test/eval/data/
 
 # Internal docs (screenshots, design notes, TODOs)
 .docs/
