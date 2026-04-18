@@ -30,7 +30,7 @@ interface GaiaRow {
   file_name?: string; // attached file in dataset (we don't auto-mount yet)
 }
 
-const SYSTEM_PROMPT =
+const SYSTEM_PROMPT_TEXT_ONLY =
   "You are an autonomous research agent. Use the available tools (browser_*, " +
   "bash, read, etc.) to find information and answer the user's question precisely. " +
   "Web search/browsing: prefer browser_navigate to a search engine, then browser_get_text " +
@@ -39,22 +39,72 @@ const SYSTEM_PROMPT =
   "the shortest possible answer (number, name, or short phrase). " +
   "Do NOT include reasoning in the final-answer line — put it above.";
 
+const SYSTEM_PROMPT_MULTIMODAL =
+  SYSTEM_PROMPT_TEXT_ONLY +
+  "\n\nThis question references an attached file. If it's an image, use " +
+  "mcp_minimax_tp_call with tool_name='understand_image' and " +
+  "arguments={prompt:'<your question>', image_source:'<file path>'} to read it. " +
+  "The file is mounted at /mnt/session/uploads/<filename> in the sandbox.";
+
+/**
+ * MCP server config for MiniMax Token Plan MCP — gives non-vision models
+ * (MiniMax-M2-highspeed) the ability to read images via the understand_image
+ * tool. Spawned in-sandbox via uv. Caller must provide MINIMAX_API_KEY +
+ * MINIMAX_API_HOST via env vars at runner-startup.
+ */
+function buildMiniMaxMcpServer() {
+  const apiKey = process.env.MINIMAX_API_KEY || process.env.OMA_MINIMAX_API_KEY;
+  const apiHost = process.env.MINIMAX_API_HOST || "https://api.minimaxi.com";
+  if (!apiKey) {
+    console.warn(
+      "[gaia] MINIMAX_API_KEY not set — multimodal GAIA tasks will fail to call understand_image.",
+    );
+  }
+  return {
+    name: "minimax_tp",
+    type: "stdio",
+    stdio: {
+      command: "uv",
+      args: [
+        "run",
+        "--no-project",
+        "--with",
+        "minimax-coding-plan-mcp",
+        "python",
+        "-c",
+        "from minimax_mcp.server import mcp; mcp.settings.host='127.0.0.1'; mcp.settings.port=8765; mcp.settings.stateless_http=True; mcp.run(transport='streamable-http')",
+      ],
+      env: {
+        MINIMAX_API_KEY: apiKey || "",
+        MINIMAX_API_HOST: apiHost,
+      },
+      port: 8765,
+      sse_path: "/mcp",
+      ready_timeout_ms: 120_000,
+    },
+  };
+}
+
 function rowToTask(row: GaiaRow, indexInLevel: number): EvalTask {
-  // Wrap gaiaMatch with a lenient outer (so flaky network during full run
-  // doesn't poison) — for now strict equality, like the official scorer.
+  const isMultimodal = !!row.file_name;
   const scorer: Scorer = all(
     gaiaMatch(row["Final answer"]),
     idleNoError(),
   );
+  const agentConfig: EvalTask["agentConfig"] & { mcp_servers?: unknown[] } = {
+    system: isMultimodal ? SYSTEM_PROMPT_MULTIMODAL : SYSTEM_PROMPT_TEXT_ONLY,
+    tools: DEFAULT_TOOLS,
+  };
+  if (isMultimodal) {
+    // Inject MiniMax MCP for image understanding (non-vision models need it).
+    agentConfig.mcp_servers = [buildMiniMaxMcpServer()];
+  }
   return {
     id: `GAIA-L${row.Level}-${indexInLevel + 1}-${row.task_id.slice(0, 8)}`,
     category: "tool-use",
     difficulty: row.Level === 1 ? "easy" : row.Level === 2 ? "medium" : "hard",
-    description: `GAIA L${row.Level}: ${row.Question.slice(0, 80)}${row.Question.length > 80 ? "..." : ""}`,
-    agentConfig: {
-      system: SYSTEM_PROMPT,
-      tools: DEFAULT_TOOLS,
-    },
+    description: `GAIA L${row.Level}${isMultimodal ? " [+file]" : ""}: ${row.Question.slice(0, 80)}${row.Question.length > 80 ? "..." : ""}`,
+    agentConfig,
     turns: [
       {
         message: row.Question,
@@ -68,6 +118,7 @@ function rowToTask(row: GaiaRow, indexInLevel: number): EvalTask {
       gaia_level: row.Level,
       gaia_expected_answer: row["Final answer"],
       gaia_file_name: row.file_name || null,
+      gaia_multimodal: isMultimodal,
     },
   } as EvalTask;
 }
