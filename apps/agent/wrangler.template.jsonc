@@ -2,7 +2,7 @@
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "sandbox-__ENV_ID__",
   "main": "src/index.ts",
-  "compatibility_date": "2025-04-01",
+  "compatibility_date": "2025-09-15",
   "compatibility_flags": ["nodejs_compat"],
 
   "containers": [
@@ -27,8 +27,11 @@
   ],
 
   "r2_buckets": [
-    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" }
+    { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
   ],
+
+  "browser": { "binding": "BROWSER" },
 
   "migrations": [
     {

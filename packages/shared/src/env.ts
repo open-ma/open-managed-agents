@@ -6,6 +6,8 @@ export interface Env {
   SANDBOX?: DurableObjectNamespace;
   WORKSPACE_BUCKET?: R2Bucket;
   FILES_BUCKET?: R2Bucket;
+  // Cloudflare Browser Rendering — only bound on agent worker (sandbox-default)
+  BROWSER?: Fetcher;
   AI?: Ai;
   VECTORIZE?: VectorizeIndex;
   ASSETS?: { fetch: (req: Request) => Promise<Response> };

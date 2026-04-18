@@ -4,8 +4,9 @@ import { anthropic } from "@ai-sdk/anthropic";
 import type { AgentConfig, ToolsetConfig, CustomToolConfig } from "@open-managed-agents/shared";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
+import { buildBrowserTools, type BrowserSession } from "./browser-tools";
 
-const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"];
+const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "browser"];
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
@@ -288,11 +289,18 @@ export async function buildTools(
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
+    browser?: BrowserSession;
   }
 ): Promise<Record<string, any>> {
   const enabled = getEnabledTools(agentConfig.tools);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Record<string, any> = {};
+
+  // Browser tools (Cloudflare Browser Rendering binding). Requires both an
+  // active session passed in AND the agent to opt in to "browser" in its toolset.
+  if (env?.browser && enabled.has("browser")) {
+    Object.assign(tools, buildBrowserTools(env.browser));
+  }
 
   if (enabled.has("bash")) {
     // CC-aligned: only "sleep" is disallowed for auto-backgrounding
