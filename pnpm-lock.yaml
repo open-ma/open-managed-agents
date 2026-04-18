@@ -54,6 +54,9 @@ importers:
       '@ai-sdk/anthropic':
         specifier: ^3.0.69
         version: 3.0.69(zod@4.3.6)
+      '@cloudflare/playwright':
+        specifier: ^1.3.0
+        version: 1.3.0
       '@cloudflare/sandbox':
         specifier: ^0.8.11
         version: 0.8.11
@@ -421,6 +424,9 @@ packages:
   '@cloudflare/kv-asset-handler@0.4.2':
     resolution: {integrity: sha512-SIOD2DxrRRwQ+jgzlXCqoEFiKOFqaPjhnNTGKXSRLvp1HiOvapLaFG2kEr9dYQTYe8rKrd9uvDUzmAITeNyaHQ==}
     engines: {node: '>=18.0.0'}
+
+  '@cloudflare/playwright@1.3.0':
+    resolution: {integrity: sha512-WOlpXzfJ7noXmW8qE/qlU7MbVHyt9IzxxwPcTGeh2+YQS1gqNIe3fl99AZvBsheH0o7oCePYtL9wRV1KPCYghQ==}
 
   '@cloudflare/sandbox@0.8.11':
     resolution: {integrity: sha512-ZXtdSZFA+7GVZT0iLM9zuvFWcU6GQ/E0rdHo5e12QYcBcyD57QxnqgTJS28jWmzuZagFuBJgBrSoLjm2xvSSvA==}
@@ -3490,6 +3496,8 @@ snapshots:
   '@cloudflare/containers@0.3.0': {}
 
   '@cloudflare/kv-asset-handler@0.4.2': {}
+
+  '@cloudflare/playwright@1.3.0': {}
 
   '@cloudflare/sandbox@0.8.11':
     dependencies:
