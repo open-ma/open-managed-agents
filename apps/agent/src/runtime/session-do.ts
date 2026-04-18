@@ -87,6 +87,11 @@ const INITIAL_SESSION_STATE: SessionState = {
  * reused across turns, destroyed on session delete/terminate.
  */
 export class SessionDO extends Agent<Env, SessionState> {
+  // 30s keepAlive heartbeat (also the agents-lib default) — held automatically
+  // for the duration of any runFiber() callback. Prevents idle DO eviction
+  // during long generateText turns.
+  static options = { keepAliveIntervalMs: 30_000 };
+
   initialState = INITIAL_SESSION_STATE;
 
   /** Build a tenant-scoped KV key */
@@ -140,6 +145,49 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Called by the agents library when a runFiber row in cf_agents_runs
+   * survives DO restart (i.e. the fiber was interrupted by eviction). For
+   * us, fibers are named "turn:{seq}" — one per drain iteration. Recovery
+   * strategy: emit a status_rescheduled marker so observers can see a
+   * recovery happened, reset stale state.status, then re-drain. The
+   * unprocessed user.message at seq is still pending (we never emitted
+   * status_idle for it) so drain re-runs the harness, and generateText
+   * sees prior tool_use/tool_result rows in history and continues from
+   * roughly where it left off (at-least-once semantics — a tool may be
+   * re-decided once, but no tool effect is lost since each result is in
+   * SQL).
+   */
+  async onFiberRecovered(ctx: { id: string; name: string; snapshot: unknown }): Promise<void> {
+    if (!ctx.name.startsWith("turn:")) {
+      console.warn(`[fiber-recover] unknown fiber: ${ctx.name}`);
+      return;
+    }
+    console.warn(
+      `[fiber-recover] turn fiber ${ctx.name} (id=${ctx.id}) interrupted; re-draining. ` +
+        `snapshot=${JSON.stringify(ctx.snapshot)}`,
+    );
+    this.ensureSchema();
+
+    // Persisted state from before eviction is stale — clear it so drain
+    // doesn't see status="running" and skip.
+    if (this.state.status === "running") {
+      this.setState({ ...this.state, status: "idle" });
+    }
+
+    // Audit marker so the trajectory shows we recovered (vs silently
+    // re-running). Doesn't change scoring.
+    const history = new SqliteHistory(this.ctx.storage.sql);
+    const reschedEvent: SessionEvent = {
+      type: "session.status_rescheduled",
+      reason: `Recovered after DO eviction (fiber ${ctx.name})`,
+    };
+    history.append(reschedEvent);
+    this.broadcastEvent(reschedEvent);
+
+    await this.drainEventQueue();
+  }
+
+  /**
    * Drain the event queue: check the events table for unprocessed user
    * events and run the harness for each one.
    *
@@ -182,25 +230,35 @@ export class SessionDO extends Agent<Env, SessionState> {
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
-        if (event.type === "user.message") {
-          await this.processUserMessage(event as UserMessageEvent);
-        } else if (event.type === "user.tool_confirmation") {
-          await this.handleToolConfirmation(event as UserToolConfirmationEvent, history);
-        } else if (event.type === "user.custom_tool_result") {
-          const customResult = event as UserCustomToolResultEvent;
-          const toolResultEvent: SessionEvent = {
-            type: "agent.tool_result",
-            tool_use_id: customResult.custom_tool_use_id,
-            content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
-          };
-          history.append(toolResultEvent);
-          this.broadcastEvent(toolResultEvent);
-          const resumeMsg: UserMessageEvent = {
-            type: "user.message",
-            content: [{ type: "text", text: "" }],
-          };
-          await this.processUserMessage(resumeMsg, 0, true);
-        }
+        // Wrap each turn's work in a durable fiber so:
+        //  - keepAlive() heartbeat protects against idle DO eviction
+        //  - cf_agents_runs row is created at start, deleted on success
+        //  - if interrupted, onFiberRecovered fires on DO restart and we
+        //    re-drain (history-based replay — generateText sees prior
+        //    tool_use/tool_result rows and continues)
+        await this.runFiber(`turn:${pendingUserEvent.seq}`, async (ctx) => {
+          ctx.stash({ user_event_seq: pendingUserEvent.seq, type: event.type });
+
+          if (event.type === "user.message") {
+            await this.processUserMessage(event as UserMessageEvent);
+          } else if (event.type === "user.tool_confirmation") {
+            await this.handleToolConfirmation(event as UserToolConfirmationEvent, history);
+          } else if (event.type === "user.custom_tool_result") {
+            const customResult = event as UserCustomToolResultEvent;
+            const toolResultEvent: SessionEvent = {
+              type: "agent.tool_result",
+              tool_use_id: customResult.custom_tool_use_id,
+              content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
+            };
+            history.append(toolResultEvent);
+            this.broadcastEvent(toolResultEvent);
+            const resumeMsg: UserMessageEvent = {
+              type: "user.message",
+              content: [{ type: "text", text: "" }],
+            };
+            await this.processUserMessage(resumeMsg, 0, true);
+          }
+        });
       } catch (err) {
         const errorMsg = this.describeError(err);
         const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
