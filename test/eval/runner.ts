@@ -482,7 +482,9 @@ async function main() {
   for (const [name, tasks] of suitesToRun) {
     let filteredTasks = tasks;
     if (task) {
-      filteredTasks = tasks.filter((t) => t.id === task);
+      // --task accepts a single id or comma-separated list (e.g. T6.1,T6.2)
+      const ids = new Set(task.split(",").map((s) => s.trim()).filter(Boolean));
+      filteredTasks = tasks.filter((t) => ids.has(t.id));
     }
     if (filteredTasks.length === 0) continue;
 

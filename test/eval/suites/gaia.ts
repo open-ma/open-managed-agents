@@ -62,7 +62,7 @@ function rowToTask(row: GaiaRow, indexInLevel: number): EvalTask {
       },
     ],
     scorer,
-    timeoutMs: 600_000, // GAIA tasks can be long-running (multi-step browse)
+    timeoutMs: 1_800_000, // 30 min — GAIA tasks can require many browse steps
     metadata: {
       gaia_task_id: row.task_id,
       gaia_level: row.Level,
