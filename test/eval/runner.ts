@@ -101,6 +101,7 @@ async function runOneTrial(task: EvalTask, trialIndex: number): Promise<EvalTria
       model: task.agentConfig.model || DEFAULT_MODEL,
       tools: task.agentConfig.tools,
       callable_agents: callableAgents.length > 0 ? callableAgents : undefined,
+      mcp_servers: task.agentConfig.mcp_servers,
     });
     agentIds.push(agentId);
 
