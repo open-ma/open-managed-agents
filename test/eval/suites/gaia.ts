@@ -4,6 +4,7 @@ import {
   all,
   gaiaMatch,
   idleNoError,
+  RECOMMENDED_AGENT_BASE,
   type Scorer,
 } from "../../../packages/shared/src/index.js";
 import { readFileSync, existsSync } from "node:fs";
@@ -30,21 +31,30 @@ interface GaiaRow {
   file_name?: string; // attached file in dataset (we don't auto-mount yet)
 }
 
-const SYSTEM_PROMPT_TEXT_ONLY =
-  "You are an autonomous research agent. Use the available tools (browser_*, " +
-  "bash, read, etc.) to find information and answer the user's question precisely. " +
-  "Web search/browsing: prefer browser_navigate to a search engine, then browser_get_text " +
-  "or browser_screenshot to read results. " +
-  "End your final response with a single line: `Final answer: X` where X is " +
-  "the shortest possible answer (number, name, or short phrase). " +
-  "Do NOT include reasoning in the final-answer line — put it above.";
+// GAIA-specific framing only — cross-cutting agent guidance comes from
+// RECOMMENDED_AGENT_BASE which the agent author opts into. This file just
+// adds the benchmark conventions.
+const GAIA_TASK_PROMPT_TEXT_ONLY =
+  "You are attempting questions from the GAIA benchmark. Use the available tools " +
+  "to research the answer.\n\n" +
+  "End your final response with a single line:\n" +
+  "  Final answer: X\n" +
+  "Where X is the shortest possible answer (a number, a name, a short phrase, or " +
+  "a comma-separated list). Do NOT include reasoning in the final-answer line — " +
+  "put it above.";
 
-const SYSTEM_PROMPT_MULTIMODAL =
-  SYSTEM_PROMPT_TEXT_ONLY +
-  "\n\nThis question references an attached file. If it's an image, use " +
-  "mcp_minimax_tp_call with tool_name='understand_image' and " +
-  "arguments={prompt:'<your question>', image_source:'<file path>'} to read it. " +
-  "The file is mounted at /mnt/session/uploads/<filename> in the sandbox.";
+const GAIA_TASK_PROMPT_MULTIMODAL =
+  GAIA_TASK_PROMPT_TEXT_ONLY +
+  "\n\nThis question references an attached file mounted at " +
+  "/mnt/session/uploads/<filename> in the sandbox. If it's an image, use " +
+  "mcp_minimax_tp_call(tool_name='understand_image', arguments={prompt:'<your question>', image_source:'<file path>'}) " +
+  "to read it.";
+
+function composeSystem(taskPrompt: string): string {
+  // Stack the recommended baseline + the GAIA-specific framing. Order
+  // matters: baseline first sets behavior, task prompt last sets context.
+  return `${RECOMMENDED_AGENT_BASE}\n\n---\n\n${taskPrompt}`;
+}
 
 /**
  * MCP server config for MiniMax Token Plan MCP — gives non-vision models
@@ -92,7 +102,7 @@ function rowToTask(row: GaiaRow, indexInLevel: number): EvalTask {
     idleNoError(),
   );
   const agentConfig: EvalTask["agentConfig"] & { mcp_servers?: unknown[] } = {
-    system: isMultimodal ? SYSTEM_PROMPT_MULTIMODAL : SYSTEM_PROMPT_TEXT_ONLY,
+    system: composeSystem(isMultimodal ? GAIA_TASK_PROMPT_MULTIMODAL : GAIA_TASK_PROMPT_TEXT_ONLY),
     tools: DEFAULT_TOOLS,
   };
   if (isMultimodal) {
