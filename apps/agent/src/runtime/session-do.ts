@@ -24,6 +24,7 @@ import { createBrowserSession, type BrowserSession } from "../harness/browser-to
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
 import { mountResources } from "./resource-mounter";
+import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
 
 interface SessionInitParams {
   agent_id: string;
@@ -105,6 +106,13 @@ export class SessionDO extends Agent<Env, SessionState> {
    * Closed on /destroy.
    */
   private browserSession: BrowserSession | null = null;
+  /**
+   * Localhost URLs of stdio MCP servers spawned in the sandbox during warmup.
+   * Indexed by mcp_servers[].name. Used to fix up the agent.mcp_servers entry
+   * before each buildTools() call so the curl-based MCP wiring talks to the
+   * right port.
+   */
+  private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
 
@@ -590,6 +598,50 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Spawn any stdio-mode MCP servers declared on the session's agent config.
+   * Idempotent — if the spawned URL is already recorded for a server name,
+   * we skip. Records each spawned server's localhost URL on this.spawnedMcpUrls
+   * so applyMcpUrlFixups can patch agent.mcp_servers before buildTools.
+   */
+  private async spawnSessionStdioMcps(sandbox: SandboxExecutor): Promise<void> {
+    const agentId = this.state.agent_id;
+    if (!agentId || !this.env.CONFIG_KV) return;
+    const agentJson = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
+    if (!agentJson) return;
+    const agent = JSON.parse(agentJson) as AgentConfig;
+    const mcps = agent.mcp_servers || [];
+    const stdios: StdioMcpConfig[] = [];
+    for (const s of mcps) {
+      if (!s.stdio) continue;
+      if (this.spawnedMcpUrls.has(s.name)) continue;
+      stdios.push({ name: s.name, ...s.stdio });
+    }
+    if (stdios.length === 0) return;
+    try {
+      const spawned = await spawnStdioMcpServers(sandbox, stdios);
+      for (const sp of spawned) this.spawnedMcpUrls.set(sp.name, sp.url);
+    } catch (err) {
+      // Best-effort: log but don't fail the whole warmup.
+      console.error("[mcp-spawner]", err);
+    }
+  }
+
+  /**
+   * Mutate agent.mcp_servers in place so any stdio entry has its `url` set
+   * to the localhost URL we spawned it on. No-op if no spawned URLs are
+   * recorded yet (warmup hasn't run, or no stdio MCPs configured).
+   */
+  private applyMcpUrlFixups(agent: AgentConfig): AgentConfig {
+    if (this.spawnedMcpUrls.size === 0) return agent;
+    if (!agent.mcp_servers) return agent;
+    const patched = agent.mcp_servers.map((s) => {
+      const url = this.spawnedMcpUrls.get(s.name);
+      return url ? { ...s, url } : s;
+    });
+    return { ...agent, mcp_servers: patched };
+  }
+
+  /**
    * Pre-warm the sandbox: run a no-op command to trigger container startup,
    * then install environment packages if configured.
    * Returns a promise that resolves when warmup is complete.
@@ -657,6 +709,11 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         }
       }
+
+      // Spawn stdio MCP servers in the sandbox if the agent uses any. The
+      // spawned process binds on 127.0.0.1 + records the URL so subsequent
+      // buildTools calls point the curl-based MCP wiring at it.
+      await this.spawnSessionStdioMcps(sandbox);
 
       // Mount all session resources (files, git repos, env secrets)
       const sessionId = this.state.session_id;
@@ -770,7 +827,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
 
         // Build tools with execute functions intact (not stripped for always_ask)
-        const allTools = await buildTools(agent, sandbox, {
+        const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
@@ -1026,7 +1083,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
 
     // Build sub-agent tools and model (platform prepares context for sub-agent too)
-    const subTools = await buildTools(subAgent, sandbox, {
+    const subTools = await buildTools(this.applyMcpUrlFixups(subAgent), sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
@@ -1175,7 +1232,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     // --- Platform prepares WHAT is available ---
 
     // Build tools from agent config
-    const allTools = await buildTools(agent, sandbox, {
+    const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,

@@ -803,6 +803,12 @@ export async function buildTools(
   // We call MCP endpoints via sandbox.exec(curl) instead of Worker-side fetch.
   if (agentConfig.mcp_servers?.length) {
     for (const server of agentConfig.mcp_servers) {
+      if (!server.url) {
+        // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
+        // (warmup hasn't run, or spawn failed). Skip silently — re-attempt
+        // when the next buildTools fires after warmup.
+        continue;
+      }
       const escapedUrl = server.url.replace(/'/g, "'\\''");
       const authHeader = server.authorization_token
         ? `-H 'Authorization: Bearer ${server.authorization_token.replace(/'/g, "'\\''")}'`
