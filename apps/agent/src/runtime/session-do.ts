@@ -161,7 +161,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         break;
       }
 
-      console.log(`[drain] processing event seq=${pendingUserEvent.seq} type=${pendingUserEvent.type}`);
+      console.log(`[drain] processing event seq=${pendingUserEvent.seq}`);
       this.setState({ ...this.state, status: "running" });
 
       try {

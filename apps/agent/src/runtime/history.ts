@@ -69,7 +69,7 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
               return {
                 type: "image" as const,
                 image: b.source.data || "",
-                mimeType: b.source.media_type,
+                mediaType: b.source.media_type,
               };
             }
             if (b.type === "document") {
@@ -85,12 +85,13 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
                     },
                   }
                 : undefined;
-              // ai-sdk uses "file" type for documents
+              // ai-sdk v6 FilePart spec: data + mediaType (NOT mimeType).
+              // Schema validation rejects mimeType.
               if (b.source.type === "url" && b.source.url) {
                 return {
                   type: "file" as const,
                   data: new URL(b.source.url),
-                  mimeType: b.source.media_type,
+                  mediaType: b.source.media_type,
                   ...(providerOptions ? { providerOptions } : {}),
                 };
               }
@@ -102,7 +103,7 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
               return {
                 type: "file" as const,
                 data: b.source.data || "",
-                mimeType: b.source.media_type || "application/pdf",
+                mediaType: b.source.media_type || "application/pdf",
                 ...(providerOptions ? { providerOptions } : {}),
               };
             }
