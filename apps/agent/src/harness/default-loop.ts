@@ -147,10 +147,19 @@ export class DefaultHarness implements HarnessInterface {
       abortSignal: signal,
 
       onStepFinish: async ({ text, toolCalls, toolResults, reasoning }) => {
-        // Emit thinking event if extended thinking was used
-        if (reasoning) {
-          const thinkingEvent: SessionEvent = { type: "agent.thinking" };
-          runtime.broadcast(thinkingEvent);
+        // Emit one agent.thinking event per reasoning block, preserving the
+        // text + provider metadata (signature for Claude, opaque ids for
+        // MiniMax). history.ts replays these as ReasoningPart in subsequent
+        // steps so the model sees its own prior chain-of-thought.
+        if (reasoning && Array.isArray(reasoning)) {
+          for (const r of reasoning) {
+            const thinkingEvent: SessionEvent = {
+              type: "agent.thinking",
+              text: r.text,
+              providerOptions: r.providerOptions as Record<string, unknown> | undefined,
+            };
+            runtime.broadcast(thinkingEvent);
+          }
         }
 
         // Emit text response
