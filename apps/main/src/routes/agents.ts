@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { AgentConfig, ModelCard } from "@open-managed-agents/shared";
 import { generateAgentId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -27,6 +27,12 @@ function formatAgent(agent: AgentConfig) {
     mcp_servers: agent.mcp_servers || [],
     callable_agents: agent.callable_agents || [],
     model_card_id: agent.model_card_id || null,
+    aux_model: agent.aux_model
+      ? (typeof agent.aux_model === "string"
+          ? { id: agent.aux_model, speed: "standard" as const }
+          : { id: agent.aux_model.id, speed: agent.aux_model.speed || "standard" as const })
+      : null,
+    aux_model_card_id: agent.aux_model_card_id || null,
     metadata: agent.metadata || {},
     archived_at: agent.archived_at || null,
   };
@@ -44,8 +50,8 @@ async function validateModel(
   modelCardId?: string
 ): Promise<{ valid: boolean; error?: string }> {
   // Load all model cards
-  const list = await kv.list({ prefix: kvPrefix(tenantId, "modelcard") });
-  const cardKeys = list.keys.filter((k) => !k.name.includes(":key"));
+  const list = await kvListAll(kv, kvPrefix(tenantId, "modelcard"));
+  const cardKeys = list.filter((k) => !k.name.includes(":key"));
 
   // No model cards configured — skip validation (uses env fallback)
   if (cardKeys.length === 0) return { valid: true };
@@ -92,6 +98,8 @@ app.post("/", async (c) => {
     callable_agents?: AgentConfig["callable_agents"];
     metadata?: Record<string, unknown>;
     model_card_id?: string;
+    aux_model?: string | { id: string; speed?: "standard" | "fast" };
+    aux_model_card_id?: string;
   }>();
 
   if (!body.name || !body.model) {
@@ -103,6 +111,15 @@ app.post("/", async (c) => {
   const modelCheck = await validateModel(c.env.CONFIG_KV, tenantId, body.model, body.model_card_id);
   if (!modelCheck.valid) {
     return c.json({ error: modelCheck.error }, 400);
+  }
+
+  // Validate aux_model when provided
+  if (body.aux_model !== undefined || body.aux_model_card_id !== undefined) {
+    const auxModel = body.aux_model ?? body.model;
+    const auxCheck = await validateModel(c.env.CONFIG_KV, tenantId, auxModel, body.aux_model_card_id);
+    if (!auxCheck.valid) {
+      return c.json({ error: `aux_model: ${auxCheck.error}` }, 400);
+    }
   }
 
   const now = new Date().toISOString();
@@ -118,6 +135,8 @@ app.post("/", async (c) => {
     skills: body.skills,
     callable_agents: body.callable_agents,
     model_card_id: body.model_card_id,
+    aux_model: body.aux_model,
+    aux_model_card_id: body.aux_model_card_id,
     metadata: body.metadata,
     version: 1,
     created_at: now,
@@ -136,10 +155,10 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "agent") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(c.get("tenant_id"), "agent"));
   const agents = (
     await Promise.all(
-      list.keys
+      list
         .filter((k) => !k.name.includes(":v"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
@@ -182,6 +201,8 @@ const updateAgent = async (c: any) => {
     skills?: AgentConfig["skills"] | null;
     callable_agents?: AgentConfig["callable_agents"] | null;
     model_card_id?: string | null;
+    aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
+    aux_model_card_id?: string | null;
     metadata?: Record<string, unknown>;
     version?: number;
   };
@@ -196,6 +217,23 @@ const updateAgent = async (c: any) => {
     }
   }
 
+  // Validate aux_model if changing
+  if (body.aux_model !== undefined || body.aux_model_card_id !== undefined) {
+    const effectiveAux = body.aux_model === null
+      ? undefined
+      : (body.aux_model ?? agent.aux_model);
+    const effectiveAuxCard = body.aux_model_card_id === null
+      ? undefined
+      : (body.aux_model_card_id ?? agent.aux_model_card_id);
+    // Only validate if there's actually an aux model after the update
+    if (effectiveAux !== undefined) {
+      const auxCheck = await validateModel(c.env.CONFIG_KV, t, effectiveAux, effectiveAuxCard);
+      if (!auxCheck.valid) {
+        return c.json({ error: `aux_model: ${auxCheck.error}` }, 400);
+      }
+    }
+  }
+
   // Optimistic concurrency: if version provided, check it matches
   if (body.version !== undefined && body.version !== agent.version) {
     return c.json({ error: "Version mismatch. Agent has been updated since you last read it." }, 409);
@@ -203,7 +241,7 @@ const updateAgent = async (c: any) => {
 
   // Detect if anything actually changed
   let changed = false;
-  const fields = ["name", "model", "system", "tools", "harness", "description", "mcp_servers", "skills", "callable_agents", "model_card_id", "metadata"] as const;
+  const fields = ["name", "model", "system", "tools", "harness", "description", "mcp_servers", "skills", "callable_agents", "model_card_id", "aux_model", "aux_model_card_id", "metadata"] as const;
   for (const key of fields) {
     if (body[key] !== undefined && JSON.stringify(body[key]) !== JSON.stringify(agent[key])) {
       changed = true;
@@ -254,10 +292,10 @@ app.get("/:id/versions", async (c) => {
   const agentData = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!agentData) return c.json({ error: "Agent not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvKey(t, "agent", `${id}:v`) });
+  const list = await kvListAll(c.env.CONFIG_KV, kvKey(t, "agent", `${id}:v`));
   const versions = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         return data ? formatAgent(JSON.parse(data)) : null;
       })
@@ -299,8 +337,8 @@ app.delete("/:id", async (c) => {
   if (!data) return c.json({ error: "Agent not found" }, 404);
 
   // Check if any active sessions reference this agent
-  const sessionList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "session") });
-  for (const k of sessionList.keys) {
+  const sessionList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "session"));
+  for (const k of sessionList) {
     const sessData = await c.env.CONFIG_KV.get(k.name);
     if (!sessData) continue;
     const sess = JSON.parse(sessData);
