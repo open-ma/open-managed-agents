@@ -30,7 +30,8 @@ This doc locks that trace down as **the canonical OMA Trajectory format**: stabl
 | Multi-agent | `session.thread_created`, `agent.thread_message`, `agent.thread_message_sent`, `agent.thread_message_received`, `agent.thread_context_compacted`, `session.thread_idle` | Sub-agent / supervisor threads |
 | Outcome | `user.define_outcome`, `outcome.evaluation_end`, `session.outcome_evaluated`, `span.outcome_evaluation_*` | Supervisor-mode revision loop |
 | Lifecycle | `session.status_running`, `session.status_idle`, `session.status_rescheduled`, `session.status_terminated`, `session.error` | Session state |
-| Spans | `span.model_request_start`, `span.model_request_end`, `span.outcome_evaluation_*` | Observability (timing, token usage) |
+| Spans | `span.model_request_start`, `span.model_request_end`, `span.outcome_evaluation_*` | Observability (timing, token usage). `span.model_request_end` carries `finish_reason` + `final_text_length` for spotting silent terminations. |
+| Aux | `aux.model_call` | Tool-internal LLM calls billed against `agent.aux_model` (e.g. `web_fetch` page summarization). Distinct from `span.model_request_*` so cost dashboards can attribute aux usage separately. |
 
 `StoredEvent` (`types.ts:495`) is the persistent envelope: `{seq, type, data, ts}`.
 
