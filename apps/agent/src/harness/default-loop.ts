@@ -42,7 +42,7 @@ async function withRetry<T>(
 
       // Don't retry on non-transient errors
       const msg = describeError(err);
-      const isTransient = /timeout|abort|429|529|5\d\d|ECONNRESET|overloaded|rate.limit|fetch failed/i.test(msg);
+      const isTransient = /timeout|abort|429|529|5\d\d|ECONNRESET|overloaded|rate.limit|fetch failed|silent_stop/i.test(msg);
 
       console.log(`[retry] attempt ${attempt + 1}/${maxRetries + 1} failed: ${msg.slice(0, 150)} transient=${isTransient}`);
 
@@ -138,7 +138,8 @@ export class DefaultHarness implements HarnessInterface {
     // Anthropic prompt caching: @ai-sdk/anthropic has cacheControl enabled
     // by default. We mark the system prompt for caching via providerOptions,
     // which avoids re-processing the same system prompt across turns.
-    const result = await withRetry((signal) => generateText({
+    const result = await withRetry(async (signal) => {
+      const r = await generateText({
       model,
       system: systemPrompt,
       messages: finalMessages,
@@ -273,7 +274,21 @@ export class DefaultHarness implements HarnessInterface {
           }
         }
       },
-    }), MAX_RETRIES, runtime.abortSignal);
+    });
+      // Silent-stop detection: model returned finish_reason="stop" with empty
+      // text and no tool calls mid-conversation. Empirically a transient model
+      // hiccup (seen on MiniMax). Throw with a "silent_stop" message so withRetry's
+      // isTransient regex catches it and retries the call. Same level as a
+      // network error; uses the same MAX_RETRIES + backoff budget.
+      if (
+        r.finishReason === "stop"
+        && (!r.text || r.text.trim().length === 0)
+        && (!r.toolCalls || r.toolCalls.length === 0)
+      ) {
+        throw new Error("silent_stop: model returned finish_reason=stop with empty text and no tool calls");
+      }
+      return r;
+    }, MAX_RETRIES, runtime.abortSignal);
 
 
     // 8. Detect pending tool confirmations and custom tool results
