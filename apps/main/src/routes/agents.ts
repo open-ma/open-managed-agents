@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { AgentConfig, ModelCard } from "@open-managed-agents/shared";
 import { generateAgentId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import { kvKey, kvPrefix } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -50,8 +50,8 @@ async function validateModel(
   modelCardId?: string
 ): Promise<{ valid: boolean; error?: string }> {
   // Load all model cards
-  const list = await kvListAll(kv, kvPrefix(tenantId, "modelcard"));
-  const cardKeys = list.filter((k) => !k.name.includes(":key"));
+  const list = await kv.list({ prefix: kvPrefix(tenantId, "modelcard") });
+  const cardKeys = list.keys.filter((k) => !k.name.includes(":key"));
 
   // No model cards configured — skip validation (uses env fallback)
   if (cardKeys.length === 0) return { valid: true };
@@ -155,10 +155,10 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(c.get("tenant_id"), "agent"));
+  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "agent") });
   const agents = (
     await Promise.all(
-      list
+      list.keys
         .filter((k) => !k.name.includes(":v"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
@@ -292,10 +292,10 @@ app.get("/:id/versions", async (c) => {
   const agentData = await c.env.CONFIG_KV.get(kvKey(t, "agent", id));
   if (!agentData) return c.json({ error: "Agent not found" }, 404);
 
-  const list = await kvListAll(c.env.CONFIG_KV, kvKey(t, "agent", `${id}:v`));
+  const list = await c.env.CONFIG_KV.list({ prefix: kvKey(t, "agent", `${id}:v`) });
   const versions = (
     await Promise.all(
-      list.map(async (k) => {
+      list.keys.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         return data ? formatAgent(JSON.parse(data)) : null;
       })
@@ -337,8 +337,8 @@ app.delete("/:id", async (c) => {
   if (!data) return c.json({ error: "Agent not found" }, 404);
 
   // Check if any active sessions reference this agent
-  const sessionList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "session"));
-  for (const k of sessionList) {
+  const sessionList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "session") });
+  for (const k of sessionList.keys) {
     const sessData = await c.env.CONFIG_KV.get(k.name);
     if (!sessData) continue;
     const sess = JSON.parse(sessData);
