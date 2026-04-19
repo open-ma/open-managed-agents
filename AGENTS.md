@@ -110,6 +110,7 @@ A **vault** is a secure credential store. Credentials in vaults are **never expo
     { "type": "agent", "id": "agent_yyy" }
   ],
   "model_card_id": "mc_xxx",
+  "aux_model": "claude-haiku-4-5",
   "harness": "default",
   "metadata": {
     "team": "platform",
@@ -131,6 +132,8 @@ A **vault** is a secure credential store. Credentials in vaults are **never expo
 | `skills` | array | No | Skill references to mount into the sandbox |
 | `callable_agents` | array | No | Other agents this agent can delegate to |
 | `model_card_id` | string | No | Reference to a model card for custom provider config |
+| `aux_model` | string or object | No | Auxiliary model used by tools for in-process LLM work (e.g. `web_fetch` page summarization). Same shape as `model`. When unset, tools that would benefit from summarization fall back to returning raw content. |
+| `aux_model_card_id` | string | No | Companion to `aux_model` — explicit model card binding when needed |
 | `harness` | string | No | Harness implementation to use (default: `"default"`) |
 | `metadata` | object | No | Arbitrary key-value metadata |
 
@@ -150,7 +153,7 @@ The `agent_toolset_20260401` provides 8 tools designed for general-purpose agent
 | **edit** | String replacement | Surgical find-and-replace. Fails if `old_str` not found or ambiguous. |
 | **glob** | File search | Pattern matching (e.g. `**/*.ts`). Returns sorted file list. |
 | **grep** | Content search | Regex search across files. Returns matching lines with context. |
-| **web_fetch** | HTTP fetch | GET requests with HTML-to-text extraction. Max 50KB result. |
+| **web_fetch** | URL → markdown | Fetches a URL, converts HTML/PDF/DOCX/etc. to markdown via Workers AI `env.AI.toMarkdown()`. When `agent.aux_model` is set, large pages (>5KB) are summarized by the aux model and the full markdown is offloaded to `/workspace/.web/<sha>.md` (readable via the `read` tool with offset/limit). Falls back to raw curl with an explicit warning if extraction fails. |
 | **web_search** | Web search | Search via Tavily API. Requires `TAVILY_API_KEY`. |
 
 ### Tool Configuration

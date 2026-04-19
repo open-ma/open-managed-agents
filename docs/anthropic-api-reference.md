@@ -610,7 +610,7 @@ Or deny:
 | Edit | `edit` | Perform string replacement in a file |
 | Glob | `glob` | Fast file pattern matching using glob patterns |
 | Grep | `grep` | Text search using regex patterns |
-| Web fetch | `web_fetch` | Fetch content from a URL |
+| Web fetch | `web_fetch` | Fetch a URL and return clean markdown (Workers AI conversion); optionally auto-summarized via `agent.aux_model` |
 | Web search | `web_search` | Search the web for information |
 
 All are enabled by default when `agent_toolset_20260401` is included.

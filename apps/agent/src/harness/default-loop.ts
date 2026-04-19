@@ -148,8 +148,8 @@ export class DefaultHarness implements HarnessInterface {
 
       onStepFinish: async ({ text, toolCalls, toolResults, reasoning }) => {
         // Emit one agent.thinking event per reasoning block, preserving the
-        // text + provider metadata (signature for Claude, opaque ids for
-        // MiniMax). history.ts replays these as ReasoningPart in subsequent
+        // text + provider metadata (signature for Claude, opaque ids for other
+        // providers). history.ts replays these as ReasoningPart in subsequent
         // steps so the model sees its own prior chain-of-thought.
         if (reasoning && Array.isArray(reasoning)) {
           for (const r of reasoning) {
@@ -298,6 +298,8 @@ export class DefaultHarness implements HarnessInterface {
         input_tokens: result.usage.inputTokens ?? 0,
         output_tokens: result.usage.outputTokens ?? 0,
       } : undefined,
+      finish_reason: result.finishReason,
+      final_text_length: typeof result.text === "string" ? result.text.length : 0,
     });
 
     // 10. Report token usage

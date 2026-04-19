@@ -370,6 +370,13 @@ export interface SpanModelRequestEndEvent extends EventBase {
     output_tokens: number;
     cache_read_input_tokens?: number;
   };
+  /** Why the model stopped: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other".
+   *  Surfaces silent terminations (e.g. provider returns finish_reason="stop"
+   *  with empty text mid-task) for debugging incomplete agent runs. */
+  finish_reason?: string;
+  /** Length of the final assistant text (may be 0 even when finish_reason="stop").
+   *  Helps spot the case where the model claims to be done but emits no text. */
+  final_text_length?: number;
 }
 
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {

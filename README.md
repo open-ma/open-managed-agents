@@ -329,7 +329,7 @@ The `agent_toolset_20260401` provides:
 | `edit` | Surgical string replacement in files |
 | `glob` | Find files matching a pattern |
 | `grep` | Search file contents with regex |
-| `web_fetch` | HTTP GET with content extraction |
+| `web_fetch` | URL → markdown via Workers AI; auto-summarized when `agent.aux_model` is set, raw saved to `/workspace/.web/` |
 | `web_search` | Web search via Tavily API |
 
 Derived tools are auto-generated based on session config:
