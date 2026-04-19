@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { FileRecord } from "@open-managed-agents/shared";
 import { generateFileId, fileR2Key } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -106,11 +106,11 @@ app.get("/", async (c) => {
   // O(all tenant files)).
   let ids: string[];
   if (scopeId) {
-    const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "filebyscope", scopeId) });
-    ids = list.keys.map((k) => k.name.split(":").pop()!).filter(Boolean);
+    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "filebyscope", scopeId));
+    ids = list.map((k) => k.name.split(":").pop()!).filter(Boolean);
   } else {
-    const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "file") });
-    ids = list.keys.map((k) => k.name.split(":").pop()!).filter(Boolean);
+    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "file"));
+    ids = list.map((k) => k.name.split(":").pop()!).filter(Boolean);
   }
 
   const files = (

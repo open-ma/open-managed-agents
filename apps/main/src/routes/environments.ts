@@ -3,7 +3,7 @@ import type { Env } from "@open-managed-agents/shared";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
 import { generateEnvId } from "@open-managed-agents/shared";
 import { addServiceBinding, envIdToBindingName } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -132,9 +132,9 @@ app.post("/:id/build-complete", async (c) => {
 // GET /v1/environments — list environments
 app.get("/", async (c) => {
   const t = c.get("tenant_id");
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "env") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "env"));
   const envs = await Promise.all(
-    list.keys.map(async (k) => {
+    list.map(async (k) => {
       const data = await c.env.CONFIG_KV.get(k.name);
       return data ? JSON.parse(data) : null;
     })
@@ -216,8 +216,8 @@ app.delete("/:id", async (c) => {
   const data = await c.env.CONFIG_KV.get(kvKey(t, "env", id));
   if (!data) return c.json({ error: "Environment not found" }, 404);
 
-  const sessionList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "session") });
-  for (const k of sessionList.keys) {
+  const sessionList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "session"));
+  for (const k of sessionList) {
     const sessionData = await c.env.CONFIG_KV.get(k.name);
     if (sessionData) {
       const session = JSON.parse(sessionData) as { environment_id: string; archived_at?: string };

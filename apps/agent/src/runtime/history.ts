@@ -34,8 +34,8 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
   }> = [];
   // Reasoning parts emitted between the previous user/tool message and the
   // upcoming assistant turn. Replayed as `{ type: "reasoning" }` parts so the
-  // model sees its own prior chain-of-thought (Claude requires this for
-  // signature verification; MiniMax requires it for context preservation).
+  // model sees its own prior chain-of-thought (some providers require this for
+  // signature verification or context preservation).
   let pendingReasoning: Array<{
     type: "reasoning";
     text: string;

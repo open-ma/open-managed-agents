@@ -30,7 +30,9 @@ export function createAuth(env: Env) {
             html: `<p>Click <a href="${url}">here</a> to reset your password.</p>`,
           });
         } else {
-          console.log(`[auth] Password reset for ${user.email}: ${url}`);
+          // No email provider configured — log that a reset was requested
+          // without exposing the URL in worker logs.
+          console.log(`[auth] Password reset requested for ${user.email} (no email provider configured)`);
         }
       },
     },

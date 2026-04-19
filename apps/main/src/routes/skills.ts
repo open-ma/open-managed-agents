@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -300,10 +300,10 @@ app.get("/", async (c) => {
   let customs: SkillMeta[] = [];
   if (source !== "builtin") {
     const t = c.get("tenant_id");
-    const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "skill") });
+    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skill"));
     customs = (
       await Promise.all(
-        list.keys.map(async (k) => {
+        list.map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
           if (!data) return null;
           try {
@@ -345,11 +345,11 @@ app.delete("/:id", async (c) => {
   const data = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
 
-  const versionKeys = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "skillver", id) });
+  const versionKeys = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skillver", id));
 
   const bucket = ensureBucket(c);
   if (bucket) {
-    for (const k of versionKeys.keys) {
+    for (const k of versionKeys) {
       const verData = await c.env.CONFIG_KV.get(k.name);
       if (!verData) continue;
       try {
@@ -361,7 +361,7 @@ app.delete("/:id", async (c) => {
 
   await Promise.all([
     c.env.CONFIG_KV.delete(kvKey(t, "skill", id)),
-    ...versionKeys.keys.map((k) => c.env.CONFIG_KV.delete(k.name)),
+    ...versionKeys.map((k) => c.env.CONFIG_KV.delete(k.name)),
   ]);
 
   return c.json({ type: "skill_deleted", id });
@@ -429,11 +429,11 @@ app.get("/:id/versions", async (c) => {
   const skillData = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!skillData) return c.json({ error: "Skill not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "skillver", id) });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skillver", id));
 
   const versions = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         if (!data) return null;
         try {
@@ -499,10 +499,8 @@ app.delete("/:id/versions/:version", async (c) => {
   const v = JSON.parse(data) as SkillVersion;
 
   if (skill.latest_version === version) {
-    const allVersions = await c.env.CONFIG_KV.list({
-      prefix: kvPrefix(t, "skillver", id),
-    });
-    const remaining = allVersions.keys
+    const allVersions = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skillver", id));
+    const remaining = allVersions
       .filter((k) => k.name !== key)
       .map((k) => k.name.split(":").pop()!)
       .sort((a, b) => parseInt(b, 10) - parseInt(a, 10));
