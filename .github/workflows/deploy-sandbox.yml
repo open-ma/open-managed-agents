@@ -69,6 +69,11 @@ jobs:
           if [ -n "${{ secrets.ANTHROPIC_MODEL }}" ]; then
             echo "${{ secrets.ANTHROPIC_MODEL }}" | npx wrangler secret put ANTHROPIC_MODEL --name "$WORKER_NAME"
           fi
+          # web_fetch tool calls Jina Reader (https://r.jina.ai). Free tier works without auth;
+          # JINA_API_KEY raises rate limits if needed.
+          if [ -n "${{ secrets.JINA_API_KEY }}" ]; then
+            echo "${{ secrets.JINA_API_KEY }}" | npx wrangler secret put JINA_API_KEY --name "$WORKER_NAME"
+          fi
 
       - name: Notify main worker
         if: always()

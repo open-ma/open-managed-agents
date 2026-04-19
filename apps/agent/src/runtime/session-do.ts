@@ -889,6 +889,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+          JINA_API_KEY: this.env.JINA_API_KEY,
           environmentConfig,
           browser: this.getBrowserSession() ?? undefined,
         });
@@ -1145,6 +1146,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      JINA_API_KEY: this.env.JINA_API_KEY,
       browser: this.getBrowserSession() ?? undefined,
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
@@ -1294,6 +1296,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+      JINA_API_KEY: this.env.JINA_API_KEY,
       environmentConfig,
       browser: this.getBrowserSession() ?? undefined,
       delegateToAgent: async (agentId: string, message: string) => {
