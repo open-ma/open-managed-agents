@@ -286,6 +286,7 @@ export async function buildTools(
     ANTHROPIC_API_KEY?: string;
     ANTHROPIC_BASE_URL?: string;
     TAVILY_API_KEY?: string;
+    JINA_API_KEY?: string;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
@@ -657,16 +658,19 @@ export async function buildTools(
   if (enabled.has("web_fetch")) {
     tools.web_fetch = tool({
       description:
-        "Fetch the content of a URL. Returns the text content of the page.",
+        "Fetch a URL and return clean markdown — handles JS-rendered pages, " +
+        "strips boilerplate (nav/ads/scripts), preserves headings and links. " +
+        "Use this as the default way to read web pages; only fall back to " +
+        "browser_* tools if you need to interact (click, fill forms).",
       inputSchema: z.object({
         url: z.string().describe("URL to fetch"),
         max_length: z
           .number()
           .optional()
-          .describe("Max response length in chars (default 50000)"),
+          .describe("Truncate returned markdown to this many chars (default 50000)"),
       }),
       execute: safe(async ({ url, max_length }) => {
-        // Enforce networking restrictions when environment uses limited mode
+        // Networking restriction enforcement (limited mode)
         if (env?.environmentConfig?.networking?.type === "limited") {
           const allowedHosts = env.environmentConfig.networking.allowed_hosts || [];
           try {
@@ -681,10 +685,39 @@ export async function buildTools(
             return "Error: Invalid URL";
           }
         }
-        return truncateResult(await sandbox.exec(
-          `curl -sL -m 30 '${url.replace(/'/g, "'\\''")}' | head -c ${max_length || 50000}`,
-          35000
-        ));
+
+        const cap = max_length || 50000;
+        const truncate = (s: string) => (s.length > cap ? s.slice(0, cap) + `\n\n…[truncated to ${cap} chars]` : s);
+
+        // ── Primary: Jina Reader (https://r.jina.ai/<url>) ──
+        // Headless Chrome + ReaderLM-v2 → clean markdown. Free tier is generous
+        // enough for our scale; set JINA_API_KEY for higher quota if needed.
+        try {
+          const headers: Record<string, string> = {
+            Accept: "text/plain",
+            "User-Agent": "OMA-Agent/1.0",
+          };
+          if (env?.JINA_API_KEY) {
+            headers.Authorization = `Bearer ${env.JINA_API_KEY}`;
+          }
+          const r = await fetch(`https://r.jina.ai/${url}`, {
+            headers,
+            signal: AbortSignal.timeout(45_000),
+          });
+          if (r.ok) {
+            return truncate(await r.text());
+          }
+          console.warn(`[web_fetch] Jina returned HTTP ${r.status} for ${url}; falling back to raw curl`);
+        } catch (err) {
+          console.warn(`[web_fetch] Jina threw for ${url}: ${(err as Error).message}; falling back to raw curl`);
+        }
+
+        // ── Fallback: raw curl (explicit "raw HTML" note so model knows) ──
+        const raw = await sandbox.exec(
+          `curl -sL -m 30 '${url.replace(/'/g, "'\\''")}' | head -c ${cap}`,
+          35000,
+        );
+        return `[NOTE: markdown extraction unavailable for this URL — returning raw response. Look for the actual content between HTML tags.]\n\n${truncateResult(raw)}`;
       }),
     });
   }

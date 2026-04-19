@@ -19,6 +19,7 @@ export interface Env {
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_MODEL?: string;
   TAVILY_API_KEY?: string;
+  JINA_API_KEY?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;
   GITHUB_TOKEN?: string;
