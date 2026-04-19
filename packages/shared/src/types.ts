@@ -54,11 +54,10 @@ export interface AgentConfig {
     /** Spawn this MCP server in the sandbox container. The process binds to
      *  127.0.0.1:port using its built-in SSE transport, and OMA routes the
      *  existing HTTP-based MCP tool wiring at it. Lets us host stdio-only
-     *  third-party MCP servers (e.g. MiniMax Token Plan MCP) without a
-     *  separate gateway. */
+     *  third-party MCP servers without a separate gateway. */
     stdio?: {
       command: string;             // e.g. "uvx"
-      args?: string[];             // e.g. ["minimax-coding-plan-mcp", "--transport", "sse", "--port", "8765"]
+      args?: string[];             // e.g. ["my-mcp-server", "--transport", "sse", "--port", "8765"]
       env?: Record<string, string>;
       port: number;                // port the server listens on inside the sandbox
       sse_path?: string;           // default "/sse"
@@ -68,6 +67,15 @@ export interface AgentConfig {
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   model_card_id?: string;
+  /**
+   * Optional auxiliary model used by tools for in-process LLM work
+   * (e.g. web_fetch summarization). Same shape as `model`.
+   * When unset, tools that would benefit from summarization fall back to
+   * returning raw content. Set this to opt into compressed tool results.
+   */
+  aux_model?: string | { id: string; speed?: "standard" | "fast" };
+  /** Companion to aux_model — explicit model card binding when needed. */
+  aux_model_card_id?: string;
   harness?: string;
   description?: string;
   metadata?: Record<string, unknown>;
@@ -201,13 +209,13 @@ export interface AgentMessageEvent extends EventBase {
 export interface AgentThinkingEvent extends EventBase {
   type: "agent.thinking";
   /** Reasoning text emitted by the model. Must be preserved verbatim when
-   *  reconstructing assistant turns — Claude extended thinking validates a
-   *  cryptographic signature and rejects modified blocks; MiniMax requires
-   *  thinking_blocks in history to keep planning context. */
+   *  reconstructing assistant turns — some providers validate cryptographic
+   *  signatures and reject modified blocks; others require thinking blocks
+   *  in history to keep planning context. */
   text?: string;
   /** Provider-specific metadata round-tripped with the reasoning. For
    *  Anthropic: { anthropic: { signature: "...", redactedData: "..." } }.
-   *  For MiniMax: opaque token IDs if any. Pass through verbatim. */
+   *  Other providers may store opaque token IDs. Pass through verbatim. */
   providerOptions?: Record<string, unknown>;
 }
 
@@ -381,6 +389,26 @@ export interface SpanOutcomeEvaluationEndEvent extends EventBase {
   feedback?: string;
 }
 
+// Aux events — platform-internal LLM calls made on behalf of a tool
+// (e.g. web_fetch summarization). Distinct from `span.model_request_*`,
+// which track the main agent loop's model calls. These let consumers
+// (cost dashboards, trajectory viewers) attribute aux usage separately.
+export interface AuxModelCallEvent extends EventBase {
+  type: "aux.model_call";
+  /** Model card the aux call resolved through (if one was matched). */
+  model_card_id?: string;
+  /** Resolved model identifier (e.g. "claude-sonnet-4-6"). */
+  model_id: string;
+  /** What the aux model was used for. Extensible — first user is "web_summarize". */
+  task: "web_summarize" | string;
+  /** Tool-use event that triggered this aux call (for trajectory linking). */
+  parent_tool_use_id?: string;
+  duration_ms: number;
+  tokens: { input: number; output: number; cache_read?: number };
+  status: "ok" | "failed";
+  error?: string;
+}
+
 export type SessionEvent =
   | UserMessageEvent
   | UserInterruptEvent
@@ -411,7 +439,8 @@ export type SessionEvent =
   | SpanModelRequestEndEvent
   | SpanOutcomeEvaluationStartEvent
   | SpanOutcomeEvaluationOngoingEvent
-  | SpanOutcomeEvaluationEndEvent;
+  | SpanOutcomeEvaluationEndEvent
+  | AuxModelCallEvent;
 
 // --- Vault ---
 

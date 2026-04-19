@@ -1,7 +1,8 @@
-import { tool } from "ai";
+import { tool, generateText } from "ai";
 import { z } from "zod";
 import { anthropic } from "@ai-sdk/anthropic";
-import type { AgentConfig, ToolsetConfig, CustomToolConfig } from "@open-managed-agents/shared";
+import type { LanguageModel } from "ai";
+import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from "@open-managed-agents/shared";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
 import { buildBrowserTools, type BrowserSession } from "./browser-tools";
@@ -10,6 +11,29 @@ const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch",
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
+
+// System prompt for the auxiliary model when summarizing web pages fetched
+// by web_fetch. Designed for the OMA agent loop: the summary lands directly
+// in the agent's tool-result context window, so it has to carry whatever the
+// agent might need next without forcing a re-read of the raw markdown.
+const WEB_SUMMARIZE_SYSTEM_PROMPT = `Compress the page below into a digest for an autonomous agent that fetched this URL while researching something. Assume the agent will not re-read the original.
+
+Keep:
+- Every concrete fact (numbers, dates, named entities, identifiers, statuses, geographic regions, units)
+- Tables and lists in their original layout — do not narrativize them
+- Outbound links that look like data sources (don't paraphrase URLs)
+- Quoted material relevant to the page's topic, verbatim
+
+Drop:
+- Site chrome (nav, ads, footers, cookie banners, legal disclaimers, "share this article")
+- Restated headers, repeated boilerplate, meta-commentary about the page itself
+- Marketing copy that adds no information
+
+Format: short markdown. Headings only when the original had them. No introduction. No "this page describes…" — just the content.
+
+If the page is an error/404/login wall/empty result, output exactly one line stating that and stop.`;
+
+
 
 /**
  * Poll a started process with CC-aligned timeout strategies:
@@ -286,11 +310,22 @@ export async function buildTools(
     ANTHROPIC_API_KEY?: string;
     ANTHROPIC_BASE_URL?: string;
     TAVILY_API_KEY?: string;
-    JINA_API_KEY?: string;
+    /** Workers AI binding — used by web_fetch for env.AI.toMarkdown(). */
+    AI?: Ai;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
     browser?: BrowserSession;
+    /** Pre-resolved auxiliary model — when present, web_fetch summarizes
+     *  large pages and offloads raw markdown to /workspace/.web/.
+     *  Falsy (default) = no aux work; web_fetch returns raw markdown. */
+    auxModel?: LanguageModel;
+    /** Identifier metadata for the aux model — written into aux.model_call
+     *  trajectory events so cost dashboards can attribute usage. */
+    auxModelInfo?: { model_card_id?: string; model_id: string };
+    /** Emit a SessionEvent into the trajectory stream. Used to record
+     *  aux.model_call events from inside tool execution. */
+    broadcastEvent?: (event: SessionEvent) => void;
   }
 ): Promise<Record<string, any>> {
   const enabled = getEnabledTools(agentConfig.tools);
@@ -658,10 +693,13 @@ export async function buildTools(
   if (enabled.has("web_fetch")) {
     tools.web_fetch = tool({
       description:
-        "Fetch a URL and return clean markdown — handles JS-rendered pages, " +
-        "strips boilerplate (nav/ads/scripts), preserves headings and links. " +
-        "Use this as the default way to read web pages; only fall back to " +
-        "browser_* tools if you need to interact (click, fill forms).",
+        "Fetch a URL and return clean markdown — strips boilerplate (nav/ads/scripts), " +
+        "preserves headings and links. Use this as the default way to read web pages; " +
+        "fall back to browser_* tools only if you need to interact (click, fill forms) " +
+        "or if the page is JS-rendered (SPA) and returns empty markdown. Large pages " +
+        "may be auto-summarized when an aux model is configured on the agent — the " +
+        "full raw markdown is then saved to /workspace/.web/, readable via the `read` " +
+        "tool when you need detail beyond the summary.",
       inputSchema: z.object({
         url: z.string().describe("URL to fetch"),
         max_length: z
@@ -689,35 +727,140 @@ export async function buildTools(
         const cap = max_length || 50000;
         const truncate = (s: string) => (s.length > cap ? s.slice(0, cap) + `\n\n…[truncated to ${cap} chars]` : s);
 
-        // ── Primary: Jina Reader (https://r.jina.ai/<url>) ──
-        // Headless Chrome + ReaderLM-v2 → clean markdown. Free tier is generous
-        // enough for our scale; set JINA_API_KEY for higher quota if needed.
-        try {
-          const headers: Record<string, string> = {
-            Accept: "text/plain",
-            "User-Agent": "OMA-Agent/1.0",
-          };
-          if (env?.JINA_API_KEY) {
-            headers.Authorization = `Bearer ${env.JINA_API_KEY}`;
+        // ── Step 1: Fetch URL → blob → env.AI.toMarkdown() ──
+        // Workers AI converts HTML/PDF/DOCX/etc. to markdown without needing
+        // an external service or API token. Free within the Workers AI quota.
+        let markdown: string | null = null;
+        let isRaw = false;
+        if (env?.AI) {
+          try {
+            const r = await fetch(url, {
+              headers: {
+                "User-Agent": "OMA-Agent/1.0 (+web_fetch)",
+                Accept: "text/html, application/xhtml+xml, application/xml;q=0.9, */*;q=0.8",
+              },
+              redirect: "follow",
+              signal: AbortSignal.timeout(20_000),
+            });
+            if (r.ok) {
+              const buf = await r.arrayBuffer();
+              const ct = r.headers.get("content-type") || "text/html";
+              const name = (() => {
+                try {
+                  const path = new URL(r.url).pathname;
+                  const last = path.split("/").filter(Boolean).pop() || "page";
+                  return last.includes(".") ? last : `${last}.html`;
+                } catch { return "page.html"; }
+              })();
+              const conv = await (env.AI as Ai).toMarkdown([{ name, blob: new Blob([buf], { type: ct }) }]);
+              const result = Array.isArray(conv) ? conv[0] : conv;
+              if (result && (result as { format?: string }).format === "markdown" && typeof (result as { data?: string }).data === "string") {
+                markdown = (result as { data: string }).data;
+              } else {
+                const errMsg = (result as { error?: string })?.error || "toMarkdown returned non-markdown result";
+                console.warn(`[web_fetch] env.AI.toMarkdown failed for ${url}: ${errMsg}`);
+              }
+            } else {
+              console.warn(`[web_fetch] origin returned HTTP ${r.status} for ${url}`);
+            }
+          } catch (err) {
+            console.warn(`[web_fetch] toMarkdown threw for ${url}: ${(err as Error).message}`);
           }
-          const r = await fetch(`https://r.jina.ai/${url}`, {
-            headers,
-            signal: AbortSignal.timeout(45_000),
-          });
-          if (r.ok) {
-            return truncate(await r.text());
-          }
-          console.warn(`[web_fetch] Jina returned HTTP ${r.status} for ${url}; falling back to raw curl`);
-        } catch (err) {
-          console.warn(`[web_fetch] Jina threw for ${url}: ${(err as Error).message}; falling back to raw curl`);
+        }
+        if (markdown === null) {
+          // Fallback: raw curl from sandbox (last-resort, model gets warning)
+          const raw = await sandbox.exec(
+            `curl -sL -m 30 '${url.replace(/'/g, "'\\''")}' | head -c ${cap}`,
+            35000,
+          );
+          markdown = `[NOTE: markdown extraction unavailable for this URL — returning raw response. Look for the actual content between HTML tags.]\n\n${truncateResult(raw)}`;
+          isRaw = true;
         }
 
-        // ── Fallback: raw curl (explicit "raw HTML" note so model knows) ──
-        const raw = await sandbox.exec(
-          `curl -sL -m 30 '${url.replace(/'/g, "'\\''")}' | head -c ${cap}`,
-          35000,
-        );
-        return `[NOTE: markdown extraction unavailable for this URL — returning raw response. Look for the actual content between HTML tags.]\n\n${truncateResult(raw)}`;
+        // ── Step 2: Aux summarization + offload (when configured) ──
+        // Only summarize clean markdown (skip raw HTML fallback to avoid
+        // confusing the summarizer). Skip small content (already concise).
+        const SUMMARY_THRESHOLD = 5000;
+        if (env?.auxModel && env?.auxModelInfo && !isRaw && markdown.length > SUMMARY_THRESHOLD) {
+          const t0 = Date.now();
+          // Sandbox-side cache key: sha-256(url) → /workspace/.web/<hex>.md
+          const sha = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(url));
+          const hex = Array.from(new Uint8Array(sha)).map((b) => b.toString(16).padStart(2, "0")).join("").slice(0, 16);
+          const rawPath = `/workspace/.web/${hex}.md`;
+          try {
+            await sandbox.exec(`mkdir -p /workspace/.web`, 5000).catch(() => "");
+            await sandbox.writeFile(rawPath, markdown);
+          } catch (writeErr) {
+            console.warn(`[web_fetch] failed to offload raw markdown for ${url}: ${(writeErr as Error).message}`);
+          }
+          try {
+            const summarizeResult = await generateText({
+              model: env.auxModel,
+              system: WEB_SUMMARIZE_SYSTEM_PROMPT,
+              prompt: `URL: ${url}\n\nPAGE CONTENT (markdown):\n\n${markdown}`,
+              maxOutputTokens: 1500,
+              temperature: 0.1,
+              abortSignal: AbortSignal.timeout(60_000),
+            });
+            const summary = (summarizeResult.text || "").trim();
+            if (summary.length === 0) throw new Error("aux model returned empty summary");
+            const usage = summarizeResult.usage || {};
+            const inputTokens = (usage as { inputTokens?: number; promptTokens?: number }).inputTokens
+              ?? (usage as { promptTokens?: number }).promptTokens
+              ?? 0;
+            const outputTokens = (usage as { outputTokens?: number; completionTokens?: number }).outputTokens
+              ?? (usage as { completionTokens?: number }).completionTokens
+              ?? 0;
+            env.broadcastEvent?.({
+              type: "aux.model_call",
+              id: `sevt-${nanoid(12)}`,
+              processed_at: new Date().toISOString(),
+              model_card_id: env.auxModelInfo.model_card_id,
+              model_id: env.auxModelInfo.model_id,
+              task: "web_summarize",
+              duration_ms: Date.now() - t0,
+              tokens: { input: inputTokens, output: outputTokens },
+              status: "ok",
+            });
+            const compressionPct = Math.round((summary.length / markdown.length) * 100);
+            return JSON.stringify({
+              url,
+              content: summary,
+              _meta: {
+                extractor: env.auxModelInfo.model_id,
+                compression: `${markdown.length} → ${summary.length} chars (${compressionPct}%)`,
+                raw_at: rawPath,
+                hint: `Use \`read ${rawPath}\` (with offset/limit) to see full original markdown if the summary is missing detail.`,
+              },
+            }, null, 2);
+          } catch (auxErr) {
+            const errMsg = (auxErr as Error).message;
+            console.warn(`[web_fetch] aux summarization failed for ${url}: ${errMsg}`);
+            env.broadcastEvent?.({
+              type: "aux.model_call",
+              id: `sevt-${nanoid(12)}`,
+              processed_at: new Date().toISOString(),
+              model_card_id: env.auxModelInfo.model_card_id,
+              model_id: env.auxModelInfo.model_id,
+              task: "web_summarize",
+              duration_ms: Date.now() - t0,
+              tokens: { input: 0, output: 0 },
+              status: "failed",
+              error: errMsg,
+            });
+            return JSON.stringify({
+              url,
+              content: truncate(markdown),
+              _meta: {
+                summary_failed: true,
+                summary_error: errMsg,
+              },
+            }, null, 2);
+          }
+        }
+
+        // ── Step 3: No aux configured (or content too small) — return raw ──
+        return truncate(markdown);
       }),
     });
   }
