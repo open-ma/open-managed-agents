@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { MemoryStoreConfig, MemoryItem, MemoryVersion } from "@open-managed-agents/shared";
 import { generateMemoryStoreId, generateMemoryId, generateMemoryVersionId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -74,10 +74,10 @@ app.get("/", async (c) => {
   const t = c.get("tenant_id");
   const includeArchived = c.req.query("include_archived") === "true";
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "memstore") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "memstore"));
   const stores = (
     await Promise.all(
-      list.keys
+      list
         .filter((k) => !k.name.includes(":mem:"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
@@ -127,12 +127,12 @@ app.delete("/:id", async (c) => {
   if (!data) return c.json({ error: "Memory store not found" }, 404);
 
   // Delete all memories in this store
-  const memList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "mem", id) });
-  await Promise.all(memList.keys.map((k) => c.env.CONFIG_KV.delete(k.name)));
+  const memList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "mem", id));
+  await Promise.all(memList.map((k) => c.env.CONFIG_KV.delete(k.name)));
 
   // Delete all versions in this store
-  const verList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "memver", id) });
-  await Promise.all(verList.keys.map((k) => c.env.CONFIG_KV.delete(k.name)));
+  const verList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "memver", id));
+  await Promise.all(verList.map((k) => c.env.CONFIG_KV.delete(k.name)));
 
   // Delete the store itself
   await c.env.CONFIG_KV.delete(kvKey(t, "memstore", id));
@@ -164,8 +164,8 @@ app.post("/:id/memories", async (c) => {
 
   // Handle preconditions
   if (body.precondition) {
-    const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "mem", storeId) });
-    for (const k of list.keys) {
+    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "mem", storeId));
+    for (const k of list) {
       const d = await c.env.CONFIG_KV.get(k.name);
       if (d) {
         const existing: MemoryItem = JSON.parse(d);
@@ -237,10 +237,10 @@ app.get("/:id/memories", async (c) => {
 
   const prefix = c.req.query("prefix");
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "mem", storeId) });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "mem", storeId));
   const memories = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         if (!data) return null;
         const mem: MemoryItem = JSON.parse(data);
@@ -368,10 +368,10 @@ app.get("/:id/memory_versions", async (c) => {
 
   const memoryIdFilter = c.req.query("memory_id");
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "memver", storeId) });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "memver", storeId));
   const versions = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         if (!data) return null;
         const ver: MemoryVersion = JSON.parse(data);
