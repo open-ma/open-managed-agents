@@ -79,6 +79,9 @@ export interface EvalTask {
     /** MCP server entries — passed through to AgentConfig.mcp_servers. Used
      *  by GAIA suite to attach MiniMax MCP for multimodal tasks. */
     mcp_servers?: unknown[];
+    /** Auxiliary model id — opt into in-tool LLM work (e.g. web_fetch
+     *  summarization + raw-markdown offload to /workspace/.web/). */
+    aux_model?: string;
   };
 
   // Sub-agents created before the eval (multi-agent tasks)

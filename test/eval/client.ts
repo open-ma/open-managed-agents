@@ -103,6 +103,7 @@ export async function createAgent(config: {
   tools: unknown[];
   callable_agents?: unknown[];
   mcp_servers?: unknown[];
+  aux_model?: string;
 }): Promise<string> {
   const data = await post("/v1/agents", {
     name: config.name,
@@ -111,6 +112,7 @@ export async function createAgent(config: {
     tools: config.tools,
     callable_agents: config.callable_agents,
     mcp_servers: config.mcp_servers,
+    aux_model: config.aux_model,
   });
   return data.id;
 }

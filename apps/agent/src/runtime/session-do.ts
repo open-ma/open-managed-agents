@@ -17,6 +17,8 @@ import type {
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
 import { resolveModel } from "../harness/provider";
+import type { ApiCompat } from "../harness/provider";
+import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
@@ -846,6 +848,120 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Persist a SessionEvent to the events table AND broadcast to WS subscribers.
+   * Used by tools (e.g. web_fetch's aux summarize step) that need to emit
+   * trajectory events from outside the harness loop. Inside the harness loop,
+   * `runtime.broadcast` already does both — this is the equivalent for tool
+   * code that doesn't receive a runtime context.
+   */
+  private persistAndBroadcastEvent(event: SessionEvent) {
+    try {
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      history.append(event);
+    } catch (err) {
+      console.warn(`[persistAndBroadcastEvent] history.append failed: ${(err as Error).message}`);
+    }
+    this.broadcastEvent(event);
+  }
+
+  /**
+   * Resolve credentials for a model identifier (with optional explicit card).
+   *
+   * Lookup order:
+   *   1. Explicit `cardId` → KV `modelcard:<id>` + `modelcard:<id>:key`
+   *   2. Card whose `model_id` matches the requested model
+   *   3. Env-var fallback (ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL)
+   *
+   * Used for both the agent's primary model and aux_model resolution
+   * (web_fetch summarization, future tool internals).
+   */
+  private async resolveModelCardCredentials(
+    modelId: string,
+    cardId?: string,
+  ): Promise<{
+    apiKey: string;
+    baseURL?: string;
+    apiCompat: ApiCompat;
+    customHeaders?: Record<string, string>;
+    cardId?: string;
+  }> {
+    let apiKey = this.env.ANTHROPIC_API_KEY;
+    let baseURL = this.env.ANTHROPIC_BASE_URL;
+    let provider: string | undefined;
+    let customHeaders: Record<string, string> | undefined;
+    let resolvedCardId: string | undefined;
+
+    if (cardId && this.env.CONFIG_KV) {
+      try {
+        const [cardData, keyData] = await Promise.all([
+          this.env.CONFIG_KV.get(this.tk("modelcard", cardId)),
+          this.env.CONFIG_KV.get(this.tk("modelcard", `${cardId}:key`)),
+        ]);
+        if (cardData && keyData) {
+          const card = JSON.parse(cardData);
+          apiKey = keyData;
+          provider = card.provider;
+          if (card.base_url) baseURL = card.base_url;
+          if (card.custom_headers) customHeaders = card.custom_headers;
+          resolvedCardId = cardId;
+        }
+      } catch {
+        // Fall back to env vars
+      }
+    } else if (this.env.CONFIG_KV) {
+      // No explicit card_id — try to find a card by model_id match
+      try {
+        const list = await this.env.CONFIG_KV.list({ prefix: this.tk("modelcard") + ":" });
+        for (const k of list.keys) {
+          if (k.name.includes(":key")) continue;
+          const data = await this.env.CONFIG_KV.get(k.name);
+          if (!data) continue;
+          const card = JSON.parse(data);
+          if (card.model_id === modelId && !card.archived_at) {
+            const key = await this.env.CONFIG_KV.get(`${k.name}:key`);
+            if (key) {
+              apiKey = key;
+              provider = card.provider;
+              if (card.base_url) baseURL = card.base_url;
+              if (card.custom_headers) customHeaders = card.custom_headers;
+              resolvedCardId = card.id;
+            }
+            break;
+          }
+        }
+      } catch {
+        // Fall back to env vars
+      }
+    }
+
+    const OAI_PROVIDERS = new Set(["oai", "oai-compatible"]);
+    const ANT_PROVIDERS = new Set(["ant", "ant-compatible"]);
+    let apiCompat: ApiCompat = "ant";
+    if (provider && (OAI_PROVIDERS.has(provider) || ANT_PROVIDERS.has(provider))) {
+      apiCompat = provider as ApiCompat;
+    }
+
+    return { apiKey, baseURL, apiCompat, customHeaders, cardId: resolvedCardId };
+  }
+
+  /**
+   * Resolve the agent's auxiliary model (when configured).
+   *
+   * Returns null when the agent has no aux_model set — callers should
+   * skip aux features (e.g. web_fetch summarization) in that case.
+   */
+  private async resolveAuxModel(agent: AgentConfig): Promise<{
+    model: LanguageModel;
+    modelInfo: { model_card_id?: string; model_id: string };
+  } | null> {
+    if (!agent.aux_model) return null;
+    const modelId = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
+    const creds = await this.resolveModelCardCredentials(modelId, agent.aux_model_card_id);
+    const model = resolveModel(modelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
+    return { model, modelInfo: { model_card_id: creds.cardId, model_id: modelId } };
+  }
+
+  /**
    * Handle tool confirmation: execute the confirmed tool or inject denial,
    * then re-run the harness to continue the conversation.
    */
@@ -885,13 +1001,17 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
 
         // Build tools with execute functions intact (not stripped for always_ask)
+        const auxResolved = await this.resolveAuxModel(agent);
         const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-          JINA_API_KEY: this.env.JINA_API_KEY,
+          AI: this.env.AI,
           environmentConfig,
           browser: this.getBrowserSession() ?? undefined,
+          auxModel: auxResolved?.model,
+          auxModelInfo: auxResolved?.modelInfo,
+          broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
         });
 
         // Find the original tool definition (before always_ask stripping)
@@ -1142,12 +1262,16 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
 
     // Build sub-agent tools and model (platform prepares context for sub-agent too)
+    const subAuxResolved = await this.resolveAuxModel(subAgent);
     const subTools = await buildTools(this.applyMcpUrlFixups(subAgent), sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      JINA_API_KEY: this.env.JINA_API_KEY,
+      AI: this.env.AI,
       browser: this.getBrowserSession() ?? undefined,
+      auxModel: subAuxResolved?.model,
+      auxModelInfo: subAuxResolved?.modelInfo,
+      broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
       },
@@ -1292,13 +1416,17 @@ export class SessionDO extends Agent<Env, SessionState> {
     // --- Platform prepares WHAT is available ---
 
     // Build tools from agent config
+    const auxResolved = await this.resolveAuxModel(agent);
     const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      JINA_API_KEY: this.env.JINA_API_KEY,
+      AI: this.env.AI,
       environmentConfig,
       browser: this.getBrowserSession() ?? undefined,
+      auxModel: auxResolved?.model,
+      auxModelInfo: auxResolved?.modelInfo,
+      broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
       delegateToAgent: async (agentId: string, message: string) => {
         return this.runSubAgent(agentId, message, history, sandbox);
       },
@@ -1316,61 +1444,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Resolve model — look up model card credentials, fall back to env vars
     const modelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
     const effectiveModelId = modelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-    let modelApiKey = this.env.ANTHROPIC_API_KEY;
-    let modelBaseURL = this.env.ANTHROPIC_BASE_URL;
-    let modelProvider: string | undefined;
-    let modelCustomHeaders: Record<string, string> | undefined;
-
-    if (agent.model_card_id && this.env.CONFIG_KV) {
-      try {
-        const [cardData, keyData] = await Promise.all([
-          this.env.CONFIG_KV.get(this.tk("modelcard", agent.model_card_id)),
-          this.env.CONFIG_KV.get(this.tk("modelcard", `${agent.model_card_id}:key`)),
-        ]);
-        if (cardData && keyData) {
-          const card = JSON.parse(cardData);
-          modelApiKey = keyData;
-          modelProvider = card.provider;
-          if (card.base_url) modelBaseURL = card.base_url;
-          if (card.custom_headers) modelCustomHeaders = card.custom_headers;
-        }
-      } catch {
-        // Fall back to env vars
-      }
-    } else if (this.env.CONFIG_KV) {
-      // No explicit model_card_id — try to find a card by model_id match
-      try {
-        const list = await this.env.CONFIG_KV.list({ prefix: this.tk("modelcard") + ":" });
-        for (const k of list.keys) {
-          if (k.name.includes(":key")) continue;
-          const data = await this.env.CONFIG_KV.get(k.name);
-          if (!data) continue;
-          const card = JSON.parse(data);
-          if (card.model_id === effectiveModelId && !card.archived_at) {
-            const key = await this.env.CONFIG_KV.get(`${k.name}:key`);
-            if (key) {
-              modelApiKey = key;
-              modelProvider = card.provider;
-              if (card.base_url) modelBaseURL = card.base_url;
-              if (card.custom_headers) modelCustomHeaders = card.custom_headers;
-            }
-            break;
-          }
-        }
-      } catch {
-        // Fall back to env vars
-      }
-    }
-
-    // Determine API compat from provider field
-    const OAI_PROVIDERS = new Set(["oai", "oai-compatible"]);
-    const ANT_PROVIDERS = new Set(["ant", "ant-compatible"]);
-    let apiCompat: "ant" | "ant-compatible" | "oai" | "oai-compatible" = "ant";
-    if (modelProvider && (OAI_PROVIDERS.has(modelProvider) || ANT_PROVIDERS.has(modelProvider))) {
-      apiCompat = modelProvider as typeof apiCompat;
-    }
-
-    const model = resolveModel(effectiveModelId, modelApiKey, modelBaseURL, apiCompat, modelCustomHeaders);
+    const creds = await this.resolveModelCardCredentials(effectiveModelId, agent.model_card_id);
+    const model = resolveModel(effectiveModelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
 
     // Build system prompt: base + skill metadata
     let systemPrompt = agent.system || "";
