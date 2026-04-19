@@ -30,6 +30,7 @@ interface ApiKeyMeta {
   id: string;
   name: string;
   prefix: string;
+  hash: string;
   created_at: string;
 }
 
@@ -58,7 +59,7 @@ app.post("/", async (c) => {
   const indexKey = `t:${tenantId}:apikeys`;
   const existing = await c.env.CONFIG_KV.get(indexKey);
   const index: ApiKeyMeta[] = existing ? JSON.parse(existing) : [];
-  index.push({ id, name, prefix: rawKey.slice(0, 8), created_at: now });
+  index.push({ id, name, prefix: rawKey.slice(0, 8), hash, created_at: now });
   await c.env.CONFIG_KV.put(indexKey, JSON.stringify(index));
 
   // Return the raw key only once — it is never stored or retrievable again
@@ -71,7 +72,7 @@ app.get("/", async (c) => {
   const indexKey = `t:${tenantId}:apikeys`;
   const existing = await c.env.CONFIG_KV.get(indexKey);
   const index: ApiKeyMeta[] = existing ? JSON.parse(existing) : [];
-  return c.json({ data: index });
+  return c.json({ data: index.map(({ hash: _, ...rest }) => rest) });
 });
 
 // DELETE /v1/api_keys/:id — revoke an API key
@@ -79,29 +80,22 @@ app.delete("/:id", async (c) => {
   const tenantId = c.get("tenant_id");
   const keyId = c.req.param("id");
 
-  // Remove from tenant index
   const indexKey = `t:${tenantId}:apikeys`;
   const existing = await c.env.CONFIG_KV.get(indexKey);
   const index: ApiKeyMeta[] = existing ? JSON.parse(existing) : [];
-  const updated = index.filter((k) => k.id !== keyId);
+  const entry = index.find((k) => k.id === keyId);
 
-  if (updated.length === index.length) {
+  if (!entry) {
     return c.json({ error: "API key not found" }, 404);
   }
 
-  await c.env.CONFIG_KV.put(indexKey, JSON.stringify(updated));
-
-  // Scan and remove the hash entry (we don't store hash→id mapping, so we scan)
-  const list = await c.env.CONFIG_KV.list({ prefix: "apikey:" });
-  for (const k of list.keys) {
-    const data = await c.env.CONFIG_KV.get(k.name);
-    if (!data) continue;
-    const record: ApiKeyRecord = JSON.parse(data);
-    if (record.id === keyId && record.tenant_id === tenantId) {
-      await c.env.CONFIG_KV.delete(k.name);
-      break;
-    }
-  }
+  const updated = index.filter((k) => k.id !== keyId);
+  await Promise.all([
+    c.env.CONFIG_KV.put(indexKey, JSON.stringify(updated)),
+    entry.hash
+      ? c.env.CONFIG_KV.delete(`apikey:${entry.hash}`)
+      : Promise.resolve(),
+  ]);
 
   return c.json({ type: "api_key_deleted", id: keyId });
 });

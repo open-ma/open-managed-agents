@@ -3,9 +3,9 @@
  *
  * Why this exists: OMA's MCP adapter is HTTP/SSE only (Cloudflare Workers
  * can't spawn child processes). Many third-party MCP servers ship as stdio
- * (e.g. MiniMax Token Plan MCP via `uvx`). The sandbox container CAN spawn
- * processes — so we run the MCP server's built-in SSE transport there, and
- * the existing curl-based MCP tool wiring talks to localhost.
+ * packages. The sandbox container CAN spawn processes — so we run the MCP
+ * server's built-in SSE transport there, and the existing curl-based MCP
+ * tool wiring talks to localhost.
  */
 import type { SandboxExecutor } from "../harness/interface";
 

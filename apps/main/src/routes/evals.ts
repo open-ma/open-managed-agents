@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateEvalRunId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -136,10 +136,10 @@ app.get("/runs", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "evalrun") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "evalrun"));
   const runs = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         return data ? (JSON.parse(data) as EvalRunRecord) : null;
       })

@@ -14,7 +14,7 @@
 import type { Env, AgentConfig, EnvironmentConfig, SessionMeta, StoredEvent } from "@open-managed-agents/shared";
 import { generateSessionId, buildTrajectory } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "./kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "./kv-helpers";
 import type { EvalRunRecord, EvalTaskResult, EvalTaskSpec } from "./routes/evals";
 
 // ---------- Sandbox helpers (mirrors routes/sessions.ts) ----------
@@ -312,9 +312,9 @@ async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {
 // ---------- Public entry point (called by scheduled handler) ----------
 
 export async function tickEvalRuns(env: Env): Promise<{ advanced: number; total: number }> {
-  const list = await env.CONFIG_KV.list({ prefix: "evalrun_active:" });
+  const list = await kvListAll(env.CONFIG_KV, "evalrun_active:");
   let advanced = 0;
-  for (const key of list.keys) {
+  for (const key of list) {
     const runId = key.name.slice("evalrun_active:".length);
     const tenantId = await env.CONFIG_KV.get(key.name);
     if (!tenantId) continue;
@@ -335,5 +335,5 @@ export async function tickEvalRuns(env: Env): Promise<{ advanced: number; total:
       await removeFromActive(env, runId);
     }
   }
-  return { advanced, total: list.keys.length };
+  return { advanced, total: list.length };
 }

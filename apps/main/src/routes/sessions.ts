@@ -4,7 +4,7 @@ import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock } from "@open-managed-agents/shared";
 import { generateSessionId, generateFileId, generateResourceId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -327,10 +327,10 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "session") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(c.get("tenant_id"), "session"));
   let sessions = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         return data ? (JSON.parse(data) as SessionMeta) : null;
       })
@@ -794,8 +794,8 @@ app.post("/:id/resources", async (c) => {
   }
 
   const t = c.get("tenant_id");
-  const existingResources = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "sesrsc", sessionId) });
-  if (existingResources.keys.length >= 100) {
+  const existingResources = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "sesrsc", sessionId));
+  if (existingResources.length >= 100) {
     return c.json({ error: "Maximum 100 resources per session" }, 400);
   }
 
@@ -833,10 +833,10 @@ app.get("/:id/resources", async (c) => {
   const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
   if (!sessionData) return c.json({ error: "Session not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(c.get("tenant_id"), "sesrsc", sessionId) });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(c.get("tenant_id"), "sesrsc", sessionId));
   const resources = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         return data ? (JSON.parse(data) as SessionResource) : null;
       })
