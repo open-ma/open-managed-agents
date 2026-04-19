@@ -104,6 +104,10 @@ function rowToTask(row: GaiaRow, indexInLevel: number): EvalTask {
   const agentConfig: EvalTask["agentConfig"] & { mcp_servers?: unknown[] } = {
     system: composeSystem(isMultimodal ? GAIA_TASK_PROMPT_MULTIMODAL : GAIA_TASK_PROMPT_TEXT_ONLY),
     tools: DEFAULT_TOOLS,
+    // Same model for main + aux — exercises the new web_fetch summarize +
+    // /workspace/.web/ offload path. Cheaper aux (e.g. M2-highspeed-fast)
+    // can be wired here later if we want to A/B cost vs quality.
+    aux_model: "MiniMax-M2-highspeed",
   };
   if (isMultimodal) {
     // Inject MiniMax MCP for image understanding (non-vision models need it).
