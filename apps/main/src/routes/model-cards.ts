@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env, ModelCard } from "@open-managed-agents/shared";
 import { generateModelCardId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
 
@@ -30,8 +30,8 @@ app.post("/", async (c) => {
   }
 
   // Unique model_id check
-  const existing = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "modelcard") });
-  for (const k of existing.keys) {
+  const existing = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "modelcard"));
+  for (const k of existing) {
     if (k.name.includes(":key")) continue;
     const data = await c.env.CONFIG_KV.get(k.name);
     if (data) {
@@ -72,10 +72,10 @@ app.post("/", async (c) => {
 // GET /v1/model_cards — list
 app.get("/", async (c) => {
   const t = c.get("tenant_id");
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "modelcard") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "modelcard"));
   const cards = (
     await Promise.all(
-      list.keys
+      list
         .filter((k) => !k.name.includes(":key"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
@@ -157,8 +157,8 @@ app.get("/:id/key", async (c) => {
 });
 
 async function clearDefaults(kv: KVNamespace, tenantId: string) {
-  const list = await kv.list({ prefix: kvPrefix(tenantId, "modelcard") });
-  for (const k of list.keys) {
+  const list = await kvListAll(kv, kvPrefix(tenantId, "modelcard"));
+  for (const k of list) {
     if (k.name.includes(":key")) continue;
     const data = await kv.get(k.name);
     if (!data) continue;

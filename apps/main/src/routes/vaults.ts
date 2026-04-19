@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { VaultConfig, CredentialConfig, CredentialAuth } from "@open-managed-agents/shared";
 import { generateVaultId, generateCredentialId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix } from "../kv-helpers";
+import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const SECRET_FIELDS: (keyof CredentialAuth)[] = [
   "token",
@@ -49,10 +49,10 @@ app.get("/", async (c) => {
   const t = c.get("tenant_id");
   const includeArchived = c.req.query("include_archived") === "true";
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "vault") });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "vault"));
   const vaults = (
     await Promise.all(
-      list.keys
+      list
         .filter((k) => !k.name.includes(":cred"))
         .map(async (k) => {
           const data = await c.env.CONFIG_KV.get(k.name);
@@ -89,9 +89,9 @@ app.post("/:id/archive", async (c) => {
   await c.env.CONFIG_KV.put(kvKey(t, "vault", id), JSON.stringify(vault));
 
   // Cascading archive: archive all credentials in this vault
-  const credList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "cred", id) });
+  const credList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "cred", id));
   await Promise.all(
-    credList.keys.map(async (k) => {
+    credList.map(async (k) => {
       const credData = await c.env.CONFIG_KV.get(k.name);
       if (credData) {
         const cred: CredentialConfig = JSON.parse(credData);
@@ -136,15 +136,15 @@ app.post("/:id/credentials", async (c) => {
   }
 
   // Max 20 credentials per vault
-  const credList = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "cred", vaultId) });
-  if (credList.keys.length >= 20) {
+  const credList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "cred", vaultId));
+  if (credList.length >= 20) {
     return c.json({ error: "Maximum 20 credentials per vault" }, 400);
   }
 
   // One credential per mcp_server_url (among non-archived creds)
   if (body.auth.mcp_server_url) {
     const existingCreds = await Promise.all(
-      credList.keys.map(async (k) => {
+      credList.map(async (k) => {
         const d = await c.env.CONFIG_KV.get(k.name);
         return d ? (JSON.parse(d) as CredentialConfig) : null;
       })
@@ -176,10 +176,10 @@ app.get("/:id/credentials", async (c) => {
   const vaultData = await c.env.CONFIG_KV.get(kvKey(t, "vault", vaultId));
   if (!vaultData) return c.json({ error: "Vault not found" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({ prefix: kvPrefix(t, "cred", vaultId) });
+  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "cred", vaultId));
   const creds = (
     await Promise.all(
-      list.keys.map(async (k) => {
+      list.map(async (k) => {
         const data = await c.env.CONFIG_KV.get(k.name);
         return data ? (JSON.parse(data) as CredentialConfig) : null;
       })
