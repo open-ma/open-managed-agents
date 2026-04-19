@@ -121,7 +121,7 @@ curl -sS -N https://api.anthropic.com/v1/sessions/$SESSION_ID/events/stream \
 | Edit | `edit` | 字符串替换编辑文件 |
 | Glob | `glob` | 文件模式匹配 |
 | Grep | `grep` | 正则搜索 |
-| Web fetch | `web_fetch` | 获取 URL 内容 |
+| Web fetch | `web_fetch` | URL → markdown（Workers AI 转换，配置 `agent.aux_model` 时自动摘要 + 原文落 `/workspace/.web/`） |
 | Web search | `web_search` | 搜索网页 |
 
 配置方式：
