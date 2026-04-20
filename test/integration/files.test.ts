@@ -44,6 +44,7 @@ describe("File upload", () => {
     const res = await post("/v1/files", {
       filename: "unknown.bin",
       content: "binary-ish",
+      encoding: "utf8",
     });
     expect(res.status).toBe(201);
     const file = (await res.json()) as any;
@@ -64,6 +65,7 @@ describe("File upload", () => {
     const res = await post("/v1/files", {
       filename: "scoped.txt",
       content: "scoped content",
+      media_type: "text/plain",
       scope_id: "sess_abc123",
     });
     expect(res.status).toBe(201);
@@ -140,6 +142,7 @@ describe("File get metadata", () => {
       filename: "meta.json",
       content: '{"key":"value"}',
       media_type: "application/json",
+      encoding: "utf8",
     });
     const file = (await createRes.json()) as any;
 
@@ -166,6 +169,7 @@ describe("File download content", () => {
       filename: "hello.txt",
       content: "Hello, world!",
       media_type: "text/plain",
+      downloadable: true,
     });
     const file = (await createRes.json()) as any;
 
@@ -190,6 +194,7 @@ describe("File delete", () => {
     const createRes = await post("/v1/files", {
       filename: "to-delete.txt",
       content: "delete me",
+      media_type: "text/plain",
     });
     const file = (await createRes.json()) as any;
 
@@ -358,6 +363,7 @@ describe("Session creation with resources", () => {
       filename: "init-file.txt",
       content: "initial content",
       media_type: "text/plain",
+      downloadable: true,
     });
     fileId = ((await f.json()) as any).id;
   });
