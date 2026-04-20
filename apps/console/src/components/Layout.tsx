@@ -72,6 +72,16 @@ const navGroups = [
       },
     ],
   },
+  {
+    label: "Integrations",
+    items: [
+      {
+        to: "/integrations/linear",
+        label: "Linear",
+        icon: "M3.5 6.5l5-5h7l5 5v11l-5 5h-7l-5-5v-11zM12 7v10M7 12h10",
+      },
+    ],
+  },
 ];
 
 /* ── Chevron icon for collapsible groups ── */

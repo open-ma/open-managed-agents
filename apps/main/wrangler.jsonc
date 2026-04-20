@@ -27,6 +27,11 @@
     { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
   ],
 
+  // Cloudflare Email Service (public beta) — transactional email
+  "send_email": [
+    { "name": "SEND_EMAIL" }
+  ],
+
   // Workers AI for generating embeddings
   "ai": { "binding": "AI" },
 
@@ -37,7 +42,8 @@
 
   // Service bindings to agent workers
   "services": [
-    { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" }
+    { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" },
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
   ],
 
   "migrations": [
