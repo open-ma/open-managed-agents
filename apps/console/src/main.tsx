@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router";
 import "./index.css";
 import { AuthProvider } from "./lib/auth";
+import { ToastProvider } from "./components/Toast";
 import { Layout } from "./components/Layout";
 import { Login } from "./pages/Login";
 import { Dashboard } from "./pages/Dashboard";
@@ -16,11 +17,17 @@ import { SkillsList } from "./pages/SkillsList";
 import { MemoryStoresList } from "./pages/MemoryStoresList";
 import { ModelCardsList } from "./pages/ModelCardsList";
 import { ApiKeysList } from "./pages/ApiKeysList";
+import {
+  IntegrationsLinearList,
+  IntegrationsLinearWorkspace,
+  IntegrationsLinearPublishPage,
+} from "./pages/IntegrationsLinear";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
-    <AuthProvider>
-      <BrowserRouter>
+    <ToastProvider>
+      <AuthProvider>
+        <BrowserRouter>
         <Routes>
           <Route path="login" element={<Login />} />
           <Route element={<Layout />}>
@@ -35,10 +42,20 @@ createRoot(document.getElementById("root")!).render(
             <Route path="memory" element={<MemoryStoresList />} />
             <Route path="model-cards" element={<ModelCardsList />} />
             <Route path="api-keys" element={<ApiKeysList />} />
+            <Route path="integrations/linear" element={<IntegrationsLinearList />} />
+            <Route
+              path="integrations/linear/publish"
+              element={<IntegrationsLinearPublishPage />}
+            />
+            <Route
+              path="integrations/linear/installations/:id"
+              element={<IntegrationsLinearWorkspace />}
+            />
             <Route path="*" element={<Navigate to="/agents" replace />} />
           </Route>
         </Routes>
       </BrowserRouter>
-    </AuthProvider>
+      </AuthProvider>
+    </ToastProvider>
   </StrictMode>
 );

@@ -7,8 +7,25 @@ import { Button } from "../components/Button";
 interface Session {
   id: string; title?: string; agent_id: string; environment_id: string;
   status?: string; created_at: string; archived_at?: string;
+  metadata?: Record<string, unknown>;
 }
 interface Vault { id: string; name: string; }
+
+/** Tiny "🔗 Linear" pill shown when a session was triggered by a Linear webhook. */
+function LinearBadge({ metadata }: { metadata?: Record<string, unknown> }) {
+  const linear = metadata?.linear as
+    | { issueIdentifier?: string; issueId?: string; workspaceId?: string }
+    | undefined;
+  if (!linear || (!linear.issueId && !linear.issueIdentifier)) return null;
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700"
+      title={`Linear issue ${linear.issueIdentifier ?? linear.issueId}`}
+    >
+      🔗 {linear.issueIdentifier ?? "Linear"}
+    </span>
+  );
+}
 
 export function SessionsList() {
   const { api } = useApi();
@@ -179,7 +196,12 @@ export function SessionsList() {
               {displayed.map((s) => (
                 <tr key={s.id} onClick={() => nav(`/sessions/${s.id}`)} className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
                   <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[180px]" title={s.id}>{s.id}</td>
-                  <td className="px-4 py-3 font-medium text-fg">{s.title || "Untitled"}</td>
+                  <td className="px-4 py-3 font-medium text-fg">
+                    <span className="inline-flex items-center gap-2">
+                      {s.title || "Untitled"}
+                      <LinearBadge metadata={s.metadata} />
+                    </span>
+                  </td>
                   <td className="px-4 py-3">
                     <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(s.status)}`}>
                       {s.status || "idle"}

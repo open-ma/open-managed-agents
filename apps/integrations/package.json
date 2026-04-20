@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/integrations",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "dependencies": {
+    "@open-managed-agents/integrations-adapters-cf": "workspace:*",
+    "@open-managed-agents/integrations-core": "workspace:*",
+    "@open-managed-agents/linear": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*",
+    "hono": "^4.7.0"
+  }
+}

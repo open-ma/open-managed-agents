@@ -9,18 +9,30 @@ interface Agent {
   skills?: unknown[]; created_at: string; updated_at?: string; archived_at?: string;
 }
 
+interface LinearPub {
+  id: string;
+  status: string;
+  mode: string;
+  persona: { name: string; avatarUrl: string | null };
+  workspace_name: string | null;
+}
+
 export function AgentDetail() {
   const { id } = useParams();
   const { api } = useApi();
   const nav = useNavigate();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [versions, setVersions] = useState<Agent[]>([]);
+  const [linearPubs, setLinearPubs] = useState<LinearPub[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!id) return;
     api<Agent>(`/v1/agents/${id}`).then(setAgent).catch((e) => setError(e.message));
     api<{ data: Agent[] }>(`/v1/agents/${id}/versions`).then((d) => setVersions(d.data)).catch(() => {});
+    api<{ data: LinearPub[] }>(`/v1/integrations/linear/agents/${id}/publications`)
+      .then((r) => setLinearPubs(r.data.filter((p) => p.status === "live")))
+      .catch(() => {});
   }, [id]);
 
   const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : `${m?.id} (${m?.speed || "standard"})`;
@@ -63,6 +75,45 @@ export function AgentDetail() {
         <span className="text-fg-muted">Created</span><span>{new Date(agent.created_at).toLocaleString()}</span>
         <span className="text-fg-muted">Updated</span><span>{new Date(agent.updated_at || agent.created_at).toLocaleString()}</span>
         {agent.archived_at && <><span className="text-fg-muted">Archived</span><span className="text-warning">{new Date(agent.archived_at).toLocaleString()}</span></>}
+      </div>
+
+      {/* Linear integrations — show live publications, link to manage page. */}
+      <div className="mt-6 max-w-2xl">
+        <h2 className="font-display text-base font-semibold mb-2">Linear</h2>
+        {linearPubs.length === 0 ? (
+          <Link
+            to={`/integrations/linear/publish?agent_id=${agent.id}`}
+            className="inline-flex items-center gap-1.5 text-sm text-brand hover:underline"
+          >
+            🔗 Publish to Linear →
+          </Link>
+        ) : (
+          <div className="space-y-1.5">
+            {linearPubs.map((p) => (
+              <Link
+                key={p.id}
+                to="/integrations/linear"
+                className="flex items-center gap-2 text-sm text-fg-muted hover:text-fg"
+              >
+                <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
+                  🔗 Live
+                </span>
+                <span>
+                  as <strong>{p.persona.name}</strong> in {p.workspace_name ?? "Linear workspace"}
+                </span>
+                <span className="text-xs text-fg-subtle">
+                  {p.mode === "full" ? "(full identity)" : "(shared bot)"}
+                </span>
+              </Link>
+            ))}
+            <Link
+              to={`/integrations/linear/publish?agent_id=${agent.id}`}
+              className="inline-block text-xs text-brand hover:underline"
+            >
+              + Publish to another workspace
+            </Link>
+          </div>
+        )}
       </div>
 
       {/* System prompt */}
