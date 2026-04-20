@@ -3,3 +3,4 @@ packages:
   - 'apps/main'
   - 'apps/agent'
   - 'apps/console'
+  - 'apps/integrations'

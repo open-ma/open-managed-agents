@@ -23,6 +23,11 @@ export function SessionDetail() {
   const [sending, setSending] = useState(false);
   const [title, setTitle] = useState("");
   const [agentId, setAgentId] = useState("");
+  const [linear, setLinear] = useState<{
+    issueId?: string;
+    issueIdentifier?: string;
+    workspaceId?: string;
+  } | null>(null);
   const [status, setStatus] = useState("idle");
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenKeys = useRef(new Set<string>());
@@ -30,16 +35,17 @@ export function SessionDetail() {
 
   const eventKey = (e: Event) => `${e.type}:${JSON.stringify(e.content || e.id || e.tool_use_id || e.error || "").slice(0, 120)}`;
 
-  const addEvent = (e: Event) => {
-    const key = eventKey(e);
+  const addEvent = (e: Record<string, unknown>) => {
+    const ev = e as Event;
+    const key = eventKey(ev);
     if (seenKeys.current.has(key)) return;
     seenKeys.current.add(key);
 
-    if (e.type === "session.status_running") { setStatus("running"); return; }
-    if (e.type === "session.status_idle") { setStatus("idle"); return; }
-    if (e.type?.startsWith("span.") || e.type === "agent.thinking") return;
+    if (ev.type === "session.status_running") { setStatus("running"); return; }
+    if (ev.type === "session.status_idle") { setStatus("idle"); return; }
+    if (ev.type?.startsWith("span.") || ev.type === "agent.thinking") return;
 
-    setEvents((prev) => [...prev, e]);
+    setEvents((prev) => [...prev, ev]);
   };
 
   useEffect(() => {
@@ -47,8 +53,21 @@ export function SessionDetail() {
     seenKeys.current.clear();
 
     // Load session info
-    api<{ title?: string; agent_id?: string }>(`/v1/sessions/${id}`)
-      .then((s) => { setTitle(s.title || id); setAgentId(s.agent_id || ""); })
+    api<{
+      title?: string;
+      agent_id?: string;
+      metadata?: Record<string, unknown>;
+    }>(`/v1/sessions/${id}`)
+      .then((s) => {
+        setTitle(s.title || id);
+        setAgentId(s.agent_id || "");
+        const linearMeta = s.metadata?.linear as
+          | { issueId?: string; issueIdentifier?: string; workspaceId?: string }
+          | undefined;
+        if (linearMeta && (linearMeta.issueId || linearMeta.issueIdentifier)) {
+          setLinear(linearMeta);
+        }
+      })
       .catch(() => {});
 
     // Load history
@@ -100,6 +119,29 @@ export function SessionDetail() {
           <span className="text-xs text-fg-subtle font-mono">{agentId}</span>
         </div>
       </div>
+
+      {/* Linear context (when triggered by a Linear webhook) */}
+      {linear && (
+        <div className="px-8 py-2 border-b border-border bg-blue-50/50 text-xs flex items-center gap-2 text-blue-900">
+          <span>🔗</span>
+          <span className="font-medium">Linear</span>
+          <span className="text-blue-700">·</span>
+          <span>
+            issue{" "}
+            <span className="font-mono">{linear.issueIdentifier ?? linear.issueId}</span>
+          </span>
+          {linear.workspaceId && (
+            <a
+              href={`https://linear.app`}
+              target="_blank"
+              rel="noreferrer"
+              className="ml-auto hover:underline"
+            >
+              Open in Linear ↗
+            </a>
+          )}
+        </div>
+      )}
 
       {/* Events */}
       <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">

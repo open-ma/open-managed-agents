@@ -8,6 +8,8 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@open-managed-agents/integrations-core": "workspace:*",
+    "@open-managed-agents/integrations-ui": "workspace:*",
     "better-auth": "^1.6.3",
     "highlight.js": "^11.11.1",
     "js-yaml": "^4.1.1",
