@@ -1,0 +1,536 @@
+// In-memory fakes for every port and repo defined in this package.
+//
+// Used by downstream package tests (e.g. @open-managed-agents/linear) to
+// exercise provider logic without spinning up workerd or a real Linear API.
+// Adapters in integrations-adapters-cf are tested separately against real
+// D1/KV via miniflare; together the two layers form the production stack.
+//
+// These fakes are intentionally simple: maps and arrays, no concurrency
+// guards. Tests should treat each instance as single-threaded.
+
+import type {
+  AppCredentials,
+  AppRepo,
+  CapabilitySet,
+  Clock,
+  Crypto,
+  CreateCredentialInput,
+  CreateSessionInput,
+  HmacVerifier,
+  HttpClient,
+  HttpRequest,
+  HttpResponse,
+  IdGenerator,
+  Installation,
+  InstallationRepo,
+  InstallKind,
+  IssueSession,
+  IssueSessionRepo,
+  IssueSessionStatus,
+  JwtSigner,
+  NewAppCredentials,
+  NewInstallation,
+  NewPublication,
+  NewSetupLink,
+  Persona,
+  ProviderId,
+  Publication,
+  PublicationRepo,
+  PublicationStatus,
+  SessionCreator,
+  SessionEventInput,
+  SessionId,
+  SetupLink,
+  SetupLinkRepo,
+  VaultManager,
+  WebhookEventStore,
+  WorkspaceId,
+} from "./index";
+
+// ─── Runtime ports ─────────────────────────────────────────────────────
+
+export class FakeClock implements Clock {
+  constructor(private current: number = 0) {}
+  nowMs(): number {
+    return this.current;
+  }
+  advance(ms: number): void {
+    this.current += ms;
+  }
+  set(ms: number): void {
+    this.current = ms;
+  }
+}
+
+export class FakeIdGenerator implements IdGenerator {
+  private counter = 0;
+  constructor(private prefix: string = "id") {}
+  generate(): string {
+    this.counter += 1;
+    return `${this.prefix}_${this.counter}`;
+  }
+}
+
+/** Trivial reversible "encryption" — base64 wrap. NEVER use in production. */
+export class FakeCrypto implements Crypto {
+  async encrypt(plaintext: string): Promise<string> {
+    return `enc(${plaintext})`;
+  }
+  async decrypt(ciphertext: string): Promise<string> {
+    if (!ciphertext.startsWith("enc(") || !ciphertext.endsWith(")")) {
+      throw new Error(`FakeCrypto.decrypt: not a fake-cipher: ${ciphertext}`);
+    }
+    return ciphertext.slice(4, -1);
+  }
+}
+
+export class FakeHmacVerifier implements HmacVerifier {
+  /** Treats `signature` as `expected:${secret}:${body}`. */
+  async verify(secret: string, body: string, signature: string): Promise<boolean> {
+    return signature === `expected:${secret}:${body}`;
+  }
+}
+
+export class FakeJwtSigner implements JwtSigner {
+  private store = new Map<string, { payload: object; expiresAt: number }>();
+  constructor(private clock: Clock = new FakeClock()) {}
+  async sign(payload: object, ttlSeconds: number): Promise<string> {
+    const token = `jwt_${Math.random().toString(36).slice(2)}`;
+    this.store.set(token, {
+      payload,
+      expiresAt: this.clock.nowMs() + ttlSeconds * 1000,
+    });
+    return token;
+  }
+  async verify<T extends object = object>(token: string): Promise<T> {
+    const entry = this.store.get(token);
+    if (!entry) throw new Error(`FakeJwtSigner: unknown token ${token}`);
+    if (this.clock.nowMs() > entry.expiresAt) {
+      throw new Error(`FakeJwtSigner: expired token ${token}`);
+    }
+    return entry.payload as T;
+  }
+}
+
+/** Records calls; replies with whatever the test queues via `respondWith`. */
+export class FakeHttpClient implements HttpClient {
+  readonly calls: HttpRequest[] = [];
+  private queue: HttpResponse[] = [];
+  private fallback: HttpResponse | null = null;
+
+  respondWith(...responses: HttpResponse[]): this {
+    this.queue.push(...responses);
+    return this;
+  }
+  setFallback(response: HttpResponse): this {
+    this.fallback = response;
+    return this;
+  }
+
+  async fetch(req: HttpRequest): Promise<HttpResponse> {
+    this.calls.push(req);
+    const next = this.queue.shift();
+    if (next) return next;
+    if (this.fallback) return this.fallback;
+    throw new Error(`FakeHttpClient: no response queued for ${req.method} ${req.url}`);
+  }
+}
+
+export class FakeSessionCreator implements SessionCreator {
+  readonly created: CreateSessionInput[] = [];
+  readonly resumed: { userId: string; sessionId: SessionId; event: SessionEventInput }[] = [];
+  private counter = 0;
+
+  async create(input: CreateSessionInput): Promise<{ sessionId: SessionId }> {
+    this.created.push(input);
+    this.counter += 1;
+    return { sessionId: `sess_${this.counter}` };
+  }
+  async resume(userId: string, sessionId: SessionId, event: SessionEventInput): Promise<void> {
+    this.resumed.push({ userId, sessionId, event });
+  }
+}
+
+export class FakeVaultManager implements VaultManager {
+  readonly created: CreateCredentialInput[] = [];
+  private counter = 0;
+  async createCredentialForUser(
+    input: CreateCredentialInput,
+  ): Promise<{ vaultId: string; credentialId: string }> {
+    this.created.push(input);
+    this.counter += 1;
+    return { vaultId: `vlt_${this.counter}`, credentialId: `crd_${this.counter}` };
+  }
+}
+
+// ─── Repositories ──────────────────────────────────────────────────────
+
+export class InMemoryInstallationRepo implements InstallationRepo {
+  private rows = new Map<string, Installation>();
+  private tokens = new Map<string, string>(); // installation id → plaintext token
+  private counter = 0;
+
+  constructor(private clock: Clock = new FakeClock()) {}
+
+  async get(id: string): Promise<Installation | null> {
+    return this.rows.get(id) ?? null;
+  }
+
+  async findByWorkspace(
+    providerId: ProviderId,
+    workspaceId: WorkspaceId,
+    installKind: InstallKind,
+    appId: string | null,
+  ): Promise<Installation | null> {
+    for (const row of this.rows.values()) {
+      if (
+        row.providerId === providerId &&
+        row.workspaceId === workspaceId &&
+        row.installKind === installKind &&
+        row.appId === appId &&
+        row.revokedAt === null
+      ) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  async listByUser(userId: string, providerId: ProviderId): Promise<readonly Installation[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.userId === userId && r.providerId === providerId && r.revokedAt === null,
+    );
+  }
+
+  async getAccessToken(id: string): Promise<string | null> {
+    const row = this.rows.get(id);
+    if (!row || row.revokedAt !== null) return null;
+    return this.tokens.get(id) ?? null;
+  }
+
+  async insert(row: NewInstallation): Promise<Installation> {
+    this.counter += 1;
+    const id = `inst_${this.counter}`;
+    const inst: Installation = {
+      id,
+      userId: row.userId,
+      providerId: row.providerId,
+      workspaceId: row.workspaceId,
+      workspaceName: row.workspaceName,
+      installKind: row.installKind,
+      appId: row.appId,
+      botUserId: row.botUserId,
+      scopes: row.scopes,
+      vaultId: null,
+      createdAt: this.clock.nowMs(),
+      revokedAt: null,
+    };
+    this.rows.set(id, inst);
+    this.tokens.set(id, row.accessToken);
+    return inst;
+  }
+
+  async setVaultId(id: string, vaultId: string): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, vaultId });
+  }
+
+  async markRevoked(id: string, at: number): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, revokedAt: at });
+  }
+}
+
+export class InMemoryPublicationRepo implements PublicationRepo {
+  private rows = new Map<string, Publication>();
+  private counter = 0;
+
+  constructor(private clock: Clock = new FakeClock()) {}
+
+  async get(id: string): Promise<Publication | null> {
+    return this.rows.get(id) ?? null;
+  }
+
+  async listByInstallation(installationId: string): Promise<readonly Publication[]> {
+    return [...this.rows.values()].filter((r) => r.installationId === installationId);
+  }
+
+  async listByUserAndAgent(
+    userId: string,
+    agentId: string,
+  ): Promise<readonly Publication[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.userId === userId && r.agentId === agentId,
+    );
+  }
+
+  async getDefaultForInstallation(installationId: string): Promise<Publication | null> {
+    for (const row of this.rows.values()) {
+      if (
+        row.installationId === installationId &&
+        row.isDefaultAgent &&
+        row.status === "live"
+      ) {
+        return row;
+      }
+    }
+    return null;
+  }
+
+  async listSlashCommands(installationId: string): Promise<readonly Publication[]> {
+    return [...this.rows.values()].filter(
+      (r) =>
+        r.installationId === installationId &&
+        r.slashCommand !== null &&
+        r.status === "live",
+    );
+  }
+
+  async insert(row: NewPublication): Promise<Publication> {
+    this.counter += 1;
+    const id = `pub_${this.counter}`;
+    const pub: Publication = {
+      id,
+      ...row,
+      createdAt: this.clock.nowMs(),
+      unpublishedAt: null,
+    };
+    this.rows.set(id, pub);
+    return pub;
+  }
+
+  async updateStatus(id: string, status: PublicationStatus): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, status });
+  }
+
+  async updateCapabilities(id: string, capabilities: CapabilitySet): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, capabilities });
+  }
+
+  async updatePersona(id: string, persona: Persona): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, persona });
+  }
+
+  async markUnpublished(id: string, at: number): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) {
+      this.rows.set(id, { ...row, status: "unpublished", unpublishedAt: at });
+    }
+  }
+}
+
+export class InMemoryAppRepo implements AppRepo {
+  private rows = new Map<string, AppCredentials>();
+  private clientSecrets = new Map<string, string>();
+  private webhookSecrets = new Map<string, string>();
+  private counter = 0;
+
+  constructor(private clock: Clock = new FakeClock()) {}
+
+  async get(id: string): Promise<AppCredentials | null> {
+    return this.rows.get(id) ?? null;
+  }
+
+  async getByPublication(publicationId: string): Promise<AppCredentials | null> {
+    for (const row of this.rows.values()) {
+      if (row.publicationId === publicationId) return row;
+    }
+    return null;
+  }
+
+  async getWebhookSecret(id: string): Promise<string | null> {
+    return this.webhookSecrets.get(id) ?? null;
+  }
+
+  async getClientSecret(id: string): Promise<string | null> {
+    return this.clientSecrets.get(id) ?? null;
+  }
+
+  async insert(row: NewAppCredentials): Promise<AppCredentials> {
+    this.counter += 1;
+    const id = `app_${this.counter}`;
+    const app: AppCredentials = {
+      id,
+      publicationId: row.publicationId,
+      clientId: row.clientId,
+      clientSecretCipher: `enc(${row.clientSecret})`,
+      webhookSecretCipher: `enc(${row.webhookSecret})`,
+      createdAt: this.clock.nowMs(),
+    };
+    this.rows.set(id, app);
+    this.clientSecrets.set(id, row.clientSecret);
+    this.webhookSecrets.set(id, row.webhookSecret);
+    return app;
+  }
+
+  async setPublicationId(id: string, publicationId: string): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, publicationId });
+  }
+
+  async delete(id: string): Promise<void> {
+    this.rows.delete(id);
+    this.clientSecrets.delete(id);
+    this.webhookSecrets.delete(id);
+  }
+}
+
+interface WebhookEventRow {
+  deliveryId: string;
+  installationId: string;
+  eventType: string;
+  receivedAt: number;
+  sessionId: string | null;
+  publicationId: string | null;
+  error: string | null;
+}
+
+export class InMemoryWebhookEventStore implements WebhookEventStore {
+  readonly rows = new Map<string, WebhookEventRow>();
+
+  async recordIfNew(
+    deliveryId: string,
+    installationId: string,
+    eventType: string,
+    receivedAt: number,
+  ): Promise<boolean> {
+    if (this.rows.has(deliveryId)) return false;
+    this.rows.set(deliveryId, {
+      deliveryId,
+      installationId,
+      eventType,
+      receivedAt,
+      sessionId: null,
+      publicationId: null,
+      error: null,
+    });
+    return true;
+  }
+
+  async attachSession(deliveryId: string, sessionId: string): Promise<void> {
+    const row = this.rows.get(deliveryId);
+    if (row) this.rows.set(deliveryId, { ...row, sessionId });
+  }
+
+  async attachPublication(deliveryId: string, publicationId: string): Promise<void> {
+    const row = this.rows.get(deliveryId);
+    if (row) this.rows.set(deliveryId, { ...row, publicationId });
+  }
+
+  async attachError(deliveryId: string, error: string): Promise<void> {
+    const row = this.rows.get(deliveryId);
+    if (row) this.rows.set(deliveryId, { ...row, error });
+  }
+}
+
+export class InMemoryIssueSessionRepo implements IssueSessionRepo {
+  private rows = new Map<string, IssueSession>();
+
+  private key(publicationId: string, issueId: string): string {
+    return `${publicationId}:${issueId}`;
+  }
+
+  async getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null> {
+    return this.rows.get(this.key(publicationId, issueId)) ?? null;
+  }
+
+  async insert(row: IssueSession): Promise<void> {
+    this.rows.set(this.key(row.publicationId, row.issueId), row);
+  }
+
+  async updateStatus(
+    publicationId: string,
+    issueId: string,
+    status: IssueSessionStatus,
+  ): Promise<void> {
+    const k = this.key(publicationId, issueId);
+    const row = this.rows.get(k);
+    if (row) this.rows.set(k, { ...row, status });
+  }
+
+  async listActive(publicationId: string): Promise<readonly IssueSession[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.publicationId === publicationId && r.status === "active",
+    );
+  }
+}
+
+export class InMemorySetupLinkRepo implements SetupLinkRepo {
+  private rows = new Map<string, SetupLink>();
+
+  async get(token: string): Promise<SetupLink | null> {
+    return this.rows.get(token) ?? null;
+  }
+
+  async insert(row: NewSetupLink): Promise<SetupLink> {
+    const token = `setup_${Math.random().toString(36).slice(2)}`;
+    const link: SetupLink = {
+      token,
+      publicationId: row.publicationId,
+      createdBy: row.createdBy,
+      expiresAt: row.expiresAt,
+      usedAt: null,
+      usedByEmail: null,
+    };
+    this.rows.set(token, link);
+    return link;
+  }
+
+  async markUsed(token: string, usedByEmail: string, usedAt: number): Promise<void> {
+    const row = this.rows.get(token);
+    if (row) this.rows.set(token, { ...row, usedAt, usedByEmail });
+  }
+
+  async deleteExpired(now: number): Promise<number> {
+    let removed = 0;
+    for (const [token, row] of this.rows) {
+      if (row.expiresAt < now) {
+        this.rows.delete(token);
+        removed += 1;
+      }
+    }
+    return removed;
+  }
+}
+
+// ─── Convenience: build a complete in-memory container ────────────────
+
+export interface FakeContainer {
+  clock: FakeClock;
+  ids: FakeIdGenerator;
+  crypto: FakeCrypto;
+  hmac: FakeHmacVerifier;
+  jwt: FakeJwtSigner;
+  http: FakeHttpClient;
+  sessions: FakeSessionCreator;
+  vaults: FakeVaultManager;
+  installations: InMemoryInstallationRepo;
+  publications: InMemoryPublicationRepo;
+  apps: InMemoryAppRepo;
+  webhookEvents: InMemoryWebhookEventStore;
+  issueSessions: InMemoryIssueSessionRepo;
+  setupLinks: InMemorySetupLinkRepo;
+}
+
+export function buildFakeContainer(): FakeContainer {
+  const clock = new FakeClock(1_700_000_000_000);
+  return {
+    clock,
+    ids: new FakeIdGenerator(),
+    crypto: new FakeCrypto(),
+    hmac: new FakeHmacVerifier(),
+    jwt: new FakeJwtSigner(clock),
+    http: new FakeHttpClient(),
+    sessions: new FakeSessionCreator(),
+    vaults: new FakeVaultManager(),
+    installations: new InMemoryInstallationRepo(clock),
+    publications: new InMemoryPublicationRepo(clock),
+    apps: new InMemoryAppRepo(clock),
+    webhookEvents: new InMemoryWebhookEventStore(),
+    issueSessions: new InMemoryIssueSessionRepo(),
+    setupLinks: new InMemorySetupLinkRepo(),
+  };
+}

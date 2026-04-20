@@ -15,6 +15,9 @@ import modelsRoutes from "./routes/models";
 import clawhubRoutes from "./routes/clawhub";
 import apiKeysRoutes from "./routes/api-keys";
 import evalsRoutes from "./routes/evals";
+import costReportRoutes from "./routes/cost-report";
+import internalRoutes from "./routes/internal";
+import integrationsRoutes from "./routes/integrations";
 import { tickEvalRuns } from "./eval-runner";
 import { log, logError } from "@open-managed-agents/shared";
 
@@ -37,7 +40,7 @@ app.on(["GET", "POST"], "/auth/*", async (c) => {
 
 // Auth info endpoint (public — tells the frontend which providers are enabled)
 app.get("/auth-info", (c) => {
-  const providers: string[] = ["email"];
+  const providers: string[] = ["email", "email-otp"];
   if (c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET) {
     providers.push("google");
   }
@@ -60,6 +63,13 @@ app.route("/v1/models", modelsRoutes);
 app.route("/v1/clawhub", clawhubRoutes);
 app.route("/v1/api_keys", apiKeysRoutes);
 app.route("/v1/evals", evalsRoutes);
+app.route("/v1/cost_report", costReportRoutes);
+app.route("/v1/integrations", integrationsRoutes);
+
+// Internal endpoints (NOT auth-middleware'd; secured by header secret inside
+// the route file). Called only by the integrations gateway worker via service
+// binding.
+app.route("/v1/internal", internalRoutes);
 
 export default {
   fetch: app.fetch,

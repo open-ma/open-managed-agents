@@ -1,0 +1,27 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "managed-agents-integrations",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // Public origin where this gateway is reachable. Used to build OAuth
+  // callback / webhook URLs the gateway hands to Linear. No trailing slash.
+  // OVERRIDE this in production to your custom domain or workers.dev URL.
+  "vars": {
+    "GATEWAY_ORIGIN": "https://managed-agents-integrations.example.workers.dev"
+  },
+
+  // Shared with apps/main. Migrations for integrations tables live with
+  // packages/integrations-adapters-cf and are applied via the same D1 instance.
+  "d1_databases": [
+    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
+  ],
+
+  // Service binding back to the main worker for session creation / resume.
+  "services": [
+    { "binding": "MAIN", "service": "managed-agents" }
+  ],
+
+  "observability": { "enabled": true }
+}
