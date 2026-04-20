@@ -258,6 +258,7 @@ describe("Constraint validations", () => {
     const fileRes = await post("/v1/files", {
       filename: "test.txt",
       content: "hello",
+      media_type: "text/plain",
     });
     const file = (await fileRes.json()) as any;
 
