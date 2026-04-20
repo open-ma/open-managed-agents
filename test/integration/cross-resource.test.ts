@@ -231,7 +231,7 @@ describe("File + Session resource", () => {
   });
 
   it("scoped file copy download returns original content", async () => {
-    const f = await post("/v1/files", { filename: "copy-src.txt", content: "copy-original-content" });
+    const f = await post("/v1/files", { filename: "copy-src.txt", content: "copy-original-content", media_type: "text/plain", downloadable: true });
     const file = (await f.json()) as any;
 
     const s = await post("/v1/sessions", {
@@ -249,7 +249,7 @@ describe("File + Session resource", () => {
   });
 
   it("file resource with mount_path is preserved", async () => {
-    const f = await post("/v1/files", { filename: "mounted.txt", content: "mounted" });
+    const f = await post("/v1/files", { filename: "mounted.txt", content: "mounted", media_type: "text/plain" });
     const file = (await f.json()) as any;
 
     const res = await post(`/v1/sessions/${sessionId}/resources`, {
@@ -263,7 +263,7 @@ describe("File + Session resource", () => {
   });
 
   it("duplicate file with different mount_paths creates two resources", async () => {
-    const f = await post("/v1/files", { filename: "dup.txt", content: "dup content" });
+    const f = await post("/v1/files", { filename: "dup.txt", content: "dup content", media_type: "text/plain" });
     const file = (await f.json()) as any;
 
     const newSess = await post("/v1/sessions", { agent: agentId, environment_id: envId });
@@ -280,7 +280,7 @@ describe("File + Session resource", () => {
   });
 
   it("deleting resource does not cascade-delete the file", async () => {
-    const f = await post("/v1/files", { filename: "nodelete.txt", content: "persistent" });
+    const f = await post("/v1/files", { filename: "nodelete.txt", content: "persistent", media_type: "text/plain" });
     const file = (await f.json()) as any;
 
     const addRes = await post(`/v1/sessions/${sessionId}/resources`, {
@@ -297,7 +297,7 @@ describe("File + Session resource", () => {
   });
 
   it("file resources with different media types (json, csv, txt)", async () => {
-    const fJson = await post("/v1/files", { filename: "data.json", content: '{"a":1}', media_type: "application/json" });
+    const fJson = await post("/v1/files", { filename: "data.json", content: '{"a":1}', media_type: "application/json", encoding: "utf8" });
     const fCsv = await post("/v1/files", { filename: "data.csv", content: "a,b\n1,2", media_type: "text/csv" });
     const fTxt = await post("/v1/files", { filename: "data.txt", content: "plain text", media_type: "text/plain" });
 
@@ -552,7 +552,7 @@ describe("Cross-entity lifecycle", () => {
     const envObj = (await eRes.json()) as any;
 
     // File
-    const fRes = await post("/v1/files", { filename: "flow.txt", content: "flow content" });
+    const fRes = await post("/v1/files", { filename: "flow.txt", content: "flow content", media_type: "text/plain" });
     expect(fRes.status).toBe(201);
     const file = (await fRes.json()) as any;
 
@@ -1055,7 +1055,7 @@ describe("GitHub Repository + Env Secret resources", () => {
   });
 
   it.skip("mixed resource types: github + env_secret + file", async () => {
-    const f = await post("/v1/files", { filename: "mixed.txt", content: "mixed content" });
+    const f = await post("/v1/files", { filename: "mixed.txt", content: "mixed content", media_type: "text/plain" });
     const file = (await f.json()) as any;
 
     const s = await post("/v1/sessions", {

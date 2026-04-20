@@ -271,6 +271,7 @@ describe("Boundary conditions", () => {
     const res = await post("/v1/files", {
       filename: longName,
       content: "long filename content",
+      media_type: "text/plain",
     });
     expect(res.status).toBe(201);
     const file = (await res.json()) as any;
@@ -283,6 +284,7 @@ describe("Boundary conditions", () => {
     const res = await post("/v1/files", {
       filename: specialName,
       content: "special filename content",
+      media_type: "text/plain",
     });
     expect(res.status).toBe(201);
     const file = (await res.json()) as any;
