@@ -371,11 +371,14 @@ const commands: Cmd[] = [
       console.log(`  Webhook secret:  ${r.webhookSecret}`);
       // The callback/webhook URLs come from server config (PUBLIC_BASE_URL on
       // the integrations gateway), NOT from OMA_BASE_URL. They must be
-      // publicly reachable for Linear to call them — local-dev URLs won't
-      // work for a real Linear OAuth App.
-      if (!isPubliclyReachable(r.callbackUrl)) {
-        console.log(`\nNote: callback URL is on a local host. Linear can't reach it from the public internet.`);
-        console.log(`This works only if you're running with a tunnel (cloudflared / ngrok) pointing at the integrations gateway.`);
+      // publicly reachable HTTPS for Linear to call them — Linear's "New
+      // OAuth application" form rejects http:// outright at submit time, so
+      // local-dev URLs can't even be saved on Linear's side.
+      if (!isPubliclyReachable(r.callbackUrl) || !r.callbackUrl.startsWith("https://")) {
+        console.log(`\n⚠  Linear requires HTTPS on a publicly-reachable host for callback/webhook URLs.`);
+        console.log(`The URLs above point at a local / non-HTTPS origin — Linear's form will reject them.`);
+        console.log(`Fix: deploy the integrations worker (or run a tunnel like cloudflared/ngrok) and set`);
+        console.log(`GATEWAY_ORIGIN to that public HTTPS host before publishing.`);
       }
       console.log(`\nStep 2 — submit the credentials Linear gives you:\n`);
       console.log(`  oma linear submit <FORM_TOKEN> \\\n    --client-id <CLIENT_ID> --client-secret <CLIENT_SECRET>\n`);

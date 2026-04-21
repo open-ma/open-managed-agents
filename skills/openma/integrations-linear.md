@@ -55,12 +55,15 @@ human must paste them verbatim. Re-running `publish` mints a *new* `formToken`
 with a *new* appId, so don't re-run between steps unless you mean to.
 
 > **URL host caveat.** The Callback / Webhook URLs come from the integrations
-> gateway's `PUBLIC_BASE_URL`, **not** from your client's `OMA_BASE_URL`. If
-> they point at `localhost` you can't paste them into a real Linear App —
-> Linear can't reach your laptop. The CLI prints a warning when it detects
-> this. To proceed, either deploy the integrations worker to a public host,
-> or run a tunnel (`cloudflared`/`ngrok`) and set `PUBLIC_BASE_URL` to the
-> tunnel hostname before retrying.
+> gateway's `PUBLIC_BASE_URL`, **not** from your client's `OMA_BASE_URL`.
+> Linear's "New OAuth application" form has client-side validation that
+> **rejects `http://` URLs outright at submit time** — even publicly-reachable
+> ones. You need an HTTPS origin for both URLs. So if `publish` returns
+> `http://localhost:8787/...` you're double-blocked: Linear's form won't save
+> it, and even if it did, Linear couldn't reach localhost. To proceed: deploy
+> the integrations worker, or run a tunnel (`cloudflared`/`ngrok`) and set
+> `GATEWAY_ORIGIN` on the integrations worker to that public HTTPS host
+> before retrying `oma linear publish`.
 
 For machine-readable output add `--json` — it skips the prose and prints the
 raw `{ formToken, callbackUrl, webhookUrl, webhookSecret, suggestedAppName }`.
@@ -123,19 +126,21 @@ to help**, then take direction. The protocol is:
 
 ### a. Check what browser tools you have
 
-Look for any of these in your environment (rough order of capability):
+Look for whatever browser-driving capability your environment provides.
+Common shapes (in rough order of capability):
 
-| Tool | How to detect |
+| Capability shape | How to detect |
 |---|---|
-| `agent-browser` (CLI) | `which agent-browser` |
-| Playwright MCP server | available tool starting with `mcp_playwright_` or similar |
-| `browser-use` / `browser_use_*` MCP | similar |
-| Chrome DevTools Protocol on a known port | `curl -s http://localhost:9222/json/list` (or :9333) |
-| WebFetch + form submission | last resort, doesn't handle session cookies well |
+| A general browser-automation MCP / SDK | check the tool list for anything matching `browser_*`, `playwright_*`, `puppeteer_*`, etc. |
+| A browser-automation CLI on PATH | `which <name>` for whatever the user's harness ships |
+| Chrome DevTools Protocol on a known port | `curl -s http://localhost:9222/json/list` (also try 9333, 9223 — varies by setup) |
+| `WebFetch` / HTTP only | last resort — works for read-only scraping, not for OAuth flows that need session cookies |
 
 If the user already has a Chrome / browser session open and logged into
 Linear (check `curl -s http://localhost:9222/json/list | grep linear.app`),
 that's the highest-leverage path: their session works as-is, no auth dance.
+Don't assume a specific tool — use whatever you actually have, and tell
+the user what you're using.
 
 ### b. Ask the user
 
@@ -166,15 +171,13 @@ URL in the user's logged-in tab, click "Authorize". Confirm with
 `oma linear list && oma linear pubs <installation-id>` — status should
 read `live`.
 
-> **Multi-tab Chrome gotcha.** If your browser tool drifts between tabs
-> (`agent-browser` notably does this when there's >1 page open in the
-> Chrome you're attached to), don't fight it — bind directly to the target
-> tab's `webSocketDebuggerUrl` and drive CDP from a small Node script. See
-> the "When agent-browser keeps drifting — go direct CDP" section in
-> `docs/console-dev-loop.md` for a copy-paste template. A previous agent
-> burned 55 tool calls trying to make `agent-browser activate` and
-> `agent-browser close && reconnect` work; CDP-direct is the escape
-> hatch.
+> **Multi-tab Chrome gotcha.** Some browser tools cache a target reference
+> and drift between tabs when the attached Chrome has more than one page
+> open. If yours does and you can't make it stick to the Linear tab, the
+> escape hatch is to drive CDP directly: bind to that specific tab's
+> `webSocketDebuggerUrl` (from `curl http://localhost:<cdp-port>/json/list`)
+> over a single WebSocket, and the connection stays bound for its lifetime.
+> See `docs/console-dev-loop.md` for one working pattern.
 
 ### d. If the user picks "manual"
 
