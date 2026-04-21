@@ -95,25 +95,9 @@ app.post("/sessions", async (c) => {
   const sessionId = generateSessionId();
   const vaultIds = body.vaultIds ?? [];
 
-  // Initialize SessionDO via the sandbox worker. Pass vault_ids so the
-  // outbound Worker can match credentials for this session.
-  await binding.fetch(`https://sandbox/sessions/${sessionId}/init`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      agent_id: body.agentId,
-      environment_id: body.environmentId,
-      title: "",
-      session_id: sessionId,
-      tenant_id: tenantId,
-      vault_ids: vaultIds,
-    }),
-  });
-
-  // Per-session augmentation of the agent config: extra MCP servers (e.g.
-  // Linear's hosted MCP at mcp.linear.app) so the agent can call them via
-  // its existing mcp_<name>_call tool wiring. Token comes from the vault
-  // via outbound injection — we deliberately don't set authorization_token.
+  // Build the agent snapshot up-front so we can ship it to SessionDO at /init
+  // (and so the per-session MCP-server augmentation actually takes effect on
+  // the snapshot the DO uses, not just the one we persist below).
   let agentSnapshot = JSON.parse(agentData) as AgentConfig;
   if (body.mcpServers && body.mcpServers.length > 0) {
     const existing = agentSnapshot.mcp_servers ?? [];
@@ -129,6 +113,30 @@ app.post("/sessions", async (c) => {
       ],
     };
   }
+
+  // Pre-fetch vault credentials so SessionDO can serve them from state
+  // instead of reading CONFIG_KV (which may be a different namespace if
+  // sandbox-default is shared across envs).
+  const vaultCredentials = await fetchVaultCredentials(c.env, tenantId, vaultIds);
+
+  // Initialize SessionDO via the sandbox worker. Pass vault_ids so the
+  // outbound Worker can match credentials for this session, plus the
+  // pre-fetched config snapshots (see snapshot rationale above).
+  await binding.fetch(`https://sandbox/sessions/${sessionId}/init`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      agent_id: body.agentId,
+      environment_id: body.environmentId,
+      title: "",
+      session_id: sessionId,
+      tenant_id: tenantId,
+      vault_ids: vaultIds,
+      agent_snapshot: agentSnapshot,
+      environment_snapshot: envConfig,
+      vault_credentials: vaultCredentials,
+    }),
+  });
 
   // Persist a session record with frozen agent + env snapshots so trajectory
   // and replay work even after the agent or env definition changes.
@@ -261,6 +269,35 @@ async function resolveTenantId(env: Env, userId: string): Promise<string | null>
     .bind(userId)
     .first<{ tenantId: string | null }>();
   return row?.tenantId ?? null;
+}
+
+/**
+ * Pre-fetch all credentials for the given vaults so they can be passed into
+ * SessionDO at /init. Mirrors the list+get loop SessionDO would otherwise
+ * do against its own (potentially wrong) CONFIG_KV namespace.
+ */
+async function fetchVaultCredentials(
+  env: Env,
+  tenantId: string,
+  vaultIds: string[],
+): Promise<Array<{ vault_id: string; credentials: CredentialConfig[] }>> {
+  if (!vaultIds.length) return [];
+  const out: Array<{ vault_id: string; credentials: CredentialConfig[] }> = [];
+  for (const vaultId of vaultIds) {
+    const list = await env.CONFIG_KV.list({ prefix: kvKey(tenantId, "cred", vaultId) + ":" });
+    const credentials: CredentialConfig[] = [];
+    for (const k of list.keys) {
+      const data = await env.CONFIG_KV.get(k.name);
+      if (!data) continue;
+      try {
+        credentials.push(JSON.parse(data) as CredentialConfig);
+      } catch {
+        // skip malformed
+      }
+    }
+    out.push({ vault_id: vaultId, credentials });
+  }
+  return out;
 }
 
 export default app;

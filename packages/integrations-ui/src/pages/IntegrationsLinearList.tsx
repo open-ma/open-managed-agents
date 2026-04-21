@@ -83,9 +83,7 @@ export function IntegrationsLinearList() {
               <div>
                 <h2 className="font-medium">{installation.workspace_name}</h2>
                 <p className="text-xs text-gray-500 mt-0.5">
-                  {installation.install_kind === "dedicated"
-                    ? "Dedicated app · full identity"
-                    : "Shared OpenMA bot · quick try"}
+                  Dedicated app · full identity
                   {" · "}
                   {publications.length} agent{publications.length === 1 ? "" : "s"}
                 </p>
@@ -128,12 +126,6 @@ function PublicationRow({ pub }: { pub: LinearPublication }) {
       )}
       <span className="font-medium">{pub.persona.name}</span>
       <StatusPill status={pub.status} />
-      {pub.is_default_agent && (
-        <span className="text-xs text-gray-500">· default</span>
-      )}
-      {pub.slash_command && (
-        <span className="text-xs text-gray-400 font-mono">/{pub.slash_command}</span>
-      )}
     </div>
   );
 }

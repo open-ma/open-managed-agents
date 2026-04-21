@@ -68,10 +68,8 @@ export interface NewPublication {
   mode: PublicationMode;
   status: PublicationStatus;
   persona: Persona;
-  slashCommand: string | null;
   capabilities: CapabilitySet;
   sessionGranularity: SessionGranularity;
-  isDefaultAgent: boolean;
 }
 
 export interface PublicationRepo {
@@ -81,10 +79,6 @@ export interface PublicationRepo {
     userId: UserId,
     agentId: AgentId,
   ): Promise<ReadonlyArray<Publication>>;
-  /** Used by B+ default-agent resolution. Returns null if no default set. */
-  getDefaultForInstallation(installationId: string): Promise<Publication | null>;
-  /** Used by B+ slash routing. Returns publications with non-null slashCommand. */
-  listSlashCommands(installationId: string): Promise<ReadonlyArray<Publication>>;
   insert(row: NewPublication): Promise<Publication>;
   updateStatus(id: string, status: PublicationStatus): Promise<void>;
   updateCapabilities(id: string, capabilities: CapabilitySet): Promise<void>;
@@ -93,6 +87,12 @@ export interface PublicationRepo {
 }
 
 export interface NewAppCredentials {
+  /**
+   * Optional explicit id. When provided, insert behaves as an upsert keyed on
+   * id (re-submitting the same App row with the same id updates the
+   * credentials in place). When omitted, the repo generates a fresh id.
+   */
+  id?: string;
   /** Null when registered ahead of the related publication (A1 install). */
   publicationId: string | null;
   clientId: string;

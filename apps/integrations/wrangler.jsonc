@@ -23,5 +23,21 @@
     { "binding": "MAIN", "service": "managed-agents" }
   ],
 
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+
+  "env": {
+    "staging": {
+      "name": "managed-agents-integrations-staging",
+      "vars": {
+        "GATEWAY_ORIGIN": "https://managed-agents-integrations-staging.hrhrngxy.workers.dev"
+      },
+      "d1_databases": [
+        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "355d8651-f5bf-4711-8e32-a089f16436a8" }
+      ],
+      "services": [
+        { "binding": "MAIN", "service": "managed-agents-staging" }
+      ],
+      "observability": { "enabled": true }
+    }
+  }
 }

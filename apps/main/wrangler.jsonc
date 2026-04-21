@@ -8,7 +8,15 @@
   "assets": {
     "directory": "../console/dist",
     "binding": "ASSETS",
-    "not_found_handling": "single-page-application"
+    "not_found_handling": "single-page-application",
+    "run_worker_first": [
+      "/v1/*",
+      "/auth/*",
+      "/auth-info",
+      "/health",
+      "/linear/*",
+      "/linear-setup/*"
+    ]
   },
 
   "rules": [
@@ -70,5 +78,33 @@
 
   "triggers": {
     "crons": ["* * * * *"]
+  },
+
+  "env": {
+    "staging": {
+      "name": "managed-agents-staging",
+      "kv_namespaces": [
+        { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
+      ],
+      "d1_databases": [
+        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "355d8651-f5bf-4711-8e32-a089f16436a8" }
+      ],
+      "r2_buckets": [
+        { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+      ],
+      "send_email": [
+        { "name": "SEND_EMAIL" }
+      ],
+      "ai": { "binding": "AI" },
+      "vectorize": [
+        { "binding": "VECTORIZE", "index_name": "memory-search" }
+      ],
+      "services": [
+        { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default-staging" },
+        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
+      ],
+      "limits": { "cpu_ms": 300000 },
+      "observability": { "enabled": true }
+    }
   }
 }

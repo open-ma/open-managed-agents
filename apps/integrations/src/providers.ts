@@ -16,11 +16,6 @@ export function buildProviders(env: Env, container: Container): ProviderBundle {
   const gatewayOrigin = env.GATEWAY_ORIGIN.replace(/\/+$/, "");
 
   const linear = new LinearProvider(container, {
-    sharedApp: {
-      clientId: env.LINEAR_APP_CLIENT_ID,
-      clientSecret: env.LINEAR_APP_CLIENT_SECRET,
-      webhookSecret: env.LINEAR_APP_WEBHOOK_SECRET,
-    },
     gatewayOrigin,
     scopes: DEFAULT_LINEAR_SCOPES,
     defaultCapabilities: ALL_CAPABILITIES,

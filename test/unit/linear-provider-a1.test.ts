@@ -6,11 +6,8 @@ import {
 } from "../../packages/integrations-core/src/test-fakes";
 import { ALL_CAPABILITIES, DEFAULT_LINEAR_SCOPES } from "../../packages/linear/src/config";
 
-const SHARED = { clientId: "shared_id", clientSecret: "shared_secret", webhookSecret: "shared_wh" };
-
 function makeProvider(c: FakeContainer): LinearProvider {
   return new LinearProvider(c, {
-    sharedApp: SHARED,
     gatewayOrigin: "https://gw",
     scopes: DEFAULT_LINEAR_SCOPES,
     defaultCapabilities: ALL_CAPABILITIES,
@@ -26,7 +23,7 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     provider = makeProvider(c);
   });
 
-  it("startInstall(full) returns credentials_form with placeholders + form token", async () => {
+  it("startInstall(full) returns credentials_form with final URLs (containing the appId minted in step 1) + form token", async () => {
     const result = await provider.startInstall({
       userId: "usr_a",
       agentId: "agt_coder",
@@ -40,12 +37,20 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     expect(result.step).toBe("credentials_form");
     expect(result.data.formToken).toBeTruthy();
     expect(result.data.suggestedAppName).toBe("Coder");
-    expect(result.data.callbackUrl).toContain("/linear/oauth/app/<APP_ID>/callback");
-    expect(result.data.webhookUrl).toContain("/linear/webhook/app/<APP_ID>");
+    // Step 1 now mints the appId so the URLs it shows are the same ones
+    // step 2 will return — no more `<APP_ID>` placeholder reconciliation.
+    expect(result.data.callbackUrl as string).toMatch(
+      /^https:\/\/gw\/linear\/oauth\/app\/[^/]+\/callback$/,
+    );
+    expect(result.data.webhookUrl as string).toMatch(
+      /^https:\/\/gw\/linear\/webhook\/app\/[^/]+$/,
+    );
+    expect(result.data.callbackUrl).not.toContain("<APP_ID>");
+    expect(result.data.webhookUrl).not.toContain("<APP_ID>");
     expect(result.data.webhookSecret).toBeTruthy();
   });
 
-  it("submit_credentials persists App and returns install URL with real appId", async () => {
+  it("submit_credentials persists App keyed on the appId from step 1 and returns install URL with the same id", async () => {
     const start = await provider.startInstall({
       userId: "usr_a",
       agentId: "agt_coder",
@@ -56,6 +61,11 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     });
     if (start.kind !== "step") throw new Error("expected step");
     const formToken = start.data.formToken as string;
+    // The appId in step-1 URLs must equal the appId step 2 hands back —
+    // that's the whole point of generating it upfront.
+    const startCallbackUrl = start.data.callbackUrl as string;
+    const startAppId = startCallbackUrl.match(/\/app\/([^/]+)\/callback$/)?.[1];
+    expect(startAppId).toBeTruthy();
 
     const submit = await provider.continueInstall({
       publicationId: null,
@@ -70,7 +80,7 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     expect(submit.step).toBe("install_link");
 
     const appId = submit.data.appId as string;
-    expect(appId).toMatch(/^app_/);
+    expect(appId).toBe(startAppId);
     const installUrl = new URL(submit.data.url as string);
     expect(installUrl.origin + installUrl.pathname).toBe("https://linear.app/oauth/authorize");
     expect(installUrl.searchParams.get("client_id")).toBe("user_app_id");
@@ -148,8 +158,6 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     const pub = await c.publications.get(complete.publicationId);
     expect(pub).toBeTruthy();
     expect(pub?.mode).toBe("full");
-    expect(pub?.slashCommand).toBeNull(); // no routing in A1
-    expect(pub?.isDefaultAgent).toBe(false);
 
     const installs = await c.installations.listByUser("usr_a", "linear");
     expect(installs).toHaveLength(1);

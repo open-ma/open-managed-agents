@@ -21,10 +21,8 @@ interface Row {
   status: string;
   persona_name: string;
   persona_avatar_url: string | null;
-  slash_command: string | null;
   capabilities: string;
   session_granularity: string;
-  is_default_agent: number;
   created_at: number;
   unpublished_at: number | null;
 }
@@ -68,29 +66,6 @@ export class D1PublicationRepo implements PublicationRepo {
     return (results ?? []).map((r) => this.toDomain(r));
   }
 
-  async getDefaultForInstallation(installationId: string): Promise<Publication | null> {
-    const row = await this.db
-      .prepare(
-        `SELECT * FROM linear_publications
-         WHERE installation_id = ? AND is_default_agent = 1 AND status = 'live'
-         LIMIT 1`,
-      )
-      .bind(installationId)
-      .first<Row>();
-    return row ? this.toDomain(row) : null;
-  }
-
-  async listSlashCommands(installationId: string): Promise<readonly Publication[]> {
-    const { results } = await this.db
-      .prepare(
-        `SELECT * FROM linear_publications
-         WHERE installation_id = ? AND slash_command IS NOT NULL AND status = 'live'`,
-      )
-      .bind(installationId)
-      .all<Row>();
-    return (results ?? []).map((r) => this.toDomain(r));
-  }
-
   async insert(row: NewPublication): Promise<Publication> {
     const id = this.ids.generate();
     const now = Date.now();
@@ -98,9 +73,9 @@ export class D1PublicationRepo implements PublicationRepo {
       .prepare(
         `INSERT INTO linear_publications (
            id, user_id, agent_id, installation_id, environment_id, mode, status,
-           persona_name, persona_avatar_url, slash_command, capabilities,
-           session_granularity, is_default_agent, created_at, unpublished_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+           persona_name, persona_avatar_url, capabilities,
+           session_granularity, created_at, unpublished_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .bind(
         id,
@@ -112,10 +87,8 @@ export class D1PublicationRepo implements PublicationRepo {
         row.status,
         row.persona.name,
         row.persona.avatarUrl,
-        row.slashCommand,
         JSON.stringify([...row.capabilities]),
         row.sessionGranularity,
-        row.isDefaultAgent ? 1 : 0,
         now,
       )
       .run();
@@ -128,10 +101,8 @@ export class D1PublicationRepo implements PublicationRepo {
       mode: row.mode,
       status: row.status,
       persona: row.persona,
-      slashCommand: row.slashCommand,
       capabilities: row.capabilities,
       sessionGranularity: row.sessionGranularity,
-      isDefaultAgent: row.isDefaultAgent,
       createdAt: now,
       unpublishedAt: null,
     };
@@ -182,10 +153,8 @@ export class D1PublicationRepo implements PublicationRepo {
       mode: row.mode as PublicationMode,
       status: row.status as PublicationStatus,
       persona: { name: row.persona_name, avatarUrl: row.persona_avatar_url },
-      slashCommand: row.slash_command,
       capabilities: new Set(caps),
       sessionGranularity: row.session_granularity as SessionGranularity,
-      isDefaultAgent: row.is_default_agent === 1,
       createdAt: row.created_at,
       unpublishedAt: row.unpublished_at,
     };

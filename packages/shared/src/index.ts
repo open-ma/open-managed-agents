@@ -10,3 +10,4 @@ export * from "./scorers";
 export * from "./log";
 export * from "./file-storage";
 export * from "./agent-prompts";
+export * from "./cf-analytics";

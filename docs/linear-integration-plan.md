@@ -11,21 +11,20 @@
 > | 1 — `integrations-core` interfaces | ✅ done |
 > | 2 — `integrations-adapters-cf` | ✅ done |
 > | 3 — `apps/integrations` skeleton + wire.ts | ✅ done |
-> | 4 — Shared OMA Linear App registration | ❌ **manual** — see `docs/linear-integration-sop.md` (deferred — depends on B+ keep/cut decision) |
-> | 5 — `packages/linear` provider + B+ install | ✅ done |
-> | 6 — Webhook + B+ routing | ✅ done |
-> | 7 — Service-binding session creation | ✅ done (`/v1/internal/sessions` on main) |
-> | 8 — MCP server | ✅ done **differently** — see addendum on design doc; uses Linear's hosted MCP via vault outbound injection, no custom server |
-> | 9 — Per_issue session lifecycle | ✅ done (basic states; handoff/escalated transitions deferred) |
-> | 10 — Lifecycle (handoff/reroute/escalate) | ⚠️ partial — DB states defined, transition triggers not wired |
-> | 11 — A1 install + setup wizard | ✅ done |
-> | 12 — Setup-link admin handoff | ✅ done (7-day signed JWT + static HTML page) |
-> | 13 — Console UI | ✅ done (`packages/integrations-ui` + 3 pages + Agent Detail badge + SessionsList/Detail badges) |
-> | 14 — Capability matrix UI + enforcement | ⚠️ UI shipped, **enforcement not wired** (vestigial; see design addendum #2) |
-> | 15 — Error/handoff comments + reauth | ❌ deferred (cross-worker; main detects error, gateway needs to post comment via vault) |
-> | 16 — Observability + smoke tests | ⚠️ partial — Cloudflare observability enabled, smoke tests need real Linear creds |
+> | 4 — `packages/linear` provider | ✅ done |
+> | 5 — Webhook receiver + dispatch | ✅ done |
+> | 6 — Service-binding session creation | ✅ done (`/v1/internal/sessions` on main) |
+> | 7 — MCP integration | ✅ done **without a custom server** — uses Linear's hosted MCP via vault outbound injection |
+> | 8 — Per_issue session lifecycle | ✅ done (basic states; handoff/escalated transitions deferred) |
+> | 9 — Lifecycle (handoff/reroute/escalate) | ⚠️ partial — DB states defined, transition triggers not wired |
+> | 10 — Per-agent App install + setup wizard | ✅ done |
+> | 11 — Setup-link admin handoff | ✅ done (7-day signed JWT + static HTML page) |
+> | 12 — Console UI | ✅ done (`packages/integrations-ui` + 3 pages + Agent Detail badge + SessionsList/Detail badges) |
+> | 13 — Capability matrix UI + enforcement | ⚠️ UI shipped, **enforcement not wired** (vestigial; see design addendum #2) |
+> | 14 — Error/handoff comments + reauth | ❌ deferred (cross-worker; main detects error, gateway needs to post comment via vault) |
+> | 15 — Observability + smoke tests | ⚠️ partial — Cloudflare observability enabled, smoke tests need real Linear creds |
 >
-> **Tests**: 32 new unit tests covering webhook parser, router precedence, OAuth helpers, full B+ install, full A1 install, handoff link generation. All 774 repo tests passing.
+> **Tests**: unit tests covering webhook parser, OAuth helpers, full per-agent App install, handoff link generation. All repo tests passing.
 >
 > **Deployment**: see `docs/linear-integration-sop.md` for the step-by-step.
 
@@ -94,7 +93,7 @@ Files in `packages/integrations-adapters-cf/src/`:
 
 - `apps/integrations/wrangler.jsonc`:
   - `name: "managed-agents-integrations"`
-  - bindings: `AUTH_DB` (shared D1), `MAIN` (service binding to `managed-agents`), `MCP_SIGNING_KEY` secret, `LINEAR_APP_*` secrets (placeholders).
+  - bindings: `AUTH_DB` (shared D1), `MAIN` (service binding to `managed-agents`), `MCP_SIGNING_KEY` secret.
   - `compatibility_date` matching main.
   - Custom domain route `integrations.<host>/*`.
 - `src/index.ts` — Hono app with `/health` only.
@@ -106,57 +105,38 @@ Files in `packages/integrations-adapters-cf/src/`:
 
 ---
 
-## Phase 4 — Shared OMA Linear App registration (B+ infrastructure)
+## Phase 4 — `packages/linear` provider, per-agent App install flow
 
-**Goal**: ground truth for the shared bot used in B+ mode.
-
-This is **manual ops**, not code:
-
-- One project maintainer creates a Linear OAuth App on linear.app (display name "OpenMA", avatar from `logo.svg`, scopes: `read`, `write`, `app:assignable`, `app:mentionable`, `app:webhooks`).
-- Set callback URL to `https://integrations.<host>/linear/oauth/shared/callback`.
-- Set webhook URL to `https://integrations.<host>/linear/webhook/shared`.
-- Generate a webhook secret.
-- Store `client_id`, `client_secret`, `webhook_secret` as `wrangler secret put` on the integrations worker (`LINEAR_APP_CLIENT_ID`, etc.).
-- Document the App's Linear-side URL in repo README so other maintainers can find it.
-
-**DoD**: secrets present; running `wrangler secret list` shows the three vars.
-
----
-
-## Phase 5 — `packages/linear` provider, B+ install flow
-
-**Goal**: end-to-end OAuth install of the shared OMA App into a user's Linear workspace, persisted in D1.
+**Goal**: end-to-end OAuth install of a per-publication Linear App into a user's workspace, persisted in D1.
 
 Files in `packages/linear/src/`:
 
 - `provider.ts` — `LinearProvider implements IntegrationProvider`. Constructor takes a `Container` of ports (the same container `apps/integrations` builds). No Cloudflare imports.
-- `oauth.ts` — `startOAuth`, `completeOAuth` for both shared (B+) and dedicated (A1) modes.
-- `graphql/client.ts` — minimal Linear GraphQL client built on the `HttpClient` port. Query helpers: `viewer`, `organization`, `installApplication`.
-- `types.ts` — Linear-specific types (kept private; not re-exported through `index.ts`).
+- `oauth/protocol.ts` — `buildAuthorizeUrl`, `buildTokenExchangeBody`, `parseTokenResponse`.
+- `graphql/client.ts` — minimal Linear GraphQL client built on the `HttpClient` port. Query helpers: `viewer`, `organization`.
 - `index.ts` — exports `LinearProvider` only.
 
 Routes in `apps/integrations/src/routes/linear/`:
 
-- `install.ts` — `GET /linear/install/shared?return_to=...` → builds Linear OAuth URL, sets state in OAuth state store (via a small `OAuthStateStore` port).
-- `callback.ts` — `GET /linear/oauth/shared/callback?code=...&state=...` → calls `LinearProvider.completeOAuth`, persists installation, redirects to Console with success.
+- `publications.ts` — `POST /linear/publications/start-a1`, `/credentials`, `/handoff-link`.
+- `dedicated-callback.ts` — `GET /linear/oauth/app/:appId/callback`.
+- `setup-page.ts` — `GET /linear-setup/:token` for non-admin handoff.
 
-**DoD**: a real OAuth install completes and creates a `linear_installations` row with `install_kind='shared'`; access token is encrypted at rest; revoking the App in Linear → next webhook 401 → installation marked `revoked_at`.
+**DoD**: a real OAuth install completes and creates a `linear_installations` row with `install_kind='dedicated'`; access token is encrypted at rest; revoking the App in Linear → next webhook 401 → installation marked `revoked_at`.
 
 ---
 
-## Phase 6 — Webhook receiver + dispatch (B+ events only)
+## Phase 5 — Webhook receiver + dispatch
 
-**Goal**: real Linear webhook events arrive, get verified, deduplicated, and routed to a publication.
+**Goal**: real Linear webhook events arrive, get verified, deduplicated, and routed to the publication.
 
 In `packages/linear/src/`:
 
-- `webhook/verify.ts` — HMAC-SHA256 verify against per-install secret (constant-time).
 - `webhook/parse.ts` — parse Linear's webhook payload into `WebhookEvent` (issue_assigned, issue_mentioned, comment_created, agent_session_event).
-- `webhook/router.ts` — given a parsed event + workspace's publications, return target publication via slash → label → default-agent precedence (§5.3).
 
-Route: `apps/integrations/src/routes/linear/webhook.ts` — `POST /linear/webhook/shared` (B+) and `POST /linear/webhook/app/:appId` (A1, will be wired in Phase 11). Returns 200 always (Linear's contract).
+Route: `apps/integrations/src/routes/linear/webhook.ts` — `POST /linear/webhook/app/:appId`. Returns 200 always (Linear's contract). The webhook arrives at a publication-specific endpoint, so the binding to a publication is direct.
 
-**DoD**: an `issueAssignedToYou` event for the shared bot deduplicates correctly on retry; routing matches a publication by `is_default_agent=true`; un-routable events log but don't error.
+**DoD**: an `issueAssignedToYou` event deduplicates correctly on retry; the dedicated install resolves to its single live publication; un-routable events log but don't error.
 
 ---
 
@@ -190,10 +170,10 @@ In `packages/linear`:
 - JWT validation: extract `publication_id`, `issue_id`, `session_id`, `exp`; reject mismatches.
 - Tool implementations live in `packages/linear/src/tools/`:
   - `get-issue.ts`
-  - `post-comment.ts` — for B+ publications, inject `createAsUser` + `displayIconUrl` from publication.persona.
+  - `post-comment.ts` — posts comment under the App's bot identity.
 - Main worker change: when starting a session triggered by Linear, inject the MCP URL + signed JWT into the session's MCP server list.
 
-**DoD**: a default agent published in B+ mode receives an issue mention, reads issue context, and posts a reply that renders with persona name + avatar in Linear.
+**DoD**: a published agent receives an issue mention, reads issue context, and posts a reply that renders with persona name + avatar in Linear.
 
 ---
 
@@ -258,7 +238,7 @@ In `packages/linear`:
 - Pages (React + Vite, matching existing Console patterns in `apps/console/src/pages/`):
   - `IntegrationsLinear.tsx` — workspace list, recent activity, "Publish agent" entry.
   - `IntegrationsLinearWorkspace.tsx` — per-workspace manage page.
-  - `IntegrationsLinearPublishWizard.tsx` — modal/route for the publish flow (A1 + B+ branches).
+  - `IntegrationsLinearPublishWizard.tsx` — modal/route for the publish flow.
   - `IntegrationsLinearPublication.tsx` — per-publication settings (capabilities, persona, session granularity, unpublish).
   - `IntegrationsLinearSetupHandoff.tsx` — page showing the generated setup link.
 - Agent Detail badge: small status component on `AgentDetail.tsx` showing publication state with a "Manage in Integrations" link.
@@ -267,7 +247,7 @@ In `packages/linear`:
   - `SessionDetail.tsx`: insert Linear context card at top when session has Linear metadata.
 - API client (`apps/console/src/lib/api/`): add typed methods for the new integrations endpoints.
 
-**DoD**: every flow described in §9 works in the deployed Console; design tokens (per Multica vibe) match existing pages; manual smoke test of full publish flow (B+ then A1) passes.
+**DoD**: every flow described in §9 works in the deployed Console; design tokens (per Multica vibe) match existing pages; manual smoke test of full publish flow passes.
 
 ---
 
@@ -301,7 +281,7 @@ In `packages/linear`:
 
 - Per-installation rate-limiter for outbound Linear API calls (token bucket, conservative initial rate; expose `Retry-After` to agent tool result).
 - Webhook ingestion metrics: `received`, `verified_failed`, `dedup_hit`, `routed_to_publication`, `routed_to_session`, `dropped` (by reason). Use Cloudflare Workers Analytics Engine if available, else Logpush.
-- Smoke tests (script + CI job, against a dedicated test Linear workspace): full B+ publish, send mention, agent responds; full A1 publish, send mention, agent responds; capability denial; handoff.
+- Smoke tests (script + CI job, against a dedicated test Linear workspace): full publish flow, send mention, agent responds; capability denial; handoff.
 - Runbook: `docs/linear-integration-runbook.md` covering reauth, dropped webhooks, rate-limit tuning, manual session resync.
 
 **DoD**: smoke tests green in CI; rate limiter prevents 429 storms when an agent loops on Linear API; runbook reviewed by another maintainer.
@@ -317,9 +297,8 @@ In `packages/linear`:
                   └→ 11 → 12 ─────────────── ┘
 ```
 
-- **Critical path to first usable B+**: 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8.
-- **Critical path to first usable A1**: above + 11 → 12.
-- Phases 13–16 can begin in parallel with 11–12 once the API surface is locked.
+- **Critical path to first usable publication**: 0 → 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8.
+- Phases 12–15 can begin in parallel with 10–11 once the API surface is locked.
 
 ---
 

@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useToast } from "../components/Toast";
 
 interface Stats {
   agents: number;
@@ -21,15 +22,37 @@ interface RecentSession {
   created_at: string;
 }
 
+const QUICKSTART_STEPS = [
+  {
+    step: 1,
+    title: "Install the CLI",
+    description: "The oma CLI lets your agent (or you) manage the platform from the terminal",
+    command: "npx open-managed-agents",
+    alt: "npm i -g open-managed-agents",
+  },
+  {
+    step: 2,
+    title: "Generate an API key",
+    description: "Your agent needs this to authenticate with the platform",
+    action: "api-key",
+  },
+  {
+    step: 3,
+    title: "Tell your agent to use it",
+    description: "Point your agent at the openma-cli or openma-api skill and let it work",
+    example: '"Use oma to create a research agent that monitors arXiv for new ML papers daily"',
+  },
+] as const;
+
 export function Dashboard() {
   const nav = useNavigate();
   const { api } = useApi();
   const { user } = useAuth();
+  const { toast } = useToast();
   const [stats, setStats] = useState<Stats | null>(null);
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [loading, setLoading] = useState(true);
-  const [agentPrompt, setAgentPrompt] = useState("");
-  const [creatingWithAI, setCreatingWithAI] = useState(false);
+  const [copied, setCopied] = useState<number | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -58,54 +81,11 @@ export function Dashboard() {
     })();
   }, []);
 
-  const createWithAI = async () => {
-    if (!agentPrompt.trim()) return;
-    setCreatingWithAI(true);
-    try {
-      // Create a helper agent that has the create-agent skill
-      const agent = await api<{ id: string }>("/v1/agents", {
-        method: "POST",
-        body: JSON.stringify({
-          name: "Agent Creator",
-          model: "claude-sonnet-4-6",
-          system: "You are an agent creation assistant for the openma platform. Help the user create and configure a managed agent based on their description. Ask clarifying questions if needed, then create the agent via the API.",
-          tools: [{ type: "agent_toolset_20260401" }],
-          skills: [{ type: "custom", skill_id: "create-agent", version: "latest" }],
-        }),
-      });
-      // Find or use default environment
-      const envs = await api<{ data: Array<{ id: string }> }>("/v1/environments");
-      const envId = envs.data[0]?.id;
-      if (!envId) {
-        // Create default env
-        const env = await api<{ id: string }>("/v1/environments", {
-          method: "POST",
-          body: JSON.stringify({ name: "default", config: { type: "cloud" } }),
-        });
-        const session = await api<{ id: string }>("/v1/sessions", {
-          method: "POST",
-          body: JSON.stringify({ agent: agent.id, environment_id: env.id, title: "Create Agent: " + agentPrompt.slice(0, 50) }),
-        });
-        // Send initial message
-        await api(`/v1/sessions/${session.id}/events`, {
-          method: "POST",
-          body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text: agentPrompt }] }] }),
-        });
-        nav(`/sessions/${session.id}`);
-      } else {
-        const session = await api<{ id: string }>("/v1/sessions", {
-          method: "POST",
-          body: JSON.stringify({ agent: agent.id, environment_id: envId, title: "Create Agent: " + agentPrompt.slice(0, 50) }),
-        });
-        await api(`/v1/sessions/${session.id}/events`, {
-          method: "POST",
-          body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text: agentPrompt }] }] }),
-        });
-        nav(`/sessions/${session.id}`);
-      }
-    } catch {
-      setCreatingWithAI(false);
-    }
+  const copyToClipboard = (text: string, step: number) => {
+    navigator.clipboard.writeText(text);
+    setCopied(step);
+    toast("Copied to clipboard", "success");
+    setTimeout(() => setCopied(null), 2000);
   };
 
   const cards = [
@@ -129,34 +109,62 @@ export function Dashboard() {
 
   return (
     <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      {/* Header */}
-      <div className="mb-8">
-        <h1 className="font-display text-xl font-semibold tracking-tight text-fg">
-          {user?.name ? `Welcome, ${user.name}` : "Dashboard"}
+      {/* Quickstart */}
+      <div className="mb-10">
+        <h1 className="font-display text-2xl font-bold tracking-tight text-fg mb-1">
+          Get started with openma
         </h1>
-        <p className="text-fg-muted text-sm mt-1">Your workspace at a glance.</p>
-      </div>
+        <p className="text-fg-muted text-sm mb-6">Use your own agent to build and manage agents on the platform.</p>
 
-      {/* Create with AI */}
-      <div className="mb-8 border border-border rounded-lg p-5 bg-bg-surface/30">
-        <h2 className="text-sm font-medium text-fg mb-2">Create with AI</h2>
-        <p className="text-xs text-fg-muted mb-3">Describe what you want your agent to do. An AI assistant will help you configure it.</p>
-        <div className="flex gap-2">
-          <input
-            value={agentPrompt}
-            onChange={(e) => setAgentPrompt(e.target.value)}
-            onKeyDown={(e) => { if (e.key === "Enter" && agentPrompt.trim()) createWithAI(); }}
-            className="flex-1 border border-border rounded-md px-3 py-2.5 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle"
-            placeholder="e.g. A research agent that finds papers and writes summaries..."
-            disabled={creatingWithAI}
-          />
-          <button
-            onClick={createWithAI}
-            disabled={!agentPrompt.trim() || creatingWithAI}
-            className="px-5 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors shrink-0"
-          >
-            {creatingWithAI ? "Starting..." : "Create"}
-          </button>
+        <div className="grid gap-4 md:grid-cols-3">
+          {QUICKSTART_STEPS.map((s) => (
+            <div key={s.step} className="border border-border rounded-xl p-5 bg-bg-surface/30 flex flex-col">
+              <div className="flex items-center gap-2.5 mb-3">
+                <span className="shrink-0 w-7 h-7 rounded-full bg-brand text-brand-fg text-xs font-bold flex items-center justify-center">
+                  {s.step}
+                </span>
+                <h3 className="text-sm font-semibold text-fg">{s.title}</h3>
+              </div>
+              <p className="text-xs text-fg-muted mb-4 flex-1">{s.description}</p>
+
+              {"command" in s && (
+                <div className="space-y-2">
+                  <button
+                    onClick={() => copyToClipboard(s.command, s.step)}
+                    className="w-full flex items-center gap-2 px-3 py-2.5 bg-zinc-900 text-zinc-100 rounded-lg font-mono text-xs hover:bg-zinc-800 transition-colors group text-left"
+                  >
+                    <span className="text-emerald-400 select-none">$</span>
+                    <span className="flex-1 truncate">{s.command}</span>
+                    <span className="shrink-0 text-zinc-500 group-hover:text-zinc-300 transition-colors">
+                      {copied === s.step ? (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6 9 17l-5-5" /></svg>
+                      ) : (
+                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
+                      )}
+                    </span>
+                  </button>
+                  <p className="text-[11px] text-fg-subtle px-1">
+                    or globally: <button onClick={() => copyToClipboard(s.alt!, s.step + 10)} className="font-mono text-brand hover:underline">{s.alt}</button>
+                  </p>
+                </div>
+              )}
+
+              {"action" in s && s.action === "api-key" && (
+                <button
+                  onClick={() => nav("/api-keys")}
+                  className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+                >
+                  Generate API Key
+                </button>
+              )}
+
+              {"example" in s && (
+                <div className="px-3 py-2.5 bg-zinc-900 text-zinc-300 rounded-lg text-xs italic leading-relaxed">
+                  {s.example}
+                </div>
+              )}
+            </div>
+          ))}
         </div>
       </div>
 
@@ -179,22 +187,6 @@ export function Dashboard() {
         ))}
       </div>
 
-      {/* Quick actions */}
-      <div className="flex flex-wrap gap-2 mb-8">
-        <button onClick={() => nav("/agents")} className="px-4 py-2 text-sm bg-brand text-brand-fg rounded-md hover:bg-brand-hover transition-colors">
-          + New Agent
-        </button>
-        <button onClick={() => nav("/model-cards")} className="px-4 py-2 text-sm border border-border rounded-md text-fg-muted hover:bg-bg-surface transition-colors">
-          Configure Model
-        </button>
-        <button onClick={() => nav("/api-keys")} className="px-4 py-2 text-sm border border-border rounded-md text-fg-muted hover:bg-bg-surface transition-colors">
-          Generate API Key
-        </button>
-        <button onClick={() => nav("/skills")} className="px-4 py-2 text-sm border border-border rounded-md text-fg-muted hover:bg-bg-surface transition-colors">
-          Browse Skills
-        </button>
-      </div>
-
       {/* Recent sessions */}
       <div>
         <div className="flex items-center justify-between mb-3">
@@ -206,7 +198,7 @@ export function Dashboard() {
         {recentSessions.length === 0 ? (
           <div className="border border-dashed border-border rounded-lg p-8 text-center">
             <p className="text-fg-subtle text-sm">No sessions yet.</p>
-            <p className="text-fg-subtle text-xs mt-1">Create an agent and start a session to see activity here.</p>
+            <p className="text-fg-subtle text-xs mt-1">Install the skill and tell your agent to create one.</p>
           </div>
         ) : (
           <div className="border border-border rounded-lg overflow-hidden">
