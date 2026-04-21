@@ -109,16 +109,91 @@ each issue (default `session_granularity: "per_issue"`).
 | Stop the agent from responding | `oma linear unpublish <publication-id>` |
 | Re-publish after unpublish | start over with `oma linear publish` (a new App is minted; the old one in Linear can be deleted) |
 
-## When to stop and ask the human
+## When you reach a human-required step
 
-You can drive every step from the CLI **except** these two — they require a
-human in front of a Linear browser tab:
+Two steps in this flow physically require a Linear browser session:
 
-1. **Pasting App values into Linear's OAuth App form** (step 1 → step 2 hand-off)
-2. **Approving the OAuth install** (the install-URL click in step 2)
+1. **Step 1 → Step 2 hand-off**: pasting App values into Linear's "New OAuth
+   Application" form and copying the resulting Client ID / Secret back.
+2. **Step 2 → Step 3 hand-off**: clicking the OAuth install URL and approving
+   the install (Linear gates this on workspace admin identity).
 
-Don't try to automate the OAuth approval — Linear gates it on workspace admin
-identity for good reason. Hand off cleanly and wait.
+You're acting as the user's agent. Don't just hand off and wait — **offer
+to help**, then take direction. The protocol is:
+
+### a. Check what browser tools you have
+
+Look for any of these in your environment (rough order of capability):
+
+| Tool | How to detect |
+|---|---|
+| `agent-browser` (CLI) | `which agent-browser` |
+| Playwright MCP server | available tool starting with `mcp_playwright_` or similar |
+| `browser-use` / `browser_use_*` MCP | similar |
+| Chrome DevTools Protocol on a known port | `curl -s http://localhost:9222/json/list` (or :9333) |
+| WebFetch + form submission | last resort, doesn't handle session cookies well |
+
+If the user already has a Chrome / browser session open and logged into
+Linear (check `curl -s http://localhost:9222/json/list | grep linear.app`),
+that's the highest-leverage path: their session works as-is, no auth dance.
+
+### b. Ask the user
+
+Phrase it as a real choice, surface what you can offer:
+
+> I'm at the step where Linear's OAuth App needs to be created. Two options:
+>
+> **a) I can drive your browser for you.** I see you have a Linear tab
+>    open at `linear.app/<workspace>/settings/api`; I'd open the "New OAuth
+>    Application" form and paste these four values, then read the Client ID
+>    and Secret back to continue. Takes ~30 seconds.
+>
+> **b) Or you do it yourself.** I'll print the four values and the exact
+>    URL; you paste, then send me back the Client ID and Secret.
+
+If you don't have any browser tools, skip to (b) directly — but say so:
+"I don't have browser automation here, so you'll need to do this yourself."
+
+### c. If the user picks "drive it"
+
+Drive the existing logged-in browser tab. Don't navigate away from any tab
+the user has work in; open a new one if needed. After you've pasted the
+four values, scrape the Client ID and Client Secret from Linear's response
+page and feed them straight into `oma linear submit`.
+
+For the **install approval** (step 2 → 3), same pattern: open the install
+URL in the user's logged-in tab, click "Authorize". Confirm with
+`oma linear list && oma linear pubs <installation-id>` — status should
+read `live`.
+
+### d. If the user picks "manual"
+
+Print exactly this, with values substituted:
+
+```
+Open: https://linear.app/<workspace-slug>/settings/api
+Click: "New OAuth Application"
+Fill:
+  Application name:  <suggestedAppName>
+  Callback URL:      <callbackUrl>
+  Webhook URL:       <webhookUrl>
+  Webhook secret:    <webhookSecret>
+Click Create.
+
+Linear will show you a Client ID and Client Secret. Reply with both and
+I'll continue.
+```
+
+When they reply, run `oma linear submit <form-token> --client-id … --client-secret …`
+and hand them the install URL with the same a/b choice.
+
+### Why we don't just always automate
+
+- The user might not want their browser touched mid-task.
+- Form-fill and OAuth approval against Linear's UI is brittle to copy
+  changes; a human paste is more reliable for one-shot flows.
+- The user's browser holds their actual workspace identity. Driving it
+  without consent is bad form even when technically possible.
 
 ## Failure modes
 
