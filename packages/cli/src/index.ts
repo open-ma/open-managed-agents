@@ -288,6 +288,111 @@ const commands: Cmd[] = [
       await connectMcp(config, resolveServerUrl(args[0]), vaultId);
     },
   },
+
+  // Linear integration
+  {
+    group: "Linear", match: ["linear", "list"],
+    usage: "oma linear list", desc: "List connected Linear workspaces",
+    http: "GET    /v1/integrations/linear/installations",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; workspace_name: string; install_kind: string; created_at: number }> }>(config, "/v1/integrations/linear/installations");
+      if (!data.length) { console.log("No Linear workspaces connected. Publish an agent with: oma linear publish <agent-id> --env <env-id>"); return; }
+      table([["WORKSPACE", "INSTALLATION ID", "KIND", "CREATED"], ...data.map(i => [i.workspace_name, i.id, i.install_kind, new Date(i.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "pubs"], needsArg: true,
+    usage: "oma linear pubs <installation-id>", desc: "List agents published to a workspace",
+    http: "GET    /v1/integrations/linear/installations/:id/publications",
+    async run(config, args) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; agent_id: string; persona: { name: string }; status: string; capabilities: string[] }> }>(config, `/v1/integrations/linear/installations/${args[0]}/publications`);
+      if (!data.length) { console.log("No publications. Publish with: oma linear publish <agent-id> --env <env-id>"); return; }
+      table([["PERSONA", "PUBLICATION ID", "AGENT", "STATUS", "CAPS"], ...data.map(p => [p.persona.name, p.id, p.agent_id, p.status, String(p.capabilities.length)])]);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "get"], needsArg: true,
+    usage: "oma linear get <publication-id>", desc: "Show one publication",
+    http: "GET    /v1/integrations/linear/publications/:id",
+    async run(config, args) {
+      const p = await apiFetch<any>(config, `/v1/integrations/linear/publications/${args[0]}`);
+      console.log(`Persona:        ${p.persona.name}\nID:             ${p.id}\nAgent:          ${p.agent_id}\nEnvironment:    ${p.environment_id}\nInstallation:   ${p.installation_id}\nMode:           ${p.mode}\nStatus:         ${p.status}\nGranularity:    ${p.session_granularity}\nCapabilities:   ${p.capabilities.join(", ")}`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "publish"], needsArg: true,
+    usage: "oma linear publish <agent-id> --env <env-id> [--persona <name>] [--avatar <url>]", desc: "Step 1: register agent → returns Linear App config",
+    http: "POST   /v1/integrations/linear/start-a1 {agentId, environmentId, personaName, personaAvatarUrl?, returnUrl}",
+    async run(config, args) {
+      const agentId = args[0];
+      const envId = flag(args, "--env");
+      const persona = flag(args, "--persona") || "";
+      const avatar = flag(args, "--avatar") || null;
+      if (!envId) { console.error("Usage: oma linear publish <agent-id> --env <env-id> [--persona <name>] [--avatar <url>]"); process.exit(1); }
+      // Persona name defaults to the agent's name when omitted.
+      let personaName = persona;
+      if (!personaName) {
+        const agent = await apiFetch<{ name: string }>(config, `/v1/agents/${agentId}`).catch(() => null);
+        personaName = agent?.name || agentId;
+      }
+      const r = await apiFetch<{ formToken: string; suggestedAppName: string; callbackUrl: string; webhookUrl: string; webhookSecret: string }>(
+        config,
+        "/v1/integrations/linear/start-a1",
+        { method: "POST", body: JSON.stringify({ agentId, environmentId: envId, personaName, personaAvatarUrl: avatar, returnUrl: `${config.baseUrl}/integrations/linear` }) },
+      );
+      console.log(`\nStep 1 complete. Now register a Linear OAuth App (Linear → Settings → API → New OAuth app):\n`);
+      console.log(`  App name:        ${r.suggestedAppName}`);
+      console.log(`  Callback URL:    ${r.callbackUrl}`);
+      console.log(`  Webhook URL:     ${r.webhookUrl}`);
+      console.log(`  Webhook secret:  ${r.webhookSecret}`);
+      console.log(`\nThen run step 2 with the clientId/clientSecret Linear gives you:\n`);
+      console.log(`  oma linear submit ${r.formToken} \\\n    --client-id <CLIENT_ID> --client-secret <CLIENT_SECRET>\n`);
+      console.log(`Form token expires in ~30 min. To send the registration to a Linear admin instead:`);
+      console.log(`  oma linear handoff ${r.formToken}`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "submit"], needsArg: true,
+    usage: "oma linear submit <form-token> --client-id <id> --client-secret <secret>", desc: "Step 2: validate creds → returns OAuth install URL",
+    http: "POST   /v1/integrations/linear/credentials {formToken, clientId, clientSecret}",
+    async run(config, args) {
+      const formToken = args[0];
+      const clientId = flag(args, "--client-id");
+      const clientSecret = flag(args, "--client-secret");
+      if (!clientId || !clientSecret) { console.error("Usage: oma linear submit <form-token> --client-id <id> --client-secret <secret>"); process.exit(1); }
+      const r = await apiFetch<{ url: string; appId: string; callbackUrl: string; webhookUrl: string }>(
+        config,
+        "/v1/integrations/linear/credentials",
+        { method: "POST", body: JSON.stringify({ formToken, clientId, clientSecret }) },
+      );
+      console.log(`\nStep 2 complete. Open this URL in a browser to authorize the install in Linear:\n`);
+      console.log(`  ${r.url}\n`);
+      console.log(`After approval Linear redirects to the callback; the publication then transitions to 'live'.`);
+      console.log(`Verify with: oma linear list && oma linear pubs <installation-id>`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "handoff"], needsArg: true,
+    usage: "oma linear handoff <form-token>", desc: "Step 2 alt: 7-day shareable URL for an admin",
+    http: "POST   /v1/integrations/linear/handoff-link {formToken}",
+    async run(config, args) {
+      const r = await apiFetch<{ url: string; expiresInDays: number }>(
+        config,
+        "/v1/integrations/linear/handoff-link",
+        { method: "POST", body: JSON.stringify({ formToken: args[0] }) },
+      );
+      console.log(`\nSend this URL to your Linear workspace admin:\n  ${r.url}\nExpires in ${r.expiresInDays} days.`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "unpublish"], needsArg: true,
+    usage: "oma linear unpublish <publication-id>", desc: "Mark a publication unpublished",
+    http: "DELETE /v1/integrations/linear/publications/:id",
+    async run(config, args) {
+      await apiFetch(config, `/v1/integrations/linear/publications/${args[0]}`, { method: "DELETE" });
+      console.log(`Unpublished: ${args[0]}`);
+    },
+  },
 ];
 
 // ─── API Endpoints not covered by CLI commands ───
@@ -313,6 +418,7 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Model Cards", http: "POST   /v1/models/list                         Fetch provider models {provider, api_key}" },
   { group: "Vaults", http: "DELETE /v1/vaults/:id                          Delete vault" },
   { group: "Vaults", http: "DELETE /v1/vaults/:id/credentials/:cid         Delete credential" },
+  { group: "Linear", http: "PATCH  /v1/integrations/linear/publications/:id  Update persona / capabilities" },
   { group: "OAuth", http: "GET    /v1/oauth/callback                      OAuth callback (internal)" },
   { group: "OAuth", http: "POST   /v1/oauth/refresh                       Refresh token {vault_id, credential_id}" },
   { group: "Skills", http: "POST   /v1/skills                              Create skill {files:[{filename,content}]}" },
@@ -416,7 +522,7 @@ function apiRef(resource?: string) {
     models: "Model Cards", vaults: "Vaults", oauth: "OAuth",
     skills: "Skills", files: "Files", memory: "Memory",
     keys: "API Keys", evals: "Evals", clawhub: "ClawHub",
-    "mcp": "MCP Servers",
+    "mcp": "MCP Servers", linear: "Linear", integrations: "Linear",
   };
 
   if (normalized && groupAlias[normalized]) {

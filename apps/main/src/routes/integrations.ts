@@ -21,24 +21,21 @@ const app = new Hono<{
   Variables: { tenant_id: string; user_id?: string };
 }>();
 
-// Per-route middleware: resolve user_id from the better-auth session. The
-// global authMiddleware sets tenant_id but not user_id; we need both for
-// Linear endpoints (publications are user-scoped).
+// Per-route guard: Linear endpoints are user-scoped (publications belong to a
+// specific user, not just a tenant). The global authMiddleware sets user_id
+// for both session cookies AND API keys (when the key was created with a
+// known user). Reject early with a clear remediation if it's missing — that
+// means a legacy API key minted before user_id was tracked, or the static
+// API_KEY env var, or some other tenant-only credential.
 app.use("*", async (c, next) => {
-  if (c.get("user_id")) return next(); // already set
-  if (!c.env.AUTH_DB) return c.json({ error: "auth not configured" }, 503);
-  try {
-    const { createAuth } = await import("../auth-config");
-    const auth = createAuth(c.env);
-    const session = await auth.api.getSession({ headers: c.req.raw.headers });
-    if (!session?.user?.id) {
-      return c.json({ error: "session required" }, 401);
-    }
-    c.set("user_id", session.user.id);
-  } catch {
-    return c.json({ error: "session required" }, 401);
-  }
-  return next();
+  if (c.get("user_id")) return next();
+  return c.json(
+    {
+      error:
+        "user-scoped endpoint: regenerate your API key (legacy keys lack user_id) or sign in with a session cookie",
+    },
+    403,
+  );
 });
 
 function buildRepos(env: Env, signingKey: string) {

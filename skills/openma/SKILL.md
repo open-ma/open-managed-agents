@@ -46,6 +46,7 @@ oma sessions message <session-id> "Your task here"
 | Credential | `oma creds list`, `oma secret add` | Secret inside a vault |
 | Skill | `oma skills list/install` | Domain expertise for agents |
 | API Key | `oma keys create/list/revoke` | Auth token for CLI/SDK |
+| Linear | `oma linear list/pubs/publish/submit/handoff/unpublish/get` | Publish agent into a Linear workspace |
 
 ## Model Cards
 
@@ -80,3 +81,10 @@ All `/v1/*` endpoints require `x-api-key` header. Use SSE streaming via
 - Sessions are stateful — send multiple messages to continue the conversation.
 - Use `oma api sessions` to see the full HTTP API when you need to code against it.
 - The `agent_toolset_20260401` tool type gives agents file ops, bash, and web access.
+
+## Integrations
+
+Publish an agent into a third-party tool so it acts as a teammate there.
+See [`integrations-linear.md`](integrations-linear.md) for the Linear flow —
+covers the OAuth-app handshake, the two moments a human is genuinely needed,
+and how to verify / unpublish from the CLI.
