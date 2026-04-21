@@ -92,10 +92,21 @@ app.post("/credentials", async (c) => {
       },
     });
   } catch (err) {
-    return c.json(
-      { error: "credentials_failed", details: err instanceof Error ? err.message : String(err) },
-      400,
-    );
+    const msg = err instanceof Error ? err.message : String(err);
+    // Surface JWT failures as a stable error code with remediation. The
+    // raw "JwtSigner.verify: <reason>" detail is implementation-leaky; map
+    // it to something a CLI / agent can reason about.
+    if (/JwtSigner\.verify/i.test(msg)) {
+      return c.json(
+        {
+          error: "form_token_invalid",
+          details: msg.replace(/.*JwtSigner\.verify:\s*/, ""),
+          remediation: "Re-run linear publish to mint a fresh form token (TTL ~30 min).",
+        },
+        400,
+      );
+    }
+    return c.json({ error: "credentials_failed", details: msg }, 400);
   }
 
   if (result.kind !== "step" || result.step !== "install_link") {
@@ -130,10 +141,18 @@ app.post("/handoff-link", async (c) => {
       payload: { kind: "handoff_link", formToken: body.formToken },
     });
   } catch (err) {
-    return c.json(
-      { error: "handoff_failed", details: err instanceof Error ? err.message : String(err) },
-      400,
-    );
+    const msg = err instanceof Error ? err.message : String(err);
+    if (/JwtSigner\.verify/i.test(msg)) {
+      return c.json(
+        {
+          error: "form_token_invalid",
+          details: msg.replace(/.*JwtSigner\.verify:\s*/, ""),
+          remediation: "Re-run linear publish to mint a fresh form token (TTL ~30 min).",
+        },
+        400,
+      );
+    }
+    return c.json({ error: "handoff_failed", details: msg }, 400);
   }
 
   if (result.kind !== "step" || result.step !== "install_link") {
