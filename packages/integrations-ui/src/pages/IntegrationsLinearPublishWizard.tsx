@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useNavigate, useSearchParams } from "react-router";
+import { Link, useSearchParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { A1FormStep, A1InstallLink } from "../api/types";
 
@@ -16,21 +16,22 @@ interface EnvironmentOption {
 }
 
 interface PublishWizardProps {
-  /**
-   * Loader for the user's existing agents — provided by Console because the
-   * /v1/agents endpoint is owned by the main app, not this package.
-   */
   loadAgents: () => Promise<AgentOption[]>;
   loadEnvironments: () => Promise<EnvironmentOption[]>;
 }
 
 type Step = "pick" | "a1-credentials" | "a1-install";
 
+const STEPS: Array<{ id: Step; label: string }> = [
+  { id: "pick", label: "Configure" },
+  { id: "a1-credentials", label: "Credentials" },
+  { id: "a1-install", label: "Install" },
+];
+
 export function IntegrationsLinearPublishWizard({
   loadAgents,
   loadEnvironments,
 }: PublishWizardProps) {
-  const nav = useNavigate();
   const [search] = useSearchParams();
   const preselectedAgent = search.get("agent_id") ?? "";
 
@@ -45,7 +46,6 @@ export function IntegrationsLinearPublishWizard({
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // A1 wizard state
   const [a1Form, setA1Form] = useState<A1FormStep | null>(null);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
@@ -64,7 +64,6 @@ export function IntegrationsLinearPublishWizard({
     })();
   }, [loadAgents, loadEnvironments]);
 
-  // Default persona name to agent's name when selected.
   useEffect(() => {
     if (!personaName && agentId) {
       const agent = agents.find((a) => a.id === agentId);
@@ -132,56 +131,117 @@ export function IntegrationsLinearPublishWizard({
   }
 
   return (
-    <div className="px-6 py-5 max-w-2xl">
-      <Link to="/integrations/linear" className="text-sm text-blue-600 hover:underline">
-        ← Linear integrations
-      </Link>
-      <h1 className="text-xl font-semibold mt-3 mb-1">Publish agent to Linear</h1>
-      <p className="text-sm text-gray-500 mb-6">
-        Make this agent a teammate in your Linear workspace.
-      </p>
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-[760px] mx-auto px-8 lg:px-10 py-8 lg:py-10">
+        <Link
+          to="/integrations/linear"
+          className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"
+        >
+          ← Linear integrations
+        </Link>
 
-      {error && (
-        <div className="mb-4 p-3 bg-red-50 border border-red-200 rounded text-sm text-red-700">
-          {error}
-        </div>
-      )}
+        <header className="mt-3 mb-6">
+          <h1 className="font-display text-[28px] leading-tight font-semibold tracking-tight text-fg">
+            Publish agent to Linear
+          </h1>
+          <p className="mt-1.5 text-[14px] text-fg-muted">
+            Make this agent a teammate in your Linear workspace.
+          </p>
+        </header>
 
-      {step === "pick" && (
-        <PickStep
-          agents={agents}
-          envs={envs}
-          agentId={agentId}
-          setAgentId={setAgentId}
-          envId={envId}
-          setEnvId={setEnvId}
-          personaName={personaName}
-          setPersonaName={setPersonaName}
-          personaAvatar={personaAvatar}
-          setPersonaAvatar={setPersonaAvatar}
-          working={working}
-          onContinue={startPublish}
-        />
-      )}
+        <StepIndicator current={step} />
 
-      {step === "a1-credentials" && a1Form && (
-        <A1CredentialsStep
-          form={a1Form}
-          clientId={clientId}
-          setClientId={setClientId}
-          clientSecret={clientSecret}
-          setClientSecret={setClientSecret}
-          working={working}
-          onSubmit={submitA1Credentials}
-          onHandoff={generateHandoffLink}
-          handoffUrl={handoffUrl}
-        />
-      )}
+        {error && (
+          <div className="mb-4 rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[13px] text-danger">
+            {error}
+          </div>
+        )}
 
-      {step === "a1-install" && a1InstallLink && (
-        <A1InstallStep link={a1InstallLink} />
-      )}
+        {step === "pick" && (
+          <PickStep
+            agents={agents}
+            envs={envs}
+            agentId={agentId}
+            setAgentId={setAgentId}
+            envId={envId}
+            setEnvId={setEnvId}
+            personaName={personaName}
+            setPersonaName={setPersonaName}
+            personaAvatar={personaAvatar}
+            setPersonaAvatar={setPersonaAvatar}
+            working={working}
+            onContinue={startPublish}
+          />
+        )}
+
+        {step === "a1-credentials" && a1Form && (
+          <A1CredentialsStep
+            form={a1Form}
+            clientId={clientId}
+            setClientId={setClientId}
+            clientSecret={clientSecret}
+            setClientSecret={setClientSecret}
+            working={working}
+            onSubmit={submitA1Credentials}
+            onHandoff={generateHandoffLink}
+            handoffUrl={handoffUrl}
+          />
+        )}
+
+        {step === "a1-install" && a1InstallLink && <A1InstallStep link={a1InstallLink} />}
+      </div>
     </div>
+  );
+}
+
+function StepIndicator({ current }: { current: Step }) {
+  const currentIdx = STEPS.findIndex((s) => s.id === current);
+  return (
+    <ol className="flex items-center gap-2 mb-7" aria-label="Wizard progress">
+      {STEPS.map((s, i) => {
+        const state =
+          i < currentIdx ? "done" : i === currentIdx ? "current" : "todo";
+        return (
+          <li key={s.id} className="flex items-center gap-2 flex-1 last:flex-none">
+            <div className="flex items-center gap-2 min-w-0">
+              <div
+                className={`w-6 h-6 rounded-full flex items-center justify-center text-[11px] font-mono font-medium shrink-0 ${
+                  state === "done"
+                    ? "bg-brand text-brand-fg"
+                    : state === "current"
+                      ? "bg-brand-subtle text-brand border border-brand"
+                      : "bg-bg-surface text-fg-subtle border border-border"
+                }`}
+              >
+                {state === "done" ? (
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="3"><path d="M20 6 9 17l-5-5" /></svg>
+                ) : (
+                  String(i + 1).padStart(2, "0")
+                )}
+              </div>
+              <span
+                className={`text-[12px] font-medium uppercase tracking-wider truncate ${
+                  state === "current"
+                    ? "text-fg"
+                    : state === "done"
+                      ? "text-fg-muted"
+                      : "text-fg-subtle"
+                }`}
+              >
+                {s.label}
+              </span>
+            </div>
+            {i < STEPS.length - 1 && (
+              <div
+                className={`flex-1 h-px ${
+                  i < currentIdx ? "bg-brand/40" : "bg-border"
+                }`}
+              />
+            )}
+          </li>
+        );
+      })}
+    </ol>
   );
 }
 
@@ -200,78 +260,74 @@ function PickStep(props: {
   onContinue: () => void;
 }) {
   return (
-    <div className="space-y-4">
-      <Field label="Agent">
-        <select
-          value={props.agentId}
-          onChange={(e) => props.setAgentId(e.target.value)}
-          className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-        >
-          <option value="">Pick an agent…</option>
-          {props.agents.map((a) => (
-            <option key={a.id} value={a.id}>
-              {a.name}
-            </option>
-          ))}
-        </select>
-      </Field>
+    <div className="space-y-5">
+      <div className="grid md:grid-cols-2 gap-4">
+        <Field label="Agent">
+          <select
+            value={props.agentId}
+            onChange={(e) => props.setAgentId(e.target.value)}
+            className={selectCls}
+          >
+            <option value="">Pick an agent…</option>
+            {props.agents.map((a) => (
+              <option key={a.id} value={a.id}>
+                {a.name}
+              </option>
+            ))}
+          </select>
+        </Field>
 
-      <Field label="Environment">
-        <select
-          value={props.envId}
-          onChange={(e) => props.setEnvId(e.target.value)}
-          className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-        >
-          <option value="">Pick an environment…</option>
-          {props.envs.map((e) => (
-            <option key={e.id} value={e.id}>
-              {e.name}
-            </option>
-          ))}
-        </select>
-      </Field>
+        <Field label="Environment">
+          <select
+            value={props.envId}
+            onChange={(e) => props.setEnvId(e.target.value)}
+            className={selectCls}
+          >
+            <option value="">Pick an environment…</option>
+            {props.envs.map((e) => (
+              <option key={e.id} value={e.id}>
+                {e.name}
+              </option>
+            ))}
+          </select>
+        </Field>
+      </div>
 
-      <Field label="Persona name (shown in Linear)">
-        <input
-          value={props.personaName}
-          onChange={(e) => props.setPersonaName(e.target.value)}
-          placeholder="e.g. Coder, Designer, Triage"
-          className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-        />
-      </Field>
+      <div className="grid md:grid-cols-2 gap-4">
+        <Field label="Persona name (shown in Linear)">
+          <input
+            value={props.personaName}
+            onChange={(e) => props.setPersonaName(e.target.value)}
+            placeholder="e.g. Coder, Designer, Triage"
+            className={inputCls}
+          />
+        </Field>
 
-      <Field label="Avatar URL (optional)">
-        <input
-          value={props.personaAvatar}
-          onChange={(e) => props.setPersonaAvatar(e.target.value)}
-          placeholder="https://…"
-          className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-        />
-      </Field>
+        <Field label="Avatar URL (optional)">
+          <input
+            value={props.personaAvatar}
+            onChange={(e) => props.setPersonaAvatar(e.target.value)}
+            placeholder="https://…"
+            className={inputCls}
+          />
+        </Field>
+      </div>
 
-      <p className="text-xs text-gray-500">
+      <div className="rounded-md border border-border bg-bg-surface/30 px-3.5 py-3 text-[12px] text-fg-muted">
         Your agent becomes a real Linear teammate with @autocomplete and a slot in the
         assignee dropdown. Setup ~3 min, requires Linear admin (or send a setup link).
-      </p>
+      </div>
 
-      <div className="pt-2">
+      <div className="pt-1">
         <button
           onClick={props.onContinue}
           disabled={props.working}
-          className="px-3 py-1.5 text-sm bg-black text-white rounded hover:bg-gray-800 disabled:opacity-50"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
         >
-          {props.working ? "Working…" : "Continue →"}
+          {props.working ? "Working…" : "Continue"}
+          <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
         </button>
       </div>
-    </div>
-  );
-}
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-sm font-medium mb-1">{label}</label>
-      {children}
     </div>
   );
 }
@@ -288,100 +344,125 @@ function A1CredentialsStep(props: {
   handoffUrl: string | null;
 }) {
   return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-base font-medium mb-2">1. Create a Linear app</h2>
-        <p className="text-sm text-gray-600 mb-3">
+    <div className="space-y-7">
+      <section>
+        <h2 className="text-[15px] font-medium text-fg mb-1.5">
+          Create a Linear OAuth app
+        </h2>
+        <p className="text-[13px] text-fg-muted mb-3">
           Open{" "}
           <a
             href="https://linear.app/settings/api"
             target="_blank"
             rel="noreferrer"
-            className="text-blue-600 hover:underline"
+            className="text-brand hover:underline"
           >
             Linear → Settings → API
           </a>{" "}
-          and create a new OAuth app with these values:
+          and register a new OAuth application with these values:
         </p>
-        <div className="bg-gray-50 border border-gray-200 rounded p-3 text-sm space-y-2">
+        <div className="rounded-md border border-border bg-bg-surface/30 divide-y divide-border">
           <CopyRow label="App name" value={props.form.suggestedAppName} />
           <CopyRow label="Callback URL" value={props.form.callbackUrl} />
           <CopyRow label="Webhook URL" value={props.form.webhookUrl} />
-          <CopyRow label="Webhook secret" value={props.form.webhookSecret} />
+          <CopyRow label="Webhook secret" value={props.form.webhookSecret} secret />
         </div>
-        <p className="text-xs text-gray-500 mt-2">
-          Note: the Callback / Webhook URLs include <code>&lt;APP_ID&gt;</code> until we
-          generate a real one — the URLs you see at step 3 will be the final values.
-        </p>
-      </div>
+      </section>
 
-      <div>
-        <h2 className="text-base font-medium mb-2">2. Paste credentials Linear gave you</h2>
-        <Field label="Client ID">
-          <input
-            value={props.clientId}
-            onChange={(e) => props.setClientId(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
-        </Field>
-        <Field label="Client Secret">
-          <input
-            type="password"
-            value={props.clientSecret}
-            onChange={(e) => props.setClientSecret(e.target.value)}
-            className="w-full border border-gray-300 rounded px-3 py-2 text-sm"
-          />
-        </Field>
-        <div className="pt-2 flex items-center gap-3">
+      <section>
+        <h2 className="text-[15px] font-medium text-fg mb-1.5">
+          Paste credentials Linear gave you
+        </h2>
+        <p className="text-[13px] text-fg-muted mb-3">
+          From the OAuth app you just created.
+        </p>
+        <div className="grid md:grid-cols-2 gap-4">
+          <Field label="Client ID">
+            <input
+              value={props.clientId}
+              onChange={(e) => props.setClientId(e.target.value)}
+              className={inputCls}
+            />
+          </Field>
+          <Field label="Client Secret">
+            <input
+              type="password"
+              value={props.clientSecret}
+              onChange={(e) => props.setClientSecret(e.target.value)}
+              className={inputCls}
+            />
+          </Field>
+        </div>
+
+        <div className="mt-4 flex items-center gap-3 flex-wrap">
           <button
             onClick={props.onSubmit}
             disabled={props.working || !props.clientId || !props.clientSecret}
-            className="px-3 py-1.5 text-sm bg-black text-white rounded hover:bg-gray-800 disabled:opacity-50"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
           >
-            {props.working ? "Validating…" : "Continue →"}
+            {props.working ? "Validating…" : "Continue"}
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
           </button>
-          <span className="text-xs text-gray-400">— or —</span>
+          <span className="text-[12px] text-fg-subtle">or</span>
           <button
             onClick={props.onHandoff}
             disabled={props.working}
-            className="text-sm text-blue-600 hover:underline disabled:opacity-50"
+            className="text-[13px] text-fg-muted hover:text-brand transition-colors disabled:opacity-50"
           >
-            Send setup link to your admin instead
+            Send setup link to your admin →
           </button>
         </div>
 
         {props.handoffUrl && (
-          <div className="mt-3 p-3 bg-amber-50 border border-amber-200 rounded text-sm">
-            <p className="font-medium mb-1">Send this link to your Linear admin:</p>
-            <CopyRow label="Setup link" value={props.handoffUrl} />
-            <p className="text-xs text-amber-800 mt-2">
-              Anyone with this link can complete the install. Treat it as sensitive. Expires in
-              7 days.
+          <div className="mt-4 rounded-md border border-warning/30 bg-warning-subtle p-3.5">
+            <div className="flex items-start gap-2 mb-2">
+              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round" className="text-warning shrink-0 mt-0.5">
+                <path d="M12 9v4M12 17h.01M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0Z" />
+              </svg>
+              <div className="text-[13px] font-medium text-fg">
+                Send this link to your Linear admin
+              </div>
+            </div>
+            <div className="rounded-md border border-warning/30 bg-bg">
+              <CopyRow label="Setup link" value={props.handoffUrl} />
+            </div>
+            <p className="text-[12px] text-fg-muted mt-2">
+              Anyone with this link can complete the install. Treat it as sensitive.
+              Expires in 7 days.
             </p>
           </div>
         )}
-      </div>
+      </section>
     </div>
   );
 }
 
 function A1InstallStep({ link }: { link: A1InstallLink }) {
   return (
-    <div className="space-y-3">
-      <h2 className="text-base font-medium">3. Install the app in your workspace</h2>
-      <p className="text-sm text-gray-600">
-        We've validated your credentials. Click below to authorize the install in Linear —
-        you'll be redirected back here automatically.
-      </p>
+    <div className="space-y-4">
+      <div>
+        <h2 className="text-[15px] font-medium text-fg mb-1.5">
+          Install the app in your workspace
+        </h2>
+        <p className="text-[13px] text-fg-muted">
+          We've validated your credentials. Click below to authorize the install in
+          Linear — you'll be redirected back here automatically.
+        </p>
+      </div>
+
       <a
         href={link.url}
-        className="inline-block px-3 py-1.5 text-sm bg-black text-white rounded hover:bg-gray-800"
+        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover transition-colors"
       >
-        Install in Linear →
+        Install in Linear
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17 17 7M7 7h10v10" /></svg>
       </a>
-      <details className="text-xs text-gray-500 mt-3">
-        <summary className="cursor-pointer">Final URLs Linear should now show</summary>
-        <div className="mt-2 space-y-1">
+
+      <details className="text-[12px] text-fg-muted mt-3">
+        <summary className="cursor-pointer hover:text-fg transition-colors">
+          Verify the URLs Linear should now show
+        </summary>
+        <div className="mt-2 rounded-md border border-border bg-bg-surface/30 divide-y divide-border">
           <CopyRow label="Callback URL" value={link.callbackUrl} />
           <CopyRow label="Webhook URL" value={link.webhookUrl} />
         </div>
@@ -390,22 +471,58 @@ function A1InstallStep({ link }: { link: A1InstallLink }) {
   );
 }
 
-function CopyRow({ label, value }: { label: string; value: string }) {
+function CopyRow({ label, value, secret = false }: { label: string; value: string; secret?: boolean }) {
+  const [copied, setCopied] = useState(false);
+  const [reveal, setReveal] = useState(!secret);
   function copy() {
     void navigator.clipboard.writeText(value);
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1500);
   }
+  const display = secret && !reveal ? "•".repeat(Math.min(value.length, 28)) : value;
   return (
-    <div className="flex items-center gap-2">
-      <span className="text-xs text-gray-500 w-28 shrink-0">{label}</span>
-      <code className="flex-1 text-xs bg-white border border-gray-200 rounded px-2 py-1 truncate">
-        {value}
+    <div className="flex items-center gap-3 px-3 py-2">
+      <span className="text-[11px] text-fg-muted font-mono uppercase tracking-wider w-28 shrink-0">
+        {label}
+      </span>
+      <code className="flex-1 text-[12px] font-mono text-fg truncate select-all">
+        {display}
       </code>
-      <button
-        onClick={copy}
-        className="text-xs text-blue-600 hover:underline shrink-0"
-      >
-        Copy
-      </button>
+      <div className="flex items-center gap-1 shrink-0">
+        {secret && (
+          <button
+            onClick={() => setReveal((r) => !r)}
+            className="text-[11px] text-fg-muted hover:text-fg transition-colors px-1.5 py-0.5 rounded"
+            title={reveal ? "Hide" : "Reveal"}
+          >
+            {reveal ? "Hide" : "Show"}
+          </button>
+        )}
+        <button
+          onClick={copy}
+          className={`text-[11px] px-2 py-0.5 rounded transition-colors ${
+            copied
+              ? "text-success bg-success-subtle"
+              : "text-fg-muted hover:text-fg hover:bg-bg-surface"
+          }`}
+        >
+          {copied ? "Copied" : "Copy"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+const inputCls =
+  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+
+const selectCls = inputCls;
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
+      {children}
     </div>
   );
 }

@@ -43,7 +43,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   return (
     <ToastContext.Provider value={{ toast }}>
       {children}
-      <div className="fixed top-0 left-0 right-0 z-[100] flex flex-col items-center gap-3 pt-4 pointer-events-none">
+      <div className="fixed bottom-4 right-4 z-[100] flex flex-col-reverse gap-2 pointer-events-none max-w-[calc(100vw-2rem)]">
         {toasts.map((t) => (
           <ToastItem key={t.id} toast={t} onDismiss={dismiss} />
         ))}
@@ -52,27 +52,27 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   );
 }
 
-const styles: Record<ToastType, string> = {
-  success: "bg-emerald-600 text-white shadow-emerald-600/25",
-  error: "bg-red-600 text-white shadow-red-600/25",
-  info: "bg-zinc-800 text-white shadow-zinc-800/25",
+const iconColor: Record<ToastType, string> = {
+  success: "text-success",
+  error: "text-danger",
+  info: "text-fg-muted",
 };
 
 const icons: Record<ToastType, ReactNode> = {
   success: (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <path d="M20 6 9 17l-5-5" />
     </svg>
   ),
   error: (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
       <line x1="15" y1="9" x2="9" y2="15" />
       <line x1="9" y1="9" x2="15" y2="15" />
     </svg>
   ),
   info: (
-    <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
       <circle cx="12" cy="12" r="10" />
       <path d="M12 16v-4" />
       <path d="M12 8h.01" />
@@ -88,27 +88,27 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
     requestAnimationFrame(() => setVisible(true));
     timerRef.current = setTimeout(() => {
       setVisible(false);
-      setTimeout(() => onDismiss(toast.id), 300);
-    }, 5000);
+      setTimeout(() => onDismiss(toast.id), 200);
+    }, 4000);
     return () => clearTimeout(timerRef.current);
   }, [toast.id, onDismiss]);
 
   return (
     <div
-      className={`pointer-events-auto flex items-center gap-3 px-5 py-3.5 rounded-xl shadow-2xl text-[15px] font-medium min-w-[320px] max-w-md transition-all duration-300 ease-out ${styles[toast.type]} ${visible ? "opacity-100 translate-y-0 scale-100" : "opacity-0 -translate-y-4 scale-95"}`}
+      className={`pointer-events-auto flex items-center gap-2.5 pl-3 pr-2 py-2 rounded-md border border-border bg-bg shadow-[0_4px_12px_-4px_rgb(0_0_0/0.12)] text-[13px] text-fg min-w-[260px] max-w-[380px] transition-all duration-200 ease-out ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"}`}
       role="alert"
     >
-      <span className="shrink-0">{icons[toast.type]}</span>
-      <span className="flex-1">{toast.message}</span>
+      <span className={`shrink-0 ${iconColor[toast.type]}`}>{icons[toast.type]}</span>
+      <span className="flex-1 leading-tight">{toast.message}</span>
       <button
         onClick={() => {
           setVisible(false);
-          setTimeout(() => onDismiss(toast.id), 300);
+          setTimeout(() => onDismiss(toast.id), 200);
         }}
-        className="shrink-0 opacity-70 hover:opacity-100 transition-opacity p-0.5"
+        className="shrink-0 text-fg-subtle hover:text-fg transition-colors p-1 -m-1 rounded"
         aria-label="Dismiss"
       >
-        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">
           <line x1="18" y1="6" x2="6" y2="18" />
           <line x1="6" y1="6" x2="18" y2="18" />
         </svg>
