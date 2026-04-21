@@ -94,6 +94,7 @@ export class IntegrationsApi {
     formToken: string;
     clientId: string;
     clientSecret: string;
+    webhookSecret: string;
   }): Promise<A1InstallLink> {
     return this.request<A1InstallLink>("/v1/integrations/linear/credentials", {
       method: "POST",

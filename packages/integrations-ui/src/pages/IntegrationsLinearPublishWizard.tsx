@@ -49,6 +49,7 @@ export function IntegrationsLinearPublishWizard({
   const [a1Form, setA1Form] = useState<A1FormStep | null>(null);
   const [clientId, setClientId] = useState("");
   const [clientSecret, setClientSecret] = useState("");
+  const [webhookSecret, setWebhookSecret] = useState("");
   const [a1InstallLink, setA1InstallLink] = useState<A1InstallLink | null>(null);
   const [handoffUrl, setHandoffUrl] = useState<string | null>(null);
 
@@ -98,7 +99,7 @@ export function IntegrationsLinearPublishWizard({
   }
 
   async function submitA1Credentials() {
-    if (!a1Form || !clientId || !clientSecret) return;
+    if (!a1Form || !clientId || !clientSecret || !webhookSecret) return;
     setError(null);
     setWorking(true);
     try {
@@ -106,6 +107,7 @@ export function IntegrationsLinearPublishWizard({
         formToken: a1Form.formToken,
         clientId,
         clientSecret,
+        webhookSecret,
       });
       setA1InstallLink(link);
       setStep("a1-install");
@@ -181,6 +183,8 @@ export function IntegrationsLinearPublishWizard({
             setClientId={setClientId}
             clientSecret={clientSecret}
             setClientSecret={setClientSecret}
+            webhookSecret={webhookSecret}
+            setWebhookSecret={setWebhookSecret}
             working={working}
             onSubmit={submitA1Credentials}
             onHandoff={generateHandoffLink}
@@ -338,6 +342,8 @@ function A1CredentialsStep(props: {
   setClientId: (v: string) => void;
   clientSecret: string;
   setClientSecret: (v: string) => void;
+  webhookSecret: string;
+  setWebhookSecret: (v: string) => void;
   working: boolean;
   onSubmit: () => void;
   onHandoff: () => void;
@@ -365,8 +371,12 @@ function A1CredentialsStep(props: {
           <CopyRow label="App name" value={props.form.suggestedAppName} />
           <CopyRow label="Callback URL" value={props.form.callbackUrl} />
           <CopyRow label="Webhook URL" value={props.form.webhookUrl} />
-          <CopyRow label="Webhook secret" value={props.form.webhookSecret} secret />
         </div>
+        <p className="text-[12px] text-fg-subtle mt-2">
+          Linear auto-generates the webhook signing secret on its side and ignores
+          any value pasted into the form. You'll copy it back to OMA in the next
+          step (it starts with <code>lin_wh_</code>).
+        </p>
       </section>
 
       <section>
@@ -374,7 +384,8 @@ function A1CredentialsStep(props: {
           Paste credentials Linear gave you
         </h2>
         <p className="text-[13px] text-fg-muted mb-3">
-          From the OAuth app you just created.
+          From the OAuth app you just created. The webhook signing secret is on
+          the same page (Webhooks → Signing secret).
         </p>
         <div className="grid md:grid-cols-2 gap-4">
           <Field label="Client ID">
@@ -392,12 +403,21 @@ function A1CredentialsStep(props: {
               className={inputCls}
             />
           </Field>
+          <Field label="Webhook signing secret (lin_wh_…)">
+            <input
+              type="password"
+              value={props.webhookSecret}
+              onChange={(e) => props.setWebhookSecret(e.target.value)}
+              placeholder="lin_wh_…"
+              className={inputCls}
+            />
+          </Field>
         </div>
 
         <div className="mt-4 flex items-center gap-3 flex-wrap">
           <button
             onClick={props.onSubmit}
-            disabled={props.working || !props.clientId || !props.clientSecret}
+            disabled={props.working || !props.clientId || !props.clientSecret || !props.webhookSecret}
             className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
           >
             {props.working ? "Validating…" : "Continue"}

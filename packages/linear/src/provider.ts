@@ -85,18 +85,23 @@ export class LinearProvider implements IntegrationProvider {
   // ─── A1 (full identity, BYO Linear App) ─────────────────────────────
 
   private async startDedicatedFlow(input: StartInstallInput): Promise<InstallStep> {
-    // Generate appId AND webhookSecret upfront so we can hand the user the
-    // *final* callback / webhook URLs to paste into Linear's app form. Without
-    // this, step 1 returned `<APP_ID>` placeholder URLs and step 2 returned
-    // the real ones — forcing the user to re-edit the Linear App after
-    // creation. Linear bakes the webhook URL at creation time and won't let
-    // you change it via API, so the only way out is to make step 1 final.
+    // Generate appId upfront so step 1 hands the user the *final* callback /
+    // webhook URLs to paste into Linear's form. Linear bakes the webhook URL
+    // at creation time and won't let you change it via API, so the only way
+    // out is to make step 1 final.
     //
-    // Both values live inside a short-lived form_token; we don't write the
+    // We deliberately do NOT generate a webhookSecret here. Linear's "New
+    // OAuth application" form auto-generates its own (`lin_wh_…`) and ignores
+    // any value pasted in — so anything we hand the user is silently
+    // overwritten, and OMA verifying with our value would mean every webhook
+    // failed signature verification (silently, with HTTP 200, since Linear
+    // sees 2xx and never reports a delivery failure). The user copies
+    // Linear's secret back at step 2 instead.
+    //
+    // Form contents live in a short-lived form_token; we don't write the
     // App row to D1 until step 2 (after the user pastes the OAuth client
-    // credentials Linear gave them).
+    // credentials + Linear's webhook signing secret).
     const appId = this.container.ids.generate();
-    const webhookSecret = this.container.ids.generate();
     const formToken = await this.container.jwt.sign(
       {
         kind: "linear.a1.form",
@@ -106,7 +111,6 @@ export class LinearProvider implements IntegrationProvider {
         persona: input.persona,
         returnUrl: input.returnUrl,
         appId,
-        webhookSecret,
       },
       OAUTH_STATE_TTL_SECONDS,
     );
@@ -120,7 +124,6 @@ export class LinearProvider implements IntegrationProvider {
         suggestedAvatarUrl: input.persona.avatarUrl,
         callbackUrl: this.dedicatedCallbackUri(appId),
         webhookUrl: this.dedicatedWebhookUri(appId),
-        webhookSecret,
       },
     };
   }
@@ -131,8 +134,11 @@ export class LinearProvider implements IntegrationProvider {
     const formToken = (payload.formToken as string) ?? "";
     const clientId = (payload.clientId as string) ?? "";
     const clientSecret = (payload.clientSecret as string) ?? "";
-    if (!formToken || !clientId || !clientSecret) {
-      throw new Error("submit_credentials: formToken, clientId, clientSecret required");
+    const webhookSecret = (payload.webhookSecret as string) ?? "";
+    if (!formToken || !clientId || !clientSecret || !webhookSecret) {
+      throw new Error(
+        "submit_credentials: formToken, clientId, clientSecret, webhookSecret required",
+      );
     }
 
     const form = await this.container.jwt.verify<{
@@ -143,7 +149,6 @@ export class LinearProvider implements IntegrationProvider {
       persona: Persona;
       returnUrl: string;
       appId: string;
-      webhookSecret: string;
     }>(formToken);
     if (form.kind !== "linear.a1.form") {
       throw new Error("submit_credentials: invalid formToken kind");
@@ -162,7 +167,7 @@ export class LinearProvider implements IntegrationProvider {
       publicationId: null,
       clientId,
       clientSecret,
-      webhookSecret: form.webhookSecret,
+      webhookSecret,
     });
 
     // Build the install URL the user clicks next. State JWT carries the
