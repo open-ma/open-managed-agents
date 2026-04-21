@@ -37,7 +37,27 @@ export const authMiddleware = createMiddleware<{
       user_id?: string;
     };
     c.set("tenant_id", tenant_id);
-    if (user_id) c.set("user_id", user_id);
+    if (user_id) {
+      c.set("user_id", user_id);
+    } else if (c.env.AUTH_DB) {
+      // Backwards compat: legacy keys minted before user_id was tracked.
+      // If the tenant has exactly one user, attribute the request to them so
+      // user-scoped endpoints (e.g. /v1/integrations/*) keep working without
+      // requiring everyone to regenerate. Multi-user tenants must explicitly
+      // regenerate; we don't guess.
+      try {
+        const r = await c.env.AUTH_DB
+          .prepare(`SELECT id FROM "user" WHERE tenantId = ? LIMIT 2`)
+          .bind(tenant_id)
+          .all<{ id: string }>();
+        if (r.results?.length === 1) {
+          c.set("user_id", r.results[0].id);
+        }
+      } catch {
+        // AUTH_DB query failed — proceed without user_id; downstream
+        // user-scoped routes will reject with their own clear message.
+      }
+    }
     return next();
   }
 
