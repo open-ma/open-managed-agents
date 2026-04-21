@@ -46,7 +46,7 @@ oma sessions message <session-id> "Your task here"
 | Credential | `oma creds list`, `oma secret add` | Secret inside a vault |
 | Skill | `oma skills list/install` | Domain expertise for agents |
 | API Key | `oma keys create/list/revoke` | Auth token for CLI/SDK |
-| Linear | `oma linear list/pubs/publish/submit/handoff/unpublish/get` | Publish agent into a Linear workspace |
+| Linear | `oma linear list/pubs/publish/submit/handoff/update/unpublish/get` | Publish agent into a Linear workspace |
 
 ## Model Cards
 
