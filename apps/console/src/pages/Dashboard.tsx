@@ -22,37 +22,15 @@ interface RecentSession {
   created_at: string;
 }
 
-const QUICKSTART_STEPS = [
-  {
-    step: 1,
-    title: "Install the CLI",
-    description: "The oma CLI lets your agent (or you) manage the platform from the terminal",
-    command: "npx open-managed-agents",
-    alt: "npm i -g open-managed-agents",
-  },
-  {
-    step: 2,
-    title: "Generate an API key",
-    description: "Your agent needs this to authenticate with the platform",
-    action: "api-key",
-  },
-  {
-    step: 3,
-    title: "Tell your agent to use it",
-    description: "Point your agent at the openma-cli or openma-api skill and let it work",
-    example: '"Use oma to create a research agent that monitors arXiv for new ML papers daily"',
-  },
-] as const;
-
 export function Dashboard() {
   const nav = useNavigate();
   const { api } = useApi();
-  const { user } = useAuth();
+  const { user: _user } = useAuth();
   const { toast } = useToast();
   const [stats, setStats] = useState<Stats | null>(null);
   const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
   const [loading, setLoading] = useState(true);
-  const [copied, setCopied] = useState<number | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
 
   useEffect(() => {
     (async () => {
@@ -81,20 +59,35 @@ export function Dashboard() {
     })();
   }, []);
 
-  const copyToClipboard = (text: string, step: number) => {
+  const copy = (text: string, key: string) => {
     navigator.clipboard.writeText(text);
-    setCopied(step);
-    toast("Copied to clipboard", "success");
-    setTimeout(() => setCopied(null), 2000);
+    setCopied(key);
+    toast("Copied", "success");
+    setTimeout(() => setCopied(null), 1600);
   };
 
-  const cards = [
-    { label: "Agents", value: stats?.agents, to: "/agents", icon: "M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" },
-    { label: "Sessions", value: stats?.sessions, to: "/sessions", icon: "M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z" },
-    { label: "Environments", value: stats?.environments, to: "/environments", icon: "M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" },
-    { label: "Vaults", value: stats?.vaults, to: "/vaults", icon: "M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" },
-    { label: "Skills", value: stats?.skills, to: "/skills", icon: "M13 10V3L4 14h7v7l9-11h-7z" },
-    { label: "Model Cards", value: stats?.modelCards, to: "/model-cards", icon: "M9 3v2m6-2v2M9 19v2m6-2v2M5 9H3m2 6H3m18-6h-2m2 6h-2M7 19h10a2 2 0 002-2V7a2 2 0 00-2-2H7a2 2 0 00-2 2v10a2 2 0 002 2zM9 9h6v6H9V9z" },
+  const stat = (label: string, value: number | undefined, to: string) => (
+    <button
+      key={label}
+      onClick={() => nav(to)}
+      className="group relative text-left px-4 py-3.5 border border-border rounded-md bg-bg hover:border-border-strong hover:bg-bg-surface/40 transition-colors"
+    >
+      <div className="font-display text-[28px] leading-none font-semibold text-fg group-hover:text-brand transition-colors tabular-nums">
+        {value ?? "–"}
+      </div>
+      <div className="mt-2 text-[11px] uppercase tracking-[0.08em] text-fg-muted font-medium">
+        {label}
+      </div>
+    </button>
+  );
+
+  const stats_ = [
+    { label: "Agents", value: stats?.agents, to: "/agents" },
+    { label: "Sessions", value: stats?.sessions, to: "/sessions" },
+    { label: "Environments", value: stats?.environments, to: "/environments" },
+    { label: "Vaults", value: stats?.vaults, to: "/vaults" },
+    { label: "Skills", value: stats?.skills, to: "/skills" },
+    { label: "Model Cards", value: stats?.modelCards, to: "/model-cards" },
   ];
 
   const statusCls = (s: string) => {
@@ -104,128 +97,193 @@ export function Dashboard() {
   };
 
   if (loading) {
-    return <div className="flex-1 flex items-center justify-center"><div className="text-fg-subtle text-sm">Loading...</div></div>;
+    return (
+      <div className="flex-1 flex items-center justify-center">
+        <div className="text-fg-subtle text-sm">Loading...</div>
+      </div>
+    );
   }
 
+  const cmd = "npx open-managed-agents";
+  const cmdGlobal = "npm i -g open-managed-agents";
+  const examplePrompt =
+    "Use oma to create a research agent that monitors arXiv for new ML papers daily";
+
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      {/* Quickstart */}
-      <div className="mb-10">
-        <h1 className="font-display text-2xl font-bold tracking-tight text-fg mb-1">
-          Get started with openma
-        </h1>
-        <p className="text-fg-muted text-sm mb-6">Use your own agent to build and manage agents on the platform.</p>
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-[1100px] mx-auto px-8 lg:px-10 py-10 lg:py-12 space-y-10">
+        {/* Header */}
+        <header>
+          <h1 className="font-display text-[32px] leading-tight font-semibold tracking-tight text-fg">
+            Get started with openma
+          </h1>
+          <p className="mt-1.5 text-[15px] text-fg-muted">
+            Hand the platform to your agent — install the CLI, mint a key, point them at it.
+          </p>
+        </header>
 
-        <div className="grid gap-4 md:grid-cols-3">
-          {QUICKSTART_STEPS.map((s) => (
-            <div key={s.step} className="border border-border rounded-xl p-5 bg-bg-surface/30 flex flex-col">
-              <div className="flex items-center gap-2.5 mb-3">
-                <span className="shrink-0 w-7 h-7 rounded-full bg-brand text-brand-fg text-xs font-bold flex items-center justify-center">
-                  {s.step}
+        {/* Quickstart — single panel with three rows, no per-step cards */}
+        <section className="border border-border rounded-lg overflow-hidden">
+          {/* Step 1 */}
+          <div className="grid md:grid-cols-[180px_1fr] gap-x-6 gap-y-2 p-5 md:p-6 border-b border-border">
+            <div>
+              <div className="font-mono text-[11px] tracking-wider text-brand">STEP 01</div>
+              <div className="mt-1 font-medium text-fg text-[15px]">Install the CLI</div>
+            </div>
+            <div className="space-y-2.5 min-w-0">
+              <p className="text-sm text-fg-muted">
+                The <code className="font-mono text-[13px] text-fg">oma</code> CLI lets your
+                agent (or you) drive the platform from the terminal.
+              </p>
+              <button
+                onClick={() => copy(cmd, "cmd")}
+                className="group w-full sm:w-auto sm:inline-flex items-center gap-3 pl-3 pr-2 py-2 rounded-md border border-border bg-bg-surface/50 hover:border-border-strong transition-colors text-left"
+              >
+                <span className="text-fg-subtle select-none font-mono text-xs">›</span>
+                <span className="font-mono text-[13px] text-fg flex-1 truncate">{cmd}</span>
+                <span className="shrink-0 text-fg-subtle group-hover:text-fg transition-colors p-1">
+                  {copied === "cmd" ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6 9 17l-5-5" /></svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
+                  )}
                 </span>
-                <h3 className="text-sm font-semibold text-fg">{s.title}</h3>
-              </div>
-              <p className="text-xs text-fg-muted mb-4 flex-1">{s.description}</p>
-
-              {"command" in s && (
-                <div className="space-y-2">
-                  <button
-                    onClick={() => copyToClipboard(s.command, s.step)}
-                    className="w-full flex items-center gap-2 px-3 py-2.5 bg-zinc-900 text-zinc-100 rounded-lg font-mono text-xs hover:bg-zinc-800 transition-colors group text-left"
-                  >
-                    <span className="text-emerald-400 select-none">$</span>
-                    <span className="flex-1 truncate">{s.command}</span>
-                    <span className="shrink-0 text-zinc-500 group-hover:text-zinc-300 transition-colors">
-                      {copied === s.step ? (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6 9 17l-5-5" /></svg>
-                      ) : (
-                        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
-                      )}
-                    </span>
-                  </button>
-                  <p className="text-[11px] text-fg-subtle px-1">
-                    or globally: <button onClick={() => copyToClipboard(s.alt!, s.step + 10)} className="font-mono text-brand hover:underline">{s.alt}</button>
-                  </p>
-                </div>
-              )}
-
-              {"action" in s && s.action === "api-key" && (
+              </button>
+              <p className="text-[12px] text-fg-subtle">
+                or globally:{" "}
                 <button
-                  onClick={() => nav("/api-keys")}
-                  className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+                  onClick={() => copy(cmdGlobal, "cmd-global")}
+                  className="font-mono text-fg-muted hover:text-brand transition-colors"
                 >
-                  Generate API Key
+                  {cmdGlobal}
                 </button>
-              )}
-
-              {"example" in s && (
-                <div className="px-3 py-2.5 bg-zinc-900 text-zinc-300 rounded-lg text-xs italic leading-relaxed">
-                  {s.example}
-                </div>
-              )}
+              </p>
             </div>
-          ))}
-        </div>
-      </div>
-
-      {/* Stats grid */}
-      <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-6 gap-3 mb-8">
-        {cards.map((c) => (
-          <button
-            key={c.label}
-            onClick={() => nav(c.to)}
-            className="text-left p-4 border border-border rounded-lg hover:border-brand hover:bg-brand-subtle/30 transition-colors group"
-          >
-            <div className="flex items-center gap-2 mb-2">
-              <svg className="w-4 h-4 text-fg-subtle group-hover:text-brand transition-colors" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
-                <path strokeLinecap="round" strokeLinejoin="round" d={c.icon} />
-              </svg>
-              <span className="text-xs text-fg-muted">{c.label}</span>
-            </div>
-            <div className="text-2xl font-semibold text-fg">{c.value ?? "-"}</div>
-          </button>
-        ))}
-      </div>
-
-      {/* Recent sessions */}
-      <div>
-        <div className="flex items-center justify-between mb-3">
-          <h2 className="text-sm font-medium text-fg">Recent Sessions</h2>
-          <button onClick={() => nav("/sessions")} className="text-xs text-fg-muted hover:text-fg transition-colors">
-            View all
-          </button>
-        </div>
-        {recentSessions.length === 0 ? (
-          <div className="border border-dashed border-border rounded-lg p-8 text-center">
-            <p className="text-fg-subtle text-sm">No sessions yet.</p>
-            <p className="text-fg-subtle text-xs mt-1">Install the skill and tell your agent to create one.</p>
           </div>
-        ) : (
-          <div className="border border-border rounded-lg overflow-hidden">
-            <table className="w-full text-sm">
-              <thead>
-                <tr className="bg-bg-surface text-fg-subtle text-xs uppercase tracking-wider">
-                  <th className="text-left px-4 py-2">Title</th>
-                  <th className="text-left px-4 py-2">Status</th>
-                  <th className="text-left px-4 py-2">Agent</th>
-                  <th className="text-left px-4 py-2">Created</th>
-                </tr>
-              </thead>
-              <tbody>
-                {recentSessions.map((s) => (
-                  <tr key={s.id} onClick={() => nav(`/sessions/${s.id}`)} className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
-                    <td className="px-4 py-2.5 font-medium text-fg">{s.title || "Untitled"}</td>
-                    <td className="px-4 py-2.5">
-                      <span className={`text-xs px-2 py-0.5 rounded-full ${statusCls(s.status)}`}>{s.status || "idle"}</span>
-                    </td>
-                    <td className="px-4 py-2.5 text-fg-muted font-mono text-xs">{s.agent_id}</td>
-                    <td className="px-4 py-2.5 text-fg-muted text-xs">{new Date(s.created_at).toLocaleDateString()}</td>
+
+          {/* Step 2 */}
+          <div className="grid md:grid-cols-[180px_1fr] gap-x-6 gap-y-2 p-5 md:p-6 border-b border-border">
+            <div>
+              <div className="font-mono text-[11px] tracking-wider text-brand">STEP 02</div>
+              <div className="mt-1 font-medium text-fg text-[15px]">Mint an API key</div>
+            </div>
+            <div className="space-y-2.5">
+              <p className="text-sm text-fg-muted">
+                Your agent needs this to authenticate. Keep it somewhere it can read.
+              </p>
+              <button
+                onClick={() => nav("/api-keys")}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors"
+              >
+                Generate API key
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
+              </button>
+            </div>
+          </div>
+
+          {/* Step 3 */}
+          <div className="grid md:grid-cols-[180px_1fr] gap-x-6 gap-y-2 p-5 md:p-6">
+            <div>
+              <div className="font-mono text-[11px] tracking-wider text-brand">STEP 03</div>
+              <div className="mt-1 font-medium text-fg text-[15px]">Hand it the reins</div>
+            </div>
+            <div className="space-y-2.5">
+              <p className="text-sm text-fg-muted">
+                Point your agent at the <code className="font-mono text-[13px] text-fg">openma-cli</code>{" "}
+                or <code className="font-mono text-[13px] text-fg">openma-api</code> skill, then
+                ask for what you want:
+              </p>
+              <button
+                onClick={() => copy(examplePrompt, "prompt")}
+                className="group w-full text-left rounded-md border border-border bg-bg-surface/50 hover:border-border-strong transition-colors p-3 flex items-start gap-3"
+              >
+                <span className="shrink-0 mt-0.5 font-mono text-[10px] tracking-wider text-fg-subtle">
+                  PROMPT
+                </span>
+                <span className="flex-1 text-[13px] text-fg leading-snug">{examplePrompt}</span>
+                <span className="shrink-0 text-fg-subtle group-hover:text-fg transition-colors mt-0.5">
+                  {copied === "prompt" ? (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6 9 17l-5-5" /></svg>
+                  ) : (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><rect x="9" y="9" width="13" height="13" rx="2" /><path d="M5 15H4a2 2 0 01-2-2V4a2 2 0 012-2h9a2 2 0 012 2v1" /></svg>
+                  )}
+                </span>
+              </button>
+            </div>
+          </div>
+        </section>
+
+        {/* Stats — number-forward, no decorative icons */}
+        <section>
+          <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-6 gap-2.5">
+            {stats_.map((s) => stat(s.label, s.value, s.to))}
+          </div>
+        </section>
+
+        {/* Recent sessions */}
+        <section>
+          <div className="flex items-baseline justify-between mb-3">
+            <h2 className="font-display text-lg font-semibold text-fg">Recent sessions</h2>
+            <button
+              onClick={() => nav("/sessions")}
+              className="text-[13px] text-fg-muted hover:text-brand transition-colors"
+            >
+              View all →
+            </button>
+          </div>
+
+          {recentSessions.length === 0 ? (
+            <div className="border border-border rounded-lg px-6 py-10 text-center bg-bg-surface/30">
+              <div className="font-mono text-fg-subtle text-sm select-none mb-2">[ &nbsp;&nbsp; ]</div>
+              <p className="text-sm text-fg">No sessions yet — the stable's empty.</p>
+              <p className="text-[13px] text-fg-muted mt-1">
+                Tell your agent to start one, or visit the{" "}
+                <button
+                  onClick={() => nav("/sessions")}
+                  className="text-brand hover:underline"
+                >
+                  Sessions page
+                </button>
+                .
+              </p>
+            </div>
+          ) : (
+            <div className="border border-border rounded-lg overflow-hidden">
+              <table className="w-full text-sm">
+                <thead>
+                  <tr className="bg-bg-surface/40 text-fg-subtle text-[11px] uppercase tracking-[0.08em]">
+                    <th className="text-left px-4 py-2.5 font-medium">Title</th>
+                    <th className="text-left px-4 py-2.5 font-medium">Status</th>
+                    <th className="text-left px-4 py-2.5 font-medium">Agent</th>
+                    <th className="text-left px-4 py-2.5 font-medium">Created</th>
                   </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        )}
+                </thead>
+                <tbody>
+                  {recentSessions.map((s) => (
+                    <tr
+                      key={s.id}
+                      onClick={() => nav(`/sessions/${s.id}`)}
+                      className="border-t border-border hover:bg-bg-surface/40 cursor-pointer transition-colors"
+                    >
+                      <td className="px-4 py-2.5 text-fg">{s.title || "Untitled"}</td>
+                      <td className="px-4 py-2.5">
+                        <span className={`text-[11px] px-2 py-0.5 rounded ${statusCls(s.status)}`}>
+                          {s.status || "idle"}
+                        </span>
+                      </td>
+                      <td className="px-4 py-2.5 text-fg-muted font-mono text-[12px]">
+                        {s.agent_id}
+                      </td>
+                      <td className="px-4 py-2.5 text-fg-muted text-[12px]">
+                        {new Date(s.created_at).toLocaleDateString()}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </section>
       </div>
     </div>
   );
