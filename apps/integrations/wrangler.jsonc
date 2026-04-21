@@ -7,9 +7,9 @@
 
   // Public origin where this gateway is reachable. Used to build OAuth
   // callback / webhook URLs the gateway hands to Linear. No trailing slash.
-  // OVERRIDE this in production to your custom domain or workers.dev URL.
+  // Override per env in [env.<name>] vars when deploying.
   "vars": {
-    "GATEWAY_ORIGIN": "https://managed-agents-integrations.example.workers.dev"
+    "GATEWAY_ORIGIN": "https://integrations.openma.dev"
   },
 
   // Shared with apps/main. Migrations for integrations tables live with
