@@ -6,7 +6,7 @@
   <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare Workers" />
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
   <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" />
-  <img src="https://img.shields.io/badge/Tests-501%20passed-brightgreen" alt="Tests" />
+  <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
 </p>
 
@@ -342,6 +342,33 @@ Derived tools are auto-generated based on session config:
 
 ---
 
+## Integrations
+
+Publish an agent into a third-party tool and have it act as a real teammate there — assigned, mentioned, replied to like any other user.
+
+### Linear
+
+Make an agent a member of your Linear workspace with its own identity, avatar, and `@autocomplete` slot. The agent appears in the assignee dropdown, gets pinged on `@mentions`, and pushes status back to issues it's working on.
+
+```bash
+# In the Console
+Integrations → Linear → Publish agent
+# Pick agent + environment + persona, paste OAuth credentials, install
+```
+
+How it works:
+
+| Piece | What it does |
+|---|---|
+| **Per-agent App** | Each agent registers as its own Linear OAuth App so identity is isolated |
+| **Inbound webhook** | Linear events (assigned, mentioned, commented) become user messages on a session |
+| **Outbound MCP** | The agent talks back through `mcp.linear.app` with its own bearer, so writes are attributed to the persona |
+| **Capability gate** | Per-publication allowlist (issues / comments / labels / assignment / triage) limits what the agent can do |
+
+The Linear integration ships in three packages: `packages/linear/` (provider logic), `packages/integrations-core/` (provider-neutral persistence types), `packages/integrations-adapters-cf/` (D1 implementation). Adding a second integration (Slack, GitHub, …) is a matter of writing a new provider against the same interfaces.
+
+---
+
 ## Project Structure
 
 ```
@@ -349,10 +376,16 @@ open-managed-agents/
 ├── apps/
 │   ├── main/              # API worker — Hono routes, auth, rate limiting
 │   ├── agent/             # Agent worker — SessionDO + harness + sandbox
-│   └── console/           # Web dashboard — React + Vite
+│   ├── integrations/      # Integrations gateway — Linear OAuth + webhooks
+│   └── console/           # Web dashboard — React + Vite + Tailwind v4
 ├── packages/
-│   └── shared/            # Shared types & utilities
-├── test/                  # 501 tests (unit + integration)
+│   ├── cli/               # `oma` CLI — agent / session / integration commands
+│   ├── shared/            # Shared types & utilities
+│   ├── linear/            # Linear provider (publish flows, webhook signing)
+│   ├── integrations-core/ # Provider-neutral types, persistence interfaces
+│   ├── integrations-adapters-cf/ # D1 / KV / Workers adapter
+│   └── integrations-ui/   # React pages mounted by the Console
+├── test/                  # Unit + integration tests
 └── scripts/               # Deployment scripts
 ```
 
@@ -372,7 +405,7 @@ open-managed-agents/
 ## Testing
 
 ```bash
-npm test          # 501 tests
+npm test          # unit + integration suite
 npm run typecheck # zero errors
 ```
 

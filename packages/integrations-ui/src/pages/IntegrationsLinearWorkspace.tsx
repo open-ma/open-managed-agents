@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import { Link, useParams, useNavigate } from "react-router";
+import { Link, useParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { LinearInstallation, LinearPublication } from "../api/types";
 
@@ -23,9 +23,17 @@ const ALL_CAPABILITIES = [
   "search.read",
 ] as const;
 
+const CAPABILITY_GROUPS: Array<{ label: string; caps: string[] }> = [
+  { label: "Issues", caps: ["issue.read", "issue.create", "issue.update", "issue.delete"] },
+  { label: "Comments", caps: ["comment.write", "comment.delete"] },
+  { label: "Labels", caps: ["label.add", "label.remove"] },
+  { label: "Assignment", caps: ["assignee.set", "assignee.set_other"] },
+  { label: "Triage", caps: ["status.set", "priority.set"] },
+  { label: "Other", caps: ["subissue.create", "user.mention", "search.read"] },
+];
+
 export function IntegrationsLinearWorkspace() {
   const { id } = useParams<{ id: string }>();
-  const nav = useNavigate();
   const [installations, setInstallations] = useState<LinearInstallation[]>([]);
   const [publications, setPublications] = useState<LinearPublication[]>([]);
   const [loading, setLoading] = useState(true);
@@ -55,34 +63,54 @@ export function IntegrationsLinearWorkspace() {
   const installation = installations.find((i) => i.id === id);
 
   return (
-    <div className="px-6 py-5 max-w-3xl">
-      <Link to="/integrations/linear" className="text-sm text-blue-600 hover:underline">
-        ← Linear integrations
-      </Link>
-      {installation && (
-        <header className="mt-3 mb-6">
-          <h1 className="text-xl font-semibold">{installation.workspace_name}</h1>
-          <p className="text-sm text-gray-500 mt-1">
-            Dedicated apps · each agent has full identity in Linear
-          </p>
-        </header>
-      )}
-
-      {loading && <p className="text-sm text-gray-500">Loading…</p>}
-      {error && <p className="text-sm text-red-600">{error}</p>}
-
-      <div className="space-y-3">
-        {publications.map((p) => (
-          <PublicationCard key={p.id} pub={p} onChange={load} />
-        ))}
-      </div>
-      <div className="mt-6">
+    <div className="flex-1 overflow-y-auto">
+      <div className="max-w-[1100px] mx-auto px-8 lg:px-10 py-8 lg:py-10">
         <Link
-          to={`/integrations/linear/publish?workspace=${id}`}
-          className="text-sm text-blue-600 hover:underline"
+          to="/integrations/linear"
+          className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"
         >
-          + Publish another agent
+          ← Linear integrations
         </Link>
+
+        {installation && (
+          <header className="mt-3 mb-7 flex items-end justify-between gap-6">
+            <div className="min-w-0">
+              <h1 className="font-display text-[28px] leading-tight font-semibold tracking-tight text-fg truncate">
+                {installation.workspace_name}
+              </h1>
+              <p className="mt-1.5 text-[14px] text-fg-muted">
+                Dedicated apps · each agent has full identity in Linear
+              </p>
+            </div>
+            <Link
+              to={`/integrations/linear/publish?workspace=${id}`}
+              className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors whitespace-nowrap"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
+              Publish another
+            </Link>
+          </header>
+        )}
+
+        {loading && <p className="text-sm text-fg-muted">Loading…</p>}
+        {error && (
+          <div className="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-sm text-danger">
+            {error}
+          </div>
+        )}
+
+        <div className="space-y-3">
+          {publications.map((p) => (
+            <PublicationCard key={p.id} pub={p} onChange={load} />
+          ))}
+        </div>
+
+        {!loading && publications.length === 0 && (
+          <div className="border border-border rounded-lg px-6 py-12 text-center bg-bg-surface/30">
+            <div className="font-mono text-fg-subtle text-sm select-none mb-3">[ &nbsp;&nbsp; ]</div>
+            <p className="text-sm text-fg">No agents published yet.</p>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -110,6 +138,7 @@ function PublicationCard({
         persona: { name: personaName, avatarUrl: personaAvatar || null },
         capabilities: [...caps],
       });
+      setOpen(false);
       onChange();
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
@@ -141,86 +170,125 @@ function PublicationCard({
   }
 
   return (
-    <div className="border border-gray-200 rounded">
+    <div className="border border-border rounded-lg overflow-hidden bg-bg">
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between p-3 hover:bg-gray-50"
+        className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-bg-surface/40 transition-colors text-left"
       >
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex items-center gap-3 min-w-0 flex-1">
           {pub.persona.avatarUrl ? (
-            <img src={pub.persona.avatarUrl} alt="" className="w-5 h-5 rounded-full" />
+            <img src={pub.persona.avatarUrl} alt="" className="w-7 h-7 rounded-full shrink-0" />
           ) : (
-            <div className="w-5 h-5 rounded-full bg-gray-200 flex items-center justify-center text-xs">
+            <div className="w-7 h-7 rounded-full bg-brand-subtle text-brand flex items-center justify-center text-[12px] font-medium shrink-0">
               {pub.persona.name.slice(0, 1).toUpperCase()}
             </div>
           )}
-          <span className="font-medium">{pub.persona.name}</span>
-          <span className="text-xs text-gray-500">{pub.status}</span>
+          <div className="min-w-0">
+            <div className="text-[15px] font-medium text-fg truncate">{pub.persona.name}</div>
+            <div className="text-[11px] text-fg-muted font-mono uppercase tracking-wider">
+              {pub.status}
+            </div>
+          </div>
         </div>
-        <span className="text-xs text-gray-400">{open ? "Hide" : "Edit"}</span>
+        <span className="shrink-0 text-[12px] text-fg-muted">
+          {open ? "Hide" : "Edit"} {open ? "▲" : "▼"}
+        </span>
       </button>
 
       {open && (
-        <div className="border-t border-gray-100 p-4 space-y-4 text-sm">
-          {error && <p className="text-red-600 text-xs">{error}</p>}
+        <div className="border-t border-border p-5 space-y-5 text-sm bg-bg-surface/20">
+          {error && (
+            <div className="rounded-md border border-danger/30 bg-danger-subtle px-3 py-2 text-[13px] text-danger">
+              {error}
+            </div>
+          )}
 
-          <div>
-            <label className="block font-medium mb-1">Persona name</label>
-            <input
-              value={personaName}
-              onChange={(e) => setPersonaName(e.target.value)}
-              className="w-full border border-gray-300 rounded px-3 py-2"
-            />
+          <div className="grid md:grid-cols-2 gap-4">
+            <Field label="Persona name">
+              <input
+                value={personaName}
+                onChange={(e) => setPersonaName(e.target.value)}
+                className={inputCls}
+              />
+            </Field>
+            <Field label="Avatar URL">
+              <input
+                value={personaAvatar}
+                onChange={(e) => setPersonaAvatar(e.target.value)}
+                placeholder="https://…"
+                className={inputCls}
+              />
+            </Field>
           </div>
 
           <div>
-            <label className="block font-medium mb-1">Avatar URL</label>
-            <input
-              value={personaAvatar}
-              onChange={(e) => setPersonaAvatar(e.target.value)}
-              placeholder="https://…"
-              className="w-full border border-gray-300 rounded px-3 py-2"
-            />
-          </div>
-
-          <div>
-            <label className="block font-medium mb-1">Capabilities</label>
-            <p className="text-xs text-gray-500 mb-2">
+            <div className="flex items-baseline justify-between mb-2">
+              <label className="text-[13px] font-medium text-fg">Capabilities</label>
+              <span className="text-[12px] text-fg-muted">
+                {caps.size} of {ALL_CAPABILITIES.length} enabled
+              </span>
+            </div>
+            <p className="text-[12px] text-fg-muted mb-3">
               What this agent may do in Linear. Defaults to everything; uncheck to restrict.
             </p>
-            <div className="grid grid-cols-2 gap-1.5">
-              {ALL_CAPABILITIES.map((cap) => (
-                <label key={cap} className="flex items-center gap-2 text-xs">
-                  <input
-                    type="checkbox"
-                    checked={caps.has(cap)}
-                    onChange={() => toggleCap(cap)}
-                  />
-                  <code className="text-gray-600">{cap}</code>
-                </label>
+            <div className="grid sm:grid-cols-2 gap-x-6 gap-y-4">
+              {CAPABILITY_GROUPS.map((g) => (
+                <div key={g.label}>
+                  <div className="font-mono text-[10px] tracking-wider text-fg-subtle uppercase mb-1.5">
+                    {g.label}
+                  </div>
+                  <div className="space-y-1">
+                    {g.caps.map((cap) => (
+                      <label
+                        key={cap}
+                        className="flex items-center gap-2 text-[12px] cursor-pointer hover:text-fg text-fg-muted"
+                      >
+                        <input
+                          type="checkbox"
+                          checked={caps.has(cap)}
+                          onChange={() => toggleCap(cap)}
+                          className="accent-brand"
+                        />
+                        <code className="font-mono">{cap}</code>
+                      </label>
+                    ))}
+                  </div>
+                </div>
               ))}
             </div>
           </div>
 
-          <div className="pt-2 flex items-center justify-between">
+          <div className="pt-2 flex items-center justify-between border-t border-border -mx-5 px-5 -mb-5 pb-5 mt-5">
             <button
               onClick={save}
               disabled={working}
-              className="px-3 py-1.5 bg-black text-white rounded hover:bg-gray-800 disabled:opacity-50 text-xs"
+              className="px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
             >
-              {working ? "Saving…" : "Save"}
+              {working ? "Saving…" : "Save changes"}
             </button>
             <button
               onClick={unpublish}
               disabled={working}
-              className="text-xs text-red-600 hover:underline disabled:opacity-50"
+              className="text-[12px] text-danger hover:underline disabled:opacity-50"
             >
-              Unpublish
+              Unpublish agent
             </button>
           </div>
         </div>
       )}
+    </div>
+  );
+}
+
+const inputCls =
+  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+
+function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <label className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
+      {children}
     </div>
   );
 }
