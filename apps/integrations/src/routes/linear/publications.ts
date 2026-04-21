@@ -69,12 +69,21 @@ interface SubmitCredentialsBody {
   formToken: string;
   clientId: string;
   clientSecret: string;
+  webhookSecret: string;
 }
 
 app.post("/credentials", async (c) => {
   const body = await c.req.json<SubmitCredentialsBody>();
-  if (!body.formToken || !body.clientId || !body.clientSecret) {
-    return c.json({ error: "formToken, clientId, clientSecret required" }, 400);
+  if (!body.formToken || !body.clientId || !body.clientSecret || !body.webhookSecret) {
+    return c.json(
+      {
+        error: "formToken, clientId, clientSecret, webhookSecret required",
+        hint:
+          "webhookSecret comes from the Linear App's webhook page (the 'lin_wh_…' value). " +
+          "Linear auto-generates it; OMA can't predict it.",
+      },
+      400,
+    );
   }
 
   const container = buildContainer(c.env);
@@ -89,6 +98,7 @@ app.post("/credentials", async (c) => {
         formToken: body.formToken,
         clientId: body.clientId,
         clientSecret: body.clientSecret,
+        webhookSecret: body.webhookSecret,
       },
     });
   } catch (err) {

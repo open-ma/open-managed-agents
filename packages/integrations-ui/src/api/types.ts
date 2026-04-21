@@ -33,7 +33,6 @@ export interface A1FormStep {
   suggestedAvatarUrl: string | null;
   callbackUrl: string;
   webhookUrl: string;
-  webhookSecret: string;
 }
 
 export interface A1InstallLink {

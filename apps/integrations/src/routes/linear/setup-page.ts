@@ -72,7 +72,10 @@ function landingPage(opts: { token: string; personaName: string }): string {
         <li>Scopes: read, write, app:assignable, app:mentionable</li>
       </ul>
     </li>
-    <li>Linear will give you <strong>Client ID</strong> and <strong>Client Secret</strong>. Paste them below.</li>
+    <li>Linear will give you <strong>Client ID</strong>, <strong>Client Secret</strong>,
+      and a <strong>Webhook signing secret</strong> (starts with <code>lin_wh_</code>).
+      Paste all three below — Linear auto-generates the webhook secret and OMA can't
+      predict it, so we need it from you.</li>
     <li>Click "Continue" and approve the install in your Linear workspace.</li>
   </ol>
 
@@ -81,6 +84,8 @@ function landingPage(opts: { token: string; personaName: string }): string {
     <input id="cid" name="cid" required autocomplete="off">
     <label for="csec">Client Secret</label>
     <input id="csec" name="csec" type="password" required autocomplete="off">
+    <label for="whsec">Webhook signing secret (lin_wh_…)</label>
+    <input id="whsec" name="whsec" type="password" required autocomplete="off" placeholder="lin_wh_…">
     <button id="submit" type="submit">Continue →</button>
     <p id="msg"></p>
   </form>
@@ -102,6 +107,7 @@ function landingPage(opts: { token: string; personaName: string }): string {
             formToken: TOKEN,
             clientId: document.getElementById("cid").value.trim(),
             clientSecret: document.getElementById("csec").value.trim(),
+            webhookSecret: document.getElementById("whsec").value.trim(),
           }),
         });
         const data = await res.json();
