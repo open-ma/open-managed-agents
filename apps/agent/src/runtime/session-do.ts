@@ -33,6 +33,23 @@ interface SessionInitParams {
   environment_id: string;
   title: string;
   session_id?: string;
+  tenant_id?: string;
+  vault_ids?: string[];
+  /**
+   * Pre-fetched tenant config snapshots passed in by the main worker. Lets
+   * SessionDO avoid reading CONFIG_KV with `t:tenantId:...` keys directly —
+   * which is wrong when the SessionDO worker is bound to a different KV
+   * namespace than the writing worker (e.g. shared sandbox-default serving
+   * both prod and staging mains). Optional for backward compat: when absent,
+   * SessionDO falls back to its own CONFIG_KV.
+   */
+  agent_snapshot?: AgentConfig;
+  environment_snapshot?: EnvironmentConfig;
+  /**
+   * Pre-fetched credentials grouped by vault id. Mirrors what SessionDO would
+   * otherwise read via `CONFIG_KV.list({ prefix: t:tenantId:cred:vaultId: })`.
+   */
+  vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
 }
 
 /**
@@ -62,6 +79,15 @@ interface SessionState {
   pending_tool_calls: PendingToolCall[];
   outcome: { description: string; rubric?: string; max_iterations?: number } | null;
   outcome_iteration: number;
+  /**
+   * Tenant config snapshots provided at /init by main worker. Used by
+   * getAgentConfig/getEnvConfig/getVaultCredentials so SessionDO doesn't
+   * need to read tenant-scoped CONFIG_KV keys directly. Optional —
+   * absence triggers KV fallback for backward compat with prod.
+   */
+  agent_snapshot?: AgentConfig;
+  environment_snapshot?: EnvironmentConfig;
+  vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
 }
 
 const INITIAL_SESSION_STATE: SessionState = {
@@ -99,6 +125,67 @@ export class SessionDO extends Agent<Env, SessionState> {
   /** Build a tenant-scoped KV key */
   private tk(...parts: string[]): string {
     return `t:${this.state.tenant_id}:${parts.join(":")}`;
+  }
+
+  /**
+   * Resolve an agent config. Prefers the snapshot passed at /init; falls back
+   * to a tenant-scoped CONFIG_KV read for backward compat or for agentIds that
+   * weren't pre-snapshotted (e.g. sub-agents). Returns null on miss.
+   *
+   * Why this exists: sandbox-default's CONFIG_KV binding may point at a
+   * different namespace than the worker that wrote the agent (e.g. shared
+   * sandbox serving both prod-main and staging-main). Snapshots flow the
+   * data through the init body and avoid the KV cross-binding issue.
+   */
+  private async getAgentConfig(agentId: string): Promise<AgentConfig | null> {
+    if (this.state.agent_snapshot && agentId === this.state.agent_id) {
+      return this.state.agent_snapshot;
+    }
+    const json = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
+    return json ? (JSON.parse(json) as AgentConfig) : null;
+  }
+
+  /** Same idea as getAgentConfig but for environments. */
+  private async getEnvConfig(envId: string): Promise<EnvironmentConfig | null> {
+    if (this.state.environment_snapshot && envId === this.state.environment_id) {
+      return this.state.environment_snapshot;
+    }
+    const json = await this.env.CONFIG_KV.get(this.tk("env", envId));
+    return json ? (JSON.parse(json) as EnvironmentConfig) : null;
+  }
+
+  /**
+   * Resolve all credentials for the listed vaults. Prefers the pre-fetched
+   * snapshot from /init; falls back to KV list/get loops if absent.
+   */
+  private async getVaultCredentials(
+    vaultIds: string[],
+  ): Promise<CredentialConfig[]> {
+    const fromSnapshot = this.state.vault_credentials;
+    if (fromSnapshot) {
+      const snapshotMap = new Map(fromSnapshot.map((v) => [v.vault_id, v.credentials]));
+      const out: CredentialConfig[] = [];
+      for (const vaultId of vaultIds) {
+        const creds = snapshotMap.get(vaultId);
+        if (creds) out.push(...creds);
+      }
+      return out;
+    }
+    // Fallback: KV list/get loop. Mirrors the original logic at the call sites.
+    const out: CredentialConfig[] = [];
+    for (const vaultId of vaultIds) {
+      const credList = await this.env.CONFIG_KV.list({ prefix: this.tk("cred", vaultId) + ":" });
+      for (const k of credList.keys) {
+        const credData = await this.env.CONFIG_KV.get(k.name);
+        if (!credData) continue;
+        try {
+          out.push(JSON.parse(credData) as CredentialConfig);
+        } catch {
+          // skip malformed
+        }
+      }
+    }
+    return out;
   }
 
   // Disable Agent's observability to avoid SpanParent I/O isolation
@@ -313,7 +400,19 @@ export class SessionDO extends Agent<Env, SessionState> {
     // PUT /init — initialize session
     if (request.method === "PUT" && url.pathname === "/init") {
       const params = (await request.json()) as SessionInitParams;
-      this.setState({ ...this.state, agent_id: params.agent_id, environment_id: params.environment_id, title: params.title, session_id: params.session_id || this.state.session_id, tenant_id: (params as any).tenant_id || "default", vault_ids: (params as any).vault_ids || [], status: "idle" });
+      this.setState({
+        ...this.state,
+        agent_id: params.agent_id,
+        environment_id: params.environment_id,
+        title: params.title,
+        session_id: params.session_id || this.state.session_id,
+        tenant_id: params.tenant_id ?? "default",
+        vault_ids: params.vault_ids ?? [],
+        agent_snapshot: params.agent_snapshot,
+        environment_snapshot: params.environment_snapshot,
+        vault_credentials: params.vault_credentials,
+        status: "idle",
+      });
 
       // Pre-warm sandbox in background (container start + package install)
       // Errors are swallowed — warmup is best-effort
@@ -666,9 +765,8 @@ export class SessionDO extends Agent<Env, SessionState> {
   private async spawnSessionStdioMcps(sandbox: SandboxExecutor): Promise<void> {
     const agentId = this.state.agent_id;
     if (!agentId || !this.env.CONFIG_KV) return;
-    const agentJson = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
-    if (!agentJson) return;
-    const agent = JSON.parse(agentJson) as AgentConfig;
+    const agent = await this.getAgentConfig(agentId);
+    if (!agent) return;
     const mcps = agent.mcp_servers || [];
     const stdios: StdioMcpConfig[] = [];
     for (const s of mcps) {
@@ -751,9 +849,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Install environment packages if configured
       const envId = this.state.environment_id;
       if (envId) {
-        const envJson = await this.env.CONFIG_KV.get(this.tk("env", envId));
-        if (envJson) {
-          const envConfig = JSON.parse(envJson) as EnvironmentConfig;
+        const envConfig = await this.getEnvConfig(envId);
+        if (envConfig) {
           const pkgs = envConfig.config?.packages;
           if (pkgs) {
             const cmds: string[] = [];
@@ -778,6 +875,10 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Mount all session resources (files, git repos, env secrets)
       const sessionId = this.state.session_id;
       if (sessionId) {
+        // TODO(staging-kv): direct CONFIG_KV read with tenant prefix — won't
+        // resolve when sandbox-default's KV binding differs from main's
+        // (e.g. shared sandbox + staging main). Snapshot the resources at
+        // /init time when the staging path needs session resources.
         const resourceList = await this.env.CONFIG_KV.list({ prefix: this.tk("sesrsc", sessionId) + ":" });
         const resources: Array<Record<string, unknown>> = [];
         const secretStore = new Map<string, string>();
@@ -810,19 +911,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Register command_secret credentials from vaults
       const vaultIds = this.state.vault_ids;
       if (vaultIds.length && sandbox.registerCommandSecrets) {
-        for (const vaultId of vaultIds) {
-          const credList = await this.env.CONFIG_KV.list({ prefix: this.tk("cred", vaultId) + ":" });
-          for (const k of credList.keys) {
-            const credData = await this.env.CONFIG_KV.get(k.name);
-            if (!credData) continue;
-            try {
-              const cred = JSON.parse(credData) as CredentialConfig;
-              if (cred.auth?.type === "command_secret" && cred.auth.command_prefixes?.length && cred.auth.env_var && cred.auth.token) {
-                for (const prefix of cred.auth.command_prefixes) {
-                  sandbox.registerCommandSecrets(prefix, { [cred.auth.env_var]: cred.auth.token });
-                }
-              }
-            } catch {}
+        const creds = await this.getVaultCredentials(vaultIds);
+        for (const cred of creds) {
+          if (cred.auth?.type === "command_secret" && cred.auth.command_prefixes?.length && cred.auth.env_var && cred.auth.token) {
+            for (const prefix of cred.auth.command_prefixes) {
+              sandbox.registerCommandSecrets(prefix, { [cred.auth.env_var]: cred.auth.token });
+            }
           }
         }
       }
@@ -893,6 +987,9 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     if (cardId && this.env.CONFIG_KV) {
       try {
+        // TODO(staging-kv): direct CONFIG_KV reads with tenant prefix — won't
+        // resolve in staging until we snapshot model cards at /init or route
+        // through main via service binding.
         const [cardData, keyData] = await Promise.all([
           this.env.CONFIG_KV.get(this.tk("modelcard", cardId)),
           this.env.CONFIG_KV.get(this.tk("modelcard", `${cardId}:key`)),
@@ -911,6 +1008,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     } else if (this.env.CONFIG_KV) {
       // No explicit card_id — try to find a card by model_id match
       try {
+        // TODO(staging-kv): tenant-prefix list — see comment on getAgentConfig.
         const list = await this.env.CONFIG_KV.list({ prefix: this.tk("modelcard") + ":" });
         for (const k of list.keys) {
           if (k.name.includes(":key")) continue;
@@ -984,18 +1082,15 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (confirmation.result === "allow" && pending) {
       // Execute the tool
       const agentId = this.state.agent_id;
-      const agentJson = agentId ? await this.env.CONFIG_KV.get(this.tk("agent", agentId)) : null;
+      const agent = agentId ? await this.getAgentConfig(agentId) : null;
 
-      if (agentJson) {
-        const agent = JSON.parse(agentJson) as AgentConfig;
-
+      if (agent) {
         // Fetch environment config for networking restrictions
         const envId = this.state.environment_id;
         let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
         if (envId) {
-          const envJson = await this.env.CONFIG_KV.get(this.tk("env", envId));
-          if (envJson) {
-            const envCfg = JSON.parse(envJson) as EnvironmentConfig;
+          const envCfg = await this.getEnvConfig(envId);
+          if (envCfg) {
             environmentConfig = envCfg.config;
           }
         }
@@ -1074,6 +1169,15 @@ export class SessionDO extends Agent<Env, SessionState> {
   private async resolveCredentialToken(credentialId?: string): Promise<string | null> {
     if (!credentialId) return null;
     const vaultIds = this.state.vault_ids;
+    // Prefer snapshot — works in staging where CONFIG_KV is the wrong namespace.
+    const snapshotCreds = await this.getVaultCredentials(vaultIds);
+    for (const cred of snapshotCreds) {
+      if (cred.id === credentialId) {
+        return cred.auth?.token || cred.auth?.access_token || null;
+      }
+    }
+    // Fallback: direct KV lookup. Already covered by getVaultCredentials when
+    // the snapshot is absent, but we keep this exact-key get as a fast path.
     for (const vaultId of vaultIds) {
       const credData = await this.env.CONFIG_KV.get(this.tk("cred", vaultId, credentialId));
       if (credData) {
@@ -1225,12 +1329,16 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Generate a unique thread ID
     const threadId = `thread_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
 
-    // Fetch sub-agent config from KV
-    const agentJson = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
-    if (!agentJson) {
+    // Fetch sub-agent config. Uses getAgentConfig so the parent agent's
+    // snapshot is consulted when the sub-agent id matches the session's
+    // agent_id; otherwise falls back to KV (broken in staging — sub-agents
+    // with arbitrary ids aren't snapshotted).
+    // TODO(staging-kv): pre-fetch sub-agent configs at /init when the agent
+    // declares them in mcp_servers / sub_agents.
+    const subAgent = await this.getAgentConfig(agentId);
+    if (!subAgent) {
       return `Sub-agent error: agent "${agentId}" not found`;
     }
-    const subAgent = JSON.parse(agentJson) as AgentConfig;
 
     // Store thread
     this.threads.set(threadId, { agentId, agentConfig: subAgent });
@@ -1346,8 +1454,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     const agentId = this.state.agent_id;
     if (!agentId) return;
 
-    const agentJson = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
-    if (!agentJson) {
+    const agent = await this.getAgentConfig(agentId);
+    if (!agent) {
       const history = new SqliteHistory(this.ctx.storage.sql);
       const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
       history.append(errorEvent);
@@ -1356,7 +1464,6 @@ export class SessionDO extends Agent<Env, SessionState> {
       return;
     }
 
-    const agent = JSON.parse(agentJson) as AgentConfig;
     const history = new SqliteHistory(this.ctx.storage.sql);
 
     // Reuse session-level sandbox (singleton) — files persist across turns
@@ -1380,9 +1487,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     const envId = this.state.environment_id;
     let environmentConfig: { networking?: { type: string; allowed_hosts?: string[] } } | undefined;
     if (envId) {
-      const envJson = await this.env.CONFIG_KV.get(this.tk("env", envId));
-      if (envJson) {
-        const envCfg = JSON.parse(envJson) as EnvironmentConfig;
+      const envCfg = await this.getEnvConfig(envId);
+      if (envCfg) {
         environmentConfig = envCfg.config;
       }
     }
@@ -1392,6 +1498,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     const memoryStoreIds: string[] = [];
     const memoryPrompts: string[] = [];
     if (sessionId) {
+      // TODO(staging-kv): tenant-prefix missing here AND wrong KV namespace
+      // in staging. Snapshot session resources at /init before fixing.
       const resourceList = await this.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
       for (const k of resourceList.keys) {
         const data = await this.env.CONFIG_KV.get(k.name);

@@ -171,47 +171,6 @@ app.delete("/linear/publications/:id", async (c) => {
 // main; main proxies these calls to the gateway via the INTEGRATIONS service
 // binding so Console stays single-origin (no CORS).
 
-interface InstallSharedBody {
-  agentId: string;
-  environmentId: string;
-  personaName: string;
-  personaAvatarUrl?: string | null;
-  returnUrl: string;
-}
-
-app.post("/linear/install-shared", async (c) => {
-  const userId = c.get("user_id")!;
-  const body = await c.req.json<InstallSharedBody>();
-  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
-  const internalSecret = c.env.INTEGRATIONS_INTERNAL_SECRET;
-  if (!internalSecret) return c.json({ error: "INTEGRATIONS_INTERNAL_SECRET not configured" }, 503);
-  const params = new URLSearchParams({
-    user_id: userId,
-    agent_id: body.agentId,
-    environment_id: body.environmentId,
-    mode: "quick",
-    persona_name: body.personaName,
-    return_to: body.returnUrl,
-  });
-  if (body.personaAvatarUrl) params.set("persona_avatar", body.personaAvatarUrl);
-  // Hit the gateway's GET /linear/install — it 302s to Linear. We pass the
-  // redirect URL back to Console so the browser can navigate to it.
-  const res = await c.env.INTEGRATIONS.fetch(
-    `http://gateway/linear/install?${params.toString()}`,
-    {
-      method: "GET",
-      redirect: "manual",
-      headers: { "x-internal-secret": internalSecret },
-    },
-  );
-  const location = res.headers.get("location");
-  if (!location) {
-    const text = await res.text();
-    return c.json({ error: "gateway didn't redirect", body: text }, 502);
-  }
-  return c.json({ url: location });
-});
-
 app.post("/linear/start-a1", async (c) => {
   const userId = c.get("user_id")!;
   const body = await c.req.json();
@@ -279,10 +238,8 @@ function serializePublication(p: Publication) {
     mode: p.mode,
     status: p.status,
     persona: p.persona,
-    slash_command: p.slashCommand,
     capabilities: [...p.capabilities],
     session_granularity: p.sessionGranularity,
-    is_default_agent: p.isDefaultAgent,
     created_at: p.createdAt,
     unpublished_at: p.unpublishedAt,
   };

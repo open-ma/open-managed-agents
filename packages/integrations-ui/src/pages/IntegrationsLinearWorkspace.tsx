@@ -63,9 +63,7 @@ export function IntegrationsLinearWorkspace() {
         <header className="mt-3 mb-6">
           <h1 className="text-xl font-semibold">{installation.workspace_name}</h1>
           <p className="text-sm text-gray-500 mt-1">
-            {installation.install_kind === "dedicated"
-              ? "Dedicated apps · each agent has full identity in Linear"
-              : "Shared OpenMA bot · agents share one identity"}
+            Dedicated apps · each agent has full identity in Linear
           </p>
         </header>
       )}
@@ -159,7 +157,6 @@ function PublicationCard({
           )}
           <span className="font-medium">{pub.persona.name}</span>
           <span className="text-xs text-gray-500">{pub.status}</span>
-          {pub.is_default_agent && <span className="text-xs text-gray-500">· default</span>}
         </div>
         <span className="text-xs text-gray-400">{open ? "Hide" : "Edit"}</span>
       </button>

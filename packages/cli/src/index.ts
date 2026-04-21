@@ -22,7 +22,7 @@ function loadConfig(): Config {
 
 // ─── API Client ───
 
-async function api<T = unknown>(config: Config, path: string, init?: RequestInit): Promise<T> {
+async function apiFetch<T = unknown>(config: Config, path: string, init?: RequestInit): Promise<T> {
   const url = `${config.baseUrl}${path}`;
   const res = await fetch(url, {
     ...init,
@@ -54,220 +54,291 @@ function table(rows: string[][]) {
   }
 }
 
-// ─── Commands: Agents ───
+// ─── Command Registry ───
 
-async function agentsList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; name: string; model: any; created_at: string }> }>(config, "/v1/agents?limit=100");
-  if (!data.length) { console.log("No agents. Create one with: oma agents create"); return; }
-  table([
-    ["NAME", "ID", "MODEL", "CREATED"],
-    ...data.map(a => [a.name, a.id, typeof a.model === "string" ? a.model : a.model?.id || "", new Date(a.created_at).toLocaleDateString()]),
-  ]);
+interface Cmd {
+  group: string;
+  match: string[];
+  needsArg?: boolean;
+  usage: string;
+  desc: string;
+  http: string;
+  run: (config: Config, args: string[]) => Promise<void> | void;
 }
 
-async function agentsCreate(config: Config, args: string[]) {
-  const name = flag(args, "--name") || args.find(a => !a.startsWith("--"));
-  const model = flag(args, "--model") || "claude-sonnet-4-6";
-  const system = flag(args, "--system") || "";
-  if (!name) { console.error("Usage: oma agents create <name> [--model <id>] [--system <prompt>]"); process.exit(1); }
-  const agent = await api<{ id: string; name: string }>(config, "/v1/agents", {
-    method: "POST",
-    body: JSON.stringify({ name, model, system, tools: [{ type: "agent_toolset_20260401" }] }),
-  });
-  console.log(`Agent created: ${agent.name} (${agent.id})`);
-}
+const commands: Cmd[] = [
+  // Agents
+  {
+    group: "Agents", match: ["agents", "list"],
+    usage: "oma agents list", desc: "List agents",
+    http: "GET    /v1/agents?limit=N&order=asc|desc",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; model: any; created_at: string }> }>(config, "/v1/agents?limit=100");
+      if (!data.length) { console.log("No agents. Create one with: oma agents create"); return; }
+      table([["NAME", "ID", "MODEL", "CREATED"], ...data.map(a => [a.name, a.id, typeof a.model === "string" ? a.model : a.model?.id || "", new Date(a.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "Agents", match: ["agents", "create"],
+    usage: "oma agents create <name> [--model <id>]", desc: "Create agent",
+    http: "POST   /v1/agents {name, model, system, tools, skills?, mcp_servers?, callable_agents?}",
+    async run(config, args) {
+      const name = flag(args, "--name") || args.find(a => !a.startsWith("--"));
+      const model = flag(args, "--model") || "claude-sonnet-4-6";
+      const system = flag(args, "--system") || "";
+      if (!name) { console.error("Usage: oma agents create <name> [--model <id>] [--system <prompt>]"); process.exit(1); }
+      const agent = await apiFetch<{ id: string; name: string }>(config, "/v1/agents", { method: "POST", body: JSON.stringify({ name, model, system, tools: [{ type: "agent_toolset_20260401" }] }) });
+      console.log(`Agent created: ${agent.name} (${agent.id})`);
+    },
+  },
+  {
+    group: "Agents", match: ["agents", "get"], needsArg: true,
+    usage: "oma agents get <id>", desc: "Get agent details",
+    http: "GET    /v1/agents/:id",
+    async run(config, args) {
+      const a = await apiFetch<any>(config, `/v1/agents/${args[0]}`);
+      console.log(`Name:    ${a.name}\nID:      ${a.id}\nModel:   ${typeof a.model === "string" ? a.model : a.model?.id}\nVersion: v${a.version}`);
+      if (a.description) console.log(`Desc:    ${a.description}`);
+      if (a.system) console.log(`System:  ${a.system.slice(0, 100)}${a.system.length > 100 ? "..." : ""}`);
+    },
+  },
+  {
+    group: "Agents", match: ["agents", "delete"], needsArg: true,
+    usage: "oma agents delete <id>", desc: "Delete agent",
+    http: "DELETE /v1/agents/:id",
+    async run(config, args) { await apiFetch(config, `/v1/agents/${args[0]}`, { method: "DELETE" }); console.log(`Agent deleted: ${args[0]}`); },
+  },
 
-async function agentsGet(config: Config, id: string) {
-  const a = await api<any>(config, `/v1/agents/${id}`);
-  console.log(`Name:    ${a.name}`);
-  console.log(`ID:      ${a.id}`);
-  console.log(`Model:   ${typeof a.model === "string" ? a.model : a.model?.id}`);
-  console.log(`Version: v${a.version}`);
-  if (a.description) console.log(`Desc:    ${a.description}`);
-  if (a.system) console.log(`System:  ${a.system.slice(0, 100)}${a.system.length > 100 ? "..." : ""}`);
-}
+  // Sessions
+  {
+    group: "Sessions", match: ["sessions", "list"],
+    usage: "oma sessions list", desc: "List sessions",
+    http: "GET    /v1/sessions?agent_id=X&limit=N",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; title: string; agent_id: string; status: string; created_at: string }> }>(config, "/v1/sessions?limit=20");
+      if (!data.length) { console.log("No sessions."); return; }
+      table([["TITLE", "ID", "STATUS", "AGENT", "CREATED"], ...data.map(s => [s.title || "Untitled", s.id, s.status || "idle", s.agent_id, new Date(s.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "Sessions", match: ["sessions", "create"],
+    usage: "oma sessions create --agent <id> --env <id> [--title <t>]", desc: "Create session",
+    http: "POST   /v1/sessions {agent, environment_id, title?, vault_ids?, resources?}",
+    async run(config, args) {
+      const agentId = flag(args, "--agent"); const envId = flag(args, "--env"); const title = flag(args, "--title") || "";
+      if (!agentId || !envId) { console.error("Usage: oma sessions create --agent <id> --env <id> [--title <text>]"); process.exit(1); }
+      const session = await apiFetch<{ id: string }>(config, "/v1/sessions", { method: "POST", body: JSON.stringify({ agent: agentId, environment_id: envId, title }) });
+      console.log(`Session created: ${session.id}`);
+    },
+  },
+  {
+    group: "Sessions", match: ["sessions", "message"], needsArg: true,
+    usage: "oma sessions message <id> <text>", desc: "Send message to session",
+    http: "POST   /v1/sessions/:id/events {events:[{type:\"user.message\",content:[{type:\"text\",text:\"...\"}]}]}",
+    async run(config, args) {
+      const text = args.slice(1).join(" ");
+      await apiFetch(config, `/v1/sessions/${args[0]}/events`, { method: "POST", body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text }] }] }) });
+      console.log("Message sent.");
+    },
+  },
 
-async function agentsDelete(config: Config, id: string) {
-  await api(config, `/v1/agents/${id}`, { method: "DELETE" });
-  console.log(`Agent deleted: ${id}`);
-}
+  // Environments
+  {
+    group: "Environments", match: ["envs", "list"],
+    usage: "oma envs list", desc: "List environments",
+    http: "GET    /v1/environments",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; status: string }> }>(config, "/v1/environments");
+      if (!data.length) { console.log("No environments. Create one with: oma envs create <name>"); return; }
+      table([["NAME", "ID", "STATUS"], ...data.map(e => [e.name, e.id, e.status || "ready"])]);
+    },
+  },
+  {
+    group: "Environments", match: ["envs", "create"], needsArg: true,
+    usage: "oma envs create <name>", desc: "Create environment",
+    http: "POST   /v1/environments {name, config:{type:\"cloud\"}}",
+    async run(config, args) {
+      const env = await apiFetch<{ id: string; name: string }>(config, "/v1/environments", { method: "POST", body: JSON.stringify({ name: args.join(" "), config: { type: "cloud" } }) });
+      console.log(`Environment created: ${env.name} (${env.id})`);
+    },
+  },
 
-// ─── Commands: Sessions ───
+  // Model Cards
+  {
+    group: "Model Cards", match: ["models", "list"],
+    usage: "oma models list", desc: "List model cards",
+    http: "GET    /v1/model_cards",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; provider: string; model_id: string; api_key_preview: string; is_default: boolean }> }>(config, "/v1/model_cards");
+      if (!data.length) { console.log("No model cards. Create one with: oma models create"); return; }
+      table([["NAME", "PROVIDER", "MODEL", "KEY", "DEFAULT"], ...data.map(c => [c.name, c.provider, c.model_id, `****${c.api_key_preview || ""}`, c.is_default ? "yes" : ""])]);
+    },
+  },
+  {
+    group: "Model Cards", match: ["models", "create"],
+    usage: "oma models create --name <n> --model-id <id> --api-key <key> [--provider <p>]", desc: "Create model card",
+    http: "POST   /v1/model_cards {name, provider, model_id, api_key, base_url?, is_default?}",
+    async run(config, args) {
+      const name = flag(args, "--name"); const provider = flag(args, "--provider") || "ant"; const modelId = flag(args, "--model-id"); const apiKey = flag(args, "--api-key"); const baseUrl = flag(args, "--base-url");
+      if (!name || !modelId || !apiKey) { console.error("Usage: oma models create --name <name> --model-id <id> --api-key <key> [--provider ant|oai|ant-compatible|oai-compatible] [--base-url <url>]"); process.exit(1); }
+      const card = await apiFetch<{ id: string; name: string }>(config, "/v1/model_cards", { method: "POST", body: JSON.stringify({ name, provider, model_id: modelId, api_key: apiKey, base_url: baseUrl }) });
+      console.log(`Model card created: ${card.name} (${card.id})`);
+    },
+  },
 
-async function sessionsList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; title: string; agent_id: string; status: string; created_at: string }> }>(config, "/v1/sessions?limit=20");
-  if (!data.length) { console.log("No sessions."); return; }
-  table([
-    ["TITLE", "ID", "STATUS", "AGENT", "CREATED"],
-    ...data.map(s => [s.title || "Untitled", s.id, s.status || "idle", s.agent_id, new Date(s.created_at).toLocaleDateString()]),
-  ]);
-}
+  // API Keys
+  {
+    group: "API Keys", match: ["keys", "list"],
+    usage: "oma keys list", desc: "List API keys",
+    http: "GET    /v1/api_keys",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; prefix: string; created_at: string }> }>(config, "/v1/api_keys");
+      if (!data.length) { console.log("No API keys. Create one with: oma keys create"); return; }
+      table([["NAME", "ID", "PREFIX", "CREATED"], ...data.map(k => [k.name, k.id, k.prefix + "...", new Date(k.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "API Keys", match: ["keys", "create"],
+    usage: "oma keys create [name]", desc: "Create API key",
+    http: "POST   /v1/api_keys {name?} — raw key returned once",
+    async run(config, args) {
+      const key = await apiFetch<{ id: string; key: string; name: string }>(config, "/v1/api_keys", { method: "POST", body: JSON.stringify({ name: args.join(" ") || "CLI key" }) });
+      console.log(`API key created: ${key.name}\n\n  ${key.key}\n\nSave this key — it won't be shown again.`);
+    },
+  },
+  {
+    group: "API Keys", match: ["keys", "revoke"], needsArg: true,
+    usage: "oma keys revoke <id>", desc: "Revoke API key",
+    http: "DELETE /v1/api_keys/:id",
+    async run(config, args) { await apiFetch(config, `/v1/api_keys/${args[0]}`, { method: "DELETE" }); console.log(`API key revoked: ${args[0]}`); },
+  },
 
-async function sessionsCreate(config: Config, args: string[]) {
-  const agentId = flag(args, "--agent");
-  const envId = flag(args, "--env");
-  const title = flag(args, "--title") || "";
-  if (!agentId || !envId) { console.error("Usage: oma sessions create --agent <id> --env <id> [--title <text>]"); process.exit(1); }
-  const session = await api<{ id: string }>(config, "/v1/sessions", {
-    method: "POST",
-    body: JSON.stringify({ agent: agentId, environment_id: envId, title }),
-  });
-  console.log(`Session created: ${session.id}`);
-}
+  // Vaults & Credentials
+  {
+    group: "Vaults", match: ["vaults", "list"],
+    usage: "oma vaults list", desc: "List vaults",
+    http: "GET    /v1/vaults",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; created_at: string }> }>(config, "/v1/vaults");
+      if (!data.length) { console.log("No vaults. Create one with: oma vaults create <name>"); return; }
+      table([["NAME", "ID", "CREATED"], ...data.map(v => [v.name, v.id, new Date(v.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "Vaults", match: ["vaults", "create"], needsArg: true,
+    usage: "oma vaults create <name>", desc: "Create vault",
+    http: "POST   /v1/vaults {name}",
+    async run(config, args) {
+      const vault = await apiFetch<{ id: string; name: string }>(config, "/v1/vaults", { method: "POST", body: JSON.stringify({ name: args.join(" ") }) });
+      console.log(`Vault created: ${vault.name} (${vault.id})`);
+    },
+  },
+  {
+    group: "Vaults", match: ["creds", "list"], needsArg: true,
+    usage: "oma creds list <vault-id>", desc: "List credentials",
+    http: "GET    /v1/vaults/:id/credentials",
+    async run(config, args) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; display_name: string; auth: { type: string; mcp_server_url?: string; command_prefixes?: string[] } }> }>(config, `/v1/vaults/${args[0]}/credentials`);
+      if (!data.length) { console.log("No credentials in this vault."); return; }
+      table([["NAME", "TYPE", "DETAIL"], ...data.map(c => [c.display_name, c.auth.type, c.auth.mcp_server_url || c.auth.command_prefixes?.join(", ") || ""])]);
+    },
+  },
+  {
+    group: "Vaults", match: ["secret", "add"],
+    usage: "oma secret add --vault <id> --name <n> --cmd <pfx> --env <var> --token <t>", desc: "Add secret credential",
+    http: "POST   /v1/vaults/:id/credentials {display_name, auth:{type, command_prefixes, env_var, token}}",
+    async run(config, args) {
+      const vaultId = flag(args, "--vault"); const name = flag(args, "--name"); const cmd = flag(args, "--cmd"); const envVar = flag(args, "--env"); const token = flag(args, "--token");
+      if (!vaultId || !name || !cmd || !envVar || !token) { console.error("Usage: oma secret add --vault <id> --name <name> --cmd <prefixes> --env <var> --token <token>"); process.exit(1); }
+      const cred = await apiFetch<{ id: string }>(config, `/v1/vaults/${vaultId}/credentials`, { method: "POST", body: JSON.stringify({ display_name: name, auth: { type: "command_secret", command_prefixes: cmd.split(",").map(s => s.trim()), env_var: envVar, token } }) });
+      console.log(`Secret added: ${name} (${cred.id})`);
+    },
+  },
 
-async function sessionsMessage(config: Config, sessionId: string, text: string) {
-  await api(config, `/v1/sessions/${sessionId}/events`, {
-    method: "POST",
-    body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text }] }] }),
-  });
-  console.log("Message sent.");
-}
+  // Skills
+  {
+    group: "Skills", match: ["skills", "list"],
+    usage: "oma skills list", desc: "List skills",
+    http: "GET    /v1/skills?source=custom|builtin",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; display_title: string; name: string; source: string }> }>(config, "/v1/skills");
+      if (!data.length) { console.log("No skills."); return; }
+      table([["NAME", "ID", "SOURCE"], ...data.map(s => [s.display_title || s.name, s.id, s.source])]);
+    },
+  },
+  {
+    group: "Skills", match: ["skills", "install"], needsArg: true,
+    usage: "oma skills install <slug>", desc: "Install from ClawHub",
+    http: "POST   /v1/clawhub/install {slug}",
+    async run(config, args) {
+      console.log(`Installing ${args[0]} from ClawHub...`);
+      const skill = await apiFetch<{ id: string; display_title: string }>(config, "/v1/clawhub/install", { method: "POST", body: JSON.stringify({ slug: args[0] }) });
+      console.log(`Installed: ${skill.display_title} (${skill.id})`);
+    },
+  },
 
-// ─── Commands: Environments ───
+  // MCP Connect
+  {
+    group: "MCP Servers", match: ["connect"], needsArg: true,
+    usage: "oma connect <server|url> --vault <id>", desc: "Connect via OAuth",
+    http: "GET    /v1/oauth/authorize?mcp_server_url=X&vault_id=Y (redirect)",
+    async run(config, args) {
+      const vaultId = flag(args, "--vault");
+      if (!vaultId) { console.error("Usage: oma connect <server> --vault <vault-id>"); process.exit(1); }
+      await connectMcp(config, resolveServerUrl(args[0]), vaultId);
+    },
+  },
+];
 
-async function envsList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; name: string; status: string }> }>(config, "/v1/environments");
-  if (!data.length) { console.log("No environments. Create one with: oma envs create <name>"); return; }
-  table([
-    ["NAME", "ID", "STATUS"],
-    ...data.map(e => [e.name, e.id, e.status || "ready"]),
-  ]);
-}
+// ─── API Endpoints not covered by CLI commands ───
 
-async function envsCreate(config: Config, name: string) {
-  const env = await api<{ id: string; name: string }>(config, "/v1/environments", {
-    method: "POST",
-    body: JSON.stringify({ name, config: { type: "cloud" } }),
-  });
-  console.log(`Environment created: ${env.name} (${env.id})`);
-}
+const extraEndpoints: { group: string; http: string }[] = [
+  { group: "Agents", http: "POST   /v1/agents/:id                          Update agent" },
+  { group: "Agents", http: "GET    /v1/agents/:id/versions                 List versions" },
+  { group: "Agents", http: "POST   /v1/agents/:id/archive                  Archive agent" },
+  { group: "Sessions", http: "GET    /v1/sessions/:id                        Get session (status, usage)" },
+  { group: "Sessions", http: "GET    /v1/sessions/:id/events?limit=N         Get events (JSON)" },
+  { group: "Sessions", http: "GET    /v1/sessions/:id/stream                 Stream events (SSE)" },
+  { group: "Sessions", http: "POST   /v1/sessions/:id/archive                Archive session" },
+  { group: "Sessions", http: "DELETE /v1/sessions/:id                        Delete session" },
+  { group: "Sessions", http: "POST   /v1/sessions/:id/files                  Promote sandbox file {path}" },
+  { group: "Sessions", http: "POST   /v1/sessions/:id/resources              Add resource {type, file_id?, memory_store_id?}" },
+  { group: "Sessions", http: "GET    /v1/sessions/:id/threads                List threads (multi-agent)" },
+  { group: "Environments", http: "GET    /v1/environments/:id                    Get environment" },
+  { group: "Environments", http: "PUT    /v1/environments/:id                    Update environment" },
+  { group: "Environments", http: "DELETE /v1/environments/:id                    Delete environment" },
+  { group: "Model Cards", http: "GET    /v1/model_cards/:id                     Get model card" },
+  { group: "Model Cards", http: "POST   /v1/model_cards/:id                     Update model card" },
+  { group: "Model Cards", http: "DELETE /v1/model_cards/:id                     Delete model card" },
+  { group: "Model Cards", http: "POST   /v1/models/list                         Fetch provider models {provider, api_key}" },
+  { group: "Vaults", http: "DELETE /v1/vaults/:id                          Delete vault" },
+  { group: "Vaults", http: "DELETE /v1/vaults/:id/credentials/:cid         Delete credential" },
+  { group: "OAuth", http: "GET    /v1/oauth/callback                      OAuth callback (internal)" },
+  { group: "OAuth", http: "POST   /v1/oauth/refresh                       Refresh token {vault_id, credential_id}" },
+  { group: "Skills", http: "POST   /v1/skills                              Create skill {files:[{filename,content}]}" },
+  { group: "Skills", http: "GET    /v1/skills/:id                          Get skill" },
+  { group: "Skills", http: "DELETE /v1/skills/:id                          Delete skill" },
+  { group: "Skills", http: "POST   /v1/skills/:id/versions                 Create new version {files}" },
+  { group: "Skills", http: "GET    /v1/skills/:id/versions                 List versions" },
+  { group: "Files", http: "POST   /v1/files                               Upload (multipart or JSON {filename,content,encoding?})" },
+  { group: "Files", http: "GET    /v1/files?scope_id=X&limit=N            List files (cursor-paginated)" },
+  { group: "Files", http: "GET    /v1/files/:id                           Get file metadata" },
+  { group: "Files", http: "GET    /v1/files/:id/content                   Download file content" },
+  { group: "Files", http: "DELETE /v1/files/:id                           Delete file" },
+  { group: "Memory", http: "POST   /v1/memory_stores                       Create store {name}" },
+  { group: "Memory", http: "GET    /v1/memory_stores                       List stores" },
+  { group: "Memory", http: "DELETE /v1/memory_stores/:id                   Delete store" },
+  { group: "Memory", http: "POST   /v1/memory_stores/:id/memories          Write memory {path, content} (max 100KB)" },
+  { group: "Memory", http: "GET    /v1/memory_stores/:id/memories?prefix=X List memories (metadata)" },
+  { group: "Memory", http: "GET    /v1/memory_stores/:id/memories/:mid     Get memory with content" },
+  { group: "Memory", http: "DELETE /v1/memory_stores/:id/memories/:mid     Delete memory" },
+  { group: "Evals", http: "POST   /v1/evals/runs                          Create eval run {agent_id, environment_id, tasks:[...]}" },
+  { group: "Evals", http: "GET    /v1/evals/runs                          List eval runs" },
+  { group: "Evals", http: "GET    /v1/evals/runs/:id                      Get eval run results" },
+  { group: "ClawHub", http: "GET    /v1/clawhub/search?q=X                  Search ClawHub registry" },
+];
 
-// ─── Commands: Model Cards ───
-
-async function modelCardsList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; name: string; provider: string; model_id: string; api_key_preview: string; is_default: boolean }> }>(config, "/v1/model_cards");
-  if (!data.length) { console.log("No model cards. Create one with: oma models create"); return; }
-  table([
-    ["NAME", "PROVIDER", "MODEL", "KEY", "DEFAULT"],
-    ...data.map(c => [c.name, c.provider, c.model_id, `****${c.api_key_preview || ""}`, c.is_default ? "yes" : ""]),
-  ]);
-}
-
-async function modelCardsCreate(config: Config, args: string[]) {
-  const name = flag(args, "--name");
-  const provider = flag(args, "--provider") || "ant";
-  const modelId = flag(args, "--model-id");
-  const apiKey = flag(args, "--api-key");
-  const baseUrl = flag(args, "--base-url");
-  if (!name || !modelId || !apiKey) {
-    console.error("Usage: oma models create --name <name> --model-id <id> --api-key <key> [--provider ant|oai|ant-compatible|oai-compatible] [--base-url <url>]");
-    process.exit(1);
-  }
-  const card = await api<{ id: string; name: string }>(config, "/v1/model_cards", {
-    method: "POST",
-    body: JSON.stringify({ name, provider, model_id: modelId, api_key: apiKey, base_url: baseUrl }),
-  });
-  console.log(`Model card created: ${card.name} (${card.id})`);
-}
-
-// ─── Commands: API Keys ───
-
-async function apiKeysList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; name: string; prefix: string; created_at: string }> }>(config, "/v1/api_keys");
-  if (!data.length) { console.log("No API keys. Create one with: oma keys create"); return; }
-  table([
-    ["NAME", "ID", "PREFIX", "CREATED"],
-    ...data.map(k => [k.name, k.id, k.prefix + "...", new Date(k.created_at).toLocaleDateString()]),
-  ]);
-}
-
-async function apiKeysCreate(config: Config, name: string) {
-  const key = await api<{ id: string; key: string; name: string }>(config, "/v1/api_keys", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-  console.log(`API key created: ${key.name}`);
-  console.log(`\n  ${key.key}\n`);
-  console.log("Save this key — it won't be shown again.");
-}
-
-async function apiKeysRevoke(config: Config, id: string) {
-  await api(config, `/v1/api_keys/${id}`, { method: "DELETE" });
-  console.log(`API key revoked: ${id}`);
-}
-
-// ─── Commands: Vaults ───
-
-async function vaultsList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; name: string; created_at: string }> }>(config, "/v1/vaults");
-  if (!data.length) { console.log("No vaults. Create one with: oma vaults create <name>"); return; }
-  table([
-    ["NAME", "ID", "CREATED"],
-    ...data.map(v => [v.name, v.id, new Date(v.created_at).toLocaleDateString()]),
-  ]);
-}
-
-async function vaultsCreate(config: Config, name: string) {
-  const vault = await api<{ id: string; name: string }>(config, "/v1/vaults", {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-  console.log(`Vault created: ${vault.name} (${vault.id})`);
-}
-
-async function credsList(config: Config, vaultId: string) {
-  const { data } = await api<{ data: Array<{
-    id: string; display_name: string;
-    auth: { type: string; mcp_server_url?: string; command_prefixes?: string[]; env_var?: string };
-  }> }>(config, `/v1/vaults/${vaultId}/credentials`);
-  if (!data.length) { console.log("No credentials in this vault."); return; }
-  table([
-    ["NAME", "TYPE", "DETAIL"],
-    ...data.map(c => [c.display_name, c.auth.type, c.auth.mcp_server_url || c.auth.command_prefixes?.join(", ") || ""]),
-  ]);
-}
-
-async function secretAdd(config: Config, args: string[]) {
-  const vaultId = flag(args, "--vault");
-  const name = flag(args, "--name");
-  const cmd = flag(args, "--cmd");
-  const envVar = flag(args, "--env");
-  const token = flag(args, "--token");
-  if (!vaultId || !name || !cmd || !envVar || !token) {
-    console.error("Usage: oma secret add --vault <id> --name <name> --cmd <prefixes> --env <var> --token <token>");
-    process.exit(1);
-  }
-  const cred = await api<{ id: string }>(config, `/v1/vaults/${vaultId}/credentials`, {
-    method: "POST",
-    body: JSON.stringify({
-      display_name: name,
-      auth: { type: "command_secret", command_prefixes: cmd.split(",").map(s => s.trim()), env_var: envVar, token },
-    }),
-  });
-  console.log(`Secret added: ${name} (${cred.id})`);
-}
-
-// ─── Commands: Skills ───
-
-async function skillsList(config: Config) {
-  const { data } = await api<{ data: Array<{ id: string; display_title: string; name: string; source: string }> }>(config, "/v1/skills");
-  if (!data.length) { console.log("No skills."); return; }
-  table([
-    ["NAME", "ID", "SOURCE"],
-    ...data.map(s => [s.display_title || s.name, s.id, s.source]),
-  ]);
-}
-
-async function skillsInstall(config: Config, slug: string) {
-  console.log(`Installing ${slug} from ClawHub...`);
-  const skill = await api<{ id: string; display_title: string }>(config, "/v1/clawhub/install", {
-    method: "POST",
-    body: JSON.stringify({ slug }),
-  });
-  console.log(`Installed: ${skill.display_title} (${skill.id})`);
-}
-
-// ─── Commands: Connect MCP ───
+// ─── MCP Connect ───
 
 const KNOWN_SERVERS: Record<string, string> = {
   airtable: "https://mcp.airtable.com/mcp",
@@ -294,7 +365,7 @@ function resolveServerUrl(nameOrUrl: string): string {
   return url;
 }
 
-async function connect(config: Config, mcpServerUrl: string, vaultId: string) {
+async function connectMcp(config: Config, mcpServerUrl: string, vaultId: string) {
   const port = 19284 + Math.floor(Math.random() * 1000);
   const redirectUri = `http://localhost:${port}/callback`;
   const authUrl = `${config.baseUrl}/v1/oauth/authorize?mcp_server_url=${encodeURIComponent(mcpServerUrl)}&vault_id=${encodeURIComponent(vaultId)}&redirect_uri=${encodeURIComponent(redirectUri)}`;
@@ -308,7 +379,7 @@ async function connect(config: Config, mcpServerUrl: string, vaultId: string) {
   } catch {}
 
   return new Promise<void>((resolve) => {
-    const server = createServer((req, res) => {
+    const server = createServer((req: any, res: any) => {
       const url = new URL(req.url || "/", `http://localhost:${port}`);
       if (url.pathname === "/callback") {
         const service = url.searchParams.get("service");
@@ -324,49 +395,59 @@ async function connect(config: Config, mcpServerUrl: string, vaultId: string) {
   });
 }
 
-// ─── CLI ───
+// ─── API Reference (derived from commands + extras) ───
+
+function apiRef(resource?: string) {
+  const groups = new Map<string, string[]>();
+  for (const c of commands) {
+    const list = groups.get(c.group) || [];
+    list.push(`  ${c.http}`);
+    groups.set(c.group, list);
+  }
+  for (const e of extraEndpoints) {
+    const list = groups.get(e.group) || [];
+    list.push(`  ${e.http}`);
+    groups.set(e.group, list);
+  }
+
+  const normalized = resource?.toLowerCase();
+  const groupAlias: Record<string, string> = {
+    agents: "Agents", sessions: "Sessions", environments: "Environments",
+    models: "Model Cards", vaults: "Vaults", oauth: "OAuth",
+    skills: "Skills", files: "Files", memory: "Memory",
+    keys: "API Keys", evals: "Evals", clawhub: "ClawHub",
+    "mcp": "MCP Servers",
+  };
+
+  if (normalized && groupAlias[normalized]) {
+    const name = groupAlias[normalized];
+    const lines = groups.get(name);
+    if (lines) { console.log(`\n${name}\n${lines.join("\n")}\n`); return; }
+  }
+
+  console.log(`\noma api — HTTP API Quick Reference\nAuth: all /v1/* endpoints require x-api-key header\n`);
+  for (const [name, lines] of groups) {
+    console.log(`${name}\n${lines.join("\n")}\n`);
+  }
+
+  if (normalized && !groupAlias[normalized]) {
+    console.log(`Unknown resource: ${resource}\nAvailable: ${Object.keys(groupAlias).join(", ")}`);
+  }
+}
+
+// ─── Usage (derived from commands) ───
 
 function usage() {
+  console.log(`\noma — Open Managed Agents CLI\n\nUsage:`);
+  let lastGroup = "";
+  for (const c of commands) {
+    if (c.group !== lastGroup) { console.log(`\n  ${c.group}:`); lastGroup = c.group; }
+    console.log(`    ${c.usage.padEnd(42)} ${c.desc}`);
+  }
   console.log(`
-oma — Open Managed Agents CLI
-
-Usage:
-  Agents:
-    oma agents list                           List agents
-    oma agents create <name> [--model <id>]   Create agent
-    oma agents get <id>                       Get agent details
-    oma agents delete <id>                    Delete agent
-
-  Sessions:
-    oma sessions list                         List sessions
-    oma sessions create --agent <id> --env <id> [--title <t>]
-    oma sessions message <id> <text>          Send message to session
-
-  Environments:
-    oma envs list                             List environments
-    oma envs create <name>                    Create environment
-
-  Model Cards:
-    oma models list                           List model cards
-    oma models create --name <n> --model-id <id> --api-key <key> [--provider <p>]
-
-  API Keys:
-    oma keys list                             List API keys
-    oma keys create [name]                    Create API key
-    oma keys revoke <id>                      Revoke API key
-
-  Vaults & Credentials:
-    oma vaults list                           List vaults
-    oma vaults create <name>                  Create vault
-    oma creds list <vault-id>                 List credentials
-    oma secret add --vault <id> --name <n> --cmd <pfx> --env <var> --token <t>
-
-  Skills:
-    oma skills list                           List skills
-    oma skills install <slug>                 Install from ClawHub
-
-  MCP Servers:
-    oma connect <server|url> --vault <id>     Connect via OAuth
+  API Reference:
+    oma api                                    Show all HTTP endpoints
+    oma api <resource>                         Show endpoints for a resource
 
 Environment:
   OMA_BASE_URL   API base (default: http://localhost:8787)
@@ -374,52 +455,23 @@ Environment:
 `);
 }
 
+// ─── Main ───
+
 async function main() {
   const args = process.argv.slice(2);
   if (!args.length || ["-h", "--help", "help"].includes(args[0])) { usage(); process.exit(0); }
+  if (args[0] === "api") { apiRef(args[1]); return; }
 
   const config = loadConfig();
-  const [cmd, sub] = args;
 
-  // agents
-  if (cmd === "agents" && sub === "list") return agentsList(config);
-  if (cmd === "agents" && sub === "create") return agentsCreate(config, args.slice(2));
-  if (cmd === "agents" && sub === "get" && args[2]) return agentsGet(config, args[2]);
-  if (cmd === "agents" && sub === "delete" && args[2]) return agentsDelete(config, args[2]);
-
-  // sessions
-  if (cmd === "sessions" && sub === "list") return sessionsList(config);
-  if (cmd === "sessions" && sub === "create") return sessionsCreate(config, args.slice(2));
-  if (cmd === "sessions" && sub === "message" && args[2] && args[3]) return sessionsMessage(config, args[2], args.slice(3).join(" "));
-
-  // environments
-  if (cmd === "envs" && sub === "list") return envsList(config);
-  if (cmd === "envs" && sub === "create" && args[2]) return envsCreate(config, args.slice(2).join(" "));
-
-  // model cards
-  if (cmd === "models" && sub === "list") return modelCardsList(config);
-  if (cmd === "models" && sub === "create") return modelCardsCreate(config, args.slice(2));
-
-  // api keys
-  if (cmd === "keys" && sub === "list") return apiKeysList(config);
-  if (cmd === "keys" && sub === "create") return apiKeysCreate(config, args.slice(2).join(" ") || "CLI key");
-  if (cmd === "keys" && sub === "revoke" && args[2]) return apiKeysRevoke(config, args[2]);
-
-  // vaults
-  if (cmd === "vaults" && sub === "list") return vaultsList(config);
-  if (cmd === "vaults" && sub === "create" && args[2]) return vaultsCreate(config, args.slice(2).join(" "));
-  if (cmd === "creds" && sub === "list" && args[2]) return credsList(config, args[2]);
-  if (cmd === "secret" && sub === "add") return secretAdd(config, args.slice(2));
-
-  // skills
-  if (cmd === "skills" && sub === "list") return skillsList(config);
-  if (cmd === "skills" && sub === "install" && args[2]) return skillsInstall(config, args[2]);
-
-  // connect
-  if (cmd === "connect" && args[1]) {
-    const vaultId = flag(args, "--vault");
-    if (!vaultId) { console.error("Usage: oma connect <server> --vault <vault-id>"); process.exit(1); }
-    return connect(config, resolveServerUrl(args[1]), vaultId);
+  for (const c of commands) {
+    const match = c.match.length === 1
+      ? args[0] === c.match[0]
+      : args[0] === c.match[0] && args[1] === c.match[1];
+    if (!match) continue;
+    if (c.needsArg && !args[c.match.length]) continue;
+    const rest = args.slice(c.match.length);
+    return c.run(config, rest);
   }
 
   console.error(`Unknown command: ${args.join(" ")}`);
@@ -427,4 +479,4 @@ async function main() {
   process.exit(1);
 }
 
-main().catch((err) => { console.error(err.message); process.exit(1); });
+main().catch((err: any) => { console.error(err.message); process.exit(1); });

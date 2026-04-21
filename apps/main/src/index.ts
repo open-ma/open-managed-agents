@@ -71,6 +71,18 @@ app.route("/v1/integrations", integrationsRoutes);
 // binding.
 app.route("/v1/internal", internalRoutes);
 
+// Proxy public integrations gateway paths to the INTEGRATIONS service binding
+// so Linear can hit the OAuth callback / webhook URLs at this worker's host.
+// (Local dev convenience: avoids running integrations on a separate port.)
+app.all("/linear/*", async (c) => {
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  return c.env.INTEGRATIONS.fetch(c.req.raw);
+});
+app.all("/linear-setup/*", async (c) => {
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  return c.env.INTEGRATIONS.fetch(c.req.raw);
+});
+
 export default {
   fetch: app.fetch,
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {

@@ -13,6 +13,11 @@ export const authMiddleware = createMiddleware<{
   Bindings: Env;
   Variables: { tenant_id: string };
 }>(async (c, next) => {
+  // Internal endpoints have their own header-secret auth (see routes/internal.ts)
+  if (c.req.path.startsWith("/v1/internal/")) {
+    return next();
+  }
+
   // 1. Try API Key authentication (for CLI / SDK)
   const apiKey = c.req.header("x-api-key");
   if (apiKey) {

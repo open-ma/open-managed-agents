@@ -24,7 +24,7 @@ interface PublishWizardProps {
   loadEnvironments: () => Promise<EnvironmentOption[]>;
 }
 
-type Step = "pick" | "a1-credentials" | "a1-install" | "shared-redirect";
+type Step = "pick" | "a1-credentials" | "a1-install";
 
 export function IntegrationsLinearPublishWizard({
   loadAgents,
@@ -40,7 +40,6 @@ export function IntegrationsLinearPublishWizard({
   const [envId, setEnvId] = useState("");
   const [personaName, setPersonaName] = useState("");
   const [personaAvatar, setPersonaAvatar] = useState("");
-  const [mode, setMode] = useState<"full" | "quick">("full");
 
   const [step, setStep] = useState<Step>("pick");
   const [working, setWorking] = useState(false);
@@ -83,28 +82,15 @@ export function IntegrationsLinearPublishWizard({
     setError(null);
     setWorking(true);
     try {
-      if (mode === "quick") {
-        const r = await api.installShared({
-          agentId,
-          environmentId: envId,
-          personaName,
-          personaAvatarUrl: personaAvatar || null,
-          returnUrl,
-        });
-        setStep("shared-redirect");
-        // Navigate the browser to Linear OAuth.
-        window.location.href = r.url;
-      } else {
-        const f = await api.startA1({
-          agentId,
-          environmentId: envId,
-          personaName,
-          personaAvatarUrl: personaAvatar || null,
-          returnUrl,
-        });
-        setA1Form(f);
-        setStep("a1-credentials");
-      }
+      const f = await api.startA1({
+        agentId,
+        environmentId: envId,
+        personaName,
+        personaAvatarUrl: personaAvatar || null,
+        returnUrl,
+      });
+      setA1Form(f);
+      setStep("a1-credentials");
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
@@ -173,8 +159,6 @@ export function IntegrationsLinearPublishWizard({
           setPersonaName={setPersonaName}
           personaAvatar={personaAvatar}
           setPersonaAvatar={setPersonaAvatar}
-          mode={mode}
-          setMode={setMode}
           working={working}
           onContinue={startPublish}
         />
@@ -197,10 +181,6 @@ export function IntegrationsLinearPublishWizard({
       {step === "a1-install" && a1InstallLink && (
         <A1InstallStep link={a1InstallLink} />
       )}
-
-      {step === "shared-redirect" && (
-        <p className="text-sm text-gray-600">Redirecting to Linear…</p>
-      )}
     </div>
   );
 }
@@ -216,8 +196,6 @@ function PickStep(props: {
   setPersonaName: (v: string) => void;
   personaAvatar: string;
   setPersonaAvatar: (v: string) => void;
-  mode: "full" | "quick";
-  setMode: (v: "full" | "quick") => void;
   working: boolean;
   onContinue: () => void;
 }) {
@@ -271,22 +249,10 @@ function PickStep(props: {
         />
       </Field>
 
-      <Field label="Identity mode">
-        <div className="space-y-2">
-          <ModeOption
-            selected={props.mode === "full"}
-            onSelect={() => props.setMode("full")}
-            title="Full identity (recommended)"
-            blurb="Agent becomes a real Linear teammate with @autocomplete and a slot in the assignee dropdown. Setup ~3 min, requires Linear admin."
-          />
-          <ModeOption
-            selected={props.mode === "quick"}
-            onSelect={() => props.setMode("quick")}
-            title="Quick try (shared bot)"
-            blurb="Posts as the shared OpenMA bot with a persona prefix. No admin needed. Limitations: no @autocomplete, single bot in dropdown."
-          />
-        </div>
-      </Field>
+      <p className="text-xs text-gray-500">
+        Your agent becomes a real Linear teammate with @autocomplete and a slot in the
+        assignee dropdown. Setup ~3 min, requires Linear admin (or send a setup link).
+      </p>
 
       <div className="pt-2">
         <button
@@ -298,31 +264,6 @@ function PickStep(props: {
         </button>
       </div>
     </div>
-  );
-}
-
-function ModeOption({
-  selected,
-  onSelect,
-  title,
-  blurb,
-}: {
-  selected: boolean;
-  onSelect: () => void;
-  title: string;
-  blurb: string;
-}) {
-  return (
-    <button
-      type="button"
-      onClick={onSelect}
-      className={`w-full text-left p-3 border rounded ${
-        selected ? "border-black bg-gray-50" : "border-gray-300 hover:border-gray-400"
-      }`}
-    >
-      <div className="text-sm font-medium">{title}</div>
-      <div className="text-xs text-gray-500 mt-1">{blurb}</div>
-    </button>
   );
 }
 
