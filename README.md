@@ -76,7 +76,7 @@ npx wrangler secret put ANTHROPIC_API_KEY
 
 # Deploy
 npm run deploy
-# → https://managed-agents.<your-subdomain>.workers.dev
+# → https://openma.dev (or https://managed-agents.<your-subdomain>.workers.dev for a personal deploy)
 ```
 
 What gets deployed:
