@@ -46,30 +46,23 @@ Save both to your password manager. The same `MCP_SIGNING_KEY` and `INTEGRATIONS
 
 ---
 
-## 3. Register the OMA Linear App
+## 3. (Per agent) Register a Linear App
 
-Go to <https://linear.app/settings/api/applications/new> and fill the form:
+Each agent you publish needs its own Linear OAuth App. The Console publish wizard tells you exactly what to paste — but for reference, the form is:
 
 | Field | Value |
 |---|---|
-| **Name** | `OpenMA` (or whatever you want users to see — this is the "B+ shared bot" identity) |
-| **Description** | `Make your OMA agents teammates in Linear` (or anything) |
+| **Name** | The agent's persona name (shown in Linear's `@` autocomplete and assignee list) |
+| **Description** | Free text |
 | **Developer URL** | Any HTTPS URL — your homepage / repo |
-| **Callback URL** | `${GATEWAY}/linear/oauth/shared/callback` |
-| **Webhook URL** | `${GATEWAY}/linear/webhook/shared` |
+| **Callback URL** | `${GATEWAY}/linear/oauth/app/<APP_ID>/callback` (Console regenerates with the real `<APP_ID>` after step 2) |
+| **Webhook URL** | `${GATEWAY}/linear/webhook/app/<APP_ID>` |
+| **Webhook secret** | Console generates one — paste it into Linear |
 | **Webhook events** | ✅ **App user notification** (required); optionally ✅ Issue, ✅ Comment |
 | **Public** | Off (Private — only your installs use it) |
 | **Scopes** | ✅ `read`, ✅ `write`, ✅ `app:assignable`, ✅ `app:mentionable` |
 
-Click **Create application**. Linear shows you three values — copy each:
-
-```
-LINEAR_APP_CLIENT_ID       (visible on the app page)
-LINEAR_APP_CLIENT_SECRET   (shown ONCE — save now or rotate)
-LINEAR_APP_WEBHOOK_SECRET  (shown ONCE — save now or rotate)
-```
-
-If you lose `CLIENT_SECRET` or `WEBHOOK_SECRET`, rotate them in the same UI.
+Linear shows you `client_id` + `client_secret` once. Paste both back into the Console wizard.
 
 ---
 
@@ -93,10 +86,7 @@ Commit this change. (Different env? Use a `[env.production]` block, but for one-
 ```bash
 cd apps/integrations
 
-# Set the 5 secrets (paste the value when prompted)
-wrangler secret put LINEAR_APP_CLIENT_ID
-wrangler secret put LINEAR_APP_CLIENT_SECRET
-wrangler secret put LINEAR_APP_WEBHOOK_SECRET
+# Set the 2 secrets (paste the value when prompted)
 wrangler secret put MCP_SIGNING_KEY                # from step 2
 wrangler secret put INTEGRATIONS_INTERNAL_SECRET   # from step 2
 
@@ -155,6 +145,7 @@ Migrations applied:
 0002_integrations_tables.sql        6 new linear_* tables + indexes
 0003_publications_environment.sql   adds environment_id column
 0004_installations_vault.sql        adds vault_id column
+0005_drop_b_plus_columns.sql        drops slash_command + is_default_agent
 ```
 
 If a migration fails because a table already exists from a previous attempt, drop the half-applied tables manually with `wrangler d1 execute openma-auth --remote --command 'DROP TABLE linear_xxx'` then re-apply.
@@ -171,23 +162,22 @@ You should see:
 - "No Linear workspaces connected yet."
 - A `+ Publish agent to Linear` button.
 
-### 8b. Publish an agent (B+ — fastest)
+### 8b. Publish an agent
 
 1. Click `+ Publish agent to Linear`
 2. Pick any existing agent
 3. Pick any environment
 4. Persona name: defaults to agent name, OK as-is
-5. Identity mode: **Quick try (shared bot)**
-6. Click `Continue →`
+5. Click `Continue →`
 
-Browser redirects to Linear. Authorize the install. After Linear redirects back, you should land on `/integrations/linear?install=ok&publication_id=...`.
+The wizard hands you a Linear app registration form (App name, Callback URL, Webhook URL, Webhook secret) — paste those into <https://linear.app/settings/api/applications/new>, then paste the `client_id` + `client_secret` Linear gives you back into the Console. Click the install link, authorize in Linear, and you'll land on `/integrations/linear?install=ok&publication_id=...`.
 
 ### 8c. Verify the install in Linear
 
 In your Linear workspace:
-- Settings → Members should show "OpenMA" (or whatever you named it) as a bot user
-- Try `@OpenMA` in any issue — autocomplete should find it
-- Assign the issue to OpenMA
+- Settings → Members should show the agent (under whatever Persona name you used) as a bot user
+- Try `@<persona-name>` in any issue — autocomplete should find it
+- Assign the issue to it
 
 Within ~10 seconds you should see:
 - A new session in OMA Console at `/sessions`, with a 🔗 ENG-XXX badge
@@ -203,38 +193,38 @@ wrangler tail managed-agents
 ```
 
 Look for:
-- Gateway: `POST /linear/webhook/shared` with 200
+- Gateway: `POST /linear/webhook/app/<APP_ID>` with 200
 - Main: `POST /v1/internal/sessions` with 200, sessionId returned
 
 Common failures:
-- **401 from gateway webhook** — `LINEAR_APP_WEBHOOK_SECRET` doesn't match what Linear has. Re-set the secret.
+- **401 from gateway webhook** — webhook secret stored on the App row doesn't match what Linear has. Re-paste in Linear's app settings.
 - **401 from main internal endpoint** — `INTEGRATIONS_INTERNAL_SECRET` differs between gateway and main. Re-set on both, redeploy.
-- **No webhook arrives at all** — Linear didn't recognize the URL. Re-check the webhook URL in Linear's app settings; it must be exactly `${GATEWAY}/linear/webhook/shared`.
+- **No webhook arrives at all** — Linear didn't recognize the URL. Re-check the webhook URL in Linear's app settings; it must be exactly `${GATEWAY}/linear/webhook/app/<APP_ID>`.
 
 ---
 
-## 9. (Optional) Try A1 mode
+## 9. (Optional) Smoke-test from CLI
 
-In Console, click `+ Publish agent to Linear` again, but pick **Full identity (recommended)**. Follow the wizard:
+If you've already published an agent in step 8, you can validate from the terminal:
 
-1. Console returns the form values to paste into Linear's app registration page.
-2. Open `https://linear.app/settings/api/applications/new` in a new tab.
-3. Paste each copied value.
-4. Linear gives you `client_id` + `client_secret` — paste back into Console.
-5. Console returns an install URL. Click it.
-6. Authorize in Linear. Redirected back to Console with the new publication live.
+```bash
+# Confirm Console sees the install
+curl -b 'session=...' https://<MAIN>/v1/integrations/linear/installations
+# → {"data":[{"workspace_name":"...","install_kind":"dedicated",...}]}
+```
 
-In Linear, this agent now appears as its own user (not "OpenMA") with `@CoderName` autocomplete and a slot in the assignee dropdown.
+In Linear, this agent appears as its own user with `@<persona>` autocomplete and a slot in the assignee dropdown.
 
 ---
 
 ## 10. Rotation / teardown
 
-### Rotate `LINEAR_APP_CLIENT_SECRET` or `LINEAR_APP_WEBHOOK_SECRET`
+### Rotate per-app `client_secret` or `webhook_secret`
+
+Per-app secrets live in D1 (`linear_apps.client_secret_cipher` / `webhook_secret_cipher`), encrypted with `MCP_SIGNING_KEY`. To rotate one publication's secrets without rotating `MCP_SIGNING_KEY`:
 
 1. In Linear app settings, click "Regenerate" for the secret.
-2. `wrangler secret put LINEAR_APP_CLIENT_SECRET` (or webhook) — paste new value.
-3. `wrangler deploy` the gateway.
+2. Re-publish from Console (the wizard re-encrypts and writes the new value).
 
 ### Rotate `MCP_SIGNING_KEY`
 
@@ -271,8 +261,8 @@ Skip step 1 (no public URL needed). Use `wrangler dev` for both workers:
 # Terminal 1 — gateway
 cd apps/integrations
 echo 'GATEWAY_ORIGIN = "http://localhost:8788"' > .dev.vars
-echo 'LINEAR_APP_CLIENT_ID = "..."' >> .dev.vars
-# (etc — all 5 secrets)
+echo 'MCP_SIGNING_KEY = "..."' >> .dev.vars
+echo 'INTEGRATIONS_INTERNAL_SECRET = "..."' >> .dev.vars
 wrangler dev --port 8788
 
 # Terminal 2 — main
@@ -288,16 +278,14 @@ For "click around the Console UI without real Linear traffic", localhost is fine
 
 ---
 
-## Appendix B — Pre-filled values cheatsheet
-
-Save this somewhere, paste during the Linear form fill:
+## Appendix B — Pre-filled values cheatsheet (for the Linear app form)
 
 ```
-App name:           OpenMA
-Description:        Make your OMA agents teammates in Linear
+App name:           <persona name from publish wizard>
+Description:        Make this OMA agent a teammate in Linear
 Developer URL:      https://github.com/yourorg/open-managed-agents
-Callback URL:       <GATEWAY>/linear/oauth/shared/callback
-Webhook URL:        <GATEWAY>/linear/webhook/shared
+Callback URL:       <GATEWAY>/linear/oauth/app/<APP_ID>/callback
+Webhook URL:        <GATEWAY>/linear/webhook/app/<APP_ID>
 Webhook events:     App user notification, Issue (optional), Comment (optional)
 Scopes:             read, write, app:assignable, app:mentionable
 Public:             No

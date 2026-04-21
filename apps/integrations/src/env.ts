@@ -24,10 +24,4 @@ export interface Env {
   // Shared secret with apps/main, gating /v1/internal/* endpoints. Must match
   // INTEGRATIONS_INTERNAL_SECRET on the main worker.
   INTEGRATIONS_INTERNAL_SECRET: string;
-
-  // Shared OMA Linear App credentials (B+ mode). Per-publication App
-  // credentials (A1 mode) are stored encrypted in D1, not in env.
-  LINEAR_APP_CLIENT_ID: string;
-  LINEAR_APP_CLIENT_SECRET: string;
-  LINEAR_APP_WEBHOOK_SECRET: string;
 }

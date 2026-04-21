@@ -21,9 +21,10 @@
     "@cloudflare/vitest-pool-workers": "^0.14.7",
     "@cloudflare/workers-types": "^4.20250410.0",
     "@playwright/test": "^1.59.1",
+    "@types/node": "^25.6.0",
     "typescript": "^5.8.0",
     "vitest": "^4.1.3",
-    "wrangler": "^4.14.0"
+    "wrangler": "^4.83.0"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.69",

@@ -5,18 +5,6 @@ import type { CapabilityKey } from "@open-managed-agents/integrations-core";
 
 export interface LinearConfig {
   /**
-   * Credentials for the shared OMA Linear App used by B+ mode. Registered
-   * once by OMA project maintainers; passed to the provider via wrangler
-   * secrets in production, via test fixtures in unit tests.
-   */
-  sharedApp: {
-    clientId: string;
-    clientSecret: string;
-    /** HMAC secret Linear uses to sign webhooks for the shared App. */
-    webhookSecret: string;
-  };
-
-  /**
    * Public origin of the integrations gateway, used to build OAuth callback
    * and webhook URLs surfaced to Linear. e.g. "https://integrations.example.com".
    */

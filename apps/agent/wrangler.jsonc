@@ -48,5 +48,43 @@
   ],
 
   "limits": { "cpu_ms": 300000 },
-  "observability": { "enabled": true }
+  "observability": { "enabled": true },
+
+  // Staging twin: a fully separate sandbox-default-staging worker bound to
+  // the staging KV / D1 / R2 / DO namespace. Keeps prod and staging session
+  // state and tenant data fully isolated. The staging main worker's
+  // SANDBOX_sandbox_default service binding points at "sandbox-default-staging".
+  "env": {
+    "staging": {
+      "name": "sandbox-default-staging",
+      "containers": [
+        {
+          "class_name": "Sandbox",
+          "image": "./Dockerfile.sandbox",
+          "instance_type": "basic",
+          "max_instances": 10
+        }
+      ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "SESSION_DO", "class_name": "SessionDO" },
+          { "name": "SANDBOX", "class_name": "Sandbox" }
+        ]
+      },
+      "kv_namespaces": [
+        { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
+      ],
+      "ai": { "binding": "AI" },
+      "vectorize": [
+        { "binding": "VECTORIZE", "index_name": "memory-search" }
+      ],
+      "r2_buckets": [
+        { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
+        { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+      ],
+      "browser": { "binding": "BROWSER" },
+      "limits": { "cpu_ms": 300000 },
+      "observability": { "enabled": true }
+    }
+  }
 }

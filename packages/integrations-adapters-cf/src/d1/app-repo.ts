@@ -57,16 +57,25 @@ export class D1AppRepo implements AppRepo {
   }
 
   async insert(row: NewAppCredentials): Promise<AppCredentials> {
-    const id = this.ids.generate();
+    const id = row.id ?? this.ids.generate();
     const now = Date.now();
     const clientSecretCipher = await this.crypto.encrypt(row.clientSecret);
     const webhookSecretCipher = await this.crypto.encrypt(row.webhookSecret);
+    // Upsert: when the same id is re-submitted (e.g. user re-pastes credentials
+    // for the same App in the publish wizard), refresh the credentials in
+    // place rather than failing on PRIMARY KEY conflict. created_at and
+    // publication_id are preserved (publication_id is set later via
+    // setPublicationId, after OAuth completes).
     await this.db
       .prepare(
         `INSERT INTO linear_apps (
            id, publication_id, client_id, client_secret_cipher,
            webhook_secret_cipher, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?)`,
+         ) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+           client_id = excluded.client_id,
+           client_secret_cipher = excluded.client_secret_cipher,
+           webhook_secret_cipher = excluded.webhook_secret_cipher`,
       )
       .bind(id, row.publicationId, row.clientId, clientSecretCipher, webhookSecretCipher, now)
       .run();

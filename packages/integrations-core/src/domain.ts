@@ -47,9 +47,9 @@ export type CapabilityKey =
 
 export type CapabilitySet = ReadonlySet<CapabilityKey>;
 
-export type InstallKind = "shared" | "dedicated";
+export type InstallKind = "dedicated";
 
-export type PublicationMode = "full" | "quick";
+export type PublicationMode = "full";
 
 export type PublicationStatus =
   | "pending_setup"
@@ -102,12 +102,8 @@ export interface Publication {
   mode: PublicationMode;
   status: PublicationStatus;
   persona: Persona;
-  /** Slash command for B+ routing (e.g. "/coder"). Null for A1. */
-  slashCommand: string | null;
   capabilities: CapabilitySet;
   sessionGranularity: SessionGranularity;
-  /** Whether this publication catches B+ events with no other route signal. */
-  isDefaultAgent: boolean;
   createdAt: number;
   unpublishedAt: number | null;
 }
