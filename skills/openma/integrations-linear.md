@@ -54,6 +54,17 @@ The Callback / Webhook URLs are real (not `<APP_ID>` placeholders) — the
 human must paste them verbatim. Re-running `publish` mints a *new* `formToken`
 with a *new* appId, so don't re-run between steps unless you mean to.
 
+> **URL host caveat.** The Callback / Webhook URLs come from the integrations
+> gateway's `PUBLIC_BASE_URL`, **not** from your client's `OMA_BASE_URL`. If
+> they point at `localhost` you can't paste them into a real Linear App —
+> Linear can't reach your laptop. The CLI prints a warning when it detects
+> this. To proceed, either deploy the integrations worker to a public host,
+> or run a tunnel (`cloudflared`/`ngrok`) and set `PUBLIC_BASE_URL` to the
+> tunnel hostname before retrying.
+
+For machine-readable output add `--json` — it skips the prose and prints the
+raw `{ formToken, callbackUrl, webhookUrl, webhookSecret, suggestedAppName }`.
+
 ### Step 2 — submit the credentials Linear gave back
 
 ```bash
@@ -92,8 +103,9 @@ each issue (default `session_granularity: "per_issue"`).
 
 | Goal | Command |
 |---|---|
-| Tighten what the agent can do in Linear | `curl -XPATCH … /publications/:id -d '{"capabilities":["issue.read","comment.write"]}'` (no CLI shorthand yet) |
-| Rename the persona | same PATCH with `{"persona":{"name":"NewName"}}` |
+| Tighten what the agent can do in Linear | `oma linear update <pub-id> --caps issue.read,comment.write,…` |
+| Rename the persona | `oma linear update <pub-id> --persona "NewName"` |
+| Change avatar | `oma linear update <pub-id> --avatar https://… ` (empty string clears) |
 | Stop the agent from responding | `oma linear unpublish <publication-id>` |
 | Re-publish after unpublish | start over with `oma linear publish` (a new App is minted; the old one in Linear can be deleted) |
 
