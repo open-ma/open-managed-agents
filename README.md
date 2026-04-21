@@ -350,11 +350,22 @@ Publish an agent into a third-party tool and have it act as a real teammate ther
 
 Make an agent a member of your Linear workspace with its own identity, avatar, and `@autocomplete` slot. The agent appears in the assignee dropdown, gets pinged on `@mentions`, and pushes status back to issues it's working on.
 
+Two ways to drive the publish flow:
+
 ```bash
-# In the Console
+# (1) Console — for humans clicking through a wizard
 Integrations → Linear → Publish agent
-# Pick agent + environment + persona, paste OAuth credentials, install
+
+# (2) CLI — for agents driving openma on a user's behalf
+oma linear publish <agent-id> --env <env-id>          # → returns Linear App config + form token
+oma linear submit <form-token> --client-id … --client-secret …   # ↑ once Linear gives you OAuth credentials
+oma linear list                                       # verify the workspace
+oma linear pubs <installation-id>                     # verify the agent shows status=live
+oma linear update <pub-id> --caps issue.read,comment.write,…   # tighten capabilities
+oma linear unpublish <pub-id>                         # tear down
 ```
+
+The full agent-side playbook (when to ask the human, how to offer browser automation, exactly what to paste into Linear's form) lives at [`skills/openma/integrations-linear.md`](skills/openma/integrations-linear.md).
 
 How it works:
 
