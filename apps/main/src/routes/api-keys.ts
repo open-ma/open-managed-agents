@@ -3,7 +3,7 @@ import type { Env } from "@open-managed-agents/shared";
 
 const app = new Hono<{
   Bindings: Env;
-  Variables: { tenant_id: string };
+  Variables: { tenant_id: string; user_id?: string };
 }>();
 
 async function sha256(data: string): Promise<string> {
@@ -37,6 +37,12 @@ interface ApiKeyMeta {
 interface ApiKeyRecord {
   id: string;
   tenant_id: string;
+  /**
+   * Creating user. Set when the key was minted from a logged-in session;
+   * absent on legacy keys created before user_id was tracked. User-scoped
+   * endpoints (e.g. /v1/integrations/linear/*) require this field.
+   */
+  user_id?: string;
   name: string;
   created_at: string;
 }
@@ -44,6 +50,7 @@ interface ApiKeyRecord {
 // POST /v1/api_keys — create a new API key
 app.post("/", async (c) => {
   const tenantId = c.get("tenant_id");
+  const userId = c.get("user_id");
   const body = await c.req.json<{ name?: string }>().catch(() => ({ name: undefined }));
   const name = body.name || "Untitled key";
 
@@ -52,7 +59,13 @@ app.post("/", async (c) => {
   const id = `ak_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const now = new Date().toISOString();
 
-  const record: ApiKeyRecord = { id, tenant_id: tenantId, name, created_at: now };
+  const record: ApiKeyRecord = {
+    id,
+    tenant_id: tenantId,
+    ...(userId ? { user_id: userId } : {}),
+    name,
+    created_at: now,
+  };
   await c.env.CONFIG_KV.put(`apikey:${hash}`, JSON.stringify(record));
 
   // Maintain per-tenant index

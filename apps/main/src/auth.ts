@@ -11,7 +11,7 @@ async function sha256(data: string): Promise<string> {
 
 export const authMiddleware = createMiddleware<{
   Bindings: Env;
-  Variables: { tenant_id: string };
+  Variables: { tenant_id: string; user_id?: string };
 }>(async (c, next) => {
   // Internal endpoints have their own header-secret auth (see routes/internal.ts)
   if (c.req.path.startsWith("/v1/internal/")) {
@@ -32,8 +32,12 @@ export const authMiddleware = createMiddleware<{
     if (!keyData) {
       return c.json({ error: "Invalid API key" }, 401);
     }
-    const { tenant_id } = JSON.parse(keyData) as { tenant_id: string };
+    const { tenant_id, user_id } = JSON.parse(keyData) as {
+      tenant_id: string;
+      user_id?: string;
+    };
     c.set("tenant_id", tenant_id);
+    if (user_id) c.set("user_id", user_id);
     return next();
   }
 
@@ -53,6 +57,7 @@ export const authMiddleware = createMiddleware<{
           return c.json({ error: "User has no workspace. Please contact support." }, 403);
         }
         c.set("tenant_id", tenantId);
+        c.set("user_id", session.user.id);
         return next();
       }
     } catch {
