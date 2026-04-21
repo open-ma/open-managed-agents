@@ -93,6 +93,62 @@ script with the `ws` package is more reliable than `agent-browser` here —
 `agent-browser` re-resolves "current tab" every call and can drift when
 multiple localhost tabs are open.
 
+### When agent-browser keeps drifting — go direct CDP
+
+A subagent burned 55 tool calls trying to make `agent-browser` focus a
+specific Linear tab in a multi-tab Chrome — none of these worked
+consistently:
+
+- `agent-browser connect 9333` (lands on whatever Chrome calls "first")
+- `curl -X POST .../json/activate/<id>` then reconnect (the activated tab
+  is now foreground, but agent-browser still binds to a stale target)
+- `agent-browser close && agent-browser connect 9333` (re-binds to a
+  random tab)
+- `agent-browser connect ws://localhost:9333/devtools/page/<id>` (silently
+  binds, then `get url` returns the wrong tab anyway)
+
+Root cause: `agent-browser` caches a target reference and CDP's "current
+target" isn't really a per-connection concept. With a single tab it works
+fine. With multiple tabs you need to drive CDP directly. Use this template:
+
+```javascript
+// /tmp/cdp-drive.mjs
+import WebSocket from 'ws';
+const tabs = await fetch('http://localhost:9333/json/list').then(r => r.json());
+const tab = tabs.find(t => t.url?.includes('linear.app/<workspace>/settings/api'));
+if (!tab) { console.log('tab not found'); process.exit(1); }
+const ws = new WebSocket(tab.webSocketDebuggerUrl);
+let id = 0;
+const send = (method, params) => new Promise((resolve, reject) => {
+  const msgId = ++id;
+  ws.send(JSON.stringify({ id: msgId, method, params }));
+  ws.on('message', function handler(data) {
+    const msg = JSON.parse(data);
+    if (msg.id === msgId) {
+      ws.off('message', handler);
+      msg.error ? reject(msg.error) : resolve(msg.result);
+    }
+  });
+});
+ws.on('open', async () => {
+  await send('Runtime.enable');
+  // Click, type, scrape — whatever the task is.
+  const r = await send('Runtime.evaluate', {
+    expression: "document.querySelector('input[name=\"name\"]').value = 'LinearBot'; 'ok'",
+    returnByValue: true,
+  });
+  console.log(r.result.value);
+  ws.close();
+  process.exit(0);
+});
+```
+
+Install once: `cd /tmp && npm install ws --silent`.
+
+This is verbose but reliable. The trick is: bind to the tab's specific
+`webSocketDebuggerUrl`, never to a generic `:9333` connection. The bind
+sticks for the lifetime of the WebSocket.
+
 ## "Vite serves new code, browser still shows old"
 
 Two distinct failure modes look identical. Diagnose before trying fixes:

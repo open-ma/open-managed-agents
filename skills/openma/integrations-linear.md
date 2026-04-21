@@ -166,6 +166,16 @@ URL in the user's logged-in tab, click "Authorize". Confirm with
 `oma linear list && oma linear pubs <installation-id>` — status should
 read `live`.
 
+> **Multi-tab Chrome gotcha.** If your browser tool drifts between tabs
+> (`agent-browser` notably does this when there's >1 page open in the
+> Chrome you're attached to), don't fight it — bind directly to the target
+> tab's `webSocketDebuggerUrl` and drive CDP from a small Node script. See
+> the "When agent-browser keeps drifting — go direct CDP" section in
+> `docs/console-dev-loop.md` for a copy-paste template. A previous agent
+> burned 55 tool calls trying to make `agent-browser activate` and
+> `agent-browser close && reconnect` work; CDP-direct is the escape
+> hatch.
+
 ### d. If the user picks "manual"
 
 Print exactly this, with values substituted:
