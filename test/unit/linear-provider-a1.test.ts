@@ -47,7 +47,10 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     );
     expect(result.data.callbackUrl).not.toContain("<APP_ID>");
     expect(result.data.webhookUrl).not.toContain("<APP_ID>");
-    expect(result.data.webhookSecret).toBeTruthy();
+    // Step 1 deliberately does NOT include a webhookSecret — Linear ignores
+    // any value pasted into its OAuth-app form and auto-generates its own.
+    // The user copies Linear's `lin_wh_…` back at step 2.
+    expect((result.data as Record<string, unknown>).webhookSecret).toBeUndefined();
   });
 
   it("submit_credentials persists App keyed on the appId from step 1 and returns install URL with the same id", async () => {
@@ -74,6 +77,7 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
         formToken,
         clientId: "user_app_id",
         clientSecret: "user_app_secret",
+        webhookSecret: "lin_wh_test_secret_from_linear",
       },
     });
     if (submit.kind !== "step") throw new Error("expected step");
@@ -92,10 +96,10 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
     expect(app?.publicationId).toBeNull();
     expect(app?.clientId).toBe("user_app_id");
 
-    // Webhook secret is stored encrypted; we can read it back decrypted.
+    // Webhook secret is the user-supplied Linear value, stored encrypted
+    // and readable back decrypted.
     const wh = await c.apps.getWebhookSecret(appId);
-    expect(wh).toBeTruthy();
-    expect(wh).toBe(start.data.webhookSecret); // matches what we showed the user
+    expect(wh).toBe("lin_wh_test_secret_from_linear");
   });
 
   it("OAuth callback completes install, links App↔Publication, creates vault", async () => {
@@ -116,6 +120,7 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
         formToken: start.data.formToken as string,
         clientId: "user_app_id",
         clientSecret: "user_app_secret",
+        webhookSecret: "lin_wh_test_secret_from_linear",
       },
     });
     if (submit.kind !== "step") throw new Error("expected step");
@@ -192,6 +197,7 @@ describe("LinearProvider — A1 (full identity) install flow", () => {
         formToken: start.data.formToken as string,
         clientId: "cid",
         clientSecret: "csec",
+        webhookSecret: "lin_wh_test_secret_from_linear",
       },
     });
     if (submit.kind !== "step") throw new Error("expected step");

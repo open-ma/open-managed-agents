@@ -44,6 +44,12 @@ app.post("/app/:appId", async (c) => {
     rawBody,
   });
 
+  // Surface routing/verification reasons in tail logs. Cheap to emit
+  // unconditionally — the structured shape stays grep-friendly.
+  console.log(
+    `[linear-webhook] appId=${appId} delivery=${deliveryId} event=${headers["linear-event"]} handled=${outcome.handled} reason=${outcome.reason ?? "ok"}`,
+  );
+
   // Linear contract: always 200. Body is informational.
   return c.json({ ok: outcome.handled, reason: outcome.reason ?? null }, 200);
 });

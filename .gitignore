@@ -20,6 +20,9 @@ test/eval/data/
 # Internal docs (screenshots, design notes, TODOs)
 .docs/
 
+# Local-only CLI creds for hitting deployed envs (oma_… user-scoped keys for staging/prod)
+.oma-cli.*
+
 # IDE
 .vscode/
 .idea/
