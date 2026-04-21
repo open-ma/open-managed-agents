@@ -7,7 +7,6 @@ import type {
   A1FormStep,
   A1InstallLink,
   HandoffLink,
-  InstallSharedResult,
   LinearInstallation,
   LinearPublication,
   PublishWizardInput,
@@ -83,13 +82,6 @@ export class IntegrationsApi {
   }
 
   // ─── Install initiation (proxied through main → integrations gateway) ───
-
-  async installShared(input: PublishWizardInput): Promise<InstallSharedResult> {
-    return this.request<InstallSharedResult>("/v1/integrations/linear/install-shared", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
-  }
 
   async startA1(input: PublishWizardInput): Promise<A1FormStep> {
     return this.request<A1FormStep>("/v1/integrations/linear/start-a1", {

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock } from "@open-managed-agents/shared";
+import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock, CredentialConfig } from "@open-managed-agents/shared";
 import { generateSessionId, generateFileId, generateResourceId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
@@ -188,6 +188,15 @@ app.post("/", async (c) => {
 
   const sessionId = generateSessionId();
 
+  // Pre-fetch snapshots so SessionDO doesn't have to read CONFIG_KV with a
+  // tenant-prefixed key (which fails when sandbox-default's KV binding
+  // differs from main's — e.g. shared sandbox + staging main).
+  const agentSnapshot = JSON.parse(agentData) as AgentConfig;
+  const envSnapshotData = await c.env.CONFIG_KV.get(kvKey(t, "env", body.environment_id));
+  const environmentSnapshot = envSnapshotData ? (JSON.parse(envSnapshotData) as EnvironmentConfig) : undefined;
+  const vaultIds = body.vault_ids || [];
+  const vaultCredentials = await fetchVaultCredentials(c.env, t, vaultIds);
+
   // Initialize SessionDO via sandbox worker
   await forwardToSandbox(
     binding,
@@ -200,7 +209,10 @@ app.post("/", async (c) => {
       title: body.title || "",
       session_id: sessionId,
       tenant_id: t,
-      vault_ids: body.vault_ids || [],
+      vault_ids: vaultIds,
+      agent_snapshot: agentSnapshot,
+      environment_snapshot: environmentSnapshot,
+      vault_credentials: vaultCredentials,
     }),
   );
 
@@ -215,9 +227,6 @@ app.post("/", async (c) => {
   };
 
   // Store session with agent + environment snapshot (frozen at session start for replay/trajectory)
-  const agentSnapshot = JSON.parse(agentData) as AgentConfig;
-  const envSnapshotData = await c.env.CONFIG_KV.get(kvKey(t, "env", body.environment_id));
-  const environmentSnapshot = envSnapshotData ? (JSON.parse(envSnapshotData) as EnvironmentConfig) : undefined;
   const sessionRecord = { ...session, agent_snapshot: agentSnapshot, environment_snapshot: environmentSnapshot };
   await c.env.CONFIG_KV.put(kvKey(t, "session", sessionId), JSON.stringify(sessionRecord));
 
@@ -860,5 +869,34 @@ app.delete("/:id/resources/:resource_id", async (c) => {
   await c.env.CONFIG_KV.delete(kvKey(t, "sesrsc", sessionId, resourceId));
   return c.json({ type: "resource_deleted", id: resourceId });
 });
+
+/**
+ * Pre-fetch all credentials for the given vaults so they can be passed into
+ * SessionDO at /init. Mirrors the list+get loop SessionDO would otherwise
+ * do against its own (potentially wrong) CONFIG_KV namespace.
+ */
+async function fetchVaultCredentials(
+  env: Env,
+  tenantId: string,
+  vaultIds: string[],
+): Promise<Array<{ vault_id: string; credentials: CredentialConfig[] }>> {
+  if (!vaultIds.length) return [];
+  const out: Array<{ vault_id: string; credentials: CredentialConfig[] }> = [];
+  for (const vaultId of vaultIds) {
+    const list = await env.CONFIG_KV.list({ prefix: kvKey(tenantId, "cred", vaultId) + ":" });
+    const credentials: CredentialConfig[] = [];
+    for (const k of list.keys) {
+      const data = await env.CONFIG_KV.get(k.name);
+      if (!data) continue;
+      try {
+        credentials.push(JSON.parse(data) as CredentialConfig);
+      } catch {
+        // skip malformed
+      }
+    }
+    out.push({ vault_id: vaultId, credentials });
+  }
+  return out;
+}
 
 export default app;

@@ -264,28 +264,6 @@ export class InMemoryPublicationRepo implements PublicationRepo {
     );
   }
 
-  async getDefaultForInstallation(installationId: string): Promise<Publication | null> {
-    for (const row of this.rows.values()) {
-      if (
-        row.installationId === installationId &&
-        row.isDefaultAgent &&
-        row.status === "live"
-      ) {
-        return row;
-      }
-    }
-    return null;
-  }
-
-  async listSlashCommands(installationId: string): Promise<readonly Publication[]> {
-    return [...this.rows.values()].filter(
-      (r) =>
-        r.installationId === installationId &&
-        r.slashCommand !== null &&
-        r.status === "live",
-    );
-  }
-
   async insert(row: NewPublication): Promise<Publication> {
     this.counter += 1;
     const id = `pub_${this.counter}`;
@@ -350,15 +328,23 @@ export class InMemoryAppRepo implements AppRepo {
   }
 
   async insert(row: NewAppCredentials): Promise<AppCredentials> {
-    this.counter += 1;
-    const id = `app_${this.counter}`;
+    let id: string;
+    if (row.id) {
+      id = row.id;
+    } else {
+      this.counter += 1;
+      id = `app_${this.counter}`;
+    }
+    const existing = this.rows.get(id);
     const app: AppCredentials = {
       id,
-      publicationId: row.publicationId,
+      // Preserve publicationId on upsert (only nulled by setPublicationId)
+      publicationId: existing ? existing.publicationId : row.publicationId,
       clientId: row.clientId,
       clientSecretCipher: `enc(${row.clientSecret})`,
       webhookSecretCipher: `enc(${row.webhookSecret})`,
-      createdAt: this.clock.nowMs(),
+      // Preserve createdAt on upsert
+      createdAt: existing ? existing.createdAt : this.clock.nowMs(),
     };
     this.rows.set(id, app);
     this.clientSecrets.set(id, row.clientSecret);

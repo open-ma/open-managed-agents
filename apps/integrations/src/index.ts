@@ -1,7 +1,5 @@
 import { Hono } from "hono";
 import type { Env } from "./env";
-import linearInstall from "./routes/linear/install";
-import linearOauthShared from "./routes/linear/callback";
 import linearWebhook from "./routes/linear/webhook";
 import linearPublications from "./routes/linear/publications";
 import linearDedicatedCallback from "./routes/linear/dedicated-callback";
@@ -18,8 +16,6 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
-app.route("/linear", linearInstall);
-app.route("/linear/oauth/shared", linearOauthShared);
 app.route("/linear/oauth/app", linearDedicatedCallback);
 app.route("/linear/webhook", linearWebhook);
 app.route("/linear/publications", linearPublications);

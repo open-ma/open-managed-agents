@@ -23,9 +23,6 @@ import type {
   CapabilityKey,
   Persona,
   Publication,
-  UserId,
-  AgentId,
-  PublicationMode,
 } from "@open-managed-agents/integrations-core";
 
 import { ALL_CAPABILITIES, DEFAULT_LINEAR_SCOPES, type LinearConfig } from "./config";
@@ -36,26 +33,9 @@ import {
   parseTokenResponse,
 } from "./oauth/protocol";
 import { parseWebhook, type NormalizedWebhookEvent, type RawWebhookEnvelope } from "./webhook/parse";
-import { routeForSharedInstall } from "./webhook/router";
 
 /** Subset of Container the LinearProvider depends on. */
 export interface LinearContainer extends Container {}
-
-/** Payload encoded in the OAuth state JWT. */
-interface OauthStatePayload {
-  userId: UserId;
-  agentId: AgentId;
-  environmentId: string;
-  mode: PublicationMode;
-  persona: Persona;
-  returnUrl: string;
-  /** Random per-request, mitigates fixation if state JWTs ever leak. */
-  nonce: string;
-  /** Discriminator for our own routing in continueInstall. */
-  kind: "linear.oauth.shared" | "linear.oauth.dedicated";
-  /** A1 only: the App credentials row to use for token exchange. */
-  appId?: string;
-}
 
 const OAUTH_STATE_TTL_SECONDS = 30 * 60; // 30 min — covers slow OAuth UX
 const PROVIDER_ID: ProviderId = "linear";
@@ -77,54 +57,13 @@ export class LinearProvider implements IntegrationProvider {
   // ─── Install ─────────────────────────────────────────────────────────
 
   async startInstall(input: StartInstallInput): Promise<InstallStep | InstallComplete> {
-    if (input.mode === "quick") {
-      return this.startSharedOauth(input);
-    }
-    if (input.mode === "full") {
-      return this.startDedicatedFlow(input);
-    }
-    throw new Error(`LinearProvider.startInstall: mode '${input.mode}' not supported`);
-  }
-
-  private async startSharedOauth(
-    input: StartInstallInput,
-  ): Promise<InstallStep> {
-    const nonce = this.container.ids.generate();
-    const state = await this.container.jwt.sign(
-      {
-        kind: "linear.oauth.shared",
-        userId: input.userId,
-        agentId: input.agentId,
-        environmentId: input.environmentId,
-        mode: input.mode,
-        persona: input.persona,
-        returnUrl: input.returnUrl,
-        nonce,
-      } satisfies OauthStatePayload,
-      OAUTH_STATE_TTL_SECONDS,
-    );
-
-    const url = buildAuthorizeUrl({
-      clientId: this.config.sharedApp.clientId,
-      redirectUri: this.sharedCallbackUri(),
-      scopes: this.config.scopes ?? DEFAULT_LINEAR_SCOPES,
-      state,
-      actor: "app",
-    });
-
-    return { kind: "step", step: "redirect", data: { url } };
+    return this.startDedicatedFlow(input);
   }
 
   async continueInstall(
     input: ContinueInstallInput,
   ): Promise<InstallStep | InstallComplete> {
     const payload = input.payload as { kind?: string; [k: string]: unknown };
-    if (payload.kind === "oauth_callback") {
-      return this.handleOauthCallback(
-        (payload.code as string) ?? "",
-        (payload.state as string) ?? "",
-      );
-    }
     if (payload.kind === "submit_credentials") {
       return this.submitDedicatedCredentials(payload);
     }
@@ -143,120 +82,20 @@ export class LinearProvider implements IntegrationProvider {
     );
   }
 
-  private async handleOauthCallback(
-    code: string,
-    stateToken: string,
-  ): Promise<InstallComplete> {
-    if (!code) throw new Error("Linear OAuth callback: missing code");
-    if (!stateToken) throw new Error("Linear OAuth callback: missing state");
-
-    const state = await this.container.jwt.verify<OauthStatePayload>(stateToken);
-    if (state.kind === "linear.oauth.shared") {
-      return this.completeSharedInstall(code, state);
-    }
-    // A1 dedicated callback handled in Phase 11.
-    throw new Error(`Linear OAuth: state kind '${state.kind}' not supported in B+`);
-  }
-
-  private async completeSharedInstall(
-    code: string,
-    state: OauthStatePayload,
-  ): Promise<InstallComplete> {
-    // 1. Exchange code for access token.
-    const tokenReq = buildTokenExchangeBody({
-      code,
-      redirectUri: this.sharedCallbackUri(),
-      clientId: this.config.sharedApp.clientId,
-      clientSecret: this.config.sharedApp.clientSecret,
-    });
-    const tokenRes = await this.container.http.fetch({
-      method: "POST",
-      url: tokenReq.url,
-      headers: { "content-type": tokenReq.contentType },
-      body: tokenReq.body,
-    });
-    if (tokenRes.status < 200 || tokenRes.status >= 300) {
-      throw new Error(
-        `Linear OAuth token exchange failed: ${tokenRes.status} ${tokenRes.body.slice(0, 200)}`,
-      );
-    }
-    const token = parseTokenResponse(tokenRes.body);
-
-    // 2. Identify workspace + bot user via GraphQL.
-    const { viewer, organization } = await this.graphql.fetchViewerAndOrg(
-      token.access_token,
-    );
-
-    // 3. Reuse existing shared install for this workspace, or create one.
-    let installation = await this.container.installations.findByWorkspace(
-      PROVIDER_ID,
-      organization.id,
-      "shared",
-      null,
-    );
-    if (!installation) {
-      installation = await this.container.installations.insert({
-        userId: state.userId,
-        providerId: PROVIDER_ID,
-        workspaceId: organization.id,
-        workspaceName: organization.name,
-        installKind: "shared",
-        appId: null,
-        accessToken: token.access_token,
-        refreshToken: null,
-        scopes: token.scope ? token.scope.split(/[\s,]+/) : [...(this.config.scopes ?? DEFAULT_LINEAR_SCOPES)],
-        botUserId: viewer.id,
-      });
-    }
-
-    // 4. Create publication.
-    const existingPubs = await this.container.publications.listByInstallation(
-      installation.id,
-    );
-    const isFirst = existingPubs.length === 0;
-
-    const publication = await this.container.publications.insert({
-      userId: state.userId,
-      agentId: state.agentId,
-      installationId: installation.id,
-      environmentId: state.environmentId,
-      mode: state.mode,
-      status: "live",
-      persona: state.persona,
-      slashCommand: slugify(state.persona.name),
-      capabilities: new Set<CapabilityKey>(
-        this.config.defaultCapabilities ?? ALL_CAPABILITIES,
-      ),
-      sessionGranularity: "per_issue",
-      isDefaultAgent: isFirst,
-    });
-
-    // Stash the access token in a vault so sessions can use it via outbound
-    // injection (sandbox never sees the token). Reuse an existing vault for
-    // this install if one was created on a prior publish to the same workspace.
-    if (!installation.vaultId) {
-      const { vaultId } = await this.container.vaults.createCredentialForUser({
-        userId: state.userId,
-        vaultName: `Linear · ${installation.workspaceName}`,
-        displayName: `Linear MCP token (${installation.workspaceName})`,
-        mcpServerUrl: LINEAR_MCP_URL,
-        bearerToken: token.access_token,
-      });
-      await this.container.installations.setVaultId(installation.id, vaultId);
-      installation = { ...installation, vaultId };
-    }
-
-    return { kind: "complete", publicationId: publication.id };
-  }
-
   // ─── A1 (full identity, BYO Linear App) ─────────────────────────────
 
   private async startDedicatedFlow(input: StartInstallInput): Promise<InstallStep> {
-    // We don't have an App row yet — the user has to create one in Linear's
-    // developer portal first. Generate the values they'll paste in (callback
-    // URL, webhook URL, our suggested name + avatar, the webhook secret we'll
-    // verify against). Stash everything in a short-lived form_token so the
-    // next step doesn't need DB persistence yet.
+    // Generate appId AND webhookSecret upfront so we can hand the user the
+    // *final* callback / webhook URLs to paste into Linear's app form. Without
+    // this, step 1 returned `<APP_ID>` placeholder URLs and step 2 returned
+    // the real ones — forcing the user to re-edit the Linear App after
+    // creation. Linear bakes the webhook URL at creation time and won't let
+    // you change it via API, so the only way out is to make step 1 final.
+    //
+    // Both values live inside a short-lived form_token; we don't write the
+    // App row to D1 until step 2 (after the user pastes the OAuth client
+    // credentials Linear gave them).
+    const appId = this.container.ids.generate();
     const webhookSecret = this.container.ids.generate();
     const formToken = await this.container.jwt.sign(
       {
@@ -266,6 +105,7 @@ export class LinearProvider implements IntegrationProvider {
         environmentId: input.environmentId,
         persona: input.persona,
         returnUrl: input.returnUrl,
+        appId,
         webhookSecret,
       },
       OAUTH_STATE_TTL_SECONDS,
@@ -278,12 +118,9 @@ export class LinearProvider implements IntegrationProvider {
         formToken,
         suggestedAppName: input.persona.name,
         suggestedAvatarUrl: input.persona.avatarUrl,
-        callbackUrl: this.dedicatedCallbackPlaceholder(),
-        webhookUrl: this.dedicatedWebhookPlaceholder(),
+        callbackUrl: this.dedicatedCallbackUri(appId),
+        webhookUrl: this.dedicatedWebhookUri(appId),
         webhookSecret,
-        // Reminder for the UI: the actual callback/webhook URLs include the
-        // appId path param. Tell the user to come back and paste credentials
-        // — we'll regenerate the URLs when we have an appId.
       },
     };
   }
@@ -305,14 +142,23 @@ export class LinearProvider implements IntegrationProvider {
       environmentId: string;
       persona: Persona;
       returnUrl: string;
+      appId: string;
       webhookSecret: string;
     }>(formToken);
     if (form.kind !== "linear.a1.form") {
       throw new Error("submit_credentials: invalid formToken kind");
     }
+    if (!form.appId) {
+      // Old formTokens minted before this change won't carry appId. Force the
+      // user to restart the flow rather than mint a fresh appId here (which
+      // would re-introduce the URL mismatch this fix is supposed to kill).
+      throw new Error("submit_credentials: formToken missing appId — please restart the publish flow");
+    }
 
-    // Persist App credentials. publication_id is null until OAuth completes.
+    // Upsert keyed on appId so a re-submit (page refresh, network retry)
+    // doesn't create a second row with a different id.
     const app = await this.container.apps.insert({
+      id: form.appId,
       publicationId: null,
       clientId,
       clientSecret,
@@ -434,8 +280,7 @@ export class LinearProvider implements IntegrationProvider {
     });
     await this.container.installations.setVaultId(installation.id, vaultId);
 
-    // Create publication and link App back to it. A1 publications don't need
-    // slash commands (no routing — the bot user IS the agent identity).
+    // Create publication and link App back to it.
     const publication = await this.container.publications.insert({
       userId: state.userId,
       agentId: state.agentId,
@@ -444,13 +289,10 @@ export class LinearProvider implements IntegrationProvider {
       mode: "full",
       status: "live",
       persona: state.persona,
-      slashCommand: null,
       capabilities: new Set<CapabilityKey>(
         this.config.defaultCapabilities ?? ALL_CAPABILITIES,
       ),
       sessionGranularity: "per_issue",
-      // A1 has only one publication per install; default routing is moot.
-      isDefaultAgent: false,
     });
     await this.container.apps.setPublicationId(app.id, publication.id);
 
@@ -523,16 +365,11 @@ export class LinearProvider implements IntegrationProvider {
       return { handled: false, reason: "installation_not_found_or_revoked" };
     }
 
-    // Resolve the webhook secret. Shared installs use the env-configured
-    // secret; dedicated (A1) installs read it from the per-app row.
-    let webhookSecret: string | null;
-    if (installation.installKind === "shared") {
-      webhookSecret = this.config.sharedApp.webhookSecret;
-    } else if (installation.appId) {
-      webhookSecret = await this.container.apps.getWebhookSecret(installation.appId);
-    } else {
+    // Resolve the webhook secret from the per-app row.
+    if (!installation.appId) {
       return { handled: false, reason: "missing_app_for_dedicated_install" };
     }
+    const webhookSecret = await this.container.apps.getWebhookSecret(installation.appId);
     if (!webhookSecret) {
       return { handled: false, reason: "missing_webhook_secret" };
     }
@@ -571,27 +408,11 @@ export class LinearProvider implements IntegrationProvider {
       return { handled: false, reason: "unparseable" };
     }
 
-    // Resolve publication.
-    let publication: Publication | null = null;
-    let routingReason = "n/a";
-    if (installation.installKind === "shared") {
-      const publications = await this.container.publications.listByInstallation(
-        installation.id,
-      );
-      const defaultAgent = await this.container.publications.getDefaultForInstallation(
-        installation.id,
-      );
-      const decision = routeForSharedInstall(event, publications, defaultAgent);
-      publication = decision.publication;
-      routingReason = decision.reason;
-    } else {
-      // A1: a dedicated install has exactly one live publication.
-      const pubs = await this.container.publications.listByInstallation(
-        installation.id,
-      );
-      publication = pubs.find((p) => p.status === "live") ?? null;
-      routingReason = publication ? "dedicated_install" : "no_live_publication";
-    }
+    // A dedicated install has exactly one live publication.
+    const pubs = await this.container.publications.listByInstallation(installation.id);
+    const publication: Publication | null =
+      pubs.find((p) => p.status === "live") ?? null;
+    const routingReason = publication ? "dedicated_install" : "no_live_publication";
 
     if (!publication) {
       await this.container.webhookEvents.attachError(req.deliveryId, routingReason);
@@ -707,19 +528,4 @@ export class LinearProvider implements IntegrationProvider {
   ): Promise<McpToolResult> {
     throw new Error("LinearProvider.invokeMcpTool: not yet implemented");
   }
-
-  // ─── Helpers ─────────────────────────────────────────────────────────
-
-  private sharedCallbackUri(): string {
-    return `${this.config.gatewayOrigin}/linear/oauth/shared/callback`;
-  }
-}
-
-/** Lowercase + non-alphanumeric → "-", trimmed. Used for slash commands. */
-function slugify(s: string): string {
-  return s
-    .toLowerCase()
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "")
-    .slice(0, 32) || "agent";
 }

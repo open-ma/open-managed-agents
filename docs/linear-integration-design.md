@@ -8,7 +8,7 @@
 >
 > The implementation diverged from this spec in a few places. Read this before the rest of the doc — what's below is the original design intent.
 >
-> 1. **No custom MCP server.** §6/§8 originally described a gateway-hosted Linear MCP server (~500 LoC of tool definitions + JSON-RPC dispatch). At build time we realized we could just point the agent's existing `mcp_servers` config at Linear's hosted MCP (`https://mcp.linear.app/mcp`) and inject the access token transparently via OMA's outbound vault mechanism. **Net code: 0 lines of MCP server.** Trade-off: per-comment `createAsUser` persona attribution (B+ requirement) is **not implemented in v1** — B+ comments post under the shared bot's identity. Only A1 mode delivers true per-agent persona.
+> 1. **No custom MCP server.** §6/§8 originally described a gateway-hosted Linear MCP server (~500 LoC of tool definitions + JSON-RPC dispatch). At build time we realized we could just point the agent's existing `mcp_servers` config at Linear's hosted MCP (`https://mcp.linear.app/mcp`) and inject the access token transparently via OMA's outbound vault mechanism. **Net code: 0 lines of MCP server.**
 >
 > 2. **Capability enforcement is vestigial.** §6 describes per-publication capability restriction. Without our own MCP proxy, capability checks have nowhere to live — the agent talks straight to Linear's hosted MCP. The capability set is stored in DB and editable in the UI but **does not actually restrict** anything in v1.
 >
@@ -16,13 +16,11 @@
 >
 > 4. **Console UI ships in `packages/integrations-ui`.** New package with its own React/JSX tsconfig, excluded from root `tsc`. apps/console mounts pages via thin wrappers (e.g. injecting `loadAgents` for the publish wizard).
 >
-> 5. **Open question (not answered as of this commit): keep B+ or cut it?** The shared OMA App registration (Phase 4) is required for B+ mode. For self-hosted single-workspace deployments B+ adds little value (everyone is already an admin → A1 is fine). Decision deferred — if cutting, just don't register the shared App and don't set `LINEAR_APP_*` secrets; B+ degrades silently in the publish wizard.
+> 5. **Public vs Private** for the per-agent App is up to the publisher; Private is the default for self-hosted single-workspace use.
 >
-> 6. **Public vs Private** for the shared OMA App depends on workspace count: 1 workspace → Private; multi-workspace → Public (or unlisted public to skip marketplace review).
+> 6. **Internal endpoint auth.** Gateway endpoints called via service binding from main require `X-Internal-Secret` header. main and gateway must share the same `INTEGRATIONS_INTERNAL_SECRET`.
 >
-> 7. **Internal endpoint auth.** Gateway endpoints called via service binding from main require `X-Internal-Secret` header. main and gateway must share the same `INTEGRATIONS_INTERNAL_SECRET`.
->
-> 8. **Storage debt acknowledged.** Most OMA entities (sessions, agents, environments, vaults) live in KV. KV has no real indexes. New tables added by this integration (`linear_*`) live in D1, which is the right home; future migration of legacy KV → D1 is a separate effort.
+> 7. **Storage debt acknowledged.** Most OMA entities (sessions, agents, environments, vaults) live in KV. KV has no real indexes. New tables added by this integration (`linear_*`) live in D1, which is the right home; future migration of legacy KV → D1 is a separate effort.
 
 ---
 
@@ -30,10 +28,7 @@
 
 This document specifies a Linear integration for Open Managed Agents (OMA). The integration lets users turn their OMA agents into **Linear teammates** — agents become real users in a Linear workspace, can be `@`-mentioned, assigned issues, post comments, change status, and otherwise participate in issue threads as if they were human members.
 
-Two installation paths are supported:
-
-- **Full identity (A1)** — primary, recommended path. Each agent registers its own Linear OAuth App and appears as a distinct first-class Linear user with autocomplete and assignee-dropdown presence.
-- **Quick try (B+)** — secondary path. A single shared OMA Linear App is installed once per workspace; multiple agents share that bot identity, with per-comment persona attribution rendered via Linear's `createAsUser` parameter.
+Each agent registers its own Linear OAuth App and appears as a distinct first-class Linear user with autocomplete and assignee-dropdown presence ("full identity").
 
 A new Cloudflare Worker (`apps/integrations`) acts as the gateway between Linear and the existing OMA platform, hosting OAuth flows, webhook receivers, and an MCP server that exposes Linear API tools to agents at runtime.
 
@@ -50,8 +45,8 @@ For teams already using Linear for issue tracking, the natural way to delegate t
 ### 2.2 Goals
 
 - **G1**: A user with an existing OMA agent can publish it to a Linear workspace such that the agent becomes a teammate (mentionable, assignable, can comment, can change status).
-- **G2**: The setup is achievable by a non-engineer in under 5 minutes for the recommended path; under 1 minute for the quick path.
-- **G3**: Agent identity in Linear is per-agent (not a shared "OMA bot") in the recommended path, supporting the "agents as colleagues" framing.
+- **G2**: The setup is achievable by a non-engineer in under 5 minutes.
+- **G3**: Agent identity in Linear is per-agent (not a shared "OMA bot"), supporting the "agents as colleagues" framing.
 - **G4**: All Linear-side traffic is centralized in a separate Cloudflare Worker (`apps/integrations`) so the existing main worker remains focused on the platform's first-party API.
 - **G5**: Linear API tokens never reach agent sandboxes; they are held only by the gateway and accessed via a scoped MCP server.
 - **G6**: Architectural foundation generalizes to future integrations (Slack, GitHub, Discord) by adding new providers under `apps/integrations/providers/`.
@@ -173,39 +168,29 @@ apps/integrations bindings:
 - INTEGRATIONS_KV     (KV; for OAuth state, webhook idempotency, setup-link tokens)
 - MAIN                (service binding to main worker for session creation)
 - MCP_SIGNING_KEY     (secret; signs JWTs delivered to agents)
-- LINEAR_APP_CLIENT_ID, LINEAR_APP_CLIENT_SECRET, LINEAR_APP_WEBHOOK_SECRET
-                      (secrets; for the shared OMA Linear App used in B+ mode)
 ```
 
 ### 3.4 Request lifecycle
 
-**OAuth install (A1 path, per-agent App):**
-1. User in Console clicks "Publish agent → Full identity".
+**OAuth install (per-agent App):**
+1. User in Console clicks "Publish agent".
 2. Console calls main worker to create a `linear_publication` record in `pending_setup` state.
 3. Main returns a setup token; user is shown copy/paste credentials and a deep link to Linear's developer settings.
 4. User registers an App in Linear, posts back `client_id`/`client_secret` to OMA via the integrations worker.
 5. Integrations worker validates credentials by performing a test OAuth handshake; on success, the publication moves to `awaiting_install` and the user clicks an install link.
 6. Linear redirects to integrations worker's callback; the worker exchanges the code for an access token (using the **per-publication** client credentials), encrypts it, stores it in `linear_apps`, and marks the publication `live`.
 
-**OAuth install (B+ path, shared App):**
-1. User clicks "Publish agent → Quick try".
-2. If the user has no existing shared-bot install for the target workspace, integrations worker initiates standard OAuth using the shared OMA App credentials (`LINEAR_APP_CLIENT_ID`).
-3. Otherwise, the publication is created and bound to the existing shared install.
-
-**Webhook event (any path):**
-1. Linear POSTs to `integrations/linear/webhook/<install_id>`.
+**Webhook event:**
+1. Linear POSTs to `integrations/linear/webhook/app/<app_id>`.
 2. Worker validates HMAC against the install's webhook secret.
 3. Worker checks `delivery_id` against `linear_webhook_events` for idempotency.
-4. Worker resolves the targeted publication:
-   - A1: webhook arrives at a publication-specific endpoint, so the binding is direct.
-   - B+: worker inspects the event (slash command, label, default agent) to pick the publication.
+4. The webhook arrives at a publication-specific endpoint, so the binding to a publication is direct.
 5. Worker calls `MAIN.fetch("/v1/sessions", ...)` to create or resume an OMA session, attaching Linear context (workspace, issue, comment) as session metadata.
 6. Worker writes the session id back into `linear_webhook_events`.
 
 **Agent → Linear callback (during session):**
 1. Main worker injects an MCP server URL into the agent session, signed with `MCP_SIGNING_KEY` and scoped to the publication + issue.
 2. Agent calls Linear tools via MCP. The integrations worker validates the JWT, looks up the publication's access token, and proxies the call to Linear's GraphQL API.
-3. For B+ comments, integrations worker injects `createAsUser` and `displayIconUrl` from the publication's persona settings.
 
 ### 3.5 Core abstractions (`packages/integrations-core`)
 
@@ -295,7 +280,7 @@ Each Cloudflare binding is wrapped by exactly one adapter that satisfies a port.
 
 All tables live in `AUTH_DB` (D1). Schema migrations live with `packages/integrations-adapters-cf` (the Cloudflare-specific adapter), not in `apps/integrations` and not in `packages/linear` — the provider package never sees SQL.
 
-### 4.1 `linear_apps` (A1 only — per-publication App credentials)
+### 4.1 `linear_apps` (per-publication App credentials)
 
 ```sql
 CREATE TABLE linear_apps (
@@ -316,8 +301,8 @@ CREATE TABLE linear_installations (
   user_id         TEXT NOT NULL,              -- OMA user (better-auth user.id)
   workspace_id    TEXT NOT NULL,              -- Linear org id
   workspace_name  TEXT NOT NULL,
-  install_kind    TEXT NOT NULL,              -- 'shared' (B+) | 'dedicated' (A1)
-  app_id          TEXT,                       -- FK linear_apps.id (A1 only); null for shared
+  install_kind    TEXT NOT NULL,              -- 'dedicated' (single value retained for forward-compat)
+  app_id          TEXT,                       -- FK linear_apps.id
   access_token    TEXT NOT NULL,              -- AES-GCM encrypted
   refresh_token   TEXT,                       -- AES-GCM encrypted (if Linear issues one)
   scopes          TEXT NOT NULL,
@@ -328,7 +313,7 @@ CREATE TABLE linear_installations (
 );
 ```
 
-For shared-mode installs, `app_id` is null and `(workspace_id, 'shared', NULL)` is unique. For dedicated installs, each app gets its own row.
+Each App registration gets its own row.
 
 ### 4.3 `linear_publications`
 
@@ -338,14 +323,12 @@ CREATE TABLE linear_publications (
   user_id             TEXT NOT NULL,          -- OMA user (publisher)
   agent_id            TEXT NOT NULL,          -- OMA agent
   installation_id     TEXT NOT NULL,          -- FK linear_installations.id
-  mode                TEXT NOT NULL,          -- 'full' (A1) | 'quick' (B+)
+  mode                TEXT NOT NULL,          -- 'full'
   status              TEXT NOT NULL,          -- 'pending_setup' | 'awaiting_install' | 'live' | 'needs_reauth' | 'unpublished'
-  persona_name        TEXT NOT NULL,          -- displayed in Linear (createAsUser for B+; App name for A1)
-  persona_avatar_url  TEXT,                   -- displayIconUrl for B+; App avatar for A1
-  slash_command       TEXT,                   -- B+ only; e.g. '/coder'
+  persona_name        TEXT NOT NULL,          -- displayed in Linear (App name)
+  persona_avatar_url  TEXT,                   -- App avatar
   capabilities        TEXT NOT NULL,          -- JSON: which Linear ops this publication may perform
   session_granularity TEXT NOT NULL,          -- 'per_issue' | 'per_event'
-  is_default_agent    INTEGER NOT NULL,       -- B+ only; one per installation
   created_at          INTEGER NOT NULL,
   unpublished_at      INTEGER
 );
@@ -398,42 +381,19 @@ CREATE TABLE linear_issue_sessions (
 
 ## 5. Identity Strategy
 
-### 5.1 A1 — Full identity (recommended)
+### 5.1 Full identity (per-agent App)
 
-Each `linear_publication` in `mode='full'` has its own `linear_apps` row with dedicated OAuth credentials. The bot user created when that App is installed in a workspace **is** the agent's identity. Linear's `@` autocomplete and assignee dropdown surface the bot like any other user.
+Each `linear_publication` has its own `linear_apps` row with dedicated OAuth credentials. The bot user created when that App is installed in a workspace **is** the agent's identity. Linear's `@` autocomplete and assignee dropdown surface the bot like any other user.
 
 **Setup cost**: ~3 minutes per agent per workspace (Linear App registration must be done by a workspace admin).
 
 **Capabilities at the protocol level**: standard `actor=app` OAuth with the requested scopes (`read`, `write`, `app:assignable`, `app:mentionable`, plus any others the user grants).
 
-### 5.2 B+ — Quick try
+Routing is implicit (event arrives at a publication-specific webhook endpoint, so the binding to a publication is direct).
 
-A single shared OMA Linear App is registered globally by the OMA project maintainers. It uses `LINEAR_APP_CLIENT_ID` / `LINEAR_APP_CLIENT_SECRET` from the gateway's secrets. Each user installs this shared App into their workspace via standard OAuth.
+### 5.2 Non-admin handoff
 
-`linear_publications` in `mode='quick'` reuse this shared install. When an agent posts a comment, the gateway uses Linear's `createAsUser` and `displayIconUrl` parameters to attribute the comment to the agent's persona, even though the underlying actor is the shared OMA bot.
-
-**Limitations** (compared to A1):
-- `@` autocomplete only shows "OpenMA"; the agent's persona name is not directly mentionable.
-- Assignee dropdown only shows "OpenMA".
-- Linear notification text reads "OpenMA …" instead of the persona name.
-- Routing is required to determine which agent handles each event (slash prefix, label, default agent).
-
-**Setup cost**: 30 seconds for first install per workspace; 5 seconds for each additional agent in the same workspace.
-
-### 5.3 Routing rules (B+ only)
-
-When a webhook arrives in B+ mode, the gateway resolves the target publication in this order:
-
-1. Slash command in event body matches a publication's `slash_command` (e.g. `@OpenMA /coder ...`)
-2. Issue carries a label matching `agent:<name>` for an active publication
-3. Workspace's `is_default_agent=true` publication
-4. If none match: drop event (with an event-log entry; no Linear-side noise)
-
-For A1, routing is implicit (event arrives at a publication-specific webhook endpoint).
-
-### 5.4 Non-admin handoff
-
-Non-admin OMA users cannot complete A1 setup themselves (Linear requires workspace admin to register Apps). The Console offers a "Send setup link to admin" action that creates a `linear_setup_links` row and surfaces a shareable URL.
+Non-admin OMA users cannot complete setup themselves (Linear requires workspace admin to register Apps). The Console offers a "Send setup link to admin" action that creates a `linear_setup_links` row and surfaces a shareable URL.
 
 The admin opens the link, lands on a minimal setup page hosted by the gateway (no OMA login required, just the link's token), completes Linear-side steps, and the credentials flow back into the originating publication. The original user is notified.
 
@@ -443,7 +403,7 @@ The admin opens the link, lands on a minimal setup page hosted by the gateway (n
 
 ### 6.1 Default
 
-All Linear API operations are enabled by default for both A1 and B+. This includes:
+All Linear API operations are enabled by default. This includes:
 
 - Read all content
 - Comment / reply
@@ -520,8 +480,6 @@ linear.set_priority(id, priority)
 linear.delete(id)
 ```
 
-For B+ mode, `post_comment` and `create_issue` automatically inject `createAsUser` + `displayIconUrl` from the publication's persona settings.
-
 ### 8.2 Tool schemas
 
 Auto-generated from Linear's GraphQL schema introspection. A single source of truth for tool definitions reduces drift.
@@ -547,10 +505,8 @@ Single source of truth for all Linear configuration:
 
 A 3-step modal:
 
-1. **Pick agent + mode** — choose the OMA agent to publish; choose A1 vs B+ with side-by-side comparison.
-2. **Setup**:
-   - A1: copy/paste Linear App credentials; "Send to admin" alternative.
-   - B+: standard OAuth flow (or skip if shared install already exists).
+1. **Pick agent** — choose the OMA agent to publish.
+2. **Setup** — copy/paste Linear App credentials; "Send to admin" alternative.
 3. **Done** — confirmation with deep link back to the workspace in Linear.
 
 ### 9.4 Workspace manage page
@@ -559,7 +515,7 @@ Per-workspace view: connection status, list of live publications, "+ Publish ano
 
 ### 9.5 Per-publication settings
 
-Capabilities matrix, persona overrides (B+: name/avatar/slash command), session granularity, unpublish.
+Capabilities matrix, persona overrides (name/avatar), session granularity, unpublish.
 
 ### 9.6 Agent Detail page
 
@@ -574,8 +530,6 @@ Minimal change: a Linear status badge with a "Manage in Integrations" link. All 
 
 ## 10. Linear-side UX
 
-### 10.1 A1 mode
-
 Agents appear as first-class Linear users:
 
 - `@` autocomplete shows the persona name
@@ -583,14 +537,7 @@ Agents appear as first-class Linear users:
 - Notification text uses the persona name ("Coder commented on ENG-142")
 - Issue sidebar Agent Session panel shows live activity, scoped to the agent
 
-### 10.2 B+ mode
-
-- Single "OpenMA" bot user in Linear
-- Comments display the persona name and avatar via `createAsUser` / `displayIconUrl`, plus a small "via OpenMA" footer (toggleable)
-- Agent Session panel header reads "OpenMA · acting as Coder"
-- Notifications and `@` autocomplete use the bot's identity
-
-### 10.3 Error / handoff comments
+### 10.1 Error / handoff comments
 
 When an agent fails or hands off, it posts a structured comment:
 
@@ -626,7 +573,6 @@ I'm not sure how to proceed — <short reason>. Unassigning so a human can take 
 - Linear projects / cycles / milestones / initiatives as event sources (agents can still operate on these objects via tools).
 - Customer requests / feedback intake.
 - Bidirectional sync with Linear MCP server (`mcp.linear.app`).
-- Browser extension to inject `@`-autocomplete entries for B+.
 - Mobile push notifications from OMA.
 - Multi-OMA-user shared ownership of a Linear workspace install (single owner per install in v1; ownership transfers via support flow).
 - Per-issue capability override label (e.g. `agent:read-only` to temporarily downscope).
@@ -641,7 +587,7 @@ I'm not sure how to proceed — <short reason>. Unassigning so a human can take 
 | Linear API rate limit (≈1500 req/h/workspace) | Agents block on bursty workloads | Token bucket per installation in gateway; expose remaining quota to agent via tool result; surface in SessionDetail |
 | Webhook delivery loss | Missed events, stale agent state | Linear retries on its side; idempotency table on ours; "Resync issue" manual button per `linear_issue_sessions` row |
 | Linear App count limit per workspace | A1 unusable past a threshold | Limit not publicly documented; add a UI cap (e.g. 20) and surface a link to Linear support if hit |
-| Workspace admin refuses A1 setup | Power user blocked from primary path | B+ available as fallback; setup-link flow encourages async coordination |
+| Workspace admin refuses setup | Power user blocked | Setup-link flow encourages async coordination with admin |
 | Linear API/UI changes | Integration breaks | Linear's Agents API is GA but Agent Plans is in preview; pin to documented endpoints; add integration smoke tests; treat preview features as best-effort |
 | Token leak | Workspace compromise | AES-GCM encryption at rest, gateway-only access, short JWT scope, audit log on Linear side via `actor=app` attribution |
 | User uninstalls App in Linear | Webhooks 401 | Gateway marks publication `needs_reauth`; Console shows red banner with reauth CTA |
@@ -659,29 +605,23 @@ The implementation plan (next phase) should respect the package layering — int
 3. D1 migrations for the six new tables, owned by the cf-adapters package.
 4. `apps/integrations` skeleton: `wrangler.jsonc`, `/health`, `wire.ts` composition root, deployed at `integrations.<host>`.
 
-**Phase B — Linear provider (B+ first, end-to-end)**
+**Phase B — Linear provider (per-agent App, end-to-end)**
 5. `packages/linear` skeleton implementing `IntegrationProvider`, depending only on `integrations-core` ports.
-6. Shared OMA Linear App registration (one-time, by maintainers) + `LINEAR_APP_*` secrets.
-7. B+ install flow (OAuth init/callback) — provider logic in `packages/linear`, route handlers in `apps/integrations`.
-8. Webhook receiver: HMAC validation in `packages/linear`, idempotency via `WebhookEventStore` adapter.
-9. Routing for B+ (slash / label / default) inside `packages/linear`.
-10. `SessionCreator` adapter calls main worker; provider attaches Linear context.
-11. Linear MCP server skeleton with `get_issue` + `post_comment` (validated end-to-end against a real Linear workspace).
-12. Persona attribution in `post_comment` (B+: `createAsUser` + `displayIconUrl`).
-13. `per_issue` session granularity via `IssueSessionRepo`.
+6. Per-publication App install flow: setup wizard, validation, install link.
+7. Setup-link handoff for non-admin users.
+8. Webhook receiver: HMAC validation in `packages/linear`, idempotency via `WebhookEventStore` adapter; arrives on per-app endpoint, so binding to publication is direct.
+9. `SessionCreator` adapter calls main worker; provider attaches Linear context.
+10. Linear MCP integration: agent's `mcp_servers` config points at Linear's hosted MCP (`https://mcp.linear.app/mcp`); access token injected via OMA's outbound vault. No custom MCP server.
+11. `per_issue` session granularity via `IssueSessionRepo`.
 
-**Phase C — A1 (full identity)**
-14. A1 install flow: per-publication App credentials, setup wizard, validation, install link.
-15. Setup-link handoff for non-admin users.
-
-**Phase D — Console + completeness**
-16. Console UI: Integrations page, workspace list, publish wizard, workspace manage page, per-publication settings.
-17. Agent Detail badge + SessionsList badge + SessionDetail Linear context card.
-18. Full Linear tool set in the MCP server.
-19. Capability matrix UI + enforcement (in `packages/linear` against the capability set carried in `McpScope`).
-20. Error / handoff structured comments.
-21. Reauth flow when token revocation is detected.
-22. Integration smoke tests, observability, rate-limit protection.
+**Phase C — Console + completeness**
+12. Console UI: Integrations page, workspace list, publish wizard, workspace manage page, per-publication settings.
+13. Agent Detail badge + SessionsList badge + SessionDetail Linear context card.
+14. Full Linear tool set in the MCP server.
+15. Capability matrix UI + enforcement (in `packages/linear` against the capability set carried in `McpScope`).
+16. Error / handoff structured comments.
+17. Reauth flow when token revocation is detected.
+18. Integration smoke tests, observability, rate-limit protection.
 
 **Test layering**
 - `packages/integrations-core`: unit tests for type guards, helper logic.
