@@ -2,7 +2,75 @@ import type { ModelMessage, LanguageModel } from "ai";
 import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 
 export interface HarnessInterface {
+  /** Main agent loop. Required. Drives generateText and emits events. */
   run(ctx: HarnessContext): Promise<void>;
+
+  /**
+   * Called once per session, after sandbox warmup, before the first user
+   * message is processed. Default behavior (DefaultHarness): inject
+   * <system-reminder> user.message events for each skill / memory_prompt /
+   * appendable_prompt the agent opted into. Override to substitute a custom
+   * RAG layer, or to opt out of platform reminders entirely (no-op).
+   *
+   * Anything written here lands in the events stream BEFORE the first user
+   * message — it becomes part of the cached prefix for every subsequent turn.
+   */
+  onSessionInit?(ctx: HarnessContext, runtime: HarnessRuntime): Promise<void>;
+
+  /**
+   * Decide whether to trigger compaction for this turn. Default behavior:
+   * estimate tokens via deriveModelContext + heuristic, fire when > 75% of
+   * the model's context window. Override for cooldown / business rules /
+   * never-compact / always-compact.
+   *
+   * `ctx.contextWindowTokens` is the resolved model's window (best-effort —
+   * may be a default if the model card doesn't expose it).
+   */
+  shouldCompact?(events: SessionEvent[], ctx: { contextWindowTokens: number }): boolean;
+
+  /**
+   * Execute compaction. Implementation MUST persist its product as a
+   * agent.thread_context_compacted event with `summary: ContentBlock[]`
+   * filled in (via runtime.broadcast). Default: send the FULL conversation
+   * (same model + system + tools as main agent's last call) to the model
+   * with a "summarize the above" user message appended — Anthropic's prompt
+   * cache then reads the prefix instead of recomputing it.
+   */
+  compact?(
+    events: SessionEvent[],
+    runtime: HarnessRuntime,
+    ctx: {
+      model: LanguageModel;
+      systemPrompt: string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: Record<string, any>;
+    },
+  ): Promise<void>;
+
+  /**
+   * Project events → ModelMessage[] for the next generateText call. Default:
+   * eventsToMessages — strict bijection inverse of writes, with
+   * agent.thread_context_compacted boundary handling. Override for
+   * sliding-window / RAG / hierarchical / no-compact strategies.
+   *
+   * Output MUST be byte-deterministic for any input — Anthropic's prompt
+   * cache invalidates on any prefix byte drift.
+   */
+  deriveModelContext?(events: SessionEvent[]): ModelMessage[];
+}
+
+export interface HarnessRuntime {
+  history: HistoryStore;
+  sandbox: SandboxExecutor;
+  /**
+   * Append an event to history AND broadcast to WS subscribers. The single
+   * write path for harness-emitted events (model output, system_reminder,
+   * compaction marker, custom marker, etc.).
+   */
+  broadcast: (event: SessionEvent) => void;
+  reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
+  pendingConfirmations?: string[];
+  abortSignal?: AbortSignal;
 }
 
 export interface HarnessContext {
@@ -16,8 +84,33 @@ export interface HarnessContext {
   /** Platform-prepared model: resolved from agent config with API key. */
   model: LanguageModel;
 
-  /** System prompt: base from agent.system + skill metadata additions. */
+  /**
+   * Platform-augmented system prompt: agent.system + authenticatedCommandGuidance.
+   * Skill/memory/appendable_prompt content is NOT here — that's injected as
+   * <system-reminder> user.message events via onSessionInit (default behavior).
+   * Use this directly to inherit platform defaults; ignore and use
+   * `rawSystemPrompt` if you want to take full control.
+   */
   systemPrompt: string;
+
+  /**
+   * Just `agent.system` verbatim, no platform additions. Use this when
+   * substituting a custom system prompt build path. Optional during the
+   * transition; SessionDO will populate it once task #9 lands.
+   */
+  rawSystemPrompt?: string;
+
+  /**
+   * Platform-resolved reminders the default `onSessionInit` will inject as
+   * `<system-reminder>` user.message events on first session run. Sources:
+   * skill metadata, memory_store prompts, opted-in appendable_prompts.
+   *
+   * Custom harnesses can ignore this and inject differently — or skip
+   * platform reminders entirely by overriding onSessionInit with a no-op.
+   * Each reminder lands as ONE event, persisted in the events stream
+   * before any user message, so it sits in the cached prefix forever.
+   */
+  platformReminders?: Array<{ source: string; text: string }>;
 
   env: {
     ANTHROPIC_API_KEY: string;
@@ -31,14 +124,7 @@ export interface HarnessContext {
     /** Register a background task for completion notification (CC-style task_notification). */
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
   };
-  runtime: {
-    history: HistoryStore;
-    sandbox: SandboxExecutor;
-    broadcast: (event: SessionEvent) => void;
-    reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
-    pendingConfirmations?: string[];
-    abortSignal?: AbortSignal;
-  };
+  runtime: HarnessRuntime;
 }
 
 export interface HistoryStore {

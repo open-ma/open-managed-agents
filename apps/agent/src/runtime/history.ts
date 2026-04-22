@@ -8,172 +8,169 @@ import type {
   AgentToolResultEvent,
   AgentMcpToolUseEvent,
   AgentMcpToolResultEvent,
+  AgentCustomToolUseEvent,
+  AgentThreadContextCompactedEvent,
+  ContentBlock,
   UserMessageEvent,
 } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
 
 /**
- * Convert an array of SessionEvents into AI SDK ModelMessage[] format.
- * Shared by SqliteHistory and InMemoryHistory to avoid duplication.
- * Groups tool_use + tool_result into proper assistant/tool message pairs.
+ * Convert SessionEvent[] → ModelMessage[]. The strict inverse of
+ * default-loop.ts onStepFinish writes — together they form the bijection
+ * that prompt-cache determinism rests on.
+ *
+ * Invariant: write(read(events)) === events at the byte level for every
+ * event sequence produced by onStepFinish (modulo lifecycle/span/notification
+ * events, which are intentionally not in model context). Any byte drift here
+ * busts Anthropic's cache from the drift point onward.
+ *
+ * Determinism rules:
+ *   - Pre-pass once to build toolCallId → toolName, so tool-result events can
+ *     resolve toolName even when the matching tool_use lies in a different
+ *     "flush window" (the old `pendingToolCalls.find` failed on that case
+ *     and produced "unknown" — a permanent cache miss).
+ *   - Iterate events strictly by storage order (caller's job to sort by seq).
+ *   - Honor the LAST agent.thread_context_compacted boundary that carries a
+ *     `summary` payload: build pre-boundary and post-boundary messages
+ *     separately, inject the summary, pick a CC-style tail of the
+ *     pre-boundary messages by token budget, then output
+ *     `[summary, ...tail, ...post-boundary]`. Boundary events without a
+ *     summary are pure UI signals (no effect here).
+ *   - Skip lifecycle.* / span.* / notification.* / agent.thread_message_*
+ *     and bare (summary-less) compaction events.
  */
 export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
+  // Pre-pass: gather toolName for every toolCallId emitted by ANY tool_use
+  // event. Resolves the cross-window lookup problem.
+  const toolNameById = new Map<string, string>();
+  for (const event of events) {
+    if (
+      event.type === "agent.tool_use" ||
+      event.type === "agent.mcp_tool_use" ||
+      event.type === "agent.custom_tool_use"
+    ) {
+      const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
+      const name = event.type === "agent.mcp_tool_use"
+        ? `mcp_${(e as AgentMcpToolUseEvent).mcp_server_name}_call`
+        : (e as AgentToolUseEvent | AgentCustomToolUseEvent).name;
+      toolNameById.set(e.id, name);
+    }
+  }
+
+  // Find the last compaction boundary that actually carries a summary —
+  // that's the one we honor. Earlier boundaries get superseded.
+  let boundaryIdx = -1;
+  let boundarySummary: ContentBlock[] | undefined;
+  for (let i = events.length - 1; i >= 0; i--) {
+    const e = events[i];
+    if (e.type === "agent.thread_context_compacted") {
+      const ce = e as AgentThreadContextCompactedEvent;
+      if (ce.summary && ce.summary.length > 0) {
+        boundaryIdx = i;
+        boundarySummary = ce.summary;
+        break;
+      }
+    }
+  }
+
+  // No boundary → walk everything straight through.
+  if (boundaryIdx < 0) {
+    return buildMessages(events, 0, events.length, toolNameById);
+  }
+
+  // Boundary exists. Build pre/post separately; pick CC-style tail from pre.
+  const preBoundary = buildMessages(events, 0, boundaryIdx, toolNameById);
+  const postBoundary = buildMessages(events, boundaryIdx + 1, events.length, toolNameById);
+  const tail = pickPreservedTail(preBoundary, {
+    minTokens: TAIL_MIN_TOKENS,
+    maxTokens: TAIL_MAX_TOKENS,
+    minMessages: TAIL_MIN_MESSAGES,
+  });
+
+  // Inject the boundary summary as a synthesized user message that opens
+  // the post-compaction view. Wrapped in <conversation-summary> tags so the
+  // model recognizes it as platform-injected context.
+  const summaryMessage: ModelMessage = {
+    role: "user",
+    content: [{ type: "text", text: serializeSummaryAsText(boundarySummary!) }],
+  };
+
+  return [summaryMessage, ...tail, ...postBoundary];
+}
+
+/**
+ * Walk events[fromIdx..toIdx) into ModelMessage[]. Maintains pending
+ * assistant + tool state internally, flushes at the end. Used by
+ * eventsToMessages on either the full stream, the pre-boundary range, or
+ * the post-boundary range.
+ */
+function buildMessages(
+  events: SessionEvent[],
+  fromIdx: number,
+  toIdx: number,
+  toolNameById: Map<string, string>,
+): ModelMessage[] {
   const messages: ModelMessage[] = [];
+  let pendingAssistantContent: AssistantModelMessage["content"] = [];
+  let pendingToolContent: ToolModelMessage["content"] = [];
 
-  let pendingToolCalls: Array<{
-    type: "tool-call";
-    toolCallId: string;
-    toolName: string;
-    input: Record<string, unknown>;
-  }> = [];
-  let pendingToolResults: Array<{
-    type: "tool-result";
-    toolCallId: string;
-    toolName: string;
-    output: { type: "text"; value: string };
-  }> = [];
-  // Reasoning parts emitted between the previous user/tool message and the
-  // upcoming assistant turn. Replayed as `{ type: "reasoning" }` parts so the
-  // model sees its own prior chain-of-thought (some providers require this for
-  // signature verification or context preservation).
-  let pendingReasoning: Array<{
-    type: "reasoning";
-    text: string;
-    providerOptions?: Record<string, unknown>;
-  }> = [];
-
+  const flushAssistant = () => {
+    if (pendingAssistantContent.length > 0) {
+      messages.push({ role: "assistant", content: pendingAssistantContent });
+      pendingAssistantContent = [];
+    }
+  };
   const flushTools = () => {
-    if (pendingToolCalls.length > 0) {
-      // Reasoning blocks emitted alongside the tool calls go in the SAME
-      // assistant message, BEFORE the tool calls — Anthropic schema requires
-      // thinking → tool_use ordering, and signature verification depends on
-      // it.
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const content: any[] = [...pendingReasoning, ...pendingToolCalls];
-      const assistantMsg: AssistantModelMessage = {
-        role: "assistant",
-        content,
-      };
-      const toolMsg: ToolModelMessage = {
-        role: "tool",
-        content: pendingToolResults,
-      };
-      messages.push(assistantMsg);
-      messages.push(toolMsg);
-      pendingToolCalls = [];
-      pendingToolResults = [];
-      pendingReasoning = [];
+    if (pendingToolContent.length > 0) {
+      messages.push({ role: "tool", content: pendingToolContent });
+      pendingToolContent = [];
     }
   };
 
-  for (const event of events) {
+  for (let i = fromIdx; i < toIdx; i++) {
+    const event = events[i];
     switch (event.type) {
       case "user.message": {
+        flushAssistant();
         flushTools();
-        const e = event as UserMessageEvent;
         messages.push({
           role: "user",
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          content: e.content.map((b): any => {
-            if (b.type === "text") {
-              return { type: "text" as const, text: b.text };
-            }
-            if (b.type === "image") {
-              if (b.source.type === "url" && b.source.url) {
-                return { type: "image" as const, image: new URL(b.source.url) };
-              }
-              // base64 or file reference
-              return {
-                type: "image" as const,
-                image: b.source.data || "",
-                mediaType: b.source.media_type,
-              };
-            }
-            if (b.type === "document") {
-              // Pass citations + title through as ai-sdk providerOptions so
-              // Anthropic's per-page citation anchors fire when the source PDF
-              // was uploaded with citations:{enabled:true}.
-              const providerOptions = (b.citations || b.title || b.context)
-                ? {
-                    anthropic: {
-                      ...(b.citations ? { citations: b.citations } : {}),
-                      ...(b.title ? { title: b.title } : {}),
-                      ...(b.context ? { context: b.context } : {}),
-                    },
-                  }
-                : undefined;
-              // ai-sdk v6 FilePart spec: data + mediaType (NOT mimeType).
-              // Schema validation rejects mimeType.
-              if (b.source.type === "url" && b.source.url) {
-                return {
-                  type: "file" as const,
-                  data: new URL(b.source.url),
-                  mediaType: b.source.media_type,
-                  ...(providerOptions ? { providerOptions } : {}),
-                };
-              }
-              if (b.source.type === "text") {
-                // Plain text document — send as text with context
-                const prefix = b.title ? `[${b.title}]\n` : "";
-                return { type: "text" as const, text: prefix + (b.source.data || "") };
-              }
-              return {
-                type: "file" as const,
-                data: b.source.data || "",
-                mediaType: b.source.media_type || "application/pdf",
-                ...(providerOptions ? { providerOptions } : {}),
-              };
-            }
-            // fallback
-            return { type: "text" as const, text: JSON.stringify(b) };
-          }),
+          content: userContentToParts((event as UserMessageEvent).content),
         });
         break;
       }
-      case "agent.message": {
-        const e = event as AgentMessageEvent;
-        // Reasoning that preceded this final assistant message must ride
-        // with it (Anthropic schema: thinking → text). Don't flushTools()
-        // first if there were no tool calls — drop reasoning into the
-        // assistant content directly.
-        if (pendingToolCalls.length > 0) {
-          flushTools();
-        }
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const content: any[] = [
-          ...pendingReasoning,
-          ...e.content.map((b) => ({ type: "text" as const, text: b.type === "text" ? b.text : "" })),
-        ];
-        messages.push({ role: "assistant", content });
-        pendingReasoning = [];
-        break;
-      }
       case "agent.thinking": {
+        flushTools();
         const e = event as AgentThinkingEvent;
-        if (e.text) {
-          pendingReasoning.push({
+        if (e.text != null) {
+          pendingAssistantContent.push({
             type: "reasoning",
             text: e.text,
-            ...(e.providerOptions ? { providerOptions: e.providerOptions } : {}),
+            ...(e.providerOptions ? { providerOptions: e.providerOptions as Record<string, any> } : {}),
           });
         }
         break;
       }
-      case "agent.tool_use": {
-        const e = event as AgentToolUseEvent;
-        pendingToolCalls.push({
-          type: "tool-call",
-          toolCallId: e.id,
-          toolName: e.name,
-          input: e.input,
-        });
+      case "agent.message": {
+        flushTools();
+        const e = event as AgentMessageEvent;
+        for (const block of e.content) {
+          if (block.type === "text") {
+            pendingAssistantContent.push({ type: "text", text: block.text });
+          }
+        }
         break;
       }
-      case "agent.mcp_tool_use": {
-        const e = event as AgentMcpToolUseEvent;
-        // MCP tools are registered as mcp_{server}_{call|list_tools} in the tool registry
-        const toolName = `mcp_${e.mcp_server_name}_call`;
-        pendingToolCalls.push({
+      case "agent.tool_use":
+      case "agent.mcp_tool_use":
+      case "agent.custom_tool_use": {
+        flushTools();
+        const e = event as AgentToolUseEvent | AgentMcpToolUseEvent | AgentCustomToolUseEvent;
+        const toolName = event.type === "agent.mcp_tool_use"
+          ? `mcp_${(e as AgentMcpToolUseEvent).mcp_server_name}_call`
+          : (e as AgentToolUseEvent | AgentCustomToolUseEvent).name;
+        pendingAssistantContent.push({
           type: "tool-call",
           toolCallId: e.id,
           toolName,
@@ -181,62 +178,233 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
         });
         break;
       }
-      case "agent.tool_result": {
-        const e = event as AgentToolResultEvent;
-        // Find matching tool call to get toolName
-        const matchingCall = pendingToolCalls.find(
-          (c) => c.toolCallId === e.tool_use_id
-        );
-        // content may be string OR ContentBlock[] (multimodal). Convert to AI SDK
-        // ToolResultOutput shape accordingly.
-        let output: { type: "text"; value: string } | { type: "content"; value: Array<{ type: "text"; text: string } | { type: "media" | "file-data"; data: string; mediaType: string }> };
-        if (typeof e.content === "string") {
-          output = { type: "text", value: e.content };
-        } else if (Array.isArray(e.content)) {
-          // Translate Anthropic-shape ContentBlock[] → AI SDK content parts
-          const parts = e.content.map((b) => {
-            if (b.type === "text") return { type: "text" as const, text: b.text };
-            if (b.type === "image" && b.source.type === "base64") {
-              return { type: "file-data" as const, data: b.source.data || "", mediaType: b.source.media_type || "image/png" };
-            }
-            if (b.type === "document" && b.source.type === "base64") {
-              return { type: "file-data" as const, data: b.source.data || "", mediaType: b.source.media_type || "application/pdf" };
-            }
-            return { type: "text" as const, text: JSON.stringify(b) };
-          });
-          output = { type: "content", value: parts };
-        } else {
-          output = { type: "text", value: JSON.stringify(e.content) };
-        }
-        pendingToolResults.push({
-          type: "tool-result",
-          toolCallId: e.tool_use_id,
-          toolName: matchingCall?.toolName ?? "unknown",
-          // @ts-expect-error AI SDK ToolResultPart.output union doesn't expose 'content' in our generated types,
-          // but the provider does accept it. See ToolResultOutput in @ai-sdk/provider-utils.
-          output,
-        });
-        break;
-      }
+      case "agent.tool_result":
       case "agent.mcp_tool_result": {
-        const e = event as AgentMcpToolResultEvent;
-        const matchingCall = pendingToolCalls.find(
-          (c) => c.toolCallId === e.mcp_tool_use_id
-        );
-        pendingToolResults.push({
+        flushAssistant();
+        const e = event as AgentToolResultEvent | AgentMcpToolResultEvent;
+        const toolCallId = event.type === "agent.tool_result"
+          ? (e as AgentToolResultEvent).tool_use_id
+          : (e as AgentMcpToolResultEvent).mcp_tool_use_id;
+        const toolName = toolNameById.get(toolCallId) ?? "unknown";
+        const output = wireContentToToolOutput((e as AgentToolResultEvent).content);
+        pendingToolContent.push({
           type: "tool-result",
-          toolCallId: e.mcp_tool_use_id,
-          toolName: matchingCall?.toolName ?? "unknown",
-          output: { type: "text", value: e.content },
+          toolCallId,
+          toolName,
+          output: output as any,
         });
         break;
       }
-      // session.status_idle, session.error — not part of messages
     }
   }
 
+  flushAssistant();
   flushTools();
   return messages;
+}
+
+// CC-style tail preservation params (sessionMemoryCompact.ts
+// DEFAULT_SM_COMPACT_CONFIG):
+//   minTokens: 10_000  maxTokens: 40_000  minTextMessages: 5
+const TAIL_MIN_TOKENS = 10_000;
+const TAIL_MAX_TOKENS = 40_000;
+const TAIL_MIN_MESSAGES = 5;
+// CC's microCompact.IMAGE_MAX_TOKEN_SIZE — images bill at a flat 2K each.
+const IMAGE_TOKEN_SIZE = 2_000;
+
+/**
+ * CC-style per-content-part token estimate (microCompact.ts:164). Text uses
+ * length/4; image/file blocks use a flat 2K; tool-use counts name + JSON
+ * input but not the id; reasoning counts the text but not the signature.
+ */
+function estimateContentPartTokens(part: unknown): number {
+  if (typeof part === "string") return Math.round(part.length / 4);
+  if (!part || typeof part !== "object") return 0;
+  const p = part as { type?: string; [k: string]: unknown };
+  switch (p.type) {
+    case "text":
+      return Math.round(((p.text as string) ?? "").length / 4);
+    case "reasoning":
+      // Match CC: count thinking text only; signature is metadata, not tokenized.
+      return Math.round(((p.text as string) ?? "").length / 4);
+    case "tool-call":
+      return Math.round((((p.toolName as string) ?? "") + JSON.stringify(p.input ?? {})).length / 4);
+    case "tool-result":
+      return estimateToolResultTokens(p.output);
+    case "image":
+    case "file":
+      return IMAGE_TOKEN_SIZE;
+    default:
+      return Math.round(JSON.stringify(part).length / 4);
+  }
+}
+
+function estimateToolResultTokens(output: unknown): number {
+  if (!output || typeof output !== "object") return 0;
+  const o = output as { type?: string; value?: unknown };
+  if (o.type === "text") return Math.round((((o.value as string) ?? "")).length / 4);
+  if (o.type === "content" && Array.isArray(o.value)) {
+    let sum = 0;
+    for (const item of o.value) {
+      if (item && typeof item === "object") {
+        const it = item as { type?: string; text?: string };
+        if (it.type === "text") sum += Math.round((it.text ?? "").length / 4);
+        else if (it.type === "image-data" || it.type === "image-url" || it.type === "file-data" || it.type === "file-url") sum += IMAGE_TOKEN_SIZE;
+        else sum += Math.round(JSON.stringify(item).length / 4);
+      }
+    }
+    return sum;
+  }
+  return Math.round(JSON.stringify(output).length / 4);
+}
+
+/**
+ * Per-message estimate, mirroring CC's `estimateMessageTokens`
+ * (microCompact.ts:164). Final result is padded by 4/3 to be conservative —
+ * matches CC's behavior so our tail-picking budget aligns with theirs.
+ */
+function estimateMessageTokensCC(m: ModelMessage): number {
+  let total = 0;
+  if (typeof m.content === "string") {
+    total = Math.round(m.content.length / 4);
+  } else if (Array.isArray(m.content)) {
+    for (const part of m.content) total += estimateContentPartTokens(part);
+  }
+  return Math.ceil((total * 4) / 3);
+}
+
+/**
+ * Walk messages backward, accumulating tokens, picking the largest tail
+ * that satisfies (min tokens AND min text-block messages, capped at max
+ * tokens). Tail must START on a user message — otherwise we'd send orphan
+ * assistant/tool messages without their preceding user turn.
+ */
+function pickPreservedTail(
+  messages: ModelMessage[],
+  opts: { minTokens: number; maxTokens: number; minMessages: number },
+): ModelMessage[] {
+  let tokens = 0;
+  let textMsgs = 0;
+  let tailStart = messages.length;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const t = estimateMessageTokensCC(messages[i]);
+    // Hard cap: don't grow past max once we've selected at least one msg.
+    if (tailStart < messages.length && tokens + t > opts.maxTokens) break;
+
+    tokens += t;
+    if (messages[i].role === "user" || messages[i].role === "assistant") textMsgs++;
+    tailStart = i;
+
+    // Both minimums met AND we're on a user message → stop here so the tail
+    // starts cleanly on a user turn.
+    if (tokens >= opts.minTokens && textMsgs >= opts.minMessages && messages[i].role === "user") {
+      break;
+    }
+  }
+
+  // Final alignment: tail must START at a user message; walk forward to
+  // the next user message if we landed on something else.
+  while (tailStart < messages.length && messages[tailStart].role !== "user") tailStart++;
+
+  return messages.slice(tailStart);
+}
+
+/**
+ * Wire `string | ContentBlock[]` → AI SDK ToolResultOutput.
+ * Strict inverse of normalizeToolOutputForWire in default-loop.ts.
+ */
+function wireContentToToolOutput(
+  content: string | ContentBlock[],
+): { type: "text"; value: string } | { type: "content"; value: any[] } {
+  if (typeof content === "string") {
+    return { type: "text", value: content };
+  }
+  return {
+    type: "content",
+    value: content.map((b) => {
+      if (b.type === "text") return { type: "text", text: b.text };
+      if (b.type === "image" && b.source.type === "base64") {
+        return { type: "image-data", data: b.source.data ?? "", mediaType: b.source.media_type ?? "image/png" };
+      }
+      if (b.type === "image" && b.source.type === "url") {
+        return { type: "image-url", url: b.source.url ?? "", mediaType: b.source.media_type };
+      }
+      if (b.type === "document" && b.source.type === "base64") {
+        return { type: "file-data", data: b.source.data ?? "", mediaType: b.source.media_type ?? "application/pdf" };
+      }
+      if (b.type === "document" && b.source.type === "url") {
+        return { type: "file-url", url: b.source.url ?? "", mediaType: b.source.media_type };
+      }
+      return { type: "text", text: JSON.stringify(b) };
+    }),
+  };
+}
+
+/**
+ * UserMessageEvent.content → AI SDK user message content[].
+ * Kept simple — image/document mapping mirrors the writer's normalizations.
+ */
+function userContentToParts(blocks: ContentBlock[]): any[] {
+  return blocks.map((b): any => {
+    if (b.type === "text") return { type: "text", text: b.text };
+    if (b.type === "image") {
+      if (b.source.type === "url" && b.source.url) {
+        return { type: "image", image: new URL(b.source.url), mediaType: b.source.media_type };
+      }
+      return { type: "image", image: b.source.data ?? "", mediaType: b.source.media_type };
+    }
+    if (b.type === "document") {
+      const providerOptions = (b.citations || b.title || b.context)
+        ? {
+            anthropic: {
+              ...(b.citations ? { citations: b.citations } : {}),
+              ...(b.title ? { title: b.title } : {}),
+              ...(b.context ? { context: b.context } : {}),
+            },
+          }
+        : undefined;
+      if (b.source.type === "url" && b.source.url) {
+        return {
+          type: "file",
+          data: new URL(b.source.url),
+          mediaType: b.source.media_type,
+          ...(providerOptions ? { providerOptions } : {}),
+        };
+      }
+      if (b.source.type === "text") {
+        const prefix = b.title ? `[${b.title}]\n` : "";
+        return { type: "text", text: prefix + (b.source.data ?? "") };
+      }
+      return {
+        type: "file",
+        data: b.source.data ?? "",
+        mediaType: b.source.media_type ?? "application/pdf",
+        ...(providerOptions ? { providerOptions } : {}),
+      };
+    }
+    return { type: "text", text: JSON.stringify(b) };
+  });
+}
+
+/**
+ * Render boundary summary as a single text block with a structural marker.
+ * The model recognizes <conversation-summary> from training data; we tag
+ * the marker so it knows the preceding history is no longer in its window.
+ *
+ * Determinism: this serialization MUST be a pure function of `summary` —
+ * no timestamps, no IDs, no key reordering. The summary itself is stored
+ * verbatim in the boundary event, so its bytes are stable across turns.
+ */
+function serializeSummaryAsText(summary: ContentBlock[]): string {
+  const parts: string[] = ["<conversation-summary>"];
+  for (const block of summary) {
+    if (block.type === "text") parts.push(block.text);
+    else if (block.type === "image") parts.push("[image elided]");
+    else if (block.type === "document") parts.push(block.title ? `[document: ${block.title}]` : "[document]");
+  }
+  parts.push("</conversation-summary>");
+  return parts.join("\n");
 }
 
 /**
