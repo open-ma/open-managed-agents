@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig } from "@open-managed-agents/shared";
-import { generateSessionId, generateVaultId, generateCredentialId } from "@open-managed-agents/shared";
+import type { SessionMeta, AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig, SessionResource } from "@open-managed-agents/shared";
+import { generateSessionId, generateVaultId, generateCredentialId, generateResourceId } from "@open-managed-agents/shared";
 import { kvKey } from "../kv-helpers";
 
 // Internal endpoints, called only by the integrations gateway worker via the
@@ -12,6 +12,14 @@ import { kvKey } from "../kv-helpers";
 // Mounted at /v1/internal/* in apps/main/src/index.ts.
 
 const app = new Hono<{ Bindings: Env }>();
+
+// Public hostname of the integrations gateway, used to wire a hosted Linear
+// MCP server into Linear-triggered sessions. Falls back to staging .workers.dev
+// if env var unset (so prod misconfig surfaces, staging keeps working).
+function integrationsOrigin(env: Env): string {
+  const explicit = (env as unknown as { INTEGRATIONS_ORIGIN?: string }).INTEGRATIONS_ORIGIN;
+  return explicit ?? "https://managed-agents-integrations-staging.hrhrngxy.workers.dev";
+}
 
 // Header-secret auth middleware. Reject early if the secret is missing or
 // the binding isn't configured.
@@ -36,6 +44,12 @@ interface CreateSessionBody {
   mcpServers?: Array<{ name: string; url: string; type?: string }>;
   metadata?: Record<string, unknown>;
   initialEvent?: { type: string; content: unknown[]; metadata?: Record<string, unknown> };
+  /**
+   * Optional repo URL to mount as a github_repository resource. Token is
+   * pulled from any vaultIds entry that has a command_secret credential
+   * with env_var=GITHUB_TOKEN — providers never see the token.
+   */
+  githubRepoUrl?: string;
 }
 
 interface ResumeSessionBody {
@@ -142,6 +156,71 @@ app.post("/sessions", async (c) => {
   // sandbox-default is shared across envs).
   const vaultCredentials = await fetchVaultCredentials(c.env, tenantId, vaultIds);
 
+  // Linear-triggered session: wire a hosted Linear MCP server into the
+  // sandbox. Mint a per-session UUID, store in metadata.linear.mcp_token,
+  // inject a static_bearer cred so outbound MITM auto-attaches it on calls
+  // to the integrations gateway, and add the MCP entry to agent_snapshot
+  // so the harness picks it up alongside the agent's own mcp_servers.
+  const sessionMetadata: Record<string, unknown> = { ...(body.metadata ?? {}) };
+  const linearMeta = sessionMetadata.linear as Record<string, unknown> | undefined;
+  if (linearMeta) {
+    const mcpToken = crypto.randomUUID();
+    const mcpUrl = `${integrationsOrigin(c.env)}/linear/mcp/${sessionId}`;
+    // Per-turn context (which AgentSession to reply into, which comment to
+    // thread under, who triggered) lives on the initialEvent's metadata.linear.
+    // Merge it onto the session-static metadata so the MCP server can read it
+    // server-side without reaching back into event history.
+    const eventLinear =
+      (body.initialEvent?.metadata?.linear ?? {}) as Record<string, unknown>;
+    sessionMetadata.linear = {
+      ...linearMeta,
+      mcp_token: mcpToken,
+      mcp_url: mcpUrl,
+      currentAgentSessionId: eventLinear.agentSessionId ?? null,
+      triggerCommentId: eventLinear.commentId ?? null,
+      actor: {
+        id: eventLinear.actorUserId ?? null,
+        // displayName lookup deferred to the MCP server; webhook payload
+        // doesn't always include it.
+        displayName: null,
+      },
+    };
+
+    // Append our hosted MCP entry to the agent snapshot's mcp_servers list.
+    // The Linear provider no longer registers mcp.linear.app — we own that
+    // wiring here so any provider can ride the same hosted shim later.
+    agentSnapshot = {
+      ...agentSnapshot,
+      mcp_servers: [
+        ...(agentSnapshot.mcp_servers ?? []),
+        { name: "linear", type: "url" as const, url: mcpUrl },
+      ],
+    };
+
+    // Inject the per-session bearer into vaultCredentials so SessionDO's
+    // outbound handler matches integrations.openma.dev hostname and attaches
+    // Authorization: Bearer <mcp_token>. We attach to the first vault if any
+    // (so cred lifecycle ties to the Linear vault); otherwise create a
+    // synthetic vault entry just for this MCP cred.
+    const synthCred: CredentialConfig = {
+      id: `cred-mcp-${sessionId}`,
+      vault_id: vaultIds[0] ?? `vlt-mcp-${sessionId}`,
+      display_name: "Linear MCP session token",
+      auth: {
+        type: "static_bearer",
+        mcp_server_url: mcpUrl,
+        token: mcpToken,
+      },
+      created_at: new Date().toISOString(),
+    };
+    const target = vaultCredentials.find((v) => v.vault_id === synthCred.vault_id);
+    if (target) {
+      target.credentials.push(synthCred);
+    } else {
+      vaultCredentials.push({ vault_id: synthCred.vault_id, credentials: [synthCred] });
+    }
+  }
+
   // Initialize SessionDO via the sandbox worker. Pass vault_ids so the
   // outbound Worker can match credentials for this session, plus the
   // pre-fetched config snapshots (see snapshot rationale above).
@@ -158,6 +237,14 @@ app.post("/sessions", async (c) => {
       agent_snapshot: agentSnapshot,
       environment_snapshot: envConfig,
       vault_credentials: vaultCredentials,
+      // Pass Linear binding to SessionDO so the panel mirror activates.
+      linear: linearMeta
+        ? {
+            publicationId: (sessionMetadata.linear as Record<string, unknown>).publicationId,
+            currentAgentSessionId:
+              (sessionMetadata.linear as Record<string, unknown>).currentAgentSessionId ?? null,
+          }
+        : undefined,
     }),
   });
 
@@ -176,12 +263,37 @@ app.post("/sessions", async (c) => {
     ...session,
     agent_snapshot: agentSnapshot,
     environment_snapshot: envConfig,
-    metadata: body.metadata ?? {},
+    metadata: sessionMetadata,
   };
   await c.env.CONFIG_KV.put(
     kvKey(tenantId, "session", sessionId),
     JSON.stringify(sessionRecord),
   );
+
+  // Materialize a github_repository resource from the supplied repo URL.
+  // The token is sourced from a command_secret credential (env_var=GITHUB_TOKEN)
+  // in one of the vaults — provider doesn't pass it inline. SessionDO will
+  // pick this up via CONFIG_KV.list when it mounts resources at warmup.
+  if (body.githubRepoUrl) {
+    const ghToken = await findGithubTokenInVaults(vaultCredentials);
+    if (ghToken) {
+      const resourceId = generateResourceId();
+      const resource: SessionResource = {
+        id: resourceId,
+        session_id: sessionId,
+        type: "github_repository",
+        url: body.githubRepoUrl,
+        repo_url: body.githubRepoUrl,
+        mount_path: "/workspace",
+        created_at: new Date().toISOString(),
+      };
+      await c.env.CONFIG_KV.put(kvKey(tenantId, "secret", sessionId, resourceId), ghToken);
+      await c.env.CONFIG_KV.put(
+        kvKey(tenantId, "sesrsc", sessionId, resourceId),
+        JSON.stringify(resource),
+      );
+    }
+  }
 
   // Seed the session with the initial event, if any.
   if (body.initialEvent) {
@@ -224,6 +336,30 @@ app.post("/sessions/:id/events", async (c) => {
     | undefined;
   if (!binding) return c.json({ error: `sandbox binding missing` }, 500);
 
+  // Refresh per-turn Linear context on the persisted session record so the
+  // MCP server reads the *current* trigger's target, not the one from when
+  // the session was created.
+  const eventLinear = (body.event?.metadata?.linear ?? {}) as Record<string, unknown>;
+  const sessionRecord = JSON.parse(sessionData) as {
+    metadata?: Record<string, unknown>;
+  };
+  const sessLinear =
+    (sessionRecord.metadata?.linear ?? {}) as Record<string, unknown>;
+  if (sessLinear.mcp_token) {
+    sessionRecord.metadata = {
+      ...(sessionRecord.metadata ?? {}),
+      linear: {
+        ...sessLinear,
+        currentAgentSessionId: eventLinear.agentSessionId ?? null,
+        triggerCommentId: eventLinear.commentId ?? null,
+      },
+    };
+    await c.env.CONFIG_KV.put(
+      kvKey(tenantId, "session", sessionId),
+      JSON.stringify(sessionRecord),
+    );
+  }
+
   await binding.fetch(`https://sandbox/sessions/${sessionId}/event`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -231,6 +367,29 @@ app.post("/sessions/:id/events", async (c) => {
   });
 
   return c.json({ ok: true });
+});
+
+/**
+ * GET /v1/internal/sessions/:id
+ * Returns the persisted session record (id + metadata + snapshots) so the
+ * integrations gateway can validate per-session MCP tokens and resolve the
+ * publication. We scan tenants — there's no tenant index from sessionId, but
+ * sessions are sparse enough this is fine for the MCP request volume.
+ */
+app.get("/sessions/:id", async (c) => {
+  const sessionId = c.req.param("id");
+  // Sessions are tenant-scoped in KV; we don't carry tenantId on the request,
+  // so we list keys with the session id suffix and read the first hit. KV.list
+  // is paginated — use a prefix-by-tenant scan keyed off our naming convention.
+  const list = await c.env.CONFIG_KV.list({ prefix: "t:" });
+  for (const k of list.keys) {
+    if (!k.name.endsWith(`:session:${sessionId}`)) continue;
+    const data = await c.env.CONFIG_KV.get(k.name);
+    if (!data) continue;
+    const record = JSON.parse(data) as { id: string; metadata?: Record<string, unknown> };
+    return c.json(record);
+  }
+  return c.json({ error: "session not found" }, 404);
 });
 
 /**
@@ -400,6 +559,30 @@ async function resolveTenantId(env: Env, userId: string): Promise<string | null>
     .bind(userId)
     .first<{ tenantId: string | null }>();
   return row?.tenantId ?? null;
+}
+
+/**
+ * Scan vault credentials for a `command_secret` credential whose env_var is
+ * GITHUB_TOKEN. Used by the integrations gateway to materialize a
+ * github_repository resource without ever sending the token over the
+ * service-binding wire.
+ */
+async function findGithubTokenInVaults(
+  vaultCredentials: Array<{ vault_id: string; credentials: CredentialConfig[] }>,
+): Promise<string | null> {
+  for (const v of vaultCredentials) {
+    for (const c of v.credentials) {
+      if (
+        c.auth?.type === "command_secret" &&
+        c.auth.env_var === "GITHUB_TOKEN" &&
+        typeof c.auth.token === "string" &&
+        c.auth.token.length > 0
+      ) {
+        return c.auth.token;
+      }
+    }
+  }
+  return null;
 }
 
 /**

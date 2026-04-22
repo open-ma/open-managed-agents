@@ -95,6 +95,13 @@ export interface CreateSessionInput {
   metadata: Record<string, unknown>;
   /** First user.message-shaped event. */
   initialEvent: SessionEventInput;
+  /**
+   * Optional GitHub repo to mount as a `github_repository` resource on the
+   * session. The token is looked up host-side from a `command_secret`
+   * credential (env_var=GITHUB_TOKEN) in one of the supplied vaultIds, so
+   * the provider never has to handle the token directly.
+   */
+  githubRepoUrl?: string;
 }
 
 export interface SessionEventInput {
