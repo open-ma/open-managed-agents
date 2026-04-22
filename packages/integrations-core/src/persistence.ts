@@ -10,6 +10,7 @@
 import type {
   AppCredentials,
   CapabilitySet,
+  GitHubAppCredentials,
   Installation,
   IssueSession,
   IssueSessionStatus,
@@ -111,6 +112,37 @@ export interface AppRepo {
   getClientSecret(id: string): Promise<string | null>;
   insert(row: NewAppCredentials): Promise<AppCredentials>;
   /** Set publication_id after the related publication is materialized. */
+  setPublicationId(id: string, publicationId: string): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
+export interface NewGitHubAppCredentials {
+  /** Optional explicit id; insert behaves as upsert when provided. */
+  id?: string;
+  publicationId: string | null;
+  /** Numeric GitHub App id (string-typed so we don't truncate large ints). */
+  appId: string;
+  appSlug: string;
+  botLogin: string;
+  clientId: string | null;
+  /** Will be encrypted before storage. Pass null when not using OAuth. */
+  clientSecret: string | null;
+  /** Will be encrypted before storage. */
+  webhookSecret: string;
+  /** Will be encrypted before storage. PEM-encoded RSA private key. */
+  privateKey: string;
+}
+
+export interface GitHubAppRepo {
+  get(id: string): Promise<GitHubAppCredentials | null>;
+  getByPublication(publicationId: string): Promise<GitHubAppCredentials | null>;
+  /** Match by GitHub's numeric app_id (e.g. on webhook dispatch). */
+  getByAppId(appId: string): Promise<GitHubAppCredentials | null>;
+  getWebhookSecret(id: string): Promise<string | null>;
+  getClientSecret(id: string): Promise<string | null>;
+  /** Returns the decrypted PEM private key for App JWT minting. */
+  getPrivateKey(id: string): Promise<string | null>;
+  insert(row: NewGitHubAppCredentials): Promise<GitHubAppCredentials>;
   setPublicationId(id: string, publicationId: string): Promise<void>;
   delete(id: string): Promise<void>;
 }

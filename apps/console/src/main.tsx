@@ -22,6 +22,11 @@ import {
   IntegrationsLinearWorkspace,
   IntegrationsLinearPublishPage,
 } from "./pages/IntegrationsLinear";
+import {
+  IntegrationsGitHubList,
+  IntegrationsGitHubWorkspace,
+  IntegrationsGitHubBindPage,
+} from "./pages/IntegrationsGitHub";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -50,6 +55,15 @@ createRoot(document.getElementById("root")!).render(
             <Route
               path="integrations/linear/installations/:id"
               element={<IntegrationsLinearWorkspace />}
+            />
+            <Route path="integrations/github" element={<IntegrationsGitHubList />} />
+            <Route
+              path="integrations/github/bind"
+              element={<IntegrationsGitHubBindPage />}
+            />
+            <Route
+              path="integrations/github/installations/:id"
+              element={<IntegrationsGitHubWorkspace />}
             />
             <Route path="*" element={<Navigate to="/agents" replace />} />
           </Route>

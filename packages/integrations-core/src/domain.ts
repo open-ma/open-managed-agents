@@ -3,7 +3,7 @@
 // These are the shapes passed across package boundaries. Concrete adapters
 // (D1, GraphQL clients) translate to and from these types.
 
-export type ProviderId = "linear"; // narrow now; widen as providers are added
+export type ProviderId = "linear" | "github";
 
 /** Linear workspace id (or equivalent in future providers). */
 export type WorkspaceId = string;
@@ -25,10 +25,17 @@ export interface Persona {
 }
 
 /**
- * Capability keys gating Linear API operations. Stable strings, used in JWT
- * scopes and DB rows.
+ * Capability keys gating provider API operations. Stable strings, used in JWT
+ * scopes and DB rows. The set is shared across providers so a publication can
+ * be assigned a uniform capability shape regardless of source — providers
+ * ignore keys that don't apply to them.
+ *
+ * `issue.*` / `comment.*` / `label.*` apply to both Linear and GitHub Issues.
+ * GitHub-only: `pr.*` (pull requests, reviews), `repo.*` (file/branch ops),
+ * `workflow.read` (CI/CD inspection), `release.*`.
  */
 export type CapabilityKey =
+  // Cross-provider
   | "issue.read"
   | "issue.create"
   | "issue.update"
@@ -43,7 +50,23 @@ export type CapabilityKey =
   | "priority.set"
   | "subissue.create"
   | "user.mention"
-  | "search.read";
+  | "search.read"
+  // GitHub-specific
+  | "pr.read"
+  | "pr.create"
+  | "pr.update"
+  | "pr.merge"
+  | "pr.close"
+  | "pr.review.write"
+  | "pr.review.comment"
+  | "repo.read"
+  | "repo.write"
+  | "repo.branch.create"
+  | "repo.branch.delete"
+  | "workflow.read"
+  | "workflow.dispatch"
+  | "release.read"
+  | "release.create";
 
 export type CapabilitySet = ReadonlySet<CapabilityKey>;
 
@@ -118,6 +141,34 @@ export interface AppCredentials {
   clientSecretCipher: string;
   /** Stored encrypted; HMAC secret for incoming webhooks. */
   webhookSecretCipher: string;
+  createdAt: number;
+}
+
+/**
+ * GitHub App credentials. Distinct from `AppCredentials` because GitHub Apps
+ * carry a few extra invariants Linear's OAuth apps don't have:
+ *
+ *   - Numeric `appId` (used as `iss` in App JWTs)
+ *   - URL `appSlug` (used to build the install link)
+ *   - `botLogin` (e.g. "myapp[bot]" — needed at webhook parse time to
+ *     detect "@mention" / "assigned-to-bot")
+ *   - PEM-encoded RSA private key (used to mint short-lived App JWTs which
+ *     in turn mint per-installation access tokens)
+ *
+ * `clientId` / `clientSecret` are optional — only needed if the App also
+ * supports OAuth-style "Sign in with GitHub" for user attribution. For the
+ * pure App-bot install used by OMA today, both are null.
+ */
+export interface GitHubAppCredentials {
+  id: string;
+  publicationId: string | null;
+  appId: string;
+  appSlug: string;
+  botLogin: string;
+  clientId: string | null;
+  clientSecretCipher: string | null;
+  webhookSecretCipher: string;
+  privateKeyCipher: string;
   createdAt: number;
 }
 
