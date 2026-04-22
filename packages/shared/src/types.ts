@@ -65,15 +65,6 @@ export interface AgentConfig {
     };
   }>;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
-  /**
-   * Opt-in to platform-built-in "appendable prompts" — short, named blocks of
-   * text appended to the system prompt at session start. Use these for
-   * provider-specific syntax (e.g. Linear @-mention) the agent shouldn't
-   * have to know unless the user explicitly opts in. Registry lives in
-   * apps/agent/src/runtime/appendable-prompts.ts. Unknown ids are silently
-   * dropped.
-   */
-  appendable_prompts?: string[];
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
   model_card_id?: string;
   /**
@@ -431,6 +422,27 @@ export interface SpanOutcomeEvaluationStartEvent extends EventBase {
   iteration: number;
 }
 
+// Compaction summarize call — distinct span type so dashboards can attribute
+// summarize cost separately from main-loop model calls. Same shape as
+// SpanModelRequest{Start,End}.
+export interface SpanCompactionSummarizeStartEvent extends EventBase {
+  type: "span.compaction_summarize_start";
+  model?: string;
+}
+
+export interface SpanCompactionSummarizeEndEvent extends EventBase {
+  type: "span.compaction_summarize_end";
+  model?: string;
+  model_usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  finish_reason?: string;
+  final_text_length?: number;
+}
+
 export interface SpanOutcomeEvaluationOngoingEvent extends EventBase {
   type: "span.outcome_evaluation_ongoing";
   iteration: number;
@@ -494,6 +506,8 @@ export type SessionEvent =
   | SpanOutcomeEvaluationStartEvent
   | SpanOutcomeEvaluationOngoingEvent
   | SpanOutcomeEvaluationEndEvent
+  | SpanCompactionSummarizeStartEvent
+  | SpanCompactionSummarizeEndEvent
   | AuxModelCallEvent;
 
 // --- Vault ---

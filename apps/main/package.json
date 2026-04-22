@@ -6,9 +6,10 @@
   "main": "src/index.ts",
   "dependencies": {
     "@cloudflare/containers": "^0.0.25",
-    "@cloudflare/sandbox": "^0.8.9",
+    "@cloudflare/sandbox": "^0.8.11",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
+    "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "hono": "^4.7.0"
   }
