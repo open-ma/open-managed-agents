@@ -56,6 +56,25 @@ app.post("/event-tap", async (c) => {
   const accessToken = await container.installations.getAccessToken(pub.installationId);
   if (!accessToken) return c.json({ ok: true, skipped: "no access token" });
 
+  // If the bot just posted an elicitation, Linear has already flipped the
+  // AgentSession to `awaitingInput`. The bot may still emit a final assistant
+  // message (it doesn't always honor the "stop generating" instruction in the
+  // tool's success payload). Mirroring that as a `response` activity would
+  // make Linear treat the turn as complete and hide the inline reply box.
+  // Drop the mirror in that case so the panel stays open for the user.
+  if (content.type === "response") {
+    const status = await fetchAgentSessionStatus(
+      accessToken,
+      linear.currentAgentSessionId,
+    );
+    if (status === "awaitingInput") {
+      console.log(
+        `[event-tap] drop response for session=${sessionId} agentSession=${linear.currentAgentSessionId} (status=awaitingInput)`,
+      );
+      return c.json({ ok: true, skipped: "panel awaiting user input" });
+    }
+  }
+
   const res = await fetch("https://api.linear.app/graphql", {
     method: "POST",
     headers: {
@@ -131,6 +150,35 @@ function summarizeArgs(input: unknown): string {
     return truncate(JSON.stringify(input), 200);
   } catch {
     return "";
+  }
+}
+
+/** Fetch the current AgentSession.status. Returns null on any failure — the
+ *  caller should treat null as "not awaitingInput" (i.e. allow the mirror to
+ *  proceed) so a transient Linear hiccup doesn't black-hole bot responses. */
+async function fetchAgentSessionStatus(
+  accessToken: string,
+  agentSessionId: string,
+): Promise<string | null> {
+  try {
+    const res = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query($id: String!) { agentSession(id: $id) { status } }`,
+        variables: { id: agentSessionId },
+      }),
+    });
+    const data = (await res.json()) as {
+      data?: { agentSession?: { status?: string } };
+    };
+    return data.data?.agentSession?.status ?? null;
+  } catch (err) {
+    console.warn(`[event-tap] status fetch failed: ${(err as Error).message}`);
+    return null;
   }
 }
 
