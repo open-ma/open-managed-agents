@@ -89,13 +89,85 @@ interface ToolDescriptor {
   handler: ToolHandler;
 }
 
-// Tool registry — currently empty. Bots reply to Linear by emitting
-// regular agent.message text; the event-tap consumer translates each
-// SessionEvent (action, message, etc.) into the matching Linear
-// AgentActivity. Keeping the MCP server skeleton in place for future
-// tools (panel.elicit, side-bar issue lookup, etc.) without bringing
-// reply routing back here.
-const TOOLS: ToolDescriptor[] = [];
+// Tool registry. Replies happen automatically via the event-tap (bot's
+// natural agent.message becomes a panel response). Tools here are for
+// behaviors the bot needs to *opt in* to — like asking the panel user a
+// follow-up question (elicitation) or posting a top-level comment.
+const TOOLS: ToolDescriptor[] = [
+  {
+    name: "linear_request_input",
+    title: "Ask the user for input",
+    description:
+      "Ask the user who triggered this Linear AgentSession a follow-up " +
+      "question. Use this when you need a confirmation or extra info from " +
+      "the user before continuing — the panel renders an inline reply box " +
+      "for them and Linear marks the session as awaiting input. Their " +
+      "response will arrive as the next user message in this session.\n\n" +
+      "Pass `body` as the question text. Don't use this for status updates " +
+      "or final answers — those are just regular assistant messages.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: {
+          type: "string",
+          description: "Question text rendered in the panel.",
+        },
+      },
+      required: ["body"],
+    },
+    handler: async (ctx, args) => {
+      const body = String(args.body ?? "").trim();
+      if (!body) return errorResult("body is required");
+      if (!ctx.linear.currentAgentSessionId) {
+        return errorResult(
+          "linear_request_input only works inside a Linear AgentSession " +
+            "(Delegate panel or @-mention panel). No agentSession bound to " +
+            "this OMA session.",
+        );
+      }
+      const res = await linearGraphQL(ctx.accessToken, {
+        query: `mutation($input: AgentActivityCreateInput!) {
+          agentActivityCreate(input: $input) { success }
+        }`,
+        variables: {
+          input: {
+            agentSessionId: ctx.linear.currentAgentSessionId,
+            content: { type: "elicitation", body },
+          },
+        },
+      });
+      return res.errors
+        ? errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`)
+        : okResult(
+            "Question posted to panel. Stop generating now — the user's " +
+              "reply will arrive as the next user message.",
+          );
+    },
+  },
+];
+
+function okResult(text: string) {
+  return { content: [{ type: "text" as const, text }] };
+}
+
+function errorResult(text: string) {
+  return { content: [{ type: "text" as const, text }], isError: true };
+}
+
+async function linearGraphQL(
+  accessToken: string,
+  payload: { query: string; variables?: Record<string, unknown> },
+): Promise<{ data?: unknown; errors?: unknown }> {
+  const res = await fetch("https://api.linear.app/graphql", {
+    method: "POST",
+    headers: {
+      authorization: `Bearer ${accessToken}`,
+      "content-type": "application/json",
+    },
+    body: JSON.stringify(payload),
+  });
+  return (await res.json()) as { data?: unknown; errors?: unknown };
+}
 
 const app = new Hono<{ Bindings: Env }>();
 
