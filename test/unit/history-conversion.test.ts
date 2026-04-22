@@ -70,16 +70,23 @@ describe("eventsToMessages — basic conversions", () => {
     }
   });
 
-  it("multiple consecutive agent messages produce multiple assistant messages", () => {
+  it("multiple consecutive agent messages merge into one assistant message", () => {
+    // New bijection-strict derive: consecutive agent.message events without
+    // a tool_result separator merge into ONE assistant message with multiple
+    // text parts. Anthropic API doesn't accept consecutive same-role messages
+    // anyway, so merging at derive time is more correct than the old
+    // per-event-emit-one-assistant behavior.
     const events: SessionEvent[] = [
       { type: "agent.message", content: [{ type: "text", text: "r1" }] },
       { type: "agent.message", content: [{ type: "text", text: "r2" }] },
     ];
     const messages = eventsToMessages(events);
-    expect(messages).toHaveLength(2);
-    for (const m of messages) {
-      expect(m.role).toBe("assistant");
-    }
+    expect(messages).toHaveLength(1);
+    expect(messages[0].role).toBe("assistant");
+    const parts = messages[0].content as Array<{ type: string; text: string }>;
+    expect(parts).toHaveLength(2);
+    expect(parts[0].text).toBe("r1");
+    expect(parts[1].text).toBe("r2");
   });
 });
 
@@ -372,16 +379,27 @@ describe("InMemoryHistory", () => {
     });
 
     const messages = history.getMessages();
-    // user, assistant (2 tool-calls), tool (2 tool-results), assistant
-    expect(messages).toHaveLength(4);
+    // New bijection-strict derive walks events in order: each tool_result
+    // forces a flushAssistant so the assistant turn that issued the call
+    // closes before the tool message lands. Pattern [tc1, tr1, tc2, tr2, msg]
+    // → [user, assistant(tc1), tool(tr1), assistant(tc2), tool(tr2), assistant(msg)] = 6.
+    //
+    // Note: in real captures from default-loop's onStepFinish, all tool_use
+    // events for one step are emitted before any tool_result events for that
+    // step (AI SDK groups them), producing the more compact 4-message form.
+    // This test constructs an interleaved sequence (use, result, use, result)
+    // to verify the strict event-order semantics.
+    expect(messages).toHaveLength(6);
     expect(messages[0].role).toBe("user");
     expect(messages[1].role).toBe("assistant");
     expect(messages[2].role).toBe("tool");
     expect(messages[3].role).toBe("assistant");
+    expect(messages[4].role).toBe("tool");
+    expect(messages[5].role).toBe("assistant");
 
-    const toolCalls = messages[1].content as any[];
-    expect(toolCalls).toHaveLength(2);
-    expect(toolCalls[0].toolName).toBe("grep");
-    expect(toolCalls[1].toolName).toBe("read");
+    const firstAssistant = messages[1].content as any[];
+    expect(firstAssistant[0].toolName).toBe("grep");
+    const secondAssistant = messages[3].content as any[];
+    expect(secondAssistant[0].toolName).toBe("read");
   });
 });
