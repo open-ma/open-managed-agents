@@ -1081,27 +1081,34 @@ export async function buildTools(
   return tools;
 }
 
-// Memory tools — operate directly on KV, no self-fetch
+// Memory tools — backed by the shared MemoryStoreService (D1 + Vectorize).
+//
+// Per Anthropic Managed Agents semantics, store_id is auto-bound from the
+// session's resources[]: the model never sees or specifies it. For multi-store
+// sessions, the first attachment is the default — model uses path prefixes to
+// organize across stores within that one.
+//
+// `access: "read_only"` attachments only get list/read/search tools; write/
+// edit/delete are not registered, so the model literally cannot mutate.
 /**
- * Build memory tools for a session. store_id is auto-bound (Anthropic-aligned).
- * Model never sees or needs to specify store_id.
- * For multi-store, first store is default; model uses path prefixes to organize.
+ * Memory store attachment as collected from session resources.
  */
-export function buildMemoryTools(
-  storeIds: string[],
-  kv: KVNamespace,
-  ai?: Ai,
-  vectorize?: VectorizeIndex,
-): Record<string, any> {
-  if (!storeIds.length || !kv) return {};
-  const tools: Record<string, any> = {};
-  const sid = storeIds[0]; // Auto-bind to first store (Anthropic: one store per session resource)
+export interface MemoryToolAttachment {
+  store_id: string;
+  access: "read_only" | "read_write";
+}
 
-  // Backfill path→id index for memories created via REST API (which don't have mempath: entries)
-  const ensurePathIndex = async (memId: string, path: string) => {
-    const existing = await kv.get(`mempath:${sid}:${path}`);
-    if (!existing) await kv.put(`mempath:${sid}:${path}`, memId);
-  };
+export function buildMemoryTools(
+  attachments: MemoryToolAttachment[],
+  tenantId: string,
+  service: import("@open-managed-agents/memory-store").MemoryStoreService,
+  agentId: string,
+): Record<string, any> {
+  if (!attachments.length) return {};
+  const tools: Record<string, any> = {};
+  const primary = attachments[0];
+  const sid = primary.store_id;
+  const actor = { type: "agent" as const, id: agentId };
 
   tools.memory_list = tool({
     description: "List memories in the store. Returns paths and metadata (no content). Use path_prefix to filter.",
@@ -1109,26 +1116,17 @@ export function buildMemoryTools(
       path_prefix: z.string().optional().describe("Filter by path prefix, e.g. 'project/'"),
     }),
     execute: safe(async ({ path_prefix }: { path_prefix?: string }) => {
-      const list = await kv.list({ prefix: `mem:${sid}:` });
-      const items = await Promise.all(
-        list.keys.map(async (k) => {
-          const data = await kv.get(k.name);
-          if (!data) return null;
-          const mem = JSON.parse(data);
-          if (path_prefix && !mem.path?.startsWith(path_prefix)) return null;
-          // Backfill path index for memories created via REST API
-          if (mem.id && mem.path) await ensurePathIndex(mem.id, mem.path);
-          return { id: mem.id, path: mem.path, size_bytes: mem.size_bytes, updated_at: mem.updated_at };
-        })
+      const memories = await service.listMemories({ tenantId, storeId: sid, pathPrefix: path_prefix });
+      return JSON.stringify(
+        memories.map((m) => ({
+          id: m.id,
+          path: m.path,
+          size_bytes: m.size_bytes,
+          updated_at: m.updated_at,
+        })),
       );
-      return JSON.stringify(items.filter(Boolean));
     }),
   });
-
-  // Helper: resolve path → memory ID via index (strong consistency)
-  const resolvePath = async (path: string): Promise<string | null> => {
-    return await kv.get(`mempath:${sid}:${path}`);
-  };
 
   tools.memory_read = tool({
     description: "Read the full content of a memory by path.",
@@ -1136,122 +1134,69 @@ export function buildMemoryTools(
       path: z.string().describe("Memory path to read"),
     }),
     execute: safe(async ({ path }: { path: string }) => {
-      const memId = await resolvePath(path);
-      if (!memId) return "Error: memory not found at path: " + path;
-      const data = await kv.get(`mem:${sid}:${memId}`);
-      if (!data) return "Error: memory data missing for path: " + path;
-      return JSON.parse(data).content || "";
+      const mem = await service.readByPath({ tenantId, storeId: sid, path });
+      if (!mem) return "Error: memory not found at path: " + path;
+      return mem.content;
     }),
   });
 
+  tools.memory_search = tool({
+    description: "Semantic search across memories. Returns matching paths + content snippets ranked by similarity.",
+    inputSchema: z.object({
+      query: z.string().describe("Search query (natural language)"),
+    }),
+    execute: safe(async ({ query }: { query: string }) => {
+      const hits = await service.searchMemories({ tenantId, storeId: sid, query, topK: 10 });
+      return JSON.stringify(
+        hits.map((h) => ({ path: h.path, snippet: h.content.slice(0, 200), score: h.score })),
+      );
+    }),
+  });
+
+  if (primary.access === "read_only") {
+    return tools;
+  }
+
   tools.memory_write = tool({
-    description: "Write or update a memory at a path. Creates if not exists, updates if path matches.",
+    description: "Write or update a memory at a path. Creates if not exists, overwrites if path matches.",
     inputSchema: z.object({
       path: z.string().describe("Memory path, e.g. 'notes/architecture.md'"),
       content: z.string().describe("Memory content"),
     }),
     execute: safe(async ({ path, content }: { path: string; content: string }) => {
-      const now = new Date().toISOString();
-      const size_bytes = new TextEncoder().encode(content).length;
-      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-      const content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
-
-      const existingId = await resolvePath(path);
-      if (existingId) {
-        const data = await kv.get(`mem:${sid}:${existingId}`);
-        if (data) {
-          const mem = JSON.parse(data);
-          mem.content = content;
-          mem.size_bytes = size_bytes;
-          mem.content_sha256 = content_sha256;
-          mem.updated_at = now;
-          await kv.put(`mem:${sid}:${existingId}`, JSON.stringify(mem));
-          return `Updated memory at ${path}`;
-        }
-      }
-
-      const id = `mem_${Date.now().toString(36)}`;
-      const mem = { id, store_id: sid, path, content, content_sha256, size_bytes, created_at: now };
-      await kv.put(`mem:${sid}:${id}`, JSON.stringify(mem));
-      await kv.put(`mempath:${sid}:${path}`, id); // path → id index
-      return `Created memory at ${path}`;
-    }),
-  });
-
-  tools.memory_search = tool({
-    description: "Search memories by keyword. Returns matching paths and content snippets.",
-    inputSchema: z.object({
-      query: z.string().describe("Search query"),
-    }),
-    execute: safe(async ({ query }: { query: string }) => {
-      // Try semantic search via Vectorize first
-      if (ai && vectorize) {
-        try {
-          const embedding = await ai.run("@cf/google/embedding-gemma" as any, { text: [query] }) as { data: number[][] };
-          if (embedding.data?.[0]) {
-            const results = await vectorize.query(embedding.data[0], {
-              topK: 10,
-              filter: { store_id: sid },
-              returnMetadata: "all",
-            });
-            if (results.matches?.length) {
-              const matches = await Promise.all(
-                results.matches.map(async (m) => {
-                  const memId = (m.metadata as any)?.memory_id;
-                  let snippet = "";
-                  if (memId) {
-                    const data = await kv.get(`mem:${sid}:${memId}`);
-                    if (data) snippet = JSON.parse(data).content?.slice(0, 200) || "";
-                  }
-                  return { path: (m.metadata as any)?.path || "", snippet, score: m.score };
-                })
-              );
-              return JSON.stringify(matches);
-            }
-          }
-        } catch { /* Fall through to substring search */ }
-      }
-
-      // Fallback: substring search
-      const list = await kv.list({ prefix: `mem:${sid}:` });
-      const matches: Array<{ path: string; snippet: string }> = [];
-      const q = query.toLowerCase();
-      for (const k of list.keys) {
-        const data = await kv.get(k.name);
-        if (!data) continue;
-        const mem = JSON.parse(data);
-        if (mem.content?.toLowerCase().includes(q) || mem.path?.toLowerCase().includes(q)) {
-          matches.push({ path: mem.path, snippet: mem.content.slice(0, 200) });
-          if (mem.id && mem.path) await ensurePathIndex(mem.id, mem.path);
-        }
-      }
-      return JSON.stringify(matches);
+      const mem = await service.writeByPath({ tenantId, storeId: sid, path, content, actor });
+      return `Wrote memory at ${path} (sha256=${mem.content_sha256.slice(0, 8)})`;
     }),
   });
 
   tools.memory_edit = tool({
-    description: "Edit an existing memory. Safer than memory_write for concurrent updates — use expected_content_sha256 for optimistic locking.",
+    description: "Edit an existing memory's content. Optionally pass expected_content_sha256 for optimistic locking.",
     inputSchema: z.object({
       path: z.string().describe("Path of the memory to edit"),
       content: z.string().describe("New content"),
       expected_content_sha256: z.string().optional().describe("Expected SHA-256 of current content for concurrency check"),
     }),
     execute: safe(async ({ path, content, expected_content_sha256 }: { path: string; content: string; expected_content_sha256?: string }) => {
-      const memId = await resolvePath(path);
-      if (!memId) return "Error: memory not found at path: " + path;
-      const data = await kv.get(`mem:${sid}:${memId}`);
-      if (!data) return "Error: memory data missing for path: " + path;
-      const mem = JSON.parse(data);
-      if (expected_content_sha256 && mem.content_sha256 !== expected_content_sha256) {
-        return "Error: content has been modified since last read (sha256 mismatch). Re-read and retry.";
+      const existing = await service.readByPath({ tenantId, storeId: sid, path });
+      if (!existing) return "Error: memory not found at path: " + path;
+      try {
+        await service.updateById({
+          tenantId,
+          storeId: sid,
+          memoryId: existing.id,
+          content,
+          precondition: expected_content_sha256
+            ? { type: "content_sha256", content_sha256: expected_content_sha256 }
+            : undefined,
+          actor,
+        });
+        return `Edited memory at ${path}`;
+      } catch (err: any) {
+        if (err?.code === "memory_precondition_failed") {
+          return "Error: content has been modified since last read (sha256 mismatch). Re-read and retry.";
+        }
+        throw err;
       }
-      mem.content = content;
-      mem.size_bytes = new TextEncoder().encode(content).length;
-      const hash = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(content));
-      mem.content_sha256 = Array.from(new Uint8Array(hash)).map(b => b.toString(16).padStart(2, "0")).join("");
-      mem.updated_at = new Date().toISOString();
-      await kv.put(`mem:${sid}:${memId}`, JSON.stringify(mem));
-      return `Edited memory at ${path}`;
     }),
   });
 
@@ -1261,10 +1206,9 @@ export function buildMemoryTools(
       path: z.string().describe("Memory path to delete"),
     }),
     execute: safe(async ({ path }: { path: string }) => {
-      const memId = await resolvePath(path);
-      if (!memId) return "Error: memory not found at path: " + path;
-      await kv.delete(`mem:${sid}:${memId}`);
-      await kv.delete(`mempath:${sid}:${path}`);
+      const existing = await service.readByPath({ tenantId, storeId: sid, path });
+      if (!existing) return "Error: memory not found at path: " + path;
+      await service.deleteById({ tenantId, storeId: sid, memoryId: existing.id, actor });
       return `Deleted memory at ${path}`;
     }),
   });

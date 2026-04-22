@@ -26,7 +26,7 @@ const REGISTRY: Record<string, AppendablePrompt> = {
     name: "Linear MCP usage",
     description:
       "Point the agent at the OMA-hosted Linear MCP's linear_reply tool for all responses.",
-    content: `Linear: respond via the OMA-hosted Linear MCP. Call \`mcp_linear_call\` with \`tool_name="linear_reply"\` and \`arguments='{"body":"<your reply>"}'\` — the server resolves the right target (agent-session panel response, threaded comment, or top-level comment) from the current trigger. Do NOT call save_comment / agentActivityCreate directly. To @-mention a user, write \`@<displayName>\` (e.g. \`@hrhrngxy\`) inside the body.`,
+    content: `Linear: respond by writing your reply as your normal final message. The platform mirrors your message into the Linear AgentSession panel automatically — you do not need any special tool. To @-mention a Linear user inside the body, write \`@<displayName>\` (e.g. \`@hrhrngxy\`).`,
   },
 };
 

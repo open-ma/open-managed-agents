@@ -237,13 +237,18 @@ app.post("/sessions", async (c) => {
       agent_snapshot: agentSnapshot,
       environment_snapshot: envConfig,
       vault_credentials: vaultCredentials,
-      // Pass Linear binding to SessionDO so the panel mirror activates.
-      linear: linearMeta
-        ? {
-            publicationId: (sessionMetadata.linear as Record<string, unknown>).publicationId,
-            currentAgentSessionId:
-              (sessionMetadata.linear as Record<string, unknown>).currentAgentSessionId ?? null,
-          }
+      // Generic event hooks. Per-provider consumers live behind these URLs;
+      // SessionDO POSTs every broadcast to each one. Provider-specific
+      // translation (e.g. Linear AgentActivity mirror) happens at the
+      // consuming endpoint.
+      event_hooks: linearMeta
+        ? [
+            {
+              name: "linear-mirror",
+              url: `${integrationsOrigin(c.env)}/linear/internal/event-tap?session=${sessionId}`,
+              auth: c.env.INTEGRATIONS_INTERNAL_SECRET,
+            },
+          ]
         : undefined,
     }),
   });

@@ -1,423 +1,347 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { MemoryStoreConfig, MemoryItem, MemoryVersion } from "@open-managed-agents/shared";
-import { generateMemoryStoreId, generateMemoryId, generateMemoryVersionId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import {
+  MemoryContentTooLargeError,
+  MemoryEmbeddingFailedError,
+  MemoryNotFoundError,
+  MemoryPreconditionFailedError,
+  MemoryStoreNotFoundError,
+  MemoryStoreService,
+  createCfMemoryStoreService,
+  type Actor,
+  type WritePrecondition,
+} from "@open-managed-agents/memory-store";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+// REST surface for memory stores. All persistence + Vectorize coordination
+// lives in MemoryStoreService — this file only marshals HTTP↔service.
 
-// --- Helpers ---
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; user_id?: string } }>();
 
-async function sha256(content: string): Promise<string> {
-  const encoder = new TextEncoder();
-  const data = encoder.encode(content);
-  const hash = await crypto.subtle.digest("SHA-256", data);
-  return Array.from(new Uint8Array(hash))
-    .map((b) => b.toString(16).padStart(2, "0"))
-    .join("");
+function service(c: { env: Env }): MemoryStoreService {
+  if (!c.env.AUTH_DB) throw new Error("AUTH_DB not bound");
+  // AI + VECTORIZE optional — factory wires Noop adapters when missing,
+  // so writes still work and only semantic search degrades.
+  return createCfMemoryStoreService(c.env);
 }
 
-async function createVersion(
-  kv: KVNamespace,
-  tenantId: string,
-  opts: {
-    memoryId: string;
-    storeId: string;
-    operation: MemoryVersion["operation"];
-    path: string;
-    content?: string;
-    content_sha256?: string;
-    size_bytes?: number;
+function actorFor(c: { get: (k: string) => unknown }): Actor {
+  const userId = c.get("user_id") as string | undefined;
+  return userId ? { type: "user", id: userId } : { type: "api_key", id: "api" };
+}
+
+/** Map service errors → HTTP status. */
+function handle(err: unknown): Response {
+  if (err instanceof MemoryStoreNotFoundError) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
   }
-): Promise<MemoryVersion> {
-  const version: MemoryVersion = {
-    id: generateMemoryVersionId(),
-    memory_id: opts.memoryId,
-    store_id: opts.storeId,
-    operation: opts.operation,
-    path: opts.path,
-    content: opts.content,
-    content_sha256: opts.content_sha256,
-    size_bytes: opts.size_bytes,
-    actor: { type: "api_key", id: "api" },
-    created_at: new Date().toISOString(),
-  };
-  await kv.put(kvKey(tenantId, "memver", opts.storeId, version.id), JSON.stringify(version));
-  return version;
+  if (err instanceof MemoryNotFoundError) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (err instanceof MemoryPreconditionFailedError) {
+    return new Response(JSON.stringify({ error: err.code, detail: err.message }), {
+      status: 409,
+      headers: { "content-type": "application/json" },
+    });
+  }
+  if (err instanceof MemoryContentTooLargeError) {
+    return new Response(
+      JSON.stringify({ error: `content exceeds 100KB limit (${err.limitBytes} bytes)` }),
+      { status: 400, headers: { "content-type": "application/json" } },
+    );
+  }
+  if (err instanceof MemoryEmbeddingFailedError) {
+    return new Response(
+      JSON.stringify({ error: err.code, detail: "embedding service unavailable; try again" }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
+  }
+  throw err;
 }
 
-// POST /v1/memory_stores — create store
+// ============================================================
+// Stores
+// ============================================================
+
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
-  const body = await c.req.json<{
-    name: string;
-    description?: string;
-  }>();
-
-  if (!body.name) {
-    return c.json({ error: "name is required" }, 400);
+  const body = await c.req.json<{ name?: string; description?: string }>();
+  if (!body.name) return c.json({ error: "name is required" }, 400);
+  try {
+    const store = await service(c).createStore({
+      tenantId: t,
+      name: body.name,
+      description: body.description,
+    });
+    return c.json(toApiStore(store), 201);
+  } catch (err) {
+    return handle(err);
   }
-
-  const store: MemoryStoreConfig = {
-    id: generateMemoryStoreId(),
-    name: body.name,
-    description: body.description,
-    created_at: new Date().toISOString(),
-  };
-
-  await c.env.CONFIG_KV.put(kvKey(t, "memstore", store.id), JSON.stringify(store));
-  return c.json(store, 201);
 });
 
-// GET /v1/memory_stores — list stores
 app.get("/", async (c) => {
   const t = c.get("tenant_id");
   const includeArchived = c.req.query("include_archived") === "true";
-
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "memstore"));
-  const stores = (
-    await Promise.all(
-      list
-        .filter((k) => !k.name.includes(":mem:"))
-        .map(async (k) => {
-          const data = await c.env.CONFIG_KV.get(k.name);
-          return data ? JSON.parse(data) : null;
-        })
-    )
-  ).filter(Boolean);
-
-  const filtered = includeArchived
-    ? stores
-    : stores.filter((s: MemoryStoreConfig) => !s.archived_at);
-
-  filtered.sort((a: MemoryStoreConfig, b: MemoryStoreConfig) => {
-    return b.created_at.localeCompare(a.created_at);
-  });
-
-  return c.json({ data: filtered });
+  const stores = await service(c).listStores({ tenantId: t, includeArchived });
+  return c.json({ data: stores.map(toApiStore) });
 });
 
-// GET /v1/memory_stores/:id — get store
 app.get("/:id", async (c) => {
   const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "memstore", id));
-  if (!data) return c.json({ error: "Memory store not found" }, 404);
-  return c.json(JSON.parse(data));
+  const store = await service(c).getStore({ tenantId: t, storeId: c.req.param("id") });
+  if (!store) return c.json({ error: "Memory store not found" }, 404);
+  return c.json(toApiStore(store));
 });
 
-// POST /v1/memory_stores/:id/archive — archive store
 app.post("/:id/archive", async (c) => {
   const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "memstore", id));
-  if (!data) return c.json({ error: "Memory store not found" }, 404);
-
-  const store: MemoryStoreConfig = JSON.parse(data);
-  store.archived_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(kvKey(t, "memstore", id), JSON.stringify(store));
-  return c.json(store);
+  try {
+    const store = await service(c).archiveStore({ tenantId: t, storeId: c.req.param("id") });
+    return c.json(toApiStore(store));
+  } catch (err) {
+    return handle(err);
+  }
 });
 
-// DELETE /v1/memory_stores/:id — delete store + all its memories + versions
 app.delete("/:id", async (c) => {
   const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "memstore", id));
-  if (!data) return c.json({ error: "Memory store not found" }, 404);
-
-  // Delete all memories in this store
-  const memList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "mem", id));
-  await Promise.all(memList.map((k) => c.env.CONFIG_KV.delete(k.name)));
-
-  // Delete all versions in this store
-  const verList = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "memver", id));
-  await Promise.all(verList.map((k) => c.env.CONFIG_KV.delete(k.name)));
-
-  // Delete the store itself
-  await c.env.CONFIG_KV.delete(kvKey(t, "memstore", id));
-  return c.json({ type: "memory_store_deleted", id });
+  try {
+    await service(c).deleteStore({ tenantId: t, storeId: c.req.param("id") });
+    return c.json({ type: "memory_store_deleted", id: c.req.param("id") });
+  } catch (err) {
+    return handle(err);
+  }
 });
 
-// POST /v1/memory_stores/:id/memories — create/write memory
+// ============================================================
+// Reconcile — tenant-scoped maintenance op
+// ============================================================
+
+app.post("/_reconcile", async (c) => {
+  const t = c.get("tenant_id");
+  type ReconcileBody = { store_id?: string; limit?: number };
+  const body = await c.req
+    .json<ReconcileBody>()
+    .catch(() => ({} as ReconcileBody));
+  try {
+    const result = await service(c).reconcile({
+      tenantId: t,
+      storeId: body.store_id,
+      limit: body.limit,
+    });
+    return c.json(result);
+  } catch (err) {
+    return handle(err);
+  }
+});
+
+// ============================================================
+// Memories
+// ============================================================
+
 app.post("/:id/memories", async (c) => {
   const t = c.get("tenant_id");
   const storeId = c.req.param("id");
-  const storeData = await c.env.CONFIG_KV.get(kvKey(t, "memstore", storeId));
-  if (!storeData) return c.json({ error: "Memory store not found" }, 404);
-
   const body = await c.req.json<{
-    path: string;
-    content: string;
-    precondition?: { type: "not_exists" } | { type: "content_sha256"; content_sha256: string };
+    path?: string;
+    content?: string;
+    precondition?: WritePrecondition;
   }>();
-
   if (!body.path || body.content === undefined) {
     return c.json({ error: "path and content are required" }, 400);
   }
-
-  // Reject content > 100KB
-  const contentBytes = new TextEncoder().encode(body.content).length;
-  if (contentBytes > 100 * 1024) {
-    return c.json({ error: "content exceeds 100KB limit" }, 400);
+  try {
+    const mem = await service(c).writeByPath({
+      tenantId: t,
+      storeId,
+      path: body.path,
+      content: body.content,
+      precondition: body.precondition,
+      actor: actorFor(c),
+    });
+    return c.json(toApiMemory(mem), 201);
+  } catch (err) {
+    return handle(err);
   }
-
-  // Handle preconditions
-  if (body.precondition) {
-    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "mem", storeId));
-    for (const k of list) {
-      const d = await c.env.CONFIG_KV.get(k.name);
-      if (d) {
-        const existing: MemoryItem = JSON.parse(d);
-        if (existing.path === body.path) {
-          if (body.precondition.type === "not_exists") {
-            return c.json({ error: "memory_precondition_failed" }, 409);
-          }
-          if (body.precondition.type === "content_sha256" &&
-              existing.content_sha256 !== body.precondition.content_sha256) {
-            return c.json({ error: "memory_precondition_failed" }, 409);
-          }
-        }
-      }
-    }
-  }
-
-  const contentHash = await sha256(body.content);
-
-  const mem: MemoryItem = {
-    id: generateMemoryId(),
-    store_id: storeId,
-    path: body.path,
-    content: body.content,
-    content_sha256: contentHash,
-    size_bytes: new TextEncoder().encode(body.content).length,
-    created_at: new Date().toISOString(),
-  };
-
-  await c.env.CONFIG_KV.put(kvKey(t, "mem", storeId, mem.id), JSON.stringify(mem));
-
-  // Create version record
-  await createVersion(c.env.CONFIG_KV, t, {
-    memoryId: mem.id,
-    storeId,
-    operation: "created",
-    path: mem.path,
-    content: mem.content,
-    content_sha256: contentHash,
-    size_bytes: mem.size_bytes,
-  });
-
-  // Generate embedding and upsert to Vectorize for semantic search
-  if (c.env.AI && c.env.VECTORIZE) {
-    try {
-      const embedding = await c.env.AI.run("@cf/google/embedding-gemma" as any, {
-        text: [body.content],
-      }) as { data: number[][] };
-      if (embedding.data?.[0]) {
-        await c.env.VECTORIZE.upsert([{
-          id: `${storeId}:${mem.id}`,
-          values: embedding.data[0],
-          metadata: { store_id: storeId, memory_id: mem.id, path: mem.path },
-        }]);
-      }
-    } catch {
-      // Best-effort: search falls back to substring if embedding fails
-    }
-  }
-
-  return c.json(mem, 201);
 });
 
-// GET /v1/memory_stores/:id/memories — list memories (metadata only)
 app.get("/:id/memories", async (c) => {
   const t = c.get("tenant_id");
   const storeId = c.req.param("id");
-  const storeData = await c.env.CONFIG_KV.get(kvKey(t, "memstore", storeId));
-  if (!storeData) return c.json({ error: "Memory store not found" }, 404);
-
-  const prefix = c.req.query("prefix");
-
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "mem", storeId));
-  const memories = (
-    await Promise.all(
-      list.map(async (k) => {
-        const data = await c.env.CONFIG_KV.get(k.name);
-        if (!data) return null;
-        const mem: MemoryItem = JSON.parse(data);
-        // Filter by path prefix if provided
-        if (prefix && !mem.path.startsWith(prefix)) return null;
-        // Return metadata only (no content)
-        const { content: _, ...metadata } = mem;
-        return metadata;
-      })
-    )
-  ).filter(Boolean);
-
-  return c.json({ data: memories });
+  const pathPrefix = c.req.query("path_prefix") ?? c.req.query("prefix");
+  try {
+    const memories = await service(c).listMemories({ tenantId: t, storeId, pathPrefix });
+    // List does not include content (mirrors Anthropic semantics).
+    return c.json({
+      data: memories.map((m) => {
+        const { content: _content, ...meta } = toApiMemory(m);
+        return meta;
+      }),
+    });
+  } catch (err) {
+    return handle(err);
+  }
 });
 
-// GET /v1/memory_stores/:id/memories/:mem_id — get full memory with content
 app.get("/:id/memories/:mem_id", async (c) => {
   const t = c.get("tenant_id");
-  const storeId = c.req.param("id");
-  const memId = c.req.param("mem_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "mem", storeId, memId));
-  if (!data) return c.json({ error: "Memory not found" }, 404);
-  return c.json(JSON.parse(data));
+  try {
+    const mem = await service(c).readById({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      memoryId: c.req.param("mem_id"),
+    });
+    if (!mem) return c.json({ error: "Memory not found" }, 404);
+    return c.json(toApiMemory(mem));
+  } catch (err) {
+    return handle(err);
+  }
 });
 
-// PATCH/POST /v1/memory_stores/:id/memories/:mem_id — update memory content/path
+type UpdateMemoryBody = {
+  path?: string;
+  content?: string;
+  precondition?: WritePrecondition;
+};
+
 const updateMemory = async (c: any) => {
   const t = c.get("tenant_id");
-  const storeId = c.req.param("id");
-  const memId = c.req.param("mem_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "mem", storeId, memId));
-  if (!data) return c.json({ error: "Memory not found" }, 404);
-
-  const body = await c.req.json() as {
-    path?: string;
-    content?: string;
-    precondition?: { type: "content_sha256"; content_sha256: string };
-  };
-
-  const mem: MemoryItem = JSON.parse(data);
-
-  // Reject content > 100KB
-  if (body.content !== undefined) {
-    const contentBytes = new TextEncoder().encode(body.content).length;
-    if (contentBytes > 100 * 1024) {
-      return c.json({ error: "content exceeds 100KB limit" }, 400);
-    }
+  const body: UpdateMemoryBody = await c.req.json();
+  try {
+    const mem = await service(c).updateById({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      memoryId: c.req.param("mem_id"),
+      path: body.path,
+      content: body.content,
+      precondition: body.precondition,
+      actor: actorFor(c),
+    });
+    return c.json(toApiMemory(mem));
+  } catch (err) {
+    return handle(err);
   }
-
-  // Handle content_sha256 precondition
-  if (body.precondition?.type === "content_sha256") {
-    if (mem.content_sha256 !== body.precondition.content_sha256) {
-      return c.json({ error: "memory_precondition_failed" }, 409);
-    }
-  }
-
-  if (body.path !== undefined) mem.path = body.path;
-  if (body.content !== undefined) {
-    mem.content = body.content;
-    mem.content_sha256 = await sha256(body.content);
-    mem.size_bytes = new TextEncoder().encode(body.content).length;
-  }
-  mem.updated_at = new Date().toISOString();
-
-  await c.env.CONFIG_KV.put(kvKey(t, "mem", storeId, memId), JSON.stringify(mem));
-
-  // Create version record
-  await createVersion(c.env.CONFIG_KV, t, {
-    memoryId: memId,
-    storeId,
-    operation: "modified",
-    path: mem.path,
-    content: mem.content,
-    content_sha256: mem.content_sha256,
-    size_bytes: mem.size_bytes,
-  });
-
-  return c.json(mem);
 };
 app.patch("/:id/memories/:mem_id", updateMemory);
 app.post("/:id/memories/:mem_id", updateMemory);
 
-// DELETE /v1/memory_stores/:id/memories/:mem_id — delete memory
-// Supports conditional delete via ?expected_content_sha256=<hash>
 app.delete("/:id/memories/:mem_id", async (c) => {
   const t = c.get("tenant_id");
-  const storeId = c.req.param("id");
-  const memId = c.req.param("mem_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "mem", storeId, memId));
-  if (!data) return c.json({ error: "Memory not found" }, 404);
-
-  const mem: MemoryItem = JSON.parse(data);
-
-  // Conditional delete: only delete if content hash matches
-  const expectedHash = c.req.query("expected_content_sha256");
-  if (expectedHash && mem.content_sha256 !== expectedHash) {
-    return c.json({ error: "memory_precondition_failed" }, 409);
+  const expectedSha = c.req.query("expected_content_sha256") ?? undefined;
+  try {
+    await service(c).deleteById({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      memoryId: c.req.param("mem_id"),
+      expectedSha,
+      actor: actorFor(c),
+    });
+    return c.json({ type: "memory_deleted", id: c.req.param("mem_id") });
+  } catch (err) {
+    return handle(err);
   }
-
-  // Create version record before deleting
-  await createVersion(c.env.CONFIG_KV, t, {
-    memoryId: memId,
-    storeId,
-    operation: "deleted",
-    path: mem.path,
-    content: mem.content,
-    content_sha256: mem.content_sha256,
-    size_bytes: mem.size_bytes,
-  });
-
-  await c.env.CONFIG_KV.delete(kvKey(t, "mem", storeId, memId));
-  return c.json({ type: "memory_deleted", id: memId });
 });
 
 // ============================================================
-// Memory Versions
+// Versions
 // ============================================================
 
-// GET /v1/memory_stores/:id/memory_versions — list versions
 app.get("/:id/memory_versions", async (c) => {
   const t = c.get("tenant_id");
-  const storeId = c.req.param("id");
-  const storeData = await c.env.CONFIG_KV.get(kvKey(t, "memstore", storeId));
-  if (!storeData) return c.json({ error: "Memory store not found" }, 404);
-
-  const memoryIdFilter = c.req.query("memory_id");
-
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "memver", storeId));
-  const versions = (
-    await Promise.all(
-      list.map(async (k) => {
-        const data = await c.env.CONFIG_KV.get(k.name);
-        if (!data) return null;
-        const ver: MemoryVersion = JSON.parse(data);
-        // Filter by memory_id if provided
-        if (memoryIdFilter && ver.memory_id !== memoryIdFilter) return null;
-        // Return metadata only (no content)
-        const { content: _, ...metadata } = ver;
-        return metadata;
-      })
-    )
-  ).filter(Boolean) as Omit<MemoryVersion, "content">[];
-
-  // Sort newest first
-  versions.sort((a, b) => b.created_at.localeCompare(a.created_at));
-
-  return c.json({ data: versions });
+  const memoryId = c.req.query("memory_id") ?? undefined;
+  try {
+    const versions = await service(c).listVersions({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      memoryId,
+    });
+    // List omits content body to match prior behavior.
+    return c.json({
+      data: versions.map((v) => {
+        const { content: _content, ...rest } = toApiVersion(v);
+        return rest;
+      }),
+    });
+  } catch (err) {
+    return handle(err);
+  }
 });
 
-// GET /v1/memory_stores/:id/memory_versions/:ver_id — get version with full content
 app.get("/:id/memory_versions/:ver_id", async (c) => {
   const t = c.get("tenant_id");
-  const storeId = c.req.param("id");
-  const verId = c.req.param("ver_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "memver", storeId, verId));
-  if (!data) return c.json({ error: "Memory version not found" }, 404);
-  return c.json(JSON.parse(data));
+  try {
+    const v = await service(c).getVersion({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      versionId: c.req.param("ver_id"),
+    });
+    if (!v) return c.json({ error: "Memory version not found" }, 404);
+    return c.json(toApiVersion(v));
+  } catch (err) {
+    return handle(err);
+  }
 });
 
-// POST /v1/memory_stores/:id/memory_versions/:ver_id/redact — redact version
 app.post("/:id/memory_versions/:ver_id/redact", async (c) => {
   const t = c.get("tenant_id");
-  const storeId = c.req.param("id");
-  const verId = c.req.param("ver_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "memver", storeId, verId));
-  if (!data) return c.json({ error: "Memory version not found" }, 404);
-
-  const ver: MemoryVersion = JSON.parse(data);
-  // Clear sensitive fields
-  delete ver.content;
-  delete ver.content_sha256;
-  delete ver.size_bytes;
-  delete (ver as any).path;
-  ver.redacted = true;
-
-  await c.env.CONFIG_KV.put(kvKey(t, "memver", storeId, verId), JSON.stringify(ver));
-  return c.json(ver);
+  try {
+    const v = await service(c).redactVersion({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      versionId: c.req.param("ver_id"),
+    });
+    return c.json(toApiVersion(v));
+  } catch (err) {
+    return handle(err);
+  }
 });
+
+/** Shape returned to clients — keeps the legacy API field names. */
+function toApiStore(s: import("@open-managed-agents/memory-store").MemoryStoreRow) {
+  return {
+    id: s.id,
+    name: s.name,
+    description: s.description ?? undefined,
+    created_at: s.created_at,
+    updated_at: s.updated_at ?? undefined,
+    archived_at: s.archived_at ?? undefined,
+  };
+}
+
+function toApiMemory(m: import("@open-managed-agents/memory-store").MemoryRow) {
+  return {
+    id: m.id,
+    store_id: m.store_id,
+    path: m.path,
+    content: m.content,
+    content_sha256: m.content_sha256,
+    size_bytes: m.size_bytes,
+    created_at: m.created_at,
+    updated_at: m.updated_at,
+    vector_synced_at: m.vector_synced_at ?? undefined,
+  };
+}
+
+/** Re-nest actor_type/actor_id back into Anthropic's `actor: {type, id}` shape. */
+function toApiVersion(v: import("@open-managed-agents/memory-store").MemoryVersionRow) {
+  return {
+    id: v.id,
+    memory_id: v.memory_id,
+    store_id: v.store_id,
+    operation: v.operation,
+    path: v.path ?? undefined,
+    content: v.content ?? undefined,
+    content_sha256: v.content_sha256 ?? undefined,
+    size_bytes: v.size_bytes ?? undefined,
+    actor: { type: v.actor_type, id: v.actor_id },
+    created_at: v.created_at,
+    redacted: v.redacted || undefined,
+  };
+}
 
 export default app;

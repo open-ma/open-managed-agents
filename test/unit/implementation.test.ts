@@ -149,10 +149,34 @@ describe("Permission policy enforcement", () => {
 // Fix 2: Memory tools injection into harness
 // ============================================================
 describe("Memory tools injection into harness", () => {
+  // Use a fake MemoryStoreService so these tests stay focused on tool
+  // injection wiring rather than D1/Vectorize behavior.
+  function makeFakeSvc() {
+    const memories = new Map<string, any>();
+    let nextId = 1;
+    return {
+      async listMemories() { return Array.from(memories.values()); },
+      async readByPath({ path }: any) { return Array.from(memories.values()).find((m: any) => m.path === path) ?? null; },
+      async writeByPath({ path, content }: any) {
+        const id = `mem-fake-${nextId++}`;
+        const row = { id, path, content, content_sha256: "deadbeef", size_bytes: content.length, updated_at: new Date().toISOString() };
+        memories.set(id, row);
+        return row;
+      },
+      async updateById() { return null; },
+      async deleteById({ memoryId }: any) { memories.delete(memoryId); },
+      async searchMemories() { return []; },
+    };
+  }
+
   it("memory tools merge correctly with built-in tools", async () => {
-    const kv = makeMockKV();
     const builtInTools = await buildTools(makeAgentConfig(), new TestSandbox());
-    const memTools = buildMemoryTools(["store_1"], kv);
+    const memTools = buildMemoryTools(
+      [{ store_id: "store_1", access: "read_write" }],
+      "tn_test",
+      makeFakeSvc() as any,
+      "agent-test",
+    );
     Object.assign(builtInTools, memTools);
 
     // Built-in tools still present
@@ -166,29 +190,32 @@ describe("Memory tools injection into harness", () => {
     expect(builtInTools.memory_delete).toBeDefined();
   });
 
-  it("memory tools are not injected when no store IDs", () => {
-    const kv = makeMockKV();
-    const memTools = buildMemoryTools([], kv);
+  it("memory tools are not injected when no attachments", () => {
+    const memTools = buildMemoryTools([], "tn_test", makeFakeSvc() as any, "agent-test");
     expect(Object.keys(memTools)).toHaveLength(0);
   });
 
   it("memory tools are operational after merge", async () => {
-    const kv = makeMockKV();
     const builtInTools = await buildTools(makeAgentConfig(), new TestSandbox());
-    const memTools = buildMemoryTools(["store_1"], kv);
+    const memTools = buildMemoryTools(
+      [{ store_id: "store_1", access: "read_write" }],
+      "tn_test",
+      makeFakeSvc() as any,
+      "agent-test",
+    );
     Object.assign(builtInTools, memTools);
 
     // Write a memory via the merged tools
     const writeResult = await builtInTools.memory_write.execute(
-      { store_id: "store_1", path: "test/notes", content: "merged test" },
-      TOOL_EXEC_OPTS
+      { path: "test/notes", content: "merged test" },
+      TOOL_EXEC_OPTS,
     );
-    expect(writeResult).toContain("Created memory at test/notes");
+    expect(writeResult).toContain("Wrote memory at test/notes");
 
     // Read it back via the merged tools
     const listResult = await builtInTools.memory_list.execute(
-      { store_id: "store_1" },
-      TOOL_EXEC_OPTS
+      {},
+      TOOL_EXEC_OPTS,
     );
     const items = JSON.parse(listResult);
     expect(items.length).toBe(1);
