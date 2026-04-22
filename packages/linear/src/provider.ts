@@ -43,6 +43,10 @@ const PROVIDER_ID: ProviderId = "linear";
 /** Linear's hosted MCP server. Outbound injection matches by hostname. */
 const LINEAR_MCP_URL = "https://mcp.linear.app/mcp";
 
+// MVP: hardcoded repo for the open-ma fleet. Move to publication.githubRepoUrl
+// when we add per-publication GitHub config.
+const PROD_GITHUB_REPO_URL = "https://github.com/open-ma/open-managed-agents.git";
+
 export class LinearProvider implements IntegrationProvider {
   readonly id: ProviderId = PROVIDER_ID;
   private readonly graphql: LinearGraphQLClient;
@@ -412,6 +416,18 @@ export class LinearProvider implements IntegrationProvider {
       await this.container.webhookEvents.attachError(req.deliveryId, "unparseable");
       return { handled: false, reason: "unparseable" };
     }
+    console.log(
+      `[linear-parsed] eventType=${event.eventType} kind=${event.kind} issueId=${event.issueId} issueIdent=${event.issueIdentifier} agentSessionId=${event.agentSessionId ?? "-"} promptCtx=${event.promptContext ? event.promptContext.length : 0}b`,
+    );
+
+    // Linear sends multiple webhooks per agent action (e.g. an Issue update
+    // PLUS an AgentSessionEvent). Only AgentSessionEvent and the
+    // AppUserNotification subtypes carry actionable user intent for the
+    // agent — bare Issue/Comment events are noise here. Drop them so we
+    // don't create empty "Linear event on ?" sessions.
+    if (event.kind === null) {
+      return { handled: false, reason: `ignored_event_${event.eventType}` };
+    }
 
     // A dedicated install has exactly one live publication.
     const pubs = await this.container.publications.listByInstallation(installation.id);
@@ -448,12 +464,51 @@ export class LinearProvider implements IntegrationProvider {
     // Look up the installation to find the vault holding the access token.
     const installation = await this.container.installations.get(publication.installationId);
     const vaultIds = installation?.vaultId ? [installation.vaultId] : [];
-    const mcpServers = [{ name: "linear", url: LINEAR_MCP_URL }];
+    // We no longer pass mcp.linear.app here — apps/main wires the hosted
+    // OMA-side Linear MCP (integrations.openma.dev/linear/mcp/<sessionId>)
+    // when it sees metadata.linear, so sandbox never talks to Linear directly.
+    const mcpServers: Array<{ name: string; url: string }> = [];
+
+    // Resolve the actor's `displayName` (the canonical handle Linear uses for
+    // @-mentions) once per dispatch. The webhook payload carries `actor.name`
+    // (the human label) and `actorUserId`, but `displayName` is what bot needs
+    // for @<handle> syntax. We surface it as `actorDisplayName` on the event
+    // so renderEventAsUserMessage can shadow `name` everywhere it would have
+    // exposed it — bot only ever sees displayName, never name.
+    let actorDisplayName: string | null = null;
+    if (event.actorUserId && installation) {
+      try {
+        const accessToken = await this.container.installations.getAccessToken(installation.id);
+        if (accessToken) {
+          const res = await this.container.http.fetch({
+            method: "POST",
+            url: "https://api.linear.app/graphql",
+            headers: {
+              authorization: `Bearer ${accessToken}`,
+              "content-type": "application/json",
+            },
+            body: JSON.stringify({
+              query: `query($id:String!){ user(id:$id){ displayName } }`,
+              variables: { id: event.actorUserId },
+            }),
+          });
+          const parsed = JSON.parse(res.body) as {
+            data?: { user?: { displayName?: string } };
+          };
+          actorDisplayName = parsed.data?.user?.displayName ?? null;
+        }
+      } catch {
+        // best effort — leave null and bot won't get explicit @ guidance
+      }
+    }
 
     const sessionEvent = {
       type: "user.message" as const,
       content: [
-        { type: "text" as const, text: this.renderEventAsUserMessage(event) },
+        {
+          type: "text" as const,
+          text: this.renderEventAsUserMessage(event, actorDisplayName),
+        },
       ],
       metadata: {
         linear: {
@@ -464,6 +519,7 @@ export class LinearProvider implements IntegrationProvider {
           actorUserId: event.actorUserId,
           eventKind: event.kind,
           deliveryId: event.deliveryId,
+          agentSessionId: event.agentSessionId ?? null,
         },
       },
     };
@@ -483,8 +539,11 @@ export class LinearProvider implements IntegrationProvider {
         environmentId: publication.environmentId,
         vaultIds,
         mcpServers,
-        metadata: { linear: { issueId: event.issueId, workspaceId: event.workspaceId } },
+        metadata: { linear: { publicationId: publication.id, issueId: event.issueId, workspaceId: event.workspaceId } },
         initialEvent: sessionEvent,
+        // MVP: hardcoded for the open-ma fleet. Move to publication.githubRepoUrl
+        // when the schema lands.
+        githubRepoUrl: PROD_GITHUB_REPO_URL,
       });
       await this.container.issueSessions.insert({
         publicationId: publication.id,
@@ -503,21 +562,38 @@ export class LinearProvider implements IntegrationProvider {
       environmentId: publication.environmentId,
       vaultIds,
       mcpServers,
-      metadata: { linear: { issueId: event.issueId, workspaceId: event.workspaceId } },
+      metadata: { linear: { publicationId: publication.id, issueId: event.issueId, workspaceId: event.workspaceId } },
       initialEvent: sessionEvent,
+      githubRepoUrl: PROD_GITHUB_REPO_URL,
     });
     return created.sessionId;
   }
 
-  private renderEventAsUserMessage(event: NormalizedWebhookEvent): string {
-    // Compact text representation passed to the agent as the first user
-    // message. The agent's MCP tools are how it fetches richer context.
+  private renderEventAsUserMessage(
+    event: NormalizedWebhookEvent,
+    actorDisplayName: string | null = null,
+  ): string {
+    // Surface the actor as `@<displayName>` so the bot can drop it verbatim
+    // into a comment reply (Linear renders @<displayName> as a real mention).
+    // We never expose `actor.name` to the bot — that's the human label, not
+    // a usable handle.
+    const actorLine = actorDisplayName
+      ? `Actor: @${actorDisplayName}\n\n`
+      : "";
+    if (event.promptContext) {
+      const header =
+        event.kind === "agentSessionPrompted"
+          ? `New message in Linear agent session on ${event.issueIdentifier ?? "?"}`
+          : `New Linear agent session on ${event.issueIdentifier ?? "?"}`;
+      return `${actorLine}${header}\n\n${event.promptContext}`;
+    }
     const lines: string[] = [];
     lines.push(`Linear ${event.kind ?? "event"} on ${event.issueIdentifier ?? "?"}`);
     if (event.issueTitle) lines.push(`Title: ${event.issueTitle}`);
-    if (event.actorUserName) lines.push(`From: ${event.actorUserName}`);
+    if (event.issueDescription) lines.push(`\nDescription:\n${event.issueDescription}`);
+    if (actorDisplayName) lines.push(`\nFrom: @${actorDisplayName}`);
     if (event.commentBody) lines.push(`\nComment:\n${event.commentBody}`);
-    return lines.join("\n");
+    return `${actorLine}${lines.join("\n")}`;
   }
 
   // ─── MCP (Phase 8+) ──────────────────────────────────────────────────

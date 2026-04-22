@@ -57,12 +57,18 @@ importers:
       '@ai-sdk/anthropic':
         specifier: ^3.0.69
         version: 3.0.69(zod@4.3.6)
+      '@cloudflare/containers':
+        specifier: ^0.3.0
+        version: 0.3.0
       '@cloudflare/playwright':
         specifier: ^1.3.0
         version: 1.3.0
       '@cloudflare/sandbox':
         specifier: ^0.8.11
         version: 0.8.11
+      '@open-managed-agents/memory-store':
+        specifier: workspace:*
+        version: link:../../packages/memory-store
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -176,14 +182,17 @@ importers:
         specifier: ^0.0.25
         version: 0.0.25
       '@cloudflare/sandbox':
-        specifier: ^0.8.9
-        version: 0.8.9
+        specifier: ^0.8.11
+        version: 0.8.11
       '@open-managed-agents/integrations-adapters-cf':
         specifier: workspace:*
         version: link:../../packages/integrations-adapters-cf
       '@open-managed-agents/integrations-core':
         specifier: workspace:*
         version: link:../../packages/integrations-core
+      '@open-managed-agents/memory-store':
+        specifier: workspace:*
+        version: link:../../packages/memory-store
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -254,6 +263,12 @@ importers:
       '@open-managed-agents/integrations-core':
         specifier: workspace:*
         version: link:../integrations-core
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/memory-store:
+    dependencies:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
@@ -524,20 +539,6 @@ packages:
 
   '@cloudflare/sandbox@0.8.11':
     resolution: {integrity: sha512-ZXtdSZFA+7GVZT0iLM9zuvFWcU6GQ/E0rdHo5e12QYcBcyD57QxnqgTJS28jWmzuZagFuBJgBrSoLjm2xvSSvA==}
-    peerDependencies:
-      '@openai/agents': ^0.3.3
-      '@opencode-ai/sdk': ^1.1.40
-      '@xterm/xterm': '>=5.0.0'
-    peerDependenciesMeta:
-      '@openai/agents':
-        optional: true
-      '@opencode-ai/sdk':
-        optional: true
-      '@xterm/xterm':
-        optional: true
-
-  '@cloudflare/sandbox@0.8.9':
-    resolution: {integrity: sha512-4lmMo96fOVck9lcmjJAJYRf2NNspcoGy8pNuEdBTary3WWuFeXBQLmzuid4ay5i6aGu2AeRegPSmjD+Z1K6qJw==}
     peerDependencies:
       '@openai/agents': ^0.3.3
       '@opencode-ai/sdk': ^1.1.40
@@ -3550,11 +3551,6 @@ snapshots:
       '@cloudflare/containers': 0.3.0
       aws4fetch: 1.0.20
       hono: 4.12.12
-
-  '@cloudflare/sandbox@0.8.9':
-    dependencies:
-      '@cloudflare/containers': 0.3.0
-      aws4fetch: 1.0.20
 
   '@cloudflare/unenv-preset@2.16.0(unenv@2.0.0-rc.24)(workerd@1.20260415.1)':
     dependencies:

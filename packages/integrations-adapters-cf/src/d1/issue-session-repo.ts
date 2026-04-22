@@ -27,11 +27,20 @@ export class D1IssueSessionRepo implements IssueSessionRepo {
   }
 
   async insert(row: IssueSession): Promise<void> {
+    // UPSERT: per_issue mode reuses an existing row when re-delegated.
+    // Without ON CONFLICT we 500 when a stale (status='inactive') row from
+    // a prior delegation still occupies (publication_id, issue_id), which
+    // is the natural state between the previous session ending and this
+    // webhook arriving. excluded.* is SQLite syntax for the new VALUES.
     await this.db
       .prepare(
         `INSERT INTO linear_issue_sessions
            (publication_id, issue_id, session_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(publication_id, issue_id) DO UPDATE SET
+           session_id = excluded.session_id,
+           status     = excluded.status,
+           created_at = excluded.created_at`,
       )
       .bind(row.publicationId, row.issueId, row.sessionId, row.status, row.createdAt)
       .run();
