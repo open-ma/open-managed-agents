@@ -65,6 +65,13 @@ export interface SandboxExecutor {
   gitCheckout?(repoUrl: string, options: { branch?: string; targetDir?: string }): Promise<unknown>;
   /** Register secrets injected only for commands matching a prefix (e.g. "git", "gh"). */
   registerCommandSecrets?(commandPrefix: string, secrets: Record<string, string>): void;
+  /**
+   * Bind the outbound handler with this session's vault credentials so they
+   * get injected as Bearer headers on matching MCP/HTTP requests.
+   */
+  setVaultCredentialsForOutbound?(
+    vault_credentials: Array<{ vault_id: string; credentials: unknown[] }>,
+  ): Promise<void>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
   /**

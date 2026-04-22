@@ -512,6 +512,7 @@ export class LinearProvider implements IntegrationProvider {
       ],
       metadata: {
         linear: {
+          publicationId: publication.id,
           workspaceId: event.workspaceId,
           issueId: event.issueId,
           issueIdentifier: event.issueIdentifier,
@@ -573,27 +574,27 @@ export class LinearProvider implements IntegrationProvider {
     event: NormalizedWebhookEvent,
     actorDisplayName: string | null = null,
   ): string {
-    // Surface the actor as `@<displayName>` so the bot can drop it verbatim
-    // into a comment reply (Linear renders @<displayName> as a real mention).
-    // We never expose `actor.name` to the bot — that's the human label, not
-    // a usable handle.
+    // Hard rule: bot only ever sees `@<displayName>`, never the user's
+    // `name`. Linear's pre-rendered `promptContext` XML embeds raw `name`
+    // values (e.g. "蛇皮") in user attributes — passing it verbatim to
+    // the bot causes it to copy the wrong handle into replies and fail to
+    // render real mentions. We rebuild the context ourselves from the
+    // parsed event fields so every user reference is the displayName.
     const actorLine = actorDisplayName
-      ? `Actor: @${actorDisplayName}\n\n`
+      ? `Actor: @${actorDisplayName}`
       : "";
-    if (event.promptContext) {
-      const header =
-        event.kind === "agentSessionPrompted"
-          ? `New message in Linear agent session on ${event.issueIdentifier ?? "?"}`
-          : `New Linear agent session on ${event.issueIdentifier ?? "?"}`;
-      return `${actorLine}${header}\n\n${event.promptContext}`;
-    }
-    const lines: string[] = [];
-    lines.push(`Linear ${event.kind ?? "event"} on ${event.issueIdentifier ?? "?"}`);
+    const header =
+      event.kind === "agentSessionPrompted"
+        ? `New message in Linear agent session on ${event.issueIdentifier ?? "?"}`
+        : event.kind === "agentSessionCreated"
+        ? `New Linear agent session on ${event.issueIdentifier ?? "?"}`
+        : `Linear ${event.kind ?? "event"} on ${event.issueIdentifier ?? "?"}`;
+    const lines: string[] = [header];
+    if (actorLine) lines.push(actorLine);
     if (event.issueTitle) lines.push(`Title: ${event.issueTitle}`);
     if (event.issueDescription) lines.push(`\nDescription:\n${event.issueDescription}`);
-    if (actorDisplayName) lines.push(`\nFrom: @${actorDisplayName}`);
     if (event.commentBody) lines.push(`\nComment:\n${event.commentBody}`);
-    return `${actorLine}${lines.join("\n")}`;
+    return lines.join("\n");
   }
 
   // ─── MCP (Phase 8+) ──────────────────────────────────────────────────

@@ -89,118 +89,13 @@ interface ToolDescriptor {
   handler: ToolHandler;
 }
 
-// Tool registry — M2 onward fills this in.
-const TOOLS: ToolDescriptor[] = [
-  {
-    name: "linear_reply",
-    title: "Reply",
-    description:
-      "Reply to the user who triggered this session. If the trigger came from " +
-      "a Linear AgentSession (Delegate or panel followup), the reply lands as " +
-      "a `response` activity inside that panel. If the trigger was a comment " +
-      "@-mention, the reply is a threaded comment under the user's comment. " +
-      "Otherwise it falls back to a top-level comment on the issue.\n\n" +
-      "Just pass `body`. Target context (issue, parent comment, agent session) " +
-      "is resolved automatically from the current trigger.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        body: {
-          type: "string",
-          description:
-            "Reply body in Markdown. To @-mention a Linear user, write " +
-            "`@<displayName>` (e.g. `@hrhrngxy`). The user's `name` (e.g. `蛇皮`) " +
-            "renders as plain text and does not notify.",
-        },
-      },
-      required: ["body"],
-    },
-    handler: async (ctx, args) => {
-      const body = String(args.body ?? "").trim();
-      if (!body) {
-        return errorResult("body is required and must be non-empty");
-      }
-      // Prefer panel mode if an AgentSession is open for this turn.
-      if (ctx.linear.currentAgentSessionId) {
-        const ok = await linearGraphQL(ctx.accessToken, {
-          query: `mutation($input: AgentActivityCreateInput!) {
-            agentActivityCreate(input: $input) { success }
-          }`,
-          variables: {
-            input: {
-              agentSessionId: ctx.linear.currentAgentSessionId,
-              content: { type: "response", body },
-            },
-          },
-        });
-        return ok.errors
-          ? errorResult(`agentActivityCreate failed: ${JSON.stringify(ok.errors)}`)
-          : okResult(`Reply posted to AgentSession ${ctx.linear.currentAgentSessionId}.`);
-      }
-      // Thread reply when we have a parent comment to chain under.
-      if (ctx.linear.triggerCommentId && ctx.linear.issueId) {
-        const ok = await linearGraphQL(ctx.accessToken, {
-          query: `mutation($input: CommentCreateInput!) {
-            commentCreate(input: $input) { success comment { id } }
-          }`,
-          variables: {
-            input: {
-              issueId: ctx.linear.issueId,
-              parentId: ctx.linear.triggerCommentId,
-              body,
-            },
-          },
-        });
-        return ok.errors
-          ? errorResult(`commentCreate failed: ${JSON.stringify(ok.errors)}`)
-          : okResult(`Threaded reply posted under ${ctx.linear.triggerCommentId}.`);
-      }
-      // Last resort: top-level comment on the issue.
-      if (ctx.linear.issueId) {
-        const ok = await linearGraphQL(ctx.accessToken, {
-          query: `mutation($input: CommentCreateInput!) {
-            commentCreate(input: $input) { success comment { id } }
-          }`,
-          variables: { input: { issueId: ctx.linear.issueId, body } },
-        });
-        return ok.errors
-          ? errorResult(`commentCreate failed: ${JSON.stringify(ok.errors)}`)
-          : okResult(`Top-level comment posted on issue ${ctx.linear.issueId}.`);
-      }
-      return errorResult(
-        "No reply target — current session has no agent_session, comment, or issue context.",
-      );
-    },
-  },
-];
-
-function okResult(text: string) {
-  return { content: [{ type: "text" as const, text }] };
-}
-
-function errorResult(text: string) {
-  return { content: [{ type: "text" as const, text }], isError: true };
-}
-
-/**
- * Single-shot GraphQL POST against api.linear.app. Token never touches the
- * sandbox or even the request log — bearer is set inside this function and
- * the caller passes only the OAuth token they got from container.installations.
- */
-async function linearGraphQL(
-  accessToken: string,
-  payload: { query: string; variables?: Record<string, unknown> },
-): Promise<{ data?: unknown; errors?: unknown }> {
-  const res = await fetch("https://api.linear.app/graphql", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify(payload),
-  });
-  return (await res.json()) as { data?: unknown; errors?: unknown };
-}
+// Tool registry — currently empty. Bots reply to Linear by emitting
+// regular agent.message text; the event-tap consumer translates each
+// SessionEvent (action, message, etc.) into the matching Linear
+// AgentActivity. Keeping the MCP server skeleton in place for future
+// tools (panel.elicit, side-bar issue lookup, etc.) without bringing
+// reply routing back here.
+const TOOLS: ToolDescriptor[] = [];
 
 const app = new Hono<{ Bindings: Env }>();
 

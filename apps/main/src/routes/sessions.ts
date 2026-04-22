@@ -165,6 +165,7 @@ app.post("/", async (c) => {
       memory_store_id?: string;
       mount_path?: string;
       access?: "read_write" | "read_only";
+      prompt?: string;
       url?: string;
       repo_url?: string;
       authorization_token?: string;
@@ -176,6 +177,12 @@ app.post("/", async (c) => {
 
   if (!body.agent || !body.environment_id) {
     return c.json({ error: "agent and environment_id are required" }, 400);
+  }
+
+  // Anthropic-aligned cap: max 8 memory_store resources per session.
+  const memoryStoreCount = (body.resources ?? []).filter((r) => r.type === "memory_store").length;
+  if (memoryStoreCount > 8) {
+    return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
   }
 
   // Verify agent exists
@@ -313,6 +320,8 @@ app.post("/", async (c) => {
           type: "memory_store",
           memory_store_id: res.memory_store_id,
           mount_path: res.mount_path,
+          access: res.access === "read_only" ? "read_only" : "read_write",
+          prompt: typeof res.prompt === "string" ? res.prompt.slice(0, 4096) : undefined,
           created_at: new Date().toISOString(),
         };
         await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
@@ -832,6 +841,8 @@ app.post("/:id/resources", async (c) => {
     file_id?: string;
     memory_store_id?: string;
     mount_path?: string;
+    access?: "read_write" | "read_only";
+    prompt?: string;
   }>();
 
   if (!body.type) {
@@ -856,6 +867,17 @@ app.post("/:id/resources", async (c) => {
     if (!body.memory_store_id) {
       return c.json({ error: "memory_store_id is required for memory_store resources" }, 400);
     }
+    // Anthropic-aligned cap: max 8 memory_store resources per session.
+    let memoryStoreCount = 0;
+    for (const k of existingResources) {
+      const data = await c.env.CONFIG_KV.get(k.name);
+      if (data && (JSON.parse(data) as SessionResource).type === "memory_store") {
+        memoryStoreCount++;
+      }
+    }
+    if (memoryStoreCount >= 8) {
+      return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
+    }
   }
 
   const resourceId = generateResourceId();
@@ -868,6 +890,13 @@ app.post("/:id/resources", async (c) => {
     mount_path: body.mount_path,
     created_at: new Date().toISOString(),
   };
+
+  if (body.type === "memory_store") {
+    resource.access = body.access === "read_only" ? "read_only" : "read_write";
+    if (typeof body.prompt === "string") {
+      resource.prompt = body.prompt.slice(0, 4096);
+    }
+  }
 
   await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
   return c.json(resource, 201);

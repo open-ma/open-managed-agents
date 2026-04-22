@@ -21,10 +21,9 @@ import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
-import { MemoryStoreService } from "@open-managed-agents/memory-store";
+import { MemoryStoreService, createCfMemoryStoreService } from "@open-managed-agents/memory-store";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
-import { createLinearPanelMirror, type LinearPanelMirror } from "./linear-panel-mirror";
 import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
@@ -54,14 +53,17 @@ interface SessionInitParams {
    */
   vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
   /**
-   * Linear context (publication + initial agent_session_id) used to set up
-   * the AgentSession-panel mirror. Optional — only present when the OMA
-   * session is bound to a Linear publication.
+   * Generic per-event POST hooks. Each hook gets the canonical SessionEvent
+   * verbatim on every broadcast. Use for provider-specific side effects
+   * (Linear AgentActivity mirror, Slack thread mirror, observability
+   * pipelines). SessionDO is provider-agnostic — the main worker sets
+   * these up at /init based on session metadata.
    */
-  linear?: {
-    publicationId: string;
-    currentAgentSessionId: string | null;
-  };
+  event_hooks?: Array<{
+    name: string;
+    url: string;
+    auth?: string;
+  }>;
 }
 
 /**
@@ -100,6 +102,8 @@ interface SessionState {
   agent_snapshot?: AgentConfig;
   environment_snapshot?: EnvironmentConfig;
   vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
+  /** Per-event POST hooks. See SessionInitParams.event_hooks. */
+  event_hooks?: Array<{ name: string; url: string; auth?: string }>;
 }
 
 const INITIAL_SESSION_STATE: SessionState = {
@@ -423,16 +427,9 @@ export class SessionDO extends Agent<Env, SessionState> {
         agent_snapshot: params.agent_snapshot,
         environment_snapshot: params.environment_snapshot,
         vault_credentials: params.vault_credentials,
+        event_hooks: params.event_hooks,
         status: "idle",
       });
-
-      // Wire the Linear panel mirror if this session is bound to a Linear
-      // publication. Subsequent /event calls will refresh the agent_session
-      // pointer when prompted webhooks fire.
-      this.ensureLinearMirror(
-        params.linear?.publicationId ?? null,
-        params.linear?.currentAgentSessionId ?? null,
-      );
 
       // Outbound proxy view: untenanted snapshot keyed only by sessionId.
       // The outbound worker only knows sessionId from the container context;
@@ -498,18 +495,6 @@ export class SessionDO extends Agent<Env, SessionState> {
       delete (raw as { _mount_file_ids?: string[] })._mount_file_ids;
       const body = raw as SessionEvent;
       const history = new SqliteHistory(this.ctx.storage.sql);
-
-      // Linear panel mirror: each incoming event may carry a different
-      // agentSessionId (a Delegate creates a fresh AgentSession; subsequent
-      // panel-replies fire as `prompted` on the same id). Refresh the mirror
-      // pointer so thought/action activities land in the right panel for
-      // this turn. Publication id is fixed per session, set at /init.
-      const eventLinear =
-        ((body as { metadata?: { linear?: { agentSessionId?: string | null } } }).metadata
-          ?.linear ?? {}) as { agentSessionId?: string | null };
-      if (this.linearMirror && "agentSessionId" in eventLinear) {
-        this.linearMirror.setCurrentAgentSession(eventLinear.agentSessionId ?? null);
-      }
 
       // Auto-mount referenced files into the sandbox FS so agent's bash/read
       // tools see them at /mnt/session/uploads/{file_id}, while the model
@@ -1011,23 +996,45 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.warn(`[persistAndBroadcastEvent] history.append failed: ${(err as Error).message}`);
     }
     this.broadcastEvent(event);
-    // Mirror to Linear AgentSession panel using the per-turn context captured
-    // when the triggering user.message arrived. No DO state pollution; the
-    // context lives only as long as the turn does (cleared on hibernation,
-    // re-populated on next /event).
-    if (this.currentLinearCtx) {
-      mirrorEventToLinearPanel(this.env, this.currentLinearCtx, event);
-    }
+    this.fanOutToHooks(event);
   }
 
-  /** Per-turn Linear context. Set in /event handler when user.message
-   *  metadata.linear is present; consulted by persistAndBroadcastEvent for
-   *  every subsequent agent.thinking / agent.tool_use / agent.mcp_tool_use
-   *  the bot emits during that turn. Reset on next user.message arrival. */
-  private currentLinearCtx: {
-    publicationId: string;
-    agentSessionId: string | null;
-  } | null = null;
+  /** Fire-and-forget POST every event to each registered hook. Provider-
+   *  specific consumers (Linear panel mirror, Slack thread mirror, etc.)
+   *  live behind these URLs — SessionDO has no knowledge of them. Hooks
+   *  are configured at /init via SessionInitParams.event_hooks.
+   *
+   *  Per-DO promise chain serializes the POSTs so they reach consumers in
+   *  broadcast order. Without this, fast events (final agent.message) can
+   *  outrun slower ones (earlier thoughts) and panel UIs render out of
+   *  order. Each event waits for the previous fan-out to finish before
+   *  kicking off, trading a few hundred ms of accumulated latency for
+   *  strict ordering. */
+  private hookChain: Promise<unknown> = Promise.resolve();
+
+  private fanOutToHooks(event: SessionEvent): void {
+    const hooks = this.state.event_hooks;
+    if (!hooks?.length) return;
+    const body = JSON.stringify(event);
+    this.hookChain = this.hookChain
+      .then(() =>
+        Promise.all(
+          hooks.map((hook) => {
+            const headers: Record<string, string> = { "content-type": "application/json" };
+            if (hook.auth) headers["x-internal-secret"] = hook.auth;
+            return fetch(hook.url, { method: "POST", headers, body }).catch((err) => {
+              console.warn(
+                `[event-hook ${hook.name}] post failed: ${(err as Error).message}`,
+              );
+            });
+          }),
+        ),
+      )
+      .catch(() => {
+        // chain swallows errors so a single bad hook can't break later
+        // events from being delivered.
+      });
+  }
 
   /**
    * Resolve credentials for a model identifier (with optional explicit card).
@@ -1482,6 +1489,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           const taggedEvent = { ...event, session_thread_id: threadId };
           parentHistory.append(taggedEvent);
           this.broadcastEvent(taggedEvent);
+          this.fanOutToHooks(taggedEvent);
         },
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
@@ -1621,10 +1629,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       },
     });
 
-    // Add memory tools if session has memory store resources
+    // Add memory tools if session has memory store resources. The CF factory
+    // wires Noop adapters when AI / VECTORIZE are unbound, so we only require
+    // AUTH_DB to be present.
     let memoryStoreService: MemoryStoreService | null = null;
-    if (memoryAttachments.length && this.env.AUTH_DB && this.env.AI && this.env.VECTORIZE) {
-      memoryStoreService = new MemoryStoreService(this.env.AUTH_DB, this.env.AI, this.env.VECTORIZE);
+    if (memoryAttachments.length && this.env.AUTH_DB) {
+      memoryStoreService = createCfMemoryStoreService(this.env);
       const memTools = buildMemoryTools(
         memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
         this.state.tenant_id,
@@ -1796,6 +1806,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         broadcast: (event) => {
           history.append(event);
           this.broadcastEvent(event);
+          this.fanOutToHooks(event);
         },
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });

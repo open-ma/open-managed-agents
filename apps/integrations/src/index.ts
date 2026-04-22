@@ -5,7 +5,7 @@ import linearPublications from "./routes/linear/publications";
 import linearDedicatedCallback from "./routes/linear/dedicated-callback";
 import linearSetupPage from "./routes/linear/setup-page";
 import linearMcp from "./routes/linear/mcp";
-import linearInternalMirror from "./routes/linear/internal-mirror";
+import linearEventTap from "./routes/linear/event-tap";
 import githubWebhook from "./routes/github/webhook";
 import githubPublications from "./routes/github/publications";
 import githubInstallCallback from "./routes/github/install-callback";
@@ -59,7 +59,7 @@ app.route("/linear/oauth/app", linearDedicatedCallback);
 app.route("/linear/webhook", linearWebhook);
 app.route("/linear/publications", linearPublications);
 app.route("/linear/mcp", linearMcp);
-app.route("/linear/internal", linearInternalMirror);
+app.route("/linear/internal", linearEventTap);
 app.route("/linear-setup", linearSetupPage);
 
 // GitHub
