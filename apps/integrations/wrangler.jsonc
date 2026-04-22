@@ -12,6 +12,17 @@
     "GATEWAY_ORIGIN": "https://integrations.openma.dev"
   },
 
+  // Keep the *.workers.dev URL alive alongside the custom domain — useful
+  // for incident debugging when the zone is having issues.
+  "workers_dev": true,
+
+  // Custom Domain: Cloudflare auto-creates the DNS record + worker route
+  // when this is in place. Requires openma.dev to be on this Cloudflare
+  // account.
+  "routes": [
+    { "pattern": "integrations.openma.dev", "custom_domain": true }
+  ],
+
   // Shared with apps/main. Migrations for integrations tables live with
   // packages/integrations-adapters-cf and are applied via the same D1 instance.
   "d1_databases": [

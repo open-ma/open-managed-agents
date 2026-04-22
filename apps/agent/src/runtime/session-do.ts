@@ -21,7 +21,10 @@ import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
+import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
+import { resolveAppendablePrompts } from "./appendable-prompts";
+import { createLinearPanelMirror, type LinearPanelMirror } from "./linear-panel-mirror";
 import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
@@ -50,6 +53,15 @@ interface SessionInitParams {
    * otherwise read via `CONFIG_KV.list({ prefix: t:tenantId:cred:vaultId: })`.
    */
   vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
+  /**
+   * Linear context (publication + initial agent_session_id) used to set up
+   * the AgentSession-panel mirror. Optional — only present when the OMA
+   * session is bound to a Linear publication.
+   */
+  linear?: {
+    publicationId: string;
+    currentAgentSessionId: string | null;
+  };
 }
 
 /**
@@ -414,6 +426,30 @@ export class SessionDO extends Agent<Env, SessionState> {
         status: "idle",
       });
 
+      // Wire the Linear panel mirror if this session is bound to a Linear
+      // publication. Subsequent /event calls will refresh the agent_session
+      // pointer when prompted webhooks fire.
+      this.ensureLinearMirror(
+        params.linear?.publicationId ?? null,
+        params.linear?.currentAgentSessionId ?? null,
+      );
+
+      // Outbound proxy view: untenanted snapshot keyed only by sessionId.
+      // The outbound worker only knows sessionId from the container context;
+      // it can't construct the tenant-prefixed `t:{tenantId}:cred:...` keys
+      // that prod uses, so without this side-write its CONFIG_KV reads
+      // always miss and credentials never get injected. See apps/agent/src/outbound.ts.
+      if (params.session_id && (params.vault_credentials?.length ?? 0) > 0) {
+        await this.env.CONFIG_KV.put(
+          `outbound:${params.session_id}`,
+          JSON.stringify({
+            tenant_id: params.tenant_id,
+            vault_ids: params.vault_ids ?? [],
+            vault_credentials: params.vault_credentials,
+          }),
+        );
+      }
+
       // Pre-warm sandbox in background (container start + package install)
       // Errors are swallowed — warmup is best-effort
       this.ctx.waitUntil(this.warmUpSandbox());
@@ -462,6 +498,18 @@ export class SessionDO extends Agent<Env, SessionState> {
       delete (raw as { _mount_file_ids?: string[] })._mount_file_ids;
       const body = raw as SessionEvent;
       const history = new SqliteHistory(this.ctx.storage.sql);
+
+      // Linear panel mirror: each incoming event may carry a different
+      // agentSessionId (a Delegate creates a fresh AgentSession; subsequent
+      // panel-replies fire as `prompted` on the same id). Refresh the mirror
+      // pointer so thought/action activities land in the right panel for
+      // this turn. Publication id is fixed per session, set at /init.
+      const eventLinear =
+        ((body as { metadata?: { linear?: { agentSessionId?: string | null } } }).metadata
+          ?.linear ?? {}) as { agentSessionId?: string | null };
+      if (this.linearMirror && "agentSessionId" in eventLinear) {
+        this.linearMirror.setCurrentAgentSession(eventLinear.agentSessionId ?? null);
+      }
 
       // Auto-mount referenced files into the sandbox FS so agent's bash/read
       // tools see them at /mnt/session/uploads/{file_id}, while the model
@@ -920,6 +968,13 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         }
       }
+
+      // Bind the outbound handler with vault credentials so MCP/static_bearer
+      // tokens get injected into outbound HTTPS as Authorization headers.
+      // See apps/agent/src/oma-sandbox.ts for the handler implementation.
+      if (vaultIds.length && sandbox.setVaultCredentialsForOutbound && this.state.vault_credentials?.length) {
+        await sandbox.setVaultCredentialsForOutbound(this.state.vault_credentials);
+      }
     } catch (err) {
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
       this.broadcastEvent({
@@ -956,7 +1011,23 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.warn(`[persistAndBroadcastEvent] history.append failed: ${(err as Error).message}`);
     }
     this.broadcastEvent(event);
+    // Mirror to Linear AgentSession panel using the per-turn context captured
+    // when the triggering user.message arrived. No DO state pollution; the
+    // context lives only as long as the turn does (cleared on hibernation,
+    // re-populated on next /event).
+    if (this.currentLinearCtx) {
+      mirrorEventToLinearPanel(this.env, this.currentLinearCtx, event);
+    }
   }
+
+  /** Per-turn Linear context. Set in /event handler when user.message
+   *  metadata.linear is present; consulted by persistAndBroadcastEvent for
+   *  every subsequent agent.thinking / agent.tool_use / agent.mcp_tool_use
+   *  the bot emits during that turn. Reset on next user.message arrival. */
+  private currentLinearCtx: {
+    publicationId: string;
+    agentSessionId: string | null;
+  } | null = null;
 
   /**
    * Resolve credentials for a model identifier (with optional explicit card).
@@ -1493,10 +1564,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Fetch memory store IDs from session resources
+    // Fetch memory store attachments from session resources
     const sessionId = this.state.session_id;
-    const memoryStoreIds: string[] = [];
-    const memoryPrompts: string[] = [];
+    const memoryAttachments: Array<{
+      store_id: string;
+      access: "read_write" | "read_only";
+      prompt?: string;
+    }> = [];
     if (sessionId) {
       // TODO(staging-kv): tenant-prefix missing here AND wrong KV namespace
       // in staging. Snapshot session resources at /init before fixing.
@@ -1506,12 +1580,16 @@ export class SessionDO extends Agent<Env, SessionState> {
         if (data) {
           const res = JSON.parse(data);
           if (res.type === "memory_store" && res.memory_store_id) {
-            memoryStoreIds.push(res.memory_store_id);
-            if (res.prompt) memoryPrompts.push(res.prompt);
+            memoryAttachments.push({
+              store_id: res.memory_store_id,
+              access: res.access === "read_only" ? "read_only" : "read_write",
+              prompt: typeof res.prompt === "string" ? res.prompt : undefined,
+            });
           }
         }
       }
     }
+    const memoryStoreIds = memoryAttachments.map((a) => a.store_id);
 
     // Resolve harness via registry — SessionDO never imports a concrete harness
     let harness: HarnessInterface;
@@ -1544,8 +1622,15 @@ export class SessionDO extends Agent<Env, SessionState> {
     });
 
     // Add memory tools if session has memory store resources
-    if (memoryStoreIds.length && this.env.CONFIG_KV) {
-      const memTools = buildMemoryTools(memoryStoreIds, this.env.CONFIG_KV, this.env.AI, this.env.VECTORIZE);
+    let memoryStoreService: MemoryStoreService | null = null;
+    if (memoryAttachments.length && this.env.AUTH_DB && this.env.AI && this.env.VECTORIZE) {
+      memoryStoreService = new MemoryStoreService(this.env.AUTH_DB, this.env.AI, this.env.VECTORIZE);
+      const memTools = buildMemoryTools(
+        memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
+        this.state.tenant_id,
+        memoryStoreService,
+        this.state.agent_id ?? "agent",
+      );
       Object.assign(allTools, memTools);
     }
 
@@ -1562,6 +1647,41 @@ export class SessionDO extends Agent<Env, SessionState> {
     systemPrompt = systemPrompt
       ? `${systemPrompt}\n\n${authenticatedCommandGuidance}`
       : authenticatedCommandGuidance;
+
+    // Platform-built-in appendable prompts the agent author opted into. Use
+    // for provider-specific syntax (e.g. Linear's @-mention URL form) that
+    // would pollute the base system prompt for agents that don't need it.
+    const appendableIds = agent.appendable_prompts ?? [];
+    const resolved = appendableIds.length ? resolveAppendablePrompts(appendableIds) : [];
+    console.log(
+      `[session-do] appendable_prompts ids=[${appendableIds.join(",")}] resolved=${resolved.length}`,
+    );
+    if (resolved.length) {
+      systemPrompt += "\n\n" + resolved.map((p) => p.content).join("\n\n");
+    }
+
+    // TEMP debug: persist the assembled system prompt to KV so we can verify
+    // exactly what the LLM is being told. Drop this after we confirm
+    // appendable_prompts wiring works end to end.
+    if (this.env.CONFIG_KV && this.state.tenant_id) {
+      const debugKey = `t:${this.state.tenant_id}:debug-prompt:${this.state.session_id}`;
+      try {
+        await this.env.CONFIG_KV.put(
+          debugKey,
+          JSON.stringify({
+            agent_id: agent.id,
+            agent_version: agent.version,
+            appendable_ids: appendableIds,
+            resolved_count: resolved.length,
+            system_prompt: systemPrompt,
+            captured_at: new Date().toISOString(),
+          }),
+          { expirationTtl: 86400 },
+        );
+      } catch (err) {
+        console.error("[session-do] debug-prompt KV write failed:", err);
+      }
+    }
     if (agent.skills?.length) {
       // Built-in (anthropic) skills from the in-memory registry
       const builtinSkills = resolveSkills(agent.skills);
@@ -1619,9 +1739,29 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Inject memory store prompts into system prompt
-    if (memoryPrompts.length) {
-      systemPrompt += "\n\n" + memoryPrompts.join("\n\n");
+    // Inject memory store metadata + per-attachment prompts into system prompt.
+    // For each attached store, the model sees: name, description, and any
+    // session-specific prompt. read_only stores are explicitly flagged so the
+    // model knows it cannot mutate them (and the write tools are absent too).
+    if (memoryAttachments.length && memoryStoreService) {
+      try {
+        for (const att of memoryAttachments) {
+          const store = await memoryStoreService.getStore({
+            tenantId: this.state.tenant_id,
+            storeId: att.store_id,
+          });
+          if (!store) continue;
+          const lines = [`## Memory store: ${store.name}`];
+          if (store.description) lines.push(store.description);
+          if (att.prompt) lines.push(att.prompt);
+          if (att.access === "read_only") lines.push("(read-only attachment — write tools are not available for this store)");
+          systemPrompt += "\n\n" + lines.join("\n");
+        }
+      } catch (err) {
+        console.warn("memory store metadata fetch failed", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
     }
 
     // Create an abort controller for this execution

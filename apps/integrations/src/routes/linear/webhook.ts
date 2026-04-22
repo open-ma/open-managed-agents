@@ -47,8 +47,16 @@ app.post("/app/:appId", async (c) => {
   // Surface routing/verification reasons in tail logs. Cheap to emit
   // unconditionally — the structured shape stays grep-friendly.
   console.log(
-    `[linear-webhook] appId=${appId} delivery=${deliveryId} event=${headers["linear-event"]} handled=${outcome.handled} reason=${outcome.reason ?? "ok"}`,
+    `[linear-webhook] appId=${appId} delivery=${deliveryId} event=${headers["linear-event"]} handled=${outcome.handled} reason=${outcome.reason ?? "ok"} sessionId=${outcome.sessionId ?? "-"}`,
   );
+  // TEMP: dump body for AgentSessionEvent so we can extend the parser.
+  // wrangler tail truncates each line ~600 bytes — split into chunks.
+  if (headers["linear-event"] === "AgentSessionEvent") {
+    const chunkSize = 400;
+    for (let i = 0; i < Math.min(rawBody.length, 8000); i += chunkSize) {
+      console.log(`[linear-body] ${deliveryId} ${i}: ${rawBody.slice(i, i + chunkSize)}`);
+    }
+  }
 
   // Linear contract: always 200. Body is informational.
   return c.json({ ok: outcome.handled, reason: outcome.reason ?? null }, 200);
