@@ -70,6 +70,7 @@ describe("buildTrajectory", () => {
       input_tokens: 100,
       output_tokens: 50,
       cache_read_input_tokens: 0,
+      cache_creation_input_tokens: 0,
     });
     expect(t.summary.duration_ms).toBe(30_000);
     expect(t.ended_at).toBe("2026-04-17T10:00:30Z");

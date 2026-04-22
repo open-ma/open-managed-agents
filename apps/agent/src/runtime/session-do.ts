@@ -88,6 +88,13 @@ interface SessionState {
   agent_snapshot?: AgentConfig;
   environment_snapshot?: EnvironmentConfig;
   vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
+  /**
+   * One-shot guard: harness.onSessionInit must run exactly once, before the
+   * first user-message-driven turn. Set true after the call lands so resumes
+   * / restarts don't re-inject reminders (which would write duplicate cached
+   * prefix bytes and bust the cache).
+   */
+  session_init_done?: boolean;
 }
 
 const INITIAL_SESSION_STATE: SessionState = {
@@ -1555,33 +1562,51 @@ export class SessionDO extends Agent<Env, SessionState> {
     const creds = await this.resolveModelCardCredentials(effectiveModelId, agent.model_card_id);
     const model = resolveModel(effectiveModelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
 
-    // Build system prompt: base + skill metadata
-    let systemPrompt = agent.system || "";
+    // Build system prompt: ONLY agent.system + authenticatedCommandGuidance.
+    // Skill / memory_store / appendable_prompt content is NOT appended here —
+    // those are collected as platformReminders and injected by the harness's
+    // onSessionInit hook as <system-reminder> user.message events. This keeps
+    // the system field byte-stable across the session, which Anthropic's
+    // prompt cache requires for the cached prefix to survive past turn 1.
+    const rawSystemPrompt = agent.system || "";
     const authenticatedCommandGuidance =
       "For commands that may require authentication, prefer issuing a single command instead of a chained shell command. If an authenticated chained command fails, retry with a simpler single-command form.";
-    systemPrompt = systemPrompt
-      ? `${systemPrompt}\n\n${authenticatedCommandGuidance}`
+    const systemPrompt = rawSystemPrompt
+      ? `${rawSystemPrompt}\n\n${authenticatedCommandGuidance}`
       : authenticatedCommandGuidance;
+
+    // Collect platformReminders for harness.onSessionInit. These get
+    // resolved ONCE at session-init and become part of the events stream.
+    // KV reads happen here; the resulting bytes are frozen — no per-turn KV
+    // race conditions, no per-turn iteration-order drift.
+    const platformReminders: Array<{ source: string; text: string }> = [];
+
     if (agent.skills?.length) {
       // Built-in (anthropic) skills from the in-memory registry
       const builtinSkills = resolveSkills(agent.skills);
-      const additions = builtinSkills.map(s => s.system_prompt_addition).filter(Boolean);
+      for (const s of builtinSkills) {
+        if (s.system_prompt_addition) {
+          platformReminders.push({ source: `skill:${s.id}`, text: s.system_prompt_addition });
+        }
+      }
 
-      // Custom skills from KV — lightweight metadata for system prompt
+      // Custom skills from KV — lightweight metadata
       if (this.env.CONFIG_KV) {
         try {
           const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV, this.state.tenant_id);
-          additions.push(...customSkills.map(s => s.system_prompt_addition).filter(Boolean));
+          for (const s of customSkills) {
+            if (s.system_prompt_addition) {
+              platformReminders.push({ source: `skill:${s.id}`, text: s.system_prompt_addition });
+            }
+          }
         } catch {
           // Best-effort
         }
       }
 
-      if (additions.length) {
-        systemPrompt += "\n\n" + additions.join("\n\n");
-      }
-
-      // Mount custom skill files into sandbox (progressive disclosure)
+      // Mount custom skill files into sandbox (progressive disclosure).
+      // Unrelated to systemPrompt — keeps the sandbox-side files for the
+      // model to read on demand via skill tools.
       if (this.env.CONFIG_KV) {
         try {
           const skillFilesResults = await getSkillFiles(
@@ -1619,9 +1644,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Inject memory store prompts into system prompt
-    if (memoryPrompts.length) {
-      systemPrompt += "\n\n" + memoryPrompts.join("\n\n");
+    // Memory store prompts → platformReminders (was: appended to systemPrompt
+    // every turn, KV-list-order dependent → permanent cache miss).
+    for (let i = 0; i < memoryPrompts.length; i++) {
+      platformReminders.push({
+        source: `memory:${memoryStoreIds[i] ?? `idx${i}`}`,
+        text: memoryPrompts[i],
+      });
     }
 
     // Create an abort controller for this execution
@@ -1635,6 +1664,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       tools: allTools,
       model,
       systemPrompt,
+      rawSystemPrompt,
+      platformReminders,
       env: {
         ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
@@ -1666,6 +1697,19 @@ export class SessionDO extends Agent<Env, SessionState> {
     };
 
     try {
+      // Run harness.onSessionInit exactly once per session, BEFORE the first
+      // running status. Default impl writes <system-reminder> user.message
+      // events for skills/memory/appendable_prompts; custom harnesses can
+      // substitute or skip. Idempotent across DO restarts via state flag.
+      if (!this.state.session_init_done && harness.onSessionInit) {
+        try {
+          await harness.onSessionInit(ctx, ctx.runtime);
+        } catch (err) {
+          console.warn(`[onSessionInit] failed: ${(err as Error).message}`);
+        }
+        this.setState({ ...this.state, session_init_done: true });
+      }
+
       // Broadcast running status
       const runningEvent: SessionEvent = { type: "session.status_running" };
       history.append(runningEvent);
