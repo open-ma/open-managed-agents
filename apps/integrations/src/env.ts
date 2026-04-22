@@ -24,4 +24,10 @@ export interface Env {
   // Shared secret with apps/main, gating /v1/internal/* endpoints. Must match
   // INTEGRATIONS_INTERNAL_SECRET on the main worker.
   INTEGRATIONS_INTERNAL_SECRET: string;
+
+  // Optional override for the GitHub MCP server URL. Defaults to the
+  // GitHub-hosted MCP at https://api.githubcopilot.com/mcp/. Set to a
+  // self-hosted endpoint (e.g. https://github-mcp.internal/) to point
+  // agents at a relay you control.
+  GITHUB_MCP_URL?: string;
 }
