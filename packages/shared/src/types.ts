@@ -478,6 +478,11 @@ export interface CredentialAuth {
   // command_secret: inject env var only for matching command prefixes
   command_prefixes?: string[];    // e.g. ["wrangler", "npx wrangler"]
   env_var?: string;               // e.g. "CLOUDFLARE_API_TOKEN"
+  // Provider tag: when set, the outbound proxy can request a token refresh
+  // via the integrations gateway (which holds the secrets needed to mint a
+  // fresh token — e.g. GitHub App private key). Used to support short-lived
+  // upstream tokens (GitHub installation tokens, ~1hr TTL).
+  provider?: "github" | "linear";
 }
 
 export interface CredentialConfig {

@@ -25,6 +25,15 @@
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
+  // Service binding to the integrations gateway. Used by the outbound proxy
+  // to refresh short-lived upstream tokens (e.g. GitHub installation tokens,
+  // ~1hr TTL) on 401. The agent worker never sees provider secrets directly
+  // — it just asks the gateway "please refresh credential X" and the gateway
+  // does the App-JWT signing using its locally-held private key.
+  "services": [
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+  ],
+
   // Workers AI for generating embeddings
   "ai": { "binding": "AI" },
 
@@ -73,6 +82,9 @@
       },
       "kv_namespaces": [
         { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
+      ],
+      "services": [
+        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
