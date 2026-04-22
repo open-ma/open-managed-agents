@@ -51,6 +51,29 @@ interface CreateVaultCredentialBody {
   displayName: string;
   mcpServerUrl: string;
   bearerToken: string;
+  provider?: "github" | "linear";
+}
+
+interface AddCommandSecretBody {
+  action: "add_command_secret";
+  userId: string;
+  /** Existing vault id; null = create fresh vault. */
+  vaultId: string | null;
+  vaultName: string;
+  displayName: string;
+  commandPrefixes: string[];
+  envVar: string;
+  token: string;
+  provider?: "github" | "linear";
+}
+
+interface RotateBody {
+  action: "rotate_bearer" | "rotate_command_secret";
+  userId: string;
+  vaultId: string;
+  newToken: string;
+  /** Required only when action=rotate_command_secret (disambiguates if vault has multiple). */
+  envVar?: string;
 }
 
 /**
@@ -212,52 +235,160 @@ app.post("/sessions/:id/events", async (c) => {
 
 /**
  * POST /v1/internal/vaults
- * Body: CreateVaultCredentialBody. Creates a fresh vault with one
- * static_bearer credential matching `mcpServerUrl`'s hostname for outbound
- * injection. Returns { vaultId, credentialId }.
+ * Body discriminated by `action`:
+ *   - "create_with_credential":  CreateVaultCredentialBody  → fresh vault + static_bearer
+ *   - "add_command_secret":      AddCommandSecretBody       → command_secret cred (in existing or fresh vault)
+ *
+ * Both return { vaultId, credentialId }.
  */
 app.post("/vaults", async (c) => {
-  const body = await c.req.json<CreateVaultCredentialBody>();
-  if (body.action !== "create_with_credential") {
-    return c.json({ error: "unknown action" }, 400);
-  }
-  if (!body.userId || !body.mcpServerUrl || !body.bearerToken) {
-    return c.json(
-      { error: "userId, mcpServerUrl, bearerToken required" },
-      400,
+  const body = (await c.req.json()) as
+    | CreateVaultCredentialBody
+    | AddCommandSecretBody;
+
+  if (body.action === "create_with_credential") {
+    if (!body.userId || !body.mcpServerUrl || !body.bearerToken) {
+      return c.json(
+        { error: "userId, mcpServerUrl, bearerToken required" },
+        400,
+      );
+    }
+    const tenantId = await resolveTenantId(c.env, body.userId);
+    if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
+
+    const vault: VaultConfig = {
+      id: generateVaultId(),
+      name: body.vaultName,
+      created_at: new Date().toISOString(),
+    };
+    await c.env.CONFIG_KV.put(kvKey(tenantId, "vault", vault.id), JSON.stringify(vault));
+
+    const credential: CredentialConfig = {
+      id: generateCredentialId(),
+      vault_id: vault.id,
+      display_name: body.displayName,
+      auth: {
+        type: "static_bearer",
+        mcp_server_url: body.mcpServerUrl,
+        token: body.bearerToken,
+        provider: body.provider,
+      },
+      created_at: new Date().toISOString(),
+    };
+    await c.env.CONFIG_KV.put(
+      kvKey(tenantId, "cred", vault.id, credential.id),
+      JSON.stringify(credential),
     );
+    return c.json({ vaultId: vault.id, credentialId: credential.id });
   }
 
+  if (body.action === "add_command_secret") {
+    if (!body.userId || !body.commandPrefixes?.length || !body.envVar || !body.token) {
+      return c.json(
+        { error: "userId, commandPrefixes, envVar, token required" },
+        400,
+      );
+    }
+    const tenantId = await resolveTenantId(c.env, body.userId);
+    if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
+
+    let vaultId = body.vaultId;
+    if (!vaultId) {
+      const vault: VaultConfig = {
+        id: generateVaultId(),
+        name: body.vaultName,
+        created_at: new Date().toISOString(),
+      };
+      await c.env.CONFIG_KV.put(kvKey(tenantId, "vault", vault.id), JSON.stringify(vault));
+      vaultId = vault.id;
+    } else {
+      // Caller-supplied vault must exist in this tenant; refuse cross-tenant attach.
+      const existing = await c.env.CONFIG_KV.get(kvKey(tenantId, "vault", vaultId));
+      if (!existing) return c.json({ error: "vault not found in tenant" }, 404);
+    }
+
+    const credential: CredentialConfig = {
+      id: generateCredentialId(),
+      vault_id: vaultId,
+      display_name: body.displayName,
+      auth: {
+        type: "command_secret",
+        command_prefixes: body.commandPrefixes,
+        env_var: body.envVar,
+        token: body.token,
+        provider: body.provider,
+      },
+      created_at: new Date().toISOString(),
+    };
+    await c.env.CONFIG_KV.put(
+      kvKey(tenantId, "cred", vaultId, credential.id),
+      JSON.stringify(credential),
+    );
+    return c.json({ vaultId, credentialId: credential.id });
+  }
+
+  return c.json({ error: "unknown action" }, 400);
+});
+
+/**
+ * POST /v1/internal/vaults/rotate
+ * Replace the token on a credential in the given vault, looking it up by
+ * type (and env_var for command_secret). Used to refresh short-lived upstream
+ * tokens (e.g. GitHub installation tokens, ~1hr TTL) without the caller
+ * having to remember credential ids.
+ */
+app.post("/vaults/rotate", async (c) => {
+  const body = (await c.req.json()) as RotateBody;
+  if (!body.userId || !body.vaultId || !body.newToken) {
+    return c.json({ error: "userId, vaultId, newToken required" }, 400);
+  }
   const tenantId = await resolveTenantId(c.env, body.userId);
   if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
 
-  const vault: VaultConfig = {
-    id: generateVaultId(),
-    name: body.vaultName,
-    created_at: new Date().toISOString(),
-  };
-  await c.env.CONFIG_KV.put(kvKey(tenantId, "vault", vault.id), JSON.stringify(vault));
+  const list = await c.env.CONFIG_KV.list({
+    prefix: kvKey(tenantId, "cred", body.vaultId) + ":",
+  });
+  if (!list.keys.length) return c.json({ error: "vault has no credentials" }, 404);
 
-  // Credential row: shape mirrors what routes/vaults.ts writes for the
-  // public POST /v1/vaults/:id/credentials endpoint. The outbound Worker
-  // matches by `auth.mcp_server_url` hostname.
-  const credential: CredentialConfig = {
-    id: generateCredentialId(),
-    vault_id: vault.id,
-    display_name: body.displayName,
-    auth: {
-      type: "static_bearer",
-      mcp_server_url: body.mcpServerUrl,
-      token: body.bearerToken,
-    },
-    created_at: new Date().toISOString(),
-  };
-  await c.env.CONFIG_KV.put(
-    kvKey(tenantId, "cred", vault.id, credential.id),
-    JSON.stringify(credential),
-  );
+  let target: { key: string; cred: CredentialConfig } | null = null;
+  for (const k of list.keys) {
+    const data = await c.env.CONFIG_KV.get(k.name);
+    if (!data) continue;
+    let cred: CredentialConfig;
+    try {
+      cred = JSON.parse(data) as CredentialConfig;
+    } catch {
+      continue;
+    }
+    if (body.action === "rotate_bearer" && cred.auth?.type === "static_bearer") {
+      target = { key: k.name, cred };
+      break;
+    }
+    if (
+      body.action === "rotate_command_secret" &&
+      cred.auth?.type === "command_secret" &&
+      (!body.envVar || cred.auth.env_var === body.envVar)
+    ) {
+      target = { key: k.name, cred };
+      break;
+    }
+  }
+  if (!target) return c.json({ error: "matching credential not found" }, 404);
 
-  return c.json({ vaultId: vault.id, credentialId: credential.id });
+  if (body.action === "rotate_bearer") {
+    if (target.cred.auth?.type !== "static_bearer") {
+      return c.json({ error: "credential is not static_bearer" }, 400);
+    }
+    target.cred.auth.token = body.newToken;
+  } else {
+    if (target.cred.auth?.type !== "command_secret") {
+      return c.json({ error: "credential is not command_secret" }, 400);
+    }
+    target.cred.auth.token = body.newToken;
+  }
+  target.cred.updated_at = new Date().toISOString();
+  await c.env.CONFIG_KV.put(target.key, JSON.stringify(target.cred));
+  return c.json({ ok: true, credentialId: target.cred.id });
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
