@@ -453,7 +453,7 @@ function synthesizeTrajectory(taskId: string, events: SSEEvent[]): Trajectory {
       num_tool_errors: numToolErrors,
       num_threads: 0,
       duration_ms: 0,
-      token_usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
+      token_usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
     },
   };
 }
