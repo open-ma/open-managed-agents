@@ -28,7 +28,7 @@ export interface SessionRecord extends SessionMeta {
 
 export interface FullStatus {
   status: string;
-  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number };
+  usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number };
   outcome_evaluations?: Array<{ result: string; iteration: number; feedback?: string }>;
 }
 
@@ -70,6 +70,7 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
   let spanInTokens = 0;
   let spanOutTokens = 0;
   let spanCacheRead = 0;
+  let spanCacheCreate = 0;
 
   for (const e of events) {
     const data = parseEventData(e);
@@ -92,11 +93,12 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
         break;
       }
       case "span.model_request_end": {
-        const u = (data as { model_usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number } })?.model_usage;
+        const u = (data as { model_usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number } })?.model_usage;
         if (u) {
           spanInTokens += u.input_tokens || 0;
           spanOutTokens += u.output_tokens || 0;
           spanCacheRead += u.cache_read_input_tokens || 0;
+          spanCacheCreate += u.cache_creation_input_tokens || 0;
         }
         break;
       }
@@ -113,6 +115,7 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
   const reportedIn = usage?.input_tokens || 0;
   const reportedOut = usage?.output_tokens || 0;
   const reportedCache = usage?.cache_read_input_tokens || 0;
+  const reportedCacheCreate = usage?.cache_creation_input_tokens || 0;
 
   return {
     num_events: events.length,
@@ -125,6 +128,7 @@ function computeSummary(events: StoredEvent[], usage: FullStatus["usage"], start
       input_tokens: Math.max(reportedIn, spanInTokens),
       output_tokens: Math.max(reportedOut, spanOutTokens),
       cache_read_input_tokens: Math.max(reportedCache, spanCacheRead),
+      cache_creation_input_tokens: Math.max(reportedCacheCreate, spanCacheCreate),
     },
   };
 }

@@ -101,7 +101,7 @@ async function executeTask(
       session_id: handle.sessionId,
       turns: [],
       reward: { total: 0 },
-      token_usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 },
+      token_usage: { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 },
       num_turns: 0,
       duration_ms: Date.now() - startTime,
       outcome: msg.includes("timeout") ? "timeout" : "error",
@@ -152,11 +152,12 @@ export async function batchRollout(
   await Promise.all(pending);
   await pool.destroyAll();
 
-  const totalTokens: TokenUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0 };
+  const totalTokens: TokenUsage = { input_tokens: 0, output_tokens: 0, cache_read_input_tokens: 0, cache_creation_input_tokens: 0 };
   for (const t of trajectories) {
     totalTokens.input_tokens += t.token_usage.input_tokens;
     totalTokens.output_tokens += t.token_usage.output_tokens;
     totalTokens.cache_read_input_tokens += t.token_usage.cache_read_input_tokens;
+    totalTokens.cache_creation_input_tokens += t.token_usage.cache_creation_input_tokens;
   }
 
   const rewardStats = batchRewardStats(trajectories.map((t) => t.reward));
