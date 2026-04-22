@@ -16,6 +16,7 @@ export { CryptoIdGenerator } from "./ids";
 export { D1InstallationRepo } from "./d1/installation-repo";
 export { D1PublicationRepo } from "./d1/publication-repo";
 export { D1AppRepo } from "./d1/app-repo";
+export { D1GitHubAppRepo } from "./d1/github-app-repo";
 export { D1WebhookEventStore } from "./d1/webhook-event-store";
 export { D1IssueSessionRepo } from "./d1/issue-session-repo";
 export { D1SetupLinkRepo } from "./d1/setup-link-repo";
