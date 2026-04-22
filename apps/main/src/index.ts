@@ -72,13 +72,21 @@ app.route("/v1/integrations", integrationsRoutes);
 app.route("/v1/internal", internalRoutes);
 
 // Proxy public integrations gateway paths to the INTEGRATIONS service binding
-// so Linear can hit the OAuth callback / webhook URLs at this worker's host.
-// (Local dev convenience: avoids running integrations on a separate port.)
+// so Linear/GitHub can hit the OAuth callback / webhook URLs at this worker's
+// host. (Local dev convenience: avoids running integrations on a separate port.)
 app.all("/linear/*", async (c) => {
   if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
   return c.env.INTEGRATIONS.fetch(c.req.raw);
 });
 app.all("/linear-setup/*", async (c) => {
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  return c.env.INTEGRATIONS.fetch(c.req.raw);
+});
+app.all("/github/*", async (c) => {
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  return c.env.INTEGRATIONS.fetch(c.req.raw);
+});
+app.all("/github-setup/*", async (c) => {
   if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
   return c.env.INTEGRATIONS.fetch(c.req.raw);
 });
