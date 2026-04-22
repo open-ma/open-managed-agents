@@ -695,6 +695,61 @@ const commands: Cmd[] = [
       console.log(`Unpublished: ${args[0]}`);
     },
   },
+
+  // Memory
+  {
+    group: "Memory", match: ["memory", "reconcile"],
+    usage: "oma memory reconcile [--store <id>] [--limit N] [--all]",
+    desc: "Re-embed memories whose Vectorize sync is stale (vector_synced_at IS NULL).",
+    http: "POST   /v1/memory_stores/_reconcile {store_id?, limit?}",
+    async run(config, args) {
+      const storeId = flag(args, "--store");
+      const limitStr = flag(args, "--limit");
+      const all = args.includes("--all");
+      const limit = limitStr ? Number(limitStr) : 200;
+      if (!storeId && !all) {
+        console.error("Specify either --store <id> or --all (drains all stores in the tenant).");
+        process.exit(1);
+      }
+      let totalScanned = 0, totalFixed = 0, totalFailing = 0;
+      const errors: Array<{ memory_id: string; error: string }> = [];
+      for (let pass = 1; pass <= 100; pass++) {
+        const body: { store_id?: string; limit?: number } = { limit };
+        if (storeId) body.store_id = storeId;
+        const result = await apiFetch<{
+          scanned: number; fixed: number; still_failing: number;
+          sample_errors: Array<{ memory_id: string; error: string }>;
+        }>(config, "/v1/memory_stores/_reconcile", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        totalScanned += result.scanned;
+        totalFixed += result.fixed;
+        totalFailing = result.still_failing; // last pass's failing count
+        for (const e of result.sample_errors) if (errors.length < 10) errors.push(e);
+        if (config.json) {
+          console.log(JSON.stringify({ pass, ...result }));
+        } else {
+          console.log(`pass ${pass}: scanned=${result.scanned} fixed=${result.fixed} failing=${result.still_failing}`);
+        }
+        // Stop when this batch had nothing to do, or when we made no progress.
+        if (result.scanned === 0) break;
+        if (result.fixed === 0 && result.still_failing > 0) {
+          console.error("No progress this pass — remaining rows keep failing. Stopping.");
+          break;
+        }
+      }
+      if (config.json) {
+        console.log(JSON.stringify({ totals: { scanned: totalScanned, fixed: totalFixed, failing: totalFailing }, errors }));
+      } else {
+        console.log(`\nDone. scanned=${totalScanned} fixed=${totalFixed} still_failing=${totalFailing}`);
+        if (errors.length) {
+          console.log("\nSample errors:");
+          for (const e of errors) console.log(`  ${e.memory_id}: ${e.error}`);
+        }
+      }
+    },
+  },
 ];
 
 // ─── API Endpoints not covered by CLI commands ───
@@ -741,6 +796,7 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Memory", http: "GET    /v1/memory_stores/:id/memories?prefix=X List memories (metadata)" },
   { group: "Memory", http: "GET    /v1/memory_stores/:id/memories/:mid     Get memory with content" },
   { group: "Memory", http: "DELETE /v1/memory_stores/:id/memories/:mid     Delete memory" },
+  { group: "Memory", http: "POST   /v1/memory_stores/_reconcile {store_id?,limit?}  Re-embed stale rows" },
   { group: "Evals", http: "POST   /v1/evals/runs                          Create eval run {agent_id, environment_id, tasks:[...]}" },
   { group: "Evals", http: "GET    /v1/evals/runs                          List eval runs" },
   { group: "Evals", http: "GET    /v1/evals/runs/:id                      Get eval run results" },
