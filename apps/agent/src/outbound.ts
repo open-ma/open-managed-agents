@@ -32,6 +32,8 @@ export async function outboundByHost(
  * Intercept and modify outbound requests from the container.
  * Injects vault credentials (OAuth tokens, bearer tokens) for MCP servers.
  * On 401 from mcp_oauth credentials, attempts token refresh and retries.
+ * On 401 from provider-tagged static_bearer credentials (e.g. GitHub
+ * installation tokens), asks the integrations gateway to refresh and retries.
  */
 export async function outbound(
   request: Request,
@@ -54,9 +56,31 @@ export async function outbound(
 
     const response = await fetch(new Request(request, { headers }));
 
-    // Token refresh: if mcp_oauth and got 401, try refreshing
+    // Token refresh path 1: mcp_oauth + 401 → standard OAuth refresh
     if (response.status === 401 && credential.type === "mcp_oauth" && credential.credential_id) {
       const refreshed = await tryRefreshToken(env, credential.vault_id, credential.credential_id);
+      if (refreshed) {
+        const retryHeaders = new Headers(request.headers);
+        retryHeaders.set("Authorization", `Bearer ${refreshed}`);
+        return fetch(new Request(request, { headers: retryHeaders }));
+      }
+    }
+
+    // Token refresh path 2: static_bearer with provider tag + 401 → ask the
+    // owning integrations gateway to mint a fresh token. The gateway holds
+    // the upstream secrets (e.g. GitHub App private key); the agent worker
+    // never sees them. Returns the new bearer to retry with.
+    if (
+      response.status === 401 &&
+      credential.type === "static_bearer" &&
+      credential.provider
+    ) {
+      const refreshed = await tryProviderRefresh(
+        env,
+        sessionId,
+        credential.provider,
+        credential.vault_id,
+      );
       if (refreshed) {
         const retryHeaders = new Headers(request.headers);
         retryHeaders.set("Authorization", `Bearer ${refreshed}`);
@@ -68,6 +92,45 @@ export async function outbound(
   }
 
   return fetch(request);
+}
+
+/**
+ * Ask the integrations gateway to refresh a provider-tagged credential.
+ * Returns the new bearer token on success, null on any failure.
+ */
+async function tryProviderRefresh(
+  env: Env,
+  sessionId: string,
+  provider: "github" | "linear",
+  vaultId: string,
+): Promise<string | null> {
+  if (!env.INTEGRATIONS || !env.INTEGRATIONS_INTERNAL_SECRET) return null;
+  try {
+    // Resolve userId from the session record so the gateway can scope the
+    // refresh to the right tenant.
+    const sessionData = await env.CONFIG_KV.get(`session:${sessionId}`);
+    if (!sessionData) return null;
+    const session = JSON.parse(sessionData) as { user_id?: string };
+    const userId = session.user_id;
+    if (!userId) return null;
+
+    const res = await env.INTEGRATIONS.fetch(
+      `http://gateway/${provider}/internal/refresh-by-vault`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-internal-secret": env.INTEGRATIONS_INTERNAL_SECRET,
+        },
+        body: JSON.stringify({ userId, vaultId }),
+      },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { token?: string };
+    return data.token ?? null;
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -143,6 +206,7 @@ async function findCredentialForHost(
   access_token?: string;
   credential_id?: string;
   vault_id: string;
+  provider?: "github" | "linear";
 } | null> {
   try {
     // Get session to find vault_ids
@@ -173,6 +237,7 @@ async function findCredentialForHost(
               access_token: cred.auth.access_token,
               credential_id: cred.id,
               vault_id: vaultId,
+              provider: cred.auth.provider,
             };
           }
         } catch {
