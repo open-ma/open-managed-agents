@@ -16,9 +16,13 @@ registerHarness("default", () => new DefaultHarness());
 
 // --- Export DO classes (required by wrangler) ---
 export { SessionDO } from "./runtime/session-do";
-export { Sandbox } from "@cloudflare/sandbox";
+export { OmaSandbox as Sandbox } from "./oma-sandbox";
 
-// --- Export outbound worker functions ---
+// --- Required by @cloudflare/sandbox 0.8.x outbound interception ---
+export { ContainerProxy } from "@cloudflare/containers";
+
+// --- Export outbound worker functions (legacy — see oma-sandbox.ts for the
+// real handler wiring via @cloudflare/sandbox 0.8.x setOutboundHandler API). ---
 export { outbound, outboundByHost } from "./outbound";
 
 // --- HTTP app: thin router to SessionDO ---

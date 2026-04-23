@@ -1,7 +1,7 @@
 import type {
-  SessionScope,
-  SessionScopeRepo,
-  SessionScopeStatus,
+  IssueSession,
+  IssueSessionRepo,
+  IssueSessionStatus,
 } from "@open-managed-agents/integrations-core";
 
 interface Row {
@@ -12,52 +12,55 @@ interface Row {
   created_at: number;
 }
 
-/**
- * D1 session-scope repo for Linear. Table name (`linear_issue_sessions`) and
- * column name (`issue_id`) are kept for migration stability — semantically
- * `issue_id` now stores the generic `scopeKey` (Linear puts its issue id; other
- * providers using this same table layout would put their own per-scope key).
- */
-export class D1LinearSessionScopeRepo implements SessionScopeRepo {
+export class D1IssueSessionRepo implements IssueSessionRepo {
   constructor(private readonly db: D1Database) {}
 
-  async getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null> {
+  async getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null> {
     const row = await this.db
       .prepare(
         `SELECT * FROM linear_issue_sessions
          WHERE publication_id = ? AND issue_id = ?`,
       )
-      .bind(publicationId, scopeKey)
+      .bind(publicationId, issueId)
       .first<Row>();
     return row ? this.toDomain(row) : null;
   }
 
-  async insert(row: SessionScope): Promise<void> {
+  async insert(row: IssueSession): Promise<void> {
+    // UPSERT: per_issue mode reuses an existing row when re-delegated.
+    // Without ON CONFLICT we 500 when a stale (status='inactive') row from
+    // a prior delegation still occupies (publication_id, issue_id), which
+    // is the natural state between the previous session ending and this
+    // webhook arriving. excluded.* is SQLite syntax for the new VALUES.
     await this.db
       .prepare(
         `INSERT INTO linear_issue_sessions
            (publication_id, issue_id, session_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+         VALUES (?, ?, ?, ?, ?)
+         ON CONFLICT(publication_id, issue_id) DO UPDATE SET
+           session_id = excluded.session_id,
+           status     = excluded.status,
+           created_at = excluded.created_at`,
       )
-      .bind(row.publicationId, row.scopeKey, row.sessionId, row.status, row.createdAt)
+      .bind(row.publicationId, row.issueId, row.sessionId, row.status, row.createdAt)
       .run();
   }
 
   async updateStatus(
     publicationId: string,
-    scopeKey: string,
-    status: SessionScopeStatus,
+    issueId: string,
+    status: IssueSessionStatus,
   ): Promise<void> {
     await this.db
       .prepare(
         `UPDATE linear_issue_sessions SET status = ?
          WHERE publication_id = ? AND issue_id = ?`,
       )
-      .bind(status, publicationId, scopeKey)
+      .bind(status, publicationId, issueId)
       .run();
   }
 
-  async listActive(publicationId: string): Promise<readonly SessionScope[]> {
+  async listActive(publicationId: string): Promise<readonly IssueSession[]> {
     const { results } = await this.db
       .prepare(
         `SELECT * FROM linear_issue_sessions
@@ -68,12 +71,12 @@ export class D1LinearSessionScopeRepo implements SessionScopeRepo {
     return (results ?? []).map((r) => this.toDomain(r));
   }
 
-  private toDomain(row: Row): SessionScope {
+  private toDomain(row: Row): IssueSession {
     return {
       publicationId: row.publication_id,
-      scopeKey: row.issue_id,
+      issueId: row.issue_id,
       sessionId: row.session_id,
-      status: row.status as SessionScopeStatus,
+      status: row.status as IssueSessionStatus,
       createdAt: row.created_at,
     };
   }

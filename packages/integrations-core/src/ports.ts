@@ -11,7 +11,10 @@
 import type { SessionId, AgentId, UserId } from "./domain";
 import type {
   AppRepo,
+  AuthoredCommentRepo,
+  GitHubAppRepo,
   InstallationRepo,
+  IssueSessionRepo,
   PublicationRepo,
   SessionScopeRepo,
   SetupLinkRepo,
@@ -94,6 +97,13 @@ export interface CreateSessionInput {
   metadata: Record<string, unknown>;
   /** First user.message-shaped event. */
   initialEvent: SessionEventInput;
+  /**
+   * Optional GitHub repo to mount as a `github_repository` resource on the
+   * session. The token is looked up host-side from a `command_secret`
+   * credential (env_var=GITHUB_TOKEN) in one of the supplied vaultIds, so
+   * the provider never has to handle the token directly.
+   */
+  githubRepoUrl?: string;
 }
 
 export interface SessionEventInput {
@@ -128,7 +138,39 @@ export interface CreateCredentialInput {
   mcpServerUrl: string;
   /** The actual bearer token (will be encrypted in OMA's storage). */
   bearerToken: string;
+  /**
+   * Provider tag for refresh routing. When set, the outbound proxy can
+   * request a token refresh via this provider's integration gateway. Used
+   * to support short-lived upstream tokens (e.g. GitHub installation
+   * tokens, ~1hr TTL).
+   */
+  provider?: ProviderTag;
 }
+
+export interface CreateCommandSecretInput {
+  userId: UserId;
+  /** Existing vault id to attach the credential to. Pass null to create a fresh vault. */
+  vaultId: string | null;
+  vaultName: string;
+  displayName: string;
+  /** Command prefixes that trigger env injection. e.g. `["gh", "git"]`. */
+  commandPrefixes: ReadonlyArray<string>;
+  /** Env var name. e.g. `"GITHUB_TOKEN"`. */
+  envVar: string;
+  /** Token value. Stored encrypted. */
+  token: string;
+  /** Provider tag — see CreateCredentialInput. */
+  provider?: ProviderTag;
+}
+
+/**
+ * Tag a credential with the integration provider that owns it. Lets the
+ * outbound proxy / session-create handler request server-side token refresh
+ * without coupling agent worker code to provider specifics. Slack tokens are
+ * long-lived by default (no rotation), so slack-tagged credentials are not
+ * needed today.
+ */
+export type ProviderTag = "github" | "linear";
 
 export interface VaultManager {
   /**
@@ -138,6 +180,46 @@ export interface VaultManager {
   createCredentialForUser(
     input: CreateCredentialInput,
   ): Promise<{ vaultId: string; credentialId: string }>;
+
+  /**
+   * Add a `command_secret` credential to an existing vault (or create a fresh
+   * vault when `vaultId` is null). Returns the vault id and credential id.
+   *
+   * Use this alongside `createCredentialForUser` when one identity needs both
+   * an MCP-injected bearer (for hosted MCP servers) AND a sandbox-injected
+   * env var (for CLI tools that consume the same token). E.g. GitHub: same
+   * `ghs_*` token, two surfaces.
+   */
+  addCommandSecretCredential(
+    input: CreateCommandSecretInput,
+  ): Promise<{ vaultId: string; credentialId: string }>;
+
+  /**
+   * Replace the bearer token on the static_bearer credential in this vault.
+   * The vault is expected to have exactly one static_bearer credential
+   * (current OMA convention: one identity per vault). Returns true if a
+   * matching credential was found and updated, false if not.
+   *
+   * Used to refresh short-lived upstream tokens (e.g. GitHub installation
+   * tokens, ~1hr TTL) without requiring the caller to track credential ids.
+   */
+  rotateBearerToken(input: {
+    userId: UserId;
+    vaultId: string;
+    newBearerToken: string;
+  }): Promise<boolean>;
+
+  /**
+   * Replace the token on the command_secret credential in this vault matching
+   * the given env var name. The vault may hold multiple command_secret creds
+   * (one per env var); `envVar` disambiguates.
+   */
+  rotateCommandSecretToken(input: {
+    userId: UserId;
+    vaultId: string;
+    envVar: string;
+    newToken: string;
+  }): Promise<boolean>;
 }
 
 /**
@@ -160,7 +242,15 @@ export interface Container {
   installations: InstallationRepo;
   publications: PublicationRepo;
   apps: AppRepo;
+  /** GitHub-App credential storage. Populated when the github provider is wired. */
+  githubApps: GitHubAppRepo;
   webhookEvents: WebhookEventStore;
+  /** Per-issue session reuse (Linear/GitHub). */
+  issueSessions: IssueSessionRepo;
+  /** Per-thread / per-channel session reuse (Slack). */
   sessionScopes: SessionScopeRepo;
+  /** Bot-authored top-level Linear comments — used to route reply webhooks
+   *  back to the originating OMA session. Phase 1 of M7. */
+  authoredComments: AuthoredCommentRepo;
   setupLinks: SetupLinkRepo;
 }

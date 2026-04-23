@@ -9,6 +9,10 @@
     { "binding": "CONFIG_KV", "id": "test-kv-id" }
   ],
 
+  "d1_databases": [
+    { "binding": "AUTH_DB", "database_name": "test-auth-db", "database_id": "test-auth-db-id", "migrations_dir": "apps/main/migrations" }
+  ],
+
   "r2_buckets": [
     { "binding": "FILES_BUCKET", "bucket_name": "test-files" }
   ],

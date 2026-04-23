@@ -40,6 +40,12 @@ export interface TokenResponse {
   token_type: string;
   expires_in: number;
   scope: string;
+  /**
+   * Linear's authorization-code flow returns a refresh_token alongside the
+   * 24-hour access_token. We persist it (encrypted) so the gateway can refresh
+   * silently when Linear returns 401 instead of forcing a reinstall.
+   */
+  refresh_token: string | null;
 }
 
 /** Build the token-exchange request body. POSTed by the caller. */
@@ -61,6 +67,33 @@ export function buildTokenExchangeBody(input: ExchangeCodeInput): {
   };
 }
 
+export interface RefreshTokenInput {
+  refreshToken: string;
+  clientId: string;
+  clientSecret: string;
+}
+
+/** Build the refresh-token request body for Linear's `/oauth/token`. Same
+ *  endpoint as the initial code exchange; only the grant_type + payload
+ *  differ. Linear rotates refresh_token on each call, so the parsed response
+ *  must be persisted in full. */
+export function buildRefreshTokenBody(input: RefreshTokenInput): {
+  url: string;
+  body: string;
+  contentType: string;
+} {
+  const params = new URLSearchParams();
+  params.set("grant_type", "refresh_token");
+  params.set("refresh_token", input.refreshToken);
+  params.set("client_id", input.clientId);
+  params.set("client_secret", input.clientSecret);
+  return {
+    url: LINEAR_TOKEN_URL,
+    body: params.toString(),
+    contentType: "application/x-www-form-urlencoded",
+  };
+}
+
 export function parseTokenResponse(body: string): TokenResponse {
   const parsed = JSON.parse(body) as Partial<TokenResponse>;
   if (!parsed.access_token || typeof parsed.access_token !== "string") {
@@ -71,5 +104,9 @@ export function parseTokenResponse(body: string): TokenResponse {
     token_type: parsed.token_type ?? "Bearer",
     expires_in: parsed.expires_in ?? 0,
     scope: parsed.scope ?? "",
+    refresh_token:
+      typeof parsed.refresh_token === "string" && parsed.refresh_token.length > 0
+        ? parsed.refresh_token
+        : null,
   };
 }

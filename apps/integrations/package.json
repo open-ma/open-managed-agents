@@ -5,6 +5,7 @@
   "type": "module",
   "main": "src/index.ts",
   "dependencies": {
+    "@open-managed-agents/github": "workspace:*",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
     "@open-managed-agents/linear": "workspace:*",

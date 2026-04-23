@@ -262,20 +262,21 @@ describe("Constraint validations", () => {
     });
     const file = (await fileRes.json()) as any;
 
-    // We need to add 100 resource entries. We can add memory_store resources
-    // (they don't require file verification) to fill up the count.
+    // Fill resource slots with file references — we can't use memory_store as
+    // filler anymore because Anthropic semantics cap a session at 8 of those.
+    // file resources have a 100-per-session limit (the cap under test here).
     for (let i = 0; i < 100; i++) {
       const res = await post(`/v1/sessions/${session.id}/resources`, {
-        type: "memory_store",
-        memory_store_id: `memstore_fake_${i}`,
+        type: "file",
+        file_id: file.id,
       });
       expect(res.status).toBe(201);
     }
 
     // The 101st should fail
     const overRes = await post(`/v1/sessions/${session.id}/resources`, {
-      type: "memory_store",
-      memory_store_id: "memstore_overflow",
+      type: "file",
+      file_id: file.id,
     });
     expect(overRes.status).toBe(400);
     const overBody = (await overRes.json()) as any;

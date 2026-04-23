@@ -14,8 +14,11 @@ import type {
   CapabilitySet,
   Clock,
   Crypto,
+  CreateCommandSecretInput,
   CreateCredentialInput,
   CreateSessionInput,
+  GitHubAppCredentials,
+  GitHubAppRepo,
   HmacVerifier,
   HttpClient,
   HttpRequest,
@@ -24,8 +27,14 @@ import type {
   Installation,
   InstallationRepo,
   InstallKind,
+  IssueSession,
+  IssueSessionRepo,
+  IssueSessionStatus,
+  AuthoredComment,
+  AuthoredCommentRepo,
   JwtSigner,
   NewAppCredentials,
+  NewGitHubAppCredentials,
   NewInstallation,
   NewPublication,
   NewSetupLink,
@@ -153,13 +162,60 @@ export class FakeSessionCreator implements SessionCreator {
 
 export class FakeVaultManager implements VaultManager {
   readonly created: CreateCredentialInput[] = [];
+  readonly commandSecrets: CreateCommandSecretInput[] = [];
+  readonly rotations: Array<
+    | { kind: "bearer"; vaultId: string; credentialId: string; newToken: string }
+    | { kind: "command_secret"; vaultId: string; credentialId: string; newToken: string }
+  > = [];
   private counter = 0;
+
   async createCredentialForUser(
     input: CreateCredentialInput,
   ): Promise<{ vaultId: string; credentialId: string }> {
     this.created.push(input);
     this.counter += 1;
     return { vaultId: `vlt_${this.counter}`, credentialId: `crd_${this.counter}` };
+  }
+
+  async addCommandSecretCredential(
+    input: CreateCommandSecretInput,
+  ): Promise<{ vaultId: string; credentialId: string }> {
+    this.commandSecrets.push(input);
+    if (input.vaultId) {
+      this.counter += 1;
+      return { vaultId: input.vaultId, credentialId: `crd_${this.counter}` };
+    }
+    this.counter += 1;
+    return { vaultId: `vlt_${this.counter}`, credentialId: `crd_${this.counter}` };
+  }
+
+  async rotateBearerToken(input: {
+    userId: string;
+    vaultId: string;
+    newBearerToken: string;
+  }): Promise<boolean> {
+    this.rotations.push({
+      kind: "bearer",
+      vaultId: input.vaultId,
+      credentialId: "(by-type)",
+      newToken: input.newBearerToken,
+    });
+    return true;
+  }
+
+  async rotateCommandSecretToken(input: {
+    userId: string;
+    vaultId: string;
+    envVar: string;
+    newToken: string;
+  }): Promise<boolean> {
+    this.rotations.push({
+      kind: "command_secret",
+      vaultId: input.vaultId,
+      credentialId: `(by-env:${input.envVar})`,
+      newToken: input.newToken,
+    });
+    return true;
   }
 }
 
@@ -168,6 +224,7 @@ export class FakeVaultManager implements VaultManager {
 export class InMemoryInstallationRepo implements InstallationRepo {
   private rows = new Map<string, Installation>();
   private tokens = new Map<string, string>(); // installation id → plaintext token
+  private refreshTokens = new Map<string, string>(); // installation id → plaintext refresh
   private counter = 0;
 
   constructor(private clock: Clock = new FakeClock()) {}
@@ -208,6 +265,12 @@ export class InMemoryInstallationRepo implements InstallationRepo {
     return this.tokens.get(id) ?? null;
   }
 
+  async getRefreshToken(id: string): Promise<string | null> {
+    const row = this.rows.get(id);
+    if (!row || row.revokedAt !== null) return null;
+    return this.refreshTokens.get(id) ?? null;
+  }
+
   async insert(row: NewInstallation): Promise<Installation> {
     this.counter += 1;
     const id = `inst_${this.counter}`;
@@ -227,12 +290,22 @@ export class InMemoryInstallationRepo implements InstallationRepo {
     };
     this.rows.set(id, inst);
     this.tokens.set(id, row.accessToken);
+    if (row.refreshToken) this.refreshTokens.set(id, row.refreshToken);
     return inst;
   }
 
   async setVaultId(id: string, vaultId: string): Promise<void> {
     const row = this.rows.get(id);
     if (row) this.rows.set(id, { ...row, vaultId });
+  }
+
+  async setTokens(
+    id: string,
+    accessToken: string,
+    refreshToken: string | null,
+  ): Promise<void> {
+    this.tokens.set(id, accessToken);
+    if (refreshToken !== null) this.refreshTokens.set(id, refreshToken);
   }
 
   async markRevoked(id: string, at: number): Promise<void> {
@@ -364,6 +437,86 @@ export class InMemoryAppRepo implements AppRepo {
   }
 }
 
+export class InMemoryGitHubAppRepo implements GitHubAppRepo {
+  private rows = new Map<string, GitHubAppCredentials>();
+  private clientSecrets = new Map<string, string>();
+  private webhookSecrets = new Map<string, string>();
+  private privateKeys = new Map<string, string>();
+  private counter = 0;
+
+  constructor(private clock: Clock = new FakeClock()) {}
+
+  async get(id: string): Promise<GitHubAppCredentials | null> {
+    return this.rows.get(id) ?? null;
+  }
+
+  async getByPublication(publicationId: string): Promise<GitHubAppCredentials | null> {
+    for (const row of this.rows.values()) {
+      if (row.publicationId === publicationId) return row;
+    }
+    return null;
+  }
+
+  async getByAppId(appId: string): Promise<GitHubAppCredentials | null> {
+    for (const row of this.rows.values()) {
+      if (row.appId === appId) return row;
+    }
+    return null;
+  }
+
+  async getWebhookSecret(id: string): Promise<string | null> {
+    return this.webhookSecrets.get(id) ?? null;
+  }
+
+  async getClientSecret(id: string): Promise<string | null> {
+    return this.clientSecrets.get(id) ?? null;
+  }
+
+  async getPrivateKey(id: string): Promise<string | null> {
+    return this.privateKeys.get(id) ?? null;
+  }
+
+  async insert(row: NewGitHubAppCredentials): Promise<GitHubAppCredentials> {
+    let id: string;
+    if (row.id) {
+      id = row.id;
+    } else {
+      this.counter += 1;
+      id = `ghapp_${this.counter}`;
+    }
+    const existing = this.rows.get(id);
+    const app: GitHubAppCredentials = {
+      id,
+      publicationId: existing ? existing.publicationId : row.publicationId,
+      appId: row.appId,
+      appSlug: row.appSlug,
+      botLogin: row.botLogin,
+      clientId: row.clientId,
+      clientSecretCipher: row.clientSecret == null ? null : `enc(${row.clientSecret})`,
+      webhookSecretCipher: `enc(${row.webhookSecret})`,
+      privateKeyCipher: `enc(${row.privateKey})`,
+      createdAt: existing ? existing.createdAt : this.clock.nowMs(),
+    };
+    this.rows.set(id, app);
+    if (row.clientSecret != null) this.clientSecrets.set(id, row.clientSecret);
+    this.webhookSecrets.set(id, row.webhookSecret);
+    this.privateKeys.set(id, row.privateKey);
+    return app;
+  }
+
+  async setPublicationId(id: string, publicationId: string): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, publicationId });
+  }
+
+  async delete(id: string): Promise<void> {
+    this.rows.delete(id);
+    this.clientSecrets.delete(id);
+    this.webhookSecrets.delete(id);
+    this.privateKeys.delete(id);
+  }
+}
+
 interface WebhookEventRow {
   deliveryId: string;
   installationId: string;
@@ -444,6 +597,50 @@ export class InMemorySessionScopeRepo implements SessionScopeRepo {
   }
 }
 
+export class InMemoryIssueSessionRepo implements IssueSessionRepo {
+  private rows = new Map<string, IssueSession>();
+
+  private key(publicationId: string, issueId: string): string {
+    return `${publicationId}:${issueId}`;
+  }
+
+  async getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null> {
+    return this.rows.get(this.key(publicationId, issueId)) ?? null;
+  }
+
+  async insert(row: IssueSession): Promise<void> {
+    this.rows.set(this.key(row.publicationId, row.issueId), row);
+  }
+
+  async updateStatus(
+    publicationId: string,
+    issueId: string,
+    status: IssueSessionStatus,
+  ): Promise<void> {
+    const k = this.key(publicationId, issueId);
+    const row = this.rows.get(k);
+    if (row) this.rows.set(k, { ...row, status });
+  }
+
+  async listActive(publicationId: string): Promise<readonly IssueSession[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.publicationId === publicationId && r.status === "active",
+    );
+  }
+}
+
+export class InMemoryAuthoredCommentRepo implements AuthoredCommentRepo {
+  private rows = new Map<string, AuthoredComment>();
+
+  async get(commentId: string): Promise<AuthoredComment | null> {
+    return this.rows.get(commentId) ?? null;
+  }
+
+  async insert(row: AuthoredComment): Promise<void> {
+    this.rows.set(row.commentId, row);
+  }
+}
+
 export class InMemorySetupLinkRepo implements SetupLinkRepo {
   private rows = new Map<string, SetupLink>();
 
@@ -496,8 +693,11 @@ export interface FakeContainer {
   installations: InMemoryInstallationRepo;
   publications: InMemoryPublicationRepo;
   apps: InMemoryAppRepo;
+  githubApps: InMemoryGitHubAppRepo;
   webhookEvents: InMemoryWebhookEventStore;
+  issueSessions: InMemoryIssueSessionRepo;
   sessionScopes: InMemorySessionScopeRepo;
+  authoredComments: InMemoryAuthoredCommentRepo;
   setupLinks: InMemorySetupLinkRepo;
 }
 
@@ -515,8 +715,11 @@ export function buildFakeContainer(): FakeContainer {
     installations: new InMemoryInstallationRepo(clock),
     publications: new InMemoryPublicationRepo(clock),
     apps: new InMemoryAppRepo(clock),
+    githubApps: new InMemoryGitHubAppRepo(clock),
     webhookEvents: new InMemoryWebhookEventStore(),
+    issueSessions: new InMemoryIssueSessionRepo(),
     sessionScopes: new InMemorySessionScopeRepo(),
+    authoredComments: new InMemoryAuthoredCommentRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
   };
 }

@@ -2,7 +2,7 @@
   "$schema": "../../node_modules/wrangler/config-schema.json",
   "name": "sandbox-default",
   "main": "src/index.ts",
-  "compatibility_date": "2025-09-15",
+  "compatibility_date": "2026-04-13",
   "compatibility_flags": ["nodejs_compat"],
 
   "containers": [
@@ -23,6 +23,22 @@
 
   "kv_namespaces": [
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
+  ],
+
+  // D1 binding for memory store metadata (memory_stores / memories /
+  // memory_versions tables) — agent's memory tools use the same shared
+  // MemoryStoreService as the main worker, which requires direct D1 access.
+  "d1_databases": [
+    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
+  ],
+
+  // Service binding to the integrations gateway. Used by the outbound proxy
+  // to refresh short-lived upstream tokens (e.g. GitHub installation tokens,
+  // ~1hr TTL) on 401. The agent worker never sees provider secrets directly
+  // — it just asks the gateway "please refresh credential X" and the gateway
+  // does the App-JWT signing using its locally-held private key.
+  "services": [
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
   ],
 
   // Workers AI for generating embeddings
@@ -73,6 +89,12 @@
       },
       "kv_namespaces": [
         { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
+      ],
+      "d1_databases": [
+        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "355d8651-f5bf-4711-8e32-a089f16436a8" }
+      ],
+      "services": [
+        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [

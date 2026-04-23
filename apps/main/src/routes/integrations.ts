@@ -41,7 +41,7 @@ app.use("*", async (c, next) => {
   );
 });
 
-type ProviderSlug = "linear" | "slack";
+type ProviderSlug = "linear" | "github" | "slack";
 
 interface ProviderRepos {
   installations: D1InstallationRepo | D1SlackInstallationRepo;
@@ -258,6 +258,157 @@ interface PatchBody {
 // Register both providers — mirrored surface, distinct backends.
 registerProviderRoutes("linear");
 registerProviderRoutes("slack");
+
+// ─── GitHub: list + manage ───────────────────────────────────────────────
+//
+// GitHub publications share `linear_installations` / `linear_publications`
+// (those tables already carry a provider_id column for multi-provider use).
+// The github_apps table holds the GitHub-specific App credentials separately
+// from linear_apps because GitHub Apps have extra fields (private key, slug,
+// bot login). See packages/github for the provider implementation.
+
+app.get("/github/installations", async (c) => {
+  const userId = c.get("user_id")!;
+  const signingKey = getSigningKey(c.env);
+  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
+  const repos = buildRepos(c.env, signingKey, "github");
+  const installations = await repos.installations.listByUser(userId, "github");
+  return c.json({
+    data: installations.map((i) => ({
+      id: i.id,
+      // For GitHub the workspace_id IS the numeric installation_id; the
+      // workspace_name is the org or user login.
+      workspace_id: i.workspaceId,
+      workspace_name: i.workspaceName,
+      install_kind: i.installKind,
+      bot_login: i.botUserId,
+      vault_id: i.vaultId,
+      created_at: i.createdAt,
+    })),
+  });
+});
+
+app.get("/github/installations/:id/publications", async (c) => {
+  const userId = c.get("user_id")!;
+  const installationId = c.req.param("id");
+  const signingKey = getSigningKey(c.env);
+  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
+  const repos = buildRepos(c.env, signingKey, "github");
+  const installation = await repos.installations.get(installationId);
+  if (!installation || installation.userId !== userId) {
+    return c.json({ error: "not found" }, 404);
+  }
+  const publications = await repos.publications.listByInstallation(installationId);
+  return c.json({
+    data: publications.map(serializePublication),
+  });
+});
+
+app.get("/github/publications/:id", async (c) => {
+  const userId = c.get("user_id")!;
+  const id = c.req.param("id");
+  const signingKey = getSigningKey(c.env);
+  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
+  const repos = buildRepos(c.env, signingKey, "github");
+  const pub = await repos.publications.get(id);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+  return c.json(serializePublication(pub));
+});
+
+app.patch("/github/publications/:id", async (c) => {
+  const userId = c.get("user_id")!;
+  const id = c.req.param("id");
+  const body = await c.req.json<PatchBody>();
+  const signingKey = getSigningKey(c.env);
+  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
+  const repos = buildRepos(c.env, signingKey, "github");
+  const pub = await repos.publications.get(id);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+
+  if (body.persona) {
+    const merged: Persona = {
+      name: body.persona.name ?? pub.persona.name,
+      avatarUrl:
+        body.persona.avatarUrl !== undefined
+          ? body.persona.avatarUrl
+          : pub.persona.avatarUrl,
+    };
+    await repos.publications.updatePersona(id, merged);
+  }
+  if (body.capabilities) {
+    await repos.publications.updateCapabilities(id, new Set(body.capabilities));
+  }
+
+  const updated = await repos.publications.get(id);
+  return c.json(updated ? serializePublication(updated) : { id });
+});
+
+app.delete("/github/publications/:id", async (c) => {
+  const userId = c.get("user_id")!;
+  const id = c.req.param("id");
+  const signingKey = getSigningKey(c.env);
+  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
+  const repos = buildRepos(c.env, signingKey, "github");
+  const pub = await repos.publications.get(id);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+  await repos.publications.markUnpublished(id, Date.now());
+  return c.json({ id, status: "unpublished" });
+});
+
+// ─── GitHub install proxy endpoints ──────────────────────────────────────
+
+app.post("/github/start-a1", async (c) => {
+  const userId = c.get("user_id")!;
+  const body = await c.req.json();
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  const internalSecret = c.env.INTEGRATIONS_INTERNAL_SECRET;
+  if (!internalSecret) return c.json({ error: "INTEGRATIONS_INTERNAL_SECRET not configured" }, 503);
+  const res = await c.env.INTEGRATIONS.fetch(
+    `http://gateway/github/publications/start-a1`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-internal-secret": internalSecret,
+      },
+      body: JSON.stringify({ ...body, userId }),
+    },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/github/credentials", async (c) => {
+  const body = await c.req.json();
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  const res = await c.env.INTEGRATIONS.fetch(
+    `http://gateway/github/publications/credentials`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+app.post("/github/handoff-link", async (c) => {
+  const body = await c.req.json();
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  const internalSecret = c.env.INTEGRATIONS_INTERNAL_SECRET;
+  if (!internalSecret) return c.json({ error: "INTEGRATIONS_INTERNAL_SECRET not configured" }, 503);
+  const res = await c.env.INTEGRATIONS.fetch(
+    `http://gateway/github/publications/handoff-link`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-internal-secret": internalSecret,
+      },
+      body: JSON.stringify(body),
+    },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 

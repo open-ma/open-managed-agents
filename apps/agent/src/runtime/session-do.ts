@@ -21,7 +21,9 @@ import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
+import { MemoryStoreService, createCfMemoryStoreService } from "@open-managed-agents/memory-store";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
+import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
@@ -50,6 +52,18 @@ interface SessionInitParams {
    * otherwise read via `CONFIG_KV.list({ prefix: t:tenantId:cred:vaultId: })`.
    */
   vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
+  /**
+   * Generic per-event POST hooks. Each hook gets the canonical SessionEvent
+   * verbatim on every broadcast. Use for provider-specific side effects
+   * (Linear AgentActivity mirror, Slack thread mirror, observability
+   * pipelines). SessionDO is provider-agnostic — the main worker sets
+   * these up at /init based on session metadata.
+   */
+  event_hooks?: Array<{
+    name: string;
+    url: string;
+    auth?: string;
+  }>;
 }
 
 /**
@@ -88,6 +102,17 @@ interface SessionState {
   agent_snapshot?: AgentConfig;
   environment_snapshot?: EnvironmentConfig;
   vault_credentials?: Array<{ vault_id: string; credentials: CredentialConfig[] }>;
+  /** Per-event POST hooks. See SessionInitParams.event_hooks. Currently
+   *  unused in production — Linear's auto-mirror was removed in M7 — but
+   *  the wiring stays so the harness fanout machinery stays compilable. */
+  event_hooks?: Array<{ name: string; url: string; auth?: string }>;
+  /**
+   * One-shot guard: harness.onSessionInit must run exactly once, before the
+   * first user-message-driven turn. Set true after the call lands so resumes
+   * / restarts don't re-inject reminders (which would write duplicate cached
+   * prefix bytes and bust the cache).
+   */
+  session_init_done?: boolean;
 }
 
 const INITIAL_SESSION_STATE: SessionState = {
@@ -411,8 +436,25 @@ export class SessionDO extends Agent<Env, SessionState> {
         agent_snapshot: params.agent_snapshot,
         environment_snapshot: params.environment_snapshot,
         vault_credentials: params.vault_credentials,
+        event_hooks: params.event_hooks,
         status: "idle",
       });
+
+      // Outbound proxy view: untenanted snapshot keyed only by sessionId.
+      // The outbound worker only knows sessionId from the container context;
+      // it can't construct the tenant-prefixed `t:{tenantId}:cred:...` keys
+      // that prod uses, so without this side-write its CONFIG_KV reads
+      // always miss and credentials never get injected. See apps/agent/src/outbound.ts.
+      if (params.session_id && (params.vault_credentials?.length ?? 0) > 0) {
+        await this.env.CONFIG_KV.put(
+          `outbound:${params.session_id}`,
+          JSON.stringify({
+            tenant_id: params.tenant_id,
+            vault_ids: params.vault_ids ?? [],
+            vault_credentials: params.vault_credentials,
+          }),
+        );
+      }
 
       // Pre-warm sandbox in background (container start + package install)
       // Errors are swallowed — warmup is best-effort
@@ -920,6 +962,13 @@ export class SessionDO extends Agent<Env, SessionState> {
           }
         }
       }
+
+      // Bind the outbound handler with vault credentials so MCP/static_bearer
+      // tokens get injected into outbound HTTPS as Authorization headers.
+      // See apps/agent/src/oma-sandbox.ts for the handler implementation.
+      if (vaultIds.length && sandbox.setVaultCredentialsForOutbound && this.state.vault_credentials?.length) {
+        await sandbox.setVaultCredentialsForOutbound(this.state.vault_credentials);
+      }
     } catch (err) {
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
       this.broadcastEvent({
@@ -956,6 +1005,44 @@ export class SessionDO extends Agent<Env, SessionState> {
       console.warn(`[persistAndBroadcastEvent] history.append failed: ${(err as Error).message}`);
     }
     this.broadcastEvent(event);
+    this.fanOutToHooks(event);
+  }
+
+  /** Fire-and-forget POST every event to each registered hook. Provider-
+   *  specific consumers (Linear panel mirror, Slack thread mirror, etc.)
+   *  live behind these URLs — SessionDO has no knowledge of them. Hooks
+   *  are configured at /init via SessionInitParams.event_hooks.
+   *
+   *  Per-DO promise chain serializes the POSTs so they reach consumers in
+   *  broadcast order. Without this, fast events (final agent.message) can
+   *  outrun slower ones (earlier thoughts) and panel UIs render out of
+   *  order. Each event waits for the previous fan-out to finish before
+   *  kicking off, trading a few hundred ms of accumulated latency for
+   *  strict ordering. */
+  private hookChain: Promise<unknown> = Promise.resolve();
+
+  private fanOutToHooks(event: SessionEvent): void {
+    const hooks = this.state.event_hooks;
+    if (!hooks?.length) return;
+    const body = JSON.stringify(event);
+    this.hookChain = this.hookChain
+      .then(() =>
+        Promise.all(
+          hooks.map((hook) => {
+            const headers: Record<string, string> = { "content-type": "application/json" };
+            if (hook.auth) headers["x-internal-secret"] = hook.auth;
+            return fetch(hook.url, { method: "POST", headers, body }).catch((err) => {
+              console.warn(
+                `[event-hook ${hook.name}] post failed: ${(err as Error).message}`,
+              );
+            });
+          }),
+        ),
+      )
+      .catch(() => {
+        // chain swallows errors so a single bad hook can't break later
+        // events from being delivered.
+      });
   }
 
   /**
@@ -1411,6 +1498,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           const taggedEvent = { ...event, session_thread_id: threadId };
           parentHistory.append(taggedEvent);
           this.broadcastEvent(taggedEvent);
+          this.fanOutToHooks(taggedEvent);
         },
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
@@ -1493,10 +1581,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Fetch memory store IDs from session resources
+    // Fetch memory store attachments from session resources
     const sessionId = this.state.session_id;
-    const memoryStoreIds: string[] = [];
-    const memoryPrompts: string[] = [];
+    const memoryAttachments: Array<{
+      store_id: string;
+      access: "read_write" | "read_only";
+      prompt?: string;
+    }> = [];
     if (sessionId) {
       // TODO(staging-kv): tenant-prefix missing here AND wrong KV namespace
       // in staging. Snapshot session resources at /init before fixing.
@@ -1506,12 +1597,16 @@ export class SessionDO extends Agent<Env, SessionState> {
         if (data) {
           const res = JSON.parse(data);
           if (res.type === "memory_store" && res.memory_store_id) {
-            memoryStoreIds.push(res.memory_store_id);
-            if (res.prompt) memoryPrompts.push(res.prompt);
+            memoryAttachments.push({
+              store_id: res.memory_store_id,
+              access: res.access === "read_only" ? "read_only" : "read_write",
+              prompt: typeof res.prompt === "string" ? res.prompt : undefined,
+            });
           }
         }
       }
     }
+    const memoryStoreIds = memoryAttachments.map((a) => a.store_id);
 
     // Resolve harness via registry — SessionDO never imports a concrete harness
     let harness: HarnessInterface;
@@ -1543,9 +1638,18 @@ export class SessionDO extends Agent<Env, SessionState> {
       },
     });
 
-    // Add memory tools if session has memory store resources
-    if (memoryStoreIds.length && this.env.CONFIG_KV) {
-      const memTools = buildMemoryTools(memoryStoreIds, this.env.CONFIG_KV, this.env.AI, this.env.VECTORIZE);
+    // Add memory tools if session has memory store resources. The CF factory
+    // wires Noop adapters when AI / VECTORIZE are unbound, so we only require
+    // AUTH_DB to be present.
+    let memoryStoreService: MemoryStoreService | null = null;
+    if (memoryAttachments.length && this.env.AUTH_DB) {
+      memoryStoreService = createCfMemoryStoreService(this.env);
+      const memTools = buildMemoryTools(
+        memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
+        this.state.tenant_id,
+        memoryStoreService,
+        this.state.agent_id ?? "agent",
+      );
       Object.assign(allTools, memTools);
     }
 
@@ -1555,33 +1659,66 @@ export class SessionDO extends Agent<Env, SessionState> {
     const creds = await this.resolveModelCardCredentials(effectiveModelId, agent.model_card_id);
     const model = resolveModel(effectiveModelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
 
-    // Build system prompt: base + skill metadata
-    let systemPrompt = agent.system || "";
+    // Build system prompt: ONLY agent.system + authenticatedCommandGuidance.
+    // Skill / memory_store / appendable_prompt content is NOT appended here —
+    // those are collected as platformReminders and injected by the harness's
+    // onSessionInit hook as <system-reminder> user.message events. This keeps
+    // the system field byte-stable across the session, which Anthropic's
+    // prompt cache requires for the cached prefix to survive past turn 1.
+    const rawSystemPrompt = agent.system || "";
     const authenticatedCommandGuidance =
       "For commands that may require authentication, prefer issuing a single command instead of a chained shell command. If an authenticated chained command fails, retry with a simpler single-command form.";
-    systemPrompt = systemPrompt
-      ? `${systemPrompt}\n\n${authenticatedCommandGuidance}`
+    const systemPrompt = rawSystemPrompt
+      ? `${rawSystemPrompt}\n\n${authenticatedCommandGuidance}`
       : authenticatedCommandGuidance;
+
+    // Collect platformReminders for harness.onSessionInit. These get
+    // resolved ONCE at session-init and become part of the events stream.
+    // KV reads happen here; the resulting bytes are frozen — no per-turn KV
+    // race conditions, no per-turn iteration-order drift.
+    const platformReminders: Array<{ source: string; text: string }> = [];
+
+    // Platform-built-in appendable prompts the agent author opted into. Use
+    // for provider-specific syntax (e.g. Linear's @-mention URL form) that
+    // would pollute the base system prompt for agents that don't need it.
+    // Routed through platformReminders so they participate in the new
+    // harness.onSessionInit cache-stable injection model.
+    const appendableIds = agent.appendable_prompts ?? [];
+    const resolved = appendableIds.length ? resolveAppendablePrompts(appendableIds) : [];
+    if (resolved.length) {
+      console.log(
+        `[session-do] appendable_prompts ids=[${appendableIds.join(",")}] resolved=${resolved.length}`,
+      );
+      for (const p of resolved) {
+        platformReminders.push({ source: `appendable:${p.id}`, text: p.content });
+      }
+    }
     if (agent.skills?.length) {
       // Built-in (anthropic) skills from the in-memory registry
       const builtinSkills = resolveSkills(agent.skills);
-      const additions = builtinSkills.map(s => s.system_prompt_addition).filter(Boolean);
+      for (const s of builtinSkills) {
+        if (s.system_prompt_addition) {
+          platformReminders.push({ source: `skill:${s.id}`, text: s.system_prompt_addition });
+        }
+      }
 
-      // Custom skills from KV — lightweight metadata for system prompt
+      // Custom skills from KV — lightweight metadata
       if (this.env.CONFIG_KV) {
         try {
           const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV, this.state.tenant_id);
-          additions.push(...customSkills.map(s => s.system_prompt_addition).filter(Boolean));
+          for (const s of customSkills) {
+            if (s.system_prompt_addition) {
+              platformReminders.push({ source: `skill:${s.id}`, text: s.system_prompt_addition });
+            }
+          }
         } catch {
           // Best-effort
         }
       }
 
-      if (additions.length) {
-        systemPrompt += "\n\n" + additions.join("\n\n");
-      }
-
-      // Mount custom skill files into sandbox (progressive disclosure)
+      // Mount custom skill files into sandbox (progressive disclosure).
+      // Unrelated to systemPrompt — keeps the sandbox-side files for the
+      // model to read on demand via skill tools.
       if (this.env.CONFIG_KV) {
         try {
           const skillFilesResults = await getSkillFiles(
@@ -1619,9 +1756,40 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Inject memory store prompts into system prompt
-    if (memoryPrompts.length) {
-      systemPrompt += "\n\n" + memoryPrompts.join("\n\n");
+    // Memory store prompts → platformReminders (was: appended to systemPrompt
+    // every turn, KV-list-order dependent → permanent cache miss). Build the
+    // prompt strings on the fly from memory store metadata + per-attachment
+    // prompt overrides.
+    const memoryPrompts: string[] = [];
+    if (memoryAttachments.length && memoryStoreService) {
+      try {
+        for (const att of memoryAttachments) {
+          const store = await memoryStoreService.getStore({
+            tenantId: this.state.tenant_id,
+            storeId: att.store_id,
+          });
+          if (!store) {
+            memoryPrompts.push("");
+            continue;
+          }
+          const lines = [`## Memory store: ${store.name}`];
+          if (store.description) lines.push(store.description);
+          if (att.prompt) lines.push(att.prompt);
+          if (att.access === "read_only") lines.push("(read-only attachment — write tools are not available for this store)");
+          memoryPrompts.push(lines.join("\n"));
+        }
+      } catch (err) {
+        console.warn("memory store metadata fetch failed", {
+          err: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    for (let i = 0; i < memoryPrompts.length; i++) {
+      if (!memoryPrompts[i]) continue;
+      platformReminders.push({
+        source: `memory:${memoryStoreIds[i] ?? `idx${i}`}`,
+        text: memoryPrompts[i],
+      });
     }
 
     // Create an abort controller for this execution
@@ -1635,6 +1803,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       tools: allTools,
       model,
       systemPrompt,
+      rawSystemPrompt,
+      platformReminders,
       env: {
         ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
@@ -1656,6 +1826,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         broadcast: (event) => {
           history.append(event);
           this.broadcastEvent(event);
+          this.fanOutToHooks(event);
         },
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
@@ -1666,6 +1837,19 @@ export class SessionDO extends Agent<Env, SessionState> {
     };
 
     try {
+      // Run harness.onSessionInit exactly once per session, BEFORE the first
+      // running status. Default impl writes <system-reminder> user.message
+      // events for skills/memory/appendable_prompts; custom harnesses can
+      // substitute or skip. Idempotent across DO restarts via state flag.
+      if (!this.state.session_init_done && harness.onSessionInit) {
+        try {
+          await harness.onSessionInit(ctx, ctx.runtime);
+        } catch (err) {
+          console.warn(`[onSessionInit] failed: ${(err as Error).message}`);
+        }
+        this.setState({ ...this.state, session_init_done: true });
+      }
+
       // Broadcast running status
       const runningEvent: SessionEvent = { type: "session.status_running" };
       history.append(runningEvent);
