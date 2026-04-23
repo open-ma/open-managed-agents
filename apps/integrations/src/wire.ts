@@ -15,6 +15,7 @@ import {
   D1GitHubAppRepo,
   D1InstallationRepo,
   D1IssueSessionRepo,
+  D1PanelBindingRepo,
   D1PublicationRepo,
   D1SetupLinkRepo,
   D1WebhookEventStore,
@@ -52,6 +53,7 @@ export function buildContainer(env: Env): Container {
   const webhookEvents = new D1WebhookEventStore(env.AUTH_DB);
   const issueSessions = new D1IssueSessionRepo(env.AUTH_DB);
   const authoredComments = new D1AuthoredCommentRepo(env.AUTH_DB);
+  const panelBindings = new D1PanelBindingRepo(env.AUTH_DB);
   const setupLinks = new D1SetupLinkRepo(env.AUTH_DB, ids);
 
   return {
@@ -70,6 +72,7 @@ export function buildContainer(env: Env): Container {
     webhookEvents,
     issueSessions,
     authoredComments,
+    panelBindings,
     setupLinks,
   };
 }

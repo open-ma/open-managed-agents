@@ -341,30 +341,6 @@ app.post("/sessions/:id/events", async (c) => {
     | undefined;
   if (!binding) return c.json({ error: `sandbox binding missing` }, 500);
 
-  // Refresh per-turn Linear context on the persisted session record so the
-  // MCP server reads the *current* trigger's target, not the one from when
-  // the session was created.
-  const eventLinear = (body.event?.metadata?.linear ?? {}) as Record<string, unknown>;
-  const sessionRecord = JSON.parse(sessionData) as {
-    metadata?: Record<string, unknown>;
-  };
-  const sessLinear =
-    (sessionRecord.metadata?.linear ?? {}) as Record<string, unknown>;
-  if (sessLinear.mcp_token) {
-    sessionRecord.metadata = {
-      ...(sessionRecord.metadata ?? {}),
-      linear: {
-        ...sessLinear,
-        currentAgentSessionId: eventLinear.agentSessionId ?? null,
-        triggerCommentId: eventLinear.commentId ?? null,
-      },
-    };
-    await c.env.CONFIG_KV.put(
-      kvKey(tenantId, "session", sessionId),
-      JSON.stringify(sessionRecord),
-    );
-  }
-
   await binding.fetch(`https://sandbox/sessions/${sessionId}/event`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -393,40 +369,6 @@ app.get("/sessions/:id", async (c) => {
     if (!data) continue;
     const record = JSON.parse(data) as { id: string; metadata?: Record<string, unknown> };
     return c.json(record);
-  }
-  return c.json({ error: "session not found" }, 404);
-});
-
-/**
- * PATCH /v1/internal/sessions/:id/metadata/linear
- * Body: { merge: Record<string, unknown> }
- *
- * Shallow-merges the body's `merge` map into `metadata.linear` for the named
- * session. Used by the Linear MCP server to stamp transient flags
- * (lastElicitationAt, etc.) that event-tap reads on subsequent broadcasts.
- *
- * Same KV-scan strategy as the GET above. Race-tolerant: read latest record,
- * merge, write back.
- */
-app.patch("/sessions/:id/metadata/linear", async (c) => {
-  const sessionId = c.req.param("id");
-  const body = (await c.req.json()) as { merge?: Record<string, unknown> };
-  if (!body.merge || typeof body.merge !== "object") {
-    return c.json({ error: "merge object required" }, 400);
-  }
-  const list = await c.env.CONFIG_KV.list({ prefix: "t:" });
-  for (const k of list.keys) {
-    if (!k.name.endsWith(`:session:${sessionId}`)) continue;
-    const data = await c.env.CONFIG_KV.get(k.name);
-    if (!data) continue;
-    const record = JSON.parse(data) as {
-      metadata?: { linear?: Record<string, unknown>; [other: string]: unknown };
-      [other: string]: unknown;
-    };
-    record.metadata = record.metadata ?? {};
-    record.metadata.linear = { ...(record.metadata.linear ?? {}), ...body.merge };
-    await c.env.CONFIG_KV.put(k.name, JSON.stringify(record));
-    return c.json({ ok: true, linear: record.metadata.linear });
   }
   return c.json({ error: "session not found" }, 404);
 });

@@ -445,66 +445,43 @@ export class LinearProvider implements IntegrationProvider {
       publication.id,
     );
 
-    // Comment-reply path (M7): if this is a threaded reply to a bot-authored
-    // comment, route it as a user message into the bot's existing OMA session
-    // — bypass the per_issue dispatch logic entirely. If the parent isn't one
-    // of ours, treat it as noise and drop.
+    // Comment-reply path (M7): when a human posts a thread reply to a
+    // bot-authored comment, deliver it as a user.message into the bot's OMA
+    // session. The bot then chooses how to respond — call linear_post_comment
+    // to reply in the same thread, or stay silent. There's no panel binding
+    // for thread replies (Linear doesn't auto-spawn one), so the bot's
+    // assistant text won't render anywhere unless it explicitly calls a tool.
     if (event.kind === "commentReply" && event.parentCommentId) {
       const authored = await this.container.authoredComments.get(event.parentCommentId);
       if (!authored) {
         return { handled: false, reason: "comment_reply_to_non_bot" };
       }
-      // Don't re-route the bot's own replies to itself.
+      // Don't bounce the bot's own thread replies back at itself.
       if (event.actorUserId && installation.botUserId === event.actorUserId) {
         return { handled: false, reason: "comment_reply_from_bot_self" };
       }
-      let actorDisplayName: string | null = null;
-      if (event.actorUserId) {
-        try {
-          const accessToken = await this.container.installations.getAccessToken(installation.id);
-          if (accessToken) {
-            const res = await this.container.http.fetch({
-              method: "POST",
-              url: "https://api.linear.app/graphql",
-              headers: {
-                authorization: `Bearer ${accessToken}`,
-                "content-type": "application/json",
-              },
-              body: JSON.stringify({
-                query: `query($id:String!){ user(id:$id){ displayName } }`,
-                variables: { id: event.actorUserId },
-              }),
-            });
-            const parsed = JSON.parse(res.body) as {
-              data?: { user?: { displayName?: string } };
-            };
-            actorDisplayName = parsed.data?.user?.displayName ?? null;
-          }
-        } catch {
-          // best effort — bot just won't see actor handle
-        }
-      }
+      const actorDisplayName = await this.resolveActorDisplayName(installation.id, event.actorUserId);
       const handle = actorDisplayName ? `@${actorDisplayName}` : "(unknown user)";
       const replyText = [
-        `Reply on Linear ${event.issueIdentifier ?? ""} from ${handle} to a comment you posted:`,
-        "",
-        event.commentBody ?? "",
-      ].join("\n").trim();
+        `# Linear thread reply`,
+        ``,
+        `**Issue:** ${event.issueIdentifier ?? event.issueId ?? "?"}`,
+        `**Thread anchor comment:** ${authored.commentId}`,
+        `**Replier:** ${handle}`,
+        ``,
+        `> ${(event.commentBody ?? "").replace(/\n/g, "\n> ")}`,
+        ``,
+        `No Linear AgentSession panel is open for this turn. To respond visibly, call`,
+        `\`linear_post_comment(body=..., parentId="${authored.commentId}")\` — that posts a sibling`,
+        `comment in the same thread. Otherwise stay silent (your assistant text won't`,
+        `appear anywhere on Linear unless you explicitly call a tool).`,
+      ].join("\n");
       await this.container.sessions.resume(publication.userId, authored.omaSessionId, {
         type: "user.message",
         content: [{ type: "text", text: replyText }],
-        metadata: {
-          linear: {
-            publicationId: publication.id,
-            workspaceId: event.workspaceId,
-            issueId: event.issueId,
-            commentId: event.commentId,
-            parentCommentId: event.parentCommentId,
-            actorUserId: event.actorUserId,
-            eventKind: event.kind,
-            deliveryId: event.deliveryId,
-          },
-        },
+        // Metadata only carries the immutable wiring fields the MCP server
+        // needs to authenticate. Everything else lives in the prompt body.
+        metadata: { linear: { publicationId: publication.id } },
       });
       await this.container.webhookEvents.attachSession(req.deliveryId, authored.omaSessionId);
       return {
@@ -540,38 +517,10 @@ export class LinearProvider implements IntegrationProvider {
     // when it sees metadata.linear, so sandbox never talks to Linear directly.
     const mcpServers: Array<{ name: string; url: string }> = [];
 
-    // Resolve the actor's `displayName` (the canonical handle Linear uses for
-    // @-mentions) once per dispatch. The webhook payload carries `actor.name`
-    // (the human label) and `actorUserId`, but `displayName` is what bot needs
-    // for @<handle> syntax. We surface it as `actorDisplayName` on the event
-    // so renderEventAsUserMessage can shadow `name` everywhere it would have
-    // exposed it — bot only ever sees displayName, never name.
-    let actorDisplayName: string | null = null;
-    if (event.actorUserId && installation) {
-      try {
-        const accessToken = await this.container.installations.getAccessToken(installation.id);
-        if (accessToken) {
-          const res = await this.container.http.fetch({
-            method: "POST",
-            url: "https://api.linear.app/graphql",
-            headers: {
-              authorization: `Bearer ${accessToken}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({
-              query: `query($id:String!){ user(id:$id){ displayName } }`,
-              variables: { id: event.actorUserId },
-            }),
-          });
-          const parsed = JSON.parse(res.body) as {
-            data?: { user?: { displayName?: string } };
-          };
-          actorDisplayName = parsed.data?.user?.displayName ?? null;
-        }
-      } catch {
-        // best effort — leave null and bot won't get explicit @ guidance
-      }
-    }
+    const actorDisplayName = await this.resolveActorDisplayName(
+      installation?.id ?? null,
+      event.actorUserId,
+    );
 
     const sessionEvent = {
       type: "user.message" as const,
@@ -581,19 +530,11 @@ export class LinearProvider implements IntegrationProvider {
           text: this.renderEventAsUserMessage(event, actorDisplayName),
         },
       ],
-      metadata: {
-        linear: {
-          publicationId: publication.id,
-          workspaceId: event.workspaceId,
-          issueId: event.issueId,
-          issueIdentifier: event.issueIdentifier,
-          commentId: event.commentId,
-          actorUserId: event.actorUserId,
-          eventKind: event.kind,
-          deliveryId: event.deliveryId,
-          agentSessionId: event.agentSessionId ?? null,
-        },
-      },
+      // Metadata only carries the immutable wiring fields the MCP server
+      // needs. The bot owns all "where am I right now" decisions via the
+      // linear_enter_panel / linear_exit_panel tools (D1-backed). No more
+      // mutating fields like currentAgentSessionId / triggerCommentId here.
+      metadata: { linear: { publicationId: publication.id } },
     };
 
     if (publication.sessionGranularity === "per_issue" && event.issueId) {
@@ -651,21 +592,76 @@ export class LinearProvider implements IntegrationProvider {
     // the bot causes it to copy the wrong handle into replies and fail to
     // render real mentions. We rebuild the context ourselves from the
     // parsed event fields so every user reference is the displayName.
-    const actorLine = actorDisplayName
-      ? `Actor: @${actorDisplayName}`
-      : "";
-    const header =
-      event.kind === "agentSessionPrompted"
-        ? `New message in Linear agent session on ${event.issueIdentifier ?? "?"}`
-        : event.kind === "agentSessionCreated"
-        ? `New Linear agent session on ${event.issueIdentifier ?? "?"}`
-        : `Linear ${event.kind ?? "event"} on ${event.issueIdentifier ?? "?"}`;
-    const lines: string[] = [header];
-    if (actorLine) lines.push(actorLine);
-    if (event.issueTitle) lines.push(`Title: ${event.issueTitle}`);
-    if (event.issueDescription) lines.push(`\nDescription:\n${event.issueDescription}`);
-    if (event.commentBody) lines.push(`\nComment:\n${event.commentBody}`);
+    const actor = actorDisplayName ? `@${actorDisplayName}` : "(unknown)";
+    const headerByKind: Record<string, string> = {
+      agentSessionPrompted: `Linear agent session — new prompt`,
+      agentSessionCreated: `Linear agent session — newly opened`,
+    };
+    const header = headerByKind[event.kind ?? ""] ?? `Linear ${event.kind ?? "event"}`;
+    const lines: string[] = [`# ${header}`, ""];
+    lines.push(`**Issue:** ${event.issueIdentifier ?? event.issueId ?? "?"}`);
+    lines.push(`**Actor:** ${actor}`);
+    if (event.agentSessionId) {
+      lines.push(`**Linear panel:** \`${event.agentSessionId}\``);
+    }
+    if (event.issueTitle) {
+      lines.push("");
+      lines.push(`**Title:** ${event.issueTitle}`);
+    }
+    if (event.issueDescription) {
+      lines.push("");
+      lines.push(`**Description:**`);
+      lines.push(event.issueDescription);
+    }
+    if (event.commentBody) {
+      lines.push("");
+      lines.push(`**Source comment:**`);
+      lines.push(`> ${event.commentBody.replace(/\n/g, "\n> ")}`);
+    }
+    if (event.agentSessionId) {
+      lines.push("");
+      lines.push(
+        `Linear opened panel \`${event.agentSessionId}\` for this turn. ` +
+          `Call \`linear_enter_panel("${event.agentSessionId}")\` if you want users ` +
+          `to watch your work — once entered, your subsequent reasoning and ` +
+          `tool calls render in that panel automatically. Without entering, ` +
+          `you stay silent and need explicit tool calls (linear_post_comment ` +
+          `etc.) to produce any user-visible output.`,
+      );
+    }
     return lines.join("\n");
+  }
+
+  /** Best-effort displayName resolution. Returns null if anything goes
+   *  wrong — callers fall back to "(unknown)" and the bot just doesn't get
+   *  the @-handle hint. */
+  private async resolveActorDisplayName(
+    installationId: string | null,
+    actorUserId: string | null | undefined,
+  ): Promise<string | null> {
+    if (!installationId || !actorUserId) return null;
+    try {
+      const accessToken = await this.container.installations.getAccessToken(installationId);
+      if (!accessToken) return null;
+      const res = await this.container.http.fetch({
+        method: "POST",
+        url: "https://api.linear.app/graphql",
+        headers: {
+          authorization: `Bearer ${accessToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          query: `query($id:String!){ user(id:$id){ displayName } }`,
+          variables: { id: actorUserId },
+        }),
+      });
+      const parsed = JSON.parse(res.body) as {
+        data?: { user?: { displayName?: string } };
+      };
+      return parsed.data?.user?.displayName ?? null;
+    } catch {
+      return null;
+    }
   }
 
   // ─── MCP (Phase 8+) ──────────────────────────────────────────────────
