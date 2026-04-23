@@ -124,6 +124,13 @@ interface SessionState {
   session_init_done?: boolean;
 }
 
+/** TTL for the per-session outbound credential snapshot in CONFIG_KV. The
+ *  snapshot carries plaintext OAuth tokens for the sandbox MITM injector,
+ *  so we cap it at 24h — the upper bound on a realistic single agent
+ *  session. The /destroy handler deletes it explicitly on graceful
+ *  teardown; this TTL only matters when teardown didn't run. */
+const OUTBOUND_SNAPSHOT_TTL_SECONDS = 24 * 60 * 60;
+
 const INITIAL_SESSION_STATE: SessionState = {
   agent_id: "",
   environment_id: "",
@@ -454,6 +461,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       // it can't construct the tenant-prefixed `t:{tenantId}:cred:...` keys
       // that prod uses, so without this side-write its CONFIG_KV reads
       // always miss and credentials never get injected. See apps/agent/src/outbound.ts.
+      //
+      // 24h TTL bounds the leftover when the explicit /destroy cleanup below
+      // doesn't run (DO eviction, sandbox crash, force-terminate). The keys
+      // contain plaintext OAuth material — we don't want them lingering
+      // beyond the realistic max session lifetime.
       if (params.session_id && (params.vault_credentials?.length ?? 0) > 0) {
         await this.env.CONFIG_KV.put(
           `outbound:${params.session_id}`,
@@ -462,6 +474,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             vault_ids: params.vault_ids ?? [],
             vault_credentials: params.vault_credentials,
           }),
+          { expirationTtl: OUTBOUND_SNAPSHOT_TTL_SECONDS },
         );
       }
 
@@ -500,6 +513,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       if (this.browserSession) {
         try { await this.browserSession.close(); } catch {}
         this.browserSession = null;
+      }
+      // Drop the outbound credential snapshot — its TTL would clean it up
+      // eventually, but explicit deletion here keeps the keyspace tidy on
+      // the normal teardown path and shrinks the leak window for plaintext
+      // OAuth material.
+      if (this.state.session_id && this.env.CONFIG_KV) {
+        try {
+          await this.env.CONFIG_KV.delete(`outbound:${this.state.session_id}`);
+        } catch {}
       }
       this.setState({ ...this.state, status: "terminated" });
 
@@ -986,7 +1008,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Bind the outbound handler with vault credentials so MCP/static_bearer
       // tokens get injected into outbound HTTPS as Authorization headers.
       // See apps/agent/src/oma-sandbox.ts for the handler implementation.
-      if (vaultIds.length && sandbox.setVaultCredentialsForOutbound && this.state.vault_credentials?.length) {
+      // Gate purely on vault_credentials presence — vaultIds can be empty
+      // when callers (e.g. apps/main /sessions for Linear-triggered sessions)
+      // synthesize a vault_id-less credential entry that still needs outbound
+      // header injection.
+      if (sandbox.setVaultCredentialsForOutbound && this.state.vault_credentials?.length) {
         await sandbox.setVaultCredentialsForOutbound(this.state.vault_credentials);
       }
     } catch (err) {
