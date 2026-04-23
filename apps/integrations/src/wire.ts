@@ -11,6 +11,7 @@
 import {
   CryptoIdGenerator,
   D1AppRepo,
+  D1AuthoredCommentRepo,
   D1GitHubAppRepo,
   D1InstallationRepo,
   D1IssueSessionRepo,
@@ -50,6 +51,7 @@ export function buildContainer(env: Env): Container {
   const githubApps = new D1GitHubAppRepo(env.AUTH_DB, cryptoImpl, ids);
   const webhookEvents = new D1WebhookEventStore(env.AUTH_DB);
   const issueSessions = new D1IssueSessionRepo(env.AUTH_DB);
+  const authoredComments = new D1AuthoredCommentRepo(env.AUTH_DB);
   const setupLinks = new D1SetupLinkRepo(env.AUTH_DB, ids);
 
   return {
@@ -67,6 +69,7 @@ export function buildContainer(env: Env): Container {
     githubApps,
     webhookEvents,
     issueSessions,
+    authoredComments,
     setupLinks,
   };
 }

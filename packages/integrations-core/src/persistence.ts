@@ -188,6 +188,30 @@ export interface IssueSessionRepo {
   listActive(publicationId: string): Promise<ReadonlyArray<IssueSession>>;
 }
 
+/**
+ * Tracks comments the bot authored via the OMA-hosted Linear MCP server's
+ * `linear_post_comment` tool. Lets us route a Linear `Comment` webhook with
+ * a `parentId` back to the bot's OMA session: if the parentId resolves to a
+ * row here, the new comment is a human reply to a question the bot asked,
+ * and we deliver it to the bot's session as a user message.
+ */
+export interface AuthoredComment {
+  commentId: string;
+  omaSessionId: string;
+  publicationId: string;
+  installationId: string;
+  issueId: string;
+  /** Linear AgentSession the bot was in when it posted, if any. Null when
+   *  the bot posted from a top-level (no-panel) context. */
+  agentSessionId: string | null;
+  createdAt: number;
+}
+
+export interface AuthoredCommentRepo {
+  get(commentId: string): Promise<AuthoredComment | null>;
+  insert(row: AuthoredComment): Promise<void>;
+}
+
 export interface NewSetupLink {
   publicationId: string;
   createdBy: UserId;

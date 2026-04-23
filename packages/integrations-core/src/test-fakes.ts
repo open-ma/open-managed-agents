@@ -29,6 +29,8 @@ import type {
   InstallKind,
   IssueSession,
   IssueSessionRepo,
+  AuthoredComment,
+  AuthoredCommentRepo,
   IssueSessionStatus,
   JwtSigner,
   NewAppCredentials,
@@ -592,6 +594,18 @@ export class InMemoryIssueSessionRepo implements IssueSessionRepo {
   }
 }
 
+export class InMemoryAuthoredCommentRepo implements AuthoredCommentRepo {
+  private rows = new Map<string, AuthoredComment>();
+
+  async get(commentId: string): Promise<AuthoredComment | null> {
+    return this.rows.get(commentId) ?? null;
+  }
+
+  async insert(row: AuthoredComment): Promise<void> {
+    this.rows.set(row.commentId, row);
+  }
+}
+
 export class InMemorySetupLinkRepo implements SetupLinkRepo {
   private rows = new Map<string, SetupLink>();
 
@@ -647,6 +661,7 @@ export interface FakeContainer {
   githubApps: InMemoryGitHubAppRepo;
   webhookEvents: InMemoryWebhookEventStore;
   issueSessions: InMemoryIssueSessionRepo;
+  authoredComments: InMemoryAuthoredCommentRepo;
   setupLinks: InMemorySetupLinkRepo;
 }
 
@@ -667,6 +682,7 @@ export function buildFakeContainer(): FakeContainer {
     githubApps: new InMemoryGitHubAppRepo(clock),
     webhookEvents: new InMemoryWebhookEventStore(),
     issueSessions: new InMemoryIssueSessionRepo(),
+    authoredComments: new InMemoryAuthoredCommentRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
   };
 }
