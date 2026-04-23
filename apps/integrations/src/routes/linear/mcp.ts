@@ -311,16 +311,19 @@ const TOOLS: ToolDescriptor[] = [
     },
   },
   {
-    name: "linear_list_comments",
-    title: "List comments on a Linear issue or thread",
+    name: "linear_get_issue",
+    title: "Read a Linear issue (header + comments)",
     description:
-      "Fetch the recent comment history on a Linear issue, or scoped to a " +
-      "single thread. Returns up to 50 comments newest-first with author " +
-      "displayname, body, parent comment id, and timestamps.\n\n" +
-      "Pass `parentCommentId` to scope the listing to one thread (parent + " +
-      "all replies). Without it, returns top-level comments only.\n\n" +
-      "Use this to read up before responding when you're woken by a thread " +
-      "reply or @-mention with no inline context.",
+      "Fetch a Linear issue's current state plus its comment history. " +
+      "Returns identifier, title, description, status, priority, labels, " +
+      "assignee, creator, urls, plus up to 50 comments (newest-first).\n\n" +
+      "Pass `parentCommentId` to scope the comment listing to a single " +
+      "thread (parent comment + all its replies). Without it, returns the " +
+      "full top-level comment list.\n\n" +
+      "`issueId` defaults to the issue this conversation is bound to.\n\n" +
+      "Use this any time you want to (re-)check issue state — when you wake " +
+      "up with only thread context, when state may have changed since you " +
+      "last looked, or when you need to read past comments before replying.",
     inputSchema: {
       type: "object",
       properties: {
@@ -332,7 +335,7 @@ const TOOLS: ToolDescriptor[] = [
         parentCommentId: {
           type: "string",
           description:
-            "Optional. If provided, list the parent comment + replies in that thread.",
+            "Optional. Scope the comment listing to one thread (parent + replies).",
         },
       },
     },
@@ -343,45 +346,86 @@ const TOOLS: ToolDescriptor[] = [
           "issueId required — no issue is bound to this conversation.",
         );
       }
-      const parentCommentId = args.parentCommentId ? String(args.parentCommentId).trim() : null;
-      const query = parentCommentId
-        ? `query($issueId:String!, $parentId:ID){
-             issue(id:$issueId){
-               comments(first:50, filter:{ or:[ { id:{eq:$parentId} }, { parent:{ id:{eq:$parentId} } } ] }){
-                 nodes{ id body createdAt parent{id} user{displayName} }
-               }
-             }
-           }`
-        : `query($issueId:String!){
-             issue(id:$issueId){
-               comments(first:50, filter:{ parent:{ null:true } }){
-                 nodes{ id body createdAt parent{id} user{displayName} }
-               }
-             }
-           }`;
-      const variables = parentCommentId
-        ? { issueId, parentId: parentCommentId }
-        : { issueId };
-      const res = await ctx.linearGraphQL({ query, variables });
+      const parentCommentId = args.parentCommentId
+        ? String(args.parentCommentId).trim()
+        : null;
+      const commentsClause = parentCommentId
+        ? `comments(first:50, filter:{ or:[ { id:{eq:"${parentCommentId}"} }, { parent:{ id:{eq:"${parentCommentId}"} } } ] }){ nodes{ id body createdAt parent{id} user{displayName} } }`
+        : `comments(first:50, filter:{ parent:{ null:true } }){ nodes{ id body createdAt parent{id} user{displayName} } }`;
+      const res = await ctx.linearGraphQL({
+        query: `query($id:String!){
+          issue(id:$id){
+            id identifier title description url
+            createdAt updatedAt
+            priority priorityLabel
+            state{ name type }
+            assignee{ displayName }
+            creator{ displayName }
+            labels(first:20){ nodes{ name } }
+            team{ key name }
+            ${commentsClause}
+          }
+        }`,
+        variables: { id: issueId },
+      });
       if (res.errors) {
-        return errorResult(`comment listing failed: ${JSON.stringify(res.errors)}`);
+        return errorResult(`issue lookup failed: ${JSON.stringify(res.errors)}`);
       }
-      const nodes =
-        ((res.data as { issue?: { comments?: { nodes?: Array<{
+      const issue =
+        (res.data as { issue?: {
           id: string;
-          body: string;
+          identifier: string;
+          title: string;
+          description: string | null;
+          url: string;
           createdAt: string;
-          parent: { id: string } | null;
-          user: { displayName: string } | null;
-        }> } } })?.issue?.comments?.nodes) ?? [];
-      const formatted = nodes
+          updatedAt: string;
+          priority: number;
+          priorityLabel: string;
+          state: { name: string; type: string } | null;
+          assignee: { displayName: string } | null;
+          creator: { displayName: string } | null;
+          labels: { nodes: Array<{ name: string }> };
+          team: { key: string; name: string } | null;
+          comments: { nodes: Array<{
+            id: string;
+            body: string;
+            createdAt: string;
+            parent: { id: string } | null;
+            user: { displayName: string } | null;
+          }> };
+        } } )?.issue;
+      if (!issue) return errorResult(`issue ${issueId} not found`);
+      const labels = issue.labels.nodes.map((l) => l.name).join(", ") || "(none)";
+      const comments = issue.comments.nodes
         .map((n) => {
           const handle = n.user?.displayName ? `@${n.user.displayName}` : "(unknown)";
           const parent = n.parent?.id ? ` (reply to ${n.parent.id})` : "";
           return `- ${handle} · ${n.id} · ${n.createdAt}${parent}\n  ${n.body.split("\n").join("\n  ")}`;
         })
         .join("\n");
-      return okResult(formatted || "(no comments)");
+      const lines = [
+        `# ${issue.identifier}: ${issue.title}`,
+        ``,
+        `- **Team:** ${issue.team ? `${issue.team.name} (${issue.team.key})` : "?"}`,
+        `- **Status:** ${issue.state?.name ?? "?"}${issue.state ? ` (${issue.state.type})` : ""}`,
+        `- **Priority:** ${issue.priorityLabel} (${issue.priority})`,
+        `- **Creator:** ${issue.creator?.displayName ? `@${issue.creator.displayName}` : "?"}`,
+        `- **Assignee:** ${issue.assignee?.displayName ? `@${issue.assignee.displayName}` : "(unassigned)"}`,
+        `- **Labels:** ${labels}`,
+        `- **Created:** ${issue.createdAt}`,
+        `- **Updated:** ${issue.updatedAt}`,
+        `- **URL:** ${issue.url}`,
+        ``,
+        `## Description`,
+        issue.description || "(empty)",
+        ``,
+        parentCommentId
+          ? `## Thread (parent=${parentCommentId})`
+          : `## Top-level comments`,
+        comments || "(none)",
+      ];
+      return okResult(lines.join("\n"));
     },
   },
 ];
