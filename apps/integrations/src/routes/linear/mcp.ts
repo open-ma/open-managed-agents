@@ -640,3 +640,6 @@ async function resolveSessionContext(
 }
 
 export default app;
+
+// Test-only exports. Keep below `export default` to make intent obvious.
+export const __testInternals = { TOOLS, UUID_RE };
