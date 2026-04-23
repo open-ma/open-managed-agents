@@ -398,6 +398,40 @@ app.get("/sessions/:id", async (c) => {
 });
 
 /**
+ * PATCH /v1/internal/sessions/:id/metadata/linear
+ * Body: { merge: Record<string, unknown> }
+ *
+ * Shallow-merges the body's `merge` map into `metadata.linear` for the named
+ * session. Used by the Linear MCP server to stamp transient flags
+ * (lastElicitationAt, etc.) that event-tap reads on subsequent broadcasts.
+ *
+ * Same KV-scan strategy as the GET above. Race-tolerant: read latest record,
+ * merge, write back.
+ */
+app.patch("/sessions/:id/metadata/linear", async (c) => {
+  const sessionId = c.req.param("id");
+  const body = (await c.req.json()) as { merge?: Record<string, unknown> };
+  if (!body.merge || typeof body.merge !== "object") {
+    return c.json({ error: "merge object required" }, 400);
+  }
+  const list = await c.env.CONFIG_KV.list({ prefix: "t:" });
+  for (const k of list.keys) {
+    if (!k.name.endsWith(`:session:${sessionId}`)) continue;
+    const data = await c.env.CONFIG_KV.get(k.name);
+    if (!data) continue;
+    const record = JSON.parse(data) as {
+      metadata?: { linear?: Record<string, unknown>; [other: string]: unknown };
+      [other: string]: unknown;
+    };
+    record.metadata = record.metadata ?? {};
+    record.metadata.linear = { ...(record.metadata.linear ?? {}), ...body.merge };
+    await c.env.CONFIG_KV.put(k.name, JSON.stringify(record));
+    return c.json({ ok: true, linear: record.metadata.linear });
+  }
+  return c.json({ error: "session not found" }, 404);
+});
+
+/**
  * POST /v1/internal/vaults
  * Body discriminated by `action`:
  *   - "create_with_credential":  CreateVaultCredentialBody  → fresh vault + static_bearer

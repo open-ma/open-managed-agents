@@ -69,6 +69,10 @@ interface SessionContext {
     query: string;
     variables?: Record<string, unknown>;
   }) => Promise<{ data?: unknown; errors?: unknown }>;
+  /** Shallow-merge keys into the OMA session's `metadata.linear`. Tool
+   *  handlers use this to stamp transient flags (e.g. `lastElicitationAt`)
+   *  that the event-tap reads on subsequent broadcasts. */
+  patchLinearMetadata: (merge: Record<string, unknown>) => Promise<void>;
   /** Mutable per-turn metadata: which Linear AgentSession the agent has
    *  currently "open" for replies, what comment id triggered this turn, etc.
    *  Populated from OMA session metadata.linear at request time. */
@@ -145,12 +149,31 @@ const TOOLS: ToolDescriptor[] = [
           },
         },
       });
-      return res.errors
-        ? errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`)
-        : okResult(
-            "Question posted to panel. Stop generating now — the user's " +
-              "reply will arrive as the next user message.",
-          );
+      if (res.errors) {
+        return errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`);
+      }
+
+      // Stamp lastElicitationAt on the OMA session metadata so event-tap can
+      // drop trailing assistant messages from the same turn. Linear flips the
+      // AgentSession to `awaitingInput` automatically on elicitation, but
+      // status propagation is async — by the time the bot's final
+      // agent.message event reaches our mirror, the status query may still
+      // see `active`. The timestamp is the authoritative local signal: if
+      // the bot just elicited within the last 30s, do not mirror response.
+      try {
+        await ctx.patchLinearMetadata({ lastElicitationAt: Date.now() });
+      } catch (err) {
+        // Best-effort — failure here means event-tap may still mirror a
+        // response over the elicitation, but the elicitation itself is
+        // already posted. Don't fail the tool call over a metadata patch.
+        console.warn(
+          `[mcp] failed to stamp lastElicitationAt: ${(err as Error).message}`,
+        );
+      }
+      return okResult(
+        "Question posted to panel. Stop generating now — the user's " +
+          "reply will arrive as the next user message.",
+      );
     },
   },
 ];
@@ -361,6 +384,22 @@ async function resolveSessionContext(
     state: tokenState,
     refresh: () => providers.linear.refreshAccessToken(pub.installationId),
   });
+  const patchLinearMetadata = async (merge: Record<string, unknown>) => {
+    const res = await env.MAIN.fetch(
+      `http://main/v1/internal/sessions/${encodeURIComponent(sessionId)}/metadata/linear`,
+      {
+        method: "PATCH",
+        headers: {
+          "x-internal-secret": env.INTEGRATIONS_INTERNAL_SECRET,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({ merge }),
+      },
+    );
+    if (!res.ok) {
+      throw new Error(`patch metadata.linear: ${res.status} ${await res.text()}`);
+    }
+  };
 
   return {
     sessionId,
@@ -369,6 +408,7 @@ async function resolveSessionContext(
     installationId: pub.installationId,
     accessToken,
     linearGraphQL: linearGraphQLBound,
+    patchLinearMetadata,
     linear: {
       issueId: linearMeta.issueId ?? null,
       currentAgentSessionId: linearMeta.currentAgentSessionId ?? null,
