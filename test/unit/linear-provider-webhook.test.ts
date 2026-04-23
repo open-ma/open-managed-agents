@@ -141,9 +141,9 @@ describe("LinearProvider — handleWebhook (dedicated)", () => {
       { name: "linear", url: "https://mcp.linear.app/mcp" },
     ]);
 
-    const issueSession = await c.issueSessions.getByIssue(pubId, "iss_142");
-    expect(issueSession?.status).toBe("active");
-    expect(issueSession?.sessionId).toBe("sess_1");
+    const scope = await c.sessionScopes.getByScope(pubId, "iss_142");
+    expect(scope?.status).toBe("active");
+    expect(scope?.sessionId).toBe("sess_1");
   });
 
   it("resumes the same session for a subsequent comment on the same issue", async () => {

@@ -27,6 +27,27 @@ function LinearBadge({ metadata }: { metadata?: Record<string, unknown> }) {
   );
 }
 
+/** Tiny "💬 Slack" pill shown when a session was triggered by a Slack event. */
+function SlackBadge({ metadata }: { metadata?: Record<string, unknown> }) {
+  const slack = metadata?.slack as
+    | { channelId?: string; threadTs?: string; workspaceId?: string }
+    | undefined;
+  if (!slack || (!slack.channelId && !slack.threadTs)) return null;
+  const label = slack.channelId
+    ? slack.channelId.startsWith("D")
+      ? "DM"
+      : slack.channelId
+    : "Slack";
+  return (
+    <span
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700"
+      title={`Slack channel ${slack.channelId}${slack.threadTs ? ` thread ${slack.threadTs}` : ""}`}
+    >
+      💬 {label}
+    </span>
+  );
+}
+
 export function SessionsList() {
   const { api } = useApi();
   const nav = useNavigate();
@@ -200,6 +221,7 @@ export function SessionsList() {
                     <span className="inline-flex items-center gap-2">
                       {s.title || "Untitled"}
                       <LinearBadge metadata={s.metadata} />
+                      <SlackBadge metadata={s.metadata} />
                     </span>
                   </td>
                   <td className="px-4 py-3">

@@ -22,6 +22,11 @@ import {
   IntegrationsLinearWorkspace,
   IntegrationsLinearPublishPage,
 } from "./pages/IntegrationsLinear";
+import {
+  IntegrationsSlackList,
+  IntegrationsSlackWorkspace,
+  IntegrationsSlackPublishPage,
+} from "./pages/IntegrationsSlack";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -50,6 +55,15 @@ createRoot(document.getElementById("root")!).render(
             <Route
               path="integrations/linear/installations/:id"
               element={<IntegrationsLinearWorkspace />}
+            />
+            <Route path="integrations/slack" element={<IntegrationsSlackList />} />
+            <Route
+              path="integrations/slack/publish"
+              element={<IntegrationsSlackPublishPage />}
+            />
+            <Route
+              path="integrations/slack/installations/:id"
+              element={<IntegrationsSlackWorkspace />}
             />
             <Route path="*" element={<Navigate to="/agents" replace />} />
           </Route>

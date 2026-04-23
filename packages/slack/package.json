@@ -1,0 +1,13 @@
+{
+  "name": "@open-managed-agents/slack",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/integrations-core": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*"
+  }
+}
