@@ -282,3 +282,265 @@ describe("eventsToMessages — context_boundary handling", () => {
     );
   });
 });
+
+// ============================================================
+// Sub-agent / thread-tagged events
+// ============================================================
+//
+// SessionDO.runSubAgent broadcasts each sub-session event into the parent
+// history with an extra `session_thread_id` field but the same `type`.
+// These tests pin down whether the parent's eventsToMessages walks those
+// tagged events or filters them — in either case, the contract MUST be
+// byte-stable so the prompt cache survives.
+//
+// If the spec changes to filter tagged events, only the assertion changes;
+// the byte-stability invariant stays.
+
+describe("eventsToMessages — sub-agent thread tagging", () => {
+  const buildParentWithSubThread = (): SessionEvent[] => [
+    { type: "user.message", content: [{ type: "text", text: "delegate it" }] },
+    {
+      type: "agent.tool_use",
+      id: "tc_call_agent",
+      name: "call_agent_researcher",
+      input: { message: "investigate X" },
+    } as AgentToolUseEvent,
+    // --- sub-session events tagged into the parent log ---
+    {
+      type: "session.thread_created",
+      session_thread_id: "thread_1",
+      agent_id: "researcher",
+      agent_name: "researcher",
+    } as any,
+    {
+      type: "agent.message",
+      session_thread_id: "thread_1",
+      content: [{ type: "text", text: "[sub] working" }],
+    } as any,
+    {
+      type: "agent.tool_use",
+      session_thread_id: "thread_1",
+      id: "thread_1_grep",
+      name: "grep",
+      input: { pattern: "TODO" },
+    } as any,
+    {
+      type: "agent.tool_result",
+      session_thread_id: "thread_1",
+      tool_use_id: "thread_1_grep",
+      content: "matches: 80",
+    } as any,
+    {
+      type: "agent.message",
+      session_thread_id: "thread_1",
+      content: [{ type: "text", text: "[sub] done" }],
+    } as any,
+    {
+      type: "session.thread_idle",
+      session_thread_id: "thread_1",
+    } as any,
+    // --- back to the parent: tool_result for the call_agent_* call ---
+    {
+      type: "agent.tool_result",
+      tool_use_id: "tc_call_agent",
+      content: "Researcher returned: 80 matches.",
+    } as AgentToolResultEvent,
+  ];
+
+  it("byte-stable across repeated derives (with tagged events present)", () => {
+    const events = buildParentWithSubThread();
+    expect(JSON.stringify(eventsToMessages(events))).toBe(
+      JSON.stringify(eventsToMessages(events)),
+    );
+  });
+
+  it("documents current shape: tagged events flow through (every type is walked)", () => {
+    // Pin the current behavior: tagged events are NOT filtered by type, so
+    // sub-session agent.tool_use / agent.tool_result events appear in the
+    // parent's projected messages alongside the parent's own tool round-trip.
+    //
+    // If a future change adds a "skip events with session_thread_id" branch
+    // to eventsToMessages, this test should be flipped (or the polluting
+    // events removed from the expected message stream). Either way it
+    // serves as a pin-down for the chosen contract.
+    const events = buildParentWithSubThread();
+    const messages = eventsToMessages(events);
+
+    // Find the assistant message holding the call_agent_* tool-call.
+    const assistantWithCall = messages.find((m) =>
+      m.role === "assistant" &&
+      Array.isArray(m.content) &&
+      (m.content as any[]).some(
+        (p) => p.type === "tool-call" && p.toolName === "call_agent_researcher",
+      ),
+    );
+    expect(assistantWithCall).toBeDefined();
+
+    // Tagged sub-session tool_use is currently surfaced as a normal tool-call.
+    const allToolCalls = messages
+      .filter((m) => m.role === "assistant")
+      .flatMap((m) => (Array.isArray(m.content) ? (m.content as any[]) : []))
+      .filter((p) => p.type === "tool-call");
+    const toolNames = allToolCalls.map((p) => p.toolName).sort();
+    expect(toolNames).toContain("call_agent_researcher");
+    // The sub-session's grep call is currently in there too — pin it down so
+    // a regression that "accidentally fixes" this without updating tests
+    // gets noticed and forces an explicit decision.
+    expect(toolNames).toContain("grep");
+  });
+
+  it("tagged events do not duplicate parent's own tool_result", () => {
+    // The parent's own agent.tool_result for tc_call_agent should still be
+    // exactly one tool message, regardless of how many sub-session events
+    // sit between the call and the result.
+    const events = buildParentWithSubThread();
+    const messages = eventsToMessages(events);
+    const toolMsgs = messages.filter((m) => m.role === "tool");
+    const callAgentResults = toolMsgs.flatMap((m) =>
+      (m.content as any[]).filter(
+        (p) => p.toolCallId === "tc_call_agent",
+      ),
+    );
+    expect(callAgentResults).toHaveLength(1);
+    expect(callAgentResults[0].toolName).toBe("call_agent_researcher");
+  });
+});
+
+// ============================================================
+// Multimodal — image bytes in tool_result content
+// ============================================================
+//
+// Anthropic's prompt cache hashes the wire bytes of every block. For
+// images that means the base64 payload must round-trip through
+// normalizeToolOutputForWire (write side) ↔ wireContentToToolOutput
+// (read side) without re-encoding, key reordering, or padding drift.
+// These tests pin down byte-perfect equality for the image path that the
+// multimodal probe exercises end-to-end.
+
+describe("eventsToMessages — multimodal image roundtrip", () => {
+  // 1×1 transparent PNG. Constant bytes — same fixture as the probe.
+  const PNG_1X1_BASE64 =
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
+
+  const buildEventsWithImage = (data: string = PNG_1X1_BASE64): SessionEvent[] => [
+    { type: "user.message", content: [{ type: "text", text: "render it" }] },
+    {
+      type: "agent.tool_use",
+      id: "tc_chart",
+      name: "render_chart",
+      input: { caption: "p99" },
+    } as AgentToolUseEvent,
+    {
+      type: "agent.tool_result",
+      tool_use_id: "tc_chart",
+      content: [
+        { type: "text", text: "Chart caption: p99." },
+        { type: "image", source: { type: "base64", media_type: "image/png", data } },
+      ],
+    } as AgentToolResultEvent,
+  ];
+
+  it("base64 bytes survive verbatim through the wire shape", () => {
+    const events = buildEventsWithImage();
+    const messages = eventsToMessages(events);
+    const tool = messages.find((m) => m.role === "tool")!;
+    const trPart = (tool.content as any[])[0];
+    expect(trPart.output.type).toBe("content");
+    const parts = trPart.output.value as any[];
+    expect(parts).toHaveLength(2);
+    expect(parts[0]).toEqual({ type: "text", text: "Chart caption: p99." });
+    expect(parts[1].type).toBe("image-data");
+    expect(parts[1].mediaType).toBe("image/png");
+    // Byte-perfect: any whitespace/padding drift here busts cache.
+    expect(parts[1].data).toBe(PNG_1X1_BASE64);
+    expect(parts[1].data.length).toBe(PNG_1X1_BASE64.length);
+  });
+
+  it("two derives produce identical bytes for image-bearing tool_results", () => {
+    const events = buildEventsWithImage();
+    expect(JSON.stringify(eventsToMessages(events))).toBe(
+      JSON.stringify(eventsToMessages(events)),
+    );
+  });
+
+  it("two distinct image payloads project to distinct bytes (no cross-contamination)", () => {
+    const altPng =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAQAAcngHTwAAAAASUVORK5CYII=";
+    const a = JSON.stringify(eventsToMessages(buildEventsWithImage(PNG_1X1_BASE64)));
+    const b = JSON.stringify(eventsToMessages(buildEventsWithImage(altPng)));
+    expect(a).not.toBe(b);
+  });
+
+  it("two image-bearing tool_results in sequence each preserve their own bytes", () => {
+    const altPng =
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAQAAcngHTwAAAAASUVORK5CYII=";
+    const events: SessionEvent[] = [
+      { type: "user.message", content: [{ type: "text", text: "render two" }] },
+      {
+        type: "agent.tool_use",
+        id: "tc_chart_a",
+        name: "render_chart",
+        input: { caption: "a" },
+      } as AgentToolUseEvent,
+      {
+        type: "agent.tool_result",
+        tool_use_id: "tc_chart_a",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_1X1_BASE64 } },
+        ],
+      } as AgentToolResultEvent,
+      {
+        type: "agent.tool_use",
+        id: "tc_chart_b",
+        name: "render_chart",
+        input: { caption: "b" },
+      } as AgentToolUseEvent,
+      {
+        type: "agent.tool_result",
+        tool_use_id: "tc_chart_b",
+        content: [
+          { type: "image", source: { type: "base64", media_type: "image/png", data: altPng } },
+        ],
+      } as AgentToolResultEvent,
+    ];
+    const messages = eventsToMessages(events);
+    const toolMsgs = messages.filter((m) => m.role === "tool");
+    const allImageBytes = toolMsgs
+      .flatMap((m) => (m.content as any[]).flatMap((p) =>
+        Array.isArray(p.output?.value) ? (p.output.value as any[]) : [],
+      ))
+      .filter((b) => b.type === "image-data")
+      .map((b) => b.data);
+    expect(allImageBytes).toEqual([PNG_1X1_BASE64, altPng]);
+  });
+
+  it("compaction summary elides images stably (no per-derive churn)", () => {
+    // Boundary summary contains an image block; serializeSummaryAsText
+    // collapses it to "[image elided]". Output bytes must be stable.
+    const events: SessionEvent[] = [
+      { type: "user.message", content: [{ type: "text", text: "q1" }] },
+      { type: "agent.message", content: [{ type: "text", text: "a1" }] },
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 2,
+        compacted_message_count: 1,
+        summary: [
+          { type: "text", text: "earlier we generated a chart" },
+          { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_1X1_BASE64 } },
+        ],
+      } as any,
+      { type: "user.message", content: [{ type: "text", text: "q2" }] },
+    ];
+    const a = eventsToMessages(events);
+    const b = eventsToMessages(events);
+    expect(JSON.stringify(a)).toBe(JSON.stringify(b));
+    const summaryText = (a[0].content as any[])[0].text as string;
+    expect(summaryText).toContain("<conversation-summary>");
+    expect(summaryText).toContain("earlier we generated a chart");
+    expect(summaryText).toContain("[image elided]");
+    // Image base64 must NOT leak into the summary text — compaction's whole
+    // point is shrinking the prefix, and serializing 50KB of base64 here
+    // would defeat that.
+    expect(summaryText).not.toContain(PNG_1X1_BASE64);
+  });
+});
