@@ -31,8 +31,6 @@ import type {
   IssueSessionRepo,
   AuthoredComment,
   AuthoredCommentRepo,
-  PanelBinding,
-  PanelBindingRepo,
   IssueSessionStatus,
   JwtSigner,
   NewAppCredentials,
@@ -608,32 +606,6 @@ export class InMemoryAuthoredCommentRepo implements AuthoredCommentRepo {
   }
 }
 
-export class InMemoryPanelBindingRepo implements PanelBindingRepo {
-  private rows = new Map<string, PanelBinding>();
-
-  async get(omaSessionId: string): Promise<PanelBinding | null> {
-    return this.rows.get(omaSessionId) ?? null;
-  }
-
-  async set(omaSessionId: string, panelAgentSessionId: string, updatedAt: number): Promise<void> {
-    this.rows.set(omaSessionId, {
-      omaSessionId,
-      panelAgentSessionId,
-      updatedAt,
-      lastElicitationAt: null,
-    });
-  }
-
-  async stampElicitation(omaSessionId: string, ts: number): Promise<void> {
-    const row = this.rows.get(omaSessionId);
-    if (row) this.rows.set(omaSessionId, { ...row, lastElicitationAt: ts });
-  }
-
-  async clear(omaSessionId: string): Promise<void> {
-    this.rows.delete(omaSessionId);
-  }
-}
-
 export class InMemorySetupLinkRepo implements SetupLinkRepo {
   private rows = new Map<string, SetupLink>();
 
@@ -690,7 +662,6 @@ export interface FakeContainer {
   webhookEvents: InMemoryWebhookEventStore;
   issueSessions: InMemoryIssueSessionRepo;
   authoredComments: InMemoryAuthoredCommentRepo;
-  panelBindings: InMemoryPanelBindingRepo;
   setupLinks: InMemorySetupLinkRepo;
 }
 
@@ -712,7 +683,6 @@ export function buildFakeContainer(): FakeContainer {
     webhookEvents: new InMemoryWebhookEventStore(),
     issueSessions: new InMemoryIssueSessionRepo(),
     authoredComments: new InMemoryAuthoredCommentRepo(),
-    panelBindings: new InMemoryPanelBindingRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
   };
 }

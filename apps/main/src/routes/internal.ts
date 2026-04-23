@@ -241,15 +241,16 @@ app.post("/sessions", async (c) => {
       // SessionDO POSTs every broadcast to each one. Provider-specific
       // translation (e.g. Linear AgentActivity mirror) happens at the
       // consuming endpoint.
-      event_hooks: linearMeta
-        ? [
-            {
-              name: "linear-mirror",
-              url: `${integrationsOrigin(c.env)}/linear/internal/event-tap?session=${sessionId}`,
-              auth: c.env.INTEGRATIONS_INTERNAL_SECRET,
-            },
-          ]
-        : undefined,
+      //
+      // Linear no longer subscribes here — the bot drives all panel-visible
+      // output explicitly via the linear_say / linear_request_input /
+      // linear_post_comment MCP tools. event-tap auto-mirror was removed
+      // because (a) auto-mirror conflicted with elicitation panel state
+      // (trailing assistant message would close the panel), (b) the panel
+      // mirror duplicated the same text into the issue thread, and
+      // (c) bot internal thinking was leaked to user view. Bot is now a
+      // first-class agent that decides what to surface.
+      event_hooks: undefined,
     }),
   });
 

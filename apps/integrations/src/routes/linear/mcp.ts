@@ -1,8 +1,6 @@
-// Linear MCP server — OMA-hosted MCP exposing agent-as-human style Linear
-// tools. Replaces `https://mcp.linear.app/mcp` for OMA sessions: instead of
-// the bot directly using Linear's hosted MCP (which requires the App OAuth
-// token to reach the sandbox), all Linear API access is funneled through
-// here so the token never crosses the worker boundary.
+// Linear MCP server — OMA-hosted MCP exposing agent-as-first-class-citizen
+// Linear tools. The bot is responsible for ALL Linear-visible output via
+// explicit tool calls — there is no auto-mirror of internal reasoning.
 //
 // URL: /linear/mcp/:sessionId
 // Auth: Authorization: Bearer <per-session-uuid>. The UUID is generated at
@@ -10,18 +8,24 @@
 //       vault static_bearer credential for integrations.openma.dev so the
 //       sandbox outbound MITM auto-injects it.
 //
-// Tools (M7 unified design):
-//   linear_enter_panel(agentSessionId) — bind this OMA session to a Linear
-//     panel; subsequent agent broadcasts (thinking / tool_use / message)
-//     mirror to that panel via event-tap.
-//   linear_exit_panel() — clear the binding; bot is now silent unless it
-//     calls a tool that produces user-visible output.
-//   linear_post_comment(body, parentId?, issueId?) — post a comment on an
-//     issue; with parentId it's a thread reply.
-//   linear_request_input(body) — post an elicitation activity to the
-//     currently-bound panel (requires linear_enter_panel first).
-//   linear_list_comments(issueId, parentCommentId?) — fetch comment thread
-//     state for context.
+// Tools:
+//   linear_say(body, panelId, kind)
+//     Post an AgentActivity to a Linear panel. kind=thought keeps panel
+//     active; kind=action shows a tool-call card; kind=response finalizes
+//     the panel (turn done). Without calling this, the bot is silent in the
+//     panel — there is no implicit mirror of internal reasoning.
+//
+//   linear_request_input(body, panelId)
+//     Post an elicitation activity. Linear flips the panel to awaitingInput
+//     and renders an inline reply box for the panel creator. Their reply
+//     arrives as the next user message.
+//
+//   linear_post_comment(body, parentId?, issueId?)
+//     Post a Linear comment (top-level or thread reply). Independent of any
+//     panel; can be used by off-panel bots too.
+//
+//   linear_list_comments(issueId, parentCommentId?)
+//     Read comment history for context.
 
 import { Hono } from "hono";
 import type { Env } from "../../env";
@@ -52,7 +56,7 @@ interface JsonRpcError {
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = {
   name: "OMA Linear",
-  version: "0.2.0",
+  version: "0.3.0",
 } as const;
 
 interface SessionContext {
@@ -72,18 +76,6 @@ interface SessionContext {
     commentId: string;
     issueId: string;
   }) => Promise<void>;
-  /** Read the OMA session's currently-bound Linear panel id. Null when the
-   *  bot is off-panel (between turns or after an explicit exit). */
-  getCurrentPanel: () => Promise<string | null>;
-  /** Bind / switch the OMA session to a Linear panel. */
-  setPanel: (agentSessionId: string) => Promise<void>;
-  /** Clear the panel binding. */
-  clearPanel: () => Promise<void>;
-  /** Stamp the panel binding with the current elicitation timestamp. event-tap
-   *  drops mirrored events for ~30s after this stamp so Linear keeps the
-   *  panel in `awaitingInput` (with the reply box) instead of seeing a
-   *  trailing assistant message and flipping to `complete`. */
-  stampElicitation: () => Promise<void>;
   /** Issue the bot was originally bound to (per_issue session granularity).
    *  Used as a fallback default when tool calls don't pass issueId. */
   issueId: string | null;
@@ -104,118 +96,123 @@ interface ToolDescriptor {
 
 const TOOLS: ToolDescriptor[] = [
   {
-    name: "linear_enter_panel",
-    title: "Enter a Linear AgentSession panel",
+    name: "linear_say",
+    title: "Speak in a Linear panel",
     description:
-      "Bind this conversation to a Linear AgentSession panel. While bound, " +
-      "your subsequent reasoning, tool calls, and assistant messages are " +
-      "mirrored into that panel as Linear AgentActivity entries — users " +
-      "watching the panel see your work in real time.\n\n" +
-      "Calling this with a different `agentSessionId` switches the binding. " +
-      "Calling `linear_exit_panel` clears it. Until you enter a panel, you " +
-      "are silent (assistant text isn't broadcast anywhere on Linear) — use " +
-      "the comment tools for explicit user-visible output instead.\n\n" +
-      "The panel id is provided in the user message that wakes you up: when " +
-      "Linear delegates an issue or a human @-mentions you, the message " +
-      "always names the panel as `ag_<uuid>`. Pass that whole id here.\n\n" +
-      "Switching to a different panel (or to one Linear doesn't recognize) " +
-      "doesn't show feedback in the OLD panel — once binding flips, anything " +
-      "you say goes to the new panel target. If the new id isn't real, your " +
-      "narration just goes silent. So if you intend to demo \"now I'm " +
-      "switching\" make sure to narrate BEFORE the switch, not after.",
+      "Post an AgentActivity to a Linear AgentSession panel — this is how the " +
+      "bot speaks visibly in a panel. Without calling this, the bot is silent " +
+      "in the panel; internal reasoning is private to the model.\n\n" +
+      "**`kind` controls panel UX:**\n" +
+      "- `thought` (default): shows as a thinking line. Panel stays active. " +
+      "Use for progress narration (\"checking the code...\", \"running tests\").\n" +
+      "- `action`: shows as a tool-call card. Pass `action` (label) and " +
+      "optional `parameter`. Use to advertise concrete operations the user " +
+      "should know happened.\n" +
+      "- `response`: shows as the bot's final answer. **This finalizes the " +
+      "panel — Linear marks it complete and any further activity will not " +
+      "render in the UI.** Only use when you're truly done with the turn.\n\n" +
+      "**`panelId`** is the Linear AgentSession id (looks like a UUID). It's " +
+      "named in the user message that woke you up. Pass exactly that string.\n\n" +
+      "Speaking in a complete panel silently fails (Linear accepts the " +
+      "activity but UI doesn't render). Don't reuse panels that have been " +
+      "finalized.\n\n" +
+      "Note: Linear renders panel activities inline in the issue's comment " +
+      "thread too. Even in-panel \"thoughts\" become public comments. Don't " +
+      "say things you wouldn't want all subscribers of this issue to see.",
     inputSchema: {
       type: "object",
       properties: {
-        agentSessionId: {
+        body: { type: "string", description: "Markdown body shown in the panel." },
+        panelId: { type: "string", description: "Linear AgentSession id (UUID)." },
+        kind: {
           type: "string",
-          description: "The Linear AgentSession id (uuid format).",
+          enum: ["thought", "action", "response"],
+          description:
+            "Activity kind. `thought` keeps panel active (default). `action` " +
+            "shows a tool-call card. `response` finalizes the panel.",
+        },
+        action: {
+          type: "string",
+          description: "Required when kind=action. Short tool/operation label.",
+        },
+        parameter: {
+          type: "string",
+          description:
+            "Optional when kind=action. Short summary of args (≤200 chars).",
         },
       },
-      required: ["agentSessionId"],
-    },
-    handler: async (ctx, args) => {
-      const id = String(args.agentSessionId ?? "").trim();
-      if (!id) return errorResult("agentSessionId is required");
-      await ctx.setPanel(id);
-      return okResult(
-        `Entered Linear panel ${id}. From this point on, your reasoning ` +
-          `and tool calls render in that panel. Call linear_exit_panel to ` +
-          `stop mirroring.`,
-      );
-    },
-  },
-  {
-    name: "linear_exit_panel",
-    title: "Exit the current Linear panel",
-    description:
-      "Clear the panel binding. Subsequent reasoning and assistant messages " +
-      "stop appearing in any Linear panel — you go silent. Use this when " +
-      "you're done with a panel and want to do background work, or when " +
-      "switching focus to a thread comment exchange that's separate from " +
-      "the panel.",
-    inputSchema: { type: "object", properties: {} },
-    handler: async (ctx) => {
-      await ctx.clearPanel();
-      return okResult("Exited Linear panel. You are now silent on Linear.");
-    },
-  },
-  {
-    name: "linear_request_input",
-    title: "Ask the panel user for input",
-    description:
-      "Post an elicitation activity to the currently-bound Linear panel. " +
-      "Linear renders an inline reply box for the panel creator and marks " +
-      "the panel as awaiting input. Their reply arrives back as the next " +
-      "user message in this conversation.\n\n" +
-      "Requires you to have entered a panel via linear_enter_panel first.\n\n" +
-      "**CRITICAL: After this tool returns, your turn is OVER.** Emit no " +
-      "further reasoning, no further tool calls, no assistant text. Linear " +
-      "treats any subsequent activity in the same turn as the agent " +
-      "continuing past the question — it flips the panel from `awaitingInput` " +
-      "back to `active` (or to `complete` on a final message), the inline " +
-      "reply box vanishes, and the user has no way to answer your question. " +
-      "Stopping is non-negotiable. The user's reply will arrive in the next " +
-      "turn as a fresh user message.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        body: {
-          type: "string",
-          description: "Question text rendered in the panel.",
-        },
-      },
-      required: ["body"],
+      required: ["body", "panelId"],
     },
     handler: async (ctx, args) => {
       const body = String(args.body ?? "").trim();
       if (!body) return errorResult("body is required");
-      const panel = await ctx.getCurrentPanel();
-      if (!panel) {
-        return errorResult(
-          "No Linear panel is currently entered. Call linear_enter_panel " +
-            "first with the panel id from the user message.",
-        );
+      const panelId = String(args.panelId ?? "").trim();
+      if (!panelId) return errorResult("panelId is required");
+      const kind = (String(args.kind ?? "thought").toLowerCase() as
+        | "thought"
+        | "action"
+        | "response");
+      if (!["thought", "action", "response"].includes(kind)) {
+        return errorResult(`unknown kind: ${kind}`);
       }
-      // Stamp BEFORE we fire the elicitation activity. event-tap reads the
-      // stamp from D1; if we stamped after the activity, the bot's
-      // immediately-following thought event could race the D1 propagation
-      // (~500ms cross-colo) and slip through. Worst case if the activity
-      // post then fails, we drop ~30s of events that should have mirrored —
-      // an acceptable tradeoff against the panel-completes UX bug.
-      try {
-        await ctx.stampElicitation();
-      } catch (err) {
-        console.warn(
-          `[mcp] failed to stamp elicitation: ${(err as Error).message}`,
-        );
+      let content: Record<string, unknown>;
+      if (kind === "action") {
+        const action = String(args.action ?? "").trim();
+        if (!action) return errorResult("action label required when kind=action");
+        const parameter = args.parameter ? String(args.parameter) : "";
+        content = { type: "action", action, parameter };
+      } else {
+        content = { type: kind, body };
       }
       const res = await ctx.linearGraphQL({
         query: `mutation($input: AgentActivityCreateInput!) {
           agentActivityCreate(input: $input) { success }
         }`,
         variables: {
+          input: { agentSessionId: panelId, content },
+        },
+      });
+      if (res.errors) {
+        return errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`);
+      }
+      const note =
+        kind === "response"
+          ? "Posted (kind=response). Panel is now finalized; further linear_say calls won't render."
+          : `Posted (kind=${kind}) to panel ${panelId}.`;
+      return okResult(note);
+    },
+  },
+  {
+    name: "linear_request_input",
+    title: "Ask the panel user for input",
+    description:
+      "Post an elicitation activity to a Linear panel. Linear flips the " +
+      "panel to `awaitingInput` and renders an inline reply box for the " +
+      "panel creator. Their reply arrives back as the next user message.\n\n" +
+      "After this returns, the panel is waiting for the user. Don't post " +
+      "more activities to the same panel — Linear is showing the question " +
+      "and the input box; further chatter would override that state and " +
+      "close the panel.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: { type: "string", description: "Question text rendered in the panel." },
+        panelId: { type: "string", description: "Linear AgentSession id (UUID)." },
+      },
+      required: ["body", "panelId"],
+    },
+    handler: async (ctx, args) => {
+      const body = String(args.body ?? "").trim();
+      if (!body) return errorResult("body is required");
+      const panelId = String(args.panelId ?? "").trim();
+      if (!panelId) return errorResult("panelId is required");
+      const res = await ctx.linearGraphQL({
+        query: `mutation($input: AgentActivityCreateInput!) {
+          agentActivityCreate(input: $input) { success }
+        }`,
+        variables: {
           input: {
-            agentSessionId: panel,
+            agentSessionId: panelId,
             content: { type: "elicitation", body },
           },
         },
@@ -224,8 +221,7 @@ const TOOLS: ToolDescriptor[] = [
         return errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`);
       }
       return okResult(
-        `Question posted to panel ${panel}. Stop generating now — the user's ` +
-          `reply will arrive as the next user message.`,
+        `Question posted to panel ${panelId}. Panel is now awaitingInput. The user's reply will arrive as the next user message.`,
       );
     },
   },
@@ -233,25 +229,22 @@ const TOOLS: ToolDescriptor[] = [
     name: "linear_post_comment",
     title: "Post a Linear comment",
     description:
-      "Post a comment on a Linear issue as the bot user.\n\n" +
+      "Post a comment on a Linear issue as the bot user. Independent of any " +
+      "panel — works whether or not you're bound to one.\n\n" +
       "**Top-level comment** (omit `parentId`): starts a new thread on the " +
       "issue. Use this to reach a different person via @-mention.\n\n" +
       "**Thread reply** (pass `parentId`): posts as a sibling reply in an " +
       "existing thread. Linear thread structure is flat (only 2 levels), so " +
       "every reply parents to the original top-level comment.\n\n" +
       "If a human replies in a thread you started (or replied to), their " +
-      "reply is delivered back to you as a user message. There is no panel " +
-      "involved on this side-channel — your further responses must be " +
-      "explicit `linear_post_comment` calls.\n\n" +
+      "reply is delivered back to you as a user message.\n\n" +
       "Body is Markdown. To @-mention a user, use plain `@<displayname>` " +
       "(e.g. `@hrhrngxy`) — Linear server-side parses it into a real " +
       "mention chip + sends a notification.\n\n" +
       "`issueId` defaults to the issue this conversation is bound to.\n\n" +
       "**Post once.** A single tool call posts a single comment. Do NOT " +
       "follow up with extra confirmation comments — \"Comment posted!\" or " +
-      "\"Done!\" follow-ups create duplicate noise in the thread. The tool " +
-      "result already tells you whether the post succeeded; no need to " +
-      "double-confirm to the user.",
+      "\"Done!\" follow-ups create duplicate noise in the thread.",
     inputSchema: {
       type: "object",
       properties: {
@@ -484,10 +477,10 @@ app.post("/:sessionId", async (c) => {
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
         instructions:
-          "Tools to interact with Linear as the bot user. Token is managed " +
-          "server-side; no auth headers needed in tool args. Use linear_enter_panel " +
-          "to bind to a Linear AgentSession panel for live mirroring of your " +
-          "reasoning, or linear_post_comment to talk in comment threads off-panel.",
+          "Linear tools. The bot owns ALL panel-visible output: nothing is " +
+          "auto-mirrored. Use linear_say to narrate progress in a panel, " +
+          "linear_request_input to ask the panel creator a question, " +
+          "linear_post_comment to talk in comment threads.",
       });
 
     case "notifications/initialized":
@@ -535,10 +528,6 @@ async function resolveSessionContext(
   sessionId: string,
   bearer: string,
 ): Promise<SessionContext> {
-  // Ask main for the session record. Main owns the CONFIG_KV with session
-  // data; integrations doesn't bind that namespace. We only need immutable
-  // wiring fields — publication id (mandatory), issue id (optional default
-  // for tools), mcp_token (auth check). Everything else lives in D1 now.
   const sessionRes = await env.MAIN.fetch(
     `http://main/v1/internal/sessions/${encodeURIComponent(sessionId)}`,
     {
@@ -591,19 +580,6 @@ async function resolveSessionContext(
       createdAt: Date.now(),
     });
   };
-  const getCurrentPanel = async () => {
-    const row = await container.panelBindings.get(sessionId);
-    return row?.panelAgentSessionId ?? null;
-  };
-  const setPanel = async (agentSessionId: string) => {
-    await container.panelBindings.set(sessionId, agentSessionId, Date.now());
-  };
-  const clearPanel = async () => {
-    await container.panelBindings.clear(sessionId);
-  };
-  const stampElicitation = async () => {
-    await container.panelBindings.stampElicitation(sessionId, Date.now());
-  };
 
   return {
     sessionId,
@@ -612,10 +588,6 @@ async function resolveSessionContext(
     installationId: pub.installationId,
     linearGraphQL: linearGraphQLBound,
     recordAuthoredComment,
-    getCurrentPanel,
-    setPanel,
-    clearPanel,
-    stampElicitation,
     issueId: linearMeta.issueId ?? null,
   };
 }
