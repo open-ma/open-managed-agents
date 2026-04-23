@@ -34,6 +34,20 @@
 //                a fresh DefaultHarness + InMemoryHistory between each
 //                so the per-mode totals are independent.
 //
+// Compaction strategy (PROBE_COMPACTION_STRATEGY env var; default = "summarize"):
+//   summarize       — original strategy that reuses main agent's prefix
+//                     (system + tools) on the summarize call. Cache-aware
+//                     in design, but ai-sdk strips tools when toolChoice="none"
+//                     so cache_read on the summarize call ends up at 0%.
+//   cc-style        — Claude-Code-inspired isolated summarize call. Own
+//                     short system, empty tools, no toolChoice, images
+//                     stripped. Pays full input price on summarize but is
+//                     robust across providers (no toolChoice quirks).
+//   opencode-style  — OpenCode-inspired isolated summarize call. Same
+//                     structure as cc-style with a Goal/Instructions/
+//                     Discoveries/Accomplished/Files template instead of
+//                     a free-form summary.
+//
 // What "good" looks like (per mode):
 //   Turn 1: cache_create > 0  (writes the prefix)
 //           cache_read   = 0
@@ -337,6 +351,14 @@ const agent: Partial<AgentConfig> = {
     compaction_trigger_fraction: process.env.PROBE_COMPACTION_TRIGGER
       ? Number(process.env.PROBE_COMPACTION_TRIGGER)
       : 0.04,
+    // PROBE_COMPACTION_STRATEGY = "summarize" (default) | "cc-style"
+    // | "opencode-style". DefaultHarness reads this from agent.metadata
+    // and resolves the matching strategy class. Use this knob to A/B
+    // the legacy cache-prefix-sharing strategy against the isolated
+    // CC/OpenCode-style strategies.
+    ...(process.env.PROBE_COMPACTION_STRATEGY
+      ? { compaction_strategy: process.env.PROBE_COMPACTION_STRATEGY }
+      : {}),
   } as Record<string, unknown>,
 };
 
@@ -477,6 +499,7 @@ async function runMode(mode: Exclude<ProbeMode, "all">) {
   console.log(`System prompt: ${systemPrompt.length} chars`);
   console.log(`Tools: ${Object.keys(modeTools).join(", ")}`);
   console.log(`Skill reminders: ${platformReminders.length}`);
+  console.log(`Compaction strategy: ${process.env.PROBE_COMPACTION_STRATEGY ?? "summarize (default)"}`);
   console.log("---");
 
   // session-init: write skill/memory reminders into history (cached prefix)
