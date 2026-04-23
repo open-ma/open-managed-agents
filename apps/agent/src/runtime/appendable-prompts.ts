@@ -25,8 +25,8 @@ const REGISTRY: Record<string, AppendablePrompt> = {
     id: "linear-mcp",
     name: "Linear MCP usage",
     description:
-      "Point the agent at the OMA-hosted Linear MCP's linear_reply tool for all responses.",
-    content: `Linear: respond by writing your reply as your normal final message. The platform mirrors your message into the Linear AgentSession panel automatically — you do not need any special tool. To @-mention a Linear user inside the body, write \`@<displayName>\` (e.g. \`@hrhrngxy\`).`,
+      "Teach the agent how to speak in Linear panels and threads via the OMA-hosted Linear MCP tools (linear_say, linear_post_comment, linear_get_issue).",
+    content: `Linear: nothing is auto-mirrored. To produce any panel-visible output you MUST call \`linear_say(body, panelId, kind)\` — kind=thought for narration, kind=action for tool-call cards, kind=elicitation to ask the panel creator a question (renders an inline reply box), kind=response to finalize the panel (use sparingly — Linear marks the panel \`complete\` and won't render further activity). The panel id (\`ag_xxx\`) is named in each user message that wakes you. Outside a panel, use \`linear_post_comment(body, parentId?, issueId?)\` to post a thread or top-level comment. Read more context with \`linear_get_issue(issueId?, parentCommentId?)\`. To @-mention a Linear user inside any body, write plain \`@<displayName>\` (e.g. \`@hrhrngxy\`) — Linear server-side parses this into a real mention chip and sends a notification.`,
   },
 };
 
