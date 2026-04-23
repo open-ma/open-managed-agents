@@ -60,13 +60,26 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
 
   // Find the last compaction boundary that actually carries a summary —
   // that's the one we honor. Earlier boundaries get superseded.
+  //
+  // "Carries a summary" means: at least one block contains real content.
+  // A bare array-length check (`summary.length > 0`) is NOT sufficient —
+  // a strategy that returns `[{type:"text", text:""}]` would still pass
+  // it and silently drop the entire pre-boundary history downstream.
+  // This is the downstream half of the empty-summary defense; the
+  // upstream half lives in DefaultHarness.compact() where the boundary
+  // event is written.
   let boundaryIdx = -1;
   let boundarySummary: ContentBlock[] | undefined;
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (e.type === "agent.thread_context_compacted") {
       const ce = e as AgentThreadContextCompactedEvent;
-      if (ce.summary && ce.summary.length > 0) {
+      const hasContent = ce.summary?.some(
+        (b) => (b.type === "text" && b.text.trim().length > 0)
+          || b.type === "image"
+          || b.type === "document",
+      );
+      if (hasContent) {
         boundaryIdx = i;
         boundarySummary = ce.summary;
         break;

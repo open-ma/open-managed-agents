@@ -232,7 +232,9 @@ const DEFAULT_SUMMARIZE_PROMPT =
 
 const IMAGE_PLACEHOLDER = "[image stripped for compaction]";
 
-function stripImagesFromMessages(messages: ModelMessage[]): ModelMessage[] {
+// Exported so tests can probe edge cases directly. Production callers use
+// it through the strategy classes below.
+export function stripImagesFromMessages(messages: ModelMessage[]): ModelMessage[] {
   return messages.map((m): ModelMessage => {
     if (typeof m.content === "string") return m;
     if (!Array.isArray(m.content)) return m;
