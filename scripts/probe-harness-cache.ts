@@ -9,7 +9,32 @@
 // Run from repo root:
 //   ANTHROPIC_API_KEY=sk-ant-... npx tsx scripts/probe-harness-cache.ts
 //
-// What "good" looks like:
+// Modes (PROBE_MODE env var; default = text):
+//   text       — current behavior: bash + mcp tool stubs only.
+//   sub-agent  — adds a `call_agent_researcher` stub that injects
+//                thread-tagged sub-session events (agent.message,
+//                agent.tool_use, agent.tool_result) into the parent's
+//                runtime BEFORE returning the response text. Faithfully
+//                simulates SessionDO.runSubAgent: the parent's getEvents()
+//                ends up with sub-session internal events, which derive()
+//                walks unless the bijection filters them out.
+//                Verdict signal: if cache_read drops to 0 on the turn
+//                AFTER each call_agent_* return, the sub-session events
+//                are polluting the parent's prefix.
+//   multimodal — every other tool result is an `agent.tool_result` whose
+//                content is a `ContentBlock[]` containing one TextBlock
+//                and one base64 PNG image. Same probe loop; the goal is
+//                that image bytes round-trip exactly through
+//                normalizeToolOutputForWire ↔ wireContentToToolOutput so
+//                cache_read keeps growing turn over turn.
+//                Also exercises the cacheControl-on-image-tail edge case:
+//                the last message of some turns ends with a tool_result
+//                whose final block is an image.
+//   all        — runs text → sub-agent → multimodal sequentially with
+//                a fresh DefaultHarness + InMemoryHistory between each
+//                so the per-mode totals are independent.
+//
+// What "good" looks like (per mode):
 //   Turn 1: cache_create > 0  (writes the prefix)
 //           cache_read   = 0
 //   Turn 2: cache_create small  (just the new tail)
@@ -30,7 +55,17 @@ import type {
   SessionEvent,
   SpanModelRequestEndEvent,
   AgentConfig,
+  ContentBlock,
 } from "@open-managed-agents/shared";
+
+// ---- mode ----
+type ProbeMode = "text" | "sub-agent" | "multimodal" | "all";
+const RAW_MODE = (process.env.PROBE_MODE ?? "text").toLowerCase();
+if (!["text", "sub-agent", "multimodal", "all"].includes(RAW_MODE)) {
+  console.error(`Unknown PROBE_MODE=${RAW_MODE}. Choose: text | sub-agent | multimodal | all`);
+  process.exit(1);
+}
+const MODE = RAW_MODE as ProbeMode;
 
 // ---- env ----
 // Two auth modes:
@@ -178,6 +213,94 @@ const mcpGithubCall = tool({
 
 const tools = { bash, mcp_github_call: mcpGithubCall };
 
+// ---- multimodal fixture ----
+// Smallest valid PNG: 1x1 transparent pixel. Constant bytes — used as the
+// image payload in multimodal-mode tool results so cache reuse across turns
+// requires byte-perfect round-trip through normalize/wireContent.
+const PNG_1X1_BASE64 =
+  "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkAAIAAAoAAv/lxKUAAAAASUVORK5CYII=";
+
+// ---- sub-agent fixture ----
+// Stub `call_agent_researcher` that simulates SessionDO.runSubAgent: tags a
+// sequence of sub-session events into the parent's runtime BEFORE returning.
+// If the parent's eventsToMessages walks tagged events, every call here will
+// add an unrelated assistant turn + tool round-trip to the parent's prefix
+// → cache_read collapses on the next turn.
+//
+// `runtime` is bound at construction time so the tool can broadcast directly.
+function makeCallAgentTool(rt: HarnessRuntime, threadCounter: { n: number }) {
+  return tool({
+    description:
+      "Delegate a research question to the researcher sub-agent (probe stub).",
+    inputSchema: z.object({
+      message: z.string().describe("question to send to the sub-agent"),
+    }),
+    execute: async ({ message }) => {
+      const threadId = `thread_probe_${threadCounter.n++}`;
+      const tag = (e: SessionEvent) => ({ ...e, session_thread_id: threadId } as SessionEvent);
+      // Mirrors SessionDO.runSubAgent (apps/agent/src/runtime/session-do.ts:1414):
+      // sub-agent's broadcasts append a tagged copy of the same event into the
+      // parent's history. Each event is the same `type` as a normal event —
+      // only the extra `session_thread_id` field distinguishes it.
+      rt.broadcast(tag({
+        type: "session.thread_created",
+        session_thread_id: threadId,
+        agent_id: "researcher",
+        agent_name: "researcher",
+      } as any));
+      rt.broadcast(tag({
+        type: "agent.message",
+        content: [{ type: "text", text: `[sub-agent] working on: ${message.slice(0, 80)}` }],
+      }));
+      rt.broadcast(tag({
+        type: "agent.tool_use",
+        id: `${threadId}_tc_grep`,
+        name: "grep",
+        input: { pattern: "TODO", path: "src/" },
+      } as any));
+      rt.broadcast(tag({
+        type: "agent.tool_result",
+        tool_use_id: `${threadId}_tc_grep`,
+        content: FAKE_GREP_OUTPUT,
+      } as any));
+      rt.broadcast(tag({
+        type: "agent.message",
+        content: [{ type: "text", text: `[sub-agent] done. Found ${80} matches across files.` }],
+      }));
+      rt.broadcast(tag({
+        type: "session.thread_idle",
+        session_thread_id: threadId,
+      } as any));
+      // Return the response text — what the parent sees as the tool result.
+      return `Researcher returned: 80 matches across the handlers tree (sample matches in trace).`;
+    },
+  });
+}
+
+// ---- multimodal fixture ----
+// Tool stub that returns a `ContentBlock[]` with a text block + a base64 PNG.
+// Built once per mode so the bytes are stable across turns. Default-loop's
+// normalizeToolOutputForWire detects the pre-shaped ContentBlock[] and
+// passes it through verbatim → wireContentToToolOutput on derive must
+// reconstruct the same bytes for cache reuse.
+function makeImageTool() {
+  const imageBlock: ContentBlock = {
+    type: "image",
+    source: { type: "base64", media_type: "image/png", data: PNG_1X1_BASE64 },
+  };
+  return tool({
+    description: "Render a chart and return [text-summary, image] (probe stub).",
+    inputSchema: z.object({ caption: z.string().describe("short caption for the chart") }),
+    // ai-sdk's strict typing forbids ContentBlock[] in `execute`'s declared
+    // return; cast to any since default-loop normalizes via the wire shape.
+    execute: async ({ caption }) =>
+      [
+        { type: "text", text: `Chart caption: ${caption}. Rendered 1x1 PNG below.` },
+        imageBlock,
+      ] as any,
+  });
+}
+
 // ---- platformReminders (simulate skill metadata + memory) ----
 const platformReminders = [
   {
@@ -194,26 +317,7 @@ const platformReminders = [
   },
 ];
 
-// ---- runtime ----
-const history = new InMemoryHistory();
-const eventLog: SessionEvent[] = [];
-
-const runtime: HarnessRuntime = {
-  history: history as any,
-  sandbox: {
-    exec: async (cmd: string) => `[probe stub exec] ${cmd}`,
-    readFile: async () => "",
-    writeFile: async () => "",
-  } as any,
-  broadcast: (event: SessionEvent) => {
-    history.append(event);
-    eventLog.push(event);
-  },
-  reportUsage: async () => {},
-  pendingConfirmations: [],
-};
-
-// ---- ctx ----
+// ---- agent + systemPrompt (shared across modes; baked into cached prefix) ----
 const agent: Partial<AgentConfig> = {
   id: "probe",
   name: "probe-agent",
@@ -237,24 +341,58 @@ const SYSTEM_AUTHENTICATED_GUIDANCE =
   "For commands that may require authentication, prefer issuing a single command instead of a chained shell command. If an authenticated chained command fails, retry with a simpler single-command form.";
 const systemPrompt = `${agent.system}\n\n${SYSTEM_AUTHENTICATED_GUIDANCE}`;
 
-const baseCtx: Omit<HarnessContext, "userMessage"> = {
-  agent: agent as AgentConfig,
-  tools,
-  model,
-  systemPrompt,
-  rawSystemPrompt: agent.system!,
-  platformReminders,
-  env: {
-    ANTHROPIC_API_KEY: apiKey ?? probeToken ?? "",
-  } as any,
-  runtime,
-};
+// ---- runtime + ctx (per mode) ----
+// Each mode gets a fresh history, runtime, and tool set so the per-mode
+// cache stats are independent. Module-level state used to be unique;
+// supporting "all" mode forced extracting this into a builder.
+function buildRunFor(mode: Exclude<ProbeMode, "all">) {
+  const history = new InMemoryHistory();
+  const eventLog: SessionEvent[] = [];
+  const runtime: HarnessRuntime = {
+    history: history as any,
+    sandbox: {
+      exec: async (cmd: string) => `[probe stub exec] ${cmd}`,
+      readFile: async () => "",
+      writeFile: async () => "",
+    } as any,
+    broadcast: (event: SessionEvent) => {
+      history.append(event);
+      eventLog.push(event);
+    },
+    reportUsage: async () => {},
+    pendingConfirmations: [],
+  };
 
-// ---- run ----
+  const threadCounter = { n: 0 };
+  const modeTools: Record<string, any> = { bash, mcp_github_call: mcpGithubCall };
+  if (mode === "sub-agent") {
+    modeTools.call_agent_researcher = makeCallAgentTool(runtime, threadCounter);
+  }
+  if (mode === "multimodal") {
+    modeTools.render_chart = makeImageTool();
+  }
+
+  const baseCtx: Omit<HarnessContext, "userMessage"> = {
+    agent: agent as AgentConfig,
+    tools: modeTools,
+    model,
+    systemPrompt,
+    rawSystemPrompt: agent.system!,
+    platformReminders,
+    env: {
+      ANTHROPIC_API_KEY: apiKey ?? probeToken ?? "",
+    } as any,
+    runtime,
+  };
+
+  return { history, eventLog, runtime, modeTools, baseCtx };
+}
+
+// ---- prompts (per mode) ----
 // Tool-driving questions: each prompt explicitly forces a bash or
 // mcp_github_call invocation so the ~5KB stub outputs accumulate fast and
 // we hit the 0.10 trigger fraction before turn 16.
-const QUESTIONS = [
+const QUESTIONS_TEXT = [
   "Run `ls -la src/` and tell me what you see in one sentence.",
   "Now grep for 'export async function handle' under src/handlers and report the top 3 matches.",
   "Use mcp_github_call to list_issues; then summarize the most common label in one sentence.",
@@ -273,12 +411,68 @@ const QUESTIONS = [
   "Final summary: which tool did you use most, in one sentence.",
 ];
 
-async function main() {
-  const harness = new DefaultHarness();
+// Sub-agent mode: alternate normal tool calls with `call_agent_researcher`
+// so we can compare cache_read on turns AFTER a sub-agent return vs
+// turns AFTER a normal tool. If the parent's prefix gets polluted by
+// sub-session events, cache_read will reset on every post-call_agent turn.
+const QUESTIONS_SUBAGENT = [
+  "Run `ls -la src/` and tell me what you see in one sentence.",
+  "Use call_agent_researcher to investigate `TODO usage in src/`. Then in one sentence relay what they said.",
+  "Now grep for 'export async function handle' under src/handlers; top 3 matches.",
+  "Use call_agent_researcher to look up `routes registered in src/handlers/`. One-sentence relay.",
+  "Use mcp_github_call to list_issues; the most common label in one sentence.",
+  "Use call_agent_researcher to summarize `auth bug history`. One-sentence relay.",
+  "Run `find . -name '*.ts'` and pick one interesting filename.",
+  "Use call_agent_researcher to look at `class definitions in src/`. One sentence.",
+  "Grep for 'import' in src/ and tell me how many imports total (one number).",
+  "Use call_agent_researcher to research `latency reports`. One sentence.",
+  "Use mcp_github_call to list_prs; one PR title.",
+  "Use call_agent_researcher to scan `error handling patterns`. One sentence.",
+  "Run `ls /etc` and pick one config file name.",
+  "Use call_agent_researcher to look at `TODO under src/handlers/`. One sentence.",
+  "Grep for 'function' under src/handlers and report top 3.",
+  "Final summary: which tool did you use most often?",
+];
 
+// Multimodal mode: drive `render_chart` on alternating turns so half the
+// turns end with a tool_result whose final block is a base64 image.
+// Tests both: image-byte preservation (between turns) AND cache_control
+// landing on a tail block that happens to be an image.
+const QUESTIONS_MULTIMODAL = [
+  "Run `ls -la src/` and tell me what you see in one sentence.",
+  "Use render_chart with caption `latency p99 over 7d` and tell me one observation.",
+  "Now grep for 'export async function handle' under src/handlers; top 3 matches.",
+  "Use render_chart with caption `error rate vs deploy times` and one observation.",
+  "Use mcp_github_call to list_issues; the most common label in one sentence.",
+  "Use render_chart with caption `RPS by region` and tell me one observation.",
+  "Run `find . -name '*.ts'` and pick one interesting filename.",
+  "Use render_chart with caption `memory usage over hours` and one observation.",
+  "Grep for 'import' in src/ and tell me how many imports total (one number).",
+  "Use render_chart with caption `queue depth weekly` and one observation.",
+  "Use mcp_github_call to list_prs; one PR title.",
+  "Use render_chart with caption `cold-start ms by hour` and one observation.",
+  "Run `ls /etc` and pick one config file name.",
+  "Use render_chart with caption `cache hit ratio by route` and one observation.",
+  "Grep for 'function' under src/handlers and report top 3.",
+  "Final summary: what was the most informative chart, in one sentence.",
+];
+
+function questionsFor(mode: Exclude<ProbeMode, "all">): string[] {
+  if (mode === "sub-agent") return QUESTIONS_SUBAGENT;
+  if (mode === "multimodal") return QUESTIONS_MULTIMODAL;
+  return QUESTIONS_TEXT;
+}
+
+// ---- per-mode runner ----
+async function runMode(mode: Exclude<ProbeMode, "all">) {
+  const { history, eventLog, runtime, modeTools, baseCtx } = buildRunFor(mode);
+  const harness = new DefaultHarness();
+  const questions = questionsFor(mode);
+
+  console.log(`\n=== mode=${mode} ===`);
   console.log(`Model: ${(model as any).modelId}`);
   console.log(`System prompt: ${systemPrompt.length} chars`);
-  console.log(`Tools: ${Object.keys(tools).join(", ")}`);
+  console.log(`Tools: ${Object.keys(modeTools).join(", ")}`);
   console.log(`Skill reminders: ${platformReminders.length}`);
   console.log("---");
 
@@ -286,11 +480,27 @@ async function main() {
   await harness.onSessionInit?.(baseCtx as HarnessContext, runtime);
 
   let totalIn = 0, totalOut = 0, totalRead = 0, totalCreate = 0;
+  // Per-turn tool/sub-agent markers — we annotate each turn with what kind
+  // of return preceded it, so post-call_agent_* and post-image turns are
+  // visually distinguishable in the per-turn cache log.
+  const turnMarker = (ev: SessionEvent | undefined): string => {
+    if (!ev) return "";
+    if (ev.type === "agent.tool_use" && (ev as any).name?.startsWith?.("call_agent_")) {
+      return " [post-call_agent]";
+    }
+    if (ev.type === "agent.tool_result") {
+      const c = (ev as any).content;
+      if (Array.isArray(c) && c.some((b: any) => b?.type === "image")) {
+        return " [post-image-result]";
+      }
+    }
+    return "";
+  };
 
-  for (let i = 0; i < QUESTIONS.length; i++) {
+  for (let i = 0; i < questions.length; i++) {
     const userEvent: SessionEvent = {
       type: "user.message",
-      content: [{ type: "text", text: QUESTIONS[i] }],
+      content: [{ type: "text", text: questions[i] }],
     };
     history.append(userEvent);
     eventLog.push(userEvent);
@@ -315,20 +525,28 @@ async function main() {
     const cacheCreate = u?.cache_creation_input_tokens ?? 0;
     totalIn += inp; totalOut += out; totalRead += cacheRead; totalCreate += cacheCreate;
 
+    // Look one event back for the LAST tool-related event in this turn.
+    const lastTurnEvent = [...eventLog].reverse().find(
+      (e) => e.type === "agent.tool_use" || e.type === "agent.tool_result" || e.type === "agent.mcp_tool_result",
+    );
+
     const tools_used = eventLog
       .filter((e) => e.type === "agent.tool_use" || e.type === "agent.mcp_tool_use" || e.type === "agent.custom_tool_use")
       .length;
     const compactions = eventLog.filter((e) => e.type === "agent.thread_context_compacted");
+    const subThreadEvents = eventLog.filter((e) => (e as any).session_thread_id != null);
 
     console.log(
-      `Turn ${i + 1} (${elapsed}ms): in=${inp} out=${out} cache_read=${cacheRead} cache_create=${cacheCreate}  tools_called_so_far=${tools_used} compactions=${compactions.length}`,
+      `Turn ${i + 1} (${elapsed}ms): in=${inp} out=${out} cache_read=${cacheRead} cache_create=${cacheCreate}` +
+      `  tools_called_so_far=${tools_used} sub_thread_evts=${subThreadEvents.length} compactions=${compactions.length}` +
+      turnMarker(lastTurnEvent),
     );
   }
 
   console.log("---");
-  console.log(`TOTAL: in=${totalIn} out=${totalOut} cache_read=${totalRead} cache_create=${totalCreate}`);
-  const reuseRatio = totalIn > 0 ? (totalRead / totalIn).toFixed(2) : "n/a";
-  console.log(`Cache reuse ratio: ${reuseRatio} (cache_read / input_tokens — higher is better)`);
+  console.log(`TOTAL[${mode}]: in=${totalIn} out=${totalOut} cache_read=${totalRead} cache_create=${totalCreate}`);
+  const reuseRatio = totalIn + totalRead > 0 ? (totalRead / (totalIn + totalRead)).toFixed(2) : "n/a";
+  console.log(`Cache reuse ratio: ${reuseRatio} (cache_read / (input_tokens + cache_read) — higher is better)`);
   console.log(`Total events captured: ${eventLog.length}`);
 
   // Quick verdict
@@ -338,6 +556,43 @@ async function main() {
     console.log("\nVERDICT: cache reuse > cache writes. Cache is working.");
   } else {
     console.log("\nVERDICT: some cache reuse but lower than write. Could be a short prefix; try more turns.");
+  }
+
+  // Mode-specific extra checks
+  if (mode === "sub-agent") {
+    // Identify the per-turn cache_read on the turn AFTER each call_agent_*.
+    // If the parent's prefix gets polluted by sub-session events, those
+    // post-call_agent turns will have cache_read collapse to ~0 while
+    // non-sub-agent turns keep growing.
+    const spanEvents = eventLog.filter((e) => e.type === "span.model_request_end") as SpanModelRequestEndEvent[];
+    const callAgentEvents = eventLog.filter(
+      (e) => e.type === "agent.tool_use" && (e as any).name?.startsWith?.("call_agent_"),
+    );
+    console.log(`\nSub-agent diagnostics:`);
+    console.log(`  call_agent_* invocations: ${callAgentEvents.length}`);
+    console.log(`  total tagged sub-session events injected: ${eventLog.filter((e) => (e as any).session_thread_id != null).length}`);
+    if (spanEvents.length >= 2) {
+      const last = spanEvents[spanEvents.length - 1].model_usage;
+      const first = spanEvents[0].model_usage;
+      console.log(`  first turn cache_read: ${first?.cache_read_input_tokens ?? 0}`);
+      console.log(`  last turn cache_read:  ${last?.cache_read_input_tokens ?? 0}`);
+      const lastReadIsZero = (last?.cache_read_input_tokens ?? 0) === 0;
+      if (lastReadIsZero && callAgentEvents.length > 0) {
+        console.log(`  WARNING: cache_read=0 on the last turn after sub-agent activity — check whether tagged events are polluting the parent's prefix.`);
+      }
+    }
+  }
+
+  if (mode === "multimodal") {
+    const imageResults = eventLog.filter(
+      (e) => e.type === "agent.tool_result" && Array.isArray((e as any).content) && (e as any).content.some((b: any) => b?.type === "image"),
+    );
+    console.log(`\nMultimodal diagnostics:`);
+    console.log(`  image-bearing tool_result events: ${imageResults.length}`);
+    console.log(`  PNG payload bytes per image: ${PNG_1X1_BASE64.length} chars (base64)`);
+    if (imageResults.length === 0) {
+      console.log(`  NOTE: model never invoked render_chart — probe didn't exercise image path. Try forcing it via prompt.`);
+    }
   }
 
   // Compaction summary
@@ -374,6 +629,14 @@ async function main() {
     }
   } else {
     console.log("\nNo compactions fired (didn't cross trigger threshold).");
+  }
+}
+
+async function main() {
+  const modes: Array<Exclude<ProbeMode, "all">> =
+    MODE === "all" ? ["text", "sub-agent", "multimodal"] : [MODE];
+  for (const m of modes) {
+    await runMode(m);
   }
 }
 
