@@ -219,6 +219,350 @@ const DEFAULT_SUMMARIZE_PROMPT =
   "Summarize the entire conversation above. Preserve key decisions, file paths, tool results (commands run + their output), in-flight tasks, and explicit Next Steps. If the conversation already contains a <conversation-summary> block, produce an updated summary that supersedes it (combining prior summary + new activity). Be concise but specific. Output only the summary text, no preamble.";
 
 // ============================================================
+// Image stripping helper
+// ============================================================
+//
+// Walk a message list and replace every image content block (top-level user
+// images, image-data/image-url tool_result outputs, raw image parts) with a
+// short placeholder. Used by the isolated strategies below to keep the
+// summarize call cheap — the summarizer doesn't need to "see" the image
+// bytes to know they were rendered, just that an image existed at that
+// position.
+//
+// Pure function: same input → same output bytes. Doesn't mutate input.
+
+const IMAGE_PLACEHOLDER = "[image stripped for compaction]";
+
+function stripImagesFromMessages(messages: ModelMessage[]): ModelMessage[] {
+  return messages.map((m): ModelMessage => {
+    if (typeof m.content === "string") return m;
+    if (!Array.isArray(m.content)) return m;
+    const filtered = m.content.map((part) => {
+      if (!part || typeof part !== "object" || !("type" in part)) return part;
+      const p = part as { type: string; output?: unknown };
+      // Top-level image part on a user message
+      if (p.type === "image" || p.type === "file") {
+        return { type: "text" as const, text: IMAGE_PLACEHOLDER };
+      }
+      // Tool-result with content[] where individual items can be image-data / image-url
+      if (p.type === "tool-result") {
+        const out = p.output as { type?: string; value?: unknown } | undefined;
+        if (out?.type === "content" && Array.isArray(out.value)) {
+          const cleaned = out.value.map((b: { type?: string }) => {
+            if (
+              b?.type === "image-data" ||
+              b?.type === "image-url" ||
+              b?.type === "file-data" ||
+              b?.type === "file-url"
+            ) {
+              return { type: "text", text: IMAGE_PLACEHOLDER };
+            }
+            return b;
+          });
+          return { ...part, output: { ...out, value: cleaned } };
+        }
+      }
+      return part;
+    });
+    return { ...m, content: filtered as typeof m.content } as ModelMessage;
+  });
+}
+
+// ============================================================
+// CCStyleCompactionStrategy
+// ============================================================
+//
+// Mirrors what Claude Code does in `compact.ts`: an isolated summarize
+// call that does NOT try to reuse the main agent's prompt cache. Concretely:
+//
+//   - system: hardcoded one-liner ("You are a helpful AI assistant tasked
+//     with summarizing conversations.") — NOT the main agent's full system
+//   - tools:  empty (or a tiny fixed subset like just `read`) — NOT the
+//     main agent's full toolset
+//   - toolChoice: undefined — relies on the prompt to keep the model in
+//     summarize mode rather than trying to "do work"
+//   - messages: stripped of images and post-boundary slice (iterative
+//     summarization happens via the existing boundary mechanism in
+//     eventsToMessages — prior summary becomes the leading user message)
+//   - thinking: not enabled (we don't pass providerOptions for thinking)
+//
+// Trade-off vs the original SummarizeCompactionStrategy:
+//   + Robust across providers — does NOT rely on `tool_choice: "none"`,
+//     which ai-sdk silently translates to "drop tools" for Anthropic and
+//     which MiniMax doesn't honor reliably either way.
+//   + Cheaper per call — short system, empty tools, no images to encode.
+//   + Predictable empty-summary behavior — we skip writing the boundary
+//     when text is empty so the model doesn't lose the entire history.
+//   – Cache miss every time — the request prefix is fundamentally different
+//     from the main agent's last call. Summary calls cost full input price.
+//     Compaction is rare enough on real workloads that this is acceptable;
+//     the original "share the prefix, hit cache" approach was empirically
+//     not landing because of provider/SDK quirks anyway.
+
+export class CCStyleCompactionStrategy implements CompactionStrategy {
+  readonly name = "cc-style";
+
+  constructor(
+    private opts: {
+      tailMinTokens?: number;
+      tailMaxTokens?: number;
+      tailMinMessages?: number;
+      triggerFraction?: number;
+      summarySystemPrompt?: string;
+      maxSummaryTokens?: number;
+    } = {},
+  ) {}
+
+  shouldCompact(events: SessionEvent[], { contextWindowTokens }: { contextWindowTokens: number }): boolean {
+    const messages = eventsToMessages(events);
+    const tokens = estimateMessagesTokens(messages);
+    return tokens > contextWindowTokens * (this.opts.triggerFraction ?? TRIGGER_FRACTION);
+  }
+
+  async compact(
+    events: SessionEvent[],
+    { model, runtime }: {
+      model: LanguageModel;
+      contextWindowTokens: number;
+      systemPrompt: string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: Record<string, any>;
+      applyCacheStrategy: (
+        systemPrompt: string,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        tools: Record<string, any>,
+        messages: ModelMessage[],
+      ) => CacheStrategyApplied;
+      runtime?: HarnessRuntime;
+    },
+  ): Promise<CompactionResult | null> {
+    const allMessages = eventsToMessages(events);
+    if (allMessages.length < 4) return null;
+
+    // Strip image bytes from the messages we send to the summarizer. The
+    // summarizer doesn't need to see pixel data to summarize what happened —
+    // it sees the placeholder and produces text like "the agent rendered a
+    // chart showing X". Saves ~2K tokens per image in the conversation.
+    const cleanedMessages = stripImagesFromMessages(allMessages);
+
+    const summarizeRequest: ModelMessage = {
+      role: "user",
+      content: this.opts.summarySystemPrompt ?? CC_STYLE_SUMMARIZE_PROMPT,
+    };
+
+    const modelId = (model as { modelId?: string })?.modelId ?? "unknown";
+    runtime?.broadcast({ type: "span.compaction_summarize_start", model: modelId });
+
+    // Note what we are NOT passing:
+    //   - The main agent's system prompt (we use our own short one)
+    //   - The main agent's tools (we pass nothing)
+    //   - toolChoice (we don't try to constrain — relies on the prompt)
+    //   - applyCacheStrategy (we're not optimizing for cache reuse here)
+    const result = await generateText({
+      model,
+      system: CC_STYLE_SYSTEM_PROMPT,
+      messages: [...cleanedMessages, summarizeRequest],
+      maxOutputTokens: this.opts.maxSummaryTokens ?? 2000,
+    });
+
+    runtime?.broadcast({
+      type: "span.compaction_summarize_end",
+      model: modelId,
+      model_usage: result.usage ? {
+        input_tokens: result.usage.inputTokens ?? 0,
+        output_tokens: result.usage.outputTokens ?? 0,
+        cache_read_input_tokens: result.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+        cache_creation_input_tokens: result.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+      } : undefined,
+      finish_reason: result.finishReason,
+      final_text_length: typeof result.text === "string" ? result.text.length : 0,
+    });
+
+    // Empty-summary defense: if the model returned no text (provider quirk,
+    // policy refusal, or the conversation was too short to summarize), do
+    // NOT write a boundary event. Otherwise downstream eventsToMessages
+    // would honor the empty-summary boundary and silently drop the entire
+    // pre-boundary history. Caller will retry on the next turn.
+    if (typeof result.text !== "string" || result.text.trim().length === 0) {
+      return null;
+    }
+
+    return {
+      summary: [{ type: "text", text: result.text }],
+      pre_tokens: estimateMessagesTokens(allMessages),
+      original_message_count: allMessages.length,
+      compacted_message_count: 1,
+    };
+  }
+}
+
+const CC_STYLE_SYSTEM_PROMPT =
+  "You are a helpful AI assistant tasked with summarizing conversations.";
+
+const CC_STYLE_SUMMARIZE_PROMPT =
+  "Provide a detailed but concise summary of the older conversation history. The most recent turns may be preserved verbatim outside your summary, so focus on information that would still be needed to continue the work with that recent context available. Cover: what was done, what is currently being worked on, which files are being modified, what needs to be done next, key user requests/constraints/preferences that should persist, and important technical decisions and why they were made. Do not respond to any questions in the conversation, only output the summary.";
+
+// ============================================================
+// OpenCodeStyleCompactionStrategy
+// ============================================================
+//
+// Same isolation idea as CCStyleCompactionStrategy, with OpenCode's
+// preferred summary template (Goal / Instructions / Discoveries /
+// Accomplished / Relevant files). The difference vs CC-style is purely
+// the prompt text — the structural choices (own system, no tools, no
+// toolChoice, image stripped) are identical.
+//
+// Pick this one when you want summaries that downstream agents or humans
+// can scan structurally rather than narratively.
+
+export class OpenCodeStyleCompactionStrategy implements CompactionStrategy {
+  readonly name = "opencode-style";
+
+  constructor(
+    private opts: {
+      tailMinTokens?: number;
+      tailMaxTokens?: number;
+      tailMinMessages?: number;
+      triggerFraction?: number;
+      summarySystemPrompt?: string;
+      maxSummaryTokens?: number;
+    } = {},
+  ) {}
+
+  shouldCompact(events: SessionEvent[], { contextWindowTokens }: { contextWindowTokens: number }): boolean {
+    const messages = eventsToMessages(events);
+    const tokens = estimateMessagesTokens(messages);
+    return tokens > contextWindowTokens * (this.opts.triggerFraction ?? TRIGGER_FRACTION);
+  }
+
+  async compact(
+    events: SessionEvent[],
+    { model, runtime }: {
+      model: LanguageModel;
+      contextWindowTokens: number;
+      systemPrompt: string;
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      tools: Record<string, any>;
+      applyCacheStrategy: (
+        systemPrompt: string,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        tools: Record<string, any>,
+        messages: ModelMessage[],
+      ) => CacheStrategyApplied;
+      runtime?: HarnessRuntime;
+    },
+  ): Promise<CompactionResult | null> {
+    const allMessages = eventsToMessages(events);
+    if (allMessages.length < 4) return null;
+
+    const cleanedMessages = stripImagesFromMessages(allMessages);
+
+    const summarizeRequest: ModelMessage = {
+      role: "user",
+      content: this.opts.summarySystemPrompt ?? OPENCODE_STYLE_SUMMARIZE_PROMPT,
+    };
+
+    const modelId = (model as { modelId?: string })?.modelId ?? "unknown";
+    runtime?.broadcast({ type: "span.compaction_summarize_start", model: modelId });
+
+    const result = await generateText({
+      model,
+      system: OPENCODE_STYLE_SYSTEM_PROMPT,
+      messages: [...cleanedMessages, summarizeRequest],
+      maxOutputTokens: this.opts.maxSummaryTokens ?? 2000,
+    });
+
+    runtime?.broadcast({
+      type: "span.compaction_summarize_end",
+      model: modelId,
+      model_usage: result.usage ? {
+        input_tokens: result.usage.inputTokens ?? 0,
+        output_tokens: result.usage.outputTokens ?? 0,
+        cache_read_input_tokens: result.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+        cache_creation_input_tokens: result.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+      } : undefined,
+      finish_reason: result.finishReason,
+      final_text_length: typeof result.text === "string" ? result.text.length : 0,
+    });
+
+    if (typeof result.text !== "string" || result.text.trim().length === 0) {
+      return null;
+    }
+
+    return {
+      summary: [{ type: "text", text: result.text }],
+      pre_tokens: estimateMessagesTokens(allMessages),
+      original_message_count: allMessages.length,
+      compacted_message_count: 1,
+    };
+  }
+}
+
+const OPENCODE_STYLE_SYSTEM_PROMPT =
+  "You are a helpful AI assistant tasked with summarizing conversations. Output only the summary text, no preamble.";
+
+const OPENCODE_STYLE_SUMMARIZE_PROMPT = `When constructing the summary, try to stick to this template:
+---
+## Goal
+
+[What goal(s) is the user trying to accomplish?]
+
+## Instructions
+
+- [What important instructions did the user give you that are relevant]
+- [If there is a plan or spec, include information about it so next agent can continue using it]
+
+## Discoveries
+
+[What notable things were learned during this conversation that would be useful for the next agent to know when continuing the work]
+
+## Accomplished
+
+[What work has been completed, what work is still in progress, and what work is left?]
+
+## Relevant files / directories
+
+[Construct a structured list of relevant files that have been read, edited, or created that pertain to the task at hand. If all the files in a directory are relevant, include the path to the directory.]
+---`;
+
+// ============================================================
+// Strategy registry
+// ============================================================
+//
+// Used by DefaultHarness to resolve `agent.metadata.compaction_strategy`.
+// Names match the `name` field on each strategy class.
+
+export type CompactionStrategyName = "summarize" | "cc-style" | "opencode-style";
+
+export function resolveCompactionStrategy(
+  name: string | undefined,
+  opts: {
+    headProtectMsgs?: number;
+    tailMinTokens?: number;
+    tailMaxTokens?: number;
+    tailMinMessages?: number;
+    triggerFraction?: number;
+    summarySystemPrompt?: string;
+    maxSummaryTokens?: number;
+  } = {},
+): CompactionStrategy {
+  switch (name) {
+    case "cc-style":
+      return new CCStyleCompactionStrategy(opts);
+    case "opencode-style":
+      return new OpenCodeStyleCompactionStrategy(opts);
+    case "summarize":
+    case undefined:
+      return new SummarizeCompactionStrategy(opts);
+    default:
+      // Unknown name → fall back to default. Don't throw — agent metadata
+      // is user-controlled and a typo shouldn't crash the harness.
+      console.warn(`[compaction] unknown strategy "${name}", falling back to "summarize"`);
+      return new SummarizeCompactionStrategy(opts);
+  }
+}
+
+// ============================================================
 // Backwards-compatible adapter (deprecated)
 // ============================================================
 // Old API used by anything still importing { SummarizeCompaction } from
