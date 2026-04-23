@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS "linear_publications" (
   "id"                    TEXT PRIMARY KEY NOT NULL,
   "user_id"               TEXT NOT NULL,
   "agent_id"              TEXT NOT NULL,
-  "installation_id"       TEXT NOT NULL REFERENCES "linear_installations"("id"),
+  "installation_id"       TEXT NOT NULL,        -- soft FK to linear_installations (cascade in app layer)
   "mode"                  TEXT NOT NULL,        -- 'full' | 'quick'
   "status"                TEXT NOT NULL,        -- pending_setup|awaiting_install|live|needs_reauth|unpublished
   "persona_name"          TEXT NOT NULL,

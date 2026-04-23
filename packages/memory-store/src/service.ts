@@ -124,8 +124,8 @@ export class MemoryStoreService {
   /**
    * Delete the store and all its memories + versions. Best-effort vector
    * cleanup — list all memory IDs, delete them from the index, then drop the
-   * D1 rows via FK cascade. Failure to clean the index leaves orphan vectors
-   * that search-time D1 join will filter out.
+   * D1 rows via adapter-level cascade. Failure to clean the index leaves
+   * orphan vectors that search-time D1 join will filter out.
    */
   async deleteStore(opts: { tenantId: string; storeId: string }): Promise<void> {
     await this.requireStore(opts);

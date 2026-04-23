@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig, SessionResource } from "@open-managed-agents/shared";
-import { generateSessionId, generateVaultId, generateCredentialId, generateResourceId } from "@open-managed-agents/shared";
+import { generateSessionId, generateVaultId, generateResourceId } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
 
 // Internal endpoints, called only by the integrations gateway worker via the
@@ -11,7 +12,7 @@ import { kvKey } from "../kv-helpers";
 //
 // Mounted at /v1/internal/* in apps/main/src/index.ts.
 
-const app = new Hono<{ Bindings: Env }>();
+const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
 
 // Public hostname of the integrations gateway, used to wire a hosted Linear
 // MCP server into Linear-triggered sessions. Falls back to staging .workers.dev
@@ -154,7 +155,7 @@ app.post("/sessions", async (c) => {
   // Pre-fetch vault credentials so SessionDO can serve them from state
   // instead of reading CONFIG_KV (which may be a different namespace if
   // sandbox-default is shared across envs).
-  const vaultCredentials = await fetchVaultCredentials(c.env, tenantId, vaultIds);
+  const vaultCredentials = await fetchVaultCredentials(c.var.services, tenantId, vaultIds);
 
   // Linear-triggered session: wire a hosted Linear MCP server into the
   // sandbox. Mint a per-session UUID, store in metadata.linear.mcp_token,
@@ -404,22 +405,17 @@ app.post("/vaults", async (c) => {
     };
     await c.env.CONFIG_KV.put(kvKey(tenantId, "vault", vault.id), JSON.stringify(vault));
 
-    const credential: CredentialConfig = {
-      id: generateCredentialId(),
-      vault_id: vault.id,
-      display_name: body.displayName,
+    const credential = await c.var.services.credentials.create({
+      tenantId,
+      vaultId: vault.id,
+      displayName: body.displayName,
       auth: {
         type: "static_bearer",
         mcp_server_url: body.mcpServerUrl,
         token: body.bearerToken,
         provider: body.provider,
       },
-      created_at: new Date().toISOString(),
-    };
-    await c.env.CONFIG_KV.put(
-      kvKey(tenantId, "cred", vault.id, credential.id),
-      JSON.stringify(credential),
-    );
+    });
     return c.json({ vaultId: vault.id, credentialId: credential.id });
   }
 
@@ -448,10 +444,10 @@ app.post("/vaults", async (c) => {
       if (!existing) return c.json({ error: "vault not found in tenant" }, 404);
     }
 
-    const credential: CredentialConfig = {
-      id: generateCredentialId(),
-      vault_id: vaultId,
-      display_name: body.displayName,
+    const credential = await c.var.services.credentials.create({
+      tenantId,
+      vaultId,
+      displayName: body.displayName,
       auth: {
         type: "command_secret",
         command_prefixes: body.commandPrefixes,
@@ -459,12 +455,7 @@ app.post("/vaults", async (c) => {
         token: body.token,
         provider: body.provider,
       },
-      created_at: new Date().toISOString(),
-    };
-    await c.env.CONFIG_KV.put(
-      kvKey(tenantId, "cred", vaultId, credential.id),
-      JSON.stringify(credential),
-    );
+    });
     return c.json({ vaultId, credentialId: credential.id });
   }
 
@@ -486,50 +477,41 @@ app.post("/vaults/rotate", async (c) => {
   const tenantId = await resolveTenantId(c.env, body.userId);
   if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
 
-  const list = await c.env.CONFIG_KV.list({
-    prefix: kvKey(tenantId, "cred", body.vaultId) + ":",
-  });
-  if (!list.keys.length) return c.json({ error: "vault has no credentials" }, 404);
+  const service = c.var.services.credentials;
+  const list = await service.list({ tenantId, vaultId: body.vaultId });
+  if (!list.length) return c.json({ error: "vault has no credentials" }, 404);
 
-  let target: { key: string; cred: CredentialConfig } | null = null;
-  for (const k of list.keys) {
-    const data = await c.env.CONFIG_KV.get(k.name);
-    if (!data) continue;
-    let cred: CredentialConfig;
-    try {
-      cred = JSON.parse(data) as CredentialConfig;
-    } catch {
-      continue;
+  const target = list.find((cred) => {
+    if (body.action === "rotate_bearer") return cred.auth?.type === "static_bearer";
+    if (body.action === "rotate_command_secret") {
+      return (
+        cred.auth?.type === "command_secret" &&
+        (!body.envVar || cred.auth.env_var === body.envVar)
+      );
     }
-    if (body.action === "rotate_bearer" && cred.auth?.type === "static_bearer") {
-      target = { key: k.name, cred };
-      break;
-    }
-    if (
-      body.action === "rotate_command_secret" &&
-      cred.auth?.type === "command_secret" &&
-      (!body.envVar || cred.auth.env_var === body.envVar)
-    ) {
-      target = { key: k.name, cred };
-      break;
-    }
-  }
+    return false;
+  });
   if (!target) return c.json({ error: "matching credential not found" }, 404);
 
   if (body.action === "rotate_bearer") {
-    if (target.cred.auth?.type !== "static_bearer") {
+    if (target.auth?.type !== "static_bearer") {
       return c.json({ error: "credential is not static_bearer" }, 400);
     }
-    target.cred.auth.token = body.newToken;
   } else {
-    if (target.cred.auth?.type !== "command_secret") {
+    if (target.auth?.type !== "command_secret") {
       return c.json({ error: "credential is not command_secret" }, 400);
     }
-    target.cred.auth.token = body.newToken;
   }
-  target.cred.updated_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(target.key, JSON.stringify(target.cred));
-  return c.json({ ok: true, credentialId: target.cred.id });
+
+  // Merge-replacement keeps every other auth field; service.update merges
+  // the partial into the existing row's auth blob.
+  await service.update({
+    tenantId,
+    vaultId: body.vaultId,
+    credentialId: target.id,
+    auth: { token: body.newToken },
+  });
+  return c.json({ ok: true, credentialId: target.id });
 });
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
@@ -569,31 +551,22 @@ async function findGithubTokenInVaults(
 
 /**
  * Pre-fetch all credentials for the given vaults so they can be passed into
- * SessionDO at /init. Mirrors the list+get loop SessionDO would otherwise
- * do against its own (potentially wrong) CONFIG_KV namespace.
+ * SessionDO at /init. Reads from D1 via the credentials-store service.
  */
 async function fetchVaultCredentials(
-  env: Env,
+  services: Services,
   tenantId: string,
   vaultIds: string[],
 ): Promise<Array<{ vault_id: string; credentials: CredentialConfig[] }>> {
   if (!vaultIds.length) return [];
-  const out: Array<{ vault_id: string; credentials: CredentialConfig[] }> = [];
-  for (const vaultId of vaultIds) {
-    const list = await env.CONFIG_KV.list({ prefix: kvKey(tenantId, "cred", vaultId) + ":" });
-    const credentials: CredentialConfig[] = [];
-    for (const k of list.keys) {
-      const data = await env.CONFIG_KV.get(k.name);
-      if (!data) continue;
-      try {
-        credentials.push(JSON.parse(data) as CredentialConfig);
-      } catch {
-        // skip malformed
-      }
-    }
-    out.push({ vault_id: vaultId, credentials });
-  }
-  return out;
+  const grouped = await services.credentials.listByVaults({
+    tenantId,
+    vaultIds,
+  });
+  return grouped.map((g) => ({
+    vault_id: g.vault_id,
+    credentials: g.credentials as unknown as CredentialConfig[],
+  }));
 }
 
 export default app;
