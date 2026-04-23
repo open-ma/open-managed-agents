@@ -237,12 +237,19 @@ const TOOLS: ToolDescriptor[] = [
     handler: async (ctx, args) => {
       const body = String(args.body ?? "").trim();
       if (!body) return errorResult("body is required");
-      const issueId = String(args.issueId ?? ctx.issueId ?? "").trim();
-      if (!issueId) {
+      const issueIdRaw = String(args.issueId ?? ctx.issueId ?? "").trim();
+      if (!issueIdRaw) {
         return errorResult(
           "issueId required — no issue is bound to this conversation, so " +
             "the bot must pass it explicitly.",
         );
+      }
+      // Resolve identifier (e.g. "OPE-38") → UUID. Linear's commentCreate
+      // accepts both, but we store the UUID in linear_authored_comments so
+      // future reply-routing lookups by issue UUID work consistently.
+      const issueId = await resolveIssueUuid(ctx, issueIdRaw);
+      if (!issueId) {
+        return errorResult(`could not resolve issueId "${issueIdRaw}" to a Linear issue`);
       }
       const parentId = args.parentId ? String(args.parentId).trim() : null;
       const input: Record<string, unknown> = { issueId, body };
@@ -452,6 +459,25 @@ function isAuthError(
 ): boolean {
   if (!errors?.length) return false;
   return errors.some((e) => e.extensions?.code === "AUTHENTICATION_ERROR");
+}
+
+/** UUID detector — Linear issue UUIDs match this; identifiers (OPE-38) don't. */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** Resolve a Linear issue identifier (OPE-38) to its UUID. Pass-through if
+ *  already a UUID. Returns null on lookup failure. We store UUIDs in
+ *  authored_comments so reply-routing by issue id stays consistent regardless
+ *  of which form the bot used at post time. */
+async function resolveIssueUuid(
+  ctx: { linearGraphQL: (p: { query: string; variables?: Record<string, unknown> }) => Promise<{ data?: unknown; errors?: unknown }> },
+  identifierOrUuid: string,
+): Promise<string | null> {
+  if (UUID_RE.test(identifierOrUuid)) return identifierOrUuid;
+  const res = await ctx.linearGraphQL({
+    query: `query($id:String!){ issue(id:$id){ id } }`,
+    variables: { id: identifierOrUuid },
+  });
+  return ((res.data as { issue?: { id?: string } } | undefined)?.issue?.id) ?? null;
 }
 
 const app = new Hono<{ Bindings: Env }>();
