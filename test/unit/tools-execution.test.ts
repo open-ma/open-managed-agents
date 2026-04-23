@@ -889,71 +889,115 @@ describe("MCP tools", () => {
 // 5. Memory tools
 // ============================================================
 describe("Memory tools", () => {
-  it("buildMemoryTools with store IDs creates 6 tools", () => {
-    const kv = makeMockKV();
-    const memTools = buildMemoryTools(["store_abc"], kv);
+  // The new buildMemoryTools wraps MemoryStoreService instead of touching KV
+  // directly. We pass a fake service that records calls so we can assert
+  // tool behavior without standing up D1 + Vectorize for every test.
+  const tenantId = "tn_test";
+  const storeId = "memstore_test";
 
+  function makeFakeSvc() {
+    const memories = new Map<string, { id: string; path: string; content: string; size_bytes: number; updated_at: string }>();
+    let nextId = 1;
+    return {
+      memories,
+      async listMemories({ pathPrefix }: { pathPrefix?: string }) {
+        const arr = Array.from(memories.values()).filter((m) => !pathPrefix || m.path.startsWith(pathPrefix));
+        return arr;
+      },
+      async readByPath({ path }: { path: string }) {
+        return Array.from(memories.values()).find((m) => m.path === path) ?? null;
+      },
+      async writeByPath({ path, content }: { path: string; content: string }) {
+        const id = `mem-fake-${nextId++}`;
+        const row = { id, path, content, size_bytes: content.length, content_sha256: "deadbeef", updated_at: new Date().toISOString() };
+        memories.set(id, row as any);
+        return row;
+      },
+      async updateById({ memoryId, content }: { memoryId: string; content?: string }) {
+        const row = memories.get(memoryId);
+        if (row && content !== undefined) row.content = content;
+        return row;
+      },
+      async deleteById({ memoryId }: { memoryId: string }) {
+        memories.delete(memoryId);
+      },
+      async searchMemories() { return []; },
+    };
+  }
+
+  it("buildMemoryTools with read_write attachment creates 6 tools", () => {
+    const svc = makeFakeSvc() as any;
+    const memTools = buildMemoryTools(
+      [{ store_id: storeId, access: "read_write" }],
+      tenantId,
+      svc,
+      "agent-test",
+    );
     expect(memTools.memory_list).toBeDefined();
     expect(memTools.memory_read).toBeDefined();
     expect(memTools.memory_write).toBeDefined();
     expect(memTools.memory_search).toBeDefined();
+    expect(memTools.memory_edit).toBeDefined();
     expect(memTools.memory_delete).toBeDefined();
     expect(Object.keys(memTools)).toHaveLength(6);
   });
 
-  it("buildMemoryTools with empty array returns empty", () => {
-    const kv = makeMockKV();
-    const memTools = buildMemoryTools([], kv);
+  it("read_only attachment omits write/edit/delete tools", () => {
+    const svc = makeFakeSvc() as any;
+    const memTools = buildMemoryTools(
+      [{ store_id: storeId, access: "read_only" }],
+      tenantId,
+      svc,
+      "agent-test",
+    );
+    expect(memTools.memory_list).toBeDefined();
+    expect(memTools.memory_read).toBeDefined();
+    expect(memTools.memory_search).toBeDefined();
+    expect(memTools.memory_write).toBeUndefined();
+    expect(memTools.memory_edit).toBeUndefined();
+    expect(memTools.memory_delete).toBeUndefined();
+  });
+
+  it("buildMemoryTools with empty attachments returns empty", () => {
+    const svc = makeFakeSvc() as any;
+    const memTools = buildMemoryTools([], tenantId, svc, "agent-test");
     expect(Object.keys(memTools)).toHaveLength(0);
   });
 
-  it("memory_write execute creates entry in KV", async () => {
-    const kv = makeMockKV();
-    const memTools = buildMemoryTools(["store_1"], kv);
-
+  it("memory_write execute calls service.writeByPath", async () => {
+    const svc = makeFakeSvc() as any;
+    const memTools = buildMemoryTools(
+      [{ store_id: storeId, access: "read_write" }],
+      tenantId,
+      svc,
+      "agent-test",
+    );
     const result = await memTools.memory_write.execute(
-      {
-        store_id: "store_1",
-        path: "project/notes",
-        content: "Important notes here",
-      },
-      TOOL_EXEC_OPTS
+      { path: "project/notes", content: "Important notes here" },
+      TOOL_EXEC_OPTS,
     );
-    expect(result).toContain("Created memory at project/notes");
-
-    // Verify the entry exists in KV via memory_list
-    const listResult = await memTools.memory_list.execute(
-      {},
-      TOOL_EXEC_OPTS
-    );
-    const parsed = JSON.parse(listResult);
-    expect(parsed.length).toBeGreaterThan(0);
-    expect(parsed[0].path).toBe("project/notes");
+    expect(result).toContain("Wrote memory at project/notes");
+    expect(svc.memories.size).toBe(1);
   });
 
-  it("memory_delete execute removes from KV", async () => {
-    const kv = makeMockKV();
-    const memTools = buildMemoryTools(["store_1"], kv);
-
-    // First create a memory
+  it("memory_delete execute calls service.deleteById", async () => {
+    const svc = makeFakeSvc() as any;
+    const memTools = buildMemoryTools(
+      [{ store_id: storeId, access: "read_write" }],
+      tenantId,
+      svc,
+      "agent-test",
+    );
     await memTools.memory_write.execute(
       { path: "temp/data", content: "temporary data" },
-      TOOL_EXEC_OPTS
+      TOOL_EXEC_OPTS,
     );
-
-    // Delete by path
     const deleteResult = await memTools.memory_delete.execute(
       { path: "temp/data" },
-      TOOL_EXEC_OPTS
+      TOOL_EXEC_OPTS,
     );
     expect(deleteResult).toContain("Deleted");
-
-    // Verify it is gone
-    const readResult = await memTools.memory_read.execute(
-      { path: "temp/data" },
-      TOOL_EXEC_OPTS
-    );
-    expect(readResult).toContain("not found");
+    expect(svc.memories.size).toBe(0);
   });
 });
 

@@ -79,6 +79,12 @@ export interface AgentConfig {
   harness?: string;
   description?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Opt-in registry of prompt IDs (managed by appendable-prompts subsystem)
+   * to inject as additional system prompt segments at session/turn start.
+   * Resolved by session-do at init; empty/missing = no extra segments.
+   */
+  appendable_prompts?: string[];
   version: number;
   created_at: string;
   updated_at?: string;
@@ -174,6 +180,17 @@ export interface EventBase {
   id?: string;
   processed_at?: string;
   parent_event_id?: string; // optional causal predecessor in product domain (e.g. tool_result → tool_use, outcome.evaluation_end → agent.message it evaluated)
+  /**
+   * Free-form harness/platform metadata. Wire-compatible extension point —
+   * existing consumers ignore unknown fields. Use to namespace harness-emitted
+   * sub-types without inventing new top-level event types (which would break
+   * the wire format). Convention: include `harness: "<harness-name>"` plus
+   * a `kind: "..."` discriminator inside.
+   *
+   * Example: a custom RAG marker reuses `user.message` as wire type and
+   * tags `metadata: { harness: "rag", kind: "chunk", chunk_id: "..." }`.
+   */
+  metadata?: Record<string, unknown>;
 }
 
 // --- Session Events ---
@@ -332,6 +349,32 @@ export interface AgentThreadContextCompactedEvent extends EventBase {
   type: "agent.thread_context_compacted";
   original_message_count: number;
   compacted_message_count: number;
+  /**
+   * The summary that REPLACES the compacted region in model context.
+   * Persisted in the event so derive() doesn't recompute (recomputation
+   * would produce different bytes each turn → cache busts).
+   *
+   * When present, eventsToMessages() (and any custom deriveModelContext)
+   * MUST: drop all model-context events before this boundary, inject the
+   * summary as a synthesized user message at the boundary, then expand
+   * subsequent model-context events normally.
+   *
+   * Optional for backward compat: an event without `summary` is a pure
+   * notification (UI signal), and derive falls back to "no compaction
+   * happened" — i.e. it shows the full pre-boundary history. New events
+   * emitted by DefaultHarness always include `summary`.
+   */
+  summary?: ContentBlock[];
+  /**
+   * Optional: the seq range in the events table that this boundary
+   * replaces. Helps with debug / replay. Not required for derive
+   * (derive walks events forward from the boundary).
+   */
+  replaced_range?: { start_seq: number; end_seq: number };
+  /** Why compaction fired. Telemetry only. */
+  trigger?: "auto" | "manual";
+  /** Token count before compaction (best-effort estimate). Telemetry only. */
+  pre_tokens?: number;
 }
 
 // Session events
@@ -369,6 +412,7 @@ export interface SpanModelRequestEndEvent extends EventBase {
     input_tokens: number;
     output_tokens: number;
     cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
   };
   /** Why the model stopped: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other".
    *  Surfaces silent terminations (e.g. provider returns finish_reason="stop"
@@ -382,6 +426,27 @@ export interface SpanModelRequestEndEvent extends EventBase {
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {
   type: "span.outcome_evaluation_start";
   iteration: number;
+}
+
+// Compaction summarize call — distinct span type so dashboards can attribute
+// summarize cost separately from main-loop model calls. Same shape as
+// SpanModelRequest{Start,End}.
+export interface SpanCompactionSummarizeStartEvent extends EventBase {
+  type: "span.compaction_summarize_start";
+  model?: string;
+}
+
+export interface SpanCompactionSummarizeEndEvent extends EventBase {
+  type: "span.compaction_summarize_end";
+  model?: string;
+  model_usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_read_input_tokens?: number;
+    cache_creation_input_tokens?: number;
+  };
+  finish_reason?: string;
+  final_text_length?: number;
 }
 
 export interface SpanOutcomeEvaluationOngoingEvent extends EventBase {
@@ -447,6 +512,8 @@ export type SessionEvent =
   | SpanOutcomeEvaluationStartEvent
   | SpanOutcomeEvaluationOngoingEvent
   | SpanOutcomeEvaluationEndEvent
+  | SpanCompactionSummarizeStartEvent
+  | SpanCompactionSummarizeEndEvent
   | AuxModelCallEvent;
 
 // --- Vault ---
@@ -478,6 +545,11 @@ export interface CredentialAuth {
   // command_secret: inject env var only for matching command prefixes
   command_prefixes?: string[];    // e.g. ["wrangler", "npx wrangler"]
   env_var?: string;               // e.g. "CLOUDFLARE_API_TOKEN"
+  // Provider tag: when set, the outbound proxy can request a token refresh
+  // via the integrations gateway (which holds the secrets needed to mint a
+  // fresh token — e.g. GitHub App private key). Used to support short-lived
+  // upstream tokens (GitHub installation tokens, ~1hr TTL).
+  provider?: "github" | "linear";
 }
 
 export interface CredentialConfig {

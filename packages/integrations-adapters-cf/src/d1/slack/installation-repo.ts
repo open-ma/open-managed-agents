@@ -105,6 +105,26 @@ export class D1SlackInstallationRepo implements SlackInstallationRepo {
     return this.crypto.decrypt(row.user_token_cipher);
   }
 
+  /**
+   * Slack xoxb-/xoxp- tokens are long-lived by default; rotation requires the
+   * workspace to opt in to Token Rotation (we don't yet store refresh_token
+   * for that path — see migration 0006). Always returns null.
+   */
+  async getRefreshToken(_id: string): Promise<string | null> {
+    return null;
+  }
+
+  /**
+   * Stub for the shared InstallationRepo contract. Slack doesn't rotate the
+   * primary bot token via this path; if Token Rotation is added later, this
+   * will land here. Throws to make accidental callers loud.
+   */
+  async setTokens(_id: string, _accessToken: string, _refreshToken: string | null): Promise<void> {
+    throw new Error(
+      "D1SlackInstallationRepo.setTokens: Slack tokens are long-lived; rotation not yet supported",
+    );
+  }
+
   async insert(row: NewInstallation): Promise<Installation> {
     const id = this.ids.generate();
     const now = Date.now();

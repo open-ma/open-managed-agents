@@ -5,8 +5,7 @@
 // Reference: https://linear.app/developers/webhooks
 //            https://linear.app/developers/agent-interaction
 
-/**
- * Top-level webhook envelope. Linear sends this for every event; our parser
+/** Top-level webhook envelope. Linear sends this for every event; our parser
  * narrows by `type` + `action`.
  */
 export interface RawWebhookEnvelope {
@@ -22,6 +21,10 @@ export interface RawWebhookEnvelope {
   data?: Record<string, unknown>;
   /** Notification body for AppUserNotification events. */
   notification?: Record<string, unknown>;
+  /** AgentSessionEvent: the full agent session record (with .issue, .creator, etc.). */
+  agentSession?: Record<string, unknown>;
+  /** AgentSessionEvent: pre-rendered prompt context (XML, HTML-escaped). */
+  promptContext?: string;
 }
 
 /** Notification subtypes we route on. Linear emits more — ignore unknowns. */
@@ -29,7 +32,14 @@ export type NotificationKind =
   | "issueAssignedToYou"
   | "issueMention"
   | "issueCommentMention"
-  | "issueNewComment";
+  | "issueNewComment"
+  | "agentSessionCreated"
+  | "agentSessionPrompted"
+  /** Top-level Comment with a non-null parent — possibly a human reply to a
+   *  comment the bot authored via linear_post_comment. The router resolves
+   *  the parent against linear_authored_comments to decide whether to wake a
+   *  bot session. */
+  | "commentReply";
 
 /**
  * Normalized event consumed by the router and handler. One per dispatched
@@ -59,6 +69,17 @@ export interface NormalizedWebhookEvent {
   deliveryId: string;
   /** Echo of the raw event type for logging. */
   eventType: string;
+  /** Linear AgentSession id (only for AgentSessionEvent webhooks). Used to
+   * post replies back into the same Linear thread via Linear's MCP. */
+  agentSessionId?: string | null;
+  /** AgentSessionEvent: Linear's pre-rendered prompt context (decoded XML).
+   * Includes the issue title/description plus any prior comment thread —
+   * the cleanest "what to send to the LLM" payload. */
+  promptContext?: string | null;
+  /** Comment events: parent comment id when this is a threaded reply. The
+   *  Linear webhook payload exposes it as either `data.parentId` or
+   *  `data.parent.id`; we normalize. Null for top-level comments. */
+  parentCommentId?: string | null;
 }
 
 /** Parses Linear's raw webhook into our normalized shape. Pure function. */
@@ -72,6 +93,22 @@ export function parseWebhook(raw: RawWebhookEnvelope): NormalizedWebhookEvent | 
   // Handle AppUserNotification (the primary trigger for B+).
   if (eventType === "AppUserNotification") {
     return parseAppUserNotification(raw, deliveryId, eventType, action);
+  }
+
+  // Handle AgentSessionEvent — fired when a Linear OAuth app is
+  // delegated/mentioned via the new agent surface. This is the primary
+  // trigger for the A1 dedicated-app flow.
+  if (eventType === "AgentSessionEvent") {
+    return parseAgentSessionEvent(raw, deliveryId, eventType, action);
+  }
+
+  // Handle Comment events — a top-level threaded reply to a bot-authored
+  // comment is how humans answer the bot's `linear_post_comment`. The
+  // router does the actual is-this-a-reply-to-the-bot check by looking up
+  // parentCommentId in linear_authored_comments; this parser just surfaces
+  // the data.
+  if (eventType === "Comment" && action === "create") {
+    return parseCommentCreate(raw, deliveryId, eventType);
   }
 
   // Handle Issue/Comment shape webhooks (used by A1 in Phase 11).
@@ -90,6 +127,98 @@ export function parseWebhook(raw: RawWebhookEnvelope): NormalizedWebhookEvent | 
     actorUserName: null,
     deliveryId,
     eventType,
+  };
+}
+
+function parseAgentSessionEvent(
+  raw: RawWebhookEnvelope,
+  deliveryId: string,
+  eventType: string,
+  action: string,
+): NormalizedWebhookEvent | null {
+  const session = raw.agentSession ?? pickObject(raw.data ?? {}, "agentSession") ?? {};
+  const issue = pickObject(session, "issue") ?? {};
+  const creator = pickObject(session, "creator") ?? {};
+  const comment = pickObject(session, "comment") ?? null;
+
+  // Action: "created" = first delegation, "prompted" = follow-up message.
+  const kind: NotificationKind | null =
+    action === "created" ? "agentSessionCreated"
+    : action === "prompted" ? "agentSessionPrompted"
+    : null;
+
+  const labelObjects = (issue.labels as { nodes?: unknown[] } | undefined)?.nodes;
+  const labels = Array.isArray(labelObjects)
+    ? labelObjects
+        .map((n) => (n as { name?: string }).name?.toLowerCase())
+        .filter((n): n is string => typeof n === "string")
+    : [];
+
+  return {
+    kind,
+    workspaceId: raw.organizationId ?? pickString(session, "organizationId") ?? "",
+    issueId: pickString(issue, "id") ?? pickString(session, "issueId"),
+    issueIdentifier: pickString(issue, "identifier"),
+    issueTitle: pickString(issue, "title"),
+    issueDescription: pickString(issue, "description"),
+    commentBody: comment ? pickString(comment, "body") : null,
+    commentId: comment ? pickString(comment, "id") : pickString(session, "commentId"),
+    labels,
+    actorUserId: pickString(creator, "id"),
+    actorUserName: pickString(creator, "name"),
+    deliveryId,
+    eventType,
+    agentSessionId: pickString(session, "id"),
+    promptContext: typeof raw.promptContext === "string" ? decodeHtmlEntities(raw.promptContext) : null,
+  };
+}
+
+/** Linear's promptContext is XML with HTML-escaped angle brackets. Undo that. */
+function decodeHtmlEntities(s: string): string {
+  return s
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, "'")
+    .replace(/&amp;/g, "&");
+}
+
+function parseCommentCreate(
+  raw: RawWebhookEnvelope,
+  deliveryId: string,
+  eventType: string,
+): NormalizedWebhookEvent {
+  const data = raw.data ?? {};
+  const parent = pickObject(data, "parent");
+  // Linear webhook payload sometimes nests the parent comment id under
+  // `data.parent.id`, sometimes flattens to `data.parentId`. Accept either.
+  const parentCommentId =
+    pickString(data, "parentId") ??
+    (parent ? pickString(parent, "id") : null);
+  const issueId = pickString(data, "issueId");
+  const commentId = pickString(data, "id");
+  const body = pickString(data, "body");
+  const userId = pickString(data, "userId");
+  // The router decides whether this reply should wake a bot session by
+  // looking up parentCommentId — kind=commentReply just means "Comment was
+  // created with a non-null parent and is a candidate". Top-level comments
+  // (no parent) get kind=null because we don't act on them.
+  const kind: NotificationKind | null = parentCommentId ? "commentReply" : null;
+  return {
+    kind,
+    workspaceId: raw.organizationId ?? "",
+    issueId,
+    issueIdentifier: null,
+    issueTitle: null,
+    issueDescription: null,
+    commentBody: body,
+    commentId,
+    labels: [],
+    actorUserId: userId,
+    actorUserName: null,
+    deliveryId,
+    eventType,
+    parentCommentId,
   };
 }
 

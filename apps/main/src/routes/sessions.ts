@@ -165,6 +165,7 @@ app.post("/", async (c) => {
       memory_store_id?: string;
       mount_path?: string;
       access?: "read_write" | "read_only";
+      prompt?: string;
       url?: string;
       repo_url?: string;
       authorization_token?: string;
@@ -176,6 +177,12 @@ app.post("/", async (c) => {
 
   if (!body.agent || !body.environment_id) {
     return c.json({ error: "agent and environment_id are required" }, 400);
+  }
+
+  // Anthropic-aligned cap: max 8 memory_store resources per session.
+  const memoryStoreCount = (body.resources ?? []).filter((r) => r.type === "memory_store").length;
+  if (memoryStoreCount > 8) {
+    return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
   }
 
   // Verify agent exists
@@ -195,6 +202,38 @@ app.post("/", async (c) => {
   const envSnapshotData = await c.env.CONFIG_KV.get(kvKey(t, "env", body.environment_id));
   const environmentSnapshot = envSnapshotData ? (JSON.parse(envSnapshotData) as EnvironmentConfig) : undefined;
   const vaultIds = body.vault_ids || [];
+
+  // Pre-scan github_repository resources for binding fast-path. When a
+  // resource omits authorization_token AND the user has a live github
+  // binding for that org, mint a fresh installation token + attach the
+  // binding's vault. Done BEFORE SessionDO init so the augmented vault_ids
+  // make it into the snapshot the DO uses.
+  const fastPathTokens = new Map<string, string>(); // repoUrl → token
+  if (body.resources?.length) {
+    for (const res of body.resources) {
+      if (
+        (res.type === "github_repository" || res.type === "github_repo") &&
+        (res.url || res.repo_url) &&
+        !res.authorization_token
+      ) {
+        const repoUrl = res.url || res.repo_url!;
+        const fast = await tryGitHubBindingFastPath(c.env, t, repoUrl);
+        if (fast) {
+          fastPathTokens.set(repoUrl, fast.token);
+          if (!vaultIds.includes(fast.vaultId)) vaultIds.push(fast.vaultId);
+        }
+      }
+    }
+  }
+
+  // Refresh provider-tagged credentials (e.g. GitHub installation tokens,
+  // ~1hr TTL) before handing the vault to a fresh session. Best-effort:
+  // failures are logged and ignored — the existing token may still be valid;
+  // the outbound proxy's on-401 retry path covers any miss.
+  await refreshProviderCredentialsForSession(c.env, t, body.agent, vaultIds).catch(
+    () => undefined,
+  );
+
   const vaultCredentials = await fetchVaultCredentials(c.env, t, vaultIds);
 
   // Initialize SessionDO via sandbox worker
@@ -281,24 +320,30 @@ app.post("/", async (c) => {
           type: "memory_store",
           memory_store_id: res.memory_store_id,
           mount_path: res.mount_path,
+          access: res.access === "read_only" ? "read_only" : "read_write",
+          prompt: typeof res.prompt === "string" ? res.prompt.slice(0, 4096) : undefined,
           created_at: new Date().toISOString(),
         };
         await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
         createdResources.push(resource);
       } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
         const resourceId = generateResourceId();
+        const repoUrl = res.url || res.repo_url!;
         const resource: SessionResource = {
           id: resourceId,
           session_id: sessionId,
           type: "github_repository",
-          url: res.url || res.repo_url,
-          repo_url: res.url || res.repo_url,
+          url: repoUrl,
+          repo_url: repoUrl,
           mount_path: res.mount_path || "/workspace",
           checkout: res.checkout,
           created_at: new Date().toISOString(),
         };
-        if (res.authorization_token) {
-          await c.env.CONFIG_KV.put(kvKey(t, "secret", sessionId, resourceId), res.authorization_token);
+        // Token resolution order: explicit authorization_token (PAT) →
+        // pre-resolved binding fast-path (set during the pre-scan above).
+        const token = res.authorization_token ?? fastPathTokens.get(repoUrl) ?? null;
+        if (token) {
+          await c.env.CONFIG_KV.put(kvKey(t, "secret", sessionId, resourceId), token);
         }
         await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
         createdResources.push(resource);
@@ -796,6 +841,8 @@ app.post("/:id/resources", async (c) => {
     file_id?: string;
     memory_store_id?: string;
     mount_path?: string;
+    access?: "read_write" | "read_only";
+    prompt?: string;
   }>();
 
   if (!body.type) {
@@ -820,6 +867,17 @@ app.post("/:id/resources", async (c) => {
     if (!body.memory_store_id) {
       return c.json({ error: "memory_store_id is required for memory_store resources" }, 400);
     }
+    // Anthropic-aligned cap: max 8 memory_store resources per session.
+    let memoryStoreCount = 0;
+    for (const k of existingResources) {
+      const data = await c.env.CONFIG_KV.get(k.name);
+      if (data && (JSON.parse(data) as SessionResource).type === "memory_store") {
+        memoryStoreCount++;
+      }
+    }
+    if (memoryStoreCount >= 8) {
+      return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
+    }
   }
 
   const resourceId = generateResourceId();
@@ -832,6 +890,13 @@ app.post("/:id/resources", async (c) => {
     mount_path: body.mount_path,
     created_at: new Date().toISOString(),
   };
+
+  if (body.type === "memory_store") {
+    resource.access = body.access === "read_only" ? "read_only" : "read_write";
+    if (typeof body.prompt === "string") {
+      resource.prompt = body.prompt.slice(0, 4096);
+    }
+  }
 
   await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
   return c.json(resource, 201);
@@ -897,6 +962,164 @@ async function fetchVaultCredentials(
     out.push({ vault_id: vaultId, credentials });
   }
   return out;
+}
+
+/**
+ * Refresh provider-tagged credentials in the given vaults before a session
+ * starts using them. Avoids the "user starts a session 90 minutes after the
+ * last webhook → installation token already expired → bot 401s on first
+ * MCP call" failure mode. Best-effort: any failure is swallowed so the
+ * session still starts (the outbound proxy's on-401 retry will catch it
+ * later).
+ */
+async function refreshProviderCredentialsForSession(
+  env: Env,
+  tenantId: string,
+  agentId: string,
+  vaultIds: string[],
+): Promise<void> {
+  if (!vaultIds.length || !env.INTEGRATIONS || !env.INTEGRATIONS_INTERNAL_SECRET) return;
+
+  // Resolve owning userId for this session via the agent row's tenant + a
+  // direct user lookup. We need userId because the integrations gateway
+  // scopes refresh per-user.
+  let userId: string | null = null;
+  if (env.AUTH_DB) {
+    const row = await env.AUTH_DB.prepare(
+      `SELECT id FROM "user" WHERE tenantId = ? LIMIT 1`,
+    )
+      .bind(tenantId)
+      .first<{ id: string }>();
+    userId = row?.id ?? null;
+  }
+  if (!userId) return;
+
+  // Find providers represented in this session's vaults.
+  const providers = new Set<string>();
+  for (const vaultId of vaultIds) {
+    const list = await env.CONFIG_KV.list({ prefix: kvKey(tenantId, "cred", vaultId) + ":" });
+    for (const k of list.keys) {
+      const data = await env.CONFIG_KV.get(k.name);
+      if (!data) continue;
+      try {
+        const cred = JSON.parse(data) as CredentialConfig;
+        if (cred.auth?.provider) providers.add(`${cred.auth.provider}:${vaultId}`);
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // Fan out one refresh per (provider, vault) pair.
+  await Promise.all(
+    [...providers].map(async (key) => {
+      const [provider, vaultId] = key.split(":");
+      if (provider !== "github" && provider !== "linear") return;
+      try {
+        await env.INTEGRATIONS!.fetch(
+          `http://gateway/${provider}/internal/refresh-by-vault`,
+          {
+            method: "POST",
+            headers: {
+              "content-type": "application/json",
+              "x-internal-secret": env.INTEGRATIONS_INTERNAL_SECRET!,
+            },
+            body: JSON.stringify({ userId, vaultId }),
+          },
+        );
+      } catch {
+        // best-effort
+      }
+    }),
+  );
+  // agentId is currently unused (refresh is per-user not per-agent), but
+  // we accept it for signature symmetry — future per-agent rate limiting
+  // would slot here.
+  void agentId;
+}
+
+/**
+ * Look up a live github binding the tenant owns for the given repo URL. When
+ * found, calls the integrations gateway to mint a fresh installation token
+ * (~1hr TTL) and returns it alongside the binding's vault id. Returns null
+ * when no binding matches or any step fails — caller falls back to PAT.
+ */
+async function tryGitHubBindingFastPath(
+  env: Env,
+  tenantId: string,
+  repoUrl: string,
+): Promise<{ token: string; vaultId: string } | null> {
+  if (!env.INTEGRATIONS || !env.INTEGRATIONS_INTERNAL_SECRET || !env.AUTH_DB) return null;
+  const org = parseGitHubOrg(repoUrl);
+  if (!org) return null;
+
+  // Resolve the user owning this tenant. Single-user-per-tenant assumption
+  // matches the rest of the integrations layer.
+  const userRow = await env.AUTH_DB.prepare(
+    `SELECT id FROM "user" WHERE tenantId = ? LIMIT 1`,
+  )
+    .bind(tenantId)
+    .first<{ id: string }>();
+  const userId = userRow?.id;
+  if (!userId) return null;
+
+  // Look up active github installations for this user matching the org. The
+  // workspace_name field on linear_installations holds the GitHub org login.
+  const row = await env.AUTH_DB.prepare(
+    `SELECT id, vault_id FROM linear_installations
+       WHERE user_id = ? AND provider_id = 'github'
+         AND lower(workspace_name) = lower(?)
+         AND revoked_at IS NULL AND vault_id IS NOT NULL
+       ORDER BY created_at DESC LIMIT 1`,
+  )
+    .bind(userId, org)
+    .first<{ id: string; vault_id: string }>();
+  if (!row?.vault_id) return null;
+
+  // Mint fresh token via integrations gateway. The gateway holds the
+  // App private key — we don't.
+  try {
+    const res = await env.INTEGRATIONS.fetch(
+      `http://gateway/github/internal/refresh-by-vault`,
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-internal-secret": env.INTEGRATIONS_INTERNAL_SECRET,
+        },
+        body: JSON.stringify({ userId, vaultId: row.vault_id }),
+      },
+    );
+    if (!res.ok) return null;
+    const data = (await res.json()) as { token?: string };
+    if (!data.token) return null;
+    return { token: data.token, vaultId: row.vault_id };
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Extract the org login from a GitHub repo URL. Handles
+ * `https://github.com/<org>/<repo>(.git)?`, `git@github.com:<org>/<repo>`,
+ * and bare `<org>/<repo>` forms. Returns null when unparseable or not GitHub.
+ */
+function parseGitHubOrg(repoUrl: string): string | null {
+  // Try full URL form first
+  try {
+    const u = new URL(repoUrl);
+    if (u.hostname !== "github.com" && u.hostname !== "www.github.com") return null;
+    const parts = u.pathname.replace(/^\/+/, "").split("/");
+    return parts[0] || null;
+  } catch {
+    // SSH form: git@github.com:owner/repo
+    const ssh = repoUrl.match(/^git@github\.com:([^/]+)\//);
+    if (ssh) return ssh[1];
+    // Bare owner/repo
+    const bare = repoUrl.match(/^([^/]+)\/[^/]+$/);
+    if (bare) return bare[1];
+    return null;
+  }
 }
 
 export default app;

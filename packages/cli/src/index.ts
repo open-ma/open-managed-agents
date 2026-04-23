@@ -499,6 +499,203 @@ const commands: Cmd[] = [
     },
   },
 
+  // GitHub integration — mirrors `oma linear *` shape exactly.
+  {
+    group: "GitHub", match: ["github", "list"],
+    usage: "oma github list", desc: "List connected GitHub installations",
+    http: "GET    /v1/integrations/github/installations",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; workspace_name: string; bot_login: string; created_at: number }> }>(config, "/v1/integrations/github/installations");
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      if (!data.length) { console.log("No GitHub installations. Publish an agent with: oma github publish <agent-id> --env <env-id>"); return; }
+      table([["ORG/USER", "INSTALLATION ID", "BOT LOGIN", "CREATED"], ...data.map(i => [i.workspace_name, i.id, i.bot_login, new Date(i.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "pubs"], needsArg: true,
+    usage: "oma github pubs <installation-id>", desc: "List agents published to a GitHub install",
+    http: "GET    /v1/integrations/github/installations/:id/publications",
+    async run(config, args) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; agent_id: string; persona: { name: string }; status: string; capabilities: string[] }> }>(config, `/v1/integrations/github/installations/${args[0]}/publications`);
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      if (!data.length) { console.log("No publications. Publish with: oma github publish <agent-id> --env <env-id>"); return; }
+      table([["PERSONA", "PUBLICATION ID", "AGENT", "STATUS", "CAPS"], ...data.map(p => [p.persona.name, p.id, p.agent_id, p.status, capsPreview(p.capabilities)])]);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "get"], needsArg: true,
+    usage: "oma github get <publication-id>", desc: "Show one GitHub publication",
+    http: "GET    /v1/integrations/github/publications/:id",
+    async run(config, args) {
+      const p = await apiFetch<any>(config, `/v1/integrations/github/publications/${args[0]}`);
+      if (config.json) { console.log(JSON.stringify(p, null, 2)); return; }
+      console.log(`Persona:        ${p.persona.name}\nID:             ${p.id}\nAgent:          ${p.agent_id}\nEnvironment:    ${p.environment_id}\nInstallation:   ${p.installation_id}\nMode:           ${p.mode}\nStatus:         ${p.status}\nGranularity:    ${p.session_granularity}\nCapabilities:   ${p.capabilities.join(", ")}`);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "bind"], needsArg: true,
+    usage: "oma github bind <agent-id> --env <env-id> [--persona <name>] [--avatar <url>]", desc: "Bind agent to GitHub via App Manifest (one-click)",
+    http: "POST   /v1/integrations/github/start-a1 {agentId, environmentId, personaName, personaAvatarUrl?, returnUrl}",
+    async run(config, args) {
+      const agentId = args[0];
+      const envId = flag(args, "--env");
+      const persona = flag(args, "--persona") || "";
+      const avatar = flag(args, "--avatar") || null;
+      if (!envId) { console.error("Usage: oma github bind <agent-id> --env <env-id> [--persona <name>] [--avatar <url>]"); process.exit(1); }
+      let personaName = persona;
+      if (!personaName) {
+        const agent = await apiFetch<{ name: string }>(config, `/v1/agents/${agentId}`).catch(() => null);
+        personaName = agent?.name || agentId;
+      }
+      const r = await apiFetch<{
+        formToken: string;
+        appOmaId: string;
+        suggestedAppName: string;
+        setupUrl: string;
+        webhookUrl: string;
+        manifestStartUrl: string;
+        recommendedPermissions: Record<string, string>;
+        recommendedSubscriptions: string[];
+      }>(
+        config,
+        "/v1/integrations/github/start-a1",
+        { method: "POST", body: JSON.stringify({ agentId, environmentId: envId, personaName, personaAvatarUrl: avatar, returnUrl: `${config.baseUrl}/integrations/github` }) },
+      );
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`\nBinding "${r.suggestedAppName}" to GitHub.`);
+      if (!isPubliclyReachable(r.setupUrl) || !r.setupUrl.startsWith("https://")) {
+        console.log(`\n⚠  GitHub requires HTTPS on a publicly-reachable host for Setup / Webhook URLs.`);
+        console.log(`The gateway URL above is local / non-HTTPS — GitHub will reject it.`);
+        console.log(`Fix: deploy the integrations worker (or run a tunnel like cloudflared/ngrok)`);
+        console.log(`and set GATEWAY_ORIGIN to that public HTTPS host before retrying.`);
+      }
+      console.log(`\n→ Open this URL to register the GitHub App in one click:\n`);
+      console.log(`   ${r.manifestStartUrl}\n`);
+      console.log(`After confirming on GitHub you'll bounce through to "Install on org" automatically.`);
+      console.log(`Verify with:  oma github list && oma github pubs <installation-id>\n`);
+      console.log(`Manual fallback (if you want to register the App by hand instead):`);
+      console.log(`  oma github submit ${r.formToken} --app-id <ID> --private-key-file <PEM> --webhook-secret <SECRET>`);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "submit"], needsArg: true,
+    usage: "oma github submit <form-token> --app-id <id> (--private-key <pem> | --private-key-file <path>) --webhook-secret <secret> [--client-id X] [--client-secret Y]", desc: "Step 2: validate App credentials → returns install URL",
+    http: "POST   /v1/integrations/github/credentials {formToken, appId, privateKey, webhookSecret, clientId?, clientSecret?}",
+    async run(config, args) {
+      const formToken = args[0];
+      const appId = flag(args, "--app-id");
+      const privateKeyInline = flag(args, "--private-key");
+      const privateKeyFile = flag(args, "--private-key-file");
+      const webhookSecret = flag(args, "--webhook-secret");
+      const clientId = flag(args, "--client-id");
+      const clientSecret = flag(args, "--client-secret");
+      if (!appId || !webhookSecret || (!privateKeyInline && !privateKeyFile)) {
+        console.error(
+          "Usage: oma github submit <form-token> --app-id <id> --private-key-file <path> --webhook-secret <secret>\n" +
+          "  --private-key-file points at the .pem you downloaded from the App's settings page.",
+        );
+        process.exit(1);
+      }
+      let privateKey: string;
+      if (privateKeyInline) {
+        privateKey = privateKeyInline.replace(/\\n/g, "\n");
+      } else {
+        const fs = await import("node:fs/promises");
+        privateKey = await fs.readFile(privateKeyFile!, "utf8");
+      }
+      const r = await apiFetch<{ url: string; appOmaId: string; appSlug: string; botLogin: string; setupUrl: string; webhookUrl: string }>(
+        config,
+        "/v1/integrations/github/credentials",
+        { method: "POST", body: JSON.stringify({ formToken, appId, privateKey, webhookSecret, clientId, clientSecret }) },
+      ).catch((err: Error) => {
+        if (/form_token_invalid|JwtSigner\.verify/i.test(err.message)) {
+          console.error(`Form token rejected. Re-run \`oma github publish <agent-id> --env <env-id>\` to mint a fresh token.`);
+          process.exit(1);
+        }
+        if (/credentials_mismatch|appId mismatch/i.test(err.message)) {
+          console.error(`appId / private key mismatch. Both must come from the same GitHub App's settings page.`);
+          process.exit(1);
+        }
+        throw err;
+      });
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`\nStep 2 complete. Bot will appear as @${r.botLogin}.`);
+      console.log(`\nOpen this URL in a browser and pick which org / repos to install on:\n`);
+      console.log(`  ${r.url}\n`);
+      console.log(`After approval GitHub redirects to the setup URL; the publication transitions to 'live'.`);
+      console.log(`Verify with: oma github list && oma github pubs <installation-id>`);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "handoff"], needsArg: true,
+    usage: "oma github handoff <form-token>", desc: "Step 2 alt: 7-day shareable URL for an org owner",
+    http: "POST   /v1/integrations/github/handoff-link {formToken}",
+    async run(config, args) {
+      const r = await apiFetch<{ url: string; expiresInDays: number }>(
+        config,
+        "/v1/integrations/github/handoff-link",
+        { method: "POST", body: JSON.stringify({ formToken: args[0] }) },
+      ).catch((err: Error) => {
+        if (/form_token_invalid|JwtSigner\.verify/i.test(err.message)) {
+          console.error(`Form token rejected. Re-run \`oma github publish <agent-id> --env <env-id>\` to mint a fresh token.`);
+          process.exit(1);
+        }
+        throw err;
+      });
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`\nSend this URL to your GitHub org owner:\n  ${r.url}\nExpires in ${r.expiresInDays} days.`);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "update"], needsArg: true,
+    usage: "oma github update <publication-id> [--persona <name>] [--avatar <url>] [--caps <a,b,c>]", desc: "Update persona / capabilities of a GitHub publication",
+    http: "PATCH  /v1/integrations/github/publications/:id {persona?, capabilities?}",
+    async run(config, args) {
+      const id = args[0];
+      const personaName = flag(args, "--persona");
+      const avatarRaw = flag(args, "--avatar");
+      const capsRaw = flag(args, "--caps");
+      const patch: Record<string, unknown> = {};
+      if (personaName !== undefined || avatarRaw !== undefined) {
+        patch.persona = {
+          ...(personaName !== undefined ? { name: personaName } : {}),
+          ...(avatarRaw !== undefined ? { avatarUrl: avatarRaw === "" ? null : avatarRaw } : {}),
+        };
+      }
+      if (capsRaw !== undefined) {
+        patch.capabilities = capsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+      if (!Object.keys(patch).length) {
+        console.error("Nothing to update. Pass at least --persona, --avatar, or --caps.");
+        process.exit(1);
+      }
+      const updated = await apiFetch<any>(config, `/v1/integrations/github/publications/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      if (config.json) { console.log(JSON.stringify(updated, null, 2)); return; }
+      console.log(`Updated: ${updated.persona.name} (${updated.id}) — caps: ${updated.capabilities.length}`);
+    },
+  },
+  {
+    group: "GitHub", match: ["github", "unpublish"], needsArg: true,
+    usage: "oma github unpublish <publication-id>", desc: "Mark a GitHub publication unpublished",
+    http: "DELETE /v1/integrations/github/publications/:id",
+    async run(config, args) {
+      try {
+        await apiFetch(config, `/v1/integrations/github/publications/${args[0]}`, { method: "DELETE" });
+      } catch (err: any) {
+        if (/^404 /.test(err.message)) {
+          console.error(`No publication with id ${args[0]}.`);
+          console.error(`Find valid publication ids with: oma github list && oma github pubs <installation-id>`);
+          process.exit(1);
+        }
+        throw err;
+      }
+      console.log(`Unpublished: ${args[0]}`);
+    },
+  },
+
   // Slack integration — mirrors Linear's surface (A1 per-publication App).
   {
     group: "Slack", match: ["slack", "list"],
@@ -690,6 +887,61 @@ const commands: Cmd[] = [
       console.log(`Unpublished: ${args[0]}`);
     },
   },
+
+  // Memory
+  {
+    group: "Memory", match: ["memory", "reconcile"],
+    usage: "oma memory reconcile [--store <id>] [--limit N] [--all]",
+    desc: "Re-embed memories whose Vectorize sync is stale (vector_synced_at IS NULL).",
+    http: "POST   /v1/memory_stores/_reconcile {store_id?, limit?}",
+    async run(config, args) {
+      const storeId = flag(args, "--store");
+      const limitStr = flag(args, "--limit");
+      const all = args.includes("--all");
+      const limit = limitStr ? Number(limitStr) : 200;
+      if (!storeId && !all) {
+        console.error("Specify either --store <id> or --all (drains all stores in the tenant).");
+        process.exit(1);
+      }
+      let totalScanned = 0, totalFixed = 0, totalFailing = 0;
+      const errors: Array<{ memory_id: string; error: string }> = [];
+      for (let pass = 1; pass <= 100; pass++) {
+        const body: { store_id?: string; limit?: number } = { limit };
+        if (storeId) body.store_id = storeId;
+        const result = await apiFetch<{
+          scanned: number; fixed: number; still_failing: number;
+          sample_errors: Array<{ memory_id: string; error: string }>;
+        }>(config, "/v1/memory_stores/_reconcile", {
+          method: "POST",
+          body: JSON.stringify(body),
+        });
+        totalScanned += result.scanned;
+        totalFixed += result.fixed;
+        totalFailing = result.still_failing; // last pass's failing count
+        for (const e of result.sample_errors) if (errors.length < 10) errors.push(e);
+        if (config.json) {
+          console.log(JSON.stringify({ pass, ...result }));
+        } else {
+          console.log(`pass ${pass}: scanned=${result.scanned} fixed=${result.fixed} failing=${result.still_failing}`);
+        }
+        // Stop when this batch had nothing to do, or when we made no progress.
+        if (result.scanned === 0) break;
+        if (result.fixed === 0 && result.still_failing > 0) {
+          console.error("No progress this pass — remaining rows keep failing. Stopping.");
+          break;
+        }
+      }
+      if (config.json) {
+        console.log(JSON.stringify({ totals: { scanned: totalScanned, fixed: totalFixed, failing: totalFailing }, errors }));
+      } else {
+        console.log(`\nDone. scanned=${totalScanned} fixed=${totalFixed} still_failing=${totalFailing}`);
+        if (errors.length) {
+          console.log("\nSample errors:");
+          for (const e of errors) console.log(`  ${e.memory_id}: ${e.error}`);
+        }
+      }
+    },
+  },
 ];
 
 // ─── API Endpoints not covered by CLI commands ───
@@ -716,6 +968,7 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Vaults", http: "DELETE /v1/vaults/:id                          Delete vault" },
   { group: "Vaults", http: "DELETE /v1/vaults/:id/credentials/:cid         Delete credential" },
   { group: "Linear", http: "PATCH  /v1/integrations/linear/publications/:id  Update persona / capabilities" },
+  { group: "GitHub", http: "PATCH  /v1/integrations/github/publications/:id  Update persona / capabilities" },
   { group: "OAuth", http: "GET    /v1/oauth/callback                      OAuth callback (internal)" },
   { group: "OAuth", http: "POST   /v1/oauth/refresh                       Refresh token {vault_id, credential_id}" },
   { group: "Skills", http: "POST   /v1/skills                              Create skill {files:[{filename,content}]}" },
@@ -735,6 +988,7 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Memory", http: "GET    /v1/memory_stores/:id/memories?prefix=X List memories (metadata)" },
   { group: "Memory", http: "GET    /v1/memory_stores/:id/memories/:mid     Get memory with content" },
   { group: "Memory", http: "DELETE /v1/memory_stores/:id/memories/:mid     Delete memory" },
+  { group: "Memory", http: "POST   /v1/memory_stores/_reconcile {store_id?,limit?}  Re-embed stale rows" },
   { group: "Evals", http: "POST   /v1/evals/runs                          Create eval run {agent_id, environment_id, tasks:[...]}" },
   { group: "Evals", http: "GET    /v1/evals/runs                          List eval runs" },
   { group: "Evals", http: "GET    /v1/evals/runs/:id                      Get eval run results" },
@@ -819,7 +1073,7 @@ function apiRef(resource?: string) {
     models: "Model Cards", vaults: "Vaults", oauth: "OAuth",
     skills: "Skills", files: "Files", memory: "Memory",
     keys: "API Keys", evals: "Evals", clawhub: "ClawHub",
-    "mcp": "MCP Servers", linear: "Linear", integrations: "Linear",
+    "mcp": "MCP Servers", linear: "Linear", github: "GitHub", integrations: "Linear",
   };
 
   if (normalized && groupAlias[normalized]) {

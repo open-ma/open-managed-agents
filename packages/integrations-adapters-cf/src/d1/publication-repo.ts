@@ -86,7 +86,8 @@ export class D1PublicationRepo implements PublicationRepo {
         row.mode,
         row.status,
         row.persona.name,
-        row.persona.avatarUrl,
+        // D1 rejects undefined; coerce to null when persona has no avatar.
+        row.persona.avatarUrl ?? null,
         JSON.stringify([...row.capabilities]),
         row.sessionGranularity,
         now,

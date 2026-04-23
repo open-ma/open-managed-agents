@@ -10,7 +10,10 @@
 import type {
   AppCredentials,
   CapabilitySet,
+  GitHubAppCredentials,
   Installation,
+  IssueSession,
+  IssueSessionStatus,
   Persona,
   Publication,
   PublicationStatus,
@@ -54,9 +57,22 @@ export interface InstallationRepo {
    * revoked. Implementations are expected to hold a Crypto instance.
    */
   getAccessToken(id: string): Promise<string | null>;
+  /**
+   * Returns the decrypted refresh token (if one was persisted), or null. Used
+   * by the provider to renew an expired access token without forcing the user
+   * to reinstall the OAuth app.
+   */
+  getRefreshToken(id: string): Promise<string | null>;
   insert(row: NewInstallation): Promise<Installation>;
   /** Set the vault id holding the bearer credential for this install. */
   setVaultId(id: string, vaultId: string): Promise<void>;
+  /**
+   * Atomically rotate the stored access token (and refresh token, which the
+   * provider may rotate alongside). Both values are encrypted before storage.
+   * Pass refreshToken=null to leave the existing refresh row untouched only
+   * when the upstream response did not return one.
+   */
+  setTokens(id: string, accessToken: string, refreshToken: string | null): Promise<void>;
   markRevoked(id: string, at: number): Promise<void>;
 }
 
@@ -115,6 +131,37 @@ export interface AppRepo {
   delete(id: string): Promise<void>;
 }
 
+export interface NewGitHubAppCredentials {
+  /** Optional explicit id; insert behaves as upsert when provided. */
+  id?: string;
+  publicationId: string | null;
+  /** Numeric GitHub App id (string-typed so we don't truncate large ints). */
+  appId: string;
+  appSlug: string;
+  botLogin: string;
+  clientId: string | null;
+  /** Will be encrypted before storage. Pass null when not using OAuth. */
+  clientSecret: string | null;
+  /** Will be encrypted before storage. */
+  webhookSecret: string;
+  /** Will be encrypted before storage. PEM-encoded RSA private key. */
+  privateKey: string;
+}
+
+export interface GitHubAppRepo {
+  get(id: string): Promise<GitHubAppCredentials | null>;
+  getByPublication(publicationId: string): Promise<GitHubAppCredentials | null>;
+  /** Match by GitHub's numeric app_id (e.g. on webhook dispatch). */
+  getByAppId(appId: string): Promise<GitHubAppCredentials | null>;
+  getWebhookSecret(id: string): Promise<string | null>;
+  getClientSecret(id: string): Promise<string | null>;
+  /** Returns the decrypted PEM private key for App JWT minting. */
+  getPrivateKey(id: string): Promise<string | null>;
+  insert(row: NewGitHubAppCredentials): Promise<GitHubAppCredentials>;
+  setPublicationId(id: string, publicationId: string): Promise<void>;
+  delete(id: string): Promise<void>;
+}
+
 export interface WebhookEventStore {
   /**
    * Atomically inserts the delivery id; returns true if it's new (caller should
@@ -141,6 +188,44 @@ export interface SessionScopeRepo {
     status: SessionScopeStatus,
   ): Promise<void>;
   listActive(publicationId: string): Promise<ReadonlyArray<SessionScope>>;
+}
+
+/**
+ * Per-issue session reuse for Linear/GitHub. Linear keys on the issue UUID;
+ * GitHub keys on `<repo>#<number>`. Slack uses the parallel SessionScopeRepo
+ * keyed on `${channel}:${thread_ts}`.
+ */
+export interface IssueSessionRepo {
+  getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null>;
+  insert(row: IssueSession): Promise<void>;
+  updateStatus(
+    publicationId: string,
+    issueId: string,
+    status: IssueSessionStatus,
+  ): Promise<void>;
+  listActive(publicationId: string): Promise<ReadonlyArray<IssueSession>>;
+}
+
+/**
+ * Tracks comments the bot authored via the OMA-hosted Linear MCP server's
+ * `linear_post_comment` tool. Lets us route a Linear `Comment` webhook with
+ * a `parentId` back to the bot's OMA session.
+ *
+ * Slim schema by design: anything derivable from the omaSessionId
+ * (publication / installation / vault) is fetched on demand at webhook
+ * time. Only `issueId` is kept inline — it's used by the bot's
+ * thread-context tools without needing a session record round-trip.
+ */
+export interface AuthoredComment {
+  commentId: string;
+  omaSessionId: string;
+  issueId: string;
+  createdAt: number;
+}
+
+export interface AuthoredCommentRepo {
+  get(commentId: string): Promise<AuthoredComment | null>;
+  insert(row: AuthoredComment): Promise<void>;
 }
 
 export interface NewSetupLink {
