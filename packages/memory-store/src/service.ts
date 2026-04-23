@@ -467,6 +467,7 @@ export class MemoryStoreService {
     storeId: string;
     versionId: string;
   }): Promise<MemoryVersionRow> {
+    await this.requireStore(opts);
     const existing = await this.versionRepo.get(opts.storeId, opts.versionId);
     if (!existing) throw new MemoryNotFoundError("Memory version not found");
     return this.versionRepo.redact(opts.storeId, opts.versionId);
