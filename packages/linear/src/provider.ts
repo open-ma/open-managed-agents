@@ -622,12 +622,10 @@ export class LinearProvider implements IntegrationProvider {
       lines.push("");
       lines.push(
         `Linear opened panel \`${event.agentSessionId}\` for this turn. ` +
-          `To narrate progress in the panel, call ` +
-          `\`linear_say(body, panelId="${event.agentSessionId}", kind="thought")\`. ` +
-          `For a final answer, kind=response (this finalizes the panel). ` +
-          `For a question that needs a reply box, call ` +
-          `\`linear_request_input(body, panelId="${event.agentSessionId}")\`. ` +
-          `Without explicit tool calls, you stay silent in the panel — your ` +
+          `Speak in the panel via \`linear_say(body, panelId="${event.agentSessionId}", kind=...)\` ` +
+          `— kind=thought for narration, kind=action for tool-call cards, ` +
+          `kind=elicitation for a reply box, kind=response to finalize. ` +
+          `Without explicit tool calls, you stay silent in the panel — ` +
           `internal reasoning is private and never auto-mirrored.`,
       );
     }
