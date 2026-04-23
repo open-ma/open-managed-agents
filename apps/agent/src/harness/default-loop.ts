@@ -500,6 +500,29 @@ export class DefaultHarness implements HarnessInterface {
       runtime,
     });
     if (!result) return;
+
+    // Empty-summary defense (upstream layer). If a strategy returns a
+    // result whose summary contains no actual text, do NOT broadcast the
+    // boundary event. Otherwise eventsToMessages would later "honor" the
+    // empty boundary and silently drop the entire pre-boundary history.
+    //
+    // Observed in the wild on MiniMax: model returns finish_reason="tool-calls"
+    // with empty text → SummarizeCompactionStrategy returns
+    // summary=[{type:"text", text:""}] → boundary written → next derive
+    // tosses 60 turns of conversation. The new cc-style / opencode-style
+    // strategies catch this themselves (return null) but the legacy
+    // `summarize` strategy does not, so this layer is the safety net for
+    // any strategy that doesn't self-defend.
+    const hasContent = result.summary?.some(
+      (b) => (b.type === "text" && b.text.trim().length > 0)
+        || b.type === "image"
+        || b.type === "document",
+    );
+    if (!hasContent) {
+      console.warn("[compact] strategy produced empty summary — skipping boundary write");
+      return;
+    }
+
     runtime.broadcast({
       type: "agent.thread_context_compacted",
       original_message_count: result.original_message_count,
