@@ -445,6 +445,76 @@ export class LinearProvider implements IntegrationProvider {
       publication.id,
     );
 
+    // Comment-reply path (M7): if this is a threaded reply to a bot-authored
+    // comment, route it as a user message into the bot's existing OMA session
+    // — bypass the per_issue dispatch logic entirely. If the parent isn't one
+    // of ours, treat it as noise and drop.
+    if (event.kind === "commentReply" && event.parentCommentId) {
+      const authored = await this.container.authoredComments.get(event.parentCommentId);
+      if (!authored) {
+        return { handled: false, reason: "comment_reply_to_non_bot" };
+      }
+      // Don't re-route the bot's own replies to itself.
+      if (event.actorUserId && installation.botUserId === event.actorUserId) {
+        return { handled: false, reason: "comment_reply_from_bot_self" };
+      }
+      let actorDisplayName: string | null = null;
+      if (event.actorUserId) {
+        try {
+          const accessToken = await this.container.installations.getAccessToken(installation.id);
+          if (accessToken) {
+            const res = await this.container.http.fetch({
+              method: "POST",
+              url: "https://api.linear.app/graphql",
+              headers: {
+                authorization: `Bearer ${accessToken}`,
+                "content-type": "application/json",
+              },
+              body: JSON.stringify({
+                query: `query($id:String!){ user(id:$id){ displayName } }`,
+                variables: { id: event.actorUserId },
+              }),
+            });
+            const parsed = JSON.parse(res.body) as {
+              data?: { user?: { displayName?: string } };
+            };
+            actorDisplayName = parsed.data?.user?.displayName ?? null;
+          }
+        } catch {
+          // best effort — bot just won't see actor handle
+        }
+      }
+      const handle = actorDisplayName ? `@${actorDisplayName}` : "(unknown user)";
+      const replyText = [
+        `Reply on Linear ${event.issueIdentifier ?? ""} from ${handle} to a comment you posted:`,
+        "",
+        event.commentBody ?? "",
+      ].join("\n").trim();
+      await this.container.sessions.resume(publication.userId, authored.omaSessionId, {
+        type: "user.message",
+        content: [{ type: "text", text: replyText }],
+        metadata: {
+          linear: {
+            publicationId: publication.id,
+            workspaceId: event.workspaceId,
+            issueId: event.issueId,
+            commentId: event.commentId,
+            parentCommentId: event.parentCommentId,
+            actorUserId: event.actorUserId,
+            eventKind: event.kind,
+            deliveryId: event.deliveryId,
+          },
+        },
+      });
+      await this.container.webhookEvents.attachSession(req.deliveryId, authored.omaSessionId);
+      return {
+        handled: true,
+        reason: "comment_reply_to_bot",
+        publicationId: publication.id,
+        sessionId: authored.omaSessionId,
+      };
+    }
+
     // Dispatch to OMA. per_issue mode resumes the existing session; per_event
     // (and the first hit on per_issue) creates a fresh one.
     const sessionId = await this.dispatchEvent(publication, event);

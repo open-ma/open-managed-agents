@@ -11,6 +11,7 @@
 import type { SessionId, AgentId, UserId } from "./domain";
 import type {
   AppRepo,
+  AuthoredCommentRepo,
   GitHubAppRepo,
   InstallationRepo,
   IssueSessionRepo,
@@ -242,5 +243,8 @@ export interface Container {
   githubApps: GitHubAppRepo;
   webhookEvents: WebhookEventStore;
   issueSessions: IssueSessionRepo;
+  /** Bot-authored top-level Linear comments — used to route reply webhooks
+   *  back to the originating OMA session. Phase 1 of M7. */
+  authoredComments: AuthoredCommentRepo;
   setupLinks: SetupLinkRepo;
 }
