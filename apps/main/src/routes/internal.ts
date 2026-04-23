@@ -630,3 +630,6 @@ async function fetchVaultCredentials(
 }
 
 export default app;
+
+// Test-only exports.
+export const __testInternals = { integrationsOrigin };
