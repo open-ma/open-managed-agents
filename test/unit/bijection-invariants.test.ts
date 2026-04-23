@@ -211,7 +211,7 @@ describe("eventsToMessages — context_boundary handling", () => {
     expect(messages).toHaveLength(5);
   });
 
-  it("boundary WITH summary drops pre-boundary model_io and injects summary", () => {
+  it("boundary WITH summary injects summary and preserves a tail of pre-boundary messages", () => {
     const events: SessionEvent[] = [
       ...eventsBefore,
       {
@@ -224,15 +224,20 @@ describe("eventsToMessages — context_boundary handling", () => {
       { type: "agent.message", content: [{ type: "text", text: "third answer" }] },
     ];
     const messages = eventsToMessages(events);
-    // [synthesized summary user] + [user "third"] + [assistant "third answer"]
-    expect(messages).toHaveLength(3);
+    // [synthesized summary user] + [tail of pre-boundary] + [user "third"] +
+    // [assistant "third answer"]. Tail-preservation (CC-style) keeps the
+    // last K messages of the pre-boundary range alongside the summary so the
+    // model has recent context. With only 4 short pre-boundary messages, the
+    // picker keeps all of them (minimums not met for trimming).
+    expect(messages.length).toBeGreaterThanOrEqual(3);
     expect(messages[0].role).toBe("user");
     const sumContent = messages[0].content as any[];
     expect(sumContent[0].type).toBe("text");
     expect(sumContent[0].text).toContain("<conversation-summary>");
     expect(sumContent[0].text).toContain("Earlier the user asked X");
-    expect(messages[1].role).toBe("user");
-    expect(messages[2].role).toBe("assistant");
+    // Last two messages are the post-boundary user "third" + agent reply.
+    expect(messages[messages.length - 2].role).toBe("user");
+    expect(messages[messages.length - 1].role).toBe("assistant");
   });
 
   it("only the LAST boundary with summary is honored (iterative compaction)", () => {
@@ -260,10 +265,15 @@ describe("eventsToMessages — context_boundary handling", () => {
       { type: "user.message", content: [{ type: "text", text: "q3" }] },
     ];
     const messages = eventsToMessages(events);
-    expect(messages).toHaveLength(2); // [v2 summary, q3]
+    // First message is the v2 summary user message; v1 was superseded.
+    // Tail preservation may include some pre-v2-boundary messages; the
+    // post-boundary q3 is always at the end.
+    expect(messages.length).toBeGreaterThanOrEqual(2);
     const sumText = (messages[0].content as any[])[0].text;
     expect(sumText).toContain("summary v2");
     expect(sumText).not.toContain("summary v1");
+    expect(messages[messages.length - 1].role).toBe("user");
+    expect((messages[messages.length - 1].content as any[])[0].text).toBe("q3");
   });
 
   it("boundary handling stays byte-stable", () => {
@@ -280,5 +290,117 @@ describe("eventsToMessages — context_boundary handling", () => {
     expect(JSON.stringify(eventsToMessages(events))).toBe(
       JSON.stringify(eventsToMessages(events)),
     );
+  });
+});
+
+// ============================================================
+// Empty-summary defense (downstream layer)
+// ============================================================
+//
+// A boundary event with an array summary that contains only empty / whitespace
+// text MUST be ignored. Otherwise a strategy that returned `[{type:"text", text:""}]`
+// would silently drop the entire pre-boundary history.
+//
+// Symptom in the wild: MiniMax sometimes returns finish_reason="tool-calls"
+// with empty text on summarize; SummarizeCompactionStrategy passes that
+// through verbatim into the boundary event. This test pins down that
+// eventsToMessages no longer trusts such boundaries.
+
+describe("eventsToMessages — empty-summary defense", () => {
+  const baseHistory: SessionEvent[] = [
+    { type: "user.message", content: [{ type: "text", text: "q1" }] },
+    { type: "agent.message", content: [{ type: "text", text: "a1" }] },
+    { type: "user.message", content: [{ type: "text", text: "q2" }] },
+    { type: "agent.message", content: [{ type: "text", text: "a2" }] },
+  ];
+
+  it("boundary with empty-text summary is ignored (history NOT dropped)", () => {
+    const events: SessionEvent[] = [
+      ...baseHistory,
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 4,
+        compacted_message_count: 1,
+        summary: [{ type: "text", text: "" }],
+      } as any,
+      { type: "user.message", content: [{ type: "text", text: "q3" }] },
+    ];
+    const messages = eventsToMessages(events);
+    // Pre-boundary 4 messages + post-boundary q3 — boundary is treated as
+    // a no-op because its summary text is empty.
+    expect(messages).toHaveLength(5);
+    expect(messages[0].role).toBe("user");
+    expect((messages[0].content as any[])[0].text).toBe("q1");
+    expect(messages[messages.length - 1].role).toBe("user");
+    expect((messages[messages.length - 1].content as any[])[0].text).toBe("q3");
+  });
+
+  it("boundary with whitespace-only summary is ignored", () => {
+    const events: SessionEvent[] = [
+      ...baseHistory,
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 4,
+        compacted_message_count: 1,
+        summary: [{ type: "text", text: "   \n\t  " }],
+      } as any,
+      { type: "user.message", content: [{ type: "text", text: "q3" }] },
+    ];
+    const messages = eventsToMessages(events);
+    expect(messages).toHaveLength(5);
+  });
+
+  it("boundary with image-only summary IS honored (multimodal escape)", () => {
+    // Edge case: a strategy that produces a summary consisting only of an
+    // image block (no text). Rare but legal — it counts as "carries content"
+    // so the boundary takes effect.
+    const events: SessionEvent[] = [
+      ...baseHistory,
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 4,
+        compacted_message_count: 1,
+        summary: [
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: "AAA=" },
+          },
+        ],
+      } as any,
+      { type: "user.message", content: [{ type: "text", text: "q3" }] },
+    ];
+    const messages = eventsToMessages(events);
+    // Honored: synthesized summary at index 0, post-boundary q3 at end.
+    // Tail preservation may add some pre-boundary messages between them.
+    expect(messages.length).toBeGreaterThanOrEqual(2);
+    expect(messages[0].role).toBe("user");
+    expect((messages[0].content as any[])[0].text).toContain("[image elided]");
+  });
+
+  it("when latest boundary is empty but earlier boundary has real summary, fall through to earlier", () => {
+    // Two boundaries; the most recent is empty (defense rejects it). The
+    // earlier one has a real summary and should be the one honored.
+    const events: SessionEvent[] = [
+      { type: "user.message", content: [{ type: "text", text: "q1" }] },
+      { type: "agent.message", content: [{ type: "text", text: "a1" }] },
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 2,
+        compacted_message_count: 1,
+        summary: [{ type: "text", text: "real summary v1" }],
+      } as any,
+      { type: "user.message", content: [{ type: "text", text: "q2" }] },
+      { type: "agent.message", content: [{ type: "text", text: "a2" }] },
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 4,
+        compacted_message_count: 1,
+        summary: [{ type: "text", text: "" }], // empty — skipped
+      } as any,
+      { type: "user.message", content: [{ type: "text", text: "q3" }] },
+    ];
+    const messages = eventsToMessages(events);
+    const sumText = (messages[0].content as any[])[0].text;
+    expect(sumText).toContain("real summary v1");
   });
 });
