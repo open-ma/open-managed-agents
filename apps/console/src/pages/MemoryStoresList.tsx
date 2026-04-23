@@ -8,14 +8,17 @@ export function MemoryStoresList() {
   const { api } = useApi();
   const [stores, setStores] = useState<MemoryStore[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [showCreate, setShowCreate] = useState(false);
   const [formName, setFormName] = useState("");
   const [formDesc, setFormDesc] = useState("");
+  const [formError, setFormError] = useState<string | null>(null);
 
   // Store detail
   const [selectedStore, setSelectedStore] = useState<MemoryStore | null>(null);
   const [memories, setMemories] = useState<Memory[]>([]);
   const [memsLoading, setMemsLoading] = useState(false);
+  const [detailError, setDetailError] = useState<string | null>(null);
 
   // Memory detail
   const [selectedMemory, setSelectedMemory] = useState<Memory | null>(null);
@@ -24,46 +27,71 @@ export function MemoryStoresList() {
   const [showWrite, setShowWrite] = useState(false);
   const [writePath, setWritePath] = useState("");
   const [writeContent, setWriteContent] = useState("");
+  const [writeError, setWriteError] = useState<string | null>(null);
 
   const load = async () => {
     setLoading(true);
-    try { setStores((await api<{ data: MemoryStore[] }>("/v1/memory_stores?limit=100")).data); } catch {}
+    setError(null);
+    try {
+      setStores((await api<{ data: MemoryStore[] }>("/v1/memory_stores?limit=100")).data);
+    } catch (e) {
+      setError(errMsg(e));
+    }
     setLoading(false);
   };
 
   useEffect(() => { load(); }, []);
 
   const createStore = async () => {
-    await api("/v1/memory_stores", {
-      method: "POST",
-      body: JSON.stringify({ name: formName, description: formDesc || undefined }),
-    });
-    setShowCreate(false); setFormName(""); setFormDesc(""); load();
+    setFormError(null);
+    try {
+      await api("/v1/memory_stores", {
+        method: "POST",
+        body: JSON.stringify({ name: formName, description: formDesc || undefined }),
+      });
+      setShowCreate(false); setFormName(""); setFormDesc(""); load();
+    } catch (e) {
+      setFormError(errMsg(e));
+    }
   };
 
   const openStore = async (s: MemoryStore) => {
     setSelectedStore(s);
     setSelectedMemory(null);
     setMemsLoading(true);
+    setDetailError(null);
     try {
       setMemories((await api<{ data: Memory[] }>(`/v1/memory_stores/${s.id}/memories`)).data);
-    } catch { setMemories([]); }
+    } catch (e) {
+      setMemories([]);
+      setDetailError(errMsg(e));
+    }
     setMemsLoading(false);
   };
 
   const writeMemory = async () => {
     if (!selectedStore) return;
-    await api(`/v1/memory_stores/${selectedStore.id}/memories`, {
-      method: "POST",
-      body: JSON.stringify({ path: writePath, content: writeContent }),
-    });
-    setShowWrite(false); setWritePath(""); setWriteContent("");
-    openStore(selectedStore);
+    setWriteError(null);
+    try {
+      await api(`/v1/memory_stores/${selectedStore.id}/memories`, {
+        method: "POST",
+        body: JSON.stringify({ path: writePath, content: writeContent }),
+      });
+      setShowWrite(false); setWritePath(""); setWriteContent("");
+      openStore(selectedStore);
+    } catch (e) {
+      setWriteError(errMsg(e));
+    }
   };
 
   const deleteStore = async (id: string) => {
-    await api(`/v1/memory_stores/${id}`, { method: "DELETE" });
-    setSelectedStore(null); setMemories([]); load();
+    setDetailError(null);
+    try {
+      await api(`/v1/memory_stores/${id}`, { method: "DELETE" });
+      setSelectedStore(null); setMemories([]); load();
+    } catch (e) {
+      setDetailError(errMsg(e));
+    }
   };
 
   // Store detail view
@@ -89,6 +117,8 @@ export function MemoryStoresList() {
           </button>
         </div>
 
+        {detailError && <ErrorBanner message={detailError} onDismiss={() => setDetailError(null)} />}
+
         {showWrite && (
           <div className="bg-bg-surface border border-border rounded-lg p-4 mb-4">
             <h3 className="font-semibold mb-3">Write Memory</h3>
@@ -96,9 +126,10 @@ export function MemoryStoresList() {
               className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg outline-none focus:border-border-strong" />
             <textarea placeholder="Content" value={writeContent} onChange={e => setWriteContent(e.target.value)} rows={6}
               className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg font-mono outline-none focus:border-border-strong" />
+            {writeError && <p className="text-danger text-sm mb-2">{writeError}</p>}
             <div className="flex gap-2">
               <button onClick={writeMemory} className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">Save</button>
-              <button onClick={() => setShowWrite(false)} className="px-4 py-2 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">Cancel</button>
+              <button onClick={() => { setShowWrite(false); setWriteError(null); }} className="px-4 py-2 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">Cancel</button>
             </div>
           </div>
         )}
@@ -153,15 +184,18 @@ export function MemoryStoresList() {
         </button>
       </div>
 
+      {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
+
       {showCreate && (
         <div className="bg-bg-surface border border-border rounded-lg p-4 mb-4">
           <input placeholder="Store name" value={formName} onChange={e => setFormName(e.target.value)}
             className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg outline-none focus:border-border-strong" />
           <input placeholder="Description (optional)" value={formDesc} onChange={e => setFormDesc(e.target.value)}
             className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-2 bg-bg text-fg outline-none focus:border-border-strong" />
+          {formError && <p className="text-danger text-sm mb-2">{formError}</p>}
           <div className="flex gap-2">
             <button onClick={createStore} className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">Create</button>
-            <button onClick={() => setShowCreate(false)} className="px-4 py-2 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">Cancel</button>
+            <button onClick={() => { setShowCreate(false); setFormError(null); }} className="px-4 py-2 border border-border rounded-lg text-sm text-fg-muted hover:bg-bg-surface transition-colors">Cancel</button>
           </div>
         </div>
       )}
@@ -192,4 +226,19 @@ export function MemoryStoresList() {
       )}
     </div>
   );
+}
+
+function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () => void }) {
+  return (
+    <div className="bg-danger/10 border border-danger/30 rounded-lg px-4 py-3 mb-4 flex items-start justify-between gap-4">
+      <p className="text-danger text-sm">{message}</p>
+      <button onClick={onDismiss} className="text-danger/70 hover:text-danger text-sm flex-shrink-0">Dismiss</button>
+    </div>
+  );
+}
+
+function errMsg(e: unknown): string {
+  if (e instanceof Error) return e.message;
+  if (typeof e === "string") return e;
+  return "Unknown error";
 }

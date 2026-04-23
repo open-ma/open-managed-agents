@@ -51,6 +51,7 @@ export class ServiceBindingSessionCreator implements SessionCreator {
         mcpServers: input.mcpServers,
         metadata: input.metadata,
         initialEvent: input.initialEvent,
+        githubRepoUrl: input.githubRepoUrl,
       }),
     });
     if (!res.ok) {

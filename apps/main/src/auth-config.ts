@@ -110,16 +110,17 @@ export function createAuth(env: Env) {
       user: {
         create: {
           after: async (user) => {
-            const tenantId = `tn_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
-            const now = Math.floor(Date.now() / 1000);
-            const stmt = env.AUTH_DB.prepare(
-              "INSERT INTO tenant (id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)"
-            );
-            await stmt.bind(tenantId, `${user.name}'s workspace`, now, now).run();
-            const update = env.AUTH_DB.prepare(
-              "UPDATE user SET tenantId = ?, role = ? WHERE id = ?"
-            );
-            await update.bind(tenantId, "owner", user.id).run();
+            try {
+              await ensureTenant(env.AUTH_DB, user.id, user.name);
+            } catch (err) {
+              // Don't block sign-up on tenant creation — auth.ts has a self-heal
+              // path that will retry on first authenticated request. Log so the
+              // failure is visible.
+              console.error("user.create.after: ensureTenant failed", {
+                user_id: user.id,
+                err: err instanceof Error ? err.message : String(err),
+              });
+            }
           },
         },
       },
@@ -136,4 +137,38 @@ export async function getTenantId(db: D1Database, userId: string): Promise<strin
     .bind(userId)
     .first<{ tenantId: string | null }>();
   return result?.tenantId ?? null;
+}
+
+/**
+ * Ensure the user has a tenant; create one on demand if not. Idempotent —
+ * concurrent invocations with the same userId may race on tenant creation
+ * but only one wins, the loser re-reads and returns the existing tenantId.
+ *
+ * Used by:
+ *   - databaseHooks.user.create.after (sign-up path)
+ *   - apps/main/src/auth.ts cookie path (self-heal for legacy users whose
+ *     sign-up predated this hook, or whose hook-time INSERT failed silently)
+ */
+export async function ensureTenant(
+  db: D1Database,
+  userId: string,
+  userName: string,
+): Promise<string> {
+  const existing = await getTenantId(db, userId);
+  if (existing) return existing;
+
+  const tenantId = `tn_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+  const now = Math.floor(Date.now() / 1000);
+  await db
+    .prepare("INSERT INTO tenant (id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)")
+    .bind(tenantId, `${userName}'s workspace`, now, now)
+    .run();
+  await db
+    .prepare("UPDATE user SET tenantId = ?, role = ? WHERE id = ? AND tenantId IS NULL")
+    .bind(tenantId, "owner", userId)
+    .run();
+  // Re-read in case a concurrent caller won the race — UPDATE's WHERE clause
+  // ensures we never overwrite an existing tenantId with our orphan.
+  const final = await getTenantId(db, userId);
+  return final ?? tenantId;
 }

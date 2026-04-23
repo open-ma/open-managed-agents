@@ -10,6 +10,8 @@ export default defineConfig({
       "@cloudflare/sandbox": "./test/sandbox-stub.ts",
       // Resolve workspace package for miniflare/workerd runtime
       "@open-managed-agents/shared": "./packages/shared/src/index.ts",
+      "@open-managed-agents/memory-store/test-fakes": "./packages/memory-store/src/test-fakes.ts",
+      "@open-managed-agents/memory-store": "./packages/memory-store/src/index.ts",
     },
   },
   test: {

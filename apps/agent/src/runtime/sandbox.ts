@@ -147,6 +147,29 @@ export class CloudflareSandbox implements SandboxExecutor {
     this.commandSecrets.set(commandPrefix, secrets);
   }
 
+  /**
+   * Bind the OmaSandbox `inject_vault_creds` outbound handler with the
+   * session's vault credentials. After this call, any HTTPS request the
+   * container makes whose hostname matches a credential's `mcp_server_url`
+   * gets a Bearer header injected before being forwarded upstream.
+   * The credentials never leave the Workers runtime.
+   */
+  async setVaultCredentialsForOutbound(
+    vault_credentials: Array<{ vault_id: string; credentials: unknown[] }>,
+  ): Promise<void> {
+    if (!vault_credentials.length) return;
+    try {
+      const sandbox = await this.getSandbox();
+      const hasFn = typeof sandbox.setOutboundHandler === "function";
+      console.log(`[sandbox] setVaultCredentialsForOutbound vaults=${vault_credentials.length} hasFn=${hasFn}`);
+      if (!hasFn) return;
+      await sandbox.setOutboundHandler("inject_vault_creds", { vault_credentials });
+      console.log(`[sandbox] setOutboundHandler bound`);
+    } catch (err) {
+      console.error(`[sandbox] setVaultCredentialsForOutbound failed: ${(err as Error).message ?? err}`);
+    }
+  }
+
 
   async destroy(): Promise<void> {
     try {

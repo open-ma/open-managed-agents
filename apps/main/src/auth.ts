@@ -66,15 +66,18 @@ export const authMiddleware = createMiddleware<{
   // where better-auth's Node.js deps aren't available
   if (c.env.AUTH_DB) {
     try {
-      const { createAuth, getTenantId } = await import("./auth-config");
+      const { createAuth, getTenantId, ensureTenant } = await import("./auth-config");
       const auth = createAuth(c.env);
       const session = await auth.api.getSession({
         headers: c.req.raw.headers,
       });
       if (session?.user) {
-        const tenantId = await getTenantId(c.env.AUTH_DB, session.user.id);
+        let tenantId = await getTenantId(c.env.AUTH_DB, session.user.id);
         if (!tenantId) {
-          return c.json({ error: "User has no workspace. Please contact support." }, 403);
+          // Self-heal: legacy users registered before the sign-up hook landed,
+          // or hook silently failed at creation time, would otherwise be
+          // permanently stuck. Mint a tenant on the fly.
+          tenantId = await ensureTenant(c.env.AUTH_DB, session.user.id, session.user.name ?? session.user.email ?? "user");
         }
         c.set("tenant_id", tenantId);
         c.set("user_id", session.user.id);
