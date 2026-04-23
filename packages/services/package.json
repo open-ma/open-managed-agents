@@ -1,0 +1,15 @@
+{
+  "name": "@open-managed-agents/services",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/credentials-store": "workspace:*",
+    "@open-managed-agents/memory-store": "workspace:*",
+    "hono": "^4.7.0"
+  }
+}

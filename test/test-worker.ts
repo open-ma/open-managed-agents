@@ -34,6 +34,8 @@ import drop0005 from "../apps/main/migrations/0005_drop_b_plus_columns.sql?raw";
 import gh0006 from "../apps/main/migrations/0006_github_tables.sql?raw";
 // @ts-expect-error
 import mem0007 from "../apps/main/migrations/0007_memory_tables.sql?raw";
+// @ts-expect-error
+import cred0009 from "../apps/main/migrations/0009_credentials_table.sql?raw";
 
 const MIGRATIONS_RAW: string[] = [
   auth0001 as string,
@@ -43,6 +45,7 @@ const MIGRATIONS_RAW: string[] = [
   drop0005 as string,
   gh0006 as string,
   mem0007 as string,
+  cred0009 as string,
 ];
 
 let migrationsApplied = false;

@@ -21,7 +21,8 @@ import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
-import { MemoryStoreService, createCfMemoryStoreService } from "@open-managed-agents/memory-store";
+import { MemoryStoreService } from "@open-managed-agents/memory-store";
+import { buildCfServices } from "@open-managed-agents/services";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
@@ -64,6 +65,14 @@ interface SessionInitParams {
     url: string;
     auth?: string;
   }>;
+  /**
+   * Pre-flight events to seed the session event stream at /init time.
+   * Used by the main worker to surface warnings (e.g. failed pre-session
+   * credential refreshes) the user should see in the console without
+   * hard-failing session start. Each event is appended to SQLite + WS-broadcast
+   * + fan-out to event_hooks, in order, before /init returns.
+   */
+  init_events?: SessionEvent[];
 }
 
 /**
@@ -454,6 +463,17 @@ export class SessionDO extends Agent<Env, SessionState> {
             vault_credentials: params.vault_credentials,
           }),
         );
+      }
+
+      // Pre-flight events from main worker (e.g. credential refresh warnings).
+      // Append in order so the console renders them as the first items in the
+      // session timeline. Use persistAndBroadcastEvent so each event also
+      // fans out to event_hooks (Linear panel mirror, etc.) — state was just
+      // set above so event_hooks is populated by the time we get here.
+      if (params.init_events?.length) {
+        for (const ev of params.init_events) {
+          this.persistAndBroadcastEvent(ev);
+        }
       }
 
       // Pre-warm sandbox in background (container start + package install)
@@ -1643,7 +1663,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     // AUTH_DB to be present.
     let memoryStoreService: MemoryStoreService | null = null;
     if (memoryAttachments.length && this.env.AUTH_DB) {
-      memoryStoreService = createCfMemoryStoreService(this.env);
+      memoryStoreService = buildCfServices(this.env).memory;
       const memTools = buildMemoryTools(
         memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
         this.state.tenant_id,

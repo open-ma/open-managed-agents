@@ -1,4 +1,5 @@
 import type { Env } from "@open-managed-agents/shared";
+import { buildCfServices } from "@open-managed-agents/services";
 
 /**
  * Outbound Worker — intercepts HTTP requests from the Sandbox container.
@@ -202,21 +203,24 @@ async function tryRefreshToken(
       : undefined;
     await env.CONFIG_KV.put(`outbound:${sessionId}`, JSON.stringify(snapshot));
 
-    // Best-effort: also update the tenant-prefixed cred record so future
-    // sessions inherit the refreshed token. Falls back gracefully if KV
-    // doesn't have the key (e.g. staging path with no tenant prefix).
-    if (snapshot.tenant_id) {
-      const tenantedKey = `t:${snapshot.tenant_id}:cred:${vaultId}:${credentialId}`;
-      const existing = await env.CONFIG_KV.get(tenantedKey);
-      if (existing) {
-        try {
-          const record = JSON.parse(existing);
-          record.auth = { ...record.auth, ...cred.auth };
-          record.updated_at = new Date().toISOString();
-          await env.CONFIG_KV.put(tenantedKey, JSON.stringify(record));
-        } catch {
-          // best-effort: snapshot is the source of truth this session anyway
-        }
+    // Best-effort: also update the canonical D1 row so future sessions
+    // inherit the refreshed token. The snapshot remains the source of truth
+    // for this session — if the D1 write fails the session still gets the
+    // fresh token, just future sessions may take one extra refresh.
+    if (snapshot.tenant_id && env.AUTH_DB) {
+      try {
+        await buildCfServices(env).credentials.refreshAuth({
+          tenantId: snapshot.tenant_id,
+          vaultId,
+          credentialId,
+          auth: {
+            access_token: cred.auth.access_token,
+            refresh_token: cred.auth.refresh_token,
+            expires_at: cred.auth.expires_at,
+          },
+        });
+      } catch {
+        // best-effort: snapshot is the source of truth this session anyway
       }
     }
 
