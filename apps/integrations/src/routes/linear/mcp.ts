@@ -9,23 +9,20 @@
 //       sandbox outbound MITM auto-injects it.
 //
 // Tools:
-//   linear_say(body, panelId, kind)
+//   linear_say(body, panelId, kind, action?, parameter?)
 //     Post an AgentActivity to a Linear panel. kind=thought keeps panel
-//     active; kind=action shows a tool-call card; kind=response finalizes
-//     the panel (turn done). Without calling this, the bot is silent in the
-//     panel — there is no implicit mirror of internal reasoning.
-//
-//   linear_request_input(body, panelId)
-//     Post an elicitation activity. Linear flips the panel to awaitingInput
-//     and renders an inline reply box for the panel creator. Their reply
-//     arrives as the next user message.
+//     active; kind=action shows a tool-call card; kind=elicitation flips
+//     the panel to awaitingInput with an inline reply box; kind=response
+//     finalizes the panel (turn done). Without calling this, the bot is
+//     silent in the panel — there is no implicit mirror of internal
+//     reasoning.
 //
 //   linear_post_comment(body, parentId?, issueId?)
 //     Post a Linear comment (top-level or thread reply). Independent of any
 //     panel; can be used by off-panel bots too.
 //
-//   linear_list_comments(issueId, parentCommentId?)
-//     Read comment history for context.
+//   linear_get_issue(issueId?, parentCommentId?)
+//     Read an issue's full state plus its comment history.
 
 import { Hono } from "hono";
 import type { Env } from "../../env";
@@ -324,6 +321,15 @@ const TOOLS: ToolDescriptor[] = [
       const parentCommentId = args.parentCommentId
         ? String(args.parentCommentId).trim()
         : null;
+      // GraphQL safety: parentCommentId is interpolated into the query body
+      // below (Linear's `comments(filter:...)` doesn't accept Variables for the
+      // ID equality predicates we need). Reject anything that isn't a UUID so
+      // the LLM-supplied value can't smuggle sibling selections into the query.
+      if (parentCommentId && !UUID_RE.test(parentCommentId)) {
+        return errorResult(
+          `parentCommentId must be a UUID, got: ${parentCommentId}`,
+        );
+      }
       const commentsClause = parentCommentId
         ? `comments(first:50, filter:{ or:[ { id:{eq:"${parentCommentId}"} }, { parent:{ id:{eq:"${parentCommentId}"} } } ] }){ nodes{ id body createdAt parent{id} user{displayName} } }`
         : `comments(first:50, filter:{ parent:{ null:true } }){ nodes{ id body createdAt parent{id} user{displayName} } }`;
@@ -516,9 +522,12 @@ app.post("/:sessionId", async (c) => {
         serverInfo: SERVER_INFO,
         instructions:
           "Linear tools. The bot owns ALL panel-visible output: nothing is " +
-          "auto-mirrored. Use linear_say to narrate progress in a panel, " +
-          "linear_request_input to ask the panel creator a question, " +
-          "linear_post_comment to talk in comment threads.",
+          "auto-mirrored. Use linear_say(kind=\"thought\") to narrate, " +
+          "linear_say(kind=\"elicitation\") to ask the panel creator a " +
+          "question (renders an inline reply box), " +
+          "linear_say(kind=\"response\") to finalize the panel, " +
+          "linear_post_comment to talk in comment threads, " +
+          "linear_get_issue to read issue + thread context.",
       });
 
     case "notifications/initialized":
