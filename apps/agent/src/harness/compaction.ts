@@ -86,12 +86,11 @@ function estimateMessagesTokens(messages: ModelMessage[]): number {
 }
 
 // Trigger fraction: shouldCompact fires when estimated tokens exceed
-// `triggerFraction * contextWindowTokens`. CC uses ~0.85 effective (after
-// the 13K AUTOCOMPACT_BUFFER reservation); 0.75 gives more headroom for
-// long single turns to flush tool results before the trigger.
+// `triggerFraction * contextWindowTokens`. We pick 0.75 to give headroom
+// for long single turns to flush tool results before the trigger.
 //
 // Tail preservation lives entirely in derive (history.ts) — it walks
-// pre-boundary events using CC-style estimateMessageTokens and renders the
+// pre-boundary events using the same per-message estimate and renders the
 // last K messages verbatim alongside the summary. Strategy doesn't need to
 // coordinate; it just produces the summary covering everything.
 const TRIGGER_FRACTION = 0.75;
