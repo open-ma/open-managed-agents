@@ -44,6 +44,21 @@ app.post("/event-tap", async (c) => {
     return c.json({ ok: true, skipped: "no panel binding" });
   }
 
+  // Elicitation grace: after the bot calls linear_request_input, the model
+  // tends to emit a wrap-up sentence ("Question sent, waiting...") that
+  // would mirror as a `response` activity and flip Linear's panel from
+  // `awaitingInput` to `complete` — destroying the inline reply box. Drop
+  // *every* event for ~30s after an elicitation stamp so the panel only
+  // sees the elicitation activity itself.
+  const ELICITATION_GRACE_MS = 30_000;
+  if (binding.lastElicitationAt && Date.now() - binding.lastElicitationAt < ELICITATION_GRACE_MS) {
+    return c.json({
+      ok: true,
+      skipped: "post-elicitation grace window",
+      sinceElicitation: Date.now() - binding.lastElicitationAt,
+    });
+  }
+
   // Resolve publication via the OMA session record. The session's metadata
   // carries the immutable linear.publicationId stamp, which gives us the
   // installation + access token. We don't write to that metadata anymore —

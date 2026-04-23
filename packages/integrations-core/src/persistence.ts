@@ -223,11 +223,22 @@ export interface PanelBinding {
   omaSessionId: string;
   panelAgentSessionId: string;
   updatedAt: number;
+  /** Stamped by the linear_request_input MCP tool right after the elicitation
+   *  activity is posted. event-tap reads it to drop ALL trailing broadcasts
+   *  for the same turn, so Linear sees only the elicitation and keeps the
+   *  panel in `awaitingInput` (with the inline reply box). Null means no
+   *  elicitation was made yet on this binding. */
+  lastElicitationAt: number | null;
 }
 
 export interface PanelBindingRepo {
   get(omaSessionId: string): Promise<PanelBinding | null>;
   set(omaSessionId: string, panelAgentSessionId: string, updatedAt: number): Promise<void>;
+  /** Stamp the elicitation timestamp on the existing binding row. No-op if
+   *  the row doesn't exist (which would mean the bot called
+   *  linear_request_input without entering a panel — handler validates that
+   *  upstream). */
+  stampElicitation(omaSessionId: string, ts: number): Promise<void>;
   clear(omaSessionId: string): Promise<void>;
 }
 
