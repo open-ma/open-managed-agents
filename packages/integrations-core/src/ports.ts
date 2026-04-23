@@ -15,7 +15,6 @@ import type {
   GitHubAppRepo,
   InstallationRepo,
   IssueSessionRepo,
-  PanelBindingRepo,
   PublicationRepo,
   SetupLinkRepo,
   WebhookEventStore,
@@ -247,8 +246,5 @@ export interface Container {
   /** Bot-authored top-level Linear comments — used to route reply webhooks
    *  back to the originating OMA session. Phase 1 of M7. */
   authoredComments: AuthoredCommentRepo;
-  /** Per-OMA-session current panel binding — bot writes via enter/exit_panel
-   *  tools; event-tap reads to know where to mirror broadcasts. */
-  panelBindings: PanelBindingRepo;
   setupLinks: SetupLinkRepo;
 }

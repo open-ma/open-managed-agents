@@ -622,11 +622,13 @@ export class LinearProvider implements IntegrationProvider {
       lines.push("");
       lines.push(
         `Linear opened panel \`${event.agentSessionId}\` for this turn. ` +
-          `Call \`linear_enter_panel("${event.agentSessionId}")\` if you want users ` +
-          `to watch your work — once entered, your subsequent reasoning and ` +
-          `tool calls render in that panel automatically. Without entering, ` +
-          `you stay silent and need explicit tool calls (linear_post_comment ` +
-          `etc.) to produce any user-visible output.`,
+          `To narrate progress in the panel, call ` +
+          `\`linear_say(body, panelId="${event.agentSessionId}", kind="thought")\`. ` +
+          `For a final answer, kind=response (this finalizes the panel). ` +
+          `For a question that needs a reply box, call ` +
+          `\`linear_request_input(body, panelId="${event.agentSessionId}")\`. ` +
+          `Without explicit tool calls, you stay silent in the panel — your ` +
+          `internal reasoning is private and never auto-mirrored.`,
       );
     }
     return lines.join("\n");
