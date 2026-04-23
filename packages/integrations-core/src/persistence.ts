@@ -191,25 +191,44 @@ export interface IssueSessionRepo {
 /**
  * Tracks comments the bot authored via the OMA-hosted Linear MCP server's
  * `linear_post_comment` tool. Lets us route a Linear `Comment` webhook with
- * a `parentId` back to the bot's OMA session: if the parentId resolves to a
- * row here, the new comment is a human reply to a question the bot asked,
- * and we deliver it to the bot's session as a user message.
+ * a `parentId` back to the bot's OMA session.
+ *
+ * Slim schema by design: anything derivable from the omaSessionId
+ * (publication / installation / vault) is fetched on demand at webhook
+ * time. Only `issueId` is kept inline — it's used by the bot's
+ * thread-context tools without needing a session record round-trip.
  */
 export interface AuthoredComment {
   commentId: string;
   omaSessionId: string;
-  publicationId: string;
-  installationId: string;
   issueId: string;
-  /** Linear AgentSession the bot was in when it posted, if any. Null when
-   *  the bot posted from a top-level (no-panel) context. */
-  agentSessionId: string | null;
   createdAt: number;
 }
 
 export interface AuthoredCommentRepo {
   get(commentId: string): Promise<AuthoredComment | null>;
   insert(row: AuthoredComment): Promise<void>;
+}
+
+/**
+ * Per-OMA-session pointer to the Linear AgentSession panel the bot is
+ * currently "in". The bot writes this via the linear_enter_panel /
+ * linear_exit_panel MCP tools; the event-tap reads it to decide whether
+ * (and where) to mirror agent broadcasts as Linear AgentActivity entries.
+ *
+ * One row per OMA session; absence = bot is off-panel (silent / posting
+ * comments via the comment tools instead).
+ */
+export interface PanelBinding {
+  omaSessionId: string;
+  panelAgentSessionId: string;
+  updatedAt: number;
+}
+
+export interface PanelBindingRepo {
+  get(omaSessionId: string): Promise<PanelBinding | null>;
+  set(omaSessionId: string, panelAgentSessionId: string, updatedAt: number): Promise<void>;
+  clear(omaSessionId: string): Promise<void>;
 }
 
 export interface NewSetupLink {
