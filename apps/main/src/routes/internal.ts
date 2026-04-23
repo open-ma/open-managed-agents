@@ -14,11 +14,20 @@ import { kvKey } from "../kv-helpers";
 const app = new Hono<{ Bindings: Env }>();
 
 // Public hostname of the integrations gateway, used to wire a hosted Linear
-// MCP server into Linear-triggered sessions. Falls back to staging .workers.dev
-// if env var unset (so prod misconfig surfaces, staging keeps working).
+// MCP server into Linear-triggered sessions. We hard-fail when the env var
+// is unset rather than fall back to a default: a silent default would have
+// us mint MCP URLs (and per-session bearer tokens) pointing at whatever
+// hostname was baked in, on any future env stanza that forgot to declare
+// it. Both prod and staging wrangler stanzas explicitly set this — anything
+// else is a config bug we want to see immediately.
 function integrationsOrigin(env: Env): string {
   const explicit = (env as unknown as { INTEGRATIONS_ORIGIN?: string }).INTEGRATIONS_ORIGIN;
-  return explicit ?? "https://managed-agents-integrations-staging.hrhrngxy.workers.dev";
+  if (!explicit) {
+    throw new Error(
+      "INTEGRATIONS_ORIGIN is not configured — refusing to mint MCP URLs against an unknown gateway",
+    );
+  }
+  return explicit;
 }
 
 // Header-secret auth middleware. Reject early if the secret is missing or
@@ -276,6 +285,15 @@ app.post("/sessions", async (c) => {
     JSON.stringify(sessionRecord),
   );
 
+  // Reverse index: sessionId → tenantId. Lets GET /v1/internal/sessions/:id
+  // do an O(1) lookup instead of paginating every tenant-prefixed key in
+  // CONFIG_KV. Untenanted by design — the lookup endpoint receives only the
+  // sessionId. Reasonably long TTL so resumes / retroactive lookups still
+  // work; a missed cleanup is harmless (record is just an integer mapping).
+  await c.env.CONFIG_KV.put(`sidx:${sessionId}`, tenantId, {
+    expirationTtl: 30 * 24 * 60 * 60,
+  });
+
   // Materialize a github_repository resource from the supplied repo URL.
   // The token is sourced from a command_secret credential (env_var=GITHUB_TOKEN)
   // in one of the vaults — provider doesn't pass it inline. SessionDO will
@@ -355,22 +373,37 @@ app.post("/sessions/:id/events", async (c) => {
  * GET /v1/internal/sessions/:id
  * Returns the persisted session record (id + metadata + snapshots) so the
  * integrations gateway can validate per-session MCP tokens and resolve the
- * publication. We scan tenants — there's no tenant index from sessionId, but
- * sessions are sparse enough this is fine for the MCP request volume.
+ * publication. Uses the `sidx:` reverse index (sessionId → tenantId) for
+ * an O(1) lookup; falls back to a paginated tenant scan only if the index
+ * is missing (sessions created before sidx existed).
  */
 app.get("/sessions/:id", async (c) => {
   const sessionId = c.req.param("id");
-  // Sessions are tenant-scoped in KV; we don't carry tenantId on the request,
-  // so we list keys with the session id suffix and read the first hit. KV.list
-  // is paginated — use a prefix-by-tenant scan keyed off our naming convention.
-  const list = await c.env.CONFIG_KV.list({ prefix: "t:" });
-  for (const k of list.keys) {
-    if (!k.name.endsWith(`:session:${sessionId}`)) continue;
-    const data = await c.env.CONFIG_KV.get(k.name);
-    if (!data) continue;
-    const record = JSON.parse(data) as { id: string; metadata?: Record<string, unknown> };
-    return c.json(record);
+  const tenantId = await c.env.CONFIG_KV.get(`sidx:${sessionId}`);
+  if (tenantId) {
+    const data = await c.env.CONFIG_KV.get(kvKey(tenantId, "session", sessionId));
+    if (data) {
+      return c.json(JSON.parse(data));
+    }
   }
+  // Fallback: scan tenant-prefixed keys with cursor pagination so we don't
+  // get truncated by the 1000-key page cap. Used only for legacy sessions
+  // (no sidx) — new sessions hit the index above and short-circuit.
+  let cursor: string | undefined = undefined;
+  do {
+    const list: KVNamespaceListResult<unknown> = await c.env.CONFIG_KV.list({
+      prefix: "t:",
+      cursor,
+    });
+    for (const k of list.keys) {
+      if (!k.name.endsWith(`:session:${sessionId}`)) continue;
+      const data = await c.env.CONFIG_KV.get(k.name);
+      if (!data) continue;
+      const record = JSON.parse(data) as { id: string; metadata?: Record<string, unknown> };
+      return c.json(record);
+    }
+    cursor = list.list_complete ? undefined : list.cursor;
+  } while (cursor);
   return c.json({ error: "session not found" }, 404);
 });
 
@@ -597,3 +630,6 @@ async function fetchVaultCredentials(
 }
 
 export default app;
+
+// Test-only exports.
+export const __testInternals = { integrationsOrigin };
