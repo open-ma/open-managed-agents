@@ -697,4 +697,146 @@ export class LinearProvider implements IntegrationProvider {
 
     return fresh.access_token;
   }
+
+  // ─── One-shot re-authorize (migrate pre-refresh-support installs) ────
+  //
+  // For installations created before refreshAccessToken landed: we have no
+  // refresh_token to roll, so the only path back to a working state is for
+  // the user to re-grant OAuth consent. These two methods drive that flow
+  // without touching the new-install codepath:
+  //
+  //   buildReauthorizeUrl(installationId, redirectBase)
+  //     → builds the Linear authorize URL + state JWT, no DB writes
+  //   completeReauthorize(installationId, appId, code, state)
+  //     → verifies state, exchanges code, rotates tokens + vault in place
+  //
+  // Once every previously-deployed install has been migrated, both methods
+  // (and the admin endpoints that call them) can be deleted.
+
+  /**
+   * Build a single-use Linear authorize URL that re-grants consent for an
+   * existing installation. The state JWT carries `installationId` so the
+   * companion callback can rotate that exact row without searching.
+   */
+  async buildReauthorizeUrl(input: {
+    installationId: string;
+    redirectBase: string;
+    ttlSeconds?: number;
+  }): Promise<{
+    authorizeUrl: string;
+    appId: string;
+    workspaceName: string;
+    botUserId: string;
+  }> {
+    const inst = await this.container.installations.get(input.installationId);
+    if (!inst) throw new Error(`installation ${input.installationId} not found`);
+    if (!inst.appId) throw new Error(`installation ${input.installationId} has no appId`);
+    const app = await this.container.apps.get(inst.appId);
+    if (!app) throw new Error(`app ${inst.appId} not found`);
+
+    const stateToken = await this.container.jwt.sign(
+      { kind: "linear.oauth.reauth", installationId: inst.id, appId: app.id },
+      input.ttlSeconds ?? 60 * 30,
+    );
+    const redirectUri = this.reauthCallbackUri(input.redirectBase, app.id);
+    const authorizeUrl = buildAuthorizeUrl({
+      clientId: app.clientId,
+      redirectUri,
+      scopes: this.config.scopes ?? DEFAULT_LINEAR_SCOPES,
+      state: stateToken,
+      actor: "app",
+    });
+    return {
+      authorizeUrl,
+      appId: app.id,
+      workspaceName: inst.workspaceName,
+      botUserId: inst.botUserId,
+    };
+  }
+
+  /**
+   * Verify a re-authorize callback's state, exchange the fresh code for a
+   * token pair, and rotate the existing installation's tokens (and vault
+   * bearer) in place. Throws on any validation or upstream failure.
+   */
+  async completeReauthorize(input: {
+    appId: string;
+    code: string;
+    state: string;
+    redirectBase: string;
+  }): Promise<{
+    installationId: string;
+    workspaceName: string;
+    botUserId: string;
+    accessToken: string;
+    capturedRefreshToken: boolean;
+  }> {
+    const payload = await this.container.jwt.verify<{
+      kind: string;
+      installationId: string;
+      appId: string;
+    }>(input.state);
+    if (payload.kind !== "linear.oauth.reauth") {
+      throw new Error("reauth callback: wrong state kind");
+    }
+    if (payload.appId !== input.appId) {
+      throw new Error("reauth callback: appId mismatch");
+    }
+    const inst = await this.container.installations.get(payload.installationId);
+    if (!inst) throw new Error("reauth callback: installation not found");
+    const app = await this.container.apps.get(input.appId);
+    if (!app) throw new Error("reauth callback: app not found");
+    const clientSecret = await this.container.apps.getClientSecret(app.id);
+    if (!clientSecret) throw new Error("reauth callback: client_secret missing");
+
+    const redirectUri = this.reauthCallbackUri(input.redirectBase, app.id);
+    const tokenReq = buildTokenExchangeBody({
+      code: input.code,
+      redirectUri,
+      clientId: app.clientId,
+      clientSecret,
+    });
+    const tokenRes = await this.container.http.fetch({
+      method: "POST",
+      url: tokenReq.url,
+      headers: { "content-type": tokenReq.contentType },
+      body: tokenReq.body,
+    });
+    if (tokenRes.status < 200 || tokenRes.status >= 300) {
+      throw new Error(
+        `reauth token exchange failed: ${tokenRes.status} ${tokenRes.body.slice(0, 200)}`,
+      );
+    }
+    const token = parseTokenResponse(tokenRes.body);
+    if (!token.refresh_token) {
+      throw new Error(
+        "reauth token exchange returned no refresh_token — check the OAuth app's actor=app + offline access settings",
+      );
+    }
+
+    await this.container.installations.setTokens(
+      inst.id,
+      token.access_token,
+      token.refresh_token,
+    );
+    if (inst.vaultId) {
+      await this.container.vaults.rotateBearerToken({
+        userId: inst.userId,
+        vaultId: inst.vaultId,
+        newBearerToken: token.access_token,
+      });
+    }
+    return {
+      installationId: inst.id,
+      workspaceName: inst.workspaceName,
+      botUserId: inst.botUserId,
+      accessToken: token.access_token,
+      capturedRefreshToken: true,
+    };
+  }
+
+  private reauthCallbackUri(redirectBase: string, appId: string): string {
+    const trimmed = redirectBase.replace(/\/+$/, "");
+    return `${trimmed}/linear/oauth/reauth/${appId}/callback`;
+  }
 }
