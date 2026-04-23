@@ -41,7 +41,13 @@ app.post("/event-tap", async (c) => {
   );
   if (!sessRes.ok) return c.json({ ok: true, skipped: "session lookup failed" });
   const session = (await sessRes.json()) as {
-    metadata?: { linear?: { publicationId?: string; currentAgentSessionId?: string | null } };
+    metadata?: {
+      linear?: {
+        publicationId?: string;
+        currentAgentSessionId?: string | null;
+        lastElicitationAt?: number;
+      };
+    };
   };
   const linear = session.metadata?.linear;
   if (!linear?.publicationId || !linear.currentAgentSessionId) {
@@ -64,21 +70,45 @@ app.post("/event-tap", async (c) => {
   // tool's success payload). Mirroring that as a `response` activity would
   // make Linear treat the turn as complete and hide the inline reply box.
   // Drop the mirror in that case so the panel stays open for the user.
+  //
+  // Two signals, in order of trustworthiness:
+  //   1. lastElicitationAt — stamped by the linear_request_input MCP tool
+  //      after a successful elicitation, read straight from OMA session
+  //      metadata. Authoritative when fresh, but Cloudflare KV cross-colo
+  //      reads can lag the write by tens of seconds, so we don't rely on
+  //      it alone.
+  //   2. Recent AgentActivities — query Linear for the session's last few
+  //      activities and look for an elicitation. Linear's own data is
+  //      strongly consistent for the session that just emitted the
+  //      activity, so this catches the cases where (1) was missed.
+  //   3. AgentSession.status — final fallback. If status is awaitingInput,
+  //      drop. Status flips after elicitation but propagation is async, so
+  //      this is the weakest signal.
+  const ELICITATION_GRACE_MS = 30_000;
   if (content.type === "response") {
-    const status = await fetchAgentSessionStatus(
+    const stampedAt = linear.lastElicitationAt ?? 0;
+    const sinceStamp = Date.now() - stampedAt;
+    console.log(
+      `[event-tap] response check session=${sessionId} agentSession=${linear.currentAgentSessionId} stampedAt=${stampedAt} sinceStamp=${sinceStamp}ms`,
+    );
+    if (stampedAt > 0 && sinceStamp < ELICITATION_GRACE_MS) {
+      console.log(
+        `[event-tap] drop response (lastElicitationAt was ${sinceStamp}ms ago)`,
+      );
+      return c.json({ ok: true, skipped: "post-elicitation grace window" });
+    }
+    const recentElicitation = await sessionHasRecentElicitation(
       accessToken,
       linear.currentAgentSessionId,
+      ELICITATION_GRACE_MS,
     );
-    // null = transient lookup failure → allow mirror; awaitingInput → drop;
-    // unauthenticated → triggers the same lazy refresh path the mutation
-    // below uses, so we don't bail on a stale token here.
-    if (status === "awaitingInput") {
+    if (recentElicitation === "yes") {
       console.log(
-        `[event-tap] drop response for session=${sessionId} agentSession=${linear.currentAgentSessionId} (status=awaitingInput)`,
+        `[event-tap] drop response (recent elicitation found via Linear activity query)`,
       );
-      return c.json({ ok: true, skipped: "panel awaiting user input" });
+      return c.json({ ok: true, skipped: "recent elicitation in session" });
     }
-    if (status === "unauthenticated") {
+    if (recentElicitation === "unauthenticated") {
       try {
         accessToken = await providers.linear.refreshAccessToken(pub.installationId);
         console.log(`[event-tap] refreshed access token for installation=${pub.installationId}`);
@@ -88,12 +118,14 @@ app.post("/event-tap", async (c) => {
         );
         return c.json({ ok: false, error: "token_refresh_failed" }, 502);
       }
-      const refreshed = await fetchAgentSessionStatus(accessToken, linear.currentAgentSessionId);
-      if (refreshed === "awaitingInput") {
-        console.log(
-          `[event-tap] drop response for session=${sessionId} agentSession=${linear.currentAgentSessionId} (status=awaitingInput, post-refresh)`,
-        );
-        return c.json({ ok: true, skipped: "panel awaiting user input" });
+      const retried = await sessionHasRecentElicitation(
+        accessToken,
+        linear.currentAgentSessionId,
+        ELICITATION_GRACE_MS,
+      );
+      if (retried === "yes") {
+        console.log(`[event-tap] drop response (recent elicitation, post-refresh)`);
+        return c.json({ ok: true, skipped: "recent elicitation in session" });
       }
     }
   }
@@ -236,6 +268,67 @@ function isAuthError(
 ): boolean {
   if (!errors?.length) return false;
   return errors.some((e) => e.extensions?.code === "AUTHENTICATION_ERROR");
+}
+
+/** Look at the AgentSession's recent activities and return whether any
+ *  elicitation was created within `windowMs` of now. Linear's own data is
+ *  the authoritative source for "did we just elicit?", so this catches the
+ *  case where our KV-stamped lastElicitationAt is stale due to cross-colo
+ *  read lag. Returns "yes" / "no" / "unauthenticated" / null (transient). */
+async function sessionHasRecentElicitation(
+  accessToken: string,
+  agentSessionId: string,
+  windowMs: number,
+): Promise<"yes" | "no" | "unauthenticated" | null> {
+  try {
+    const res = await fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${accessToken}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({
+        query: `query($id: String!) {
+          agentSession(id: $id) {
+            activities(first: 10) {
+              nodes {
+                createdAt
+                content {
+                  ... on AgentActivityElicitationContent { type }
+                }
+              }
+            }
+          }
+        }`,
+        variables: { id: agentSessionId },
+      }),
+    });
+    const data = (await res.json()) as {
+      data?: {
+        agentSession?: {
+          activities?: {
+            nodes?: Array<{
+              createdAt: string;
+              content?: { type?: string };
+            }>;
+          };
+        };
+      };
+      errors?: Array<{ extensions?: { code?: string } }>;
+    };
+    if (isAuthError(data.errors)) return "unauthenticated";
+    const nodes = data.data?.agentSession?.activities?.nodes ?? [];
+    const cutoff = Date.now() - windowMs;
+    const hit = nodes.some((n) => {
+      if (n.content?.type !== "elicitation") return false;
+      const ts = Date.parse(n.createdAt);
+      return Number.isFinite(ts) && ts >= cutoff;
+    });
+    return hit ? "yes" : "no";
+  } catch (err) {
+    console.warn(`[event-tap] activity check failed: ${(err as Error).message}`);
+    return null;
+  }
 }
 
 export default app;

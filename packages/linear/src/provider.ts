@@ -738,7 +738,12 @@ export class LinearProvider implements IntegrationProvider {
       { kind: "linear.oauth.reauth", installationId: inst.id, appId: app.id },
       input.ttlSeconds ?? 60 * 30,
     );
-    const redirectUri = this.reauthCallbackUri(input.redirectBase, app.id);
+    // Reuse the install callback URI on purpose. The dedicated-callback
+    // handler dispatches by state.kind: "linear.oauth.dedicated" → first
+    // install; "linear.oauth.reauth" → token rotation. Reusing the URI
+    // means we don't have to register a new redirect_uri in the Linear
+    // OAuth app config.
+    const redirectUri = this.dedicatedCallbackUriFromBase(input.redirectBase, app.id);
     const authorizeUrl = buildAuthorizeUrl({
       clientId: app.clientId,
       redirectUri,
@@ -789,7 +794,7 @@ export class LinearProvider implements IntegrationProvider {
     const clientSecret = await this.container.apps.getClientSecret(app.id);
     if (!clientSecret) throw new Error("reauth callback: client_secret missing");
 
-    const redirectUri = this.reauthCallbackUri(input.redirectBase, app.id);
+    const redirectUri = this.dedicatedCallbackUriFromBase(input.redirectBase, app.id);
     const tokenReq = buildTokenExchangeBody({
       code: input.code,
       redirectUri,
@@ -836,7 +841,15 @@ export class LinearProvider implements IntegrationProvider {
   }
 
   private reauthCallbackUri(redirectBase: string, appId: string): string {
+    return this.dedicatedCallbackUriFromBase(redirectBase, appId);
+  }
+
+  /** Same shape as `dedicatedCallbackUri` but accepts an arbitrary base —
+   *  used when callers pass in env.GATEWAY_ORIGIN explicitly (admin endpoints
+   *  invoked from the Hono app rather than from the constructor's
+   *  config.gatewayOrigin). */
+  private dedicatedCallbackUriFromBase(redirectBase: string, appId: string): string {
     const trimmed = redirectBase.replace(/\/+$/, "");
-    return `${trimmed}/linear/oauth/reauth/${appId}/callback`;
+    return `${trimmed}/linear/oauth/app/${appId}/callback`;
   }
 }
