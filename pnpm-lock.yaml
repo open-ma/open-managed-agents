@@ -163,6 +163,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
       hono:
         specifier: ^4.7.0
         version: 4.12.12
@@ -205,6 +208,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/slack':
+        specifier: workspace:*
+        version: link:../slack
 
   packages/integrations-core:
     dependencies:
@@ -251,6 +257,15 @@ importers:
       nanoid:
         specifier: ^5.1.0
         version: 5.1.7
+
+  packages/slack:
+    dependencies:
+      '@open-managed-agents/integrations-core':
+        specifier: workspace:*
+        version: link:../integrations-core
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
 
 packages:
 

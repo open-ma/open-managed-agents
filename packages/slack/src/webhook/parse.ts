@@ -1,0 +1,225 @@
+// Slack Events API payload shapes — typed from Slack's documented schema with
+// only the fields we consume. Keep narrow: extracting more later is cheap,
+// pretending we know fields we don't is expensive.
+//
+// References:
+//   https://docs.slack.dev/apis/events-api/
+//   https://docs.slack.dev/reference/events/
+//   https://docs.slack.dev/reference/events/url_verification/
+//   https://docs.slack.dev/ai/developing-ai-apps  (assistant_thread_*)
+
+/**
+ * Top-level envelope. Slack's Events API uses a tagged union — the `type`
+ * field discriminates between handshake, event_callback, and rate-limit.
+ */
+export type RawSlackEnvelope =
+  | RawUrlVerification
+  | RawEventCallback
+  | RawAppRateLimited
+  | RawUnknown;
+
+export interface RawUrlVerification {
+  type: "url_verification";
+  /** Random string Slack expects us to echo back within 3 sec. */
+  challenge: string;
+  token?: string;
+}
+
+export interface RawEventCallback {
+  type: "event_callback";
+  /** Globally-unique delivery id (idempotency key, e.g. `Ev01ABC…`). */
+  event_id: string;
+  event_time: number;
+  /** Workspace id. */
+  team_id: string;
+  api_app_id: string;
+  event: RawEventInner;
+}
+
+export interface RawAppRateLimited {
+  type: "app_rate_limited";
+  team_id?: string;
+  api_app_id?: string;
+  minute_rate_limited?: number;
+}
+
+export interface RawUnknown {
+  type: string;
+  [k: string]: unknown;
+}
+
+export interface RawEventInner {
+  type: string;
+  user?: string;
+  text?: string;
+  channel?: string;
+  /** Top-level message ts. */
+  ts?: string;
+  /** Set when the message is in a thread. */
+  thread_ts?: string;
+  event_ts?: string;
+  /** Subtype distinguishes bot messages, edits, etc. */
+  subtype?: string;
+  bot_id?: string;
+  bot_profile?: { name?: string };
+  /** assistant_thread_started events ship the assistant_thread block. */
+  assistant_thread?: {
+    user_id?: string;
+    context?: Record<string, unknown>;
+    channel_id?: string;
+    thread_ts?: string;
+  };
+  /** tokens_revoked / app_uninstalled events. */
+  tokens?: { oauth?: string[]; bot?: string[] };
+  [k: string]: unknown;
+}
+
+// ─── Normalized shape consumed by the provider ──────────────────────────
+
+/** Event kinds we route on. Slack emits more — anything else returns null. */
+export type SlackEventKind =
+  | "app_mention"
+  | "message"
+  | "assistant_thread_started"
+  | "tokens_revoked"
+  | "app_uninstalled";
+
+export interface NormalizedSlackEvent {
+  kind: SlackEventKind | null;
+  /** Slack's event_id (idempotency key). */
+  deliveryId: string;
+  /** Workspace / team id. */
+  workspaceId: string;
+  /** Channel id (C.../G.../D...) — null for tokens_revoked/app_uninstalled. */
+  channelId: string | null;
+  /** thread_ts if in a thread, falls back to ts (top-level message). */
+  threadTs: string | null;
+  /** Event timestamp (the message's own `ts`). */
+  eventTs: string | null;
+  /**
+   * Conversation scope key for per-thread session granularity:
+   *   `${channel_id}:${thread_ts ?? event_ts}`
+   * Null when there's no channel/ts (uninstall events).
+   */
+  scopeKey: string | null;
+  userId: string | null;
+  text: string | null;
+  /** True when the event originated from a bot (skip to avoid loops). */
+  isBotMessage: boolean;
+  /** Raw event type for logging (e.g. "app_mention", "message"). */
+  eventType: string;
+}
+
+/** Parses Slack's raw envelope into our normalized shape. Pure function. */
+export function parseWebhook(raw: RawSlackEnvelope): NormalizedSlackEvent | null {
+  if (raw.type !== "event_callback") return null; // url_verification + app_rate_limited handled separately
+  const env = raw as RawEventCallback;
+  if (!env.event_id || !env.team_id || !env.event) return null;
+
+  const inner = env.event;
+  const kind = mapEventKind(inner.type);
+  if (kind === null) {
+    // Unknown event type — record for idempotency but don't dispatch.
+    return {
+      kind: null,
+      deliveryId: env.event_id,
+      workspaceId: env.team_id,
+      channelId: typeof inner.channel === "string" ? inner.channel : null,
+      threadTs: pickThreadTs(inner),
+      eventTs: pickString(inner, "ts") ?? pickString(inner, "event_ts"),
+      scopeKey: null,
+      userId: pickString(inner, "user"),
+      text: pickString(inner, "text"),
+      isBotMessage: detectBotMessage(inner),
+      eventType: typeof inner.type === "string" ? inner.type : "",
+    };
+  }
+
+  // Revocation/uninstall events — no channel/ts.
+  if (kind === "tokens_revoked" || kind === "app_uninstalled") {
+    return {
+      kind,
+      deliveryId: env.event_id,
+      workspaceId: env.team_id,
+      channelId: null,
+      threadTs: null,
+      eventTs: null,
+      scopeKey: null,
+      userId: null,
+      text: null,
+      isBotMessage: false,
+      eventType: inner.type,
+    };
+  }
+
+  // assistant_thread_started — channel_id + thread_ts live under assistant_thread.
+  if (kind === "assistant_thread_started") {
+    const at = inner.assistant_thread ?? {};
+    const channelId = typeof at.channel_id === "string" ? at.channel_id : null;
+    const threadTs = typeof at.thread_ts === "string" ? at.thread_ts : null;
+    return {
+      kind,
+      deliveryId: env.event_id,
+      workspaceId: env.team_id,
+      channelId,
+      threadTs,
+      eventTs: pickString(inner, "event_ts"),
+      scopeKey: channelId && threadTs ? `${channelId}:${threadTs}` : null,
+      userId: typeof at.user_id === "string" ? at.user_id : null,
+      text: null,
+      isBotMessage: false,
+      eventType: inner.type,
+    };
+  }
+
+  // app_mention / message — standard channel events.
+  const channelId = typeof inner.channel === "string" ? inner.channel : null;
+  const ts = pickString(inner, "ts");
+  const threadTs = pickThreadTs(inner);
+  // For top-level mentions/messages, use the message's own ts as thread_ts —
+  // when the bot replies it'll be `thread_ts: ts` and start a thread.
+  const effectiveThread = threadTs ?? ts;
+  const scopeKey = channelId && effectiveThread ? `${channelId}:${effectiveThread}` : null;
+
+  return {
+    kind,
+    deliveryId: env.event_id,
+    workspaceId: env.team_id,
+    channelId,
+    threadTs: effectiveThread,
+    eventTs: ts ?? pickString(inner, "event_ts"),
+    scopeKey,
+    userId: pickString(inner, "user"),
+    text: pickString(inner, "text"),
+    isBotMessage: detectBotMessage(inner),
+    eventType: inner.type,
+  };
+}
+
+function mapEventKind(type: string | undefined): SlackEventKind | null {
+  switch (type) {
+    case "app_mention":
+    case "message":
+    case "assistant_thread_started":
+    case "tokens_revoked":
+    case "app_uninstalled":
+      return type;
+    default:
+      return null;
+  }
+}
+
+function pickThreadTs(inner: RawEventInner): string | null {
+  return typeof inner.thread_ts === "string" ? inner.thread_ts : null;
+}
+
+function pickString(o: Record<string, unknown>, key: string): string | null {
+  const value = o[key];
+  return typeof value === "string" ? value : null;
+}
+
+function detectBotMessage(inner: RawEventInner): boolean {
+  if (inner.subtype === "bot_message") return true;
+  if (typeof inner.bot_id === "string" && inner.bot_id.length > 0) return true;
+  return false;
+}
