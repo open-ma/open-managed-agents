@@ -80,6 +80,11 @@ const navGroups = [
         label: "Linear",
         icon: "M3.5 6.5l5-5h7l5 5v11l-5 5h-7l-5-5v-11zM12 7v10M7 12h10",
       },
+      {
+        to: "/integrations/slack",
+        label: "Slack",
+        icon: "M14 3a2 2 0 100 4h2V5a2 2 0 00-2-2zM10 21a2 2 0 100-4H8v2a2 2 0 002 2zM3 14a2 2 0 104 0v-2H5a2 2 0 00-2 2zM21 10a2 2 0 10-4 0v2h2a2 2 0 002-2zM12 17v-2a2 2 0 014 0v2a2 2 0 01-4 0zM7 12V10a2 2 0 014 0v2a2 2 0 01-4 0zM12 7V5a2 2 0 014 0v2a2 2 0 01-4 0zM17 12V10a2 2 0 014 0v2a2 2 0 01-4 0z",
+      },
     ],
   },
 ];

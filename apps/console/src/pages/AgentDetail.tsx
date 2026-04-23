@@ -17,6 +17,14 @@ interface LinearPub {
   workspace_name: string | null;
 }
 
+interface SlackPub {
+  id: string;
+  status: string;
+  mode: string;
+  persona: { name: string; avatarUrl: string | null };
+  workspace_name: string | null;
+}
+
 export function AgentDetail() {
   const { id } = useParams();
   const { api } = useApi();
@@ -24,6 +32,7 @@ export function AgentDetail() {
   const [agent, setAgent] = useState<Agent | null>(null);
   const [versions, setVersions] = useState<Agent[]>([]);
   const [linearPubs, setLinearPubs] = useState<LinearPub[]>([]);
+  const [slackPubs, setSlackPubs] = useState<SlackPub[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -32,6 +41,9 @@ export function AgentDetail() {
     api<{ data: Agent[] }>(`/v1/agents/${id}/versions`).then((d) => setVersions(d.data)).catch(() => {});
     api<{ data: LinearPub[] }>(`/v1/integrations/linear/agents/${id}/publications`)
       .then((r) => setLinearPubs(r.data.filter((p) => p.status === "live")))
+      .catch(() => {});
+    api<{ data: SlackPub[] }>(`/v1/integrations/slack/agents/${id}/publications`)
+      .then((r) => setSlackPubs(r.data.filter((p) => p.status === "live")))
       .catch(() => {});
   }, [id]);
 
@@ -108,6 +120,42 @@ export function AgentDetail() {
             ))}
             <Link
               to={`/integrations/linear/publish?agent_id=${agent.id}`}
+              className="inline-block text-xs text-brand hover:underline"
+            >
+              + Publish to another workspace
+            </Link>
+          </div>
+        )}
+      </div>
+
+      {/* Slack integrations — same shape as Linear. */}
+      <div className="mt-6 max-w-2xl">
+        <h2 className="font-display text-base font-semibold mb-2">Slack</h2>
+        {slackPubs.length === 0 ? (
+          <Link
+            to={`/integrations/slack/publish?agent_id=${agent.id}`}
+            className="inline-flex items-center gap-1.5 text-sm text-brand hover:underline"
+          >
+            💬 Publish to Slack →
+          </Link>
+        ) : (
+          <div className="space-y-1.5">
+            {slackPubs.map((p) => (
+              <Link
+                key={p.id}
+                to="/integrations/slack"
+                className="flex items-center gap-2 text-sm text-fg-muted hover:text-fg"
+              >
+                <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">
+                  💬 Live
+                </span>
+                <span>
+                  as <strong>{p.persona.name}</strong> in {p.workspace_name ?? "Slack workspace"}
+                </span>
+              </Link>
+            ))}
+            <Link
+              to={`/integrations/slack/publish?agent_id=${agent.id}`}
               className="inline-block text-xs text-brand hover:underline"
             >
               + Publish to another workspace

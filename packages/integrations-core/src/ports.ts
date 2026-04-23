@@ -12,8 +12,8 @@ import type { SessionId, AgentId, UserId } from "./domain";
 import type {
   AppRepo,
   InstallationRepo,
-  IssueSessionRepo,
   PublicationRepo,
+  SessionScopeRepo,
   SetupLinkRepo,
   WebhookEventStore,
 } from "./persistence";
@@ -161,6 +161,6 @@ export interface Container {
   publications: PublicationRepo;
   apps: AppRepo;
   webhookEvents: WebhookEventStore;
-  issueSessions: IssueSessionRepo;
+  sessionScopes: SessionScopeRepo;
   setupLinks: SetupLinkRepo;
 }

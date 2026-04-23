@@ -9,6 +9,7 @@
     "@open-managed-agents/integrations-core": "workspace:*",
     "@open-managed-agents/linear": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/slack": "workspace:*",
     "hono": "^4.7.0"
   }
 }

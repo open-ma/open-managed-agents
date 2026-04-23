@@ -3,9 +3,9 @@
 // These are the shapes passed across package boundaries. Concrete adapters
 // (D1, GraphQL clients) translate to and from these types.
 
-export type ProviderId = "linear"; // narrow now; widen as providers are added
+export type ProviderId = "linear" | "slack"; // widen as providers are added
 
-/** Linear workspace id (or equivalent in future providers). */
+/** External workspace id (Linear workspace, Slack team, etc.). */
 export type WorkspaceId = string;
 
 /** OMA platform user (better-auth user id). */
@@ -25,25 +25,12 @@ export interface Persona {
 }
 
 /**
- * Capability keys gating Linear API operations. Stable strings, used in JWT
- * scopes and DB rows.
+ * Capability keys gating provider API operations. Stored as opaque strings at
+ * the core boundary so each provider can define its own union (Linear's
+ * `issue.*` keys, Slack's `message.*` keys, etc.) without colliding. Providers
+ * narrow internally; core only sees the string set.
  */
-export type CapabilityKey =
-  | "issue.read"
-  | "issue.create"
-  | "issue.update"
-  | "issue.delete"
-  | "comment.write"
-  | "comment.delete"
-  | "label.add"
-  | "label.remove"
-  | "assignee.set"
-  | "assignee.set_other"
-  | "status.set"
-  | "priority.set"
-  | "subissue.create"
-  | "user.mention"
-  | "search.read";
+export type CapabilityKey = string;
 
 export type CapabilitySet = ReadonlySet<CapabilityKey>;
 
@@ -58,14 +45,14 @@ export type PublicationStatus =
   | "needs_reauth"
   | "unpublished";
 
-export type IssueSessionStatus =
+export type SessionScopeStatus =
   | "active"
   | "completed"
   | "human_handoff"
   | "rerouted"
   | "escalated";
 
-export type SessionGranularity = "per_issue" | "per_event";
+export type SessionGranularity = "per_issue" | "per_thread" | "per_event";
 
 export interface Installation {
   id: string;
@@ -121,12 +108,16 @@ export interface AppCredentials {
   createdAt: number;
 }
 
-export interface IssueSession {
+export interface SessionScope {
   publicationId: string;
-  /** Provider-native issue id. */
-  issueId: string;
+  /**
+   * Provider-native key identifying the conversational scope this session is
+   * bound to. Linear stores the issue id (e.g. `iss_…`); Slack stores
+   * `${channel_id}:${thread_ts ?? event_ts}`. Opaque to core.
+   */
+  scopeKey: string;
   sessionId: SessionId;
-  status: IssueSessionStatus;
+  status: SessionScopeStatus;
   createdAt: number;
 }
 

@@ -35,7 +35,7 @@ app.post("/app/:appId", async (c) => {
     }
   }
 
-  const { linear } = buildProviders(c.env, container);
+  const { linear } = buildProviders(c.env);
   const outcome = await linear.handleWebhook({
     providerId: "linear",
     installationId,

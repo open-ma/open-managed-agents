@@ -27,7 +27,7 @@ app.get("/:appId/callback", async (c) => {
   }
 
   const container = buildContainer(c.env);
-  const { linear } = buildProviders(c.env, container);
+  const { linear } = buildProviders(c.env);
 
   let result;
   try {

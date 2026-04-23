@@ -11,13 +11,13 @@ import type {
   AppCredentials,
   CapabilitySet,
   Installation,
-  IssueSession,
-  IssueSessionStatus,
   Persona,
   Publication,
   PublicationStatus,
   ProviderId,
   SessionGranularity,
+  SessionScope,
+  SessionScopeStatus,
   SetupLink,
   UserId,
   WorkspaceId,
@@ -132,15 +132,15 @@ export interface WebhookEventStore {
   attachError(deliveryId: string, error: string): Promise<void>;
 }
 
-export interface IssueSessionRepo {
-  getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null>;
-  insert(row: IssueSession): Promise<void>;
+export interface SessionScopeRepo {
+  getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null>;
+  insert(row: SessionScope): Promise<void>;
   updateStatus(
     publicationId: string,
-    issueId: string,
-    status: IssueSessionStatus,
+    scopeKey: string,
+    status: SessionScopeStatus,
   ): Promise<void>;
-  listActive(publicationId: string): Promise<ReadonlyArray<IssueSession>>;
+  listActive(publicationId: string): Promise<ReadonlyArray<SessionScope>>;
 }
 
 export interface NewSetupLink {
