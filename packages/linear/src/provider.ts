@@ -465,7 +465,8 @@ export class LinearProvider implements IntegrationProvider {
       const replyText = [
         `# Linear thread reply`,
         ``,
-        `**Issue:** ${event.issueIdentifier ?? event.issueId ?? "?"}`,
+        `**Issue:** ${event.issueIdentifier ?? "?"}`,
+        ...(event.issueId ? [`**Issue UUID:** \`${event.issueId}\``] : []),
         `**Thread anchor comment:** ${authored.commentId}`,
         `**Replier:** ${handle}`,
         ``,
@@ -599,7 +600,10 @@ export class LinearProvider implements IntegrationProvider {
     };
     const header = headerByKind[event.kind ?? ""] ?? `Linear ${event.kind ?? "event"}`;
     const lines: string[] = [`# ${header}`, ""];
-    lines.push(`**Issue:** ${event.issueIdentifier ?? event.issueId ?? "?"}`);
+    lines.push(`**Issue:** ${event.issueIdentifier ?? "?"}`);
+    if (event.issueId) {
+      lines.push(`**Issue UUID:** \`${event.issueId}\` (use this when a tool asks for issueId)`);
+    }
     lines.push(`**Actor:** ${actor}`);
     if (event.agentSessionId) {
       lines.push(`**Linear panel:** \`${event.agentSessionId}\``);
