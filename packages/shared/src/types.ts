@@ -79,6 +79,12 @@ export interface AgentConfig {
   harness?: string;
   description?: string;
   metadata?: Record<string, unknown>;
+  /**
+   * Opt-in registry of prompt IDs (managed by appendable-prompts subsystem)
+   * to inject as additional system prompt segments at session/turn start.
+   * Resolved by session-do at init; empty/missing = no extra segments.
+   */
+  appendable_prompts?: string[];
   version: number;
   created_at: string;
   updated_at?: string;

@@ -29,6 +29,7 @@ import { ALL_CAPABILITIES, DEFAULT_LINEAR_SCOPES, type LinearConfig } from "./co
 import { LinearGraphQLClient } from "./graphql/client";
 import {
   buildAuthorizeUrl,
+  buildRefreshTokenBody,
   buildTokenExchangeBody,
   parseTokenResponse,
 } from "./oauth/protocol";
@@ -274,7 +275,7 @@ export class LinearProvider implements IntegrationProvider {
       installKind: "dedicated",
       appId: app.id,
       accessToken: token.access_token,
-      refreshToken: null,
+      refreshToken: token.refresh_token,
       scopes: token.scope ? token.scope.split(/[\s,]+/) : [...(this.config.scopes ?? DEFAULT_LINEAR_SCOPES)],
       botUserId: viewer.id,
     });
@@ -609,5 +610,91 @@ export class LinearProvider implements IntegrationProvider {
     _input: unknown,
   ): Promise<McpToolResult> {
     throw new Error("LinearProvider.invokeMcpTool: not yet implemented");
+  }
+
+  // ─── Token refresh ───────────────────────────────────────────────────
+  //
+  // Linear's `actor=app` authorization-code grant returns a 24-hour access
+  // token + a refresh token. We persist both at install time. When a Linear
+  // API call returns 401, the gateway calls `refreshAccessToken(installationId)`
+  // to swap the dead token for a fresh one in-place — no reinstall needed.
+  //
+  // Linear rotates the refresh_token on every call, so the response payload
+  // must be persisted in full. If Linear ever responds with a missing or
+  // empty refresh_token, we leave the old one in place to keep future
+  // refreshes possible.
+
+  /**
+   * Run Linear's OAuth refresh flow for `installationId`. Persists the rotated
+   * tokens via the installation repo and returns the new access token. Throws
+   * if the installation is missing, has no stored refresh token, the App row
+   * can't be located, or Linear rejects the refresh (e.g. user revoked the
+   * App). Caller decides whether to bubble the error or surface a friendlier
+   * "please reinstall" message.
+   */
+  async refreshAccessToken(installationId: string): Promise<string> {
+    const installation = await this.container.installations.get(installationId);
+    if (!installation) {
+      throw new Error(`installation ${installationId} not found`);
+    }
+    if (installation.revokedAt !== null) {
+      throw new Error(`installation ${installationId} is revoked`);
+    }
+    if (!installation.appId) {
+      throw new Error(
+        `installation ${installationId} has no appId — refresh requires the OAuth app's client credentials`,
+      );
+    }
+    const refreshToken = await this.container.installations.getRefreshToken(installationId);
+    if (!refreshToken) {
+      throw new Error(
+        `installation ${installationId} has no stored refresh_token — cannot refresh, user must reinstall`,
+      );
+    }
+    const app = await this.container.apps.get(installation.appId);
+    if (!app) {
+      throw new Error(`app ${installation.appId} for installation ${installationId} not found`);
+    }
+    const clientSecret = await this.container.apps.getClientSecret(app.id);
+    if (!clientSecret) {
+      throw new Error(`app ${app.id} has no client_secret`);
+    }
+    const refreshReq = buildRefreshTokenBody({
+      refreshToken,
+      clientId: app.clientId,
+      clientSecret,
+    });
+    const refreshRes = await this.container.http.fetch({
+      method: "POST",
+      url: refreshReq.url,
+      headers: { "content-type": refreshReq.contentType },
+      body: refreshReq.body,
+    });
+    if (refreshRes.status < 200 || refreshRes.status >= 300) {
+      throw new Error(
+        `Linear OAuth refresh failed: ${refreshRes.status} ${refreshRes.body.slice(0, 200)}`,
+      );
+    }
+    const fresh = parseTokenResponse(refreshRes.body);
+    await this.container.installations.setTokens(
+      installationId,
+      fresh.access_token,
+      // null is fine here — setTokens leaves the prior refresh row in place
+      // when Linear didn't rotate. In practice Linear always sends one.
+      fresh.refresh_token,
+    );
+
+    // Mirror the new bearer into the vault so the sandbox MITM injection picks
+    // it up on the next outbound HTTPS call. Best-effort: a missing vault row
+    // (older installs) shouldn't fail the refresh.
+    if (installation.vaultId) {
+      await this.container.vaults.rotateBearerToken({
+        userId: installation.userId,
+        vaultId: installation.vaultId,
+        newBearerToken: fresh.access_token,
+      });
+    }
+
+    return fresh.access_token;
   }
 }
