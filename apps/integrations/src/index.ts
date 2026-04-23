@@ -6,6 +6,7 @@ import linearDedicatedCallback from "./routes/linear/dedicated-callback";
 import linearSetupPage from "./routes/linear/setup-page";
 import linearMcp from "./routes/linear/mcp";
 import linearEventTap from "./routes/linear/event-tap";
+import linearReauth from "./routes/linear/reauth";
 import githubWebhook from "./routes/github/webhook";
 import githubPublications from "./routes/github/publications";
 import githubInstallCallback from "./routes/github/install-callback";
@@ -13,6 +14,7 @@ import githubSetupPage from "./routes/github/setup-page";
 import githubManifest from "./routes/github/manifest";
 import githubInternal from "./routes/github/internal";
 import { buildContainer } from "./wire";
+import { buildProviders } from "./providers";
 
 // Integrations gateway worker: receives 3rd-party webhooks (Linear + GitHub
 // today; Slack later), runs OAuth/install flows for installations, and hosts
@@ -54,8 +56,50 @@ app.get("/admin/dump-linear-installation-token", async (c) => {
   });
 });
 
+// TEMP one-shot admin: build a Linear OAuth re-authorize URL for an existing
+// installation that pre-dates refresh_token capture. Open the returned URL,
+// approve on linear.app, and the callback at /linear/oauth/reauth/.../callback
+// rotates this row's tokens in place (capturing refresh_token this time).
+// Remove together with /admin/dump-linear-installation-token.
+app.get("/admin/linear-reauth-link", async (c) => {
+  if (
+    !c.env.TEMP_DEBUG_TOKEN ||
+    c.req.header("x-debug-token") !== c.env.TEMP_DEBUG_TOKEN
+  ) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  const installationId = c.req.query("installation_id");
+  if (!installationId) return c.json({ error: "installation_id required" }, 400);
+
+  const container = buildContainer(c.env);
+  const { linear } = buildProviders(c.env, container);
+
+  let result;
+  try {
+    result = await linear.buildReauthorizeUrl({
+      installationId,
+      redirectBase: c.env.GATEWAY_ORIGIN,
+    });
+  } catch (err) {
+    return c.json(
+      { error: "build_reauth_url_failed", details: err instanceof Error ? err.message : String(err) },
+      500,
+    );
+  }
+
+  return c.json({
+    installationId,
+    appId: result.appId,
+    workspaceName: result.workspaceName,
+    botUserId: result.botUserId,
+    authorizeUrl: result.authorizeUrl,
+    note: "Open authorizeUrl, approve on linear.app, and the callback rotates this install's tokens in place.",
+  });
+});
+
 // Linear
 app.route("/linear/oauth/app", linearDedicatedCallback);
+app.route("/linear/oauth/reauth", linearReauth);
 app.route("/linear/webhook", linearWebhook);
 app.route("/linear/publications", linearPublications);
 app.route("/linear/mcp", linearMcp);
