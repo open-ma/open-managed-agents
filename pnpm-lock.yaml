@@ -66,9 +66,15 @@ importers:
       '@cloudflare/sandbox':
         specifier: ^0.8.11
         version: 0.8.11
+      '@open-managed-agents/credentials-store':
+        specifier: workspace:*
+        version: link:../../packages/credentials-store
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
+      '@open-managed-agents/services':
+        specifier: workspace:*
+        version: link:../../packages/services
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -184,6 +190,9 @@ importers:
       '@cloudflare/sandbox':
         specifier: ^0.8.11
         version: 0.8.11
+      '@open-managed-agents/credentials-store':
+        specifier: workspace:*
+        version: link:../../packages/credentials-store
       '@open-managed-agents/integrations-adapters-cf':
         specifier: workspace:*
         version: link:../../packages/integrations-adapters-cf
@@ -193,6 +202,9 @@ importers:
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
+      '@open-managed-agents/services':
+        specifier: workspace:*
+        version: link:../../packages/services
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -208,6 +220,12 @@ importers:
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
+
+  packages/credentials-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/github:
     dependencies:
@@ -272,6 +290,21 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+
+  packages/services:
+    dependencies:
+      '@open-managed-agents/credentials-store':
+        specifier: workspace:*
+        version: link:../credentials-store
+      '@open-managed-agents/memory-store':
+        specifier: workspace:*
+        version: link:../memory-store
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+      hono:
+        specifier: ^4.7.0
+        version: 4.12.12
 
   packages/shared:
     dependencies:

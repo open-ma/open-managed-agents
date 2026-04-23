@@ -1,12 +1,16 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock, CredentialConfig } from "@open-managed-agents/shared";
+import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
 import { generateSessionId, generateFileId, generateResourceId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; services: Services };
+}>();
 
 /**
  * Resolve the sandbox worker service binding for a given environment.
@@ -227,14 +231,24 @@ app.post("/", async (c) => {
   }
 
   // Refresh provider-tagged credentials (e.g. GitHub installation tokens,
-  // ~1hr TTL) before handing the vault to a fresh session. Best-effort:
-  // failures are logged and ignored — the existing token may still be valid;
-  // the outbound proxy's on-401 retry path covers any miss.
-  await refreshProviderCredentialsForSession(c.env, t, body.agent, vaultIds).catch(
-    () => undefined,
+  // ~1hr TTL) before handing the vault to a fresh session. Per OPE-12: failures
+  // are no longer silent — they become session.warning events the console
+  // renders, so users see "credential refresh failed" instead of mysterious
+  // 401s mid-task. Refresh failure is non-fatal: the existing token may still
+  // be valid, and the outbound proxy's on-401 retry path covers a true miss.
+  const refreshResult = await refreshProviderCredentialsForSession(
+    c.env,
+    c.var.services,
+    t,
+    body.agent,
+    vaultIds,
   );
+  const refreshWarnings = refreshResultToInitEvents(refreshResult, {
+    sessionId,
+    tenantId: t,
+  });
 
-  const vaultCredentials = await fetchVaultCredentials(c.env, t, vaultIds);
+  const vaultCredentials = await fetchVaultCredentials(c.var.services, t, vaultIds);
 
   // Initialize SessionDO via sandbox worker
   await forwardToSandbox(
@@ -252,6 +266,7 @@ app.post("/", async (c) => {
       agent_snapshot: agentSnapshot,
       environment_snapshot: environmentSnapshot,
       vault_credentials: vaultCredentials,
+      init_events: refreshWarnings,
     }),
   );
 
@@ -649,7 +664,7 @@ app.post("/:id/files", async (c) => {
 });
 
 // SSE stream
-async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_id: string } }>, id: string) {
+async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>, id: string) {
   const t = c.get("tenant_id");
   const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
@@ -703,7 +718,7 @@ async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_i
 }
 
 // JSON events
-async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_id: string } }>, id: string) {
+async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>, id: string) {
   const t = c.get("tenant_id");
   const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
   if (!data) return c.json({ error: "Session not found" }, 404);
@@ -937,86 +952,111 @@ app.delete("/:id/resources/:resource_id", async (c) => {
 
 /**
  * Pre-fetch all credentials for the given vaults so they can be passed into
- * SessionDO at /init. Mirrors the list+get loop SessionDO would otherwise
- * do against its own (potentially wrong) CONFIG_KV namespace.
+ * SessionDO at /init. Reads from D1 via the credentials-store service.
+ * SessionDO consumers only need the id + auth fields, so the extra
+ * `tenant_id` on CredentialRow is harmless when serialized.
  */
 async function fetchVaultCredentials(
-  env: Env,
+  services: Services,
   tenantId: string,
   vaultIds: string[],
 ): Promise<Array<{ vault_id: string; credentials: CredentialConfig[] }>> {
   if (!vaultIds.length) return [];
-  const out: Array<{ vault_id: string; credentials: CredentialConfig[] }> = [];
-  for (const vaultId of vaultIds) {
-    const list = await env.CONFIG_KV.list({ prefix: kvKey(tenantId, "cred", vaultId) + ":" });
-    const credentials: CredentialConfig[] = [];
-    for (const k of list.keys) {
-      const data = await env.CONFIG_KV.get(k.name);
-      if (!data) continue;
-      try {
-        credentials.push(JSON.parse(data) as CredentialConfig);
-      } catch {
-        // skip malformed
-      }
-    }
-    out.push({ vault_id: vaultId, credentials });
-  }
-  return out;
+  const grouped = await services.credentials.listByVaults({
+    tenantId,
+    vaultIds,
+  });
+  return grouped.map((g) => ({
+    vault_id: g.vault_id,
+    credentials: g.credentials as unknown as CredentialConfig[],
+  }));
+}
+
+/**
+ * Outcome of a pre-session credential refresh attempt. The session start path
+ * uses this to decide whether to emit warning events into the session stream
+ * (so the user sees something in the console instead of a silent expired token
+ * surfacing as a 401 mid-task — see OPE-12).
+ */
+export interface CredentialRefreshResult {
+  /** Total (provider, vault) pairs we tried to refresh. */
+  attempted: number;
+  /** Successful refreshes. */
+  succeeded: number;
+  /** Per-failure detail for caller's warning event / log. */
+  failures: Array<{
+    provider: "github" | "linear";
+    vaultId: string;
+    error: string;
+    httpStatus?: number;
+  }>;
+  /**
+   * Set when the refresh path could not run at all (e.g. integrations binding
+   * missing, no user row for tenant). Distinct from per-(provider, vault)
+   * failure: the whole pass was skipped.
+   */
+  skippedReason?: "no_integrations_binding" | "no_auth_db" | "no_user_for_tenant" | "no_provider_credentials";
 }
 
 /**
  * Refresh provider-tagged credentials in the given vaults before a session
  * starts using them. Avoids the "user starts a session 90 minutes after the
  * last webhook → installation token already expired → bot 401s on first
- * MCP call" failure mode. Best-effort: any failure is swallowed so the
- * session still starts (the outbound proxy's on-401 retry will catch it
- * later).
+ * MCP call" failure mode.
+ *
+ * Returns a structured result instead of throwing — the caller decides
+ * whether to surface failures (e.g. as session.warning events). Per-OPE-12,
+ * we never silently swallow.
  */
 async function refreshProviderCredentialsForSession(
   env: Env,
+  services: Services,
   tenantId: string,
   agentId: string,
   vaultIds: string[],
-): Promise<void> {
-  if (!vaultIds.length || !env.INTEGRATIONS || !env.INTEGRATIONS_INTERNAL_SECRET) return;
+): Promise<CredentialRefreshResult> {
+  const empty = (): CredentialRefreshResult => ({ attempted: 0, succeeded: 0, failures: [] });
+
+  if (!vaultIds.length) return empty();
+  if (!env.INTEGRATIONS || !env.INTEGRATIONS_INTERNAL_SECRET) {
+    return { ...empty(), skippedReason: "no_integrations_binding" };
+  }
+  if (!env.AUTH_DB) return { ...empty(), skippedReason: "no_auth_db" };
 
   // Resolve owning userId for this session via the agent row's tenant + a
   // direct user lookup. We need userId because the integrations gateway
   // scopes refresh per-user.
-  let userId: string | null = null;
-  if (env.AUTH_DB) {
-    const row = await env.AUTH_DB.prepare(
-      `SELECT id FROM "user" WHERE tenantId = ? LIMIT 1`,
-    )
-      .bind(tenantId)
-      .first<{ id: string }>();
-    userId = row?.id ?? null;
-  }
-  if (!userId) return;
+  const row = await env.AUTH_DB.prepare(
+    `SELECT id FROM "user" WHERE tenantId = ? LIMIT 1`,
+  )
+    .bind(tenantId)
+    .first<{ id: string }>();
+  const userId = row?.id ?? null;
+  if (!userId) return { ...empty(), skippedReason: "no_user_for_tenant" };
 
-  // Find providers represented in this session's vaults.
-  const providers = new Set<string>();
-  for (const vaultId of vaultIds) {
-    const list = await env.CONFIG_KV.list({ prefix: kvKey(tenantId, "cred", vaultId) + ":" });
-    for (const k of list.keys) {
-      const data = await env.CONFIG_KV.get(k.name);
-      if (!data) continue;
-      try {
-        const cred = JSON.parse(data) as CredentialConfig;
-        if (cred.auth?.provider) providers.add(`${cred.auth.provider}:${vaultId}`);
-      } catch {
-        // ignore
-      }
-    }
+  // One SQL round-trip via the partial-index on (tenant_id, vault_id, provider).
+  // Replaces the previous N-vault × M-key KV scan.
+  const tagged = await services.credentials.listProviderTagged({
+    tenantId,
+    vaultIds,
+  });
+  if (!tagged.length) return { ...empty(), skippedReason: "no_provider_credentials" };
+
+  // Dedupe to one refresh per (provider, vault) pair.
+  const targets = new Map<string, { provider: "github" | "linear"; vaultId: string }>();
+  for (const cred of tagged) {
+    const provider = cred.auth.provider;
+    if (provider !== "github" && provider !== "linear") continue;
+    const key = `${provider}:${cred.vault_id}`;
+    if (!targets.has(key)) targets.set(key, { provider, vaultId: cred.vault_id });
   }
 
-  // Fan out one refresh per (provider, vault) pair.
+  const failures: CredentialRefreshResult["failures"] = [];
+  let succeeded = 0;
   await Promise.all(
-    [...providers].map(async (key) => {
-      const [provider, vaultId] = key.split(":");
-      if (provider !== "github" && provider !== "linear") return;
+    Array.from(targets.values()).map(async ({ provider, vaultId }) => {
       try {
-        await env.INTEGRATIONS!.fetch(
+        const res = await env.INTEGRATIONS!.fetch(
           `http://gateway/${provider}/internal/refresh-by-vault`,
           {
             method: "POST",
@@ -1027,8 +1067,28 @@ async function refreshProviderCredentialsForSession(
             body: JSON.stringify({ userId, vaultId }),
           },
         );
-      } catch {
-        // best-effort
+        if (!res.ok) {
+          let bodyText: string | undefined;
+          try {
+            bodyText = (await res.text()).slice(0, 200);
+          } catch {
+            // ignore body-read failures — status code is the load-bearing signal
+          }
+          failures.push({
+            provider,
+            vaultId,
+            httpStatus: res.status,
+            error: `gateway returned ${res.status}${bodyText ? `: ${bodyText}` : ""}`,
+          });
+          return;
+        }
+        succeeded++;
+      } catch (err) {
+        failures.push({
+          provider,
+          vaultId,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }),
   );
@@ -1036,6 +1096,43 @@ async function refreshProviderCredentialsForSession(
   // we accept it for signature symmetry — future per-agent rate limiting
   // would slot here.
   void agentId;
+  return { attempted: targets.size, succeeded, failures };
+}
+
+/**
+ * Convert refresh failures to session.warning events the SessionDO appends to
+ * the event stream at /init. One event per failure so the console can surface
+ * each (provider, vault) pair distinctly. Per-OPE-12: never silent — even when
+ * the whole refresh pass was skipped (no integrations binding, etc.) we log
+ * but don't emit a stream event since that's a config/infrastructure signal
+ * not actionable to the end user.
+ */
+function refreshResultToInitEvents(
+  result: CredentialRefreshResult,
+  ctx: { sessionId: string; tenantId: string },
+): SessionEvent[] {
+  if (result.skippedReason) {
+    console.warn(
+      `[session-start] credential refresh skipped: reason=${result.skippedReason} session=${ctx.sessionId} tenant=${ctx.tenantId}`,
+    );
+    return [];
+  }
+  if (!result.failures.length) return [];
+  console.warn(
+    `[session-start] credential refresh: ${result.failures.length}/${result.attempted} failed session=${ctx.sessionId} tenant=${ctx.tenantId}`,
+    result.failures,
+  );
+  return result.failures.map((f) => ({
+    type: "session.warning",
+    source: "credential_refresh",
+    message: `${f.provider} credential refresh failed for vault ${f.vaultId} — tools using this credential may 401 mid-task and trigger an on-401 retry. ${f.error}`,
+    details: {
+      provider: f.provider,
+      vault_id: f.vaultId,
+      http_status: f.httpStatus,
+      error: f.error,
+    },
+  }));
 }
 
 /**
@@ -1123,3 +1220,9 @@ function parseGitHubOrg(repoUrl: string): string | null {
 }
 
 export default app;
+
+// Test-only re-exports — keep route surface clean by namespacing helpers
+// that have no business being a public API but need coverage in unit tests.
+export const __test__ = {
+  refreshResultToInitEvents,
+};

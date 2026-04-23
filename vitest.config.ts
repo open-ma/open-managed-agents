@@ -12,6 +12,9 @@ export default defineConfig({
       "@open-managed-agents/shared": "./packages/shared/src/index.ts",
       "@open-managed-agents/memory-store/test-fakes": "./packages/memory-store/src/test-fakes.ts",
       "@open-managed-agents/memory-store": "./packages/memory-store/src/index.ts",
+      "@open-managed-agents/credentials-store/test-fakes": "./packages/credentials-store/src/test-fakes.ts",
+      "@open-managed-agents/credentials-store": "./packages/credentials-store/src/index.ts",
+      "@open-managed-agents/services": "./packages/services/src/index.ts",
     },
   },
   test: {

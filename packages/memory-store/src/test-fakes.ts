@@ -83,8 +83,8 @@ export class InMemoryStoreRepo implements MemoryStoreRepo {
   async delete(tenantId: string, storeId: string): Promise<void> {
     if (this.stores.get(storeId)?.tenant_id === tenantId) {
       this.stores.delete(storeId);
-      // Cascade — D1 does this via FK ON DELETE CASCADE, fakes have to do it
-      // explicitly to keep state consistent.
+      // App-layer cascade — matches D1 adapter's batch DELETE on memory_versions
+      // + memories. The schema is no-FK by project convention.
       this.memoryRepo?.deleteByStore(storeId);
     }
   }
@@ -210,6 +210,10 @@ export class InMemoryMemoryRepo implements MemoryRepo {
   // ── helpers used by InMemoryStoreRepo for cascade delete ──
   deleteByStore(storeId: string): void {
     for (const [id, m] of this.byId.entries()) if (m.store_id === storeId) this.byId.delete(id);
+    // Also drop versions — D1 adapter cascades both in the same batch.
+    for (let i = this.versions.length - 1; i >= 0; i--) {
+      if (this.versions[i].store_id === storeId) this.versions.splice(i, 1);
+    }
   }
   listIdsByStore(storeId: string): string[] {
     const out: string[] = [];
