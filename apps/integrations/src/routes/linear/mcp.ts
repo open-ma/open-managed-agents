@@ -10,15 +10,18 @@
 //       vault static_bearer credential for integrations.openma.dev so the
 //       sandbox outbound MITM auto-injects it.
 //
-// Per-request flow:
-//   1. Validate path sessionId + bearer against the OMA session record
-//   2. Resolve session → publication → installation → App OAuth token
-//      (decrypted in-memory, never logged)
-//   3. Dispatch the JSON-RPC method to a tool handler that uses the token
-//      to call Linear's GraphQL API on the bot's behalf
-//
-// M1 (this file): JSON-RPC plumbing + zero registered tools. M2 lands the
-// first real tool (linear_reply).
+// Tools (M7 unified design):
+//   linear_enter_panel(agentSessionId) — bind this OMA session to a Linear
+//     panel; subsequent agent broadcasts (thinking / tool_use / message)
+//     mirror to that panel via event-tap.
+//   linear_exit_panel() — clear the binding; bot is now silent unless it
+//     calls a tool that produces user-visible output.
+//   linear_post_comment(body, parentId?, issueId?) — post a comment on an
+//     issue; with parentId it's a thread reply.
+//   linear_request_input(body) — post an elicitation activity to the
+//     currently-bound panel (requires linear_enter_panel first).
+//   linear_list_comments(issueId, parentCommentId?) — fetch comment thread
+//     state for context.
 
 import { Hono } from "hono";
 import type { Env } from "../../env";
@@ -46,12 +49,10 @@ interface JsonRpcError {
   error: { code: number; message: string; data?: unknown };
 }
 
-type JsonRpcResponse<T = unknown> = JsonRpcSuccess<T> | JsonRpcError;
-
 const PROTOCOL_VERSION = "2024-11-05";
 const SERVER_INFO = {
   name: "OMA Linear",
-  version: "0.1.0",
+  version: "0.2.0",
 } as const;
 
 interface SessionContext {
@@ -59,42 +60,30 @@ interface SessionContext {
   userId: string;
   publicationId: string;
   installationId: string;
-  /** App OAuth bearer for api.linear.app / mcp.linear.app. */
-  accessToken: string;
-  /** Auth-aware GraphQL client bound to this installation. Wrap raw fetches
-   *  with this so a 401 from Linear (24h token expiry) auto-refreshes via
-   *  the stored refresh_token + retries once. Tool handlers should never
-   *  build their own fetch with `accessToken` directly. */
+  /** Auth-aware GraphQL client bound to this installation. Auto-refreshes
+   *  on Linear AUTHENTICATION_ERROR; tool handlers should never bypass. */
   linearGraphQL: (payload: {
     query: string;
     variables?: Record<string, unknown>;
   }) => Promise<{ data?: unknown; errors?: unknown }>;
-  /** Shallow-merge keys into the OMA session's `metadata.linear`. Tool
-   *  handlers use this to stamp transient flags (e.g. `lastElicitationAt`)
-   *  that the event-tap reads on subsequent broadcasts. */
-  patchLinearMetadata: (merge: Record<string, unknown>) => Promise<void>;
   /** Persist a record of a comment the bot just authored, so the Linear
    *  Comment webhook can route reply comments back to this OMA session. */
   recordAuthoredComment: (input: {
     commentId: string;
     issueId: string;
   }) => Promise<void>;
-  /** Mutable per-turn metadata: which Linear AgentSession the agent has
-   *  currently "open" for replies, what comment id triggered this turn, etc.
-   *  Populated from OMA session metadata.linear at request time. */
-  linear: {
-    issueId: string | null;
-    currentAgentSessionId: string | null;
-    triggerCommentId: string | null;
-    actor: { id: string | null; displayName: string | null };
-  };
+  /** Read the OMA session's currently-bound Linear panel id. Null when the
+   *  bot is off-panel (between turns or after an explicit exit). */
+  getCurrentPanel: () => Promise<string | null>;
+  /** Bind / switch the OMA session to a Linear panel. */
+  setPanel: (agentSessionId: string) => Promise<void>;
+  /** Clear the panel binding. */
+  clearPanel: () => Promise<void>;
+  /** Issue the bot was originally bound to (per_issue session granularity).
+   *  Used as a fallback default when tool calls don't pass issueId. */
+  issueId: string | null;
 }
 
-/**
- * Tool registry. Each handler receives the resolved SessionContext + parsed
- * arguments, returns the JSON-RPC `result` payload (per MCP, that's
- * `{ content: [...], isError?: boolean }`).
- */
 type ToolHandler = (
   ctx: SessionContext,
   args: Record<string, unknown>,
@@ -108,22 +97,69 @@ interface ToolDescriptor {
   handler: ToolHandler;
 }
 
-// Tool registry. Replies happen automatically via the event-tap (bot's
-// natural agent.message becomes a panel response). Tools here are for
-// behaviors the bot needs to *opt in* to — like asking the panel user a
-// follow-up question (elicitation) or posting a top-level comment.
 const TOOLS: ToolDescriptor[] = [
   {
-    name: "linear_request_input",
-    title: "Ask the user for input",
+    name: "linear_enter_panel",
+    title: "Enter a Linear AgentSession panel",
     description:
-      "Ask the user who triggered this Linear AgentSession a follow-up " +
-      "question. Use this when you need a confirmation or extra info from " +
-      "the user before continuing — the panel renders an inline reply box " +
-      "for them and Linear marks the session as awaiting input. Their " +
-      "response will arrive as the next user message in this session.\n\n" +
-      "Pass `body` as the question text. Don't use this for status updates " +
-      "or final answers — those are just regular assistant messages.",
+      "Bind this conversation to a Linear AgentSession panel. While bound, " +
+      "your subsequent reasoning, tool calls, and assistant messages are " +
+      "mirrored into that panel as Linear AgentActivity entries — users " +
+      "watching the panel see your work in real time.\n\n" +
+      "Calling this with a different `agentSessionId` switches the binding. " +
+      "Calling `linear_exit_panel` clears it. Until you enter a panel, you " +
+      "are silent (assistant text isn't broadcast anywhere on Linear) — use " +
+      "the comment tools for explicit user-visible output instead.\n\n" +
+      "The panel id is provided in the user message that wakes you up: when " +
+      "Linear delegates an issue or a human @-mentions you, the message " +
+      "always names the panel as `ag_<uuid>`. Pass that whole id here.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        agentSessionId: {
+          type: "string",
+          description: "The Linear AgentSession id (uuid format).",
+        },
+      },
+      required: ["agentSessionId"],
+    },
+    handler: async (ctx, args) => {
+      const id = String(args.agentSessionId ?? "").trim();
+      if (!id) return errorResult("agentSessionId is required");
+      await ctx.setPanel(id);
+      return okResult(
+        `Entered Linear panel ${id}. From this point on, your reasoning ` +
+          `and tool calls render in that panel. Call linear_exit_panel to ` +
+          `stop mirroring.`,
+      );
+    },
+  },
+  {
+    name: "linear_exit_panel",
+    title: "Exit the current Linear panel",
+    description:
+      "Clear the panel binding. Subsequent reasoning and assistant messages " +
+      "stop appearing in any Linear panel — you go silent. Use this when " +
+      "you're done with a panel and want to do background work, or when " +
+      "switching focus to a thread comment exchange that's separate from " +
+      "the panel.",
+    inputSchema: { type: "object", properties: {} },
+    handler: async (ctx) => {
+      await ctx.clearPanel();
+      return okResult("Exited Linear panel. You are now silent on Linear.");
+    },
+  },
+  {
+    name: "linear_request_input",
+    title: "Ask the panel user for input",
+    description:
+      "Post an elicitation activity to the currently-bound Linear panel. " +
+      "Linear renders an inline reply box for the panel creator and marks " +
+      "the panel as awaiting input. Their reply arrives back as the next " +
+      "user message in this conversation.\n\n" +
+      "Requires you to have entered a panel via linear_enter_panel first. " +
+      "After this returns, stop generating — anything else you say in the " +
+      "same turn will be mirrored to the panel and confuse the UX.",
     inputSchema: {
       type: "object",
       properties: {
@@ -137,11 +173,11 @@ const TOOLS: ToolDescriptor[] = [
     handler: async (ctx, args) => {
       const body = String(args.body ?? "").trim();
       if (!body) return errorResult("body is required");
-      if (!ctx.linear.currentAgentSessionId) {
+      const panel = await ctx.getCurrentPanel();
+      if (!panel) {
         return errorResult(
-          "linear_request_input only works inside a Linear AgentSession " +
-            "(Delegate panel or @-mention panel). No agentSession bound to " +
-            "this OMA session.",
+          "No Linear panel is currently entered. Call linear_enter_panel " +
+            "first with the panel id from the user message.",
         );
       }
       const res = await ctx.linearGraphQL({
@@ -150,7 +186,7 @@ const TOOLS: ToolDescriptor[] = [
         }`,
         variables: {
           input: {
-            agentSessionId: ctx.linear.currentAgentSessionId,
+            agentSessionId: panel,
             content: { type: "elicitation", body },
           },
         },
@@ -158,60 +194,47 @@ const TOOLS: ToolDescriptor[] = [
       if (res.errors) {
         return errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`);
       }
-
-      // Stamp lastElicitationAt on the OMA session metadata so event-tap can
-      // drop trailing assistant messages from the same turn. Linear flips the
-      // AgentSession to `awaitingInput` automatically on elicitation, but
-      // status propagation is async — by the time the bot's final
-      // agent.message event reaches our mirror, the status query may still
-      // see `active`. The timestamp is the authoritative local signal: if
-      // the bot just elicited within the last 30s, do not mirror response.
-      try {
-        await ctx.patchLinearMetadata({ lastElicitationAt: Date.now() });
-      } catch (err) {
-        // Best-effort — failure here means event-tap may still mirror a
-        // response over the elicitation, but the elicitation itself is
-        // already posted. Don't fail the tool call over a metadata patch.
-        console.warn(
-          `[mcp] failed to stamp lastElicitationAt: ${(err as Error).message}`,
-        );
-      }
       return okResult(
-        "Question posted to panel. Stop generating now — the user's " +
-          "reply will arrive as the next user message.",
+        `Question posted to panel ${panel}. Stop generating now — the user's ` +
+          `reply will arrive as the next user message.`,
       );
     },
   },
   {
     name: "linear_post_comment",
-    title: "Post a top-level comment on a Linear issue",
+    title: "Post a Linear comment",
     description:
-      "Post a top-level (non-panel) comment on a Linear issue as the bot user. " +
-      "Use this when you need to talk to *someone other than* the user who " +
-      "spawned this AgentSession panel — e.g. @-mention a different teammate to " +
-      "ask them a question, or leave a status update on the issue itself.\n\n" +
-      "If the human you @-mention replies in the comment thread, their reply " +
-      "will be delivered back to you as a user message in this OMA session — " +
-      "so this is the bot equivalent of \"send a message and wait for an " +
-      "answer\" outside the panel surface.\n\n" +
-      "Pass `body` as Markdown. To @-mention a Linear user, use the syntax " +
-      "`@[Display Name](mention://user/<USER_UUID>)` — Linear renders that as " +
-      "an actual mention chip and notifies the user. Passing plain `@username` " +
-      "text just shows as text and does NOT notify anyone.\n\n" +
-      "`issueId` defaults to the issue this session is bound to. Override " +
-      "only when you want to post on a different issue.",
+      "Post a comment on a Linear issue as the bot user.\n\n" +
+      "**Top-level comment** (omit `parentId`): starts a new thread on the " +
+      "issue. Use this to reach a different person via @-mention.\n\n" +
+      "**Thread reply** (pass `parentId`): posts as a sibling reply in an " +
+      "existing thread. Linear thread structure is flat (only 2 levels), so " +
+      "every reply parents to the original top-level comment.\n\n" +
+      "If a human replies in a thread you started (or replied to), their " +
+      "reply is delivered back to you as a user message. There is no panel " +
+      "involved on this side-channel — your further responses must be " +
+      "explicit `linear_post_comment` calls.\n\n" +
+      "Body is Markdown. To @-mention a user, use plain `@<displayname>` " +
+      "(e.g. `@hrhrngxy`) — Linear server-side parses it into a real " +
+      "mention chip + sends a notification.\n\n" +
+      "`issueId` defaults to the issue this conversation is bound to.",
     inputSchema: {
       type: "object",
       properties: {
         body: {
           type: "string",
           description:
-            "Markdown body. Use `@[name](mention://user/UUID)` for real mentions.",
+            "Markdown body. To @-mention a teammate, use plain `@<displayname>`.",
+        },
+        parentId: {
+          type: "string",
+          description:
+            "Parent comment id for a thread reply. Omit for a top-level comment.",
         },
         issueId: {
           type: "string",
           description:
-            "Linear issue UUID. Defaults to the current AgentSession's issue.",
+            "Linear issue UUID. Defaults to the issue this conversation is bound to.",
         },
       },
       required: ["body"],
@@ -219,18 +242,21 @@ const TOOLS: ToolDescriptor[] = [
     handler: async (ctx, args) => {
       const body = String(args.body ?? "").trim();
       if (!body) return errorResult("body is required");
-      const issueId = String(args.issueId ?? ctx.linear.issueId ?? "").trim();
+      const issueId = String(args.issueId ?? ctx.issueId ?? "").trim();
       if (!issueId) {
         return errorResult(
-          "issueId required — no issue is bound to this OMA session, so the " +
-            "bot must pass it explicitly.",
+          "issueId required — no issue is bound to this conversation, so " +
+            "the bot must pass it explicitly.",
         );
       }
+      const parentId = args.parentId ? String(args.parentId).trim() : null;
+      const input: Record<string, unknown> = { issueId, body };
+      if (parentId) input.parentId = parentId;
       const res = await ctx.linearGraphQL({
         query: `mutation($input: CommentCreateInput!) {
           commentCreate(input: $input) { success comment { id } }
         }`,
-        variables: { input: { issueId, body } },
+        variables: { input },
       });
       if (res.errors) {
         return errorResult(`commentCreate failed: ${JSON.stringify(res.errors)}`);
@@ -243,18 +269,92 @@ const TOOLS: ToolDescriptor[] = [
       try {
         await ctx.recordAuthoredComment({ commentId, issueId });
       } catch (err) {
-        // Comment is already on Linear; failing the tool would mislead the
-        // bot. Log and warn — reply routing won't work for this comment but
-        // the comment itself is delivered.
         console.warn(
           `[mcp] recordAuthoredComment failed for ${commentId}: ${(err as Error).message}`,
         );
       }
+      const where = parentId
+        ? `as a thread reply to ${parentId}`
+        : "as a new top-level thread";
       return okResult(
-        `Posted comment ${commentId} on issue ${issueId}. If the @-mentioned ` +
-          "human replies in the thread, their reply will arrive here as the " +
-          "next user message.",
+        `Posted comment ${commentId} on issue ${issueId} ${where}. If a ` +
+          "human replies in this thread, their reply will arrive here as " +
+          "the next user message.",
       );
+    },
+  },
+  {
+    name: "linear_list_comments",
+    title: "List comments on a Linear issue or thread",
+    description:
+      "Fetch the recent comment history on a Linear issue, or scoped to a " +
+      "single thread. Returns up to 50 comments newest-first with author " +
+      "displayname, body, parent comment id, and timestamps.\n\n" +
+      "Pass `parentCommentId` to scope the listing to one thread (parent + " +
+      "all replies). Without it, returns top-level comments only.\n\n" +
+      "Use this to read up before responding when you're woken by a thread " +
+      "reply or @-mention with no inline context.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        issueId: {
+          type: "string",
+          description:
+            "Linear issue UUID. Defaults to the issue this conversation is bound to.",
+        },
+        parentCommentId: {
+          type: "string",
+          description:
+            "Optional. If provided, list the parent comment + replies in that thread.",
+        },
+      },
+    },
+    handler: async (ctx, args) => {
+      const issueId = String(args.issueId ?? ctx.issueId ?? "").trim();
+      if (!issueId) {
+        return errorResult(
+          "issueId required — no issue is bound to this conversation.",
+        );
+      }
+      const parentCommentId = args.parentCommentId ? String(args.parentCommentId).trim() : null;
+      const query = parentCommentId
+        ? `query($issueId:String!, $parentId:ID){
+             issue(id:$issueId){
+               comments(first:50, filter:{ or:[ { id:{eq:$parentId} }, { parent:{ id:{eq:$parentId} } } ] }){
+                 nodes{ id body createdAt parent{id} user{displayName} }
+               }
+             }
+           }`
+        : `query($issueId:String!){
+             issue(id:$issueId){
+               comments(first:50, filter:{ parent:{ null:true } }){
+                 nodes{ id body createdAt parent{id} user{displayName} }
+               }
+             }
+           }`;
+      const variables = parentCommentId
+        ? { issueId, parentId: parentCommentId }
+        : { issueId };
+      const res = await ctx.linearGraphQL({ query, variables });
+      if (res.errors) {
+        return errorResult(`comment listing failed: ${JSON.stringify(res.errors)}`);
+      }
+      const nodes =
+        ((res.data as { issue?: { comments?: { nodes?: Array<{
+          id: string;
+          body: string;
+          createdAt: string;
+          parent: { id: string } | null;
+          user: { displayName: string } | null;
+        }> } } })?.issue?.comments?.nodes) ?? [];
+      const formatted = nodes
+        .map((n) => {
+          const handle = n.user?.displayName ? `@${n.user.displayName}` : "(unknown)";
+          const parent = n.parent?.id ? ` (reply to ${n.parent.id})` : "";
+          return `- ${handle} · ${n.id} · ${n.createdAt}${parent}\n  ${n.body.split("\n").join("\n  ")}`;
+        })
+        .join("\n");
+      return okResult(formatted || "(no comments)");
     },
   },
 ];
@@ -282,12 +382,6 @@ async function linearGraphQL(
   return (await res.json()) as { data?: unknown; errors?: unknown };
 }
 
-/** Build a GraphQL caller bound to one installation. Issues the call with the
- *  current access token; on a Linear AUTHENTICATION_ERROR (their way of saying
- *  "the 24h OAuth token is dead") it refreshes via the provider, persists the
- *  new tokens, mutates the captured `state` so subsequent calls in this same
- *  request reuse the fresh token, and retries once. Other errors pass through
- *  untouched. */
 function buildAuthAwareGraphQL(args: {
   installationId: string;
   state: { token: string };
@@ -331,9 +425,6 @@ app.post("/:sessionId", async (c) => {
     return jsonRpcError(null, -32001, "missing bearer token");
   }
 
-  // Resolve session + validate token via main worker. We don't read the
-  // session record directly — main owns CONFIG_KV. Service binding does the
-  // lookup and returns the auth context we need.
   let ctx: SessionContext;
   try {
     ctx = await resolveSessionContext(c.env, sessionId, bearer);
@@ -359,12 +450,13 @@ app.post("/:sessionId", async (c) => {
         capabilities: { tools: { listChanged: false } },
         serverInfo: SERVER_INFO,
         instructions:
-          "Use these tools to interact with Linear as the bot user. " +
-          "Token is managed server-side; no auth headers needed in tool args.",
+          "Tools to interact with Linear as the bot user. Token is managed " +
+          "server-side; no auth headers needed in tool args. Use linear_enter_panel " +
+          "to bind to a Linear AgentSession panel for live mirroring of your " +
+          "reasoning, or linear_post_comment to talk in comment threads off-panel.",
       });
 
     case "notifications/initialized":
-      // No-op notification — no response expected.
       return new Response(null, { status: 204 });
 
     case "tools/list":
@@ -404,20 +496,15 @@ function jsonRpcError(id: JsonRpcId, code: number, message: string, data?: unkno
   return Response.json(body);
 }
 
-/**
- * Validate the per-session bearer and assemble the resolved context. Looks up
- * the OMA session record (via main worker service binding to CONFIG_KV),
- * verifies the bearer matches the recorded `linear_mcp_token`, then resolves
- * the publication and installation to produce the App OAuth token plus the
- * trigger metadata the tools will need.
- */
 async function resolveSessionContext(
   env: Env,
   sessionId: string,
   bearer: string,
 ): Promise<SessionContext> {
   // Ask main for the session record. Main owns the CONFIG_KV with session
-  // data; integrations doesn't bind that namespace.
+  // data; integrations doesn't bind that namespace. We only need immutable
+  // wiring fields — publication id (mandatory), issue id (optional default
+  // for tools), mcp_token (auth check). Everything else lives in D1 now.
   const sessionRes = await env.MAIN.fetch(
     `http://main/v1/internal/sessions/${encodeURIComponent(sessionId)}`,
     {
@@ -435,9 +522,6 @@ async function resolveSessionContext(
         publicationId?: string;
         mcp_token?: string;
         issueId?: string | null;
-        currentAgentSessionId?: string | null;
-        triggerCommentId?: string | null;
-        actor?: { id?: string | null; displayName?: string | null };
       };
     };
   };
@@ -456,31 +540,12 @@ async function resolveSessionContext(
   const accessToken = await container.installations.getAccessToken(pub.installationId);
   if (!accessToken) throw new Error("App OAuth token not available");
 
-  // Capture the token in a mutable cell so the auth-aware caller can swap it
-  // in-place if a refresh fires mid-request. Subsequent tool calls in the
-  // same context then see the fresh value too.
   const tokenState = { token: accessToken };
   const linearGraphQLBound = buildAuthAwareGraphQL({
     installationId: pub.installationId,
     state: tokenState,
     refresh: () => providers.linear.refreshAccessToken(pub.installationId),
   });
-  const patchLinearMetadata = async (merge: Record<string, unknown>) => {
-    const res = await env.MAIN.fetch(
-      `http://main/v1/internal/sessions/${encodeURIComponent(sessionId)}/metadata/linear`,
-      {
-        method: "PATCH",
-        headers: {
-          "x-internal-secret": env.INTEGRATIONS_INTERNAL_SECRET,
-          "content-type": "application/json",
-        },
-        body: JSON.stringify({ merge }),
-      },
-    );
-    if (!res.ok) {
-      throw new Error(`patch metadata.linear: ${res.status} ${await res.text()}`);
-    }
-  };
   const recordAuthoredComment = async (input: {
     commentId: string;
     issueId: string;
@@ -488,12 +553,19 @@ async function resolveSessionContext(
     await container.authoredComments.insert({
       commentId: input.commentId,
       omaSessionId: sessionId,
-      publicationId: pub.id,
-      installationId: pub.installationId,
       issueId: input.issueId,
-      agentSessionId: linearMeta.currentAgentSessionId ?? null,
       createdAt: Date.now(),
     });
+  };
+  const getCurrentPanel = async () => {
+    const row = await container.panelBindings.get(sessionId);
+    return row?.panelAgentSessionId ?? null;
+  };
+  const setPanel = async (agentSessionId: string) => {
+    await container.panelBindings.set(sessionId, agentSessionId, Date.now());
+  };
+  const clearPanel = async () => {
+    await container.panelBindings.clear(sessionId);
   };
 
   return {
@@ -501,19 +573,12 @@ async function resolveSessionContext(
     userId: pub.userId,
     publicationId: pub.id,
     installationId: pub.installationId,
-    accessToken,
     linearGraphQL: linearGraphQLBound,
-    patchLinearMetadata,
     recordAuthoredComment,
-    linear: {
-      issueId: linearMeta.issueId ?? null,
-      currentAgentSessionId: linearMeta.currentAgentSessionId ?? null,
-      triggerCommentId: linearMeta.triggerCommentId ?? null,
-      actor: {
-        id: linearMeta.actor?.id ?? null,
-        displayName: linearMeta.actor?.displayName ?? null,
-      },
-    },
+    getCurrentPanel,
+    setPanel,
+    clearPanel,
+    issueId: linearMeta.issueId ?? null,
   };
 }
 
