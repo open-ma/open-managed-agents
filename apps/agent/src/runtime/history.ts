@@ -203,19 +203,19 @@ function buildMessages(
   return messages;
 }
 
-// CC-style tail preservation params (sessionMemoryCompact.ts
-// DEFAULT_SM_COMPACT_CONFIG):
+// Tail preservation params (Claude Code-style defaults — observed values
+// that work well for multi-turn coding sessions):
 //   minTokens: 10_000  maxTokens: 40_000  minTextMessages: 5
 const TAIL_MIN_TOKENS = 10_000;
 const TAIL_MAX_TOKENS = 40_000;
 const TAIL_MIN_MESSAGES = 5;
-// CC's microCompact.IMAGE_MAX_TOKEN_SIZE — images bill at a flat 2K each.
+// Industry-standard heuristic: image blocks bill at a flat ~2K tokens each.
 const IMAGE_TOKEN_SIZE = 2_000;
 
 /**
- * CC-style per-content-part token estimate (microCompact.ts:164). Text uses
- * length/4; image/file blocks use a flat 2K; tool-use counts name + JSON
- * input but not the id; reasoning counts the text but not the signature.
+ * Per-content-part token estimate. Text uses length/4; image/file blocks
+ * use a flat 2K; tool-use counts name + JSON input but not the id;
+ * reasoning counts the text but not the signature.
  */
 function estimateContentPartTokens(part: unknown): number {
   if (typeof part === "string") return Math.round(part.length / 4);
@@ -225,7 +225,7 @@ function estimateContentPartTokens(part: unknown): number {
     case "text":
       return Math.round(((p.text as string) ?? "").length / 4);
     case "reasoning":
-      // Match CC: count thinking text only; signature is metadata, not tokenized.
+      // Count thinking text only; signature is metadata, not tokenized.
       return Math.round(((p.text as string) ?? "").length / 4);
     case "tool-call":
       return Math.round((((p.toolName as string) ?? "") + JSON.stringify(p.input ?? {})).length / 4);
@@ -259,9 +259,9 @@ function estimateToolResultTokens(output: unknown): number {
 }
 
 /**
- * Per-message estimate, mirroring CC's `estimateMessageTokens`
- * (microCompact.ts:164). Final result is padded by 4/3 to be conservative —
- * matches CC's behavior so our tail-picking budget aligns with theirs.
+ * Per-message estimate. Final result is padded by 4/3 to be conservative,
+ * matching the heuristic Claude Code uses so our tail-picking budget aligns
+ * with what users have come to expect from CC sessions.
  */
 function estimateMessageTokensCC(m: ModelMessage): number {
   let total = 0;

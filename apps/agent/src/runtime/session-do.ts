@@ -1279,7 +1279,7 @@ export class SessionDO extends Agent<Env, SessionState> {
    * Register a background task for completion tracking.
    * Starts a setInterval poller that checks process status every 2s.
    * When complete, injects a task_notification event and re-triggers harness.
-   * Like CC's shellCommand.result.then() — but poll-based since we can't
+   * Event-driven completion notification — but poll-based since we can't
    * get exit events from container processes.
    */
   /**
