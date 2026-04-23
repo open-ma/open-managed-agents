@@ -73,6 +73,12 @@ interface SessionContext {
    *  handlers use this to stamp transient flags (e.g. `lastElicitationAt`)
    *  that the event-tap reads on subsequent broadcasts. */
   patchLinearMetadata: (merge: Record<string, unknown>) => Promise<void>;
+  /** Persist a record of a comment the bot just authored, so the Linear
+   *  Comment webhook can route reply comments back to this OMA session. */
+  recordAuthoredComment: (input: {
+    commentId: string;
+    issueId: string;
+  }) => Promise<void>;
   /** Mutable per-turn metadata: which Linear AgentSession the agent has
    *  currently "open" for replies, what comment id triggered this turn, etc.
    *  Populated from OMA session metadata.linear at request time. */
@@ -173,6 +179,81 @@ const TOOLS: ToolDescriptor[] = [
       return okResult(
         "Question posted to panel. Stop generating now — the user's " +
           "reply will arrive as the next user message.",
+      );
+    },
+  },
+  {
+    name: "linear_post_comment",
+    title: "Post a top-level comment on a Linear issue",
+    description:
+      "Post a top-level (non-panel) comment on a Linear issue as the bot user. " +
+      "Use this when you need to talk to *someone other than* the user who " +
+      "spawned this AgentSession panel — e.g. @-mention a different teammate to " +
+      "ask them a question, or leave a status update on the issue itself.\n\n" +
+      "If the human you @-mention replies in the comment thread, their reply " +
+      "will be delivered back to you as a user message in this OMA session — " +
+      "so this is the bot equivalent of \"send a message and wait for an " +
+      "answer\" outside the panel surface.\n\n" +
+      "Pass `body` as Markdown. To @-mention a Linear user, use the syntax " +
+      "`@[Display Name](mention://user/<USER_UUID>)` — Linear renders that as " +
+      "an actual mention chip and notifies the user. Passing plain `@username` " +
+      "text just shows as text and does NOT notify anyone.\n\n" +
+      "`issueId` defaults to the issue this session is bound to. Override " +
+      "only when you want to post on a different issue.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        body: {
+          type: "string",
+          description:
+            "Markdown body. Use `@[name](mention://user/UUID)` for real mentions.",
+        },
+        issueId: {
+          type: "string",
+          description:
+            "Linear issue UUID. Defaults to the current AgentSession's issue.",
+        },
+      },
+      required: ["body"],
+    },
+    handler: async (ctx, args) => {
+      const body = String(args.body ?? "").trim();
+      if (!body) return errorResult("body is required");
+      const issueId = String(args.issueId ?? ctx.linear.issueId ?? "").trim();
+      if (!issueId) {
+        return errorResult(
+          "issueId required — no issue is bound to this OMA session, so the " +
+            "bot must pass it explicitly.",
+        );
+      }
+      const res = await ctx.linearGraphQL({
+        query: `mutation($input: CommentCreateInput!) {
+          commentCreate(input: $input) { success comment { id } }
+        }`,
+        variables: { input: { issueId, body } },
+      });
+      if (res.errors) {
+        return errorResult(`commentCreate failed: ${JSON.stringify(res.errors)}`);
+      }
+      const data = res.data as { commentCreate?: { comment?: { id?: string } } };
+      const commentId = data.commentCreate?.comment?.id;
+      if (!commentId) {
+        return errorResult("commentCreate returned no comment id");
+      }
+      try {
+        await ctx.recordAuthoredComment({ commentId, issueId });
+      } catch (err) {
+        // Comment is already on Linear; failing the tool would mislead the
+        // bot. Log and warn — reply routing won't work for this comment but
+        // the comment itself is delivered.
+        console.warn(
+          `[mcp] recordAuthoredComment failed for ${commentId}: ${(err as Error).message}`,
+        );
+      }
+      return okResult(
+        `Posted comment ${commentId} on issue ${issueId}. If the @-mentioned ` +
+          "human replies in the thread, their reply will arrive here as the " +
+          "next user message.",
       );
     },
   },
@@ -400,6 +481,20 @@ async function resolveSessionContext(
       throw new Error(`patch metadata.linear: ${res.status} ${await res.text()}`);
     }
   };
+  const recordAuthoredComment = async (input: {
+    commentId: string;
+    issueId: string;
+  }) => {
+    await container.authoredComments.insert({
+      commentId: input.commentId,
+      omaSessionId: sessionId,
+      publicationId: pub.id,
+      installationId: pub.installationId,
+      issueId: input.issueId,
+      agentSessionId: linearMeta.currentAgentSessionId ?? null,
+      createdAt: Date.now(),
+    });
+  };
 
   return {
     sessionId,
@@ -409,6 +504,7 @@ async function resolveSessionContext(
     accessToken,
     linearGraphQL: linearGraphQLBound,
     patchLinearMetadata,
+    recordAuthoredComment,
     linear: {
       issueId: linearMeta.issueId ?? null,
       currentAgentSessionId: linearMeta.currentAgentSessionId ?? null,

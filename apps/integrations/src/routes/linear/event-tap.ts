@@ -71,62 +71,62 @@ app.post("/event-tap", async (c) => {
   // make Linear treat the turn as complete and hide the inline reply box.
   // Drop the mirror in that case so the panel stays open for the user.
   //
+  // After an elicitation, drop EVERY event in the grace window — not just
+  // responses. Linear infers "agent is still working" from any new activity
+  // (thought/action/response), so even mirroring a chain-of-thought block
+  // keeps the panel header at "Working" and never flips to "Awaiting input".
+  // The bot's burst of post-elicitation events (final summary, action, etc.)
+  // should be invisible to the user; they only see the question and reply.
+  //
   // Two signals, in order of trustworthiness:
-  //   1. lastElicitationAt — stamped by the linear_request_input MCP tool
-  //      after a successful elicitation, read straight from OMA session
-  //      metadata. Authoritative when fresh, but Cloudflare KV cross-colo
-  //      reads can lag the write by tens of seconds, so we don't rely on
-  //      it alone.
-  //   2. Recent AgentActivities — query Linear for the session's last few
-  //      activities and look for an elicitation. Linear's own data is
-  //      strongly consistent for the session that just emitted the
-  //      activity, so this catches the cases where (1) was missed.
-  //   3. AgentSession.status — final fallback. If status is awaitingInput,
-  //      drop. Status flips after elicitation but propagation is async, so
-  //      this is the weakest signal.
+  //   1. lastElicitationAt — stamped by the linear_request_input MCP tool.
+  //      Cheap, but Cloudflare KV cross-colo reads can lag, so we don't
+  //      rely on it alone.
+  //   2. Linear AgentSession activity list — query the last 10 activities
+  //      for an elicitation within the grace window. Linear's own data is
+  //      consistent for the session it just wrote to, so this is the
+  //      reliable backstop.
   const ELICITATION_GRACE_MS = 30_000;
-  if (content.type === "response") {
-    const stampedAt = linear.lastElicitationAt ?? 0;
-    const sinceStamp = Date.now() - stampedAt;
+  const stampedAt = linear.lastElicitationAt ?? 0;
+  const sinceStamp = Date.now() - stampedAt;
+  console.log(
+    `[event-tap] mirror check session=${sessionId} agentSession=${linear.currentAgentSessionId} eventType=${event.type} stampedAt=${stampedAt} sinceStamp=${sinceStamp}ms`,
+  );
+  if (stampedAt > 0 && sinceStamp < ELICITATION_GRACE_MS) {
     console.log(
-      `[event-tap] response check session=${sessionId} agentSession=${linear.currentAgentSessionId} stampedAt=${stampedAt} sinceStamp=${sinceStamp}ms`,
+      `[event-tap] drop ${content.type} (lastElicitationAt was ${sinceStamp}ms ago)`,
     );
-    if (stampedAt > 0 && sinceStamp < ELICITATION_GRACE_MS) {
-      console.log(
-        `[event-tap] drop response (lastElicitationAt was ${sinceStamp}ms ago)`,
+    return c.json({ ok: true, skipped: "post-elicitation grace window" });
+  }
+  const recentElicitation = await sessionHasRecentElicitation(
+    accessToken,
+    linear.currentAgentSessionId,
+    ELICITATION_GRACE_MS,
+  );
+  if (recentElicitation === "yes") {
+    console.log(
+      `[event-tap] drop ${content.type} (recent elicitation found via Linear activity query)`,
+    );
+    return c.json({ ok: true, skipped: "recent elicitation in session" });
+  }
+  if (recentElicitation === "unauthenticated") {
+    try {
+      accessToken = await providers.linear.refreshAccessToken(pub.installationId);
+      console.log(`[event-tap] refreshed access token for installation=${pub.installationId}`);
+    } catch (err) {
+      console.warn(
+        `[event-tap] token refresh failed for installation=${pub.installationId}: ${(err as Error).message}`,
       );
-      return c.json({ ok: true, skipped: "post-elicitation grace window" });
+      return c.json({ ok: false, error: "token_refresh_failed" }, 502);
     }
-    const recentElicitation = await sessionHasRecentElicitation(
+    const retried = await sessionHasRecentElicitation(
       accessToken,
       linear.currentAgentSessionId,
       ELICITATION_GRACE_MS,
     );
-    if (recentElicitation === "yes") {
-      console.log(
-        `[event-tap] drop response (recent elicitation found via Linear activity query)`,
-      );
+    if (retried === "yes") {
+      console.log(`[event-tap] drop ${content.type} (recent elicitation, post-refresh)`);
       return c.json({ ok: true, skipped: "recent elicitation in session" });
-    }
-    if (recentElicitation === "unauthenticated") {
-      try {
-        accessToken = await providers.linear.refreshAccessToken(pub.installationId);
-        console.log(`[event-tap] refreshed access token for installation=${pub.installationId}`);
-      } catch (err) {
-        console.warn(
-          `[event-tap] token refresh failed for installation=${pub.installationId}: ${(err as Error).message}`,
-        );
-        return c.json({ ok: false, error: "token_refresh_failed" }, 502);
-      }
-      const retried = await sessionHasRecentElicitation(
-        accessToken,
-        linear.currentAgentSessionId,
-        ELICITATION_GRACE_MS,
-      );
-      if (retried === "yes") {
-        console.log(`[event-tap] drop response (recent elicitation, post-refresh)`);
-        return c.json({ ok: true, skipped: "recent elicitation in session" });
-      }
     }
   }
 
