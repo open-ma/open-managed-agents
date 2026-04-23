@@ -23,6 +23,7 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
 import { buildContainer } from "../../wire";
+import { buildProviders } from "../../providers";
 
 type JsonRpcId = string | number | null;
 
@@ -60,6 +61,14 @@ interface SessionContext {
   installationId: string;
   /** App OAuth bearer for api.linear.app / mcp.linear.app. */
   accessToken: string;
+  /** Auth-aware GraphQL client bound to this installation. Wrap raw fetches
+   *  with this so a 401 from Linear (24h token expiry) auto-refreshes via
+   *  the stored refresh_token + retries once. Tool handlers should never
+   *  build their own fetch with `accessToken` directly. */
+  linearGraphQL: (payload: {
+    query: string;
+    variables?: Record<string, unknown>;
+  }) => Promise<{ data?: unknown; errors?: unknown }>;
   /** Mutable per-turn metadata: which Linear AgentSession the agent has
    *  currently "open" for replies, what comment id triggered this turn, etc.
    *  Populated from OMA session metadata.linear at request time. */
@@ -125,7 +134,7 @@ const TOOLS: ToolDescriptor[] = [
             "this OMA session.",
         );
       }
-      const res = await linearGraphQL(ctx.accessToken, {
+      const res = await ctx.linearGraphQL({
         query: `mutation($input: AgentActivityCreateInput!) {
           agentActivityCreate(input: $input) { success }
         }`,
@@ -167,6 +176,45 @@ async function linearGraphQL(
     body: JSON.stringify(payload),
   });
   return (await res.json()) as { data?: unknown; errors?: unknown };
+}
+
+/** Build a GraphQL caller bound to one installation. Issues the call with the
+ *  current access token; on a Linear AUTHENTICATION_ERROR (their way of saying
+ *  "the 24h OAuth token is dead") it refreshes via the provider, persists the
+ *  new tokens, mutates the captured `state` so subsequent calls in this same
+ *  request reuse the fresh token, and retries once. Other errors pass through
+ *  untouched. */
+function buildAuthAwareGraphQL(args: {
+  installationId: string;
+  state: { token: string };
+  refresh: () => Promise<string>;
+}): (payload: { query: string; variables?: Record<string, unknown> }) => Promise<{
+  data?: unknown;
+  errors?: unknown;
+}> {
+  return async (payload) => {
+    const first = await linearGraphQL(args.state.token, payload);
+    if (!isAuthError((first.errors as Array<{ extensions?: { code?: string } }>) ?? undefined)) {
+      return first;
+    }
+    try {
+      args.state.token = await args.refresh();
+      console.log(`[mcp] refreshed access token for installation=${args.installationId}`);
+    } catch (err) {
+      console.warn(
+        `[mcp] token refresh failed for installation=${args.installationId}: ${(err as Error).message}`,
+      );
+      return first;
+    }
+    return linearGraphQL(args.state.token, payload);
+  };
+}
+
+function isAuthError(
+  errors: Array<{ extensions?: { code?: string } }> | undefined,
+): boolean {
+  if (!errors?.length) return false;
+  return errors.some((e) => e.extensions?.code === "AUTHENTICATION_ERROR");
 }
 
 const app = new Hono<{ Bindings: Env }>();
@@ -298,10 +346,21 @@ async function resolveSessionContext(
   }
 
   const container = buildContainer(env);
+  const providers = buildProviders(env, container);
   const pub = await container.publications.get(linearMeta.publicationId);
   if (!pub) throw new Error("publication not found");
   const accessToken = await container.installations.getAccessToken(pub.installationId);
   if (!accessToken) throw new Error("App OAuth token not available");
+
+  // Capture the token in a mutable cell so the auth-aware caller can swap it
+  // in-place if a refresh fires mid-request. Subsequent tool calls in the
+  // same context then see the fresh value too.
+  const tokenState = { token: accessToken };
+  const linearGraphQLBound = buildAuthAwareGraphQL({
+    installationId: pub.installationId,
+    state: tokenState,
+    refresh: () => providers.linear.refreshAccessToken(pub.installationId),
+  });
 
   return {
     sessionId,
@@ -309,6 +368,7 @@ async function resolveSessionContext(
     publicationId: pub.id,
     installationId: pub.installationId,
     accessToken,
+    linearGraphQL: linearGraphQLBound,
     linear: {
       issueId: linearMeta.issueId ?? null,
       currentAgentSessionId: linearMeta.currentAgentSessionId ?? null,
