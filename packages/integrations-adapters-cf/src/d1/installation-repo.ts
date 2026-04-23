@@ -86,6 +86,45 @@ export class D1InstallationRepo implements InstallationRepo {
     return this.crypto.decrypt(row.access_token_cipher);
   }
 
+  async getRefreshToken(id: string): Promise<string | null> {
+    const row = await this.db
+      .prepare(
+        `SELECT refresh_token_cipher FROM linear_installations
+         WHERE id = ? AND revoked_at IS NULL`,
+      )
+      .bind(id)
+      .first<{ refresh_token_cipher: string | null }>();
+    if (!row || !row.refresh_token_cipher) return null;
+    return this.crypto.decrypt(row.refresh_token_cipher);
+  }
+
+  async setTokens(
+    id: string,
+    accessToken: string,
+    refreshToken: string | null,
+  ): Promise<void> {
+    const accessCipher = await this.crypto.encrypt(accessToken);
+    if (refreshToken === null) {
+      // Leave the existing refresh row untouched. Linear actually rotates the
+      // refresh token on every refresh — callers should pass it through — so
+      // this branch only fires when upstream genuinely omitted it.
+      await this.db
+        .prepare(`UPDATE linear_installations SET access_token_cipher = ? WHERE id = ?`)
+        .bind(accessCipher, id)
+        .run();
+      return;
+    }
+    const refreshCipher = await this.crypto.encrypt(refreshToken);
+    await this.db
+      .prepare(
+        `UPDATE linear_installations
+           SET access_token_cipher = ?, refresh_token_cipher = ?
+         WHERE id = ?`,
+      )
+      .bind(accessCipher, refreshCipher, id)
+      .run();
+  }
+
   async insert(row: NewInstallation): Promise<Installation> {
     const id = this.ids.generate();
     const now = Date.now();

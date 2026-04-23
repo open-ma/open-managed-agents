@@ -55,9 +55,22 @@ export interface InstallationRepo {
    * revoked. Implementations are expected to hold a Crypto instance.
    */
   getAccessToken(id: string): Promise<string | null>;
+  /**
+   * Returns the decrypted refresh token (if one was persisted), or null. Used
+   * by the provider to renew an expired access token without forcing the user
+   * to reinstall the OAuth app.
+   */
+  getRefreshToken(id: string): Promise<string | null>;
   insert(row: NewInstallation): Promise<Installation>;
   /** Set the vault id holding the bearer credential for this install. */
   setVaultId(id: string, vaultId: string): Promise<void>;
+  /**
+   * Atomically rotate the stored access token (and refresh token, which the
+   * provider may rotate alongside). Both values are encrypted before storage.
+   * Pass refreshToken=null to leave the existing refresh row untouched only
+   * when the upstream response did not return one.
+   */
+  setTokens(id: string, accessToken: string, refreshToken: string | null): Promise<void>;
   markRevoked(id: string, at: number): Promise<void>;
 }
 

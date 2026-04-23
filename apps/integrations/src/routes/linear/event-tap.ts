@@ -10,6 +10,7 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
 import { buildContainer } from "../../wire";
+import { buildProviders } from "../../providers";
 
 const app = new Hono<{ Bindings: Env }>();
 
@@ -51,9 +52,10 @@ app.post("/event-tap", async (c) => {
   if (!content) return c.json({ ok: true, skipped: "event not mirrored" });
 
   const container = buildContainer(c.env);
+  const providers = buildProviders(c.env, container);
   const pub = await container.publications.get(linear.publicationId);
   if (!pub) return c.json({ ok: true, skipped: "publication not found" });
-  const accessToken = await container.installations.getAccessToken(pub.installationId);
+  let accessToken = await container.installations.getAccessToken(pub.installationId);
   if (!accessToken) return c.json({ ok: true, skipped: "no access token" });
 
   // If the bot just posted an elicitation, Linear has already flipped the
@@ -67,30 +69,69 @@ app.post("/event-tap", async (c) => {
       accessToken,
       linear.currentAgentSessionId,
     );
+    // null = transient lookup failure → allow mirror; awaitingInput → drop;
+    // unauthenticated → triggers the same lazy refresh path the mutation
+    // below uses, so we don't bail on a stale token here.
     if (status === "awaitingInput") {
       console.log(
         `[event-tap] drop response for session=${sessionId} agentSession=${linear.currentAgentSessionId} (status=awaitingInput)`,
       );
       return c.json({ ok: true, skipped: "panel awaiting user input" });
     }
+    if (status === "unauthenticated") {
+      try {
+        accessToken = await providers.linear.refreshAccessToken(pub.installationId);
+        console.log(`[event-tap] refreshed access token for installation=${pub.installationId}`);
+      } catch (err) {
+        console.warn(
+          `[event-tap] token refresh failed for installation=${pub.installationId}: ${(err as Error).message}`,
+        );
+        return c.json({ ok: false, error: "token_refresh_failed" }, 502);
+      }
+      const refreshed = await fetchAgentSessionStatus(accessToken, linear.currentAgentSessionId);
+      if (refreshed === "awaitingInput") {
+        console.log(
+          `[event-tap] drop response for session=${sessionId} agentSession=${linear.currentAgentSessionId} (status=awaitingInput, post-refresh)`,
+        );
+        return c.json({ ok: true, skipped: "panel awaiting user input" });
+      }
+    }
   }
 
-  const res = await fetch("https://api.linear.app/graphql", {
-    method: "POST",
-    headers: {
-      authorization: `Bearer ${accessToken}`,
-      "content-type": "application/json",
-    },
-    body: JSON.stringify({
-      query: `mutation($input: AgentActivityCreateInput!) {
-        agentActivityCreate(input: $input) { success }
-      }`,
-      variables: {
-        input: { agentSessionId: linear.currentAgentSessionId, content },
+  const postActivity = (token: string) =>
+    fetch("https://api.linear.app/graphql", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${token}`,
+        "content-type": "application/json",
       },
-    }),
-  });
-  const data = (await res.json()) as { errors?: unknown };
+      body: JSON.stringify({
+        query: `mutation($input: AgentActivityCreateInput!) {
+          agentActivityCreate(input: $input) { success }
+        }`,
+        variables: {
+          input: { agentSessionId: linear.currentAgentSessionId, content },
+        },
+      }),
+    });
+
+  let res = await postActivity(accessToken);
+  let data = (await res.json()) as { errors?: Array<{ extensions?: { code?: string } }> };
+  if (isAuthError(data.errors)) {
+    try {
+      accessToken = await providers.linear.refreshAccessToken(pub.installationId);
+      console.log(
+        `[event-tap] refreshed access token for installation=${pub.installationId} (mutation 401)`,
+      );
+    } catch (err) {
+      console.warn(
+        `[event-tap] token refresh failed for installation=${pub.installationId}: ${(err as Error).message}`,
+      );
+      return c.json({ ok: false, error: "token_refresh_failed" }, 502);
+    }
+    res = await postActivity(accessToken);
+    data = (await res.json()) as { errors?: Array<{ extensions?: { code?: string } }> };
+  }
   if (data.errors) {
     console.warn(`[event-tap] linear errors: ${JSON.stringify(data.errors)}`);
     return c.json({ ok: false }, 502);
@@ -153,9 +194,11 @@ function summarizeArgs(input: unknown): string {
   }
 }
 
-/** Fetch the current AgentSession.status. Returns null on any failure — the
- *  caller should treat null as "not awaitingInput" (i.e. allow the mirror to
- *  proceed) so a transient Linear hiccup doesn't black-hole bot responses. */
+/** Fetch the current AgentSession.status. Returns null on any failure other
+ *  than auth — the caller should treat null as "not awaitingInput" (i.e.
+ *  allow the mirror to proceed) so a transient Linear hiccup doesn't
+ *  black-hole bot responses. Returns the literal "unauthenticated" when
+ *  Linear says the token is dead, so the caller can refresh and retry. */
 async function fetchAgentSessionStatus(
   accessToken: string,
   agentSessionId: string,
@@ -174,12 +217,25 @@ async function fetchAgentSessionStatus(
     });
     const data = (await res.json()) as {
       data?: { agentSession?: { status?: string } };
+      errors?: Array<{ extensions?: { code?: string } }>;
     };
+    if (isAuthError(data.errors)) return "unauthenticated";
     return data.data?.agentSession?.status ?? null;
   } catch (err) {
     console.warn(`[event-tap] status fetch failed: ${(err as Error).message}`);
     return null;
   }
+}
+
+/** Linear surfaces dead-token errors with extensions.code=AUTHENTICATION_ERROR.
+ *  Both the GraphQL response (HTTP 200, errors[]) and a hypothetical raw 401
+ *  are signs the access token needs refresh — this helper normalizes only the
+ *  GraphQL-level case since `fetch` returns 200 even when Linear rejects auth. */
+function isAuthError(
+  errors: Array<{ extensions?: { code?: string } }> | undefined,
+): boolean {
+  if (!errors?.length) return false;
+  return errors.some((e) => e.extensions?.code === "AUTHENTICATION_ERROR");
 }
 
 export default app;

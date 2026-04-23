@@ -219,6 +219,7 @@ export class FakeVaultManager implements VaultManager {
 export class InMemoryInstallationRepo implements InstallationRepo {
   private rows = new Map<string, Installation>();
   private tokens = new Map<string, string>(); // installation id → plaintext token
+  private refreshTokens = new Map<string, string>(); // installation id → plaintext refresh
   private counter = 0;
 
   constructor(private clock: Clock = new FakeClock()) {}
@@ -259,6 +260,12 @@ export class InMemoryInstallationRepo implements InstallationRepo {
     return this.tokens.get(id) ?? null;
   }
 
+  async getRefreshToken(id: string): Promise<string | null> {
+    const row = this.rows.get(id);
+    if (!row || row.revokedAt !== null) return null;
+    return this.refreshTokens.get(id) ?? null;
+  }
+
   async insert(row: NewInstallation): Promise<Installation> {
     this.counter += 1;
     const id = `inst_${this.counter}`;
@@ -278,12 +285,22 @@ export class InMemoryInstallationRepo implements InstallationRepo {
     };
     this.rows.set(id, inst);
     this.tokens.set(id, row.accessToken);
+    if (row.refreshToken) this.refreshTokens.set(id, row.refreshToken);
     return inst;
   }
 
   async setVaultId(id: string, vaultId: string): Promise<void> {
     const row = this.rows.get(id);
     if (row) this.rows.set(id, { ...row, vaultId });
+  }
+
+  async setTokens(
+    id: string,
+    accessToken: string,
+    refreshToken: string | null,
+  ): Promise<void> {
+    this.tokens.set(id, accessToken);
+    if (refreshToken !== null) this.refreshTokens.set(id, refreshToken);
   }
 
   async markRevoked(id: string, at: number): Promise<void> {
