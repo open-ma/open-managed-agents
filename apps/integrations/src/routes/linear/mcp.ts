@@ -79,6 +79,11 @@ interface SessionContext {
   setPanel: (agentSessionId: string) => Promise<void>;
   /** Clear the panel binding. */
   clearPanel: () => Promise<void>;
+  /** Stamp the panel binding with the current elicitation timestamp. event-tap
+   *  drops mirrored events for ~30s after this stamp so Linear keeps the
+   *  panel in `awaitingInput` (with the reply box) instead of seeing a
+   *  trailing assistant message and flipping to `complete`. */
+  stampElicitation: () => Promise<void>;
   /** Issue the bot was originally bound to (per_issue session granularity).
    *  Used as a fallback default when tool calls don't pass issueId. */
   issueId: string | null;
@@ -112,7 +117,12 @@ const TOOLS: ToolDescriptor[] = [
       "the comment tools for explicit user-visible output instead.\n\n" +
       "The panel id is provided in the user message that wakes you up: when " +
       "Linear delegates an issue or a human @-mentions you, the message " +
-      "always names the panel as `ag_<uuid>`. Pass that whole id here.",
+      "always names the panel as `ag_<uuid>`. Pass that whole id here.\n\n" +
+      "Switching to a different panel (or to one Linear doesn't recognize) " +
+      "doesn't show feedback in the OLD panel — once binding flips, anything " +
+      "you say goes to the new panel target. If the new id isn't real, your " +
+      "narration just goes silent. So if you intend to demo \"now I'm " +
+      "switching\" make sure to narrate BEFORE the switch, not after.",
     inputSchema: {
       type: "object",
       properties: {
@@ -157,9 +167,15 @@ const TOOLS: ToolDescriptor[] = [
       "Linear renders an inline reply box for the panel creator and marks " +
       "the panel as awaiting input. Their reply arrives back as the next " +
       "user message in this conversation.\n\n" +
-      "Requires you to have entered a panel via linear_enter_panel first. " +
-      "After this returns, stop generating — anything else you say in the " +
-      "same turn will be mirrored to the panel and confuse the UX.",
+      "Requires you to have entered a panel via linear_enter_panel first.\n\n" +
+      "**CRITICAL: After this tool returns, your turn is OVER.** Emit no " +
+      "further reasoning, no further tool calls, no assistant text. Linear " +
+      "treats any subsequent activity in the same turn as the agent " +
+      "continuing past the question — it flips the panel from `awaitingInput` " +
+      "back to `active` (or to `complete` on a final message), the inline " +
+      "reply box vanishes, and the user has no way to answer your question. " +
+      "Stopping is non-negotiable. The user's reply will arrive in the next " +
+      "turn as a fresh user message.",
     inputSchema: {
       type: "object",
       properties: {
@@ -178,6 +194,19 @@ const TOOLS: ToolDescriptor[] = [
         return errorResult(
           "No Linear panel is currently entered. Call linear_enter_panel " +
             "first with the panel id from the user message.",
+        );
+      }
+      // Stamp BEFORE we fire the elicitation activity. event-tap reads the
+      // stamp from D1; if we stamped after the activity, the bot's
+      // immediately-following thought event could race the D1 propagation
+      // (~500ms cross-colo) and slip through. Worst case if the activity
+      // post then fails, we drop ~30s of events that should have mirrored —
+      // an acceptable tradeoff against the panel-completes UX bug.
+      try {
+        await ctx.stampElicitation();
+      } catch (err) {
+        console.warn(
+          `[mcp] failed to stamp elicitation: ${(err as Error).message}`,
         );
       }
       const res = await ctx.linearGraphQL({
@@ -217,7 +246,12 @@ const TOOLS: ToolDescriptor[] = [
       "Body is Markdown. To @-mention a user, use plain `@<displayname>` " +
       "(e.g. `@hrhrngxy`) — Linear server-side parses it into a real " +
       "mention chip + sends a notification.\n\n" +
-      "`issueId` defaults to the issue this conversation is bound to.",
+      "`issueId` defaults to the issue this conversation is bound to.\n\n" +
+      "**Post once.** A single tool call posts a single comment. Do NOT " +
+      "follow up with extra confirmation comments — \"Comment posted!\" or " +
+      "\"Done!\" follow-ups create duplicate noise in the thread. The tool " +
+      "result already tells you whether the post succeeded; no need to " +
+      "double-confirm to the user.",
     inputSchema: {
       type: "object",
       properties: {
@@ -567,6 +601,9 @@ async function resolveSessionContext(
   const clearPanel = async () => {
     await container.panelBindings.clear(sessionId);
   };
+  const stampElicitation = async () => {
+    await container.panelBindings.stampElicitation(sessionId, Date.now());
+  };
 
   return {
     sessionId,
@@ -578,6 +615,7 @@ async function resolveSessionContext(
     getCurrentPanel,
     setPanel,
     clearPanel,
+    stampElicitation,
     issueId: linearMeta.issueId ?? null,
   };
 }
