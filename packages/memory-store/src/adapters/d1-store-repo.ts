@@ -65,10 +65,17 @@ export class D1MemoryStoreRepo implements MemoryStoreRepo {
   }
 
   async delete(tenantId: string, storeId: string): Promise<void> {
-    await this.db
-      .prepare(`DELETE FROM memory_stores WHERE id = ? AND tenant_id = ?`)
-      .bind(storeId, tenantId)
-      .run();
+    // App-layer cascade: explicitly drop memory_versions + memories before the
+    // store row. Done in one D1.batch so the three DELETEs run atomically —
+    // matches the previous FK ON DELETE CASCADE behavior without depending on
+    // the FK constraint (the schema is no-FK by project convention).
+    await this.db.batch([
+      this.db.prepare(`DELETE FROM memory_versions WHERE store_id = ?`).bind(storeId),
+      this.db.prepare(`DELETE FROM memories WHERE store_id = ?`).bind(storeId),
+      this.db
+        .prepare(`DELETE FROM memory_stores WHERE id = ? AND tenant_id = ?`)
+        .bind(storeId, tenantId),
+    ]);
   }
 
   async listMemoryIds(storeId: string): Promise<string[]> {

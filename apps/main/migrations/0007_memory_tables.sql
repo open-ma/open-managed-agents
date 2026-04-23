@@ -30,7 +30,7 @@ CREATE INDEX IF NOT EXISTS "idx_memory_stores_tenant"
 -- memory.content can be up to 100 KB. SQLite TEXT handles 100 KB without issue.
 CREATE TABLE IF NOT EXISTS "memories" (
   "id"                TEXT PRIMARY KEY NOT NULL,
-  "store_id"          TEXT NOT NULL REFERENCES "memory_stores"("id") ON DELETE CASCADE,
+  "store_id"          TEXT NOT NULL,    -- soft FK to memory_stores (cascade via D1MemoryStoreRepo.delete batch)
   "path"              TEXT NOT NULL,
   "content"           TEXT NOT NULL,
   "content_sha256"    TEXT NOT NULL,
@@ -62,7 +62,7 @@ CREATE INDEX IF NOT EXISTS "idx_memories_unsynced"
 CREATE TABLE IF NOT EXISTS "memory_versions" (
   "id"              TEXT PRIMARY KEY NOT NULL,
   "memory_id"       TEXT NOT NULL,
-  "store_id"        TEXT NOT NULL REFERENCES "memory_stores"("id") ON DELETE CASCADE,
+  "store_id"        TEXT NOT NULL,    -- soft FK to memory_stores (cascade via D1MemoryStoreRepo.delete batch)
   "operation"       TEXT NOT NULL,                   -- 'created' | 'modified' | 'deleted'
   "path"            TEXT,                            -- nullable so redact can clear it
   "content"         TEXT,                            -- nullable so redact can clear it
