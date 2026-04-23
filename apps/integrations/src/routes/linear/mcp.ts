@@ -99,26 +99,33 @@ const TOOLS: ToolDescriptor[] = [
     name: "linear_say",
     title: "Speak in a Linear panel",
     description:
-      "Post an AgentActivity to a Linear AgentSession panel — this is how the " +
-      "bot speaks visibly in a panel. Without calling this, the bot is silent " +
-      "in the panel; internal reasoning is private to the model.\n\n" +
-      "**`kind` controls panel UX:**\n" +
-      "- `thought` (default): shows as a thinking line. Panel stays active. " +
+      "Post an AgentActivity to a Linear AgentSession panel — this is how " +
+      "the bot speaks visibly in a panel. Without calling this, the bot is " +
+      "silent in the panel; internal reasoning is private to the model.\n\n" +
+      "**`kind` controls panel UX (and panel state):**\n" +
+      "- `thought` (default): shows as a thinking line. Panel stays `active`. " +
       "Use for progress narration (\"checking the code...\", \"running tests\").\n" +
       "- `action`: shows as a tool-call card. Pass `action` (label) and " +
-      "optional `parameter`. Use to advertise concrete operations the user " +
-      "should know happened.\n" +
-      "- `response`: shows as the bot's final answer. **This finalizes the " +
-      "panel — Linear marks it complete and any further activity will not " +
-      "render in the UI.** Only use when you're truly done with the turn.\n\n" +
-      "**`panelId`** is the Linear AgentSession id (looks like a UUID). It's " +
-      "named in the user message that woke you up. Pass exactly that string.\n\n" +
-      "Speaking in a complete panel silently fails (Linear accepts the " +
-      "activity but UI doesn't render). Don't reuse panels that have been " +
-      "finalized.\n\n" +
+      "optional `parameter`. Panel stays `active`.\n" +
+      "- `elicitation`: shows as a question with an inline reply box. Panel " +
+      "flips to `awaitingInput`. The user's reply arrives as the next user " +
+      "message in this conversation.\n" +
+      "- `response`: shows as the bot's final answer. **Panel flips to " +
+      "`complete` — Linear treats this as turn over, no further activity " +
+      "renders in the UI.** Only use when truly done.\n\n" +
+      "**Sequence rules:**\n" +
+      "- After `kind=elicitation`, don't post more activities to the same " +
+      "panel until the user replies — Linear is showing the input box and " +
+      "you'd override that state.\n" +
+      "- After `kind=response`, the panel is dead — further calls succeed " +
+      "in API but UI doesn't render. Don't call elicitation/anything on a " +
+      "complete panel; Linear will spawn a new panel for the user's next " +
+      "interaction instead.\n\n" +
+      "**`panelId`** is the Linear AgentSession id (UUID), named in the " +
+      "user message that woke you up.\n\n" +
       "Note: Linear renders panel activities inline in the issue's comment " +
-      "thread too. Even in-panel \"thoughts\" become public comments. Don't " +
-      "say things you wouldn't want all subscribers of this issue to see.",
+      "thread too. Even in-panel \"thoughts\" become public comments visible " +
+      "to all subscribers — don't say things you wouldn't put in a comment.",
     inputSchema: {
       type: "object",
       properties: {
@@ -126,10 +133,11 @@ const TOOLS: ToolDescriptor[] = [
         panelId: { type: "string", description: "Linear AgentSession id (UUID)." },
         kind: {
           type: "string",
-          enum: ["thought", "action", "response"],
+          enum: ["thought", "action", "elicitation", "response"],
           description:
-            "Activity kind. `thought` keeps panel active (default). `action` " +
-            "shows a tool-call card. `response` finalizes the panel.",
+            "Activity kind. `thought` (default) keeps panel active. `action` " +
+            "shows tool-call card. `elicitation` opens a reply box. " +
+            "`response` finalizes the panel.",
         },
         action: {
           type: "string",
@@ -151,8 +159,9 @@ const TOOLS: ToolDescriptor[] = [
       const kind = (String(args.kind ?? "thought").toLowerCase() as
         | "thought"
         | "action"
+        | "elicitation"
         | "response");
-      if (!["thought", "action", "response"].includes(kind)) {
+      if (!["thought", "action", "elicitation", "response"].includes(kind)) {
         return errorResult(`unknown kind: ${kind}`);
       }
       let content: Record<string, unknown>;
@@ -177,52 +186,11 @@ const TOOLS: ToolDescriptor[] = [
       }
       const note =
         kind === "response"
-          ? "Posted (kind=response). Panel is now finalized; further linear_say calls won't render."
+          ? `Posted (kind=response). Panel ${panelId} is now finalized; further linear_say calls won't render.`
+          : kind === "elicitation"
+          ? `Posted (kind=elicitation). Panel ${panelId} is now awaitingInput. The user's reply will arrive as the next user message — don't post more activities to this panel until then.`
           : `Posted (kind=${kind}) to panel ${panelId}.`;
       return okResult(note);
-    },
-  },
-  {
-    name: "linear_request_input",
-    title: "Ask the panel user for input",
-    description:
-      "Post an elicitation activity to a Linear panel. Linear flips the " +
-      "panel to `awaitingInput` and renders an inline reply box for the " +
-      "panel creator. Their reply arrives back as the next user message.\n\n" +
-      "After this returns, the panel is waiting for the user. Don't post " +
-      "more activities to the same panel — Linear is showing the question " +
-      "and the input box; further chatter would override that state and " +
-      "close the panel.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        body: { type: "string", description: "Question text rendered in the panel." },
-        panelId: { type: "string", description: "Linear AgentSession id (UUID)." },
-      },
-      required: ["body", "panelId"],
-    },
-    handler: async (ctx, args) => {
-      const body = String(args.body ?? "").trim();
-      if (!body) return errorResult("body is required");
-      const panelId = String(args.panelId ?? "").trim();
-      if (!panelId) return errorResult("panelId is required");
-      const res = await ctx.linearGraphQL({
-        query: `mutation($input: AgentActivityCreateInput!) {
-          agentActivityCreate(input: $input) { success }
-        }`,
-        variables: {
-          input: {
-            agentSessionId: panelId,
-            content: { type: "elicitation", body },
-          },
-        },
-      });
-      if (res.errors) {
-        return errorResult(`agentActivityCreate failed: ${JSON.stringify(res.errors)}`);
-      }
-      return okResult(
-        `Question posted to panel ${panelId}. Panel is now awaitingInput. The user's reply will arrive as the next user message.`,
-      );
     },
   },
   {
