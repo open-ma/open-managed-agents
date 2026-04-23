@@ -24,9 +24,6 @@ import type {
   Installation,
   InstallationRepo,
   InstallKind,
-  IssueSession,
-  IssueSessionRepo,
-  IssueSessionStatus,
   JwtSigner,
   NewAppCredentials,
   NewInstallation,
@@ -40,6 +37,9 @@ import type {
   SessionCreator,
   SessionEventInput,
   SessionId,
+  SessionScope,
+  SessionScopeRepo,
+  SessionScopeStatus,
   SetupLink,
   SetupLinkRepo,
   VaultManager,
@@ -412,32 +412,32 @@ export class InMemoryWebhookEventStore implements WebhookEventStore {
   }
 }
 
-export class InMemoryIssueSessionRepo implements IssueSessionRepo {
-  private rows = new Map<string, IssueSession>();
+export class InMemorySessionScopeRepo implements SessionScopeRepo {
+  private rows = new Map<string, SessionScope>();
 
-  private key(publicationId: string, issueId: string): string {
-    return `${publicationId}:${issueId}`;
+  private key(publicationId: string, scopeKey: string): string {
+    return `${publicationId}:${scopeKey}`;
   }
 
-  async getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null> {
-    return this.rows.get(this.key(publicationId, issueId)) ?? null;
+  async getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null> {
+    return this.rows.get(this.key(publicationId, scopeKey)) ?? null;
   }
 
-  async insert(row: IssueSession): Promise<void> {
-    this.rows.set(this.key(row.publicationId, row.issueId), row);
+  async insert(row: SessionScope): Promise<void> {
+    this.rows.set(this.key(row.publicationId, row.scopeKey), row);
   }
 
   async updateStatus(
     publicationId: string,
-    issueId: string,
-    status: IssueSessionStatus,
+    scopeKey: string,
+    status: SessionScopeStatus,
   ): Promise<void> {
-    const k = this.key(publicationId, issueId);
+    const k = this.key(publicationId, scopeKey);
     const row = this.rows.get(k);
     if (row) this.rows.set(k, { ...row, status });
   }
 
-  async listActive(publicationId: string): Promise<readonly IssueSession[]> {
+  async listActive(publicationId: string): Promise<readonly SessionScope[]> {
     return [...this.rows.values()].filter(
       (r) => r.publicationId === publicationId && r.status === "active",
     );
@@ -497,7 +497,7 @@ export interface FakeContainer {
   publications: InMemoryPublicationRepo;
   apps: InMemoryAppRepo;
   webhookEvents: InMemoryWebhookEventStore;
-  issueSessions: InMemoryIssueSessionRepo;
+  sessionScopes: InMemorySessionScopeRepo;
   setupLinks: InMemorySetupLinkRepo;
 }
 
@@ -516,7 +516,7 @@ export function buildFakeContainer(): FakeContainer {
     publications: new InMemoryPublicationRepo(clock),
     apps: new InMemoryAppRepo(clock),
     webhookEvents: new InMemoryWebhookEventStore(),
-    issueSessions: new InMemoryIssueSessionRepo(),
+    sessionScopes: new InMemorySessionScopeRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
   };
 }

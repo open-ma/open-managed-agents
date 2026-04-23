@@ -469,7 +469,7 @@ export class LinearProvider implements IntegrationProvider {
     };
 
     if (publication.sessionGranularity === "per_issue" && event.issueId) {
-      const existing = await this.container.issueSessions.getByIssue(
+      const existing = await this.container.sessionScopes.getByScope(
         publication.id,
         event.issueId,
       );
@@ -486,9 +486,9 @@ export class LinearProvider implements IntegrationProvider {
         metadata: { linear: { issueId: event.issueId, workspaceId: event.workspaceId } },
         initialEvent: sessionEvent,
       });
-      await this.container.issueSessions.insert({
+      await this.container.sessionScopes.insert({
         publicationId: publication.id,
-        issueId: event.issueId,
+        scopeKey: event.issueId,
         sessionId: created.sessionId,
         status: "active",
         createdAt: this.container.clock.nowMs(),
