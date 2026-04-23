@@ -6,7 +6,6 @@ import linearDedicatedCallback from "./routes/linear/dedicated-callback";
 import linearSetupPage from "./routes/linear/setup-page";
 import linearMcp from "./routes/linear/mcp";
 import linearEventTap from "./routes/linear/event-tap";
-import linearReauth from "./routes/linear/reauth";
 import githubWebhook from "./routes/github/webhook";
 import githubPublications from "./routes/github/publications";
 import githubInstallCallback from "./routes/github/install-callback";
@@ -99,7 +98,6 @@ app.get("/admin/linear-reauth-link", async (c) => {
 
 // Linear
 app.route("/linear/oauth/app", linearDedicatedCallback);
-app.route("/linear/oauth/reauth", linearReauth);
 app.route("/linear/webhook", linearWebhook);
 app.route("/linear/publications", linearPublications);
 app.route("/linear/mcp", linearMcp);
