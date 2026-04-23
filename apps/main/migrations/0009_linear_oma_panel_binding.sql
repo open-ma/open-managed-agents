@@ -5,12 +5,16 @@
 -- reader (event-tap) — strong consistency via D1 instead of the previous
 -- KV-based scattered state.
 --
--- Replaces the metadata.linear.currentAgentSessionId field that used to live
--- in the OMA session record (KV) and got overwritten on every webhook resume.
--- Now the bot itself decides when it's "on stage" in a panel.
+-- last_elicitation_at: stamped by linear_request_input after the elicitation
+-- activity is posted. event-tap drops every event for ~30s afterward, so
+-- Linear sees only the elicitation and keeps the panel in `awaitingInput`
+-- state — without this, a model that emits "Question sent, waiting" after
+-- the tool call would be mirrored as a `response` activity, flipping the
+-- panel to `complete` and removing the inline reply box.
 
 CREATE TABLE IF NOT EXISTS "linear_oma_panel_binding" (
   "oma_session_id"          TEXT PRIMARY KEY,
   "panel_agent_session_id"  TEXT NOT NULL,
-  "updated_at"              INTEGER NOT NULL
+  "updated_at"              INTEGER NOT NULL,
+  "last_elicitation_at"     INTEGER
 );

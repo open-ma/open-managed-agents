@@ -616,7 +616,17 @@ export class InMemoryPanelBindingRepo implements PanelBindingRepo {
   }
 
   async set(omaSessionId: string, panelAgentSessionId: string, updatedAt: number): Promise<void> {
-    this.rows.set(omaSessionId, { omaSessionId, panelAgentSessionId, updatedAt });
+    this.rows.set(omaSessionId, {
+      omaSessionId,
+      panelAgentSessionId,
+      updatedAt,
+      lastElicitationAt: null,
+    });
+  }
+
+  async stampElicitation(omaSessionId: string, ts: number): Promise<void> {
+    const row = this.rows.get(omaSessionId);
+    if (row) this.rows.set(omaSessionId, { ...row, lastElicitationAt: ts });
   }
 
   async clear(omaSessionId: string): Promise<void> {
