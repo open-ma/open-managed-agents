@@ -70,13 +70,14 @@ const MODE = RAW_MODE as ProbeMode;
 // ---- env ----
 // Two auth modes:
 //   1. ANTHROPIC_API_KEY (sk-ant-...) → standard x-api-key against api.anthropic.com
-//   2. PROBE_AUTH_TOKEN + PROBE_BASE_URL → bearer auth against a custom proxy
+//   2. PROBE_AUTH_TOKEN + PROBE_BASE_URL → bearer auth against any
+//      Anthropic-Messages-compatible endpoint
 //
 // We deliberately ignore inherited ANTHROPIC_AUTH_TOKEN/BASE_URL because
-// Claude Code's defaults point at platform-api.xaminim.com, which speaks a
-// different protocol than Anthropic's Messages API and returns "Invalid
-// JSON response" on direct ai-sdk calls. To probe through that proxy,
-// re-export them as PROBE_* explicitly.
+// some local setups point at a proxy that doesn't speak Anthropic's
+// Messages API directly (returns "Invalid JSON response" on raw ai-sdk
+// calls). To probe through that kind of endpoint, re-export the auth as
+// PROBE_AUTH_TOKEN + PROBE_BASE_URL explicitly.
 const apiKey = process.env.ANTHROPIC_API_KEY;
 const probeToken = process.env.PROBE_AUTH_TOKEN;
 const probeBase = process.env.PROBE_BASE_URL;
@@ -106,10 +107,12 @@ function parseHeaders(raw: string | undefined): Record<string, string> | undefin
   }
 }
 
-// Empty — direct providers (api.example.com, api.anthropic.com) don't
-// require any X-Sub-Module or X-From routing headers. Only the company
-// proxy (platform-api.xaminim.com) does.
-const PROBE_HEADERS: Record<string, string> = {};
+// Routing headers for the proxy. Empty by default — direct providers
+// (api.anthropic.com and most Messages-API-compatible endpoints) don't
+// require routing headers. Set PROBE_HEADERS env var (JSON object or
+// `Header: Value\nHeader2: Value2` lines) to inject — required by some
+// internal proxies that route on custom headers.
+const PROBE_HEADERS: Record<string, string> = parseHeaders(process.env.PROBE_HEADERS) ?? {};
 
 let reqIdx = 0;
 const debugFetch: typeof fetch = async (input, init) => {
