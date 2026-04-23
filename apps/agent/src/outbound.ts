@@ -201,7 +201,13 @@ async function tryRefreshToken(
     cred.auth.expires_at = tokens.expires_in
       ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
       : undefined;
-    await env.CONFIG_KV.put(`outbound:${sessionId}`, JSON.stringify(snapshot));
+    // Match the TTL used at the original write site in session-do.ts —
+    // refreshing the snapshot resets the lifetime, which is what we want:
+    // an active session should keep its credentials live; an idle one
+    // ages out within the same 24h window.
+    await env.CONFIG_KV.put(`outbound:${sessionId}`, JSON.stringify(snapshot), {
+      expirationTtl: 24 * 60 * 60,
+    });
 
     // Best-effort: also update the canonical D1 row so future sessions
     // inherit the refreshed token. The snapshot remains the source of truth
