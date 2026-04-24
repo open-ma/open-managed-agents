@@ -105,6 +105,19 @@ export interface WebhookOutcome {
   reason?: string;
   publicationId?: string;
   sessionId?: string;
+  /**
+   * Optional plain-text body the route handler should echo back in the 200
+   * response. Used by Slack's `url_verification` handshake — the gateway must
+   * return Slack's challenge string within 3 sec.
+   */
+  challengeResponse?: string;
+  /**
+   * Optional async work the route handler should attach to
+   * `c.executionCtx.waitUntil(...)` so the webhook can 200 immediately.
+   * Slack's 3-second response budget rules out doing the dispatch inline; the
+   * provider returns the dispatch closure here and lets the route detach it.
+   */
+  deferredWork?: () => Promise<void>;
 }
 
 // ─── Provider interface ────────────────────────────────────────────────

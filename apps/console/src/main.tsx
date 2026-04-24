@@ -27,6 +27,11 @@ import {
   IntegrationsGitHubWorkspace,
   IntegrationsGitHubBindPage,
 } from "./pages/IntegrationsGitHub";
+import {
+  IntegrationsSlackList,
+  IntegrationsSlackWorkspace,
+  IntegrationsSlackPublishPage,
+} from "./pages/IntegrationsSlack";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -64,6 +69,15 @@ createRoot(document.getElementById("root")!).render(
             <Route
               path="integrations/github/installations/:id"
               element={<IntegrationsGitHubWorkspace />}
+            />
+            <Route path="integrations/slack" element={<IntegrationsSlackList />} />
+            <Route
+              path="integrations/slack/publish"
+              element={<IntegrationsSlackPublishPage />}
+            />
+            <Route
+              path="integrations/slack/installations/:id"
+              element={<IntegrationsSlackWorkspace />}
             />
             <Route path="*" element={<Navigate to="/agents" replace />} />
           </Route>

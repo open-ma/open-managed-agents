@@ -11,12 +11,16 @@ import githubInstallCallback from "./routes/github/install-callback";
 import githubSetupPage from "./routes/github/setup-page";
 import githubManifest from "./routes/github/manifest";
 import githubInternal from "./routes/github/internal";
+import slackWebhook from "./routes/slack/webhook";
+import slackPublications from "./routes/slack/publications";
+import slackDedicatedCallback from "./routes/slack/dedicated-callback";
+import slackSetupPage from "./routes/slack/setup-page";
 import { buildContainer } from "./wire";
 import { buildProviders } from "./providers";
 
-// Integrations gateway worker: receives 3rd-party webhooks (Linear + GitHub
-// today; Slack later), runs OAuth/install flows for installations, and hosts
-// the MCP servers that expose external APIs to agent sessions.
+// Integrations gateway worker: receives 3rd-party webhooks (Linear + GitHub +
+// Slack), runs OAuth/install flows for installations, and hosts the MCP servers
+// that expose external APIs to agent sessions.
 //
 // Provider logic lives in packages/<provider>; this app is the composition
 // root that wires Cloudflare adapters into provider implementations.
@@ -84,7 +88,7 @@ app.get("/admin/linear-reauth-link", async (c) => {
   if (!installationId) return c.json({ error: "installation_id required" }, 400);
 
   const container = buildContainer(c.env);
-  const { linear } = buildProviders(c.env, container);
+  const { linear } = buildProviders(c.env);
 
   let result;
   try {
@@ -98,6 +102,9 @@ app.get("/admin/linear-reauth-link", async (c) => {
       500,
     );
   }
+  // container is referenced indirectly via the provider; touch to silence
+  // unused-var if the noUnusedLocals lint kicks in.
+  void container;
 
   return c.json({
     installationId,
@@ -123,6 +130,12 @@ app.route("/github/internal", githubInternal);
 app.route("/github/webhook", githubWebhook);
 app.route("/github/publications", githubPublications);
 app.route("/github-setup", githubSetupPage);
+
+// Slack
+app.route("/slack/oauth/app", slackDedicatedCallback);
+app.route("/slack/webhook", slackWebhook);
+app.route("/slack/publications", slackPublications);
+app.route("/slack-setup", slackSetupPage);
 
 export default {
   fetch: app.fetch,

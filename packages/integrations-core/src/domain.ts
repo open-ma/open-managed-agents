@@ -3,9 +3,9 @@
 // These are the shapes passed across package boundaries. Concrete adapters
 // (D1, GraphQL clients) translate to and from these types.
 
-export type ProviderId = "linear" | "github";
+export type ProviderId = "linear" | "github" | "slack";
 
-/** Linear workspace id (or equivalent in future providers). */
+/** External workspace id (Linear workspace, Slack team, etc.). */
 export type WorkspaceId = string;
 
 /** OMA platform user (better-auth user id). */
@@ -25,14 +25,13 @@ export interface Persona {
 }
 
 /**
+/**
  * Capability keys gating provider API operations. Stable strings, used in JWT
- * scopes and DB rows. The set is shared across providers so a publication can
- * be assigned a uniform capability shape regardless of source — providers
- * ignore keys that don't apply to them.
- *
- * `issue.*` / `comment.*` / `label.*` apply to both Linear and GitHub Issues.
- * GitHub-only: `pr.*` (pull requests, reviews), `repo.*` (file/branch ops),
- * `workflow.read` (CI/CD inspection), `release.*`.
+ * scopes and DB rows. Cross-provider keys (`issue.*` / `comment.*` / etc.)
+ * are shared so a publication can hold a uniform capability shape regardless
+ * of source — providers ignore keys that don't apply to them. Provider-
+ * specific keys (GitHub's `pr.*`, Slack's `message.*`) coexist in the union;
+ * each provider narrows internally.
  */
 export type CapabilityKey =
   // Cross-provider
@@ -66,7 +65,17 @@ export type CapabilityKey =
   | "workflow.read"
   | "workflow.dispatch"
   | "release.read"
-  | "release.create";
+  | "release.create"
+  // Slack-specific
+  | "message.read"
+  | "message.write"
+  | "message.update"
+  | "message.delete"
+  | "thread.reply"
+  | "reaction.add"
+  | "reaction.remove"
+  | "user.read"
+  | "canvas.write";
 
 export type CapabilitySet = ReadonlySet<CapabilityKey>;
 
@@ -81,14 +90,14 @@ export type PublicationStatus =
   | "needs_reauth"
   | "unpublished";
 
-export type IssueSessionStatus =
+export type SessionScopeStatus =
   | "active"
   | "completed"
   | "human_handoff"
   | "rerouted"
   | "escalated";
 
-export type SessionGranularity = "per_issue" | "per_event";
+export type SessionGranularity = "per_issue" | "per_thread" | "per_event";
 
 export interface Installation {
   id: string;
@@ -181,6 +190,11 @@ export interface GitHubAppCredentials {
   createdAt: number;
 }
 
+/**
+ * Per-issue session reuse for Linear/GitHub providers. Linear binds one
+ * session per issue UUID; GitHub binds one per `<repo>#<number>`. Slack uses
+ * a parallel `SessionScope` keyed on `${channel}:${thread_ts}` (see below).
+ */
 export interface IssueSession {
   /** OMA tenant that owns this issue-session row. NOT NULL in storage. */
   tenantId: string;
@@ -189,6 +203,29 @@ export interface IssueSession {
   issueId: string;
   sessionId: SessionId;
   status: IssueSessionStatus;
+  createdAt: number;
+}
+
+export type IssueSessionStatus = SessionScopeStatus;
+
+/**
+ * Generalized session-scope binding for providers whose session granularity
+ * isn't a single issue id. Slack uses this with `scopeKey = ${channel_id}:
+ * ${thread_ts ?? event_ts}`. Same shape as `IssueSession`, just with an
+ * opaque `scopeKey` instead of a provider-native `issueId`.
+ */
+export interface SessionScope {
+  /** OMA tenant that owns this session-scope row. NOT NULL in storage. */
+  tenantId: string;
+  publicationId: string;
+  /**
+   * Provider-native key identifying the conversational scope this session is
+   * bound to. Linear stores the issue id (e.g. `iss_…`); Slack stores
+   * `${channel_id}:${thread_ts ?? event_ts}`. Opaque to core.
+   */
+  scopeKey: string;
+  sessionId: SessionId;
+  status: SessionScopeStatus;
   createdAt: number;
 }
 

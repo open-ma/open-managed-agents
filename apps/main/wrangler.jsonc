@@ -91,8 +91,11 @@
     "staging": {
       "name": "managed-agents-staging",
       "vars": {
-        "INTEGRATIONS_ORIGIN": "https://managed-agents-integrations-staging.hrhrngxy.workers.dev"
+        "INTEGRATIONS_ORIGIN": "https://integrations.staging.openma.dev"
       },
+      "routes": [
+        { "pattern": "app.staging.openma.dev", "custom_domain": true }
+      ],
       "kv_namespaces": [
         { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
       ],

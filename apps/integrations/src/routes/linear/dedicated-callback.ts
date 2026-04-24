@@ -34,7 +34,7 @@ app.get("/:appId/callback", async (c) => {
   }
 
   const container = buildContainer(c.env);
-  const { linear } = buildProviders(c.env, container);
+  const { linear } = buildProviders(c.env);
 
   // Peek at state.kind to decide which provider entrypoint to invoke. We
   // verify the JWT signature here instead of trusting an unverified payload;
