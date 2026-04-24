@@ -9,6 +9,9 @@ export default defineConfig({
       // can't load. Production builds use wrangler bundling which handles this.
       "@cloudflare/sandbox": "./test/sandbox-stub.ts",
       // Resolve workspace package for miniflare/workerd runtime
+      "@open-managed-agents/api-types": "./packages/api-types/src/index.ts",
+      "@open-managed-agents/cf-billing": "./packages/cf-billing/src/index.ts",
+      "@open-managed-agents/eval-core": "./packages/eval-core/src/index.ts",
       "@open-managed-agents/shared": "./packages/shared/src/index.ts",
       "@open-managed-agents/memory-store/test-fakes": "./packages/memory-store/src/test-fakes.ts",
       "@open-managed-agents/memory-store": "./packages/memory-store/src/index.ts",

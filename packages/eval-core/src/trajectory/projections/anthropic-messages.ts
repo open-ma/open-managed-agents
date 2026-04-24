@@ -9,7 +9,7 @@
 // Use this to feed a trajectory into HF datasets / SWE-bench scorers / any
 // community Anthropic-shaped consumer.
 
-import type { ContentBlock, StoredEvent } from "../../types.js";
+import type { ContentBlock, StoredEvent } from "@open-managed-agents/api-types";
 import type { Trajectory } from "../types.js";
 
 export interface AnthropicMessage {

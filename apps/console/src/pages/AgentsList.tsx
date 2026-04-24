@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
+import type { ModelCard } from "@open-managed-agents/api-types";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
@@ -11,10 +12,6 @@ interface Agent {
   description?: string; skills?: unknown[]; mcp_servers?: unknown[]; callable_agents?: unknown[];
 }
 
-interface ModelCard {
-  id: string; name: string; provider: string; model_id: string;
-  api_key_preview?: string; base_url?: string; is_default?: boolean;
-}
 interface McpEntry { name: string; type: string; url: string }
 interface SkillEntry { type: "anthropic" | "custom"; skill_id: string; version?: string }
 interface CallableEntry { type: "agent"; id: string; version: number }

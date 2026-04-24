@@ -2,7 +2,7 @@ import {
   IntegrationsLinearList,
   IntegrationsLinearPublishWizard,
   IntegrationsLinearWorkspace,
-} from "@open-managed-agents/integrations-ui";
+} from "../integrations";
 import { useApi } from "../lib/api";
 
 // Thin Console-side wrapper for the publish wizard. The wizard needs to know
