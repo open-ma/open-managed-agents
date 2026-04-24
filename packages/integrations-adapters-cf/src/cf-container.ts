@@ -29,13 +29,19 @@ import { D1InstallationRepo } from "./d1/installation-repo";
 import { D1IssueSessionRepo } from "./d1/issue-session-repo";
 import { D1PublicationRepo } from "./d1/publication-repo";
 import { D1SetupLinkRepo } from "./d1/setup-link-repo";
+import { D1TenantResolver } from "./d1/tenant-resolver";
 import { D1WebhookEventStore } from "./d1/webhook-event-store";
 import { ServiceBindingSessionCreator } from "./service-binding-session-creator";
 import { ServiceBindingVaultManager } from "./service-binding-vault-manager";
 
 /** Env subset needed by buildCfRepos. */
 export interface CfReposEnv {
-  AUTH_DB: D1Database;
+  /** Per-tenant D1 database, resolved by the caller via TenantDbProvider.
+   *  In Phase 1 this is always env.AUTH_DB. */
+  db: D1Database;
+  /** Control-plane DB for cross-tenant lookups (TenantResolver). Always
+   *  env.AUTH_DB regardless of per-tenant routing. */
+  controlPlaneDb: D1Database;
   MCP_SIGNING_KEY: string;
 }
 
@@ -62,14 +68,18 @@ export function buildCfRepos(env: CfReposEnv) {
   const hmac = new WebCryptoHmacVerifier();
   const jwt = new WebCryptoJwtSigner(env.MCP_SIGNING_KEY);
   const http = new WorkerHttpClient();
-  const installations = new D1InstallationRepo(env.AUTH_DB, cryptoImpl, ids);
-  const publications = new D1PublicationRepo(env.AUTH_DB, ids);
-  const apps = new D1AppRepo(env.AUTH_DB, cryptoImpl, ids);
-  const githubApps = new D1GitHubAppRepo(env.AUTH_DB, cryptoImpl, ids);
-  const webhookEvents = new D1WebhookEventStore(env.AUTH_DB);
-  const issueSessions = new D1IssueSessionRepo(env.AUTH_DB);
-  const authoredComments = new D1AuthoredCommentRepo(env.AUTH_DB);
-  const setupLinks = new D1SetupLinkRepo(env.AUTH_DB, ids);
+  // TenantResolver always queries control-plane (better-auth `user` table) —
+  // it must work without per-tenant routing being decided yet (e.g. install
+  // callbacks know userId before they know tenantId).
+  const tenants = new D1TenantResolver(env.controlPlaneDb);
+  const installations = new D1InstallationRepo(env.db, cryptoImpl, ids);
+  const publications = new D1PublicationRepo(env.db, ids);
+  const apps = new D1AppRepo(env.db, cryptoImpl, ids);
+  const githubApps = new D1GitHubAppRepo(env.db, cryptoImpl, ids);
+  const webhookEvents = new D1WebhookEventStore(env.db);
+  const issueSessions = new D1IssueSessionRepo(env.db);
+  const authoredComments = new D1AuthoredCommentRepo(env.db);
+  const setupLinks = new D1SetupLinkRepo(env.db, ids);
 
   return {
     clock,
@@ -78,6 +88,7 @@ export function buildCfRepos(env: CfReposEnv) {
     hmac,
     jwt,
     http,
+    tenants,
     installations,
     publications,
     apps,

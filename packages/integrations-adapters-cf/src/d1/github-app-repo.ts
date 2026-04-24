@@ -8,6 +8,7 @@ import type {
 
 interface Row {
   id: string;
+  tenant_id: string;
   publication_id: string | null;
   app_id: string;
   app_slug: string;
@@ -86,15 +87,15 @@ export class D1GitHubAppRepo implements GitHubAppRepo {
     const privateKeyCipher = await this.crypto.encrypt(row.privateKey);
     // Upsert: a re-submit of the publish form (e.g. user pasted wrong key,
     // tries again with the same formToken) refreshes credentials in place
-    // rather than failing on PRIMARY KEY conflict. publication_id and
-    // created_at are preserved.
+    // rather than failing on PRIMARY KEY conflict. publication_id, tenant_id
+    // and created_at are preserved.
     await this.db
       .prepare(
         `INSERT INTO github_apps (
-           id, publication_id, app_id, app_slug, bot_login,
+           id, tenant_id, publication_id, app_id, app_slug, bot_login,
            client_id, client_secret_cipher, webhook_secret_cipher,
            private_key_cipher, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            app_id = excluded.app_id,
            app_slug = excluded.app_slug,
@@ -106,6 +107,7 @@ export class D1GitHubAppRepo implements GitHubAppRepo {
       )
       .bind(
         id,
+        row.tenantId,
         row.publicationId,
         row.appId,
         row.appSlug,
@@ -119,6 +121,7 @@ export class D1GitHubAppRepo implements GitHubAppRepo {
       .run();
     return {
       id,
+      tenantId: row.tenantId,
       publicationId: row.publicationId,
       appId: row.appId,
       appSlug: row.appSlug,
@@ -145,6 +148,7 @@ export class D1GitHubAppRepo implements GitHubAppRepo {
   private toDomain(row: Row): GitHubAppCredentials {
     return {
       id: row.id,
+      tenantId: row.tenant_id,
       publicationId: row.publication_id,
       appId: row.app_id,
       appSlug: row.app_slug,
