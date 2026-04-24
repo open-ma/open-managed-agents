@@ -13,8 +13,14 @@ import type {
   EnvironmentConfig,
   SessionMeta,
   StoredEvent,
-} from "../types.js";
-import { generateId } from "../id.js";
+} from "@open-managed-agents/api-types";
+import { customAlphabet } from "nanoid";
+
+// Local id generator. Matches the alphabet/length of @oma/shared.generateId
+// but avoids a workspace dep so eval-core has no cycle with shared (which
+// re-exports eval-core for back-compat).
+const nanoid = customAlphabet("0123456789abcdefghijklmnopqrstuvwxyz", 16);
+const generateId = () => nanoid();
 import type {
   Trajectory,
   TrajectoryOutcome,

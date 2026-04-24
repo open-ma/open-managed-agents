@@ -17,6 +17,9 @@
     "url": "https://github.com/open-ma/open-managed-agents"
   },
   "files": ["dist"],
+  "dependencies": {
+    "@open-managed-agents/api-types": "workspace:*"
+  },
   "devDependencies": {
     "esbuild": "^0.25.0",
     "tsx": "^4.19.0"
