@@ -21,7 +21,9 @@ import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
-import { MemoryStoreService, createCfMemoryStoreService } from "@open-managed-agents/memory-store";
+import { MemoryStoreService } from "@open-managed-agents/memory-store";
+import { buildCfServices } from "@open-managed-agents/services";
+import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
@@ -64,6 +66,14 @@ interface SessionInitParams {
     url: string;
     auth?: string;
   }>;
+  /**
+   * Pre-flight events to seed the session event stream at /init time.
+   * Used by the main worker to surface warnings (e.g. failed pre-session
+   * credential refreshes) the user should see in the console without
+   * hard-failing session start. Each event is appended to SQLite + WS-broadcast
+   * + fan-out to event_hooks, in order, before /init returns.
+   */
+  init_events?: SessionEvent[];
 }
 
 /**
@@ -114,13 +124,6 @@ interface SessionState {
    */
   session_init_done?: boolean;
 }
-
-/** TTL for the per-session outbound credential snapshot in CONFIG_KV. The
- *  snapshot carries plaintext OAuth tokens for the sandbox MITM injector,
- *  so we cap it at 24h — the upper bound on a realistic single agent
- *  session. The /destroy handler deletes it explicitly on graceful
- *  teardown; this TTL only matters when teardown didn't run. */
-const OUTBOUND_SNAPSHOT_TTL_SECONDS = 24 * 60 * 60;
 
 const INITIAL_SESSION_STATE: SessionState = {
   agent_id: "",
@@ -173,8 +176,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (this.state.agent_snapshot && agentId === this.state.agent_id) {
       return this.state.agent_snapshot;
     }
-    const json = await this.env.CONFIG_KV.get(this.tk("agent", agentId));
-    return json ? (JSON.parse(json) as AgentConfig) : null;
+    // Cross-tenant lookup — DO has no tenant scope here. Trusts the caller.
+    const row = await buildCfServices(this.env).agents.getById({ agentId });
+    if (!row) return null;
+    const { tenant_id: _t, ...config } = row;
+    return config;
   }
 
   /** Same idea as getAgentConfig but for environments. */
@@ -182,8 +188,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (this.state.environment_snapshot && envId === this.state.environment_id) {
       return this.state.environment_snapshot;
     }
-    const json = await this.env.CONFIG_KV.get(this.tk("env", envId));
-    return json ? (JSON.parse(json) as EnvironmentConfig) : null;
+    const row = await buildCfServices(this.env).environments.get({
+      tenantId: this.state.tenant_id,
+      environmentId: envId,
+    });
+    return row ? toEnvironmentConfig(row) : null;
   }
 
   /**
@@ -450,23 +459,33 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Outbound proxy view: untenanted snapshot keyed only by sessionId.
       // The outbound worker only knows sessionId from the container context;
       // it can't construct the tenant-prefixed `t:{tenantId}:cred:...` keys
-      // that prod uses, so without this side-write its CONFIG_KV reads
-      // always miss and credentials never get injected. See apps/agent/src/outbound.ts.
+      // that prod uses, so without this side-write its lookups always miss
+      // and credentials never get injected. See apps/agent/src/outbound.ts.
       //
-      // 24h TTL bounds the leftover when the explicit /destroy cleanup below
-      // doesn't run (DO eviction, sandbox crash, force-terminate). The keys
-      // contain plaintext OAuth material — we don't want them lingering
-      // beyond the realistic max session lifetime.
+      // 24h TTL (defaulted by the service) bounds the leftover when the
+      // explicit /destroy cleanup below doesn't run (DO eviction, sandbox
+      // crash, force-terminate). The blob contains plaintext OAuth material
+      // so we don't want it lingering beyond a realistic max session lifetime.
       if (params.session_id && (params.vault_credentials?.length ?? 0) > 0) {
-        await this.env.CONFIG_KV.put(
-          `outbound:${params.session_id}`,
-          JSON.stringify({
-            tenant_id: params.tenant_id,
+        await buildCfServices(this.env).outboundSnapshots.publish({
+          sessionId: params.session_id,
+          snapshot: {
+            tenant_id: params.tenant_id ?? "default",
             vault_ids: params.vault_ids ?? [],
-            vault_credentials: params.vault_credentials,
-          }),
-          { expirationTtl: OUTBOUND_SNAPSHOT_TTL_SECONDS },
-        );
+            vault_credentials: params.vault_credentials!,
+          },
+        });
+      }
+
+      // Pre-flight events from main worker (e.g. credential refresh warnings).
+      // Append in order so the console renders them as the first items in the
+      // session timeline. Use persistAndBroadcastEvent so each event also
+      // fans out to event_hooks (Linear panel mirror, etc.) — state was just
+      // set above so event_hooks is populated by the time we get here.
+      if (params.init_events?.length) {
+        for (const ev of params.init_events) {
+          this.persistAndBroadcastEvent(ev);
+        }
       }
 
       // Pre-warm sandbox in background (container start + package install)
@@ -498,9 +517,11 @@ export class SessionDO extends Agent<Env, SessionState> {
       // eventually, but explicit deletion here keeps the keyspace tidy on
       // the normal teardown path and shrinks the leak window for plaintext
       // OAuth material.
-      if (this.state.session_id && this.env.CONFIG_KV) {
+      if (this.state.session_id) {
         try {
-          await this.env.CONFIG_KV.delete(`outbound:${this.state.session_id}`);
+          await buildCfServices(this.env).outboundSnapshots.delete({
+            sessionId: this.state.session_id,
+          });
         } catch {}
       }
       this.setState({ ...this.state, status: "terminated" });
@@ -939,25 +960,24 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Mount all session resources (files, git repos, env secrets)
       const sessionId = this.state.session_id;
       if (sessionId) {
-        // TODO(staging-kv): direct CONFIG_KV read with tenant prefix — won't
-        // resolve when sandbox-default's KV binding differs from main's
-        // (e.g. shared sandbox + staging main). Snapshot the resources at
-        // /init time when the staging path needs session resources.
-        const resourceList = await this.env.CONFIG_KV.list({ prefix: this.tk("sesrsc", sessionId) + ":" });
+        // Sessions-store reads via the session_id PRIMARY KEY index, no
+        // tenant prefix needed — fixes the staging-kv namespace mismatch
+        // the legacy CONFIG_KV.list path tripped over.
+        const services = buildCfServices(this.env);
+        const rows = await services.sessions.listResourcesBySession({ sessionId });
         const resources: Array<Record<string, unknown>> = [];
         const secretStore = new Map<string, string>();
 
-        for (const k of resourceList.keys) {
-          const data = await this.env.CONFIG_KV.get(k.name);
-          if (!data) continue;
-          const res = JSON.parse(data);
-          resources.push(res);
-
-          // Load write-only secrets from separate KV keys
-          if (res.id) {
-            const secretData = await this.env.CONFIG_KV.get(this.tk("secret", sessionId, res.id));
-            if (secretData) secretStore.set(res.id, secretData);
-          }
+        for (const row of rows) {
+          resources.push(row.resource as unknown as Record<string, unknown>);
+          // Secret payloads (env_secret.value, github_repository.token) live
+          // in the per-session secret store, keyed by (tenant, session, resource).
+          const secretData = await services.sessionSecrets.get({
+            tenantId: this.state.tenant_id,
+            sessionId,
+            resourceId: row.id,
+          });
+          if (secretData) secretStore.set(row.id, secretData);
         }
 
         if (resources.length) {
@@ -1098,50 +1118,26 @@ export class SessionDO extends Agent<Env, SessionState> {
     let customHeaders: Record<string, string> | undefined;
     let resolvedCardId: string | undefined;
 
-    if (cardId && this.env.CONFIG_KV) {
+    if (this.env.AUTH_DB) {
       try {
-        // TODO(staging-kv): direct CONFIG_KV reads with tenant prefix — won't
-        // resolve in staging until we snapshot model cards at /init or route
-        // through main via service binding.
-        const [cardData, keyData] = await Promise.all([
-          this.env.CONFIG_KV.get(this.tk("modelcard", cardId)),
-          this.env.CONFIG_KV.get(this.tk("modelcard", `${cardId}:key`)),
-        ]);
-        if (cardData && keyData) {
-          const card = JSON.parse(cardData);
-          apiKey = keyData;
-          provider = card.provider;
-          if (card.base_url) baseURL = card.base_url;
-          if (card.custom_headers) customHeaders = card.custom_headers;
-          resolvedCardId = cardId;
-        }
-      } catch {
-        // Fall back to env vars
-      }
-    } else if (this.env.CONFIG_KV) {
-      // No explicit card_id — try to find a card by model_id match
-      try {
-        // TODO(staging-kv): tenant-prefix list — see comment on getAgentConfig.
-        const list = await this.env.CONFIG_KV.list({ prefix: this.tk("modelcard") + ":" });
-        for (const k of list.keys) {
-          if (k.name.includes(":key")) continue;
-          const data = await this.env.CONFIG_KV.get(k.name);
-          if (!data) continue;
-          const card = JSON.parse(data);
-          if (card.model_id === modelId && !card.archived_at) {
-            const key = await this.env.CONFIG_KV.get(`${k.name}:key`);
-            if (key) {
-              apiKey = key;
-              provider = card.provider;
-              if (card.base_url) baseURL = card.base_url;
-              if (card.custom_headers) customHeaders = card.custom_headers;
-              resolvedCardId = card.id;
-            }
-            break;
+        const services = buildCfServices(this.env);
+        const tenantId = this.state.tenant_id;
+        let card = cardId
+          ? await services.modelCards.get({ tenantId, cardId })
+          : await services.modelCards.findByModelId({ tenantId, modelId });
+        if (card && !card.archived_at) {
+          const key = await services.modelCards.getApiKey({ tenantId, cardId: card.id });
+          if (key) {
+            apiKey = key;
+            provider = card.provider;
+            if (card.base_url) baseURL = card.base_url;
+            if (card.custom_headers) customHeaders = card.custom_headers;
+            resolvedCardId = card.id;
+            console.log(`[model-card] resolved from D1: id=${card.id} model_id=${card.model_id} baseURL=${card.base_url ?? "(default)"} provider=${card.provider}`);
           }
         }
-      } catch {
-        // Fall back to env vars
+      } catch (err) {
+        console.warn(`[model-card] D1 lookup failed, falling back to env: ${err instanceof Error ? err.message : String(err)}`);
       }
     }
 
@@ -1615,20 +1611,18 @@ export class SessionDO extends Agent<Env, SessionState> {
       prompt?: string;
     }> = [];
     if (sessionId) {
-      // TODO(staging-kv): tenant-prefix missing here AND wrong KV namespace
-      // in staging. Snapshot session resources at /init before fixing.
-      const resourceList = await this.env.CONFIG_KV.list({ prefix: `sesrsc:${sessionId}:` });
-      for (const k of resourceList.keys) {
-        const data = await this.env.CONFIG_KV.get(k.name);
-        if (data) {
-          const res = JSON.parse(data);
-          if (res.type === "memory_store" && res.memory_store_id) {
-            memoryAttachments.push({
-              store_id: res.memory_store_id,
-              access: res.access === "read_only" ? "read_only" : "read_write",
-              prompt: typeof res.prompt === "string" ? res.prompt : undefined,
-            });
-          }
+      // listResourcesBySession queries the session_id column directly — no
+      // tenant-prefix mismatch, no JSON.parse loop. Replaces the prior
+      // CONFIG_KV.list scan that tripped over staging KV namespaces.
+      const services = buildCfServices(this.env);
+      const rows = await services.sessions.listResourcesBySession({ sessionId });
+      for (const row of rows) {
+        if (row.type === "memory_store" && row.resource.type === "memory_store" && row.resource.memory_store_id) {
+          memoryAttachments.push({
+            store_id: row.resource.memory_store_id,
+            access: row.resource.access === "read_only" ? "read_only" : "read_write",
+            prompt: typeof row.resource.prompt === "string" ? row.resource.prompt : undefined,
+          });
         }
       }
     }
@@ -1669,7 +1663,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     // AUTH_DB to be present.
     let memoryStoreService: MemoryStoreService | null = null;
     if (memoryAttachments.length && this.env.AUTH_DB) {
-      memoryStoreService = createCfMemoryStoreService(this.env);
+      memoryStoreService = buildCfServices(this.env).memory;
       const memTools = buildMemoryTools(
         memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
         this.state.tenant_id,

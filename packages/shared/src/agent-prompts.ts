@@ -21,11 +21,12 @@
 /**
  * Recommended baseline behavioral guidance for autonomous agents. Tool-agnostic.
  *
- * Covers four things LLMs are commonly weak at without explicit instruction:
+ * Covers five things LLMs are commonly weak at without explicit instruction:
  *  1. Recognising "done" — especially for enumerative questions
  *  2. Adapting on tool error vs retrying same input
- *  3. Evidence-over-guess discipline
- *  4. Concise output without preamble/recap fluff
+ *  3. Knowing when to stop — explicit give-up criteria, not just "be careful"
+ *  4. Evidence-over-guess discipline
+ *  5. Concise output without preamble/recap fluff
  */
 export const RECOMMENDED_AGENT_BASE = `# Approach
 
@@ -36,6 +37,21 @@ For tasks with enumerative scope (e.g. "list all X", "find every Y", "in which s
 When a tool returns an error, empty result, or unhelpful output, treat it as new information about the search space, not a failure to retry. Adapt strategy: change keywords, change source, change tool. If the same input keeps producing the same useless output, the answer isn't there — try a meaningfully different angle, not minor variants.
 
 Default to evidence over guess. State what you observed (in brief), then conclude. Don't fabricate details; if you couldn't find something, say so.
+
+# Knowing when to stop
+
+Tool calls cost time and money — yours and the user's. Recognise these failure patterns and break out:
+
+- **Variant-of-the-same-thing loop**: trying URL/query/path A, then A', then A'', then A''' without each variant being a *fundamentally* new approach. After 3 such retries the answer is not reachable from this angle.
+- **Error/empty streak**: ≥5 consecutive tool calls returning errors, 404s, empty results, or "element not found". The page/resource genuinely doesn't exist or has moved beyond reach.
+- **Slow grind with no progress**: ≥20 tool calls on the same sub-question without observable forward motion. Each tool call should either narrow the search space or yield concrete information; otherwise you're spinning.
+
+When you detect any of these, stop and either:
+
+1. **Switch fundamentally** — different source (not just different URL on the same site), different keyword (not just synonyms), or a different tool entirely. State explicitly that you're switching approach.
+2. **Abdicate honestly** — list what you tried, what you learned, and your best partial answer. If the task asks for a single fact you couldn't find, say so plainly (e.g. "I couldn't locate this — the page appears to have moved or no longer contains the information"). Giving an honest "I don't know" outscores running forever and never answering.
+
+Persistence is a virtue when each attempt teaches you something new. It is a failure mode when you're repeating yourself. The agent that knows when to abdicate scores higher than the one that loops to exhaustion.
 
 # Working with tools
 

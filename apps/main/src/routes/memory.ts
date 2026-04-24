@@ -6,23 +6,19 @@ import {
   MemoryNotFoundError,
   MemoryPreconditionFailedError,
   MemoryStoreNotFoundError,
-  MemoryStoreService,
-  createCfMemoryStoreService,
   type Actor,
   type WritePrecondition,
 } from "@open-managed-agents/memory-store";
+import type { Services } from "@open-managed-agents/services";
 
 // REST surface for memory stores. All persistence + Vectorize coordination
 // lives in MemoryStoreService — this file only marshals HTTP↔service.
+// Service surface comes from c.var.services (see packages/services).
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; user_id?: string } }>();
-
-function service(c: { env: Env }): MemoryStoreService {
-  if (!c.env.AUTH_DB) throw new Error("AUTH_DB not bound");
-  // AI + VECTORIZE optional — factory wires Noop adapters when missing,
-  // so writes still work and only semantic search degrades.
-  return createCfMemoryStoreService(c.env);
-}
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string; services: Services };
+}>();
 
 function actorFor(c: { get: (k: string) => unknown }): Actor {
   const userId = c.get("user_id") as string | undefined;
@@ -73,7 +69,7 @@ app.post("/", async (c) => {
   const body = await c.req.json<{ name?: string; description?: string }>();
   if (!body.name) return c.json({ error: "name is required" }, 400);
   try {
-    const store = await service(c).createStore({
+    const store = await c.var.services.memory.createStore({
       tenantId: t,
       name: body.name,
       description: body.description,
@@ -87,13 +83,13 @@ app.post("/", async (c) => {
 app.get("/", async (c) => {
   const t = c.get("tenant_id");
   const includeArchived = c.req.query("include_archived") === "true";
-  const stores = await service(c).listStores({ tenantId: t, includeArchived });
+  const stores = await c.var.services.memory.listStores({ tenantId: t, includeArchived });
   return c.json({ data: stores.map(toApiStore) });
 });
 
 app.get("/:id", async (c) => {
   const t = c.get("tenant_id");
-  const store = await service(c).getStore({ tenantId: t, storeId: c.req.param("id") });
+  const store = await c.var.services.memory.getStore({ tenantId: t, storeId: c.req.param("id") });
   if (!store) return c.json({ error: "Memory store not found" }, 404);
   return c.json(toApiStore(store));
 });
@@ -101,7 +97,7 @@ app.get("/:id", async (c) => {
 app.post("/:id/archive", async (c) => {
   const t = c.get("tenant_id");
   try {
-    const store = await service(c).archiveStore({ tenantId: t, storeId: c.req.param("id") });
+    const store = await c.var.services.memory.archiveStore({ tenantId: t, storeId: c.req.param("id") });
     return c.json(toApiStore(store));
   } catch (err) {
     return handle(err);
@@ -111,7 +107,7 @@ app.post("/:id/archive", async (c) => {
 app.delete("/:id", async (c) => {
   const t = c.get("tenant_id");
   try {
-    await service(c).deleteStore({ tenantId: t, storeId: c.req.param("id") });
+    await c.var.services.memory.deleteStore({ tenantId: t, storeId: c.req.param("id") });
     return c.json({ type: "memory_store_deleted", id: c.req.param("id") });
   } catch (err) {
     return handle(err);
@@ -129,7 +125,7 @@ app.post("/_reconcile", async (c) => {
     .json<ReconcileBody>()
     .catch(() => ({} as ReconcileBody));
   try {
-    const result = await service(c).reconcile({
+    const result = await c.var.services.memory.reconcile({
       tenantId: t,
       storeId: body.store_id,
       limit: body.limit,
@@ -156,7 +152,7 @@ app.post("/:id/memories", async (c) => {
     return c.json({ error: "path and content are required" }, 400);
   }
   try {
-    const mem = await service(c).writeByPath({
+    const mem = await c.var.services.memory.writeByPath({
       tenantId: t,
       storeId,
       path: body.path,
@@ -175,7 +171,7 @@ app.get("/:id/memories", async (c) => {
   const storeId = c.req.param("id");
   const pathPrefix = c.req.query("path_prefix") ?? c.req.query("prefix");
   try {
-    const memories = await service(c).listMemories({ tenantId: t, storeId, pathPrefix });
+    const memories = await c.var.services.memory.listMemories({ tenantId: t, storeId, pathPrefix });
     // List does not include content (mirrors Anthropic semantics).
     return c.json({
       data: memories.map((m) => {
@@ -191,7 +187,7 @@ app.get("/:id/memories", async (c) => {
 app.get("/:id/memories/:mem_id", async (c) => {
   const t = c.get("tenant_id");
   try {
-    const mem = await service(c).readById({
+    const mem = await c.var.services.memory.readById({
       tenantId: t,
       storeId: c.req.param("id"),
       memoryId: c.req.param("mem_id"),
@@ -213,7 +209,7 @@ const updateMemory = async (c: any) => {
   const t = c.get("tenant_id");
   const body: UpdateMemoryBody = await c.req.json();
   try {
-    const mem = await service(c).updateById({
+    const mem = await c.var.services.memory.updateById({
       tenantId: t,
       storeId: c.req.param("id"),
       memoryId: c.req.param("mem_id"),
@@ -234,7 +230,7 @@ app.delete("/:id/memories/:mem_id", async (c) => {
   const t = c.get("tenant_id");
   const expectedSha = c.req.query("expected_content_sha256") ?? undefined;
   try {
-    await service(c).deleteById({
+    await c.var.services.memory.deleteById({
       tenantId: t,
       storeId: c.req.param("id"),
       memoryId: c.req.param("mem_id"),
@@ -255,7 +251,7 @@ app.get("/:id/memory_versions", async (c) => {
   const t = c.get("tenant_id");
   const memoryId = c.req.query("memory_id") ?? undefined;
   try {
-    const versions = await service(c).listVersions({
+    const versions = await c.var.services.memory.listVersions({
       tenantId: t,
       storeId: c.req.param("id"),
       memoryId,
@@ -275,7 +271,7 @@ app.get("/:id/memory_versions", async (c) => {
 app.get("/:id/memory_versions/:ver_id", async (c) => {
   const t = c.get("tenant_id");
   try {
-    const v = await service(c).getVersion({
+    const v = await c.var.services.memory.getVersion({
       tenantId: t,
       storeId: c.req.param("id"),
       versionId: c.req.param("ver_id"),
@@ -290,7 +286,7 @@ app.get("/:id/memory_versions/:ver_id", async (c) => {
 app.post("/:id/memory_versions/:ver_id/redact", async (c) => {
   const t = c.get("tenant_id");
   try {
-    const v = await service(c).redactVersion({
+    const v = await c.var.services.memory.redactVersion({
       tenantId: t,
       storeId: c.req.param("id"),
       versionId: c.req.param("ver_id"),
