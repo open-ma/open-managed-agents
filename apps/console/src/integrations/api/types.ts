@@ -109,10 +109,9 @@ export interface GitHubA1InstallLink {
 
 // ─── Sessions (subset, used by activity timeline) ────────────────────────
 //
-// Mirrors a slice of @open-managed-agents/shared SessionMeta. We don't
-// re-export shared types here because integrations-ui shouldn't take a
-// hard dep on the host server's type package — keeping these snake-cased
-// shapes inline matches the wire format and stays decoupled.
+// Mirrors a slice of @open-managed-agents/shared SessionMeta. Kept inline
+// here so the console UI stays decoupled from the host server's type
+// package — snake-case shapes match the wire format.
 
 export interface SessionSummary {
   id: string;

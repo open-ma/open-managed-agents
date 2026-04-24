@@ -9,6 +9,7 @@
     "@cloudflare/sandbox": "^0.8.11",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
+    "@open-managed-agents/cf-billing": "workspace:*",
     "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",

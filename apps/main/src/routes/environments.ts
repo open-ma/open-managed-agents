@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
-import { addServiceBinding, envIdToBindingName } from "@open-managed-agents/shared";
+import { addServiceBinding, envIdToBindingName } from "@open-managed-agents/cf-billing";
 import type { Services } from "@open-managed-agents/services";
 import {
   toEnvironmentConfig,

@@ -4,7 +4,7 @@
 // replay, evaluate, train on, or audit it. Stable, versioned, with documented
 // projections to popular shapes (Anthropic Messages first; OTel/Inspect/RL later).
 
-import type { AgentConfig, EnvironmentConfig, StoredEvent } from "../types.js";
+import type { AgentConfig, EnvironmentConfig, StoredEvent } from "@open-managed-agents/api-types";
 
 // --- Identity & lifecycle ---
 

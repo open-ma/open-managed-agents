@@ -1,7 +1,7 @@
 // Internal helpers for scorers — extract structured data from a Trajectory's
 // raw event stream. Keeps individual scorer files small.
 
-import type { StoredEvent } from "../types.js";
+import type { StoredEvent } from "@open-managed-agents/api-types";
 import type { Trajectory } from "../trajectory/types.js";
 
 function parseData<T = Record<string, unknown>>(e: StoredEvent): T | null {
