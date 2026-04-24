@@ -14,7 +14,7 @@
 import type { Env, AgentConfig, EnvironmentConfig, StoredEvent } from "@open-managed-agents/shared";
 import { buildTrajectory } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
-import { buildCfServices, type Services } from "@open-managed-agents/services";
+import { buildCfServices, getCfServicesForTenant, type Services } from "@open-managed-agents/services";
 import type { EvalRunRow, EvalRunStatus } from "@open-managed-agents/evals-store";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { kvKey } from "./kv-helpers";
@@ -23,7 +23,8 @@ import type { EvalRunRecord, EvalTaskResult, EvalTaskSpec } from "./routes/evals
 // ---------- Sandbox helpers (mirrors routes/sessions.ts) ----------
 
 async function getSandboxBinding(env: Env, environmentId: string, tenantId: string): Promise<Fetcher | null> {
-  const envRow = await getServices(env).environments.get({ tenantId, environmentId });
+  const services = await getServices(env, tenantId);
+  const envRow = await services.environments.get({ tenantId, environmentId });
   if (!envRow) return null;
   const envConfig = toEnvironmentConfig(envRow);
   if (envConfig.status !== "ready" && envConfig.status !== undefined) return null;
@@ -65,12 +66,16 @@ function fwd(binding: Fetcher, path: string, method: string = "GET", body?: Body
   }));
 }
 
-// ---------- Services accessor (cached per worker isolate) ----------
+// ---------- Services accessor (cached per tenant per worker isolate) ----------
 
-let cachedServices: Services | null = null;
-function getServices(env: Env): Services {
-  if (!cachedServices) cachedServices = buildCfServices(env);
-  return cachedServices;
+const servicesCache = new Map<string, Services>();
+async function getServices(env: Env, tenantId: string): Promise<Services> {
+  let cached = servicesCache.get(tenantId);
+  if (!cached) {
+    cached = await getCfServicesForTenant(env, tenantId);
+    servicesCache.set(tenantId, cached);
+  }
+  return cached;
 }
 
 // ---------- Run / task lifecycle ----------
@@ -113,13 +118,14 @@ function extractResults(run: EvalRunRecord): unknown {
 }
 
 async function loadRun(env: Env, tenantId: string, runId: string): Promise<EvalRunRecord | null> {
-  const row = await getServices(env).evals.get({ tenantId, runId });
+  const services = await getServices(env, tenantId);
+  const row = await services.evals.get({ tenantId, runId });
   if (!row) return null;
   return rowToRecord(row);
 }
 
 async function saveRun(env: Env, run: EvalRunRecord): Promise<void> {
-  const services = getServices(env);
+  const services = await getServices(env, run.tenant_id);
   if (run.status === "completed" || run.status === "failed") {
     await services.evals.markCompleted({
       tenantId: run.tenant_id,
@@ -141,7 +147,7 @@ async function saveRun(env: Env, run: EvalRunRecord): Promise<void> {
 
 async function createTaskSession(env: Env, run: EvalRunRecord, task: EvalTaskResult): Promise<string> {
   const t = run.tenant_id;
-  const services = getServices(env);
+  const services = await getServices(env, t);
   const agentRow = await services.agents.get({ tenantId: t, agentId: run.agent_id });
   if (!agentRow) throw new Error(`agent ${run.agent_id} not found`);
   const { tenant_id: _atid, ...agentSnapshot } = agentRow;
@@ -153,7 +159,7 @@ async function createTaskSession(env: Env, run: EvalRunRecord, task: EvalTaskRes
 
   // Allocate the session row first (id comes from the store), then init the
   // sandbox with that id. Single D1 INSERT replaces the legacy KV.put.
-  const { session } = await getServices(env).sessions.create({
+  const { session } = await services.sessions.create({
     tenantId: t,
     agentId: run.agent_id,
     environmentId: run.environment_id,
@@ -200,7 +206,8 @@ async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string)
 
 async function buildAndStoreTrajectory(env: Env, run: EvalRunRecord, sessionId: string): Promise<string> {
   const t = run.tenant_id;
-  const sessionRow = await getServices(env).sessions.get({ tenantId: t, sessionId });
+  const services = await getServices(env, t);
+  const sessionRow = await services.sessions.get({ tenantId: t, sessionId });
   if (!sessionRow) throw new Error(`session ${sessionId} not found`);
   const session = {
     id: sessionRow.id,
@@ -387,7 +394,11 @@ async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {
 // ---------- Public entry point (called by scheduled handler) ----------
 
 export async function tickEvalRuns(env: Env): Promise<{ advanced: number; total: number }> {
-  const services = getServices(env);
+  // Cross-tenant scan: list every active eval run across all tenants. Phase 1
+  // default returns the shared AUTH_DB so this still works against the
+  // legacy single DB. Phase 4 will need a control-plane index over tenants
+  // since per-tenant DBs make cross-tenant SELECTs impossible from one binding.
+  const services = buildCfServices(env, env.AUTH_DB);
   const activeRows = await services.evals.listActive();
   let advanced = 0;
   for (const row of activeRows) {

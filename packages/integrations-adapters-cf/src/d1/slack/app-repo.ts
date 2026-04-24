@@ -8,6 +8,7 @@ import type {
 
 interface Row {
   id: string;
+  tenant_id: string;
   publication_id: string | null;
   client_id: string;
   client_secret_cipher: string;
@@ -71,18 +72,19 @@ export class D1SlackAppRepo implements AppRepo {
     await this.db
       .prepare(
         `INSERT INTO slack_apps (
-           id, publication_id, client_id, client_secret_cipher,
+           id, tenant_id, publication_id, client_id, client_secret_cipher,
            signing_secret_cipher, created_at
-         ) VALUES (?, ?, ?, ?, ?, ?)
+         ) VALUES (?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET
            client_id = excluded.client_id,
            client_secret_cipher = excluded.client_secret_cipher,
            signing_secret_cipher = excluded.signing_secret_cipher`,
       )
-      .bind(id, row.publicationId, row.clientId, clientSecretCipher, signingSecretCipher, now)
+      .bind(id, row.tenantId, row.publicationId, row.clientId, clientSecretCipher, signingSecretCipher, now)
       .run();
     return {
       id,
+      tenantId: row.tenantId,
       publicationId: row.publicationId,
       clientId: row.clientId,
       clientSecretCipher,
@@ -105,6 +107,7 @@ export class D1SlackAppRepo implements AppRepo {
   private toDomain(row: Row): AppCredentials {
     return {
       id: row.id,
+      tenantId: row.tenant_id,
       publicationId: row.publication_id,
       clientId: row.client_id,
       clientSecretCipher: row.client_secret_cipher,

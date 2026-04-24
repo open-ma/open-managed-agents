@@ -22,8 +22,16 @@ export { outbound, outboundByHost } from "../apps/agent/src/outbound";
 
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0001 from "../apps/main/migrations/0001_schema.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0002 from "../apps/main/migrations/0002_integrations_tenant_id.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0003 from "../apps/main/migrations/0003_tenant_shard.sql?raw";
 
-const MIGRATIONS_RAW: string[] = [schema0001 as string];
+const MIGRATIONS_RAW: string[] = [
+  schema0001 as string,
+  schema0002 as string,
+  schema0003 as string,
+];
 
 let migrationsApplied = false;
 async function ensureMigrations(env: { AUTH_DB?: D1Database }): Promise<void> {

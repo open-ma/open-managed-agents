@@ -11,6 +11,8 @@
     "@open-managed-agents/linear": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/slack": "workspace:*",
+    "@open-managed-agents/tenant-db": "workspace:*",
+    "@open-managed-agents/tenant-dbs-store": "workspace:*",
     "hono": "^4.7.0"
   }
 }

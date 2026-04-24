@@ -101,6 +101,9 @@ export type SessionGranularity = "per_issue" | "per_thread" | "per_event";
 
 export interface Installation {
   id: string;
+  /** OMA tenant that owns this installation. NOT NULL in storage; backfilled
+   *  from user.tenantId for legacy rows in migration 0002. */
+  tenantId: string;
   userId: UserId;
   providerId: ProviderId;
   workspaceId: WorkspaceId;
@@ -123,6 +126,8 @@ export interface Installation {
 
 export interface Publication {
   id: string;
+  /** OMA tenant that owns this publication. NOT NULL in storage. */
+  tenantId: string;
   userId: UserId;
   agentId: AgentId;
   installationId: string;
@@ -142,6 +147,8 @@ export interface Publication {
 
 export interface AppCredentials {
   id: string;
+  /** OMA tenant that owns these App credentials. NOT NULL in storage. */
+  tenantId: string;
   /** Set only after the related publication has been materialized. */
   publicationId: string | null;
   /** OAuth client id from the provider's developer portal. */
@@ -170,6 +177,8 @@ export interface AppCredentials {
  */
 export interface GitHubAppCredentials {
   id: string;
+  /** OMA tenant that owns these App credentials. NOT NULL in storage. */
+  tenantId: string;
   publicationId: string | null;
   appId: string;
   appSlug: string;
@@ -187,6 +196,8 @@ export interface GitHubAppCredentials {
  * a parallel `SessionScope` keyed on `${channel}:${thread_ts}` (see below).
  */
 export interface IssueSession {
+  /** OMA tenant that owns this issue-session row. NOT NULL in storage. */
+  tenantId: string;
   publicationId: string;
   /** Provider-native issue id. */
   issueId: string;
@@ -218,6 +229,8 @@ export interface SessionScope {
 
 export interface SetupLink {
   token: string;
+  /** OMA tenant that owns this setup link. NOT NULL in storage. */
+  tenantId: string;
   publicationId: string;
   createdBy: UserId;
   expiresAt: number;

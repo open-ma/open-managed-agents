@@ -9,11 +9,11 @@ import type { Crypto, Logger } from "../ports";
 import { ModelCardService } from "../service";
 
 export function createCfModelCardService(
-  env: { AUTH_DB: D1Database },
+  deps: { db: D1Database },
   opts?: { logger?: Logger; crypto?: Crypto },
 ): ModelCardService {
   return new ModelCardService({
-    repo: new D1ModelCardRepo(env.AUTH_DB),
+    repo: new D1ModelCardRepo(deps.db),
     logger: opts?.logger,
     crypto: opts?.crypto,
   });

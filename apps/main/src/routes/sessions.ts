@@ -5,7 +5,7 @@ import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, Sto
 import { generateFileId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
-import { buildCfServices } from "@open-managed-agents/services";
+import { getCfServicesForTenant } from "@open-managed-agents/services";
 import { toFileRecord } from "@open-managed-agents/files-store";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import {
@@ -50,7 +50,8 @@ async function getSandboxBinding(
   environmentId: string,
   tenantId: string,
 ): Promise<{ binding: Fetcher | null; error?: string; status?: 404 | 500 | 503 }> {
-  const envRow = await buildCfServices(env).environments.get({ tenantId, environmentId });
+  const services = await getCfServicesForTenant(env, tenantId);
+  const envRow = await services.environments.get({ tenantId, environmentId });
   if (!envRow) return { binding: null, error: "Environment not found", status: 404 };
 
   const envConfig = toEnvironmentConfig(envRow);

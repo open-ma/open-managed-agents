@@ -9,6 +9,9 @@ export default defineConfig({
       // can't load. Production builds use wrangler bundling which handles this.
       "@cloudflare/sandbox": "./test/sandbox-stub.ts",
       // Resolve workspace package for miniflare/workerd runtime
+      "@open-managed-agents/api-types": "./packages/api-types/src/index.ts",
+      "@open-managed-agents/cf-billing": "./packages/cf-billing/src/index.ts",
+      "@open-managed-agents/eval-core": "./packages/eval-core/src/index.ts",
       "@open-managed-agents/shared": "./packages/shared/src/index.ts",
       "@open-managed-agents/memory-store/test-fakes": "./packages/memory-store/src/test-fakes.ts",
       "@open-managed-agents/memory-store": "./packages/memory-store/src/index.ts",
@@ -33,6 +36,10 @@ export default defineConfig({
       "@open-managed-agents/session-secrets-store/test-fakes": "./packages/session-secrets-store/src/test-fakes.ts",
       "@open-managed-agents/session-secrets-store": "./packages/session-secrets-store/src/index.ts",
       "@open-managed-agents/services": "./packages/services/src/index.ts",
+      "@open-managed-agents/tenant-db/test-fakes": "./packages/tenant-db/src/test-fakes.ts",
+      "@open-managed-agents/tenant-db": "./packages/tenant-db/src/index.ts",
+      "@open-managed-agents/tenant-dbs-store/test-fakes": "./packages/tenant-dbs-store/src/test-fakes.ts",
+      "@open-managed-agents/tenant-dbs-store": "./packages/tenant-dbs-store/src/index.ts",
     },
   },
   test: {
