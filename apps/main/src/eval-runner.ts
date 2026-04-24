@@ -11,18 +11,21 @@
 // test/eval/runner.ts setupFiles helper). Then each user message in the spec
 // is sent in sequence, waiting for idle between messages.
 
-import type { Env, AgentConfig, EnvironmentConfig, SessionMeta, StoredEvent } from "@open-managed-agents/shared";
-import { generateSessionId, buildTrajectory } from "@open-managed-agents/shared";
+import type { Env, AgentConfig, EnvironmentConfig, StoredEvent } from "@open-managed-agents/shared";
+import { buildTrajectory } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix, kvListAll } from "./kv-helpers";
+import { buildCfServices, type Services } from "@open-managed-agents/services";
+import type { EvalRunRow, EvalRunStatus } from "@open-managed-agents/evals-store";
+import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
+import { kvKey } from "./kv-helpers";
 import type { EvalRunRecord, EvalTaskResult, EvalTaskSpec } from "./routes/evals";
 
 // ---------- Sandbox helpers (mirrors routes/sessions.ts) ----------
 
 async function getSandboxBinding(env: Env, environmentId: string, tenantId: string): Promise<Fetcher | null> {
-  const envData = await env.CONFIG_KV.get(kvKey(tenantId, "env", environmentId));
-  if (!envData) return null;
-  const envConfig = JSON.parse(envData) as EnvironmentConfig;
+  const envRow = await getServices(env).environments.get({ tenantId, environmentId });
+  if (!envRow) return null;
+  const envConfig = toEnvironmentConfig(envRow);
   if (envConfig.status !== "ready" && envConfig.status !== undefined) return null;
   if (!envConfig.sandbox_worker_name) return null;
   const bindingName = `SANDBOX_${envConfig.sandbox_worker_name.replace(/-/g, "_")}`;
@@ -62,32 +65,103 @@ function fwd(binding: Fetcher, path: string, method: string = "GET", body?: Body
   }));
 }
 
+// ---------- Services accessor (cached per worker isolate) ----------
+
+let cachedServices: Services | null = null;
+function getServices(env: Env): Services {
+  if (!cachedServices) cachedServices = buildCfServices(env);
+  return cachedServices;
+}
+
 // ---------- Run / task lifecycle ----------
 
+/**
+ * Translate an EvalRunRow (D1 storage shape) to the legacy EvalRunRecord
+ * (route + advanceRun consumer shape). The mutable per-tick state lives in
+ * the opaque `results` JSON column.
+ */
+function rowToRecord(row: EvalRunRow): EvalRunRecord {
+  const partial = (row.results ?? {}) as Partial<EvalRunRecord>;
+  return {
+    id: row.id,
+    tenant_id: row.tenant_id,
+    agent_id: row.agent_id,
+    environment_id: row.environment_id,
+    status: row.status as EvalRunStatus,
+    created_at: row.started_at,
+    started_at: row.started_at,
+    ended_at: row.completed_at ?? undefined,
+    error: row.error ?? undefined,
+    task_count: partial.task_count ?? 0,
+    completed_count: partial.completed_count ?? 0,
+    failed_count: partial.failed_count ?? 0,
+    tasks: partial.tasks ?? [],
+  };
+}
+
+/**
+ * Reverse mapping: extract the per-tick mutable state from the in-memory
+ * EvalRunRecord into the opaque `results` JSON blob the store persists.
+ */
+function extractResults(run: EvalRunRecord): unknown {
+  return {
+    task_count: run.task_count,
+    completed_count: run.completed_count,
+    failed_count: run.failed_count,
+    tasks: run.tasks,
+  };
+}
+
 async function loadRun(env: Env, tenantId: string, runId: string): Promise<EvalRunRecord | null> {
-  const data = await env.CONFIG_KV.get(kvKey(tenantId, "evalrun", runId));
-  return data ? (JSON.parse(data) as EvalRunRecord) : null;
+  const row = await getServices(env).evals.get({ tenantId, runId });
+  if (!row) return null;
+  return rowToRecord(row);
 }
 
 async function saveRun(env: Env, run: EvalRunRecord): Promise<void> {
-  await env.CONFIG_KV.put(kvKey(run.tenant_id, "evalrun", run.id), JSON.stringify(run));
-}
-
-async function removeFromActive(env: Env, runId: string): Promise<void> {
-  await env.CONFIG_KV.delete(`evalrun_active:${runId}`);
+  const services = getServices(env);
+  if (run.status === "completed" || run.status === "failed") {
+    await services.evals.markCompleted({
+      tenantId: run.tenant_id,
+      runId: run.id,
+      status: run.status,
+      results: extractResults(run),
+      error: run.error,
+    });
+  } else {
+    await services.evals.update({
+      tenantId: run.tenant_id,
+      runId: run.id,
+      status: run.status,
+      results: extractResults(run),
+      error: run.error ?? null,
+    });
+  }
 }
 
 async function createTaskSession(env: Env, run: EvalRunRecord, task: EvalTaskResult): Promise<string> {
   const t = run.tenant_id;
-  const agentData = await env.CONFIG_KV.get(kvKey(t, "agent", run.agent_id));
-  if (!agentData) throw new Error(`agent ${run.agent_id} not found`);
-  const agentSnapshot = JSON.parse(agentData) as AgentConfig;
-  const envSnapshotData = await env.CONFIG_KV.get(kvKey(t, "env", run.environment_id));
-  const environmentSnapshot = envSnapshotData ? (JSON.parse(envSnapshotData) as EnvironmentConfig) : undefined;
+  const services = getServices(env);
+  const agentRow = await services.agents.get({ tenantId: t, agentId: run.agent_id });
+  if (!agentRow) throw new Error(`agent ${run.agent_id} not found`);
+  const { tenant_id: _atid, ...agentSnapshot } = agentRow;
+  const envRow = await services.environments.get({ tenantId: t, environmentId: run.environment_id });
+  const environmentSnapshot = envRow ? toEnvironmentConfig(envRow) : undefined;
 
-  const sessionId = generateSessionId();
   const binding = await getSandboxBinding(env, run.environment_id, t);
   if (!binding) throw new Error(`environment ${run.environment_id} not ready`);
+
+  // Allocate the session row first (id comes from the store), then init the
+  // sandbox with that id. Single D1 INSERT replaces the legacy KV.put.
+  const { session } = await getServices(env).sessions.create({
+    tenantId: t,
+    agentId: run.agent_id,
+    environmentId: run.environment_id,
+    title: `eval ${run.id} :: ${task.id}`,
+    agentSnapshot,
+    environmentSnapshot,
+  });
+  const sessionId = session.id;
 
   await fwd(binding, `/sessions/${sessionId}/init`, "PUT", JSON.stringify({
     agent_id: run.agent_id,
@@ -97,17 +171,6 @@ async function createTaskSession(env: Env, run: EvalRunRecord, task: EvalTaskRes
     tenant_id: t,
     vault_ids: [],
   }));
-
-  const session: SessionMeta = {
-    id: sessionId,
-    agent_id: run.agent_id,
-    environment_id: run.environment_id,
-    title: `eval ${run.id} :: ${task.id}`,
-    status: "idle",
-    created_at: new Date().toISOString(),
-  };
-  const sessionRecord: SessionRecord = { ...session, agent_snapshot: agentSnapshot, environment_snapshot: environmentSnapshot };
-  await env.CONFIG_KV.put(kvKey(t, "session", sessionId), JSON.stringify(sessionRecord));
 
   return sessionId;
 }
@@ -137,9 +200,22 @@ async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string)
 
 async function buildAndStoreTrajectory(env: Env, run: EvalRunRecord, sessionId: string): Promise<string> {
   const t = run.tenant_id;
-  const sessionData = await env.CONFIG_KV.get(kvKey(t, "session", sessionId));
-  if (!sessionData) throw new Error(`session ${sessionId} not found`);
-  const session = JSON.parse(sessionData) as SessionRecord;
+  const sessionRow = await getServices(env).sessions.get({ tenantId: t, sessionId });
+  if (!sessionRow) throw new Error(`session ${sessionId} not found`);
+  const session = {
+    id: sessionRow.id,
+    agent_id: sessionRow.agent_id,
+    environment_id: sessionRow.environment_id,
+    title: sessionRow.title,
+    status: sessionRow.status,
+    created_at: sessionRow.created_at,
+    updated_at: sessionRow.updated_at ?? undefined,
+    archived_at: sessionRow.archived_at ?? undefined,
+    vault_ids: sessionRow.vault_ids ?? undefined,
+    metadata: sessionRow.metadata ?? undefined,
+    agent_snapshot: sessionRow.agent_snapshot ?? undefined,
+    environment_snapshot: sessionRow.environment_snapshot ?? undefined,
+  } as SessionRecord;
   const binding = await getSandboxBinding(env, run.environment_id, t);
   if (!binding) throw new Error("environment binding lost");
 
@@ -276,7 +352,7 @@ async function advanceTask(env: Env, run: EvalRunRecord, task: EvalTaskResult): 
 
 async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {
   if (run.status === "completed" || run.status === "failed") {
-    await removeFromActive(env, run.id);
+    // Already terminal — no work to do; status-driven listActive will skip it.
     return;
   }
 
@@ -302,7 +378,6 @@ async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {
     run.status = run.failed_count > 0 && run.completed_count === 0 ? "failed" : "completed";
     run.ended_at = new Date().toISOString();
     await saveRun(env, run);
-    await removeFromActive(env, run.id);
     return;
   }
 
@@ -312,28 +387,28 @@ async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {
 // ---------- Public entry point (called by scheduled handler) ----------
 
 export async function tickEvalRuns(env: Env): Promise<{ advanced: number; total: number }> {
-  const list = await kvListAll(env.CONFIG_KV, "evalrun_active:");
+  const services = getServices(env);
+  const activeRows = await services.evals.listActive();
   let advanced = 0;
-  for (const key of list) {
-    const runId = key.name.slice("evalrun_active:".length);
-    const tenantId = await env.CONFIG_KV.get(key.name);
-    if (!tenantId) continue;
-    const run = await loadRun(env, tenantId, runId);
-    if (!run) {
-      await removeFromActive(env, runId);
-      continue;
-    }
+  for (const row of activeRows) {
+    const run = rowToRecord(row);
     try {
       await advanceRun(env, run);
       advanced++;
     } catch (err: unknown) {
-      // Mark the whole run failed if advance throws unrecoverably
+      // Mark the whole run failed if advance throws unrecoverably.
       run.status = "failed";
       run.error = err instanceof Error ? err.message : String(err);
       run.ended_at = new Date().toISOString();
       await saveRun(env, run);
-      await removeFromActive(env, runId);
     }
   }
-  return { advanced, total: list.length };
+  return { advanced, total: activeRows.length };
 }
+
+// `loadRun` and `EvalTaskSpec` re-export shape — kept unused locally now that
+// listActive replaces the per-id KV fetch loop, but keep both exported so any
+// future direct-load consumer (admin tooling, debug page) doesn't have to
+// rebuild the row→record translator.
+export { loadRun };
+export type { EvalTaskSpec };

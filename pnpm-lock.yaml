@@ -66,12 +66,42 @@ importers:
       '@cloudflare/sandbox':
         specifier: ^0.8.11
         version: 0.8.11
+      '@open-managed-agents/agents-store':
+        specifier: workspace:*
+        version: link:../../packages/agents-store
+      '@open-managed-agents/credentials-store':
+        specifier: workspace:*
+        version: link:../../packages/credentials-store
+      '@open-managed-agents/environments-store':
+        specifier: workspace:*
+        version: link:../../packages/environments-store
+      '@open-managed-agents/files-store':
+        specifier: workspace:*
+        version: link:../../packages/files-store
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
+      '@open-managed-agents/model-cards-store':
+        specifier: workspace:*
+        version: link:../../packages/model-cards-store
+      '@open-managed-agents/outbound-snapshots-store':
+        specifier: workspace:*
+        version: link:../../packages/outbound-snapshots-store
+      '@open-managed-agents/services':
+        specifier: workspace:*
+        version: link:../../packages/services
+      '@open-managed-agents/session-secrets-store':
+        specifier: workspace:*
+        version: link:../../packages/session-secrets-store
+      '@open-managed-agents/sessions-store':
+        specifier: workspace:*
+        version: link:../../packages/sessions-store
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/vaults-store':
+        specifier: workspace:*
+        version: link:../../packages/vaults-store
       ai:
         specifier: ^6.0.158
         version: 6.0.158(zod@4.3.6)
@@ -187,6 +217,21 @@ importers:
       '@cloudflare/sandbox':
         specifier: ^0.8.11
         version: 0.8.11
+      '@open-managed-agents/agents-store':
+        specifier: workspace:*
+        version: link:../../packages/agents-store
+      '@open-managed-agents/credentials-store':
+        specifier: workspace:*
+        version: link:../../packages/credentials-store
+      '@open-managed-agents/environments-store':
+        specifier: workspace:*
+        version: link:../../packages/environments-store
+      '@open-managed-agents/evals-store':
+        specifier: workspace:*
+        version: link:../../packages/evals-store
+      '@open-managed-agents/files-store':
+        specifier: workspace:*
+        version: link:../../packages/files-store
       '@open-managed-agents/integrations-adapters-cf':
         specifier: workspace:*
         version: link:../../packages/integrations-adapters-cf
@@ -196,12 +241,36 @@ importers:
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
+      '@open-managed-agents/model-cards-store':
+        specifier: workspace:*
+        version: link:../../packages/model-cards-store
+      '@open-managed-agents/outbound-snapshots-store':
+        specifier: workspace:*
+        version: link:../../packages/outbound-snapshots-store
+      '@open-managed-agents/services':
+        specifier: workspace:*
+        version: link:../../packages/services
+      '@open-managed-agents/session-secrets-store':
+        specifier: workspace:*
+        version: link:../../packages/session-secrets-store
+      '@open-managed-agents/sessions-store':
+        specifier: workspace:*
+        version: link:../../packages/sessions-store
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/vaults-store':
+        specifier: workspace:*
+        version: link:../../packages/vaults-store
       hono:
         specifier: ^4.7.0
         version: 4.12.12
+
+  packages/agents-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/cli:
     devDependencies:
@@ -211,6 +280,30 @@ importers:
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
+
+  packages/credentials-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/environments-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/evals-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/files-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/github:
     dependencies:
@@ -279,6 +372,72 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/model-cards-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/outbound-snapshots-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/services:
+    dependencies:
+      '@open-managed-agents/agents-store':
+        specifier: workspace:*
+        version: link:../agents-store
+      '@open-managed-agents/credentials-store':
+        specifier: workspace:*
+        version: link:../credentials-store
+      '@open-managed-agents/environments-store':
+        specifier: workspace:*
+        version: link:../environments-store
+      '@open-managed-agents/evals-store':
+        specifier: workspace:*
+        version: link:../evals-store
+      '@open-managed-agents/files-store':
+        specifier: workspace:*
+        version: link:../files-store
+      '@open-managed-agents/memory-store':
+        specifier: workspace:*
+        version: link:../memory-store
+      '@open-managed-agents/model-cards-store':
+        specifier: workspace:*
+        version: link:../model-cards-store
+      '@open-managed-agents/outbound-snapshots-store':
+        specifier: workspace:*
+        version: link:../outbound-snapshots-store
+      '@open-managed-agents/session-secrets-store':
+        specifier: workspace:*
+        version: link:../session-secrets-store
+      '@open-managed-agents/sessions-store':
+        specifier: workspace:*
+        version: link:../sessions-store
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+      '@open-managed-agents/vaults-store':
+        specifier: workspace:*
+        version: link:../vaults-store
+      hono:
+        specifier: ^4.7.0
+        version: 4.12.12
+
+  packages/session-secrets-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/sessions-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   packages/shared:
     dependencies:
       nanoid:
@@ -290,6 +449,12 @@ importers:
       '@open-managed-agents/integrations-core':
         specifier: workspace:*
         version: link:../integrations-core
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/vaults-store:
+    dependencies:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
