@@ -94,6 +94,10 @@ export interface GitHubA1FormStep {
   suggestedAvatarUrl: string | null;
   setupUrl: string;
   webhookUrl: string;
+  /** Recommended UX path: opens a manifest auto-POST page on the gateway
+   *  that streamlines App registration to ~30s. Optional because not every
+   *  step variant exposes it (e.g. server-side resumed flows). */
+  manifestStartUrl?: string;
   recommendedPermissions: Record<string, string>;
   recommendedSubscriptions: string[];
 }
@@ -109,10 +113,9 @@ export interface GitHubA1InstallLink {
 
 // ─── Sessions (subset, used by activity timeline) ────────────────────────
 //
-// Mirrors a slice of @open-managed-agents/shared SessionMeta. We don't
-// re-export shared types here because integrations-ui shouldn't take a
-// hard dep on the host server's type package — keeping these snake-cased
-// shapes inline matches the wire format and stays decoupled.
+// Mirrors a slice of @open-managed-agents/shared SessionMeta. Kept inline
+// here so the console UI stays decoupled from the host server's type
+// package — snake-case shapes match the wire format.
 
 export interface SessionSummary {
   id: string;
