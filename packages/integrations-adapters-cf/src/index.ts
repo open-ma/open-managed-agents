@@ -25,3 +25,5 @@ export { ServiceBindingSessionCreator } from "./service-binding-session-creator"
 export type { ServiceBindingSessionCreatorOptions } from "./service-binding-session-creator";
 export { ServiceBindingVaultManager } from "./service-binding-vault-manager";
 export type { ServiceBindingVaultManagerOptions } from "./service-binding-vault-manager";
+export { buildCfRepos, buildCfContainer } from "./cf-container";
+export type { CfReposEnv, CfContainerEnv } from "./cf-container";

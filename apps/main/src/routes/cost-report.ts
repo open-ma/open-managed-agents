@@ -4,7 +4,7 @@ import {
   generateCostReport,
   DEFAULT_PRICING,
   type CfPricing,
-} from "@open-managed-agents/shared";
+} from "@open-managed-agents/cf-billing";
 
 const PRICING_KV_KEY = "system:cf_pricing";
 
