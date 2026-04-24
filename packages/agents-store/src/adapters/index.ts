@@ -9,11 +9,11 @@ import type { Logger } from "../ports";
 import { AgentService } from "../service";
 
 export function createCfAgentService(
-  env: { AUTH_DB: D1Database },
+  deps: { db: D1Database },
   opts?: { logger?: Logger },
 ): AgentService {
   return new AgentService({
-    repo: new D1AgentRepo(env.AUTH_DB),
+    repo: new D1AgentRepo(deps.db),
     logger: opts?.logger,
   });
 }

@@ -38,4 +38,21 @@ export interface Env {
   INTEGRATIONS_PUBLIC_URL?: string;
   // Used by integrations subsystem to sign tokens at rest. Gateway's value.
   MCP_SIGNING_KEY?: string;
+  // Killswitch for per-tenant D1 routing. Unset / "true" / anything else =
+  // routing enabled (the default — uses tenant_shard meta table). Set to
+  // "false" or "0" to roll back to the shared-AUTH_DB provider without
+  // redeploying code. Implemented in
+  // packages/services/src/index.ts buildCfTenantDbProvider.
+  PER_TENANT_DB_ENABLED?: string;
+  // Per-store backend selection. JSON object mapping store key (e.g.
+  // "agents", "sessions") to backend name ("cf" | "pg" | "memory"). Missing
+  // entries default to "cf". Lets a deployment route a single store to a
+  // self-hosted Postgres without touching service or route code — the
+  // adapter layer is the only thing that changes.
+  // Example: STORE_BACKENDS={"agents":"pg","sessions":"cf"}
+  STORE_BACKENDS?: string;
+  // Postgres connection string used by any pg-backed store. On Cloudflare
+  // Workers, point this at a Hyperdrive connection string for production;
+  // direct DSN works in local dev / Node deployments.
+  DATABASE_URL?: string;
 }
