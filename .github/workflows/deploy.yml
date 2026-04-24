@@ -30,6 +30,27 @@ jobs:
       - name: Build console
         run: pnpm --filter managed-agents-console build
 
+      # Apply D1 migrations BEFORE deploying any worker. New code that
+      # references columns / tables added in this PR will start serving
+      # traffic the moment the deploy step finishes, so the schema must
+      # already be in place. Fail-fast: if the migration apply fails, the
+      # deploy steps don't run — better than half-applied schema with
+      # mismatched worker code.
+      #
+      # `wrangler d1 migrations apply` is idempotent: it tracks applied
+      # names in `d1_migrations` and skips anything already done. So this
+      # step is safe to run on every push, including no-op pushes.
+      - name: Apply D1 migrations
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/main
+          # `--remote` targets the prod D1 (binding AUTH_DB). The CI runner
+          # is non-interactive, so wrangler picks the default "yes" for the
+          # "DB may be unavailable during migration" prompt.
+          npx wrangler d1 migrations apply AUTH_DB --remote
+
       # --- Deploy both workers with retry ---
       - name: Deploy agent worker
         env:
