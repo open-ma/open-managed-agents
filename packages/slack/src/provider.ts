@@ -195,8 +195,10 @@ export class SlackProvider implements IntegrationProvider {
     // App row uses webhookSecret column for the signing secret (same
     // AppRepo interface as Linear; semantically Slack's "webhook secret" IS
     // its signing secret).
+    const tenantId = await this.container.tenants.resolveByUserId(form.userId);
     const app = await this.container.apps.insert({
       id: form.appId,
+      tenantId,
       publicationId: null,
       clientId,
       clientSecret,
@@ -296,7 +298,9 @@ export class SlackProvider implements IntegrationProvider {
       // when next exercised by an event.
     }
 
+    const tenantId = await this.container.tenants.resolveByUserId(state.userId);
     const installation = await this.container.installations.insert({
+      tenantId,
       userId: state.userId,
       providerId: PROVIDER_ID,
       workspaceId: token.team.id,
@@ -344,6 +348,7 @@ export class SlackProvider implements IntegrationProvider {
     await this.container.installations.setBotVaultId(installation.id, botVaultId);
 
     const publication = await this.container.publications.insert({
+      tenantId,
       userId: state.userId,
       agentId: state.agentId,
       installationId: installation.id,
@@ -470,6 +475,7 @@ export class SlackProvider implements IntegrationProvider {
     // Idempotency on event_id.
     const fresh = await this.container.webhookEvents.recordIfNew(
       env.event_id,
+      installation.tenantId,
       installation.id,
       env.event?.type ?? "unknown",
       this.container.clock.nowMs(),

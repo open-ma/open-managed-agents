@@ -1,131 +1,82 @@
 // Composition root.
 //
-// Builds concrete adapter instances from the worker's bindings and assembles
-// per-provider containers. Each provider gets its own Container with its own
-// repos (parallel `linear_*` vs `slack_*` tables), but they share the same
-// underlying infrastructure adapters (clock, ids, crypto, jwt, http, sessions,
-// vaults). Sharing infra is harmless; it keeps secrets isolated by use-label
-// inside Crypto/JWT but uses one D1 binding for both.
+// Linear + GitHub run against the shared `linear_*` / `github_*` D1 tables and
+// share one Container built via buildCfContainer. Slack runs against parallel
+// `slack_*` tables (dual-token model doesn't fit the shared installations
+// schema) and gets its own SlackContainer.
+//
+// To add a provider that fits the shared tables: just instantiate it with
+// the result of buildContainer(env). For one with parallel tables (slack-
+// style), follow buildSlackContainer's pattern below.
+//
+// DB routing: integrations always run against env.AUTH_DB. Tenant sharding
+// (when enabled in apps/main) doesn't apply here — webhook entry can't
+// resolve tenant before signature verify, and integration data lives in the
+// shared control-plane DB.
 
 import {
-  CryptoIdGenerator,
-  D1AppRepo,
-  D1AuthoredCommentRepo,
-  D1GitHubAppRepo,
-  D1InstallationRepo,
-  D1IssueSessionRepo,
-  D1PublicationRepo,
-  D1SetupLinkRepo,
+  buildCfContainer,
   D1SlackAppRepo,
   D1SlackInstallationRepo,
   D1SlackPublicationRepo,
   D1SlackSessionScopeRepo,
   D1SlackSetupLinkRepo,
   D1SlackWebhookEventStore,
-  D1WebhookEventStore,
-  ServiceBindingSessionCreator,
-  ServiceBindingVaultManager,
-  SystemClock,
-  WebCryptoAesGcm,
-  WebCryptoHmacVerifier,
-  WebCryptoJwtSigner,
-  WorkerHttpClient,
+  type CfContainerEnv,
 } from "@open-managed-agents/integrations-adapters-cf";
-import type {
-  Clock,
-  Container,
-  Crypto,
-  HmacVerifier,
-  HttpClient,
-  IdGenerator,
-  JwtSigner,
-  SessionCreator,
-  VaultManager,
-} from "@open-managed-agents/integrations-core";
+import type { Container } from "@open-managed-agents/integrations-core";
 import type { SlackContainer } from "@open-managed-agents/slack";
 import type { Env } from "./env";
 
-interface SharedInfra {
-  clock: Clock;
-  ids: IdGenerator;
-  crypto: Crypto;
-  hmac: HmacVerifier;
-  jwt: JwtSigner;
-  http: HttpClient;
-  sessions: SessionCreator;
-  vaults: VaultManager;
-}
-
-function buildSharedInfra(env: Env): SharedInfra {
-  const clock = new SystemClock();
-  const ids = new CryptoIdGenerator();
-  // Token-at-rest encryption uses a distinct label so the derived key is
-  // different from the JWT signing key, even though both seed from the same
-  // root secret.
-  const crypto = new WebCryptoAesGcm(env.MCP_SIGNING_KEY, "integrations.tokens");
-  const hmac = new WebCryptoHmacVerifier();
-  const jwt = new WebCryptoJwtSigner(env.MCP_SIGNING_KEY);
-  const http = new WorkerHttpClient();
-  const sessions = new ServiceBindingSessionCreator(env.MAIN, {
-    internalSecret: env.INTEGRATIONS_INTERNAL_SECRET,
-  });
-  const vaults = new ServiceBindingVaultManager(env.MAIN, {
-    internalSecret: env.INTEGRATIONS_INTERNAL_SECRET,
-  });
-  return { clock, ids, crypto, hmac, jwt, http, sessions, vaults };
-}
-
 /**
  * Shared container — Linear + GitHub use these `linear_*` / `github_*` tables.
- * `provider_id` distinguishes rows in the shared tables (e.g.
- * `linear_installations` carries both Linear and GitHub installs).
+ * `provider_id` distinguishes rows in the shared tables.
  *
- * Slack runs against the parallel `slack_*` tables — see buildSlackContainer.
+ * sessionScopes uses D1SlackSessionScopeRepo as the shared impl too — it
+ * happens to point at slack_thread_sessions, but Linear/GitHub never call
+ * into it (they use issueSessions instead). Concrete impl is required by
+ * the Container interface contract.
  */
 export function buildContainer(env: Env): Container {
-  const infra = buildSharedInfra(env);
+  const cfEnv: CfContainerEnv = {
+    db: env.AUTH_DB,
+    controlPlaneDb: env.AUTH_DB,
+    MCP_SIGNING_KEY: env.MCP_SIGNING_KEY,
+    MAIN: env.MAIN,
+    INTEGRATIONS_INTERNAL_SECRET: env.INTEGRATIONS_INTERNAL_SECRET,
+  };
+  const base = buildCfContainer(cfEnv);
   return {
-    ...infra,
-    installations: new D1InstallationRepo(env.AUTH_DB, infra.crypto, infra.ids),
-    publications: new D1PublicationRepo(env.AUTH_DB, infra.ids),
-    apps: new D1AppRepo(env.AUTH_DB, infra.crypto, infra.ids),
-    githubApps: new D1GitHubAppRepo(env.AUTH_DB, infra.crypto, infra.ids),
-    webhookEvents: new D1WebhookEventStore(env.AUTH_DB),
-    issueSessions: new D1IssueSessionRepo(env.AUTH_DB),
-    // Slack-specific scope repo not needed for Linear/GitHub; supply a stub
-    // pointing at slack's table — Linear/GitHub never call into it.
+    ...base,
     sessionScopes: new D1SlackSessionScopeRepo(env.AUTH_DB),
-    authoredComments: new D1AuthoredCommentRepo(env.AUTH_DB),
-    setupLinks: new D1SetupLinkRepo(env.AUTH_DB, infra.ids),
   };
 }
 
-/** Backward-compat alias — some Linear route handlers call buildLinearContainer. */
-export function buildLinearContainer(env: Env): Container {
-  return buildContainer(env);
-}
-
-/** Slack container — `slack_*` tables, with the Slack-specific
+/**
+ * Slack container — parallel `slack_*` tables, with the Slack-specific
  * SlackInstallationRepo (adds getUserToken/setUserToken/setBotVaultId/getBotVaultId).
  *
- * Slack uses its own parallel install/publication/apps tables because dual-token
- * (xoxb + xoxp) doesn't fit the shared `linear_installations` schema. The
- * `githubApps` / `issueSessions` / `authoredComments` ports are required by the
- * Container interface but never queried by the Slack provider — they share the
- * same D1 binding and read empty results for slack-tagged work.
+ * Reuses every shared adapter (clock/ids/crypto/hmac/jwt/http/sessions/vaults/
+ * tenants/githubApps/issueSessions/authoredComments) from buildCfContainer
+ * and only swaps the installations/publications/apps/setupLinks/webhookEvents/
+ * sessionScopes ports for slack-specific D1 repos.
  */
 export function buildSlackContainer(env: Env): SlackContainer {
-  const infra = buildSharedInfra(env);
+  const cfEnv: CfContainerEnv = {
+    db: env.AUTH_DB,
+    controlPlaneDb: env.AUTH_DB,
+    MCP_SIGNING_KEY: env.MCP_SIGNING_KEY,
+    MAIN: env.MAIN,
+    INTEGRATIONS_INTERNAL_SECRET: env.INTEGRATIONS_INTERNAL_SECRET,
+  };
+  const base = buildCfContainer(cfEnv);
   return {
-    ...infra,
-    installations: new D1SlackInstallationRepo(env.AUTH_DB, infra.crypto, infra.ids),
-    publications: new D1SlackPublicationRepo(env.AUTH_DB, infra.ids),
-    apps: new D1SlackAppRepo(env.AUTH_DB, infra.crypto, infra.ids),
-    githubApps: new D1GitHubAppRepo(env.AUTH_DB, infra.crypto, infra.ids),
+    ...base,
+    installations: new D1SlackInstallationRepo(env.AUTH_DB, base.crypto, base.ids),
+    publications: new D1SlackPublicationRepo(env.AUTH_DB, base.ids),
+    apps: new D1SlackAppRepo(env.AUTH_DB, base.crypto, base.ids),
     webhookEvents: new D1SlackWebhookEventStore(env.AUTH_DB),
-    issueSessions: new D1IssueSessionRepo(env.AUTH_DB),
     sessionScopes: new D1SlackSessionScopeRepo(env.AUTH_DB),
-    authoredComments: new D1AuthoredCommentRepo(env.AUTH_DB),
-    setupLinks: new D1SlackSetupLinkRepo(env.AUTH_DB, infra.ids),
+    setupLinks: new D1SlackSetupLinkRepo(env.AUTH_DB, base.ids),
   };
 }

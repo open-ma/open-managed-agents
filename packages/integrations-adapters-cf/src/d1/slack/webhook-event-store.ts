@@ -11,6 +11,7 @@ export class D1SlackWebhookEventStore implements WebhookEventStore {
    */
   async recordIfNew(
     deliveryId: string,
+    tenantId: string,
     installationId: string,
     eventType: string,
     receivedAt: number,
@@ -18,10 +19,10 @@ export class D1SlackWebhookEventStore implements WebhookEventStore {
     const result = await this.db
       .prepare(
         `INSERT OR IGNORE INTO slack_webhook_events
-           (delivery_id, installation_id, event_type, received_at)
-         VALUES (?, ?, ?, ?)`,
+           (delivery_id, tenant_id, installation_id, event_type, received_at)
+         VALUES (?, ?, ?, ?, ?)`,
       )
-      .bind(deliveryId, installationId, eventType, receivedAt)
+      .bind(deliveryId, tenantId, installationId, eventType, receivedAt)
       .run();
     return (result.meta?.changes ?? 0) > 0;
   }

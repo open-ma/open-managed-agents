@@ -1,5 +1,6 @@
 import { createServer } from "node:http";
 import { execSync } from "node:child_process";
+import type { AgentConfig, ModelCard, SessionMeta } from "@open-managed-agents/api-types";
 
 // ─── Config ───
 

@@ -51,6 +51,7 @@ import type {
   SessionScopeStatus,
   SetupLink,
   SetupLinkRepo,
+  TenantResolver,
   VaultManager,
   WebhookEventStore,
   WorkspaceId,
@@ -276,6 +277,7 @@ export class InMemoryInstallationRepo implements InstallationRepo {
     const id = `inst_${this.counter}`;
     const inst: Installation = {
       id,
+      tenantId: row.tenantId,
       userId: row.userId,
       providerId: row.providerId,
       workspaceId: row.workspaceId,
@@ -411,6 +413,8 @@ export class InMemoryAppRepo implements AppRepo {
     const existing = this.rows.get(id);
     const app: AppCredentials = {
       id,
+      // tenantId is preserved on upsert too — re-submits should not silently re-tenant.
+      tenantId: existing ? existing.tenantId : row.tenantId,
       // Preserve publicationId on upsert (only nulled by setPublicationId)
       publicationId: existing ? existing.publicationId : row.publicationId,
       clientId: row.clientId,
@@ -487,6 +491,7 @@ export class InMemoryGitHubAppRepo implements GitHubAppRepo {
     const existing = this.rows.get(id);
     const app: GitHubAppCredentials = {
       id,
+      tenantId: existing ? existing.tenantId : row.tenantId,
       publicationId: existing ? existing.publicationId : row.publicationId,
       appId: row.appId,
       appSlug: row.appSlug,
@@ -519,6 +524,7 @@ export class InMemoryGitHubAppRepo implements GitHubAppRepo {
 
 interface WebhookEventRow {
   deliveryId: string;
+  tenantId: string;
   installationId: string;
   eventType: string;
   receivedAt: number;
@@ -532,6 +538,7 @@ export class InMemoryWebhookEventStore implements WebhookEventStore {
 
   async recordIfNew(
     deliveryId: string,
+    tenantId: string,
     installationId: string,
     eventType: string,
     receivedAt: number,
@@ -539,6 +546,7 @@ export class InMemoryWebhookEventStore implements WebhookEventStore {
     if (this.rows.has(deliveryId)) return false;
     this.rows.set(deliveryId, {
       deliveryId,
+      tenantId,
       installationId,
       eventType,
       receivedAt,
@@ -652,6 +660,7 @@ export class InMemorySetupLinkRepo implements SetupLinkRepo {
     const token = `setup_${Math.random().toString(36).slice(2)}`;
     const link: SetupLink = {
       token,
+      tenantId: row.tenantId,
       publicationId: row.publicationId,
       createdBy: row.createdBy,
       expiresAt: row.expiresAt,
@@ -681,6 +690,29 @@ export class InMemorySetupLinkRepo implements SetupLinkRepo {
 
 // ─── Convenience: build a complete in-memory container ────────────────
 
+/**
+ * In-memory TenantResolver. Default behavior: when a userId hasn't been
+ * explicitly registered via `set(...)`, returns a derived `tn_for_<userId>`
+ * tenant id rather than throwing. This keeps existing tests that don't care
+ * about tenant routing working without modification — only tests that
+ * specifically exercise tenant scoping need to call `set(...)`.
+ *
+ * The strict-throw behavior is left to the D1 adapter (D1TenantResolver),
+ * which raises on missing rows because in production a missing tenant for a
+ * known user is an integrity violation.
+ */
+export class InMemoryTenantResolver implements TenantResolver {
+  private readonly mapping = new Map<string, string>();
+
+  set(userId: string, tenantId: string): void {
+    this.mapping.set(userId, tenantId);
+  }
+
+  async resolveByUserId(userId: string): Promise<string> {
+    return this.mapping.get(userId) ?? `tn_for_${userId}`;
+  }
+}
+
 export interface FakeContainer {
   clock: FakeClock;
   ids: FakeIdGenerator;
@@ -688,6 +720,7 @@ export interface FakeContainer {
   hmac: FakeHmacVerifier;
   jwt: FakeJwtSigner;
   http: FakeHttpClient;
+  tenants: InMemoryTenantResolver;
   sessions: FakeSessionCreator;
   vaults: FakeVaultManager;
   installations: InMemoryInstallationRepo;
@@ -710,6 +743,7 @@ export function buildFakeContainer(): FakeContainer {
     hmac: new FakeHmacVerifier(),
     jwt: new FakeJwtSigner(clock),
     http: new FakeHttpClient(),
+    tenants: new InMemoryTenantResolver(),
     sessions: new FakeSessionCreator(),
     vaults: new FakeVaultManager(),
     installations: new InMemoryInstallationRepo(clock),
