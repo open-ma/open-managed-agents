@@ -3,6 +3,7 @@ import { env, exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
 import { registerHarness } from "../../apps/agent/src/harness/registry";
 import { tickEvalRuns } from "../../apps/main/src/eval-runner";
+import { buildCfServices } from "@open-managed-agents/services";
 
 // Lightweight test harness: emits a single agent.message per turn, then idle.
 class EvalTestHarness {
@@ -292,9 +293,11 @@ describe("tickEvalRuns advances state", () => {
     });
     const { run_id } = (await createRes.json()) as any;
 
-    // Active index should contain it
-    const activeBefore = await env.CONFIG_KV.get(`evalrun_active:${run_id}`);
-    expect(activeBefore).toBeTruthy();
+    // Active list (status-driven via services.evals.listActive) should
+    // contain the new run.
+    const services = buildCfServices(env);
+    const activeBefore = await services.evals.listActive();
+    expect(activeBefore.some((r: any) => r.id === run_id)).toBe(true);
 
     // Drive to completion
     for (let i = 0; i < 5; i++) {
@@ -305,9 +308,9 @@ describe("tickEvalRuns advances state", () => {
       if (body.status === "completed" || body.status === "failed") break;
     }
 
-    // Active index should be cleared
-    const activeAfter = await env.CONFIG_KV.get(`evalrun_active:${run_id}`);
-    expect(activeAfter).toBeNull();
+    // Active list should no longer include the run (status flipped to terminal).
+    const activeAfter = await services.evals.listActive();
+    expect(activeAfter.some((r: any) => r.id === run_id)).toBe(false);
   });
 
   it("trials > 1: spawns N independent sessions per task and stores N trajectories", async () => {

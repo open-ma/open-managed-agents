@@ -15,10 +15,10 @@ check() {
   local name="$1" expected="$2" actual="$3"
   if [[ "$actual" == *"$expected"* ]]; then
     echo "  ✓ $name"
-    ((PASS++))
+    ((++PASS))
   else
     echo "  ✗ $name — expected '$expected', got '$actual'"
-    ((FAIL++))
+    ((++FAIL))
   fi
 }
 
