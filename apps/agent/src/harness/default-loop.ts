@@ -3,7 +3,7 @@ import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } fro
 import type { HarnessInterface, HarnessContext, HarnessRuntime } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
-import { SummarizeCompactionStrategy } from "./compaction";
+import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
 
 const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"]);
@@ -276,9 +276,10 @@ export class DefaultHarness implements HarnessInterface {
   async run(ctx: HarnessContext): Promise<void> {
     const { agent, userMessage, runtime, tools, model, systemPrompt } = ctx;
 
-    // Resolve compaction params from agent config. One strategy
-    // (SummarizeCompactionStrategy) with CC-aligned tail defaults — opt-in
-    // overrides via agent.metadata for tuning per-agent if needed.
+    // Resolve compaction params from agent config. Strategy class is
+    // selectable via `agent.metadata.compaction_strategy` (defaults to
+    // "summarize" for backward compat); shared knobs (tail, trigger
+    // fraction) apply to whichever strategy is picked.
     const meta = (agent.metadata ?? {}) as Record<string, unknown>;
     const triggerFraction = typeof meta.compaction_trigger_fraction === "number"
       ? meta.compaction_trigger_fraction as number
@@ -292,7 +293,10 @@ export class DefaultHarness implements HarnessInterface {
     const tailMinMessages = typeof meta.compaction_tail_min_messages === "number"
       ? meta.compaction_tail_min_messages as number
       : undefined;
-    this.compactionStrategy = new SummarizeCompactionStrategy({
+    const strategyName = typeof meta.compaction_strategy === "string"
+      ? meta.compaction_strategy as string
+      : undefined;
+    this.compactionStrategy = resolveCompactionStrategy(strategyName, {
       tailMinTokens,
       tailMaxTokens,
       tailMinMessages,
@@ -496,6 +500,29 @@ export class DefaultHarness implements HarnessInterface {
       runtime,
     });
     if (!result) return;
+
+    // Empty-summary defense (upstream layer). If a strategy returns a
+    // result whose summary contains no actual text, do NOT broadcast the
+    // boundary event. Otherwise eventsToMessages would later "honor" the
+    // empty boundary and silently drop the entire pre-boundary history.
+    //
+    // Observed in the wild on MiniMax: model returns finish_reason="tool-calls"
+    // with empty text → SummarizeCompactionStrategy returns
+    // summary=[{type:"text", text:""}] → boundary written → next derive
+    // tosses 60 turns of conversation. The new cc-style / opencode-style
+    // strategies catch this themselves (return null) but the legacy
+    // `summarize` strategy does not, so this layer is the safety net for
+    // any strategy that doesn't self-defend.
+    const hasContent = result.summary?.some(
+      (b) => (b.type === "text" && b.text.trim().length > 0)
+        || b.type === "image"
+        || b.type === "document",
+    );
+    if (!hasContent) {
+      console.warn("[compact] strategy produced empty summary — skipping boundary write");
+      return;
+    }
+
     runtime.broadcast({
       type: "agent.thread_context_compacted",
       original_message_count: result.original_message_count,
