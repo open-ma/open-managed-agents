@@ -1,10 +1,13 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { CredentialConfig, CredentialAuth } from "@open-managed-agents/shared";
-import { generateCredentialId } from "@open-managed-agents/shared";
+import type { CredentialAuth } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; services: Services };
+}>();
 
 // ─── Helpers ───
 
@@ -315,28 +318,27 @@ app.get("/callback", async (c) => {
   };
 
   if (oauthState.credential_id) {
-    // Update existing credential
-    const credKey = kvKey(oauthState.tenant_id, "cred", oauthState.vault_id, oauthState.credential_id);
-    const existingData = await c.env.CONFIG_KV.get(credKey);
-    if (existingData) {
-      const existing: CredentialConfig = JSON.parse(existingData);
-      existing.auth = credAuth;
-      existing.updated_at = new Date().toISOString();
-      await c.env.CONFIG_KV.put(credKey, JSON.stringify(existing));
-    }
+    // Update existing credential — refresh on a known credential row. If the
+    // row vanished mid-flow (race with delete/archive), swallow: the OAuth
+    // dance still completes for UX and the operator can retry attaching.
+    await c.var.services.credentials
+      .update({
+        tenantId: oauthState.tenant_id,
+        vaultId: oauthState.vault_id,
+        credentialId: oauthState.credential_id,
+        auth: credAuth,
+      })
+      .catch(() => {
+        /* not found — leave it; user can re-initiate */
+      });
   } else {
     // Create new credential
-    const cred: CredentialConfig = {
-      id: generateCredentialId(),
-      vault_id: oauthState.vault_id,
-      display_name: `${serverName} (OAuth)`,
+    await c.var.services.credentials.create({
+      tenantId: oauthState.tenant_id,
+      vaultId: oauthState.vault_id,
+      displayName: `${serverName} (OAuth)`,
       auth: credAuth,
-      created_at: new Date().toISOString(),
-    };
-    await c.env.CONFIG_KV.put(
-      kvKey(oauthState.tenant_id, "cred", oauthState.vault_id, cred.id),
-      JSON.stringify(cred),
-    );
+    });
   }
 
   // Clean up state
@@ -378,13 +380,16 @@ app.post("/refresh", async (c) => {
   }
 
   const t = c.get("tenant_id");
-  const credKey = kvKey(t, "cred", body.vault_id, body.credential_id);
-  const credData = await c.env.CONFIG_KV.get(credKey);
-  if (!credData) {
+  const service = c.var.services.credentials;
+  const cred = await service.get({
+    tenantId: t,
+    vaultId: body.vault_id,
+    credentialId: body.credential_id,
+  });
+  if (!cred) {
     return c.json({ error: "Credential not found" }, 404);
   }
 
-  const cred: CredentialConfig = JSON.parse(credData);
   if (cred.auth.type !== "mcp_oauth") {
     return c.json({ error: "Credential is not mcp_oauth type" }, 400);
   }
@@ -419,19 +424,25 @@ app.post("/refresh", async (c) => {
     expires_in?: number;
   };
 
-  // Update credential
-  cred.auth.access_token = tokens.access_token;
-  if (tokens.refresh_token) cred.auth.refresh_token = tokens.refresh_token;
-  cred.auth.expires_at = tokens.expires_in
+  const expiresAt = tokens.expires_in
     ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
     : undefined;
-  cred.updated_at = new Date().toISOString();
 
-  await c.env.CONFIG_KV.put(credKey, JSON.stringify(cred));
+  // Merge-update: refreshAuth keeps mcp_server_url, token_endpoint, client_id, etc.
+  await service.refreshAuth({
+    tenantId: t,
+    vaultId: body.vault_id,
+    credentialId: body.credential_id,
+    auth: {
+      access_token: tokens.access_token,
+      refresh_token: tokens.refresh_token ?? cred.auth.refresh_token,
+      expires_at: expiresAt,
+    },
+  });
 
   return c.json({
     access_token: tokens.access_token,
-    expires_at: cred.auth.expires_at,
+    expires_at: expiresAt,
   });
 });
 

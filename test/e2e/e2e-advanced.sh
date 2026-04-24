@@ -11,9 +11,9 @@ PASS=0; FAIL=0
 check() {
   local name="$1" expected="$2" actual="$3"
   if [[ "$actual" == *"$expected"* ]]; then
-    echo "  ✓ $name"; ((PASS++))
+    echo "  ✓ $name"; ((++PASS))
   else
-    echo "  ✗ $name — expected '$expected'"; ((FAIL++))
+    echo "  ✗ $name — expected '$expected'"; ((++FAIL))
   fi
 }
 
