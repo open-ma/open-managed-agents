@@ -60,13 +60,26 @@ export function eventsToMessages(events: SessionEvent[]): ModelMessage[] {
 
   // Find the last compaction boundary that actually carries a summary —
   // that's the one we honor. Earlier boundaries get superseded.
+  //
+  // "Carries a summary" means: at least one block contains real content.
+  // A bare array-length check (`summary.length > 0`) is NOT sufficient —
+  // a strategy that returns `[{type:"text", text:""}]` would still pass
+  // it and silently drop the entire pre-boundary history downstream.
+  // This is the downstream half of the empty-summary defense; the
+  // upstream half lives in DefaultHarness.compact() where the boundary
+  // event is written.
   let boundaryIdx = -1;
   let boundarySummary: ContentBlock[] | undefined;
   for (let i = events.length - 1; i >= 0; i--) {
     const e = events[i];
     if (e.type === "agent.thread_context_compacted") {
       const ce = e as AgentThreadContextCompactedEvent;
-      if (ce.summary && ce.summary.length > 0) {
+      const hasContent = ce.summary?.some(
+        (b) => (b.type === "text" && b.text.trim().length > 0)
+          || b.type === "image"
+          || b.type === "document",
+      );
+      if (hasContent) {
         boundaryIdx = i;
         boundarySummary = ce.summary;
         break;
@@ -203,19 +216,19 @@ function buildMessages(
   return messages;
 }
 
-// CC-style tail preservation params (sessionMemoryCompact.ts
-// DEFAULT_SM_COMPACT_CONFIG):
+// Tail preservation params (Claude Code-style defaults — observed values
+// that work well for multi-turn coding sessions):
 //   minTokens: 10_000  maxTokens: 40_000  minTextMessages: 5
 const TAIL_MIN_TOKENS = 10_000;
 const TAIL_MAX_TOKENS = 40_000;
 const TAIL_MIN_MESSAGES = 5;
-// CC's microCompact.IMAGE_MAX_TOKEN_SIZE — images bill at a flat 2K each.
+// Industry-standard heuristic: image blocks bill at a flat ~2K tokens each.
 const IMAGE_TOKEN_SIZE = 2_000;
 
 /**
- * CC-style per-content-part token estimate (microCompact.ts:164). Text uses
- * length/4; image/file blocks use a flat 2K; tool-use counts name + JSON
- * input but not the id; reasoning counts the text but not the signature.
+ * Per-content-part token estimate. Text uses length/4; image/file blocks
+ * use a flat 2K; tool-use counts name + JSON input but not the id;
+ * reasoning counts the text but not the signature.
  */
 function estimateContentPartTokens(part: unknown): number {
   if (typeof part === "string") return Math.round(part.length / 4);
@@ -225,7 +238,7 @@ function estimateContentPartTokens(part: unknown): number {
     case "text":
       return Math.round(((p.text as string) ?? "").length / 4);
     case "reasoning":
-      // Match CC: count thinking text only; signature is metadata, not tokenized.
+      // Count thinking text only; signature is metadata, not tokenized.
       return Math.round(((p.text as string) ?? "").length / 4);
     case "tool-call":
       return Math.round((((p.toolName as string) ?? "") + JSON.stringify(p.input ?? {})).length / 4);
@@ -259,9 +272,9 @@ function estimateToolResultTokens(output: unknown): number {
 }
 
 /**
- * Per-message estimate, mirroring CC's `estimateMessageTokens`
- * (microCompact.ts:164). Final result is padded by 4/3 to be conservative —
- * matches CC's behavior so our tail-picking budget aligns with theirs.
+ * Per-message estimate. Final result is padded by 4/3 to be conservative,
+ * matching the heuristic Claude Code uses so our tail-picking budget aligns
+ * with what users have come to expect from CC sessions.
  */
 function estimateMessageTokensCC(m: ModelMessage): number {
   let total = 0;
