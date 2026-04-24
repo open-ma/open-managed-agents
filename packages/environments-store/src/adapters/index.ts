@@ -7,11 +7,11 @@ import type { Logger } from "../ports";
 import { EnvironmentService } from "../service";
 
 export function createCfEnvironmentService(
-  env: { AUTH_DB: D1Database },
+  deps: { db: D1Database },
   opts?: { logger?: Logger },
 ): EnvironmentService {
   return new EnvironmentService({
-    repo: new D1EnvironmentRepo(env.AUTH_DB),
+    repo: new D1EnvironmentRepo(deps.db),
     logger: opts?.logger,
   });
 }

@@ -9,11 +9,11 @@ import type { Logger } from "../ports";
 import { CredentialService } from "../service";
 
 export function createCfCredentialService(
-  env: { AUTH_DB: D1Database },
+  deps: { db: D1Database },
   opts?: { logger?: Logger },
 ): CredentialService {
   return new CredentialService({
-    repo: new D1CredentialRepo(env.AUTH_DB),
+    repo: new D1CredentialRepo(deps.db),
     logger: opts?.logger,
   });
 }

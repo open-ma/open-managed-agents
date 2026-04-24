@@ -13,6 +13,7 @@ import type {
 
 interface Row {
   id: string;
+  tenant_id: string;
   user_id: string;
   agent_id: string;
   installation_id: string;
@@ -72,13 +73,14 @@ export class D1PublicationRepo implements PublicationRepo {
     await this.db
       .prepare(
         `INSERT INTO linear_publications (
-           id, user_id, agent_id, installation_id, environment_id, mode, status,
+           id, tenant_id, user_id, agent_id, installation_id, environment_id, mode, status,
            persona_name, persona_avatar_url, capabilities,
            session_granularity, created_at, unpublished_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .bind(
         id,
+        row.tenantId,
         row.userId,
         row.agentId,
         row.installationId,
@@ -95,6 +97,7 @@ export class D1PublicationRepo implements PublicationRepo {
       .run();
     return {
       id,
+      tenantId: row.tenantId,
       userId: row.userId,
       agentId: row.agentId,
       installationId: row.installationId,
@@ -147,6 +150,7 @@ export class D1PublicationRepo implements PublicationRepo {
     const caps = JSON.parse(row.capabilities) as CapabilityKey[];
     return {
       id: row.id,
+      tenantId: row.tenant_id,
       userId: row.user_id,
       agentId: row.agent_id,
       installationId: row.installation_id,
