@@ -285,6 +285,14 @@ function EventBubble({ event }: { event: Event }) {
         </div>
       );
 
+    case "session.warning":
+      return (
+        <div className="max-w-2xl bg-warning-subtle border border-warning/30 rounded-lg px-4 py-2.5 text-sm text-warning">
+          <div className="font-medium mb-0.5">Warning ({event.source})</div>
+          <div>{event.message}</div>
+        </div>
+      );
+
     default:
       return null;
   }

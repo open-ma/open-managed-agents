@@ -29,7 +29,7 @@
   // memory_versions tables) — agent's memory tools use the same shared
   // MemoryStoreService as the main worker, which requires direct D1 access.
   "d1_databases": [
-    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
+    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" }
   ],
 
   // Service binding to the integrations gateway. Used by the outbound proxy
@@ -91,7 +91,7 @@
         { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
       ],
       "d1_databases": [
-        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "355d8651-f5bf-4711-8e32-a089f16436a8" }
+        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" }
       ],
       "services": [
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }

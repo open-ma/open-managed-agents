@@ -32,7 +32,7 @@ export interface MemoryStoreRepo {
   get(tenantId: string, storeId: string): Promise<MemoryStoreRow | null>;
   list(tenantId: string, opts: { includeArchived: boolean }): Promise<MemoryStoreRow[]>;
   archive(tenantId: string, storeId: string, archivedAt: number): Promise<MemoryStoreRow>;
-  /** Cascades to memories + memory_versions via FK ON DELETE CASCADE in D1 adapter. */
+  /** Cascades to memories + memory_versions in the adapter (no FK; explicit cleanup). */
   delete(tenantId: string, storeId: string): Promise<void>;
   /** All memory IDs in a store — used to pre-compute Vectorize ids before deleteStore. */
   listMemoryIds(storeId: string): Promise<string[]>;
