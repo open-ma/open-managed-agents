@@ -4,6 +4,7 @@ import {
   appMentionPayload,
   buildFakeSlackContainer,
   makeSlackProvider,
+  messagePayload,
   seedDedicatedSlackPublication,
   urlVerificationPayload,
   type FakeSlackBundle,
@@ -292,5 +293,150 @@ describe("SlackProvider — handleWebhook", () => {
     });
     expect(out.handled).toBe(true);
     expect(out.reason).toBe("app_uninstalled");
+  });
+
+  it("drops the redundant `message` Slack delivers alongside `app_mention`", async () => {
+    // Slack always sends BOTH message.channels and app_mention for an @-bot
+    // post in a channel. They reference the same Slack message ts. The
+    // provider must drop the message so the OMA session doesn't get a
+    // duplicate user.message + so the two events don't race on the
+    // per-thread session row.
+    const body = messagePayload({
+      channel: "C0CHAN",
+      ts: "1700000000.000100",
+      eventId: "Ev_DUP",
+      // U07BOT is the bot user id seeded by seedDedicatedSlackPublication.
+      text: "<@U07BOT> hello there",
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out).toEqual(
+      expect.objectContaining({ handled: false, reason: "redundant_with_app_mention" }),
+    );
+    expect(c.sessions.created).toHaveLength(0);
+  });
+
+  it("drops random channel chatter the bot wasn't invoked for", async () => {
+    // Bot is in #C0CHAN but a user posts a regular message that doesn't
+    // mention the bot and isn't continuing an existing thread. We must NOT
+    // start a new agent session — the bot wasn't addressed.
+    const body = messagePayload({
+      channel: "C0CHAN",
+      ts: "1700000000.000400",
+      eventId: "Ev_CHATTER",
+      text: "team meeting at 3pm",
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out).toEqual(
+      expect.objectContaining({ handled: false, reason: "not_addressed_to_bot" }),
+    );
+    expect(c.sessions.created).toHaveLength(0);
+  });
+
+  it("dispatches DM messages without requiring an @-mention", async () => {
+    // The DM IS to the bot — channel id starts with D, channel_type is "im".
+    const body = messagePayload({
+      channel: "D0DM",
+      channelType: "im",
+      ts: "1700000000.000500",
+      eventId: "Ev_DM",
+      text: "hi privately",
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out.handled).toBe(true);
+    expect(out.deferredWork).toBeTypeOf("function");
+    await out.deferredWork!();
+    expect(c.sessions.created).toHaveLength(1);
+  });
+
+  it("resumes an active thread on continuation messages with no @-mention", async () => {
+    await c.sessionScopes.insert({
+      tenantId: "tnt_a",
+      publicationId: pubId,
+      scopeKey: "C0CHAN:1700000000.000100",
+      sessionId: "sess_existing",
+      status: "active",
+      createdAt: 1_700_000_000_000,
+    });
+    const body = messagePayload({
+      channel: "C0CHAN",
+      ts: "1700000005.000200",
+      thread_ts: "1700000000.000100",
+      eventId: "Ev_FOLLOWUP",
+      text: "got it, thanks",
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out.handled).toBe(true);
+    await out.deferredWork!();
+    expect(c.sessions.created).toHaveLength(0);
+    expect(c.sessions.resumed).toHaveLength(1);
+    expect(c.sessions.resumed[0].sessionId).toBe("sess_existing");
+  });
+
+  it("recovers from a sessionScope insert race by resuming the winner", async () => {
+    // Pre-seed a winner scope row — concurrent dispatcher already bound it.
+    await c.sessionScopes.insert({
+      tenantId: "tnt_a",
+      publicationId: pubId,
+      scopeKey: "C0CHAN:1700000000.000700",
+      sessionId: "sess_winner",
+      status: "active",
+      createdAt: 1_700_000_000_000,
+    });
+    // Stub getByScope so the FIRST call (in classifyDispatch) returns null
+    // (so we don't take the early-resume path), but the SECOND call (the
+    // post-conflict re-fetch in dispatchEvent) returns the winner.
+    const real = c.sessionScopes.getByScope.bind(c.sessionScopes);
+    let calls = 0;
+    c.sessionScopes.getByScope = async (p: string, k: string) => {
+      calls += 1;
+      return calls === 1 ? null : real(p, k);
+    };
+    const body = appMentionPayload({
+      channel: "C0CHAN",
+      ts: "1700000000.000700",
+      eventId: "Ev_RACE",
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out.handled).toBe(true);
+    await out.deferredWork!();
+    // The orphan session WAS created (we lost the race after creation);
+    // but the event was routed to the winner via resume.
+    expect(c.sessions.resumed).toHaveLength(1);
+    expect(c.sessions.resumed[0].sessionId).toBe("sess_winner");
   });
 });

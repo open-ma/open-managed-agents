@@ -92,6 +92,17 @@ export interface NormalizedSlackEvent {
   workspaceId: string;
   /** Channel id (C.../G.../D...) — null for tokens_revoked/app_uninstalled. */
   channelId: string | null;
+  /**
+   * Conversation kind, derived from inner.channel_type when present and from
+   * channelId prefix as fallback. Lets the provider decide dispatch policy
+   * without re-parsing raw fields.
+   *   - "im"      direct message to the bot
+   *   - "channel" public channel
+   *   - "group"   private channel
+   *   - "mpim"    multi-person DM
+   *   - null      no channel (tokens_revoked / app_uninstalled)
+   */
+  channelType: "im" | "channel" | "group" | "mpim" | null;
   /** thread_ts if in a thread, falls back to ts (top-level message). */
   threadTs: string | null;
   /** Event timestamp (the message's own `ts`). */
@@ -120,11 +131,13 @@ export function parseWebhook(raw: RawSlackEnvelope): NormalizedSlackEvent | null
   const kind = mapEventKind(inner.type);
   if (kind === null) {
     // Unknown event type — record for idempotency but don't dispatch.
+    const channelId = typeof inner.channel === "string" ? inner.channel : null;
     return {
       kind: null,
       deliveryId: env.event_id,
       workspaceId: env.team_id,
-      channelId: typeof inner.channel === "string" ? inner.channel : null,
+      channelId,
+      channelType: pickChannelType(inner, channelId),
       threadTs: pickThreadTs(inner),
       eventTs: pickString(inner, "ts") ?? pickString(inner, "event_ts"),
       scopeKey: null,
@@ -142,6 +155,7 @@ export function parseWebhook(raw: RawSlackEnvelope): NormalizedSlackEvent | null
       deliveryId: env.event_id,
       workspaceId: env.team_id,
       channelId: null,
+      channelType: null,
       threadTs: null,
       eventTs: null,
       scopeKey: null,
@@ -162,6 +176,7 @@ export function parseWebhook(raw: RawSlackEnvelope): NormalizedSlackEvent | null
       deliveryId: env.event_id,
       workspaceId: env.team_id,
       channelId,
+      channelType: pickChannelType(inner, channelId),
       threadTs,
       eventTs: pickString(inner, "event_ts"),
       scopeKey: channelId && threadTs ? `${channelId}:${threadTs}` : null,
@@ -174,6 +189,7 @@ export function parseWebhook(raw: RawSlackEnvelope): NormalizedSlackEvent | null
 
   // app_mention / message — standard channel events.
   const channelId = typeof inner.channel === "string" ? inner.channel : null;
+  const channelType = pickChannelType(inner, channelId);
   const ts = pickString(inner, "ts");
   const threadTs = pickThreadTs(inner);
   // For top-level mentions/messages, use the message's own ts as thread_ts —
@@ -186,6 +202,7 @@ export function parseWebhook(raw: RawSlackEnvelope): NormalizedSlackEvent | null
     deliveryId: env.event_id,
     workspaceId: env.team_id,
     channelId,
+    channelType,
     threadTs: effectiveThread,
     eventTs: ts ?? pickString(inner, "event_ts"),
     scopeKey,
@@ -211,6 +228,29 @@ function mapEventKind(type: string | undefined): SlackEventKind | null {
 
 function pickThreadTs(inner: RawEventInner): string | null {
   return typeof inner.thread_ts === "string" ? inner.thread_ts : null;
+}
+
+/**
+ * Determine the conversation kind. Slack provides `channel_type` on most
+ * `message.*` events; falls back to channel id prefix when absent (e.g. on
+ * `app_mention` payloads which don't include channel_type).
+ */
+function pickChannelType(
+  inner: RawEventInner,
+  channelId: string | null,
+): "im" | "channel" | "group" | "mpim" | null {
+  const ct = typeof inner.channel_type === "string" ? inner.channel_type : null;
+  if (ct === "im" || ct === "channel" || ct === "group" || ct === "mpim") {
+    return ct;
+  }
+  if (!channelId) return null;
+  // Slack id prefixes: D=direct message, G=private group/mpim, C=public channel.
+  // mpim shares the G prefix with private groups; channel_type would
+  // disambiguate if it were present, otherwise we return "group" for both.
+  if (channelId.startsWith("D")) return "im";
+  if (channelId.startsWith("G")) return "group";
+  if (channelId.startsWith("C")) return "channel";
+  return null;
 }
 
 function pickString(o: Record<string, unknown>, key: string): string | null {

@@ -193,7 +193,13 @@ export interface WebhookEventStore {
 
 export interface SessionScopeRepo {
   getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null>;
-  insert(row: SessionScope): Promise<void>;
+  /**
+   * Insert a fresh scope→session mapping. Returns true when a row was actually
+   * inserted, false when the (publication_id, scope_key) row already existed
+   * (concurrent winner). Callers receiving false should re-`getByScope` to
+   * resume the winner's session and abandon any session they just created.
+   */
+  insert(row: SessionScope): Promise<boolean>;
   updateStatus(
     publicationId: string,
     scopeKey: string,
