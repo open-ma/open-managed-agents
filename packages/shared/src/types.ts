@@ -319,6 +319,22 @@ export interface SessionErrorEvent extends EventBase {
   };
 }
 
+/**
+ * Non-fatal warning surfaced to the session event stream — distinct from
+ * `session.error` (which implies the harness aborted). Used for things like
+ * pre-session credential refresh failures that may degrade later tool calls
+ * but don't block session start.
+ */
+export interface SessionWarningEvent extends EventBase {
+  type: "session.warning";
+  /** Short category for grouping in UI / metrics (e.g. "credential_refresh"). */
+  source: string;
+  /** Human-readable warning text shown in the console. */
+  message: string;
+  /** Optional structured detail for debugging (provider, vault, http status). */
+  details?: Record<string, unknown>;
+}
+
 export interface SessionThreadCreatedEvent extends EventBase {
   type: "session.thread_created";
   session_thread_id: string;
@@ -504,6 +520,7 @@ export type SessionEvent =
   | SessionTerminatedEvent
   | SessionStatusEvent
   | SessionErrorEvent
+  | SessionWarningEvent
   | SessionOutcomeEvaluatedEvent
   | SessionThreadCreatedEvent
   | SessionThreadIdleEvent
