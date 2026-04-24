@@ -22,7 +22,7 @@ import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
 import { buildTools, buildMemoryTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
-import { buildCfServices } from "@open-managed-agents/services";
+import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
@@ -177,7 +177,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       return this.state.agent_snapshot;
     }
     // Cross-tenant lookup — DO has no tenant scope here. Trusts the caller.
-    const row = await buildCfServices(this.env).agents.getById({ agentId });
+    // Phase 1: still queries against the shared AUTH_DB. Phase 4: per-tenant
+    // DB will scope this naturally — `WHERE id = ?` in the tenant's DB only
+    // returns the tenant's row. Either way, this.state.tenant_id is the
+    // right routing key.
+    const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
+    const row = await services.agents.getById({ agentId });
     if (!row) return null;
     const { tenant_id: _t, ...config } = row;
     return config;
@@ -188,7 +193,8 @@ export class SessionDO extends Agent<Env, SessionState> {
     if (this.state.environment_snapshot && envId === this.state.environment_id) {
       return this.state.environment_snapshot;
     }
-    const row = await buildCfServices(this.env).environments.get({
+    const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
+    const row = await services.environments.get({
       tenantId: this.state.tenant_id,
       environmentId: envId,
     });
@@ -467,7 +473,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       // crash, force-terminate). The blob contains plaintext OAuth material
       // so we don't want it lingering beyond a realistic max session lifetime.
       if (params.session_id && (params.vault_credentials?.length ?? 0) > 0) {
-        await buildCfServices(this.env).outboundSnapshots.publish({
+        // outboundSnapshots is KV-backed; AUTH_DB is fine.
+        await buildCfServices(this.env, this.env.AUTH_DB).outboundSnapshots.publish({
           sessionId: params.session_id,
           snapshot: {
             tenant_id: params.tenant_id ?? "default",
@@ -519,7 +526,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       // OAuth material.
       if (this.state.session_id) {
         try {
-          await buildCfServices(this.env).outboundSnapshots.delete({
+          // KV-backed; AUTH_DB is fine.
+          await buildCfServices(this.env, this.env.AUTH_DB).outboundSnapshots.delete({
             sessionId: this.state.session_id,
           });
         } catch {}
@@ -963,7 +971,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         // Sessions-store reads via the session_id PRIMARY KEY index, no
         // tenant prefix needed — fixes the staging-kv namespace mismatch
         // the legacy CONFIG_KV.list path tripped over.
-        const services = buildCfServices(this.env);
+        const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
         const rows = await services.sessions.listResourcesBySession({ sessionId });
         const resources: Array<Record<string, unknown>> = [];
         const secretStore = new Map<string, string>();
@@ -1120,7 +1128,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     if (this.env.AUTH_DB) {
       try {
-        const services = buildCfServices(this.env);
+        const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
         const tenantId = this.state.tenant_id;
         let card = cardId
           ? await services.modelCards.get({ tenantId, cardId })
@@ -1614,7 +1622,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       // listResourcesBySession queries the session_id column directly — no
       // tenant-prefix mismatch, no JSON.parse loop. Replaces the prior
       // CONFIG_KV.list scan that tripped over staging KV namespaces.
-      const services = buildCfServices(this.env);
+      const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
       const rows = await services.sessions.listResourcesBySession({ sessionId });
       for (const row of rows) {
         if (row.type === "memory_store" && row.resource.type === "memory_store" && row.resource.memory_store_id) {
@@ -1663,7 +1671,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     // AUTH_DB to be present.
     let memoryStoreService: MemoryStoreService | null = null;
     if (memoryAttachments.length && this.env.AUTH_DB) {
-      memoryStoreService = buildCfServices(this.env).memory;
+      memoryStoreService = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
       const memTools = buildMemoryTools(
         memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
         this.state.tenant_id,

@@ -202,6 +202,12 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/tenant-db':
+        specifier: workspace:*
+        version: link:../../packages/tenant-db
+      '@open-managed-agents/tenant-dbs-store':
+        specifier: workspace:*
+        version: link:../../packages/tenant-dbs-store
       hono:
         specifier: ^4.7.0
         version: 4.12.12
@@ -259,6 +265,12 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/tenant-db':
+        specifier: workspace:*
+        version: link:../../packages/tenant-db
+      '@open-managed-agents/tenant-dbs-store':
+        specifier: workspace:*
+        version: link:../../packages/tenant-dbs-store
       '@open-managed-agents/vaults-store':
         specifier: workspace:*
         version: link:../../packages/vaults-store
@@ -408,6 +420,12 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/tenant-db':
+        specifier: workspace:*
+        version: link:../tenant-db
+      '@open-managed-agents/tenant-dbs-store':
+        specifier: workspace:*
+        version: link:../tenant-dbs-store
       '@open-managed-agents/vaults-store':
         specifier: workspace:*
         version: link:../vaults-store
@@ -438,6 +456,10 @@ importers:
       nanoid:
         specifier: ^5.1.0
         version: 5.1.7
+
+  packages/tenant-db: {}
+
+  packages/tenant-dbs-store: {}
 
   packages/vaults-store:
     dependencies:
