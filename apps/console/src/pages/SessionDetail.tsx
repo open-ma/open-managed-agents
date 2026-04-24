@@ -28,6 +28,12 @@ export function SessionDetail() {
     issueIdentifier?: string;
     workspaceId?: string;
   } | null>(null);
+  const [slack, setSlack] = useState<{
+    channelId?: string;
+    threadTs?: string;
+    workspaceId?: string;
+    eventKind?: string;
+  } | null>(null);
   const [status, setStatus] = useState("idle");
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenKeys = useRef(new Set<string>());
@@ -66,6 +72,12 @@ export function SessionDetail() {
           | undefined;
         if (linearMeta && (linearMeta.issueId || linearMeta.issueIdentifier)) {
           setLinear(linearMeta);
+        }
+        const slackMeta = s.metadata?.slack as
+          | { channelId?: string; threadTs?: string; workspaceId?: string; eventKind?: string }
+          | undefined;
+        if (slackMeta && (slackMeta.channelId || slackMeta.threadTs)) {
+          setSlack(slackMeta);
         }
       })
       .catch(() => {});
@@ -139,6 +151,35 @@ export function SessionDetail() {
             >
               Open in Linear ↗
             </a>
+          )}
+        </div>
+      )}
+
+      {/* Slack context (when triggered by a Slack event) */}
+      {slack && (
+        <div className="px-8 py-2 border-b border-border bg-purple-50/50 text-xs flex items-center gap-2 text-purple-900">
+          <span>💬</span>
+          <span className="font-medium">Slack</span>
+          <span className="text-purple-700">·</span>
+          <span>
+            {slack.channelId ? (
+              <>
+                channel <span className="font-mono">{slack.channelId}</span>
+              </>
+            ) : (
+              "—"
+            )}
+            {slack.threadTs && (
+              <>
+                {" "}thread{" "}
+                <span className="font-mono">{slack.threadTs}</span>
+              </>
+            )}
+          </span>
+          {slack.eventKind && (
+            <span className="text-purple-700/60 font-mono uppercase tracking-wider text-[10px]">
+              {slack.eventKind}
+            </span>
           )}
         </div>
       )}

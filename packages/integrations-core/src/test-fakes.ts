@@ -29,9 +29,9 @@ import type {
   InstallKind,
   IssueSession,
   IssueSessionRepo,
+  IssueSessionStatus,
   AuthoredComment,
   AuthoredCommentRepo,
-  IssueSessionStatus,
   JwtSigner,
   NewAppCredentials,
   NewGitHubAppCredentials,
@@ -46,6 +46,9 @@ import type {
   SessionCreator,
   SessionEventInput,
   SessionId,
+  SessionScope,
+  SessionScopeRepo,
+  SessionScopeStatus,
   SetupLink,
   SetupLinkRepo,
   TenantResolver,
@@ -570,6 +573,41 @@ export class InMemoryWebhookEventStore implements WebhookEventStore {
   }
 }
 
+export class InMemorySessionScopeRepo implements SessionScopeRepo {
+  private rows = new Map<string, SessionScope>();
+
+  private key(publicationId: string, scopeKey: string): string {
+    return `${publicationId}:${scopeKey}`;
+  }
+
+  async getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null> {
+    return this.rows.get(this.key(publicationId, scopeKey)) ?? null;
+  }
+
+  async insert(row: SessionScope): Promise<boolean> {
+    const k = this.key(row.publicationId, row.scopeKey);
+    if (this.rows.has(k)) return false;
+    this.rows.set(k, row);
+    return true;
+  }
+
+  async updateStatus(
+    publicationId: string,
+    scopeKey: string,
+    status: SessionScopeStatus,
+  ): Promise<void> {
+    const k = this.key(publicationId, scopeKey);
+    const row = this.rows.get(k);
+    if (row) this.rows.set(k, { ...row, status });
+  }
+
+  async listActive(publicationId: string): Promise<readonly SessionScope[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.publicationId === publicationId && r.status === "active",
+    );
+  }
+}
+
 export class InMemoryIssueSessionRepo implements IssueSessionRepo {
   private rows = new Map<string, IssueSession>();
 
@@ -694,6 +732,7 @@ export interface FakeContainer {
   githubApps: InMemoryGitHubAppRepo;
   webhookEvents: InMemoryWebhookEventStore;
   issueSessions: InMemoryIssueSessionRepo;
+  sessionScopes: InMemorySessionScopeRepo;
   authoredComments: InMemoryAuthoredCommentRepo;
   setupLinks: InMemorySetupLinkRepo;
 }
@@ -716,6 +755,7 @@ export function buildFakeContainer(): FakeContainer {
     githubApps: new InMemoryGitHubAppRepo(clock),
     webhookEvents: new InMemoryWebhookEventStore(),
     issueSessions: new InMemoryIssueSessionRepo(),
+    sessionScopes: new InMemorySessionScopeRepo(),
     authoredComments: new InMemoryAuthoredCommentRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
   };

@@ -19,6 +19,8 @@ import type {
   PublicationStatus,
   ProviderId,
   SessionGranularity,
+  SessionScope,
+  SessionScopeStatus,
   SetupLink,
   UserId,
   WorkspaceId,
@@ -189,6 +191,28 @@ export interface WebhookEventStore {
   attachError(deliveryId: string, error: string): Promise<void>;
 }
 
+export interface SessionScopeRepo {
+  getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null>;
+  /**
+   * Insert a fresh scope→session mapping. Returns true when a row was actually
+   * inserted, false when the (publication_id, scope_key) row already existed
+   * (concurrent winner). Callers receiving false should re-`getByScope` to
+   * resume the winner's session and abandon any session they just created.
+   */
+  insert(row: SessionScope): Promise<boolean>;
+  updateStatus(
+    publicationId: string,
+    scopeKey: string,
+    status: SessionScopeStatus,
+  ): Promise<void>;
+  listActive(publicationId: string): Promise<ReadonlyArray<SessionScope>>;
+}
+
+/**
+ * Per-issue session reuse for Linear/GitHub. Linear keys on the issue UUID;
+ * GitHub keys on `<repo>#<number>`. Slack uses the parallel SessionScopeRepo
+ * keyed on `${channel}:${thread_ts}`.
+ */
 export interface IssueSessionRepo {
   getByIssue(publicationId: string, issueId: string): Promise<IssueSession | null>;
   insert(row: IssueSession): Promise<void>;
