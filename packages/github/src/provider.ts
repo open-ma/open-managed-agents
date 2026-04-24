@@ -208,9 +208,12 @@ export class GitHubProvider implements IntegrationProvider {
     }
 
     // Upsert keyed on appOmaId so a re-submit (page refresh) doesn't create
-    // a second row with a different id.
+    // a second row with a different id. tenant_id is required at write time
+    // so the row can be mechanically routed to a per-tenant DB later.
+    const tenantId = await this.container.tenants.resolveByUserId(form.userId);
     const app = await this.container.githubApps.insert({
       id: form.appOmaId,
+      tenantId,
       publicationId: null,
       appId,
       appSlug: appInfo.slug,
@@ -302,7 +305,9 @@ export class GitHubProvider implements IntegrationProvider {
 
     const installDetail = await this.api.getInstallation(appJwt, installationId);
 
+    const tenantId = await this.container.tenants.resolveByUserId(state.userId);
     const installation = await this.container.installations.insert({
+      tenantId,
       userId: state.userId,
       providerId: PROVIDER_ID,
       // For GitHub the installation id is the stable workspace handle (orgs
@@ -350,6 +355,7 @@ export class GitHubProvider implements IntegrationProvider {
     await this.container.installations.setVaultId(installation.id, vaultId);
 
     const publication = await this.container.publications.insert({
+      tenantId,
       userId: state.userId,
       agentId: state.agentId,
       installationId: installation.id,
@@ -502,8 +508,10 @@ export class GitHubProvider implements IntegrationProvider {
 
     // Persist as a github_apps row keyed on the OMA-internal appOmaId we
     // pre-allocated at form-token time. Same upsert path as manual submit.
+    const tenantId = await this.container.tenants.resolveByUserId(state.userId);
     const app = await this.container.githubApps.insert({
       id: state.appOmaId,
+      tenantId,
       publicationId: null,
       appId: String(result.id),
       appSlug: result.slug,
@@ -624,6 +632,7 @@ export class GitHubProvider implements IntegrationProvider {
     // Idempotency: refuse to dispatch the same delivery twice.
     const fresh = await this.container.webhookEvents.recordIfNew(
       req.deliveryId,
+      app.tenantId, // Phase 0: nullable until backfill of pre-existing rows
       app.publicationId, // stash publicationId here for traceability
       req.headers["x-github-event"] ?? "unknown",
       this.container.clock.nowMs(),
@@ -756,6 +765,7 @@ export class GitHubProvider implements IntegrationProvider {
         initialEvent: sessionEvent,
       });
       await this.container.issueSessions.insert({
+        tenantId: publication.tenantId, // inherits from the publication
         publicationId: publication.id,
         issueId: issueKey,
         sessionId: created.sessionId,

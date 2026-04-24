@@ -622,6 +622,7 @@ async function resolveSessionContext(
   }) => {
     await container.authoredComments.insert({
       commentId: input.commentId,
+      tenantId: pub.tenantId,
       omaSessionId: sessionId,
       issueId: input.issueId,
       createdAt: Date.now(),
