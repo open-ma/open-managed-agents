@@ -43,7 +43,7 @@
         "GATEWAY_ORIGIN": "https://managed-agents-integrations-staging.hrhrngxy.workers.dev"
       },
       "d1_databases": [
-        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "355d8651-f5bf-4711-8e32-a089f16436a8" }
+        { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" }
       ],
       "services": [
         { "binding": "MAIN", "service": "managed-agents-staging" }
