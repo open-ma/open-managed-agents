@@ -94,6 +94,10 @@ export interface GitHubA1FormStep {
   suggestedAvatarUrl: string | null;
   setupUrl: string;
   webhookUrl: string;
+  /** Recommended UX path: opens a manifest auto-POST page on the gateway
+   *  that streamlines App registration to ~30s. Optional because not every
+   *  step variant exposes it (e.g. server-side resumed flows). */
+  manifestStartUrl?: string;
   recommendedPermissions: Record<string, string>;
   recommendedSubscriptions: string[];
 }

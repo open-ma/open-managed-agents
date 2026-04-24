@@ -137,9 +137,10 @@ describe("LinearProvider — handleWebhook (dedicated)", () => {
     expect(created.agentId).toBe("agt_default");
     expect(created.environmentId).toBe("env_dev");
     expect(created.vaultIds).toEqual(["vlt_acme"]);
-    expect(created.mcpServers).toEqual([
-      { name: "linear", url: "https://mcp.linear.app/mcp" },
-    ]);
+    // Provider no longer passes mcp.linear.app directly — apps/main wires
+    // the OMA-hosted Linear MCP (integrations.openma.dev/linear/mcp/...)
+    // based on session metadata. See provider.ts:516 for the rationale.
+    expect(created.mcpServers).toEqual([]);
 
     const issueSession = await c.issueSessions.getByIssue(pubId, "iss_142");
     expect(issueSession?.status).toBe("active");
