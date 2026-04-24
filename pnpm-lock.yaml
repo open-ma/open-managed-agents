@@ -120,12 +120,12 @@ importers:
 
   apps/console:
     dependencies:
+      '@open-managed-agents/api-types':
+        specifier: workspace:*
+        version: link:../../packages/api-types
       '@open-managed-agents/integrations-core':
         specifier: workspace:*
         version: link:../../packages/integrations-core
-      '@open-managed-agents/integrations-ui':
-        specifier: workspace:*
-        version: link:../../packages/integrations-ui
       better-auth:
         specifier: ^1.6.3
         version: 1.6.3(@cloudflare/workers-types@4.20260410.1)(@opentelemetry/api@1.9.0)(drizzle-orm@0.45.2(@cloudflare/workers-types@4.20260410.1)(@opentelemetry/api@1.9.0)(kysely@0.28.16))(react-dom@19.2.5(react@19.2.5))(react@19.2.5)(vitest@4.1.4(@opentelemetry/api@1.9.0)(@types/node@25.6.0)(vite@6.4.2(@types/node@25.6.0)(jiti@2.6.1)(lightningcss@1.32.0)(tsx@4.21.0)))
@@ -217,6 +217,9 @@ importers:
       '@open-managed-agents/agents-store':
         specifier: workspace:*
         version: link:../../packages/agents-store
+      '@open-managed-agents/cf-billing':
+        specifier: workspace:*
+        version: link:../../packages/cf-billing
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../../packages/credentials-store
@@ -269,7 +272,15 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/api-types: {}
+
+  packages/cf-billing: {}
+
   packages/cli:
+    dependencies:
+      '@open-managed-agents/api-types':
+        specifier: workspace:*
+        version: link:../api-types
     devDependencies:
       esbuild:
         specifier: ^0.25.0
@@ -289,6 +300,15 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+
+  packages/eval-core:
+    dependencies:
+      '@open-managed-agents/api-types':
+        specifier: workspace:*
+        version: link:../api-types
+      nanoid:
+        specifier: ^5.1.0
+        version: 5.1.9
 
   packages/evals-store:
     dependencies:
@@ -325,31 +345,6 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
-
-  packages/integrations-ui:
-    dependencies:
-      '@open-managed-agents/integrations-core':
-        specifier: workspace:*
-        version: link:../integrations-core
-      '@open-managed-agents/shared':
-        specifier: workspace:*
-        version: link:../shared
-    devDependencies:
-      '@types/react':
-        specifier: ^19.1.0
-        version: 19.2.14
-      '@types/react-dom':
-        specifier: ^19.1.0
-        version: 19.2.3(@types/react@19.2.14)
-      react:
-        specifier: ^19.1.0
-        version: 19.2.5
-      react-dom:
-        specifier: ^19.1.0
-        version: 19.2.5(react@19.2.5)
-      react-router:
-        specifier: ^7.5.0
-        version: 7.14.0(react-dom@19.2.5(react@19.2.5))(react@19.2.5)
 
   packages/linear:
     dependencies:
@@ -434,6 +429,12 @@ importers:
 
   packages/shared:
     dependencies:
+      '@open-managed-agents/api-types':
+        specifier: workspace:*
+        version: link:../api-types
+      '@open-managed-agents/eval-core':
+        specifier: workspace:*
+        version: link:../eval-core
       nanoid:
         specifier: ^5.1.0
         version: 5.1.7

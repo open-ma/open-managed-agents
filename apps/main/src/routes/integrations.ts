@@ -1,12 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import {
-  CryptoIdGenerator,
-  D1AppRepo,
-  D1InstallationRepo,
-  D1PublicationRepo,
-  WebCryptoAesGcm,
-} from "@open-managed-agents/integrations-adapters-cf";
+import { buildCfRepos } from "@open-managed-agents/integrations-adapters-cf";
 import type { CapabilityKey, Persona, Publication, SessionGranularity } from "@open-managed-agents/integrations-core";
 
 // User-facing read/manage endpoints for integrations data. Mounted at
@@ -38,31 +32,28 @@ app.use("*", async (c, next) => {
   );
 });
 
-function buildRepos(env: Env, signingKey: string) {
-  const crypto = new WebCryptoAesGcm(signingKey, "integrations.tokens");
-  const ids = new CryptoIdGenerator();
-  return {
-    installations: new D1InstallationRepo(env.AUTH_DB, crypto, ids),
-    publications: new D1PublicationRepo(env.AUTH_DB, ids),
-    apps: new D1AppRepo(env.AUTH_DB, crypto, ids),
-  };
-}
-
-function getSigningKey(env: Env): string | null {
-  // Reuse the same MCP_SIGNING_KEY the gateway uses; main needs it to decrypt
-  // tokens for display (we don't actually decrypt for read endpoints, but the
-  // crypto instance is required by the repo constructor).
-  const k = (env as unknown as Record<string, unknown>).MCP_SIGNING_KEY;
-  return typeof k === "string" ? k : null;
+/**
+ * Build the integrations repo bag for this request. Returns null with a 503
+ * Response when MCP_SIGNING_KEY is missing — caller should `return` it.
+ *
+ * apps/main consumes only the repo half of the integrations Container; the
+ * SessionCreator/VaultManager half lives in apps/integrations because it
+ * needs the MAIN service binding (which apps/main does not have on itself).
+ */
+function reposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response }) {
+  const k = (c.env as unknown as Record<string, unknown>).MCP_SIGNING_KEY;
+  if (typeof k !== "string" || !k) {
+    return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
+  }
+  return { repos: buildCfRepos({ AUTH_DB: c.env.AUTH_DB, MCP_SIGNING_KEY: k }), err: null };
 }
 
 // ─── GET /v1/integrations/linear/installations ───────────────────────────
 
 app.get("/linear/installations", async (c) => {
   const userId = c.get("user_id")!;
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const installations = await repos.installations.listByUser(userId, "linear");
   return c.json({
     data: installations.map((i) => ({
@@ -82,9 +73,8 @@ app.get("/linear/installations", async (c) => {
 app.get("/linear/installations/:id/publications", async (c) => {
   const userId = c.get("user_id")!;
   const installationId = c.req.param("id");
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const installation = await repos.installations.get(installationId);
   if (!installation || installation.userId !== userId) {
     return c.json({ error: "not found" }, 404);
@@ -100,9 +90,8 @@ app.get("/linear/installations/:id/publications", async (c) => {
 app.get("/linear/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   return c.json(serializePublication(pub));
@@ -120,9 +109,8 @@ app.patch("/linear/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
   const body = await c.req.json<PatchBody>();
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
 
@@ -152,9 +140,8 @@ app.patch("/linear/publications/:id", async (c) => {
 app.delete("/linear/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   await repos.publications.markUnpublished(id, Date.now());
@@ -233,9 +220,8 @@ app.post("/linear/handoff-link", async (c) => {
 
 app.get("/github/installations", async (c) => {
   const userId = c.get("user_id")!;
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const installations = await repos.installations.listByUser(userId, "github");
   return c.json({
     data: installations.map((i) => ({
@@ -255,9 +241,8 @@ app.get("/github/installations", async (c) => {
 app.get("/github/installations/:id/publications", async (c) => {
   const userId = c.get("user_id")!;
   const installationId = c.req.param("id");
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const installation = await repos.installations.get(installationId);
   if (!installation || installation.userId !== userId) {
     return c.json({ error: "not found" }, 404);
@@ -271,9 +256,8 @@ app.get("/github/installations/:id/publications", async (c) => {
 app.get("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   return c.json(serializePublication(pub));
@@ -283,9 +267,8 @@ app.patch("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
   const body = await c.req.json<PatchBody>();
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
 
@@ -310,9 +293,8 @@ app.patch("/github/publications/:id", async (c) => {
 app.delete("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
-  const signingKey = getSigningKey(c.env);
-  if (!signingKey) return c.json({ error: "MCP_SIGNING_KEY not configured" }, 503);
-  const repos = buildRepos(c.env, signingKey);
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   await repos.publications.markUnpublished(id, Date.now());

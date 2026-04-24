@@ -1,7 +1,7 @@
-// @open-managed-agents/integrations-ui
+// apps/console/src/integrations
 //
-// React UI for managing 3rd-party integrations (Linear today; Slack/GitHub
-// later). Pages are composed into apps/console via react-router routes.
+// React UI for managing 3rd-party integrations (Linear, GitHub). Pages are
+// composed into the console app via react-router routes in main.tsx.
 
 export { IntegrationsLinearList } from "./pages/IntegrationsLinearList";
 export { IntegrationsLinearWorkspace } from "./pages/IntegrationsLinearWorkspace";

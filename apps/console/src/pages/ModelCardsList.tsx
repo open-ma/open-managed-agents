@@ -2,15 +2,7 @@ import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
-
-interface ModelCard {
-  id: string; name: string;
-  provider: string;
-  model_id: string; api_key_preview?: string;
-  base_url?: string; custom_headers?: Record<string, string>;
-  is_default?: boolean;
-  created_at: string; updated_at?: string;
-}
+import type { ModelCard } from "@open-managed-agents/api-types";
 
 const PROVIDERS = [
   { value: "ant", label: "Anthropic", desc: "Claude models" },
