@@ -113,7 +113,9 @@ export function IntegrationsGitHubBindWizard({ loadAgents, loadEnvironments }: P
       setForm(r);
       // Open manifest flow in a popup. The popup will eventually navigate
       // to our gateway callback, which auto-redirects to GitHub install.
-      window.open(r.manifestStartUrl, "github-bind", "width=820,height=720");
+      if (r.manifestStartUrl) {
+        window.open(r.manifestStartUrl, "github-bind", "width=820,height=720");
+      }
       // Optimistically advance to "installing" — once the user's clicked
       // through the manifest flow, GitHub takes them straight into the
       // install screen. The poll below covers both phases until a live
@@ -216,7 +218,7 @@ export function IntegrationsGitHubBindWizard({ loadAgents, loadEnvironments }: P
           <InProgress
             phase={phase}
             personaName={form.suggestedAppName}
-            manifestUrl={form.manifestStartUrl}
+            manifestUrl={form.manifestStartUrl ?? null}
             installUrl={installLink?.url ?? null}
             onRefresh={refresh}
           />
@@ -391,7 +393,7 @@ function InProgress({
 }: {
   phase: Phase;
   personaName: string;
-  manifestUrl: string;
+  manifestUrl: string | null;
   installUrl: string | null;
   onRefresh: () => void;
 }) {
@@ -408,7 +410,7 @@ function InProgress({
       </p>
 
       <div className="flex flex-col gap-2 items-center">
-        {phase === "registering" && (
+        {phase === "registering" && manifestUrl && (
           <a
             href={manifestUrl}
             target="github-bind"

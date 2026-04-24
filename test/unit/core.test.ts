@@ -111,16 +111,17 @@ describe("Provider", () => {
 // 2. Outbound Worker — outboundByHost
 // ============================================================
 describe("Outbound Worker", () => {
-  function makeMockEnv(kvData: Record<string, string | null>, kvListData?: Record<string, { keys: { name: string }[] }>): Env {
+  // outboundByHost reads the per-session OutboundSnapshot through
+  // services.outboundSnapshots.get → CONFIG_KV `outbound:{sessionId}`.
+  function makeMockEnv(snapshots: Record<string, object | string | null>): Env {
     return {
       CONFIG_KV: {
-        get: async (key: string) => kvData[key] ?? null,
-        list: async (opts: { prefix: string }) => {
-          if (kvListData && kvListData[opts.prefix]) {
-            return kvListData[opts.prefix];
-          }
-          return { keys: [] };
+        get: async (key: string) => {
+          const v = snapshots[key];
+          if (v === undefined || v === null) return null;
+          return typeof v === "string" ? v : JSON.stringify(v);
         },
+        list: async () => ({ keys: [] }),
         put: async () => {},
         delete: async () => {},
         getWithMetadata: async () => ({ value: null, metadata: null }),
@@ -130,6 +131,22 @@ describe("Outbound Worker", () => {
       API_KEY: "test",
       ANTHROPIC_API_KEY: "test",
     } as Env;
+  }
+
+  function snap(creds: Array<{ url: string; token?: string }>) {
+    return {
+      tenant_id: "tnt",
+      vault_ids: ["vlt_1"],
+      vault_credentials: [
+        {
+          vault_id: "vlt_1",
+          credentials: creds.map((c, i) => ({
+            id: `cred_${i}`,
+            auth: { type: "static_bearer", mcp_server_url: c.url, token: c.token },
+          })),
+        },
+      ],
+    };
   }
 
   it("outboundByHost returns null without sessionId", async () => {
@@ -145,78 +162,42 @@ describe("Outbound Worker", () => {
   });
 
   it("outboundByHost returns 'outbound' for host with matching credential", async () => {
-    const mockEnv = makeMockEnv(
-      {
-        "session:sess_test": JSON.stringify({ vault_ids: ["vlt_1"] }),
-        "cred:vlt_1:cred_1": JSON.stringify({
-          auth: {
-            type: "static_bearer",
-            mcp_server_url: "https://mcp.example.com/mcp",
-            token: "secret-token",
-          },
-        }),
-      },
-      {
-        "cred:vlt_1:": { keys: [{ name: "cred:vlt_1:cred_1" }] },
-      }
-    );
+    const mockEnv = makeMockEnv({
+      "outbound:sess_test": snap([{ url: "https://mcp.example.com/mcp", token: "secret-token" }]),
+    });
 
     const result = await outboundByHost("mcp.example.com", mockEnv, "sess_test");
     expect(result).toBe("outbound");
   });
 
   it("outboundByHost returns null for host without matching credential", async () => {
-    const mockEnv = makeMockEnv(
-      {
-        "session:sess_test": JSON.stringify({ vault_ids: ["vlt_1"] }),
-        "cred:vlt_1:cred_1": JSON.stringify({
-          auth: {
-            type: "static_bearer",
-            mcp_server_url: "https://other.example.com/mcp",
-            token: "token",
-          },
-        }),
-      },
-      {
-        "cred:vlt_1:": { keys: [{ name: "cred:vlt_1:cred_1" }] },
-      }
-    );
+    const mockEnv = makeMockEnv({
+      "outbound:sess_test": snap([{ url: "https://other.example.com/mcp", token: "token" }]),
+    });
 
     const result = await outboundByHost("nomatch.example.com", mockEnv, "sess_test");
     expect(result).toBeNull();
   });
 
-  it("outboundByHost returns null when session has no vault_ids", async () => {
+  it("outboundByHost returns null when snapshot has empty vault_credentials", async () => {
     const mockEnv = makeMockEnv({
-      "session:sess_no_vaults": JSON.stringify({ agent_id: "a1" }),
+      "outbound:sess_no_vaults": { tenant_id: "tnt", vault_ids: [], vault_credentials: [] },
     });
 
     const result = await outboundByHost("example.com", mockEnv, "sess_no_vaults");
     expect(result).toBeNull();
   });
 
-  it("outboundByHost handles missing session gracefully", async () => {
+  it("outboundByHost handles missing snapshot gracefully", async () => {
     const mockEnv = makeMockEnv({});
     const result = await outboundByHost("example.com", mockEnv, "sess_nonexistent");
     expect(result).toBeNull();
   });
 
   it("outboundByHost handles credential with invalid mcp_server_url", async () => {
-    const mockEnv = makeMockEnv(
-      {
-        "session:sess_bad_url": JSON.stringify({ vault_ids: ["vlt_2"] }),
-        "cred:vlt_2:cred_1": JSON.stringify({
-          auth: {
-            type: "static_bearer",
-            mcp_server_url: "not-a-valid-url",
-            token: "token",
-          },
-        }),
-      },
-      {
-        "cred:vlt_2:": { keys: [{ name: "cred:vlt_2:cred_1" }] },
-      }
-    );
+    const mockEnv = makeMockEnv({
+      "outbound:sess_bad_url": snap([{ url: "not-a-valid-url", token: "token" }]),
+    });
 
     // Should not crash, just return null
     const result = await outboundByHost("example.com", mockEnv, "sess_bad_url");
