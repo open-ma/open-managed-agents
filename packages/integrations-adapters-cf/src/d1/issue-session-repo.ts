@@ -5,6 +5,7 @@ import type {
 } from "@open-managed-agents/integrations-core";
 
 interface Row {
+  tenant_id: string;
   publication_id: string;
   issue_id: string;
   session_id: string;
@@ -32,17 +33,19 @@ export class D1IssueSessionRepo implements IssueSessionRepo {
     // a prior delegation still occupies (publication_id, issue_id), which
     // is the natural state between the previous session ending and this
     // webhook arriving. excluded.* is SQLite syntax for the new VALUES.
+    // tenant_id is preserved on conflict — re-delegations within the same
+    // publication can never change tenant.
     await this.db
       .prepare(
         `INSERT INTO linear_issue_sessions
-           (publication_id, issue_id, session_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?)
+           (tenant_id, publication_id, issue_id, session_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)
          ON CONFLICT(publication_id, issue_id) DO UPDATE SET
            session_id = excluded.session_id,
            status     = excluded.status,
            created_at = excluded.created_at`,
       )
-      .bind(row.publicationId, row.issueId, row.sessionId, row.status, row.createdAt)
+      .bind(row.tenantId, row.publicationId, row.issueId, row.sessionId, row.status, row.createdAt)
       .run();
   }
 
@@ -73,6 +76,7 @@ export class D1IssueSessionRepo implements IssueSessionRepo {
 
   private toDomain(row: Row): IssueSession {
     return {
+      tenantId: row.tenant_id,
       publicationId: row.publication_id,
       issueId: row.issue_id,
       sessionId: row.session_id,

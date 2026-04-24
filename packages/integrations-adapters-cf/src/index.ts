@@ -21,6 +21,7 @@ export { D1WebhookEventStore } from "./d1/webhook-event-store";
 export { D1IssueSessionRepo } from "./d1/issue-session-repo";
 export { D1AuthoredCommentRepo } from "./d1/authored-comment-repo";
 export { D1SetupLinkRepo } from "./d1/setup-link-repo";
+export { D1TenantResolver } from "./d1/tenant-resolver";
 // Slack adapters — parallel to Linear's, separate slack_* tables.
 export { D1SlackAppRepo } from "./d1/slack/app-repo";
 export { D1SlackInstallationRepo } from "./d1/slack/installation-repo";
@@ -32,3 +33,5 @@ export { ServiceBindingSessionCreator } from "./service-binding-session-creator"
 export type { ServiceBindingSessionCreatorOptions } from "./service-binding-session-creator";
 export { ServiceBindingVaultManager } from "./service-binding-vault-manager";
 export type { ServiceBindingVaultManagerOptions } from "./service-binding-vault-manager";
+export { buildCfRepos, buildCfContainer } from "./cf-container";
+export type { CfReposEnv, CfContainerEnv } from "./cf-container";

@@ -26,17 +26,17 @@ import type { Logger } from "../ports";
  * NULL forever; nothing to reconcile against). Production deployments MUST
  * bind both for semantic search to function.
  */
-export function createCfMemoryStoreService(env: {
-  AUTH_DB: D1Database;
-  AI?: Ai;
-  VECTORIZE?: VectorizeIndex;
+export function createCfMemoryStoreService(deps: {
+  db: D1Database;
+  ai?: Ai;
+  vectorize?: VectorizeIndex;
 }, opts?: { logger?: Logger }): MemoryStoreService {
   return new MemoryStoreService({
-    storeRepo: new D1MemoryStoreRepo(env.AUTH_DB),
-    memoryRepo: new D1MemoryRepo(env.AUTH_DB),
-    versionRepo: new D1MemoryVersionRepo(env.AUTH_DB),
-    embedding: env.AI ? new WorkersAiEmbeddingProvider(env.AI) : new NoopEmbeddingProvider(),
-    vectorIndex: env.VECTORIZE ? new CfVectorIndex(env.VECTORIZE) : new NoopVectorIndex(),
+    storeRepo: new D1MemoryStoreRepo(deps.db),
+    memoryRepo: new D1MemoryRepo(deps.db),
+    versionRepo: new D1MemoryVersionRepo(deps.db),
+    embedding: deps.ai ? new WorkersAiEmbeddingProvider(deps.ai) : new NoopEmbeddingProvider(),
+    vectorIndex: deps.vectorize ? new CfVectorIndex(deps.vectorize) : new NoopVectorIndex(),
     logger: opts?.logger,
   });
 }

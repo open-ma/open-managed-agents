@@ -167,8 +167,10 @@ export class LinearProvider implements IntegrationProvider {
 
     // Upsert keyed on appId so a re-submit (page refresh, network retry)
     // doesn't create a second row with a different id.
+    const tenantId = await this.container.tenants.resolveByUserId(form.userId);
     const app = await this.container.apps.insert({
       id: form.appId,
+      tenantId,
       publicationId: null,
       clientId,
       clientSecret,
@@ -267,7 +269,9 @@ export class LinearProvider implements IntegrationProvider {
     const { viewer, organization } = await this.graphql.fetchViewerAndOrg(token.access_token);
 
     // A1 installs are always fresh — one App per agent per workspace, no reuse.
+    const tenantId = await this.container.tenants.resolveByUserId(state.userId);
     const installation = await this.container.installations.insert({
+      tenantId,
       userId: state.userId,
       providerId: PROVIDER_ID,
       workspaceId: organization.id,
@@ -292,6 +296,7 @@ export class LinearProvider implements IntegrationProvider {
 
     // Create publication and link App back to it.
     const publication = await this.container.publications.insert({
+      tenantId,
       userId: state.userId,
       agentId: state.agentId,
       installationId: installation.id,
@@ -398,6 +403,7 @@ export class LinearProvider implements IntegrationProvider {
     // aggressively on 5xx, so this gate matters.
     const fresh = await this.container.webhookEvents.recordIfNew(
       req.deliveryId,
+      installation.tenantId, // Phase 0: nullable until backfill of pre-existing rows
       installation.id,
       "unknown",
       this.container.clock.nowMs(),
@@ -539,7 +545,7 @@ export class LinearProvider implements IntegrationProvider {
     };
 
     if (publication.sessionGranularity === "per_issue" && event.issueId) {
-      const existing = await this.container.sessionScopes.getByScope(
+      const existing = await this.container.issueSessions.getByIssue(
         publication.id,
         event.issueId,
       );
@@ -559,9 +565,10 @@ export class LinearProvider implements IntegrationProvider {
         // when the schema lands.
         githubRepoUrl: PROD_GITHUB_REPO_URL,
       });
-      await this.container.sessionScopes.insert({
+      await this.container.issueSessions.insert({
+        tenantId: publication.tenantId,
         publicationId: publication.id,
-        scopeKey: event.issueId,
+        issueId: event.issueId,
         sessionId: created.sessionId,
         status: "active",
         createdAt: this.container.clock.nowMs(),
