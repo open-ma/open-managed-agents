@@ -1,5 +1,5 @@
 import type { Env } from "@open-managed-agents/shared";
-import { buildCfServices } from "@open-managed-agents/services";
+import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
 import type { OutboundSnapshot } from "@open-managed-agents/outbound-snapshots-store";
 
 /**
@@ -121,7 +121,9 @@ async function findCredentialForHost(
 }
 
 async function loadSnapshot(env: Env, sessionId: string): Promise<OutboundSnapshot | null> {
-  return buildCfServices(env).outboundSnapshots.get({ sessionId });
+  // outboundSnapshots is KV-backed; the D1 binding doesn't matter here.
+  // Pass AUTH_DB to satisfy the factory signature.
+  return buildCfServices(env, env.AUTH_DB).outboundSnapshots.get({ sessionId });
 }
 
 /**
@@ -177,7 +179,7 @@ async function tryRefreshToken(
     // refreshing the snapshot resets the lifetime, which is what we want:
     // an active session should keep its credentials live; an idle one
     // ages out within the same 24h window.
-    await buildCfServices(env).outboundSnapshots.publish({ sessionId, snapshot });
+    await buildCfServices(env, env.AUTH_DB).outboundSnapshots.publish({ sessionId, snapshot });
 
     // Best-effort: also update the canonical D1 row so future sessions
     // inherit the refreshed token. The snapshot remains the source of truth
@@ -185,7 +187,8 @@ async function tryRefreshToken(
     // fresh token, just future sessions may take one extra refresh.
     if (snapshot.tenant_id && env.AUTH_DB) {
       try {
-        await buildCfServices(env).credentials.refreshAuth({
+        const services = await getCfServicesForTenant(env, snapshot.tenant_id);
+        await services.credentials.refreshAuth({
           tenantId: snapshot.tenant_id,
           vaultId,
           credentialId,

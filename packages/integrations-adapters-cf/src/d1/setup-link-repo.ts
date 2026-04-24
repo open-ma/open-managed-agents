@@ -7,6 +7,7 @@ import type {
 
 interface Row {
   token: string;
+  tenant_id: string;
   publication_id: string;
   created_by: string;
   expires_at: number;
@@ -34,13 +35,14 @@ export class D1SetupLinkRepo implements SetupLinkRepo {
     await this.db
       .prepare(
         `INSERT INTO linear_setup_links
-           (token, publication_id, created_by, expires_at, used_at, used_by_email)
-         VALUES (?, ?, ?, ?, NULL, NULL)`,
+           (token, tenant_id, publication_id, created_by, expires_at, used_at, used_by_email)
+         VALUES (?, ?, ?, ?, ?, NULL, NULL)`,
       )
-      .bind(token, row.publicationId, row.createdBy, row.expiresAt)
+      .bind(token, row.tenantId, row.publicationId, row.createdBy, row.expiresAt)
       .run();
     return {
       token,
+      tenantId: row.tenantId,
       publicationId: row.publicationId,
       createdBy: row.createdBy,
       expiresAt: row.expiresAt,
@@ -69,6 +71,7 @@ export class D1SetupLinkRepo implements SetupLinkRepo {
   private toDomain(row: Row): SetupLink {
     return {
       token: row.token,
+      tenantId: row.tenant_id,
       publicationId: row.publication_id,
       createdBy: row.created_by,
       expiresAt: row.expires_at,

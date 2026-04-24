@@ -31,6 +31,25 @@ export interface IdGenerator {
 }
 
 /**
+ * Resolves the OMA tenant id for a given OMA user. The integrations
+ * gateway needs this whenever it inserts a new installation/publication/App
+ * row so the row can carry tenant_id (Phase 0 of the per-tenant-D1 work).
+ *
+ * Implemented in adapters via a SELECT against the `user` table (which lives
+ * in the better-auth control-plane DB). Provider code calls this at install
+ * completion time, when only `state.userId` is known from the OAuth state JWT.
+ */
+export interface TenantResolver {
+  /**
+   * Returns the user's tenantId. Throws when the user has no tenant — that's
+   * an integrity violation (every user should have a tenant after sign-up,
+   * see auth-config.ts ensureTenant), and silently inserting a row with
+   * tenantId="" would defeat the point of this column.
+   */
+  resolveByUserId(userId: UserId): Promise<string>;
+}
+
+/**
  * Symmetric encryption for tokens at rest. Output is opaque to callers — only
  * the same Crypto instance can decrypt what it produced.
  */
@@ -234,6 +253,9 @@ export interface Container {
   hmac: HmacVerifier;
   jwt: JwtSigner;
   http: HttpClient;
+  /** Maps OMA userId → tenantId. Used by providers to populate tenant_id on
+   *  newly inserted installations/publications/Apps (Phase 0 of per-tenant-D1). */
+  tenants: TenantResolver;
   sessions: SessionCreator;
   vaults: VaultManager;
   installations: InstallationRepo;
