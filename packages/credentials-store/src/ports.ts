@@ -7,6 +7,12 @@
 // language. Pass plain data + return plain data. The schema is no-FK by
 // project convention; cascade-by-vault lives in this port (`archiveByVault`)
 // so adapters and the in-memory fake share one canonical implementation.
+//
+// Tenant routing: every method takes `tenantId` as the first argument (or
+// a top-level field on the input). This is intentional — it makes tenantId
+// a routing key, so a future per-tenant-D1 / per-tenant-SQLite adapter can
+// pick a database per call without any port changes. See
+// packages/services/README.md "Per-tenant routing is an adapter-internal concern".
 
 import type { CredentialAuth } from "@open-managed-agents/shared";
 import type { CredentialRow } from "./types";

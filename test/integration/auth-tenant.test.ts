@@ -110,7 +110,7 @@ describe("API keys", () => {
 // ============================================================
 
 describe("multi-tenant KV isolation", () => {
-  it("resources are scoped to tenant via KV prefix", async () => {
+  it("agents are scoped to tenant via D1 column", async () => {
     // Create an agent under default tenant (via static API_KEY)
     const createRes = await api("/v1/agents", {
       method: "POST",
@@ -124,16 +124,14 @@ describe("multi-tenant KV isolation", () => {
     expect(createRes.status).toBe(201);
     const agent = await createRes.json();
 
-    // Verify the KV key has tenant prefix
-    const kvKey = `t:default:agent:${agent.id}`;
-    const stored = await env.CONFIG_KV.get(kvKey);
-    expect(stored).toBeTruthy();
-    const parsed = JSON.parse(stored);
-    expect(parsed.name).toBe("Tenant Test Agent");
-
-    // Old-style key should NOT exist
-    const oldKey = await env.CONFIG_KV.get(`agent:${agent.id}`);
-    expect(oldKey).toBeNull();
+    // Agents are in D1 now (was KV pre-storage-port). Verify the row exists
+    // for tenant=default and the agent name round-trips through `config` JSON.
+    const row = await env.AUTH_DB.prepare(
+      "SELECT tenant_id, config FROM agents WHERE id = ?",
+    ).bind(agent.id).first<{ tenant_id: string; config: string }>();
+    expect(row).toBeTruthy();
+    expect(row!.tenant_id).toBe("default");
+    expect(JSON.parse(row!.config).name).toBe("Tenant Test Agent");
   });
 });
 

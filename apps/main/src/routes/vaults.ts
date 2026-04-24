@@ -1,7 +1,5 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { VaultConfig } from "@open-managed-agents/shared";
-import { generateVaultId } from "@open-managed-agents/shared";
 import {
   CredentialDuplicateMcpUrlError,
   CredentialImmutableFieldError,
@@ -9,23 +7,30 @@ import {
   CredentialNotFoundError,
   stripSecrets,
 } from "@open-managed-agents/credentials-store";
+import { VaultNotFoundError } from "@open-managed-agents/vaults-store";
 import type { Services } from "@open-managed-agents/services";
-import { kvKey, kvListAll, kvPrefix } from "../kv-helpers";
 
-// Credentials live in D1 (packages/credentials-store, OPE-7 migration). Vaults
-// themselves are still in KV — out of scope for OPE-7. The two only interact
-// at HTTP boundary (vault existence check + cascade archive call).
-//
+// Both vaults and credentials live in D1 (vaults-store + credentials-store).
 // Service surface comes from c.var.services (see packages/services). Wiring
 // (CF / Postgres / etc.) lives in one factory; this file only sees abstract
 // service interfaces.
+//
+// Cascade-archive of credentials when a vault is archived is orchestrated
+// here at the route boundary — vaults-store doesn't know credentials exist
+// (and vice versa), so the cross-store cascade lives in the route handler.
 
 const app = new Hono<{
   Bindings: Env;
   Variables: { tenant_id: string; services: Services };
 }>();
 
-function handleCredError(err: unknown): Response {
+function handleError(err: unknown): Response {
+  if (err instanceof VaultNotFoundError) {
+    return new Response(JSON.stringify({ error: err.message }), {
+      status: 404,
+      headers: { "content-type": "application/json" },
+    });
+  }
   if (err instanceof CredentialNotFoundError) {
     return new Response(JSON.stringify({ error: err.message }), {
       status: 404,
@@ -53,7 +58,32 @@ function handleCredError(err: unknown): Response {
   throw err;
 }
 
-// ─── Vault endpoints (still KV — OPE-7 only migrates credentials) ───
+/** Strip server-internal fields from a vault row before returning to API. */
+function toApiVault(v: { id: string; name: string; created_at: string; updated_at: string | null; archived_at: string | null }) {
+  return {
+    id: v.id,
+    name: v.name,
+    created_at: v.created_at,
+    updated_at: v.updated_at,
+    archived_at: v.archived_at,
+  };
+}
+
+/** Strip server-internal fields from a credential row before returning to API.
+ *  Caller MUST run stripSecrets() first if the response leaves the trust boundary. */
+function toApiCred<T extends { id: string; vault_id: string; display_name: string; auth: unknown; created_at: string; updated_at: string | null; archived_at: string | null }>(c: T) {
+  return {
+    id: c.id,
+    vault_id: c.vault_id,
+    display_name: c.display_name,
+    auth: c.auth,
+    created_at: c.created_at,
+    updated_at: c.updated_at,
+    archived_at: c.archived_at,
+  };
+}
+
+// ─── Vault endpoints ───
 
 // POST /v1/vaults — create vault
 app.post("/", async (c) => {
@@ -64,90 +94,66 @@ app.post("/", async (c) => {
     return c.json({ error: "name is required" }, 400);
   }
 
-  const vault: VaultConfig = {
-    id: generateVaultId(),
+  const vault = await c.var.services.vaults.create({
+    tenantId: t,
     name: body.name,
-    created_at: new Date().toISOString(),
-  };
-
-  await c.env.CONFIG_KV.put(kvKey(t, "vault", vault.id), JSON.stringify(vault));
-  return c.json(vault, 201);
+  });
+  return c.json(toApiVault(vault), 201);
 });
 
 // GET /v1/vaults — list vaults
 app.get("/", async (c) => {
   const t = c.get("tenant_id");
   const includeArchived = c.req.query("include_archived") === "true";
-
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "vault"));
-  const vaults = (
-    await Promise.all(
-      list
-        .filter((k) => !k.name.includes(":cred"))
-        .map(async (k) => {
-          const data = await c.env.CONFIG_KV.get(k.name);
-          return data ? (JSON.parse(data) as VaultConfig) : null;
-        })
-    )
-  ).filter(Boolean) as VaultConfig[];
-
-  const filtered = includeArchived
-    ? vaults
-    : vaults.filter((v) => !v.archived_at);
-
-  return c.json({ data: filtered });
+  const data = await c.var.services.vaults.list({ tenantId: t, includeArchived });
+  return c.json({ data: data.map(toApiVault) });
 });
 
 // GET /v1/vaults/:id — get vault
 app.get("/:id", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "vault", id));
-  if (!data) return c.json({ error: "Vault not found" }, 404);
-  return c.json(JSON.parse(data));
+  const vault = await c.var.services.vaults.get({ tenantId: t, vaultId: id });
+  if (!vault) return c.json({ error: "Vault not found" }, 404);
+  return c.json(toApiVault(vault));
 });
 
 // POST /v1/vaults/:id/archive — archive vault (cascades to credentials)
 app.post("/:id/archive", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "vault", id));
-  if (!data) return c.json({ error: "Vault not found" }, 404);
-
-  const vault: VaultConfig = JSON.parse(data);
-  vault.archived_at = new Date().toISOString();
-  await c.env.CONFIG_KV.put(kvKey(t, "vault", id), JSON.stringify(vault));
-
-  // Cascade archive — single SQL UPDATE replaces the previous KV list+loop
-  // (which was non-atomic). Soft FK in app layer per project convention.
   try {
+    const vault = await c.var.services.vaults.archive({ tenantId: t, vaultId: id });
+    // Cross-store cascade: archive every active credential in this vault.
+    // Single SQL UPDATE in D1 — replaces the previous KV list+loop.
     await c.var.services.credentials.archiveByVault({ tenantId: t, vaultId: id });
+    return c.json(toApiVault(vault));
   } catch (err) {
-    return handleCredError(err);
+    return handleError(err);
   }
-
-  return c.json(vault);
 });
 
 // DELETE /v1/vaults/:id — delete vault
 app.delete("/:id", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "vault", id));
-  if (!data) return c.json({ error: "Vault not found" }, 404);
-
-  await c.env.CONFIG_KV.delete(kvKey(t, "vault", id));
-  return c.json({ type: "vault_deleted", id });
+  try {
+    await c.var.services.vaults.delete({ tenantId: t, vaultId: id });
+    return c.json({ type: "vault_deleted", id });
+  } catch (err) {
+    return handleError(err);
+  }
 });
 
-// ─── Credential endpoints (now backed by D1 via credentials-store) ───
+// ─── Credential endpoints (nested under vaults) ───
 
 // POST /v1/vaults/:id/credentials — add credential
 app.post("/:id/credentials", async (c) => {
   const t = c.get("tenant_id");
   const vaultId = c.req.param("id");
-  const vaultData = await c.env.CONFIG_KV.get(kvKey(t, "vault", vaultId));
-  if (!vaultData) return c.json({ error: "Vault not found" }, 404);
+  if (!(await c.var.services.vaults.exists({ tenantId: t, vaultId }))) {
+    return c.json({ error: "Vault not found" }, 404);
+  }
 
   const body = await c.req.json<{
     display_name: string;
@@ -165,9 +171,9 @@ app.post("/:id/credentials", async (c) => {
       displayName: body.display_name,
       auth: body.auth,
     });
-    return c.json(stripSecrets(cred), 201);
+    return c.json(toApiCred(stripSecrets(cred)), 201);
   } catch (err) {
-    return handleCredError(err);
+    return handleError(err);
   }
 });
 
@@ -175,16 +181,17 @@ app.post("/:id/credentials", async (c) => {
 app.get("/:id/credentials", async (c) => {
   const t = c.get("tenant_id");
   const vaultId = c.req.param("id");
-  const vaultData = await c.env.CONFIG_KV.get(kvKey(t, "vault", vaultId));
-  if (!vaultData) return c.json({ error: "Vault not found" }, 404);
+  if (!(await c.var.services.vaults.exists({ tenantId: t, vaultId }))) {
+    return c.json({ error: "Vault not found" }, 404);
+  }
 
   try {
     // includeArchived defaults to true to match the historical KV behavior
     // (GET /credentials returned all rows, including archived).
     const creds = await c.var.services.credentials.list({ tenantId: t, vaultId });
-    return c.json({ data: creds.map(stripSecrets) });
+    return c.json({ data: creds.map((c) => toApiCred(stripSecrets(c))) });
   } catch (err) {
-    return handleCredError(err);
+    return handleError(err);
   }
 });
 
@@ -207,9 +214,9 @@ app.post("/:id/credentials/:cred_id", async (c) => {
       displayName: body.display_name,
       auth: body.auth,
     });
-    return c.json(stripSecrets(cred));
+    return c.json(toApiCred(stripSecrets(cred)));
   } catch (err) {
-    return handleCredError(err);
+    return handleError(err);
   }
 });
 
@@ -225,9 +232,9 @@ app.post("/:id/credentials/:cred_id/archive", async (c) => {
       vaultId,
       credentialId: credId,
     });
-    return c.json(stripSecrets(cred));
+    return c.json(toApiCred(stripSecrets(cred)));
   } catch (err) {
-    return handleCredError(err);
+    return handleError(err);
   }
 });
 
@@ -241,7 +248,7 @@ app.delete("/:id/credentials/:cred_id", async (c) => {
     await c.var.services.credentials.delete({ tenantId: t, vaultId, credentialId: credId });
     return c.json({ type: "credential_deleted", id: credId });
   } catch (err) {
-    return handleCredError(err);
+    return handleError(err);
   }
 });
 
