@@ -584,8 +584,11 @@ export class InMemorySessionScopeRepo implements SessionScopeRepo {
     return this.rows.get(this.key(publicationId, scopeKey)) ?? null;
   }
 
-  async insert(row: SessionScope): Promise<void> {
-    this.rows.set(this.key(row.publicationId, row.scopeKey), row);
+  async insert(row: SessionScope): Promise<boolean> {
+    const k = this.key(row.publicationId, row.scopeKey);
+    if (this.rows.has(k)) return false;
+    this.rows.set(k, row);
+    return true;
   }
 
   async updateStatus(

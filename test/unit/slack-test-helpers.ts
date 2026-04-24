@@ -178,3 +178,35 @@ export function urlVerificationPayload(challenge: string): string {
     challenge,
   });
 }
+
+/**
+ * Plain `message` event envelope (NOT an `app_mention`). Use to test
+ * channel chatter, thread continuations, and DMs.
+ */
+export function messagePayload(opts: {
+  channel: string;
+  channelType?: "channel" | "im" | "group" | "mpim";
+  ts: string;
+  thread_ts?: string;
+  eventId: string;
+  user?: string;
+  text?: string;
+}): string {
+  return JSON.stringify({
+    type: "event_callback",
+    event_id: opts.eventId,
+    event_time: 1_700_000_000,
+    team_id: "T07TEAM",
+    api_app_id: "A07APP",
+    event: {
+      type: "message",
+      channel: opts.channel,
+      channel_type: opts.channelType ?? "channel",
+      ts: opts.ts,
+      thread_ts: opts.thread_ts,
+      user: opts.user ?? "U0USER",
+      text: opts.text ?? "hello",
+      event_ts: opts.ts,
+    },
+  });
+}

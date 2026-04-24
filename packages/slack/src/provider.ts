@@ -501,6 +501,15 @@ export class SlackProvider implements IntegrationProvider {
       return { handled: false, reason: "bot_message" };
     }
 
+    // Decide whether this event should reach the agent. Slack delivers a
+    // mix of signals; we route them according to user intent rather than
+    // raw event kind. See classifyDispatch() for the rules.
+    const decision = await this.classifyDispatch(pub, event, installation.botUserId);
+    if (decision.kind === "drop") {
+      await this.container.webhookEvents.attachError(env.event_id, decision.reason);
+      return { handled: false, reason: decision.reason };
+    }
+
     if (pub.status !== "live") {
       await this.container.webhookEvents.attachError(env.event_id, "publication_not_live");
       return { handled: false, reason: "publication_not_live" };
@@ -591,13 +600,33 @@ export class SlackProvider implements IntegrationProvider {
         },
         initialEvent: sessionEvent,
       });
-      await this.container.sessionScopes.insert({
+      const inserted = await this.container.sessionScopes.insert({
+        tenantId: publication.tenantId,
         publicationId: publication.id,
         scopeKey: event.scopeKey,
         sessionId: created.sessionId,
         status: "active",
         createdAt: this.container.clock.nowMs(),
       });
+      if (inserted) return created.sessionId;
+      // Lost a race with a concurrent dispatcher that already bound this
+      // scope to a session. Re-read, route THIS event to the winner via
+      // resume, and abandon the throwaway session we just spun up. (Slack
+      // sandwich case: app_mention + message arrive almost-concurrently
+      // for the same @-bot message — classifyDispatch already drops the
+      // duplicate `message`, but two genuinely distinct events on the
+      // same scope can still race.)
+      const winner = await this.container.sessionScopes.getByScope(
+        publication.id,
+        event.scopeKey,
+      );
+      if (winner && winner.status === "active") {
+        await this.container.sessions.resume(publication.userId, winner.sessionId, sessionEvent);
+        return winner.sessionId;
+      }
+      // Edge: row exists but inactive (rerouted / completed). Fall through to
+      // returning our session id; the just-created session will run for this
+      // event and the scope row stays bound to whoever wrote it.
       return created.sessionId;
     }
 
@@ -618,6 +647,56 @@ export class SlackProvider implements IntegrationProvider {
       initialEvent: sessionEvent,
     });
     return created.sessionId;
+  }
+
+  /**
+   * Classify whether an inbound event should reach the agent. Slack delivers
+   * a noisy stream of overlapping signals; this is the single place that
+   * decides "drop" vs "dispatch" so that handleWebhook + dispatchEvent stay
+   * narrow.
+   *
+   * Rules (in order):
+   *   1. `app_mention` → dispatch. Canonical signal that the bot was invoked.
+   *      Wins over the simultaneous `message` Slack also delivers for the
+   *      same Slack message ts.
+   *   2. `assistant_thread_started` → dispatch. Explicit AI-pane open.
+   *   3. `message` in a DM (channel_type === "im") → dispatch. The DM IS
+   *      addressed to the bot; no @-mention is needed.
+   *   4. `message` whose text contains `<@bot_user_id>` → drop. Slack
+   *      always also delivers `app_mention` for these; treating both would
+   *      double-record the user.message in the OMA session.
+   *   5. `message` continuing an active thread (scopeKey already bound) →
+   *      dispatch. The bot was previously invoked here; the user is
+   *      following up.
+   *   6. Anything else → drop. Random channel chatter the bot happened to
+   *      see because it's a member of the channel; not addressed to it.
+   */
+  private async classifyDispatch(
+    publication: Publication,
+    event: NormalizedSlackEvent,
+    botUserId: string | null,
+  ): Promise<{ kind: "dispatch" } | { kind: "drop"; reason: string }> {
+    if (event.kind === "app_mention" || event.kind === "assistant_thread_started") {
+      return { kind: "dispatch" };
+    }
+    if (event.kind !== "message") {
+      // Anything else (tokens_revoked, app_uninstalled, unknown) is handled
+      // upstream; if it reaches here, drop defensively.
+      return { kind: "drop", reason: "unsupported_event_kind" };
+    }
+    if (event.channelType === "im") return { kind: "dispatch" };
+    if (botUserId && event.text && event.text.includes(`<@${botUserId}>`)) {
+      // Slack will also deliver app_mention for this message.
+      return { kind: "drop", reason: "redundant_with_app_mention" };
+    }
+    if (event.scopeKey) {
+      const existing = await this.container.sessionScopes.getByScope(
+        publication.id,
+        event.scopeKey,
+      );
+      if (existing && existing.status === "active") return { kind: "dispatch" };
+    }
+    return { kind: "drop", reason: "not_addressed_to_bot" };
   }
 
   private renderEventAsUserMessage(event: NormalizedSlackEvent): string {

@@ -5,6 +5,7 @@ import type {
 } from "@open-managed-agents/integrations-core";
 
 interface Row {
+  tenant_id: string;
   publication_id: string;
   scope_key: string;
   session_id: string;
@@ -31,15 +32,19 @@ export class D1SlackSessionScopeRepo implements SessionScopeRepo {
     return row ? this.toDomain(row) : null;
   }
 
-  async insert(row: SessionScope): Promise<void> {
-    await this.db
+  async insert(row: SessionScope): Promise<boolean> {
+    // INSERT OR IGNORE so concurrent dispatchers racing on the same
+    // (publication_id, scope_key) don't 500. Returns true when this call
+    // wrote the row; false when the row was already present (race loser).
+    const result = await this.db
       .prepare(
-        `INSERT INTO slack_thread_sessions
-           (publication_id, scope_key, session_id, status, created_at)
-         VALUES (?, ?, ?, ?, ?)`,
+        `INSERT OR IGNORE INTO slack_thread_sessions
+           (tenant_id, publication_id, scope_key, session_id, status, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
       )
-      .bind(row.publicationId, row.scopeKey, row.sessionId, row.status, row.createdAt)
+      .bind(row.tenantId, row.publicationId, row.scopeKey, row.sessionId, row.status, row.createdAt)
       .run();
+    return (result.meta?.changes ?? 0) > 0;
   }
 
   async updateStatus(
@@ -69,6 +74,7 @@ export class D1SlackSessionScopeRepo implements SessionScopeRepo {
 
   private toDomain(row: Row): SessionScope {
     return {
+      tenantId: row.tenant_id,
       publicationId: row.publication_id,
       scopeKey: row.scope_key,
       sessionId: row.session_id,
