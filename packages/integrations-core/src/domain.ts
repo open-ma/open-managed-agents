@@ -215,6 +215,8 @@ export type IssueSessionStatus = SessionScopeStatus;
  * opaque `scopeKey` instead of a provider-native `issueId`.
  */
 export interface SessionScope {
+  /** OMA tenant that owns this session-scope row. NOT NULL in storage. */
+  tenantId: string;
   publicationId: string;
   /**
    * Provider-native key identifying the conversational scope this session is
