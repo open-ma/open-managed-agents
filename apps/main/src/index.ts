@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import { servicesMiddleware } from "@open-managed-agents/services";
+import { servicesMiddleware, tenantDbMiddleware } from "@open-managed-agents/services";
 import { authMiddleware } from "./auth";
 import { rateLimitMiddleware } from "./rate-limit";
 import agentsRoutes from "./routes/agents";
@@ -51,6 +51,10 @@ app.get("/auth-info", (c) => {
 // API routes (require authentication)
 app.use("/v1/*", authMiddleware);
 app.use("/v1/*", rateLimitMiddleware);
+// Resolve the per-tenant D1 database for this request. Phase 1: returns the
+// shared AUTH_DB for every tenant (zero behaviour change). Phase 4: routes
+// to per-tenant bindings published by the CICD sync script.
+app.use("/v1/*", tenantDbMiddleware);
 // Build the platform-agnostic service container once per request and stash it
 // on c.var.services. Wiring (CF / Postgres / SQLite) lives in
 // packages/services — routes only see the abstract Services interface.

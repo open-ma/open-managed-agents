@@ -11,6 +11,7 @@ import type {
 
 interface Row {
   id: string;
+  tenant_id: string;
   user_id: string;
   provider_id: string;
   workspace_id: string;
@@ -135,13 +136,14 @@ export class D1InstallationRepo implements InstallationRepo {
     await this.db
       .prepare(
         `INSERT INTO linear_installations (
-           id, user_id, provider_id, workspace_id, workspace_name,
+           id, tenant_id, user_id, provider_id, workspace_id, workspace_name,
            install_kind, app_id, access_token_cipher, refresh_token_cipher,
            scopes, bot_user_id, created_at, revoked_at
-         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
       )
       .bind(
         id,
+        row.tenantId,
         row.userId,
         row.providerId,
         row.workspaceId,
@@ -157,6 +159,7 @@ export class D1InstallationRepo implements InstallationRepo {
       .run();
     return {
       id,
+      tenantId: row.tenantId,
       userId: row.userId,
       providerId: row.providerId,
       workspaceId: row.workspaceId,
@@ -188,6 +191,7 @@ export class D1InstallationRepo implements InstallationRepo {
   private toDomain(row: Row): Installation {
     return {
       id: row.id,
+      tenantId: row.tenant_id,
       userId: row.user_id,
       providerId: row.provider_id as ProviderId,
       workspaceId: row.workspace_id,
