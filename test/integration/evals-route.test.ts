@@ -295,7 +295,7 @@ describe("tickEvalRuns advances state", () => {
 
     // Active list (status-driven via services.evals.listActive) should
     // contain the new run.
-    const services = buildCfServices(env);
+    const services = buildCfServices(env, env.AUTH_DB);
     const activeBefore = await services.evals.listActive();
     expect(activeBefore.some((r: any) => r.id === run_id)).toBe(true);
 

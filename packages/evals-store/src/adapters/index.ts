@@ -9,11 +9,11 @@ import type { Logger } from "../ports";
 import { EvalRunService } from "../service";
 
 export function createCfEvalRunService(
-  env: { AUTH_DB: D1Database },
+  deps: { db: D1Database },
   opts?: { logger?: Logger },
 ): EvalRunService {
   return new EvalRunService({
-    repo: new D1EvalRunRepo(env.AUTH_DB),
+    repo: new D1EvalRunRepo(deps.db),
     logger: opts?.logger,
   });
 }

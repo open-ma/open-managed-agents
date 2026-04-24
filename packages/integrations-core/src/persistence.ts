@@ -28,6 +28,8 @@ import type {
 } from "./domain";
 
 export interface NewInstallation {
+  /** OMA tenant that owns this installation. NOT NULL in storage. */
+  tenantId: string;
   userId: UserId;
   providerId: ProviderId;
   workspaceId: WorkspaceId;
@@ -75,6 +77,8 @@ export interface InstallationRepo {
 }
 
 export interface NewPublication {
+  /** OMA tenant that owns this publication. See NewInstallation.tenantId. */
+  tenantId: string;
   userId: UserId;
   agentId: AgentId;
   installationId: string;
@@ -107,6 +111,8 @@ export interface NewAppCredentials {
    * credentials in place). When omitted, the repo generates a fresh id.
    */
   id?: string;
+  /** OMA tenant that owns these credentials. See NewInstallation.tenantId. */
+  tenantId: string;
   /** Null when registered ahead of the related publication (A1 install). */
   publicationId: string | null;
   clientId: string;
@@ -132,6 +138,8 @@ export interface AppRepo {
 export interface NewGitHubAppCredentials {
   /** Optional explicit id; insert behaves as upsert when provided. */
   id?: string;
+  /** OMA tenant that owns these credentials. See NewInstallation.tenantId. */
+  tenantId: string;
   publicationId: string | null;
   /** Numeric GitHub App id (string-typed so we don't truncate large ints). */
   appId: string;
@@ -165,9 +173,13 @@ export interface WebhookEventStore {
    * Atomically inserts the delivery id; returns true if it's new (caller should
    * proceed to dispatch), false if it's a duplicate (caller should return 200
    * immediately).
+   *
+   * `tenantId` is resolved by the caller from the related installation/App
+   * row. NOT NULL — the column is NOT NULL after migration 0002.
    */
   recordIfNew(
     deliveryId: string,
+    tenantId: string,
     installationId: string,
     eventType: string,
     receivedAt: number,
@@ -200,6 +212,9 @@ export interface IssueSessionRepo {
  */
 export interface AuthoredComment {
   commentId: string;
+  /** OMA tenant that owns the bot session this comment was authored from.
+   *  NOT NULL in storage; backfilled from sessions.tenant_id. */
+  tenantId: string;
   omaSessionId: string;
   issueId: string;
   createdAt: number;
@@ -211,6 +226,8 @@ export interface AuthoredCommentRepo {
 }
 
 export interface NewSetupLink {
+  /** OMA tenant that owns this setup link. See NewInstallation.tenantId. */
+  tenantId: string;
   publicationId: string;
   createdBy: UserId;
   expiresAt: number;

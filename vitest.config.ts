@@ -36,6 +36,10 @@ export default defineConfig({
       "@open-managed-agents/session-secrets-store/test-fakes": "./packages/session-secrets-store/src/test-fakes.ts",
       "@open-managed-agents/session-secrets-store": "./packages/session-secrets-store/src/index.ts",
       "@open-managed-agents/services": "./packages/services/src/index.ts",
+      "@open-managed-agents/tenant-db/test-fakes": "./packages/tenant-db/src/test-fakes.ts",
+      "@open-managed-agents/tenant-db": "./packages/tenant-db/src/index.ts",
+      "@open-managed-agents/tenant-dbs-store/test-fakes": "./packages/tenant-dbs-store/src/test-fakes.ts",
+      "@open-managed-agents/tenant-dbs-store": "./packages/tenant-dbs-store/src/index.ts",
     },
   },
   test: {
