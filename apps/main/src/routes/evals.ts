@@ -1,9 +1,13 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import { generateEvalRunId } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import type { EvalRunStatus } from "@open-managed-agents/evals-store";
+import type { Services } from "@open-managed-agents/services";
+import { kvKey } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; services: Services };
+}>();
 
 // ---------- Types (Phase 1 + P0a server-side trials) ----------
 
@@ -18,7 +22,7 @@ export interface EvalTaskSpec {
   trials?: number;
 }
 
-export type EvalRunStatus = "pending" | "running" | "completed" | "failed";
+export type { EvalRunStatus };
 
 export interface EvalTrialResult {
   trial_index: number;
@@ -81,23 +85,17 @@ app.post("/runs", async (c) => {
     }
   }
 
-  // Verify agent + env exist for this tenant
-  const [agentData, envData] = await Promise.all([
-    c.env.CONFIG_KV.get(kvKey(t, "agent", body.agent_id)),
-    c.env.CONFIG_KV.get(kvKey(t, "env", body.environment_id)),
+  // Verify agent + env exist for this tenant — service treats *_id as opaque,
+  // so the existence checks stay in the route layer.
+  const [agentRow, envRow] = await Promise.all([
+    c.var.services.agents.get({ tenantId: t, agentId: body.agent_id }),
+    c.var.services.environments.get({ tenantId: t, environmentId: body.environment_id }),
   ]);
-  if (!agentData) return c.json({ error: "Agent not found" }, 404);
-  if (!envData) return c.json({ error: "Environment not found" }, 404);
+  if (!agentRow) return c.json({ error: "Agent not found" }, 404);
+  if (!envRow) return c.json({ error: "Environment not found" }, 404);
 
-  const runId = generateEvalRunId();
-  const now = new Date().toISOString();
-  const record: EvalRunRecord = {
-    id: runId,
-    tenant_id: t,
-    agent_id: body.agent_id,
-    environment_id: body.environment_id,
-    status: "pending",
-    created_at: now,
+  // Initial results blob — opaque to the service.
+  const initialResults = {
     task_count: body.tasks.length,
     completed_count: 0,
     failed_count: 0,
@@ -107,25 +105,30 @@ app.post("/runs", async (c) => {
       for (let i = 0; i < trialCount; i++) {
         trials.push({ trial_index: i, status: "pending" });
       }
-      return { id: spec.id, spec, status: "pending", trials, trial_total: trialCount };
+      return { id: spec.id, spec, status: "pending" as EvalRunStatus, trials, trial_total: trialCount };
     }),
   };
 
-  await Promise.all([
-    c.env.CONFIG_KV.put(kvKey(t, "evalrun", runId), JSON.stringify(record)),
-    // Index for cron scan: lightweight active list
-    c.env.CONFIG_KV.put(`evalrun_active:${runId}`, t),
-  ]);
+  const run = await c.var.services.evals.create({
+    tenantId: t,
+    agentId: body.agent_id,
+    environmentId: body.environment_id,
+    results: initialResults,
+    // status defaults to "pending" — listActive picks it up on the next tick.
+  });
 
-  return c.json({ run_id: runId, task_count: body.tasks.length });
+  return c.json({ run_id: run.id, task_count: body.tasks.length });
 });
 
 // GET /v1/evals/runs/:id
 app.get("/runs/:id", async (c) => {
   const t = c.get("tenant_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "evalrun", c.req.param("id")));
-  if (!data) return c.json({ error: "Run not found" }, 404);
-  return c.json(JSON.parse(data));
+  const run = await c.var.services.evals.get({
+    tenantId: t,
+    runId: c.req.param("id"),
+  });
+  if (!run) return c.json({ error: "Run not found" }, 404);
+  return c.json(rowToApi(run));
 });
 
 // GET /v1/evals/runs — list runs for this tenant
@@ -136,18 +139,39 @@ app.get("/runs", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "evalrun"));
-  const runs = (
-    await Promise.all(
-      list.map(async (k) => {
-        const data = await c.env.CONFIG_KV.get(k.name);
-        return data ? (JSON.parse(data) as EvalRunRecord) : null;
-      })
-    )
-  ).filter((r): r is EvalRunRecord => r !== null);
+  const runs = await c.var.services.evals.list({
+    tenantId: t,
+    limit,
+    agentId: c.req.query("agent_id") || undefined,
+    environmentId: c.req.query("environment_id") || undefined,
+    status: c.req.query("status") as EvalRunStatus | undefined,
+  });
 
-  runs.sort((a, b) => b.created_at.localeCompare(a.created_at));
-  return c.json({ data: runs.slice(0, limit) });
+  return c.json({ data: runs.map(rowToApi) });
 });
+
+/**
+ * Flatten an EvalRunRow back into the legacy EvalRunRecord shape that the
+ * Console + CLI consume. Maintains backward compatibility while the table
+ * stores its mutable per-tick state inside the opaque `results` JSON column.
+ */
+function rowToApi(run: import("@open-managed-agents/evals-store").EvalRunRow) {
+  const partial = (run.results ?? {}) as Partial<EvalRunRecord>;
+  return {
+    id: run.id,
+    tenant_id: run.tenant_id,
+    agent_id: run.agent_id,
+    environment_id: run.environment_id,
+    status: run.status,
+    created_at: run.started_at,
+    started_at: run.started_at,
+    ended_at: run.completed_at ?? undefined,
+    error: run.error ?? undefined,
+    task_count: partial.task_count ?? 0,
+    completed_count: partial.completed_count ?? 0,
+    failed_count: partial.failed_count ?? 0,
+    tasks: partial.tasks ?? [],
+  };
+}
 
 export default app;

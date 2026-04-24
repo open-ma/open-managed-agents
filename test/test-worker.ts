@@ -21,29 +21,9 @@ export { outbound, outboundByHost } from "../apps/agent/src/outbound";
 // Idempotent: every CREATE uses IF NOT EXISTS, drop is a no-op rerun.
 
 // @ts-expect-error vitest resolves SQL via ?raw
-import auth0001 from "../apps/main/migrations/0001_auth_tables.sql?raw";
-// @ts-expect-error
-import int0002 from "../apps/main/migrations/0002_integrations_tables.sql?raw";
-// @ts-expect-error
-import pub0003 from "../apps/main/migrations/0003_publications_environment.sql?raw";
-// @ts-expect-error
-import inst0004 from "../apps/main/migrations/0004_installations_vault.sql?raw";
-// @ts-expect-error
-import drop0005 from "../apps/main/migrations/0005_drop_b_plus_columns.sql?raw";
-// @ts-expect-error
-import gh0006 from "../apps/main/migrations/0006_github_tables.sql?raw";
-// @ts-expect-error
-import mem0007 from "../apps/main/migrations/0007_memory_tables.sql?raw";
+import schema0001 from "../apps/main/migrations/0001_schema.sql?raw";
 
-const MIGRATIONS_RAW: string[] = [
-  auth0001 as string,
-  int0002 as string,
-  pub0003 as string,
-  inst0004 as string,
-  drop0005 as string,
-  gh0006 as string,
-  mem0007 as string,
-];
+const MIGRATIONS_RAW: string[] = [schema0001 as string];
 
 let migrationsApplied = false;
 async function ensureMigrations(env: { AUTH_DB?: D1Database }): Promise<void> {
