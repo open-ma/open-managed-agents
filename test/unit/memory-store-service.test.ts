@@ -318,4 +318,20 @@ describe("MemoryStoreService — version operations", () => {
     expect(after!.redacted).toBe(true);
     expect(after!.actor_type).toBe("system");
   });
+
+  it("rejects cross-tenant redactVersion (regression for ultrareview bug_009)", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const storeA = await service.createStore({ tenantId: "tn_a", name: "A" });
+    await service.writeByPath({ tenantId: "tn_a", storeId: storeA.id, path: "/p", content: "secret-A", actor: ACTOR });
+    const versionsA = await service.listVersions({ tenantId: "tn_a", storeId: storeA.id });
+    const versionId = versionsA[0].id;
+
+    await expect(
+      service.redactVersion({ tenantId: "tn_b", storeId: storeA.id, versionId }),
+    ).rejects.toThrow(MemoryStoreNotFoundError);
+
+    const after = await service.getVersion({ tenantId: "tn_a", storeId: storeA.id, versionId });
+    expect(after!.content).toBe("secret-A");
+    expect(after!.redacted).toBe(false);
+  });
 });

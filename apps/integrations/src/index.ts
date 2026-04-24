@@ -29,10 +29,21 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
+// Staging-only gate for the TEMP admin endpoints below. We detect staging
+// by hostname rather than introducing a new env var: only the staging
+// `wrangler.jsonc` env stanza names "staging" in GATEWAY_ORIGIN. A prod
+// deploy that accidentally inherits TEMP_DEBUG_TOKEN still gets 404'd.
+function isStagingEnv(env: Env): boolean {
+  return /\bstaging\b/i.test(env.GATEWAY_ORIGIN ?? "");
+}
+
 // TEMP one-shot admin: dump a Linear installation's App OAuth access token.
 // Used to validate end-to-end on a fresh env. Remove this route + the
 // TEMP_DEBUG_TOKEN secret after verification.
 app.get("/admin/dump-linear-installation-token", async (c) => {
+  if (!isStagingEnv(c.env)) {
+    return c.notFound();
+  }
   if (
     !c.env.TEMP_DEBUG_TOKEN ||
     c.req.header("x-debug-token") !== c.env.TEMP_DEBUG_TOKEN
@@ -64,6 +75,9 @@ app.get("/admin/dump-linear-installation-token", async (c) => {
 // rotates this row's tokens in place (capturing refresh_token this time).
 // Remove together with /admin/dump-linear-installation-token.
 app.get("/admin/linear-reauth-link", async (c) => {
+  if (!isStagingEnv(c.env)) {
+    return c.notFound();
+  }
   if (
     !c.env.TEMP_DEBUG_TOKEN ||
     c.req.header("x-debug-token") !== c.env.TEMP_DEBUG_TOKEN
