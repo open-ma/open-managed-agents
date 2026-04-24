@@ -33,6 +33,42 @@ import {
   MemoryStoreService,
   createCfMemoryStoreService,
 } from "@open-managed-agents/memory-store";
+import {
+  VaultService,
+  createCfVaultService,
+} from "@open-managed-agents/vaults-store";
+import {
+  SessionService,
+  createCfSessionService,
+} from "@open-managed-agents/sessions-store";
+import {
+  FileService,
+  createCfFileService,
+} from "@open-managed-agents/files-store";
+import {
+  EvalRunService,
+  createCfEvalRunService,
+} from "@open-managed-agents/evals-store";
+import {
+  ModelCardService,
+  createCfModelCardService,
+} from "@open-managed-agents/model-cards-store";
+import {
+  AgentService,
+  createCfAgentService,
+} from "@open-managed-agents/agents-store";
+import {
+  EnvironmentService,
+  createCfEnvironmentService,
+} from "@open-managed-agents/environments-store";
+import {
+  OutboundSnapshotService,
+  createCfOutboundSnapshotService,
+} from "@open-managed-agents/outbound-snapshots-store";
+import {
+  SessionSecretService,
+  createCfSessionSecretService,
+} from "@open-managed-agents/session-secrets-store";
 
 /**
  * The platform-agnostic service surface. Every service the application uses
@@ -42,6 +78,15 @@ import {
 export interface Services {
   credentials: CredentialService;
   memory: MemoryStoreService;
+  vaults: VaultService;
+  sessions: SessionService;
+  files: FileService;
+  evals: EvalRunService;
+  modelCards: ModelCardService;
+  agents: AgentService;
+  environments: EnvironmentService;
+  outboundSnapshots: OutboundSnapshotService;
+  sessionSecrets: SessionSecretService;
 }
 
 /**
@@ -85,6 +130,15 @@ export function buildCfServices(env: Env): Services {
   return {
     credentials: createCfCredentialService(env),
     memory: createCfMemoryStoreService(env),
+    vaults: createCfVaultService(env),
+    sessions: createCfSessionService(env),
+    files: createCfFileService(env),
+    evals: createCfEvalRunService(env),
+    modelCards: createCfModelCardService(env),
+    agents: createCfAgentService(env),
+    environments: createCfEnvironmentService(env),
+    outboundSnapshots: createCfOutboundSnapshotService(env),
+    sessionSecrets: createCfSessionSecretService(env),
   };
 }
 

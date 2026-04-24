@@ -1,9 +1,9 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig, SessionResource } from "@open-managed-agents/shared";
-import { generateSessionId, generateVaultId, generateResourceId } from "@open-managed-agents/shared";
+import type { AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig } from "@open-managed-agents/shared";
+import { generateVaultId } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
-import { kvKey } from "../kv-helpers";
+import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 
 // Internal endpoints, called only by the integrations gateway worker via the
 // `MAIN` service binding. Auth is a shared header secret — no better-auth
@@ -117,14 +117,15 @@ app.post("/sessions", async (c) => {
   const tenantId = await resolveTenantId(c.env, body.userId);
   if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
 
-  const agentData = await c.env.CONFIG_KV.get(kvKey(tenantId, "agent", body.agentId));
-  if (!agentData) return c.json({ error: "agent not found in tenant" }, 404);
+  const agentRow = await c.var.services.agents.get({ tenantId, agentId: body.agentId });
+  if (!agentRow) return c.json({ error: "agent not found in tenant" }, 404);
 
-  const envSnapshotData = await c.env.CONFIG_KV.get(
-    kvKey(tenantId, "env", body.environmentId),
-  );
-  if (!envSnapshotData) return c.json({ error: "environment not found in tenant" }, 404);
-  const envConfig = JSON.parse(envSnapshotData) as EnvironmentConfig;
+  const envRow = await c.var.services.environments.get({
+    tenantId,
+    environmentId: body.environmentId,
+  });
+  if (!envRow) return c.json({ error: "environment not found in tenant" }, 404);
+  const envConfig = toEnvironmentConfig(envRow);
 
   // Resolve the sandbox binding for this environment. Same naming convention
   // as the public sessions route: SANDBOX_<sanitized worker name>.
@@ -139,13 +140,12 @@ app.post("/sessions", async (c) => {
     return c.json({ error: `sandbox binding ${bindingName} not bound` }, 500);
   }
 
-  const sessionId = generateSessionId();
-  const vaultIds = body.vaultIds ?? [];
-
   // Build the agent snapshot up-front so we can ship it to SessionDO at /init
   // (and so the per-session MCP-server augmentation actually takes effect on
   // the snapshot the DO uses, not just the one we persist below).
-  let agentSnapshot = JSON.parse(agentData) as AgentConfig;
+  const vaultIds = body.vaultIds ?? [];
+  const { tenant_id: _atid, ...agentBase } = agentRow;
+  let agentSnapshot: AgentConfig = agentBase;
   if (body.mcpServers && body.mcpServers.length > 0) {
     const existing = agentSnapshot.mcp_servers ?? [];
     agentSnapshot = {
@@ -161,6 +161,22 @@ app.post("/sessions", async (c) => {
     };
   }
 
+  // Allocate the session id by inserting the row first — sessions-store owns
+  // id generation. Linear MCP wiring below augments the snapshot + metadata
+  // and we re-persist via service.update to keep the row consistent.
+  const initialMetadata: Record<string, unknown> = { ...(body.metadata ?? {}) };
+  const { session: createdSession } = await c.var.services.sessions.create({
+    tenantId,
+    agentId: body.agentId,
+    environmentId: body.environmentId,
+    title: "",
+    vaultIds,
+    agentSnapshot,
+    environmentSnapshot: envConfig,
+    metadata: Object.keys(initialMetadata).length === 0 ? undefined : initialMetadata,
+  });
+  const sessionId = createdSession.id;
+
   // Pre-fetch vault credentials so SessionDO can serve them from state
   // instead of reading CONFIG_KV (which may be a different namespace if
   // sandbox-default is shared across envs).
@@ -171,8 +187,9 @@ app.post("/sessions", async (c) => {
   // inject a static_bearer cred so outbound MITM auto-attaches it on calls
   // to the integrations gateway, and add the MCP entry to agent_snapshot
   // so the harness picks it up alongside the agent's own mcp_servers.
-  const sessionMetadata: Record<string, unknown> = { ...(body.metadata ?? {}) };
+  const sessionMetadata: Record<string, unknown> = { ...initialMetadata };
   const linearMeta = sessionMetadata.linear as Record<string, unknown> | undefined;
+  let metadataDirty = false;
   if (linearMeta) {
     const mcpToken = crypto.randomUUID();
     const mcpUrl = `${integrationsOrigin(c.env)}/linear/mcp/${sessionId}`;
@@ -195,6 +212,7 @@ app.post("/sessions", async (c) => {
         displayName: null,
       },
     };
+    metadataDirty = true;
 
     // Append our hosted MCP entry to the agent snapshot's mcp_servers list.
     // The Linear provider no longer registers mcp.linear.app — we own that
@@ -231,6 +249,17 @@ app.post("/sessions", async (c) => {
     }
   }
 
+  // Re-persist the augmented snapshot + metadata when the linear branch
+  // mutated either. Skipped for the common (non-Linear) case.
+  if (metadataDirty) {
+    await c.var.services.sessions.update({
+      tenantId,
+      sessionId,
+      agentSnapshot,
+      metadata: sessionMetadata,
+    });
+  }
+
   // Initialize SessionDO via the sandbox worker. Pass vault_ids so the
   // outbound Worker can match credentials for this session, plus the
   // pre-fetched config snapshots (see snapshot rationale above).
@@ -264,59 +293,30 @@ app.post("/sessions", async (c) => {
     }),
   });
 
-  // Persist a session record with frozen agent + env snapshots so trajectory
-  // and replay work even after the agent or env definition changes.
-  const session: SessionMeta = {
-    id: sessionId,
-    agent_id: body.agentId,
-    environment_id: body.environmentId,
-    title: "",
-    status: "idle",
-    vault_ids: vaultIds,
-    created_at: new Date().toISOString(),
-  };
-  const sessionRecord = {
-    ...session,
-    agent_snapshot: agentSnapshot,
-    environment_snapshot: envConfig,
-    metadata: sessionMetadata,
-  };
-  await c.env.CONFIG_KV.put(
-    kvKey(tenantId, "session", sessionId),
-    JSON.stringify(sessionRecord),
-  );
-
-  // Reverse index: sessionId → tenantId. Lets GET /v1/internal/sessions/:id
-  // do an O(1) lookup instead of paginating every tenant-prefixed key in
-  // CONFIG_KV. Untenanted by design — the lookup endpoint receives only the
-  // sessionId. Reasonably long TTL so resumes / retroactive lookups still
-  // work; a missed cleanup is harmless (record is just an integer mapping).
-  await c.env.CONFIG_KV.put(`sidx:${sessionId}`, tenantId, {
-    expirationTtl: 30 * 24 * 60 * 60,
-  });
-
   // Materialize a github_repository resource from the supplied repo URL.
   // The token is sourced from a command_secret credential (env_var=GITHUB_TOKEN)
-  // in one of the vaults — provider doesn't pass it inline. SessionDO will
-  // pick this up via CONFIG_KV.list when it mounts resources at warmup.
+  // in one of the vaults — provider doesn't pass it inline. SessionDO picks
+  // this up via sessions-store at warmup.
   if (body.githubRepoUrl) {
     const ghToken = await findGithubTokenInVaults(vaultCredentials);
     if (ghToken) {
-      const resourceId = generateResourceId();
-      const resource: SessionResource = {
-        id: resourceId,
-        session_id: sessionId,
-        type: "github_repository",
-        url: body.githubRepoUrl,
-        repo_url: body.githubRepoUrl,
-        mount_path: "/workspace",
-        created_at: new Date().toISOString(),
-      };
-      await c.env.CONFIG_KV.put(kvKey(tenantId, "secret", sessionId, resourceId), ghToken);
-      await c.env.CONFIG_KV.put(
-        kvKey(tenantId, "sesrsc", sessionId, resourceId),
-        JSON.stringify(resource),
-      );
+      const added = await c.var.services.sessions.addResource({
+        tenantId,
+        sessionId,
+        resource: {
+          type: "github_repository",
+          url: body.githubRepoUrl,
+          repo_url: body.githubRepoUrl,
+          mount_path: "/workspace",
+        },
+      });
+      // Token continues to live in the per-session secret store.
+      await c.var.services.sessionSecrets.put({
+        tenantId,
+        sessionId,
+        resourceId: added.id,
+        value: ghToken,
+      });
     }
   }
 
@@ -346,15 +346,15 @@ app.post("/sessions/:id/events", async (c) => {
   const tenantId = await resolveTenantId(c.env, body.userId);
   if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
 
-  const sessionData = await c.env.CONFIG_KV.get(kvKey(tenantId, "session", sessionId));
-  if (!sessionData) return c.json({ error: "session not found" }, 404);
-  const session = JSON.parse(sessionData) as SessionMeta;
+  const session = await c.var.services.sessions.get({ tenantId, sessionId });
+  if (!session) return c.json({ error: "session not found" }, 404);
 
-  const envSnapshotData = await c.env.CONFIG_KV.get(
-    kvKey(tenantId, "env", session.environment_id),
-  );
-  if (!envSnapshotData) return c.json({ error: "environment missing" }, 500);
-  const envConfig = JSON.parse(envSnapshotData) as EnvironmentConfig;
+  const envRow2 = await c.var.services.environments.get({
+    tenantId,
+    environmentId: session.environment_id,
+  });
+  if (!envRow2) return c.json({ error: "environment missing" }, 500);
+  const envConfig = toEnvironmentConfig(envRow2);
   const bindingName = `SANDBOX_${(envConfig.sandbox_worker_name ?? "").replace(/-/g, "_")}`;
   const binding = (c.env as unknown as Record<string, unknown>)[bindingName] as
     | Fetcher
@@ -374,38 +374,15 @@ app.post("/sessions/:id/events", async (c) => {
  * GET /v1/internal/sessions/:id
  * Returns the persisted session record (id + metadata + snapshots) so the
  * integrations gateway can validate per-session MCP tokens and resolve the
- * publication. Uses the `sidx:` reverse index (sessionId → tenantId) for
- * an O(1) lookup; falls back to a paginated tenant scan only if the index
- * is missing (sessions created before sidx existed).
+ * publication. O(1) PRIMARY KEY lookup via the sessions-store cross-tenant
+ * `getById` — the legacy `sidx:` reverse index + paginated tenant scan
+ * fallback is retired.
  */
 app.get("/sessions/:id", async (c) => {
   const sessionId = c.req.param("id");
-  const tenantId = await c.env.CONFIG_KV.get(`sidx:${sessionId}`);
-  if (tenantId) {
-    const data = await c.env.CONFIG_KV.get(kvKey(tenantId, "session", sessionId));
-    if (data) {
-      return c.json(JSON.parse(data));
-    }
-  }
-  // Fallback: scan tenant-prefixed keys with cursor pagination so we don't
-  // get truncated by the 1000-key page cap. Used only for legacy sessions
-  // (no sidx) — new sessions hit the index above and short-circuit.
-  let cursor: string | undefined = undefined;
-  do {
-    const list: KVNamespaceListResult<unknown> = await c.env.CONFIG_KV.list({
-      prefix: "t:",
-      cursor,
-    });
-    for (const k of list.keys) {
-      if (!k.name.endsWith(`:session:${sessionId}`)) continue;
-      const data = await c.env.CONFIG_KV.get(k.name);
-      if (!data) continue;
-      const record = JSON.parse(data) as { id: string; metadata?: Record<string, unknown> };
-      return c.json(record);
-    }
-    cursor = list.list_complete ? undefined : list.cursor;
-  } while (cursor);
-  return c.json({ error: "session not found" }, 404);
+  const session = await c.var.services.sessions.getById({ sessionId });
+  if (!session) return c.json({ error: "session not found" }, 404);
+  return c.json(session);
 });
 
 /**
@@ -431,12 +408,10 @@ app.post("/vaults", async (c) => {
     const tenantId = await resolveTenantId(c.env, body.userId);
     if (!tenantId) return c.json({ error: "user has no tenant" }, 404);
 
-    const vault: VaultConfig = {
-      id: generateVaultId(),
+    const vault = await c.var.services.vaults.create({
+      tenantId,
       name: body.vaultName,
-      created_at: new Date().toISOString(),
-    };
-    await c.env.CONFIG_KV.put(kvKey(tenantId, "vault", vault.id), JSON.stringify(vault));
+    });
 
     const credential = await c.var.services.credentials.create({
       tenantId,
@@ -464,17 +439,16 @@ app.post("/vaults", async (c) => {
 
     let vaultId = body.vaultId;
     if (!vaultId) {
-      const vault: VaultConfig = {
-        id: generateVaultId(),
+      const vault = await c.var.services.vaults.create({
+        tenantId,
         name: body.vaultName,
-        created_at: new Date().toISOString(),
-      };
-      await c.env.CONFIG_KV.put(kvKey(tenantId, "vault", vault.id), JSON.stringify(vault));
+      });
       vaultId = vault.id;
     } else {
       // Caller-supplied vault must exist in this tenant; refuse cross-tenant attach.
-      const existing = await c.env.CONFIG_KV.get(kvKey(tenantId, "vault", vaultId));
-      if (!existing) return c.json({ error: "vault not found in tenant" }, 404);
+      if (!(await c.var.services.vaults.exists({ tenantId, vaultId }))) {
+        return c.json({ error: "vault not found in tenant" }, 404);
+      }
     }
 
     const credential = await c.var.services.credentials.create({

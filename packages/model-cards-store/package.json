@@ -1,0 +1,13 @@
+{
+  "name": "@open-managed-agents/model-cards-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test-fakes": "./src/test-fakes.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*"
+  }
+}
