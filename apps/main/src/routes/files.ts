@@ -1,10 +1,13 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { FileRecord } from "@open-managed-agents/shared";
 import { generateFileId, fileR2Key } from "@open-managed-agents/shared";
-import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import { toFileRecord, FileNotFoundError } from "@open-managed-agents/files-store";
+import type { Services } from "@open-managed-agents/services";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; services: Services };
+}>();
 
 function ensureBucket(c: { env: Env }): R2Bucket | null {
   return c.env.FILES_BUCKET || null;
@@ -68,25 +71,23 @@ app.post("/", async (c) => {
   }
 
   const id = generateFileId();
-  await bucket.put(fileR2Key(t, id), body, { httpMetadata: { contentType: mediaType } });
+  const r2Key = fileR2Key(t, id);
+  // R2 PUT first, then metadata insert — same failure semantics as the KV era
+  // (orphan R2 object on metadata failure, never the reverse).
+  await bucket.put(r2Key, body, { httpMetadata: { contentType: mediaType } });
 
-  const record: FileRecord = {
+  const row = await c.var.services.files.create({
     id,
-    type: "file" as const,
+    tenantId: t,
+    sessionId: scopeId,
     filename,
-    media_type: mediaType,
-    size_bytes: body.byteLength,
-    scope_id: scopeId,
+    mediaType,
+    sizeBytes: body.byteLength,
+    r2Key,
     downloadable,
-    created_at: new Date().toISOString(),
-  };
-  await c.env.CONFIG_KV.put(kvKey(t, "file", id), JSON.stringify(record));
-  // Maintain a scope index for cheap server-side filtering on list.
-  if (scopeId) {
-    await c.env.CONFIG_KV.put(kvKey(t, "filebyscope", scopeId, id), "1");
-  }
+  });
 
-  return c.json(record, 201);
+  return c.json(toFileRecord(row), 201);
 });
 
 // GET /v1/files — list files (cursor-paginated, optional scope_id filter)
@@ -98,102 +99,80 @@ app.get("/", async (c) => {
   const afterId = c.req.query("after_id");   // returns files with id > after_id
   const order = c.req.query("order") === "asc" ? "asc" : "desc";
 
-  let limit = limitParam ? parseInt(limitParam, 10) : 100;
-  if (isNaN(limit) || limit < 1) limit = 100;
-  if (limit > 1000) limit = 1000;
+  let requested = limitParam ? parseInt(limitParam, 10) : 100;
+  if (isNaN(requested) || requested < 1) requested = 100;
+  if (requested > 1000) requested = 1000;
 
-  // When scope_id is provided, use the scope index (O(scope size) instead of
-  // O(all tenant files)).
-  let ids: string[];
-  if (scopeId) {
-    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "filebyscope", scopeId));
-    ids = list.map((k) => k.name.split(":").pop()!).filter(Boolean);
-  } else {
-    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "file"));
-    ids = list.map((k) => k.name.split(":").pop()!).filter(Boolean);
-  }
-
-  const files = (
-    await Promise.all(
-      ids.map(async (id) => {
-        const data = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
-        return data ? (JSON.parse(data) as FileRecord) : null;
-      }),
-    )
-  ).filter((f): f is FileRecord => f !== null);
-
-  // Cursor pagination is over file id (lexicographic). created_at could be
-  // used too but id is monotonic-ish and unique.
-  let filtered = files;
-  if (beforeId) filtered = filtered.filter((f) => f.id < beforeId);
-  if (afterId) filtered = filtered.filter((f) => f.id > afterId);
-
-  filtered.sort((a, b) => {
-    const cmp = a.created_at.localeCompare(b.created_at);
-    return order === "asc" ? cmp : -cmp;
+  // Ask for one extra row so we can derive `has_more` without a count query.
+  const rows = await c.var.services.files.list({
+    tenantId: t,
+    sessionId: scopeId,
+    beforeId,
+    afterId,
+    order,
+    limit: requested + 1,
   });
 
-  const slice = filtered.slice(0, limit);
-  const hasMore = filtered.length > limit;
+  const slice = rows.slice(0, requested);
+  const data = slice.map(toFileRecord);
   return c.json({
-    data: slice,
-    has_more: hasMore,
-    first_id: slice[0]?.id,
-    last_id: slice[slice.length - 1]?.id,
+    data,
+    has_more: rows.length > requested,
+    first_id: data[0]?.id,
+    last_id: data[data.length - 1]?.id,
   });
 });
 
 // GET /v1/files/:id — get file metadata
 app.get("/:id", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
-  if (!data) return c.json({ error: "File not found" }, 404);
-  return c.json(JSON.parse(data));
+  const row = await c.var.services.files.get({
+    tenantId: c.get("tenant_id"),
+    fileId: c.req.param("id"),
+  });
+  if (!row) return c.json({ error: "File not found" }, 404);
+  return c.json(toFileRecord(row));
 });
 
 // GET /v1/files/:id/content — download file content (streamed from R2).
 // Gated by `downloadable` flag, mirroring Anthropic's split: user-uploaded
 // files are opaque, model/sandbox-emitted artefacts are downloadable.
 app.get("/:id/content", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
   const bucket = ensureBucket(c);
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
-  const metaData = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
-  if (!metaData) return c.json({ error: "File not found" }, 404);
-  const meta = JSON.parse(metaData) as FileRecord;
-
-  if (!meta.downloadable) {
+  const row = await c.var.services.files.get({
+    tenantId: c.get("tenant_id"),
+    fileId: c.req.param("id"),
+  });
+  if (!row) return c.json({ error: "File not found" }, 404);
+  if (!row.downloadable) {
     return c.json({ error: "This file is not downloadable" }, 403);
   }
 
-  const obj = await bucket.get(fileR2Key(t, id));
+  const obj = await bucket.get(row.r2_key);
   if (!obj) return c.json({ error: "File content not found" }, 404);
 
   return new Response(obj.body, {
-    headers: { "Content-Type": meta.media_type },
+    headers: { "Content-Type": row.media_type },
   });
 });
 
-// DELETE /v1/files/:id — delete metadata + R2 object + scope index entry
+// DELETE /v1/files/:id — delete metadata + R2 object
 app.delete("/:id", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
   const bucket = ensureBucket(c);
-
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "file", id));
-  if (!data) return c.json({ error: "File not found" }, 404);
-
-  const meta = JSON.parse(data) as FileRecord;
-  await c.env.CONFIG_KV.delete(kvKey(t, "file", id));
-  if (meta.scope_id) {
-    await c.env.CONFIG_KV.delete(kvKey(t, "filebyscope", meta.scope_id, id));
+  try {
+    const deleted = await c.var.services.files.delete({
+      tenantId: c.get("tenant_id"),
+      fileId: c.req.param("id"),
+    });
+    if (bucket) await bucket.delete(deleted.r2_key);
+    return c.json({ type: "file_deleted", id: deleted.id });
+  } catch (err) {
+    if (err instanceof FileNotFoundError) {
+      return c.json({ error: "File not found" }, 404);
+    }
+    throw err;
   }
-  if (bucket) await bucket.delete(fileR2Key(t, id));
-
-  return c.json({ type: "file_deleted", id });
 });
 
 export default app;

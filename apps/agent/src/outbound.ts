@@ -1,5 +1,6 @@
 import type { Env } from "@open-managed-agents/shared";
 import { buildCfServices } from "@open-managed-agents/services";
+import type { OutboundSnapshot } from "@open-managed-agents/outbound-snapshots-store";
 
 /**
  * Outbound Worker — intercepts HTTP requests from the Sandbox container.
@@ -10,32 +11,9 @@ import { buildCfServices } from "@open-managed-agents/services";
  * Container-internal HTTP → Outbound Worker → credential injection → external service.
  *
  * The outbound worker only knows sessionId from container context — not tenantId.
- * SessionDO publishes a snapshot to the untenanted key `outbound:{sessionId}` at
- * /init time, so we read that here instead of reconstructing tenant-prefixed
- * `t:{tenantId}:cred:...` keys.
+ * SessionDO publishes a snapshot via services.outboundSnapshots.publish() at
+ * /init time, so we read it back through the same service here.
  */
-
-interface OutboundSnapshot {
-  tenant_id: string;
-  vault_ids: string[];
-  vault_credentials: Array<{
-    vault_id: string;
-    credentials: Array<{
-      id: string;
-      auth?: {
-        type: string;
-        mcp_server_url?: string;
-        token?: string;
-        access_token?: string;
-        refresh_token?: string;
-        token_endpoint?: string;
-        client_id?: string;
-        client_secret?: string;
-        expires_at?: string;
-      };
-    }>;
-  }>;
-}
 
 /**
  * Determine if a request to this host should be intercepted.
@@ -143,13 +121,7 @@ async function findCredentialForHost(
 }
 
 async function loadSnapshot(env: Env, sessionId: string): Promise<OutboundSnapshot | null> {
-  const data = await env.CONFIG_KV.get(`outbound:${sessionId}`);
-  if (!data) return null;
-  try {
-    return JSON.parse(data) as OutboundSnapshot;
-  } catch {
-    return null;
-  }
+  return buildCfServices(env).outboundSnapshots.get({ sessionId });
 }
 
 /**
@@ -205,9 +177,7 @@ async function tryRefreshToken(
     // refreshing the snapshot resets the lifetime, which is what we want:
     // an active session should keep its credentials live; an idle one
     // ages out within the same 24h window.
-    await env.CONFIG_KV.put(`outbound:${sessionId}`, JSON.stringify(snapshot), {
-      expirationTtl: 24 * 60 * 60,
-    });
+    await buildCfServices(env).outboundSnapshots.publish({ sessionId, snapshot });
 
     // Best-effort: also update the canonical D1 row so future sessions
     // inherit the refreshed token. The snapshot remains the source of truth

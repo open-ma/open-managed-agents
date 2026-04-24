@@ -1,16 +1,46 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, FileRecord, SessionResource, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
-import { generateSessionId, generateFileId, generateResourceId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
+import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
+import { generateFileId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
-import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import { buildCfServices } from "@open-managed-agents/services";
+import { toFileRecord } from "@open-managed-agents/files-store";
+import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
+import {
+  SessionArchivedError,
+  SessionMemoryStoreMaxExceededError,
+  SessionNotFoundError,
+  SessionResourceMaxExceededError,
+  SessionResourceNotFoundError,
+  type NewResourceInput,
+} from "@open-managed-agents/sessions-store";
 
 const app = new Hono<{
   Bindings: Env;
   Variables: { tenant_id: string; services: Services };
 }>();
+
+/**
+ * Map sessions-store domain errors → HTTP responses. Centralized so every
+ * route handler returns the same status codes for the same failure modes.
+ */
+function mapSessionError(c: Context, err: unknown): Response {
+  if (err instanceof SessionNotFoundError) return c.json({ error: "Session not found" }, 404);
+  if (err instanceof SessionResourceNotFoundError) return c.json({ error: "Resource not found" }, 404);
+  if (err instanceof SessionArchivedError) return c.json({ error: err.message }, 409);
+  if (err instanceof SessionResourceMaxExceededError) return c.json({ error: err.message }, 400);
+  if (err instanceof SessionMemoryStoreMaxExceededError) return c.json({ error: err.message }, 422);
+  throw err;
+}
+
+/** Strip server-internal fields from a session row before returning to API.
+ *  Legacy SessionMeta did not expose tenant_id; keep that contract. */
+function toApiSession<T extends { tenant_id?: string }>(row: T): Omit<T, "tenant_id"> {
+  const { tenant_id: _t, ...rest } = row;
+  return rest;
+}
 
 /**
  * Resolve the sandbox worker service binding for a given environment.
@@ -20,10 +50,10 @@ async function getSandboxBinding(
   environmentId: string,
   tenantId: string,
 ): Promise<{ binding: Fetcher | null; error?: string; status?: 404 | 500 | 503 }> {
-  const envData = await env.CONFIG_KV.get(kvKey(tenantId, "env", environmentId));
-  if (!envData) return { binding: null, error: "Environment not found", status: 404 };
+  const envRow = await buildCfServices(env).environments.get({ tenantId, environmentId });
+  if (!envRow) return { binding: null, error: "Environment not found", status: 404 };
 
-  const envConfig = JSON.parse(envData) as EnvironmentConfig;
+  const envConfig = toEnvironmentConfig(envRow);
 
   if (envConfig.status === "building") {
     return { binding: null, error: "Environment is still building", status: 503 };
@@ -115,6 +145,7 @@ function bytesToBase64(bytes: Uint8Array): string {
  */
 async function resolveFileIds(
   env: Env,
+  services: Services,
   tenantId: string,
   content: ContentBlock[],
 ): Promise<{ content: ContentBlock[]; mountFileIds: string[] }> {
@@ -129,14 +160,11 @@ async function resolveFileIds(
       block.source.file_id
     ) {
       const fileId = block.source.file_id;
-      const [metaJson, obj] = await Promise.all([
-        env.CONFIG_KV.get(kvKey(tenantId, "file", fileId)),
-        bucket.get(fileR2Key(tenantId, fileId)),
-      ]);
-      if (!metaJson || !obj) {
+      const meta = await services.files.get({ tenantId, fileId });
+      const obj = meta ? await bucket.get(meta.r2_key) : null;
+      if (!meta || !obj) {
         throw new Error(`file_id ${fileId} not found`);
       }
-      const meta = JSON.parse(metaJson) as FileRecord;
       const buf = await obj.arrayBuffer();
       const data = bytesToBase64(new Uint8Array(buf));
       out.push({
@@ -183,28 +211,31 @@ app.post("/", async (c) => {
     return c.json({ error: "agent and environment_id are required" }, 400);
   }
 
-  // Anthropic-aligned cap: max 8 memory_store resources per session.
+  // The 8-memory-store sub-cap is enforced inside sessions-store on
+  // create — but mirror the early 422 here so over-large payloads fail
+  // before snapshot fetches and credential refreshes.
   const memoryStoreCount = (body.resources ?? []).filter((r) => r.type === "memory_store").length;
   if (memoryStoreCount > 8) {
     return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
   }
 
   // Verify agent exists
-  const agentData = await c.env.CONFIG_KV.get(kvKey(t, "agent", body.agent));
-  if (!agentData) return c.json({ error: "Agent not found" }, 404);
+  const agentRow = await c.var.services.agents.get({ tenantId: t, agentId: body.agent });
+  if (!agentRow) return c.json({ error: "Agent not found" }, 404);
 
   // Resolve sandbox worker binding
   const { binding, error, status } = await getSandboxBinding(c.env, body.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
-  const sessionId = generateSessionId();
-
   // Pre-fetch snapshots so SessionDO doesn't have to read CONFIG_KV with a
   // tenant-prefixed key (which fails when sandbox-default's KV binding
   // differs from main's — e.g. shared sandbox + staging main).
-  const agentSnapshot = JSON.parse(agentData) as AgentConfig;
-  const envSnapshotData = await c.env.CONFIG_KV.get(kvKey(t, "env", body.environment_id));
-  const environmentSnapshot = envSnapshotData ? (JSON.parse(envSnapshotData) as EnvironmentConfig) : undefined;
+  const { tenant_id: _atid, ...agentSnapshot } = agentRow;
+  const envRow = await c.var.services.environments.get({
+    tenantId: t,
+    environmentId: body.environment_id,
+  });
+  const environmentSnapshot = envRow ? toEnvironmentConfig(envRow) : undefined;
   const vaultIds = body.vault_ids || [];
 
   // Pre-scan github_repository resources for binding fast-path. When a
@@ -243,14 +274,73 @@ app.post("/", async (c) => {
     body.agent,
     vaultIds,
   );
+
+  const vaultCredentials = await fetchVaultCredentials(c.var.services, t, vaultIds);
+
+  // Build the non-file initial resources (memory_store, github_repository,
+  // env_secret). File resources need the session id BEFORE we can create the
+  // scoped file row, so they're handled after the session row exists.
+  const nonFileInputs: NewResourceInput[] = [];
+  for (const res of body.resources ?? []) {
+    if (res.type === "memory_store" && res.memory_store_id) {
+      nonFileInputs.push({
+        type: "memory_store",
+        memory_store_id: res.memory_store_id,
+        mount_path: res.mount_path,
+        access: res.access === "read_only" ? "read_only" : "read_write",
+        prompt: typeof res.prompt === "string" ? res.prompt.slice(0, 4096) : undefined,
+      });
+    } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
+      const repoUrl = res.url || res.repo_url!;
+      nonFileInputs.push({
+        type: "github_repository",
+        url: repoUrl,
+        repo_url: repoUrl,
+        mount_path: res.mount_path || "/workspace",
+        checkout: res.checkout,
+      });
+    } else if (res.type === "env_secret" && res.name && res.value) {
+      nonFileInputs.push({
+        type: "env_secret",
+        name: res.name,
+      });
+    }
+  }
+
+  // Atomic create — session row + non-file resources in one D1 batch.
+  // sessions-store throws SessionResourceMaxExceededError /
+  // SessionMemoryStoreMaxExceededError if either cap is hit; route maps to
+  // 400/422 via mapSessionError.
+  let session;
+  let createdResources;
+  try {
+    const result = await c.var.services.sessions.create({
+      tenantId: t,
+      agentId: body.agent,
+      environmentId: body.environment_id,
+      title: body.title || "",
+      vaultIds,
+      agentSnapshot,
+      environmentSnapshot,
+      resources: nonFileInputs,
+    });
+    session = result.session;
+    createdResources = result.resources;
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
+  const sessionId = session.id;
+
+  // Build refresh warnings with the freshly-allocated sessionId.
   const refreshWarnings = refreshResultToInitEvents(refreshResult, {
     sessionId,
     tenantId: t,
   });
 
-  const vaultCredentials = await fetchVaultCredentials(c.var.services, t, vaultIds);
-
-  // Initialize SessionDO via sandbox worker
+  // Initialize SessionDO via sandbox worker. Resources land before the DO's
+  // first warmup reads `listResourcesBySession` — so any resource we add
+  // below (files) must be in place before the SessionDO actually mounts
+  // them; the DO does that lazily so this ordering is fine.
   await forwardToSandbox(
     binding,
     `/sessions/${sessionId}/init`,
@@ -270,117 +360,115 @@ app.post("/", async (c) => {
     }),
   );
 
-  const session: SessionMeta = {
-    id: sessionId,
-    agent_id: body.agent,
-    environment_id: body.environment_id,
-    title: body.title || "",
-    status: "idle",
-    vault_ids: body.vault_ids,
-    created_at: new Date().toISOString(),
-  };
-
-  // Store session with agent + environment snapshot (frozen at session start for replay/trajectory)
-  const sessionRecord = { ...session, agent_snapshot: agentSnapshot, environment_snapshot: environmentSnapshot };
-  await c.env.CONFIG_KV.put(kvKey(t, "session", sessionId), JSON.stringify(sessionRecord));
-
-  // Process resources if provided
-  const createdResources: SessionResource[] = [];
-  if (body.resources && Array.isArray(body.resources)) {
-    for (const res of body.resources) {
-      if (res.type === "file" && res.file_id) {
-        const fileData = await c.env.CONFIG_KV.get(kvKey(t, "file", res.file_id));
-        if (!fileData) continue;
-
-        const sourceFile = JSON.parse(fileData) as FileRecord;
-        const scopedFileId = generateFileId();
-        const scopedFile: FileRecord = {
-          ...sourceFile,
-          id: scopedFileId,
-          scope_id: sessionId,
-          created_at: new Date().toISOString(),
-        };
-        await c.env.CONFIG_KV.put(kvKey(t, "file", scopedFileId), JSON.stringify(scopedFile));
-
-        // Copy R2 object to scoped key so the resource is independent of the
-        // source file's lifecycle. Best-effort: if the source object isn't in
-        // R2 (e.g. legacy file with no bytes), still create the metadata.
-        if (c.env.FILES_BUCKET) {
-          const obj = await c.env.FILES_BUCKET.get(fileR2Key(t, res.file_id));
-          if (obj) {
-            await c.env.FILES_BUCKET.put(
-              fileR2Key(t, scopedFileId),
-              obj.body,
-              { httpMetadata: { contentType: sourceFile.media_type } },
-            );
-          }
+  // Persist secret KV entries for the env_secret + github_repository inputs
+  // we created above. These continue to live in CONFIG_KV — sessions-store
+  // intentionally records resource METADATA only.
+  for (let i = 0; i < (body.resources?.length ?? 0); i++) {
+    const res = body.resources![i];
+    if (res.type === "env_secret" && res.name && res.value) {
+      // Find the matching createdResource by metadata equality (env_secret
+      // has no meaningful natural key beyond name; the order is preserved
+      // because we built nonFileInputs in source order and sessions-store
+      // returns the same order).
+      const created = createdResources.find(
+        (r) => r.type === "env_secret" && r.resource.type === "env_secret" && r.resource.name === res.name,
+      );
+      if (created) {
+        await c.var.services.sessionSecrets.put({
+          tenantId: t,
+          sessionId,
+          resourceId: created.id,
+          value: res.value,
+        });
+      }
+    } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
+      const repoUrl = res.url || res.repo_url!;
+      const token = res.authorization_token ?? fastPathTokens.get(repoUrl) ?? null;
+      if (token) {
+        const created = createdResources.find(
+          (r) => r.type === "github_repository" && r.resource.type === "github_repository" && r.resource.url === repoUrl,
+        );
+        if (created) {
+          await c.var.services.sessionSecrets.put({
+            tenantId: t,
+            sessionId,
+            resourceId: created.id,
+            value: token,
+          });
         }
-
-        const resourceId = generateResourceId();
-        const resource: SessionResource = {
-          id: resourceId,
-          session_id: sessionId,
-          type: "file",
-          file_id: scopedFileId,
-          mount_path: res.mount_path,
-          created_at: new Date().toISOString(),
-        };
-        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
-        createdResources.push(resource);
-      } else if (res.type === "memory_store" && res.memory_store_id) {
-        const resourceId = generateResourceId();
-        const resource: SessionResource = {
-          id: resourceId,
-          session_id: sessionId,
-          type: "memory_store",
-          memory_store_id: res.memory_store_id,
-          mount_path: res.mount_path,
-          access: res.access === "read_only" ? "read_only" : "read_write",
-          prompt: typeof res.prompt === "string" ? res.prompt.slice(0, 4096) : undefined,
-          created_at: new Date().toISOString(),
-        };
-        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
-        createdResources.push(resource);
-      } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
-        const resourceId = generateResourceId();
-        const repoUrl = res.url || res.repo_url!;
-        const resource: SessionResource = {
-          id: resourceId,
-          session_id: sessionId,
-          type: "github_repository",
-          url: repoUrl,
-          repo_url: repoUrl,
-          mount_path: res.mount_path || "/workspace",
-          checkout: res.checkout,
-          created_at: new Date().toISOString(),
-        };
-        // Token resolution order: explicit authorization_token (PAT) →
-        // pre-resolved binding fast-path (set during the pre-scan above).
-        const token = res.authorization_token ?? fastPathTokens.get(repoUrl) ?? null;
-        if (token) {
-          await c.env.CONFIG_KV.put(kvKey(t, "secret", sessionId, resourceId), token);
-        }
-        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
-        createdResources.push(resource);
-      } else if (res.type === "env_secret" && res.name && res.value) {
-        const resourceId = generateResourceId();
-        const resource: SessionResource = {
-          id: resourceId,
-          session_id: sessionId,
-          type: "env_secret",
-          name: res.name,
-          created_at: new Date().toISOString(),
-        };
-        await c.env.CONFIG_KV.put(kvKey(t, "secret", sessionId, resourceId), res.value);
-        await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
-        createdResources.push(resource);
       }
     }
   }
 
-  const response: Record<string, unknown> = { ...session };
+  // File resources require sessionId to scope the new R2 + file_metadata
+  // row — handle these after the session exists. addResource runs the
+  // per-session cap check each time; we already pre-validated 8-memory-store
+  // so the only failure mode here is hitting the 100-resource ceiling
+  // (extremely unlikely at create time).
+  for (const res of body.resources ?? []) {
+    if (res.type === "file" && res.file_id) {
+      const sourceFile = await c.var.services.files.get({
+        tenantId: t,
+        fileId: res.file_id,
+      });
+      if (!sourceFile) continue;
+
+      const scopedFileId = generateFileId();
+      const scopedR2Key = fileR2Key(t, scopedFileId);
+
+      // R2 copy first — best-effort (legacy files may have no R2 bytes).
+      if (c.env.FILES_BUCKET) {
+        const obj = await c.env.FILES_BUCKET.get(sourceFile.r2_key);
+        if (obj) {
+          await c.env.FILES_BUCKET.put(
+            scopedR2Key,
+            obj.body,
+            { httpMetadata: { contentType: sourceFile.media_type } },
+          );
+        }
+      }
+
+      await c.var.services.files.create({
+        id: scopedFileId,
+        tenantId: t,
+        sessionId,
+        filename: sourceFile.filename,
+        mediaType: sourceFile.media_type,
+        sizeBytes: sourceFile.size_bytes,
+        r2Key: scopedR2Key,
+        downloadable: sourceFile.downloadable,
+      });
+
+      try {
+        const added = await c.var.services.sessions.addResource({
+          tenantId: t,
+          sessionId,
+          resource: {
+            type: "file",
+            file_id: scopedFileId,
+            mount_path: res.mount_path,
+          },
+        });
+        createdResources.push(added);
+      } catch (err) {
+        return mapSessionError(c, err);
+      }
+    }
+  }
+
+  // Surface a Session-shaped response (legacy SessionMeta + frozen snapshots).
+  const responseSession: SessionMeta = {
+    id: session.id,
+    agent_id: session.agent_id,
+    environment_id: session.environment_id,
+    title: session.title,
+    status: session.status,
+    vault_ids: session.vault_ids ?? undefined,
+    created_at: session.created_at,
+  };
+  const response: Record<string, unknown> = { ...responseSession };
   if (createdResources.length > 0) {
-    response.resources = createdResources;
+    response.resources = createdResources.map((r) => r.resource);
   }
 
   return c.json(response, 201);
@@ -396,43 +484,28 @@ app.get("/", async (c) => {
   if (isNaN(limit) || limit < 1) limit = 100;
   if (limit > 1000) limit = 1000;
 
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(c.get("tenant_id"), "session"));
-  let sessions = (
-    await Promise.all(
-      list.map(async (k) => {
-        const data = await c.env.CONFIG_KV.get(k.name);
-        return data ? (JSON.parse(data) as SessionMeta) : null;
-      })
-    )
-  ).filter((s): s is SessionMeta => s !== null);
-
-  if (!includeArchived) {
-    sessions = sessions.filter((s) => !s.archived_at);
-  }
-
-  if (agentIdFilter) {
-    sessions = sessions.filter((s) => s.agent_id === agentIdFilter);
-  }
-
-  sessions.sort((a, b) => {
-    const cmp = a.created_at.localeCompare(b.created_at);
-    return order === "asc" ? cmp : -cmp;
+  const sessions = await c.var.services.sessions.list({
+    tenantId: c.get("tenant_id"),
+    agentId: agentIdFilter ?? undefined,
+    includeArchived,
+    order,
+    limit,
   });
-
-  return c.json({ data: sessions.slice(0, limit) });
+  return c.json({ data: sessions.map(toApiSession) });
 });
 
 // GET /v1/sessions/:id — get session (status from sandbox worker)
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
-
-  const session = JSON.parse(data) as SessionMeta & { agent_snapshot?: AgentConfig };
+  const session = await c.var.services.sessions.get({
+    tenantId: c.get("tenant_id"),
+    sessionId: id,
+  });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
   // Get live status, usage, and outcome evaluations from sandbox worker
   const { binding } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
-  const response: Record<string, unknown> = { ...session };
+  const response: Record<string, unknown> = { ...toApiSession(session) };
 
   if (binding) {
     try {
@@ -442,7 +515,7 @@ app.get("/:id", async (c) => {
         usage: { input_tokens: number; output_tokens: number };
         outcome_evaluations: Array<{ result: string; iteration: number; feedback?: string }>;
       };
-      session.status = fullStatus.status as SessionMeta["status"];
+      response.status = fullStatus.status;
       response.usage = fullStatus.usage;
       if (fullStatus.outcome_evaluations?.length) {
         response.outcome_evaluations = fullStatus.outcome_evaluations;
@@ -461,58 +534,45 @@ app.get("/:id", async (c) => {
 
 // POST /v1/sessions/:id/archive
 app.post("/:id/archive", async (c) => {
-  const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
-
-  const session = JSON.parse(data) as SessionMeta;
-  session.archived_at = new Date().toISOString();
-  session.updated_at = session.archived_at;
-
-  await c.env.CONFIG_KV.put(kvKey(c.get("tenant_id"), "session", id), JSON.stringify(session));
-  return c.json(session);
+  try {
+    const session = await c.var.services.sessions.archive({
+      tenantId: c.get("tenant_id"),
+      sessionId: c.req.param("id"),
+    });
+    return c.json(toApiSession(session));
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
 });
 
 // POST /v1/sessions/:id — update session
 app.post("/:id", async (c) => {
-  const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
-
-  const session = JSON.parse(data) as SessionMeta;
   const body = await c.req.json<{
     title?: string;
     metadata?: Record<string, unknown>;
   }>();
-
-  if (body.title !== undefined) session.title = body.title;
-  if (body.metadata !== undefined) {
-    const existing = session.metadata || {};
-    for (const [key, value] of Object.entries(body.metadata)) {
-      if (value === null) {
-        delete existing[key];
-      } else {
-        existing[key] = value;
-      }
-    }
-    session.metadata = existing;
+  try {
+    const updated = await c.var.services.sessions.update({
+      tenantId: c.get("tenant_id"),
+      sessionId: c.req.param("id"),
+      title: body.title,
+      metadata: body.metadata,
+    });
+    return c.json(toApiSession(updated));
+  } catch (err) {
+    return mapSessionError(c, err);
   }
-  session.updated_at = new Date().toISOString();
-
-  await c.env.CONFIG_KV.put(kvKey(c.get("tenant_id"), "session", id), JSON.stringify(session));
-  return c.json(session);
 });
 
 // DELETE /v1/sessions/:id
 app.delete("/:id", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
-
-  const session = JSON.parse(data) as SessionMeta;
+  const t = c.get("tenant_id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
   // Check if session is running — cannot delete while active
-  const { binding } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
+  const { binding } = await getSandboxBinding(c.env, session.environment_id, t);
   if (binding) {
     try {
       const statusRes = await forwardToSandbox(binding, `/sessions/${id}/status`, c.req.raw, "GET");
@@ -524,7 +584,42 @@ app.delete("/:id", async (c) => {
     await forwardToSandbox(binding, `/sessions/${id}/destroy`, c.req.raw, "DELETE").catch(() => {});
   }
 
-  await c.env.CONFIG_KV.delete(kvKey(c.get("tenant_id"), "session", id));
+  // Cascade-delete the session row + every session_resources row in one
+  // batch. Caller is still responsible for the per-session secret KV
+  // entries (env_secret.value, github_repository.token) and for files
+  // uploaded under this session — both are cleaned up below.
+  try {
+    await c.var.services.sessions.delete({ tenantId: t, sessionId: id });
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
+
+  // Cascade-delete file metadata (files-store) and remove the corresponding
+  // R2 blobs. Best-effort: a partial failure leaks at most a few bytes of
+  // R2 storage, not user-visible.
+  try {
+    const orphanedFiles = await c.var.services.files.deleteBySession({
+      sessionId: id,
+    });
+    if (c.env.FILES_BUCKET && orphanedFiles.length) {
+      await Promise.all(
+        orphanedFiles.map((f) =>
+          c.env.FILES_BUCKET!.delete(f.r2_key).catch(() => undefined),
+        ),
+      );
+    }
+  } catch {
+    // best-effort; metadata cleanup never blocks the session delete itself
+  }
+
+  // Best-effort secret cleanup — cascade all per-resource secrets for this
+  // session. The route doesn't track resourceIds at delete time, so the
+  // store walks its keyspace internally.
+  await c.var.services.sessionSecrets.deleteAllForSession({
+    tenantId: t,
+    sessionId: id,
+  });
+
   return c.json({ type: "session_deleted", id });
 });
 
@@ -532,10 +627,8 @@ app.delete("/:id", async (c) => {
 app.post("/:id/events", async (c) => {
   const id = c.req.param("id");
   const t = c.get("tenant_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
-
-  const session = JSON.parse(data) as SessionMeta;
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
   // Archived sessions are read-only
   if (session.archived_at) {
@@ -567,7 +660,7 @@ app.post("/:id/events", async (c) => {
       const e = event as { content?: ContentBlock[] };
       if (Array.isArray(e.content)) {
         try {
-          const { content: resolved, mountFileIds } = await resolveFileIds(c.env, t, e.content);
+          const { content: resolved, mountFileIds } = await resolveFileIds(c.env, c.var.services, t, e.content);
           outgoing = {
             ...event,
             content: resolved,
@@ -602,13 +695,12 @@ app.post("/:id/events", async (c) => {
 app.post("/:id/files", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const sessionData = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
-  if (!sessionData) return c.json({ error: "Session not found" }, 404);
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
   const bucket = c.env.FILES_BUCKET;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
-  const session = JSON.parse(sessionData) as SessionMeta;
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
@@ -645,31 +737,29 @@ app.post("/:id/files", async (c) => {
   const downloadable = body.downloadable === undefined ? true : body.downloadable === true;
 
   const newFileId = generateFileId();
-  await bucket.put(fileR2Key(t, newFileId), buf, { httpMetadata: { contentType: mediaType } });
+  const r2Key = fileR2Key(t, newFileId);
+  await bucket.put(r2Key, buf, { httpMetadata: { contentType: mediaType } });
 
-  const record: FileRecord = {
+  const row = await c.var.services.files.create({
     id: newFileId,
-    type: "file" as const,
+    tenantId: t,
+    sessionId: id,
     filename,
-    media_type: mediaType,
-    size_bytes: buf.byteLength,
-    scope_id: id,
+    mediaType,
+    sizeBytes: buf.byteLength,
+    r2Key,
     downloadable,
-    created_at: new Date().toISOString(),
-  };
-  await c.env.CONFIG_KV.put(kvKey(t, "file", newFileId), JSON.stringify(record));
-  await c.env.CONFIG_KV.put(kvKey(t, "filebyscope", id, newFileId), "1");
+  });
 
-  return c.json(record, 201);
+  return c.json(toFileRecord(row), 201);
 });
 
 // SSE stream
 async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>, id: string) {
   const t = c.get("tenant_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const session = JSON.parse(data) as SessionMeta;
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
@@ -720,10 +810,9 @@ async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_i
 // JSON events
 async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>, id: string) {
   const t = c.get("tenant_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const session = JSON.parse(data) as SessionMeta;
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
@@ -745,10 +834,27 @@ app.get("/:id/events", async (c) => {
 app.get("/:id/trajectory", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
-  const sessionData = await c.env.CONFIG_KV.get(kvKey(t, "session", id));
-  if (!sessionData) return c.json({ error: "Session not found" }, 404);
+  const sessionRow = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!sessionRow) return c.json({ error: "Session not found" }, 404);
 
-  const session = JSON.parse(sessionData) as SessionRecord;
+  // Build a SessionRecord-shaped object for buildTrajectory: it expects the
+  // same shape the legacy KV record had (id + agent_id + environment_id +
+  // agent_snapshot + environment_snapshot + title + status + timestamps).
+  const session = {
+    id: sessionRow.id,
+    agent_id: sessionRow.agent_id,
+    environment_id: sessionRow.environment_id,
+    title: sessionRow.title,
+    status: sessionRow.status,
+    created_at: sessionRow.created_at,
+    updated_at: sessionRow.updated_at ?? undefined,
+    archived_at: sessionRow.archived_at ?? undefined,
+    vault_ids: sessionRow.vault_ids ?? undefined,
+    metadata: sessionRow.metadata ?? undefined,
+    agent_snapshot: sessionRow.agent_snapshot ?? undefined,
+    environment_snapshot: sessionRow.environment_snapshot ?? undefined,
+  } as SessionRecord;
+
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
   if (!binding) return c.json({ error }, status ?? 500);
 
@@ -781,8 +887,11 @@ app.get("/:id/trajectory", async (c) => {
   }
 
   async function fetchEnvironmentConfig(): Promise<EnvironmentConfig | null> {
-    const data = await c.env.CONFIG_KV.get(kvKey(t, "env", session.environment_id));
-    return data ? (JSON.parse(data) as EnvironmentConfig) : null;
+    const row = await c.var.services.environments.get({
+      tenantId: t,
+      environmentId: session.environment_id,
+    });
+    return row ? toEnvironmentConfig(row) : null;
   }
 
   try {
@@ -810,10 +919,12 @@ app.get("/:id/events/stream", async (c) => handleSSEStream(c, c.req.param("id"))
 // GET /v1/sessions/:id/threads — list threads
 app.get("/:id/threads", async (c) => {
   const id = c.req.param("id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
+  const session = await c.var.services.sessions.get({
+    tenantId: c.get("tenant_id"),
+    sessionId: id,
+  });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const session = JSON.parse(data) as SessionMeta;
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   if (!binding) return c.json({ error }, status ?? 500);
 
@@ -825,10 +936,12 @@ app.get("/:id/threads", async (c) => {
 app.get("/:id/threads/:thread_id/events", async (c) => {
   const id = c.req.param("id");
   const threadId = c.req.param("thread_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", id));
-  if (!data) return c.json({ error: "Session not found" }, 404);
+  const session = await c.var.services.sessions.get({
+    tenantId: c.get("tenant_id"),
+    sessionId: id,
+  });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const session = JSON.parse(data) as SessionMeta;
   const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
   if (!binding) return c.json({ error }, status ?? 500);
 
@@ -848,8 +961,7 @@ app.get("/:id/threads/:thread_id/stream", async (c) => {
 
 app.post("/:id/resources", async (c) => {
   const sessionId = c.req.param("id");
-  const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
-  if (!sessionData) return c.json({ error: "Session not found" }, 404);
+  const t = c.get("tenant_id");
 
   const body = await c.req.json<{
     type: "file" | "memory_store";
@@ -864,89 +976,83 @@ app.post("/:id/resources", async (c) => {
     return c.json({ error: "type is required" }, 400);
   }
 
-  const t = c.get("tenant_id");
-  const existingResources = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "sesrsc", sessionId));
-  if (existingResources.length >= 100) {
-    return c.json({ error: "Maximum 100 resources per session" }, 400);
-  }
-
+  // Per-resource pre-checks the service can't enforce (file existence is a
+  // cross-store concern; memory_store sub-cap stays inside sessions-store).
   if (body.type === "file") {
     if (!body.file_id) {
       return c.json({ error: "file_id is required for file resources" }, 400);
     }
-    const fileData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "file", body.file_id));
-    if (!fileData) return c.json({ error: "File not found" }, 404);
+    const file = await c.var.services.files.get({
+      tenantId: t,
+      fileId: body.file_id,
+    });
+    if (!file) return c.json({ error: "File not found" }, 404);
   }
 
-  if (body.type === "memory_store") {
-    if (!body.memory_store_id) {
-      return c.json({ error: "memory_store_id is required for memory_store resources" }, 400);
-    }
-    // Anthropic-aligned cap: max 8 memory_store resources per session.
-    let memoryStoreCount = 0;
-    for (const k of existingResources) {
-      const data = await c.env.CONFIG_KV.get(k.name);
-      if (data && (JSON.parse(data) as SessionResource).type === "memory_store") {
-        memoryStoreCount++;
-      }
-    }
-    if (memoryStoreCount >= 8) {
-      return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
-    }
+  if (body.type === "memory_store" && !body.memory_store_id) {
+    return c.json({ error: "memory_store_id is required for memory_store resources" }, 400);
   }
 
-  const resourceId = generateResourceId();
-  const resource: SessionResource = {
-    id: resourceId,
-    session_id: sessionId,
-    type: body.type,
-    file_id: body.file_id,
-    memory_store_id: body.memory_store_id,
-    mount_path: body.mount_path,
-    created_at: new Date().toISOString(),
-  };
-
-  if (body.type === "memory_store") {
-    resource.access = body.access === "read_only" ? "read_only" : "read_write";
-    if (typeof body.prompt === "string") {
-      resource.prompt = body.prompt.slice(0, 4096);
-    }
+  try {
+    const added = await c.var.services.sessions.addResource({
+      tenantId: t,
+      sessionId,
+      resource: {
+        type: body.type,
+        file_id: body.file_id,
+        memory_store_id: body.memory_store_id,
+        mount_path: body.mount_path,
+        access: body.type === "memory_store"
+          ? (body.access === "read_only" ? "read_only" : "read_write")
+          : undefined,
+        prompt: body.type === "memory_store" && typeof body.prompt === "string"
+          ? body.prompt.slice(0, 4096)
+          : undefined,
+      },
+    });
+    return c.json(added.resource, 201);
+  } catch (err) {
+    return mapSessionError(c, err);
   }
-
-  await c.env.CONFIG_KV.put(kvKey(t, "sesrsc", sessionId, resourceId), JSON.stringify(resource));
-  return c.json(resource, 201);
 });
 
 app.get("/:id/resources", async (c) => {
   const sessionId = c.req.param("id");
-  const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
-  if (!sessionData) return c.json({ error: "Session not found" }, 404);
-
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(c.get("tenant_id"), "sesrsc", sessionId));
-  const resources = (
-    await Promise.all(
-      list.map(async (k) => {
-        const data = await c.env.CONFIG_KV.get(k.name);
-        return data ? (JSON.parse(data) as SessionResource) : null;
-      })
-    )
-  ).filter((r): r is SessionResource => r !== null);
-
-  return c.json({ data: resources });
+  try {
+    const resources = await c.var.services.sessions.listResources({
+      tenantId: c.get("tenant_id"),
+      sessionId,
+    });
+    return c.json({ data: resources.map((r) => r.resource) });
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
 });
 
 app.delete("/:id/resources/:resource_id", async (c) => {
   const sessionId = c.req.param("id");
   const resourceId = c.req.param("resource_id");
-
-  const sessionData = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "session", sessionId));
-  if (!sessionData) return c.json({ error: "Session not found" }, 404);
-
   const t = c.get("tenant_id");
-  const resourceData = await c.env.CONFIG_KV.get(kvKey(t, "sesrsc", sessionId, resourceId));
-  if (!resourceData) return c.json({ error: "Resource not found" }, 404);
 
-  await c.env.CONFIG_KV.delete(kvKey(t, "sesrsc", sessionId, resourceId));
+  try {
+    await c.var.services.sessions.deleteResource({
+      tenantId: t,
+      sessionId,
+      resourceId,
+    });
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
+
+  // Best-effort cleanup of the corresponding secret entry (if any).
+  // The route doesn't know which resource type this was without re-fetching;
+  // a stray delete on a non-existent key is a no-op so this is safe.
+  await c.var.services.sessionSecrets.deleteOne({
+    tenantId: t,
+    sessionId,
+    resourceId,
+  });
+
   return c.json({ type: "resource_deleted", id: resourceId });
 });
 
