@@ -29,6 +29,7 @@ import { D1InstallationRepo } from "./d1/installation-repo";
 import { D1IssueSessionRepo } from "./d1/issue-session-repo";
 import { D1PublicationRepo } from "./d1/publication-repo";
 import { D1SetupLinkRepo } from "./d1/setup-link-repo";
+import { D1SlackSessionScopeRepo } from "./d1/slack/session-scope-repo";
 import { D1TenantResolver } from "./d1/tenant-resolver";
 import { D1WebhookEventStore } from "./d1/webhook-event-store";
 import { ServiceBindingSessionCreator } from "./service-binding-session-creator";
@@ -80,6 +81,10 @@ export function buildCfRepos(env: CfReposEnv) {
   const issueSessions = new D1IssueSessionRepo(env.db);
   const authoredComments = new D1AuthoredCommentRepo(env.db);
   const setupLinks = new D1SetupLinkRepo(env.db, ids);
+  // Slack-specific repo also satisfies the Container's `sessionScopes` slot —
+  // Linear/GitHub never call into it (they use issueSessions instead). Still
+  // required by the Container interface.
+  const sessionScopes = new D1SlackSessionScopeRepo(env.db);
 
   return {
     clock,
@@ -95,6 +100,7 @@ export function buildCfRepos(env: CfReposEnv) {
     githubApps,
     webhookEvents,
     issueSessions,
+    sessionScopes,
     authoredComments,
     setupLinks,
   };

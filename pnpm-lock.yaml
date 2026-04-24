@@ -202,6 +202,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/slack':
+        specifier: workspace:*
+        version: link:../../packages/slack
       '@open-managed-agents/tenant-db':
         specifier: workspace:*
         version: link:../../packages/tenant-db
@@ -351,6 +354,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/slack':
+        specifier: workspace:*
+        version: link:../slack
 
   packages/integrations-core:
     dependencies:
@@ -456,6 +462,15 @@ importers:
       nanoid:
         specifier: ^5.1.0
         version: 5.1.7
+
+  packages/slack:
+    dependencies:
+      '@open-managed-agents/integrations-core':
+        specifier: workspace:*
+        version: link:../integrations-core
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/tenant-db: {}
 

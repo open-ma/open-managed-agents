@@ -697,6 +697,198 @@ const commands: Cmd[] = [
     },
   },
 
+  // Slack integration — mirrors Linear's surface (A1 per-publication App).
+  {
+    group: "Slack", match: ["slack", "list"],
+    usage: "oma slack list", desc: "List connected Slack workspaces",
+    http: "GET    /v1/integrations/slack/installations",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; workspace_name: string; install_kind: string; created_at: number }> }>(config, "/v1/integrations/slack/installations");
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      if (!data.length) { console.log("No Slack workspaces connected. Publish an agent with: oma slack publish <agent-id> --env <env-id>"); return; }
+      table([["WORKSPACE", "INSTALLATION ID", "KIND", "CREATED"], ...data.map(i => [i.workspace_name, i.id, i.install_kind, new Date(i.created_at).toLocaleDateString()])]);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "pubs"], needsArg: true,
+    usage: "oma slack pubs <installation-id>", desc: "List agents published to a workspace",
+    http: "GET    /v1/integrations/slack/installations/:id/publications",
+    async run(config, args) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; agent_id: string; persona: { name: string }; status: string; capabilities: string[] }> }>(config, `/v1/integrations/slack/installations/${args[0]}/publications`);
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      if (!data.length) { console.log("No publications. Publish with: oma slack publish <agent-id> --env <env-id>"); return; }
+      table([["PERSONA", "PUBLICATION ID", "AGENT", "STATUS", "CAPS"], ...data.map(p => [p.persona.name, p.id, p.agent_id, p.status, capsPreview(p.capabilities)])]);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "get"], needsArg: true,
+    usage: "oma slack get <publication-id>", desc: "Show one publication",
+    http: "GET    /v1/integrations/slack/publications/:id",
+    async run(config, args) {
+      const p = await apiFetch<any>(config, `/v1/integrations/slack/publications/${args[0]}`);
+      if (config.json) { console.log(JSON.stringify(p, null, 2)); return; }
+      console.log(`Persona:        ${p.persona.name}\nID:             ${p.id}\nAgent:          ${p.agent_id}\nEnvironment:    ${p.environment_id}\nInstallation:   ${p.installation_id}\nMode:           ${p.mode}\nStatus:         ${p.status}\nGranularity:    ${p.session_granularity}\nCapabilities:   ${p.capabilities.join(", ")}`);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "publish"], needsArg: true,
+    usage: "oma slack publish <agent-id> --env <env-id> [--persona <name>] [--avatar <url>]", desc: "Step 1: register agent → returns Slack App config",
+    http: "POST   /v1/integrations/slack/start-a1 {agentId, environmentId, personaName, personaAvatarUrl?, returnUrl}",
+    async run(config, args) {
+      const agentId = args[0];
+      const envId = flag(args, "--env");
+      const persona = flag(args, "--persona") || "";
+      const avatar = flag(args, "--avatar") || null;
+      if (!envId) { console.error("Usage: oma slack publish <agent-id> --env <env-id> [--persona <name>] [--avatar <url>]"); process.exit(1); }
+      let personaName = persona;
+      if (!personaName) {
+        const agent = await apiFetch<{ name: string }>(config, `/v1/agents/${agentId}`).catch(() => null);
+        personaName = agent?.name || agentId;
+      }
+      const r = await apiFetch<{ formToken: string; suggestedAppName: string; callbackUrl: string; webhookUrl: string; manifestLaunchUrl?: string | null }>(
+        config,
+        "/v1/integrations/slack/start-a1",
+        { method: "POST", body: JSON.stringify({ agentId, environmentId: envId, personaName, personaAvatarUrl: avatar, returnUrl: `${config.baseUrl}/integrations/slack` }) },
+      );
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      if (r.manifestLaunchUrl) {
+        console.log(`\nStep 1 complete. One-click setup — open this URL to have Slack create the App for you:\n`);
+        console.log(`  ${r.manifestLaunchUrl}\n`);
+        console.log(`Slack will pre-fill name, scopes, events, and redirect URL from a manifest.`);
+        console.log(`Confirm Create on Slack, then come back and paste the secrets it shows you.\n`);
+        console.log(`Or set up manually:`);
+      } else {
+        console.log(`\nStep 1 complete. Now create a Slack App (https://api.slack.com/apps → Create New App → From scratch):\n`);
+      }
+      console.log(`  App name:             ${r.suggestedAppName}`);
+      console.log(`  Redirect URL:         ${r.callbackUrl}`);
+      console.log(`  Events Request URL:   ${r.webhookUrl}`);
+      console.log(`\nIn the App settings:`);
+      console.log(`  • OAuth & Permissions → paste Redirect URL`);
+      console.log(`  • Event Subscriptions → paste Events Request URL, wait for green "Verified" check`);
+      console.log(`  • Subscribe to bot events: app_mention, message.channels, message.im,`);
+      console.log(`    message.groups, message.mpim, tokens_revoked, app_uninstalled`);
+      // Slack will reject any non-HTTPS or non-publicly-reachable URL when verifying.
+      if (!isPubliclyReachable(r.callbackUrl) || !r.callbackUrl.startsWith("https://")) {
+        console.log(`\n⚠  Slack requires HTTPS on a publicly-reachable host for Redirect / Events URLs.`);
+        console.log(`The URLs above point at a local / non-HTTPS origin — Slack's Verify button will fail.`);
+        console.log(`Fix: deploy the integrations worker (or run a tunnel like cloudflared/ngrok) and set`);
+        console.log(`GATEWAY_ORIGIN to that public HTTPS host before publishing.`);
+      }
+      console.log(`\nStep 2 — submit the credentials Slack gives you (Basic Information page):\n`);
+      console.log(`  oma slack submit <FORM_TOKEN> \\\n    --client-id <CLIENT_ID> --client-secret <CLIENT_SECRET> --signing-secret <SIGNING_SECRET>\n`);
+      console.log(`The Signing Secret is on the same Basic Information page; Slack uses it to`);
+      console.log(`sign every webhook event.\n`);
+      console.log(`Form token (expires ~60 min):\n  ${r.formToken}\n`);
+      console.log(`Or, to send the Slack App registration to a workspace admin instead:`);
+      console.log(`  oma slack handoff ${r.formToken}`);
+      console.log(`\nFor scripts, re-run with --json to get the raw response.`);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "submit"], needsArg: true,
+    usage: "oma slack submit <form-token> --client-id <id> --client-secret <secret> --signing-secret <secret>", desc: "Step 2: validate creds → returns OAuth install URL",
+    http: "POST   /v1/integrations/slack/credentials {formToken, clientId, clientSecret, signingSecret}",
+    async run(config, args) {
+      const formToken = args[0];
+      const clientId = flag(args, "--client-id");
+      const clientSecret = flag(args, "--client-secret");
+      const signingSecret = flag(args, "--signing-secret");
+      if (!clientId || !clientSecret || !signingSecret) {
+        console.error(
+          "Usage: oma slack submit <form-token> --client-id <id> --client-secret <secret> --signing-secret <secret>\n" +
+          "  signing-secret is the 'Signing Secret' on the Slack App's Basic Information page.",
+        );
+        process.exit(1);
+      }
+      const r = await apiFetch<{ url: string; appId: string; callbackUrl: string; webhookUrl: string }>(
+        config,
+        "/v1/integrations/slack/credentials",
+        { method: "POST", body: JSON.stringify({ formToken, clientId, clientSecret, signingSecret }) },
+      ).catch((err: Error) => {
+        if (/form_token_invalid|JwtSigner\.verify/i.test(err.message)) {
+          console.error(`Form token rejected. Re-run \`oma slack publish <agent-id> --env <env-id>\` to mint a fresh token.`);
+          process.exit(1);
+        }
+        throw err;
+      });
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`\nStep 2 complete. Open this URL in a browser to authorize the install in Slack:\n`);
+      console.log(`  ${r.url}\n`);
+      console.log(`After approval Slack redirects to the callback; the publication then transitions to 'live'.`);
+      console.log(`Verify with: oma slack list && oma slack pubs <installation-id>`);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "handoff"], needsArg: true,
+    usage: "oma slack handoff <form-token>", desc: "Step 2 alt: 7-day shareable URL for an admin",
+    http: "POST   /v1/integrations/slack/handoff-link {formToken}",
+    async run(config, args) {
+      const r = await apiFetch<{ url: string; expiresInDays: number }>(
+        config,
+        "/v1/integrations/slack/handoff-link",
+        { method: "POST", body: JSON.stringify({ formToken: args[0] }) },
+      ).catch((err: Error) => {
+        if (/form_token_invalid|JwtSigner\.verify/i.test(err.message)) {
+          console.error(`Form token rejected. Re-run \`oma slack publish <agent-id> --env <env-id>\` to mint a fresh token.`);
+          process.exit(1);
+        }
+        throw err;
+      });
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`\nSend this URL to your Slack workspace admin:\n  ${r.url}\nExpires in ${r.expiresInDays} days.`);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "update"], needsArg: true,
+    usage: "oma slack update <publication-id> [--persona <name>] [--avatar <url>] [--caps <a,b,c>]", desc: "Update persona / capabilities of a publication",
+    http: "PATCH  /v1/integrations/slack/publications/:id {persona?, capabilities?}",
+    async run(config, args) {
+      const id = args[0];
+      const personaName = flag(args, "--persona");
+      const avatarRaw = flag(args, "--avatar");
+      const capsRaw = flag(args, "--caps");
+      const patch: Record<string, unknown> = {};
+      if (personaName !== undefined || avatarRaw !== undefined) {
+        patch.persona = {
+          ...(personaName !== undefined ? { name: personaName } : {}),
+          ...(avatarRaw !== undefined ? { avatarUrl: avatarRaw === "" ? null : avatarRaw } : {}),
+        };
+      }
+      if (capsRaw !== undefined) {
+        patch.capabilities = capsRaw.split(",").map((s) => s.trim()).filter(Boolean);
+      }
+      if (!Object.keys(patch).length) {
+        console.error("Nothing to update. Pass at least --persona, --avatar, or --caps.");
+        process.exit(1);
+      }
+      const updated = await apiFetch<any>(config, `/v1/integrations/slack/publications/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify(patch),
+      });
+      if (config.json) { console.log(JSON.stringify(updated, null, 2)); return; }
+      console.log(`Updated: ${updated.persona.name} (${updated.id}) — caps: ${updated.capabilities.length}`);
+    },
+  },
+  {
+    group: "Slack", match: ["slack", "unpublish"], needsArg: true,
+    usage: "oma slack unpublish <publication-id>", desc: "Mark a publication unpublished",
+    http: "DELETE /v1/integrations/slack/publications/:id",
+    async run(config, args) {
+      try {
+        await apiFetch(config, `/v1/integrations/slack/publications/${args[0]}`, { method: "DELETE" });
+      } catch (err: any) {
+        if (/^404 /.test(err.message)) {
+          console.error(`No publication with id ${args[0]}.`);
+          console.error(`Find valid publication ids with: oma slack list && oma slack pubs <installation-id>`);
+          process.exit(1);
+        }
+        throw err;
+      }
+      console.log(`Unpublished: ${args[0]}`);
+    },
+  },
+
   // Memory
   {
     group: "Memory", match: ["memory", "reconcile"],

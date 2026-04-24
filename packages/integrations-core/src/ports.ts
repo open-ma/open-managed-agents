@@ -16,6 +16,7 @@ import type {
   InstallationRepo,
   IssueSessionRepo,
   PublicationRepo,
+  SessionScopeRepo,
   SetupLinkRepo,
   WebhookEventStore,
 } from "./persistence";
@@ -184,7 +185,9 @@ export interface CreateCommandSecretInput {
 /**
  * Tag a credential with the integration provider that owns it. Lets the
  * outbound proxy / session-create handler request server-side token refresh
- * without coupling agent worker code to provider specifics.
+ * without coupling agent worker code to provider specifics. Slack tokens are
+ * long-lived by default (no rotation), so slack-tagged credentials are not
+ * needed today.
  */
 export type ProviderTag = "github" | "linear";
 
@@ -264,7 +267,10 @@ export interface Container {
   /** GitHub-App credential storage. Populated when the github provider is wired. */
   githubApps: GitHubAppRepo;
   webhookEvents: WebhookEventStore;
+  /** Per-issue session reuse (Linear/GitHub). */
   issueSessions: IssueSessionRepo;
+  /** Per-thread / per-channel session reuse (Slack). */
+  sessionScopes: SessionScopeRepo;
   /** Bot-authored top-level Linear comments — used to route reply webhooks
    *  back to the originating OMA session. Phase 1 of M7. */
   authoredComments: AuthoredCommentRepo;
