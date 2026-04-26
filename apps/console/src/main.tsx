@@ -17,6 +17,7 @@ import { SkillsList } from "./pages/SkillsList";
 import { MemoryStoresList } from "./pages/MemoryStoresList";
 import { ModelCardsList } from "./pages/ModelCardsList";
 import { ApiKeysList } from "./pages/ApiKeysList";
+import { CliLogin } from "./pages/CliLogin";
 import {
   IntegrationsLinearList,
   IntegrationsLinearWorkspace,
@@ -40,6 +41,7 @@ createRoot(document.getElementById("root")!).render(
         <BrowserRouter>
         <Routes>
           <Route path="login" element={<Login />} />
+          <Route path="cli/login" element={<CliLogin />} />
           <Route element={<Layout />}>
             <Route index element={<Dashboard />} />
             <Route path="agents" element={<AgentsList />} />
