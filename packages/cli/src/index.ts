@@ -231,7 +231,13 @@ async function authLogin(baseUrl: string, requestedTenant?: string): Promise<voi
         }
         res.writeHead(200, { "Content-Type": "text/html" }).end(approvalPage("Signed in", "You can close this tab and return to your terminal."));
         clearTimeout(timeout);
+        // server.close() only stops new connections; the browser's HTTP
+        // keep-alive socket lingers and prevents Node from exiting. Force-
+        // close all sockets so the CLI returns cleanly after writing creds.
         server.close();
+        if (typeof (server as { closeAllConnections?: () => void }).closeAllConnections === "function") {
+          (server as { closeAllConnections: () => void }).closeAllConnections();
+        }
         resolve({ token, tenant, user, key_id });
       } catch (err) {
         res.writeHead(500).end();
@@ -269,11 +275,20 @@ async function authLogin(baseUrl: string, requestedTenant?: string): Promise<voi
   });
 
   console.log(`✓ Signed in as ${me.user?.email ?? me.user?.id}`);
-  console.log(`  Tenant : ${me.tenant.name || me.tenant.id} (${me.tenant.id})`);
+  console.log(`  Tenant : ${displayTenantName(me.tenant)} (${me.tenant.id})`);
   console.log(`  Stored : ${credentialsPath()}`);
   if (me.tenants.length > 1) {
     console.log(`  ${me.tenants.length} tenants available — switch with: oma auth tenant use <id>`);
   }
+}
+
+/** Friendly fallback for legacy tenants whose name was generated as
+ *  "'s workspace" (empty user.name in old ensureTenant). Once the DB is
+ *  fixed those rows go away — this defensively cleans display either way. */
+function displayTenantName(t: { id: string; name: string }): string {
+  const trimmed = (t.name ?? "").trim();
+  if (!trimmed || trimmed === "'s workspace" || trimmed.startsWith("'s ")) return t.id;
+  return trimmed;
 }
 
 function openBrowser(url: string): void {
@@ -342,7 +357,7 @@ const commands: Cmd[] = [
         console.log(`Base URL : ${config.baseUrl}`);
         console.log(`Source   : ${config.source === "env" ? "OMA_API_KEY env var" : "stored credentials"}`);
         console.log(`User     : ${me.user?.email ?? me.user?.id ?? "(unknown — legacy key without user_id)"}`);
-        console.log(`Tenant   : ${me.tenant.name || me.tenant.id} (${me.tenant.id})`);
+        console.log(`Tenant   : ${displayTenantName(me.tenant)} (${me.tenant.id})`);
         if (me.tenants.length > 1) {
           console.log(`Available: ${me.tenants.map((t) => t.id).join(", ")}`);
         }
