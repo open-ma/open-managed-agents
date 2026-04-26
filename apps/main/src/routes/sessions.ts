@@ -4,6 +4,7 @@ import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
 import { generateFileId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
 import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
+import { rateLimitSessionCreate } from "../rate-limit";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import { getCfServicesForTenant } from "@open-managed-agents/services";
@@ -188,6 +189,10 @@ async function resolveFileIds(
 // POST /v1/sessions — create session
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
+  // Per-tenant cap on session creation — sandbox containers cost real $$
+  // per spawn so this is stricter than the generic /v1/* writer limit.
+  const rl = await rateLimitSessionCreate(c.env, t);
+  if (rl) return rl;
   const body = await c.req.json<{
     agent: string;
     environment_id: string;
