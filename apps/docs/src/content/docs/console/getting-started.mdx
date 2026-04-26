@@ -1,0 +1,94 @@
+---
+title: Getting Started in the Console
+description: Sign up, create an agent, run a session, manage skills and vaults — all from the openma.dev UI.
+---
+
+import { Steps, Aside, LinkCard } from '@astrojs/starlight/components';
+
+The Console at [app.openma.dev](https://app.openma.dev) is the easiest way to use openma — no API calls, no curl. This page walks through what's where and how to get to "first agent running" without leaving the browser.
+
+## Sign in
+
+Email + OTP, or Google OAuth. On first sign-in, openma auto-creates a tenant for you. No invite codes or admin setup.
+
+## The pages
+
+The left sidebar groups everything into three areas:
+
+### Core
+
+- **Dashboard** — a one-page view of your agents, recent sessions, and usage.
+- **Agents** — list, create, edit, archive. Click an agent to see its config and version history.
+- **Sessions** — every conversation across every agent, with the live event stream when one is running.
+- **Environments** — sandbox templates. Define which Python / Node / apt packages are pre-installed, set network rules.
+
+### Configuration
+
+- **Skills** — upload a `SKILL.md` plus any supporting files. The platform mounts them into sandboxes that opt in.
+- **Vaults** — secret stores. Add bearer tokens, OAuth tokens, env vars; bind them to specific hosts so the outbound proxy can inject auth without leaking the secret to the model.
+- **Memory** — semantic memory stores per agent.
+- **Model Cards** — bring your own model: Anthropic, OpenAI, MiniMax, or any compatible provider.
+- **API Keys** — manage personal access tokens for the REST API and CLI.
+
+### Integrations
+
+- **Linear** / **GitHub** / **Slack** — each has its own setup page. See [Connect Integrations](/console/integrations/).
+
+## Create your first agent in the UI
+
+<Steps>
+
+1. Open **Agents → New agent**.
+
+2. Fill in:
+   - **Name** — anything. Visible to integrations later.
+   - **Model** — pick from your Model Cards (Anthropic Claude is the default if you have an `ANTHROPIC_API_KEY` in your tenant settings).
+   - **System prompt** — what the agent is for.
+   - **Tools** — leave default (built-in toolset) for now.
+
+3. Click **Create**.
+
+4. Open the agent → **New session**. Type a message. Watch the event stream populate in real time.
+
+</Steps>
+
+<Aside type="tip" title="Versioning">
+  Every save creates a new agent version. Sessions pin the version they were created with — editing the agent later doesn't change running or replayed sessions.
+</Aside>
+
+## Common workflows
+
+### Add a Vault so an agent can call a private API
+
+1. **Vaults → New vault** — pick "Bearer token", paste it, bind it to the host (e.g. `api.example.com`).
+2. Edit your agent → **Tools** → add a custom tool whose endpoint is on that host.
+3. When the agent calls the tool, the outbound proxy injects `Authorization: Bearer ...` per request. The model never sees the token.
+
+### Give an agent code execution
+
+1. **Environments → New environment** — pick a base image, add `pip:numpy` or `apt:ffmpeg` etc.
+2. Edit your agent → **Environment** → select the new environment.
+3. The agent now has `bash`, `read`, `write`, `edit`, `glob`, `grep` running inside a per-session container.
+
+### Connect a custom MCP server
+
+1. Edit an agent → **MCP servers** → paste the URL.
+2. The platform handshakes with the server and registers each tool as `mcp_<server>_<tool>`. They become callable on the next session.
+
+## Where to go next
+
+<LinkCard
+  title="Connect Integrations"
+  href="/console/integrations/"
+  description="Wire your agent into Linear, GitHub, or Slack so users interact with it where they already work."
+/>
+<LinkCard
+  title="Concepts"
+  href="/concepts/"
+  description="Refresher on Agent, Session, Environment, Vault, Skill, Tool, Harness, Integration."
+/>
+<LinkCard
+  title="REST API"
+  href="/build/api/"
+  description="Everything the Console does, you can do programmatically."
+/>

@@ -1,0 +1,236 @@
+---
+title: API Endpoints
+description: Endpoint-by-endpoint REST reference for openma's /v1/* surface.
+---
+
+import { Aside, LinkCard } from '@astrojs/starlight/components';
+
+Every endpoint requires `Authorization: Bearer <api_key>` unless noted. JSON request and response bodies. Errors follow the shape in [REST API → Errors](/build/api/#errors).
+
+## Agents
+
+### `GET /v1/agents`
+List all agents in the tenant. Query params: `archived` (bool), `limit`, `cursor`.
+
+### `POST /v1/agents`
+Create an agent. Body: `AgentConfig` minus the platform-assigned fields (`id`, `version`, timestamps).
+
+### `GET /v1/agents/:id`
+Get a single agent's current version.
+
+### `GET /v1/agents/:id/versions`
+List all versions of an agent.
+
+### `GET /v1/agents/:id/versions/:version`
+Get a specific historical version.
+
+### `PATCH /v1/agents/:id`
+Update an agent. Bumps version. Body: partial `AgentConfig`.
+
+### `DELETE /v1/agents/:id`
+Archive an agent (soft delete; sessions retain pinned version).
+
+## Sessions
+
+### `POST /v1/sessions`
+Create and start a session.
+```json
+{
+  "agent_id": "agent_...",
+  "input": [{ "role": "user", "content": "..." }]
+}
+```
+Returns `SessionMeta`.
+
+### `GET /v1/sessions`
+List sessions. Query: `agent_id`, `status`, `limit`, `cursor`.
+
+### `GET /v1/sessions/:id`
+Get session metadata + status.
+
+### `GET /v1/sessions/:id/events`
+**SSE.** Live event stream. Reconnect-safe (`?after=<event_id>`).
+
+### `GET /v1/sessions/:id/log`
+Full event log as a JSON array (non-streaming).
+
+### `POST /v1/sessions/:id/messages`
+Send another user turn into an existing session.
+
+### `POST /v1/sessions/:id/cancel`
+Cancel a running session.
+
+### `DELETE /v1/sessions/:id`
+Soft-delete a session.
+
+## Environments
+
+### `GET /v1/environments`
+List environment templates.
+
+### `POST /v1/environments`
+Create an environment. Body: `EnvironmentConfig`.
+
+### `GET /v1/environments/:id`
+Get one.
+
+### `PATCH /v1/environments/:id`
+Update.
+
+### `DELETE /v1/environments/:id`
+Delete (only if no agents reference it).
+
+## Skills
+
+### `GET /v1/skills`
+List custom + built-in skills.
+
+### `POST /v1/skills`
+Upload a custom skill. **multipart/form-data** with `id`, `display_title`, `description`, and one or more `files`.
+
+### `GET /v1/skills/:id`
+Get metadata.
+
+### `GET /v1/skills/:id/files/:filename`
+Download a skill file.
+
+### `DELETE /v1/skills/:id`
+Delete (built-in skills can't be deleted).
+
+## Vaults
+
+### `GET /v1/vaults`
+List. Returned objects never include the secret material.
+
+### `POST /v1/vaults`
+Create. Body includes the secret; subsequent reads will not.
+
+### `PATCH /v1/vaults/:id`
+Update — including rotating the secret.
+
+### `DELETE /v1/vaults/:id`
+Delete.
+
+## Memory Stores
+
+### `GET /v1/memory_stores`
+List per agent.
+
+### `POST /v1/memory_stores`
+Create.
+
+### `GET /v1/memory_stores/:id/entries`
+List recent entries.
+
+### `POST /v1/memory_stores/:id/search`
+Semantic search. Body: `{ "query": "...", "limit": 10 }`.
+
+### `DELETE /v1/memory_stores/:id`
+Delete the store and its index.
+
+## Files
+
+### `POST /v1/files`
+Upload. **multipart/form-data** with `session_id` and `file`.
+
+### `GET /v1/files/:id`
+Download.
+
+### `DELETE /v1/files/:id`
+Delete.
+
+## Model Cards
+
+### `GET /v1/model_cards`
+List configured model providers.
+
+### `POST /v1/model_cards`
+Add a provider. Body:
+```json
+{
+  "id": "my-anthropic",
+  "provider": "anthropic",
+  "base_url": "https://api.anthropic.com",
+  "api_key_vault_id": "vault_...",
+  "models": ["claude-sonnet-4-6", "claude-opus-4-7"]
+}
+```
+
+### `PATCH /v1/model_cards/:id`
+Update.
+
+### `DELETE /v1/model_cards/:id`
+Delete.
+
+## Integrations
+
+### `GET /v1/integrations`
+List shipped + active integrations.
+
+### `GET /v1/integrations/:id/install`
+Start the OAuth flow for the integration. Returns a redirect URL.
+
+### `POST /v1/integrations/:id/uninstall`
+Revoke the install.
+
+### `GET /v1/integrations/:id/publications`
+List publications (which agents serve which workspaces).
+
+### `POST /v1/integrations/:id/publications`
+Create a publication.
+
+### `DELETE /v1/integrations/:id/publications/:pub_id`
+Delete a publication.
+
+## Evals
+
+### `GET /v1/evals`
+List eval runs.
+
+### `POST /v1/evals`
+Start an eval.
+
+### `GET /v1/evals/:id`
+Get an eval's results.
+
+## API Keys
+
+### `GET /v1/api_keys`
+List your keys (the actual key value is not returned).
+
+### `POST /v1/api_keys`
+Create. Body: `{ "name": "..." }`. Returns the key once — store it now.
+
+### `DELETE /v1/api_keys/:id`
+Revoke.
+
+## OAuth (Console use)
+
+### `GET /v1/oauth/:provider/authorize`
+Start an OAuth flow (Google sign-in for the Console).
+
+### `GET /v1/oauth/:provider/callback`
+OAuth callback handler.
+
+## Health
+
+### `GET /healthz`
+Returns `{"ok": true}`. **Unauthenticated.**
+
+## Where to go next
+
+<LinkCard
+  title="REST API overview"
+  href="/build/api/"
+  description="Patterns, auth, error handling."
+/>
+<LinkCard
+  title="CLI & SDK"
+  href="/build/cli-sdk/"
+  description="Skip curl: use the Node CLI."
+/>
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="Body schemas for all the request payloads above."
+/>

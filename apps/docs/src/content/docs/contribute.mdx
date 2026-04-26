@@ -1,0 +1,157 @@
+---
+title: Contributing
+description: How the openma repo is laid out, how to run it locally, where the design RFCs live, and how to ship a PR.
+---
+
+import { Steps, Aside, LinkCard } from '@astrojs/starlight/components';
+
+Thanks for considering a contribution. openma is open source under the LICENSE in the repo root; PRs are welcome for features, bug fixes, docs, and integrations.
+
+## Repo layout
+
+```
+open-managed-agents/
+├── apps/
+│   ├── main/             # REST API + Console static assets (CF Worker)
+│   ├── agent/            # Session DOs + sandbox Containers (CF Worker)
+│   ├── console/          # React SPA (Vite, served by main)
+│   ├── integrations/     # OAuth + webhook gateway (CF Worker)
+│   └── docs/             # This site (Astro + Starlight, static-asset Worker)
+├── packages/
+│   ├── api-types/        # Shared TS DTOs (zero deps; safe to import anywhere)
+│   ├── cli/              # Node CLI: `oma`
+│   ├── shared/           # Cross-worker utilities
+│   ├── github/           # GitHub integration internals
+│   ├── linear/           # Linear integration internals
+│   ├── integrations-core/        # IntegrationProvider interface + types
+│   ├── integrations-adapters-cf/ # D1/KV/R2-backed repos
+│   ├── integrations-ui/  # Console UI components for integrations
+│   ├── storage/          # Pluggable storage backends
+│   └── ...
+├── scripts/              # deploy.sh, seed scripts, etc.
+├── docs/                 # ★ Internal design RFCs (gap analyses, integration designs, harness specs)
+├── rl/                   # Reinforcement-learning experiments
+├── skills/               # Built-in skill source
+├── test/                 # Cross-package tests
+├── AGENTS.md             # Agent config schema reference
+├── README.md             # Project README
+└── prd.md                # Product requirements (Chinese)
+```
+
+The `docs/` folder at the repo root is **internal RFC and design notes** — not the user-facing docs site. The user-facing docs (this site) live in `apps/docs/`.
+
+## Local dev loop
+
+<Steps>
+
+1. **Install Node 22+, pnpm 10+, and `wrangler`.** Sign in once with `npx wrangler login`.
+
+2. **Install dependencies.**
+
+   ```bash
+   pnpm install
+   ```
+
+3. **Set up local secrets.**
+
+   Copy `.dev.vars.example` to `.dev.vars` and fill in at least `ANTHROPIC_API_KEY`, `BETTER_AUTH_SECRET`, `API_KEY`. The other secrets are optional locally.
+
+4. **Run.** Pick what you need:
+
+   ```bash
+   # API + agent worker (most common dev loop)
+   pnpm dev
+
+   # Just one of them
+   pnpm dev:main
+   pnpm dev:agent
+
+   # The Console (Vite)
+   pnpm dev:console     # → http://localhost:5173
+
+   # The docs site (this site)
+   pnpm dev:docs        # → http://localhost:4321
+   ```
+
+5. **Type check.**
+
+   ```bash
+   pnpm typecheck
+   ```
+
+6. **Run tests.**
+
+   ```bash
+   pnpm test
+   ```
+
+   Vitest with `@cloudflare/vitest-pool-workers` — tests run inside a Workers runtime, against a real isolate. Don't mock D1 / KV / R2; use the test bindings.
+
+</Steps>
+
+## Where to find things
+
+| Looking for | Look in |
+|---|---|
+| REST endpoint handlers | `apps/main/src/routes/` |
+| Session DO | `apps/agent/src/session/` |
+| Sandbox Container | `apps/agent/src/sandbox/`, `Dockerfile.sandbox` |
+| Default harness | `apps/agent/src/harness/default.ts` |
+| Linear / GitHub / Slack | `apps/integrations/src/routes/{linear,github,slack}/` |
+| Console pages | `apps/console/src/pages/` |
+| Console routing | `apps/console/src/main.tsx` |
+| TypeScript DTOs | `packages/api-types/src/` |
+| CLI source | `packages/cli/src/` |
+| Schema docs | `AGENTS.md`, `prd.md` |
+| Design RFCs | `docs/*.md` |
+
+## Conventions
+
+- **TypeScript everywhere.** No JS in source. Type checks must pass.
+- **No FK constraints in D1.** Cascade is application-layer (see the Memory: "No FK Constraints" entry).
+- **Don't store secrets in agent prompts.** Vaults exist for this reason.
+- **Test against real Workers runtime.** Don't mock D1/KV/R2.
+- **Append-only for the session event log.** Never mutate past events.
+- **Keep `packages/api-types` zero-dep.** It's imported from CLIs and the Console.
+
+## Filing a PR
+
+<Steps>
+
+1. Open an issue first if it's a feature or a non-trivial change. For typo fixes and small bugs, just open the PR.
+
+2. Branch from `main`. Use a descriptive branch name (`feature/jira-integration`, `fix/session-resume-race`).
+
+3. Make sure `pnpm typecheck` and `pnpm test` pass.
+
+4. Open the PR against `main` with a description that covers:
+   - **What** — what changed
+   - **Why** — what problem this solves
+   - **Test plan** — how you verified
+   - **Risks** — anything reviewer should pay extra attention to
+
+5. CI runs typecheck + tests. After review and green CI, a maintainer merges.
+
+</Steps>
+
+<Aside type="tip" title="Working on docs">
+  Doc-only PRs are welcome and fast to merge. Edit any `apps/docs/src/content/docs/**` file; the "Edit this page" link at the bottom of every doc page sends you to the right file in the repo.
+</Aside>
+
+## Where to go next
+
+<LinkCard
+  title="Concepts"
+  href="/concepts/"
+  description="Refresher on the nouns before diving into source."
+/>
+<LinkCard
+  title="Custom Integrations"
+  href="/build/integrations/"
+  description="The most common contribution: adding a new third-party integration."
+/>
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="Schemas you'll see referenced throughout the source."
+/>

@@ -1,0 +1,25 @@
+/* openma docs theme — derived from logo orange #FF6B50 */
+
+:root {
+  --sl-hue-accent: 9;
+
+  --sl-color-accent-low: #4a1a10;
+  --sl-color-accent: #ff6b50;
+  --sl-color-accent-high: #ffd9d0;
+}
+
+:root[data-theme='light'] {
+  --sl-color-accent-low: #ffd9d0;
+  --sl-color-accent: #e0512f;
+  --sl-color-accent-high: #5a1a0a;
+}
+
+/* Slightly tighter inline-code so it doesn't dominate prose */
+.sl-markdown-content :not(a, strong, em, del, span, input, code) + code:not(:where(.not-content *)) {
+  font-size: 0.92em;
+}
+
+/* Subtle hover on sidebar links to feel more product-y */
+.sidebar-pane a:hover {
+  background-color: var(--sl-color-gray-7);
+}
