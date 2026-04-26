@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import { kvKey } from "../kv-helpers";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 
@@ -127,16 +128,24 @@ async function extractZipFiles(res: Response): Promise<Array<{ filename: string;
           // Deflate
           const ds = new DecompressionStream("deflate-raw");
           const writer = ds.writable.getWriter();
-          writer.write(rawData).catch(() => {});
-          writer.close().catch(() => {});
+          writer.write(rawData).catch((err) => {
+            logWarn({ op: "clawhub.zip.deflate_write", err }, "deflate write failed");
+          });
+          writer.close().catch((err) => {
+            logWarn({ op: "clawhub.zip.deflate_close", err }, "deflate close failed");
+          });
           const decompressed = new Response(ds.readable);
           content = await decompressed.text();
         } else {
           content = new TextDecoder().decode(rawData);
         }
         files.push({ filename, content });
-      } catch {
-        // Skip files that fail to decompress
+      } catch (err) {
+        // Skip files that fail to decompress — preserve the rest of the zip.
+        logWarn(
+          { op: "clawhub.zip.entry_decompress", filename, err },
+          "skipping unreadable zip entry",
+        );
       }
     }
 

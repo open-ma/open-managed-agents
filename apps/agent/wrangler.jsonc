@@ -66,6 +66,13 @@
   "limits": { "cpu_ms": 300000 },
   "observability": { "enabled": true },
 
+  // Analytics Engine for structured error/event metrics from the agent
+  // worker (SessionDO, outbound proxy, sandbox lifecycle). Same dataset as
+  // the main worker so dashboards see all OMA events together.
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "oma_events" }
+  ],
+
   // Staging twin: a fully separate sandbox-default-staging worker bound to
   // the staging KV / D1 / R2 / DO namespace. Keeps prod and staging session
   // state and tenant data fully isolated. The staging main worker's
@@ -106,7 +113,10 @@
       ],
       "browser": { "binding": "BROWSER" },
       "limits": { "cpu_ms": 300000 },
-      "observability": { "enabled": true }
+      "observability": { "enabled": true },
+      "analytics_engine_datasets": [
+        { "binding": "ANALYTICS", "dataset": "oma_events_staging" }
+      ]
     }
   }
 }

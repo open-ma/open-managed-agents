@@ -1,4 +1,5 @@
 import type { Env } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
 import type { OutboundSnapshot } from "@open-managed-agents/outbound-snapshots-store";
 
@@ -108,13 +109,24 @@ async function findCredentialForHost(
               vault_id: v.vault_id,
             };
           }
-        } catch {
-          // Invalid URL in credential, skip
+        } catch (err) {
+          // Invalid URL in credential, skip — but log so vault data corruption
+          // doesn't silently route auth-required calls without bearer.
+          logWarn(
+            { op: "outbound.cred_url_parse", session_id: sessionId, vault_id: v.vault_id, err },
+            "skipping credential with malformed mcp_server_url",
+          );
         }
       }
     }
-  } catch {
-    // Snapshot missing or malformed → pass through without injection
+  } catch (err) {
+    // Snapshot missing or malformed → pass through without injection. Logged
+    // because a missing snapshot during a real session means outbound auth
+    // injection is silently disabled — every MCP call will look unauthed.
+    logWarn(
+      { op: "outbound.snapshot_load", session_id: sessionId, err },
+      "outbound snapshot unreadable; passing through without bearer injection",
+    );
   }
 
   return null;
@@ -198,13 +210,24 @@ async function tryRefreshToken(
             expires_at: cred.auth.expires_at,
           },
         });
-      } catch {
+      } catch (err) {
         // best-effort: snapshot is the source of truth this session anyway
+        logWarn(
+          { op: "outbound.snapshot_token_persist", session_id: sessionId, err },
+          "post-refresh snapshot persist failed; in-memory creds remain valid for this session",
+        );
       }
     }
 
     return tokens.access_token;
-  } catch {
+  } catch (err) {
+    // OAuth refresh failed (network / token endpoint down / refresh_token
+    // revoked). Caller surfaces the original 401 to the user but we lose the
+    // root cause without this log.
+    logWarn(
+      { op: "outbound.token_refresh", session_id: sessionId, vault_id: vaultId, credential_id: credentialId, err },
+      "OAuth refresh failed; original 401 will surface",
+    );
     return null;
   }
 }
