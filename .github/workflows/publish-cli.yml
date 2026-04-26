@@ -1,0 +1,93 @@
+name: Publish CLI
+
+# Publishes @openma/cli to npm via OIDC trusted publisher (no NPM_TOKEN
+# required). The trust relationship is configured on npmjs.com:
+#   Package: @openma/cli
+#   Repo:    open-ma/open-managed-agents
+#   Workflow filename: publish-cli.yml
+#   Environment: production
+#
+# To use:
+#   - Manual: Actions → "Publish CLI" → Run workflow → pick dist-tag
+#   - Tag push: git tag cli-v0.1.0-beta.1 && git push --tags
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag (beta, latest, next, etc.)'
+        type: string
+        default: 'beta'
+        required: true
+  push:
+    tags:
+      - 'cli-v*'
+
+concurrency:
+  group: publish-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    # Must match the environment configured in npm's trusted publisher
+    # settings, otherwise OIDC verification fails with "audience mismatch".
+    environment: production
+    permissions:
+      contents: read
+      # Required for OIDC: GitHub mints a short-lived signed JWT that npm
+      # verifies against the trusted-publisher config. Without this,
+      # npm publish falls back to NPM_TOKEN auth and fails (no token here).
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          # Required for `npm publish` to use the OIDC token. Setting this
+          # writes the registry to ~/.npmrc and authenticates via the OIDC
+          # flow at publish time. Do NOT set NODE_AUTH_TOKEN env var here —
+          # that would override OIDC with a static token.
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build CLI
+        run: pnpm --filter @openma/cli build
+
+      - name: Publish to npm
+        # --provenance signs the package with a Sigstore attestation linking
+        # it to this workflow run + commit SHA. Users can verify with
+        # `npm audit signatures`. Requires id-token: write (above).
+        #
+        # The dist-tag picks where the version lands: `beta` keeps it off
+        # the default install path (`npm i @pkg` won't grab beta unless
+        # `@beta` is appended); `latest` makes it the default.
+        run: |
+          cd packages/cli
+          npm publish --tag "${TAG}" --provenance --access public
+        env:
+          # workflow_dispatch input fallback to 'beta' for tag-push runs.
+          TAG: ${{ inputs.tag || 'beta' }}
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published @openma/cli"
+            echo ""
+            echo "- **Version**: \`$(node -p "require('./packages/cli/package.json').version")\`"
+            echo "- **Tag**: \`${TAG}\`"
+            echo "- **Install**: \`npm i -g @openma/cli@${TAG}\`"
+            echo "- **Page**: https://www.npmjs.com/package/@openma/cli"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TAG: ${{ inputs.tag || 'beta' }}
