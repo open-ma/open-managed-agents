@@ -3,6 +3,7 @@ import { NavLink, Outlet, Navigate } from "react-router";
 import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import { authClient } from "../lib/auth-client";
+import { TenantSwitcher } from "./TenantSwitcher";
 
 /* ── Navigation groups ── */
 const navGroups = [
@@ -265,10 +266,14 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
       {/* Logo */}
-      <div className="flex items-center gap-2 px-4 pt-5 pb-4 text-brand">
+      <div className="flex items-center gap-2 px-4 pt-5 pb-3 text-brand">
         <LogoMark />
         <span className="font-mono font-bold text-base">openma</span>
       </div>
+
+      {/* Workspace switcher (hidden when user has a single tenant; lets
+          owners create additional workspaces). */}
+      <TenantSwitcher />
 
       {/* Navigation */}
       <nav className="flex-1 px-2 space-y-3 overflow-y-auto" onClick={onNavigate}>
