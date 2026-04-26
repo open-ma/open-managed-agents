@@ -39,6 +39,18 @@ function isLoopback(callbackUrl: string): boolean {
   }
 }
 
+/** Fall back to a friendly label when a tenant was created with an empty
+ *  user.name (OTP signup, social signup w/o name) — `ensureTenant` builds
+ *  "${userName}'s workspace" so the row ends up named "'s workspace".
+ *  Show the tenant id instead in that degenerate case. */
+function tenantDisplayName(t: { id: string; name: string }): string {
+  const trimmed = (t.name ?? "").trim();
+  if (!trimmed || trimmed === "'s workspace" || trimmed.startsWith("'s ")) {
+    return t.id;
+  }
+  return trimmed;
+}
+
 export function CliLogin() {
   const { api } = useApi();
   const params = useMemo(() => new URLSearchParams(window.location.search), []);
@@ -125,9 +137,7 @@ export function CliLogin() {
     <div className="min-h-screen bg-bg flex items-center justify-center px-4">
       <div className="w-full max-w-md bg-bg-surface border border-border rounded-2xl p-8 shadow-sm">
         <div className="flex items-center gap-3 mb-6">
-          <div className="w-10 h-10 rounded-lg bg-brand text-brand-fg flex items-center justify-center font-mono text-sm font-bold">
-            oma
-          </div>
+          <img src="/logo.svg" alt="openma" className="h-9 shrink-0" />
           <div>
             <div className="font-display text-lg font-semibold">Authorize CLI</div>
             <div className="text-xs text-fg-subtle">openma command-line client</div>
@@ -176,7 +186,7 @@ export function CliLogin() {
               </div>
             ) : me.tenants.length === 1 ? (
               <div className="bg-bg border border-border rounded-lg px-3 py-2.5 text-sm font-mono text-fg-muted mb-5">
-                {me.tenants[0].name || me.tenants[0].id}
+                {tenantDisplayName(me.tenants[0])}
                 <span className="text-fg-subtle ml-2">({me.tenants[0].role})</span>
               </div>
             ) : (
@@ -187,7 +197,7 @@ export function CliLogin() {
               >
                 {me.tenants.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {t.name || t.id} ({t.role})
+                    {tenantDisplayName(t)} ({t.role})
                   </option>
                 ))}
               </select>
