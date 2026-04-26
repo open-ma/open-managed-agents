@@ -255,7 +255,16 @@ async function authLogin(baseUrl: string, requestedTenant?: string): Promise<voi
   if (requestedTenant) params.set("tenant", requestedTenant);
   const loginUrl = `${baseUrl}/cli/login?${params.toString()}`;
 
-  const result = await new Promise<{ token: string; tenant: string; user: string; key_id: string }>((resolve, reject) => {
+  interface CallbackToken {
+    tenant_id: string;
+    tenant_name: string;
+    role: string;
+    token: string;
+    key_id: string;
+  }
+  type CallbackResult = { tokens: CallbackToken[]; user: string };
+
+  const result = await new Promise<CallbackResult>((resolve, reject) => {
     const timeout = setTimeout(() => {
       server.close();
       reject(new Error("Timed out after 5 minutes waiting for browser approval."));
@@ -269,42 +278,61 @@ async function authLogin(baseUrl: string, requestedTenant?: string): Promise<voi
           return;
         }
         const got = u.searchParams;
+        const finish = (statusCode: number, page: ReturnType<typeof approvalPage>, action: () => void) => {
+          res.writeHead(statusCode, { "Content-Type": "text/html" }).end(page);
+          clearTimeout(timeout);
+          server.close();
+          if (typeof (server as { closeAllConnections?: () => void }).closeAllConnections === "function") {
+            (server as { closeAllConnections: () => void }).closeAllConnections();
+          }
+          action();
+        };
         if (got.get("error")) {
           const err = String(got.get("error"));
-          res.writeHead(400, { "Content-Type": "text/html" }).end(approvalPage("Cancelled", `Login was cancelled: ${err}. You can close this tab.`));
-          clearTimeout(timeout);
-          server.close();
-          reject(new Error(`Login cancelled: ${err}`));
-          return;
+          return finish(400, approvalPage("Cancelled", `Login was cancelled: ${err}.`), () =>
+            reject(new Error(`Login cancelled: ${err}`)),
+          );
         }
         if (got.get("state") !== state) {
-          res.writeHead(400, { "Content-Type": "text/html" }).end(approvalPage("State mismatch", "The login response didn't match what this CLI session expected. Please try again."));
-          clearTimeout(timeout);
-          server.close();
-          reject(new Error("State mismatch — refusing the callback"));
-          return;
+          return finish(400, approvalPage("State mismatch", "The login response didn't match what this CLI session expected. Please try again."), () =>
+            reject(new Error("State mismatch — refusing the callback")),
+          );
         }
-        const token = got.get("token");
-        const tenant = got.get("tenant");
-        const user = got.get("user");
-        const key_id = got.get("key_id");
-        if (!token || !tenant || !user || !key_id) {
-          res.writeHead(400, { "Content-Type": "text/html" }).end(approvalPage("Incomplete callback", "The browser handoff is missing required fields."));
-          clearTimeout(timeout);
-          server.close();
-          reject(new Error("Callback missing required fields"));
-          return;
+        // New format (beta.5+): tokens=base64(JSON array). Old format
+        // (token=...&tenant=...) used to land here too — kept the parser
+        // compatible so the same CLI works against both old and new
+        // /cli/login deployments during rollout.
+        const tokensB64 = got.get("tokens");
+        const userId = got.get("user") ?? "";
+        let tokens: CallbackToken[] = [];
+        if (tokensB64) {
+          try {
+            const json = Buffer.from(tokensB64, "base64").toString("utf8");
+            tokens = JSON.parse(json) as CallbackToken[];
+          } catch {
+            return finish(400, approvalPage("Bad payload", "The browser handoff payload was unreadable."), () =>
+              reject(new Error("Failed to decode tokens from callback")),
+            );
+          }
+        } else {
+          // Legacy single-token format.
+          const token = got.get("token");
+          const tenant = got.get("tenant");
+          const key_id = got.get("key_id");
+          if (token && tenant && key_id) {
+            tokens = [
+              { tenant_id: tenant, tenant_name: "", role: "owner", token, key_id },
+            ];
+          }
         }
-        res.writeHead(200, { "Content-Type": "text/html" }).end(approvalPage("Signed in", "You can close this tab and return to your terminal."));
-        clearTimeout(timeout);
-        // server.close() only stops new connections; the browser's HTTP
-        // keep-alive socket lingers and prevents Node from exiting. Force-
-        // close all sockets so the CLI returns cleanly after writing creds.
-        server.close();
-        if (typeof (server as { closeAllConnections?: () => void }).closeAllConnections === "function") {
-          (server as { closeAllConnections: () => void }).closeAllConnections();
+        if (tokens.length === 0) {
+          return finish(400, approvalPage("Incomplete callback", "The browser handoff is missing required fields."), () =>
+            reject(new Error("Callback missing required fields")),
+          );
         }
-        resolve({ token, tenant, user, key_id });
+        return finish(200, approvalPage("Signed in", "You can close this tab and return to your terminal."), () =>
+          resolve({ tokens, user: userId }),
+        );
       } catch (err) {
         res.writeHead(500).end();
         clearTimeout(timeout);
@@ -320,48 +348,67 @@ async function authLogin(baseUrl: string, requestedTenant?: string): Promise<voi
     openBrowser(loginUrl);
   });
 
-  // Use the freshly-minted token to fetch full identity + tenant list, so
-  // the credentials file carries useful display fields for `oma whoami`.
-  const tempConfig: Config = { baseUrl, apiKey: result.token, json: false, source: "stored" };
+  // Use the first minted token to fetch full identity, so the credentials
+  // file carries useful display fields for `oma whoami`. All tokens share
+  // the same user; we only need one /v1/me call.
+  const firstToken = result.tokens[0];
+  const tempConfig: Config = { baseUrl, apiKey: firstToken.token, json: false, source: "stored" };
   const me = await apiFetch<{
     user: { id: string; email: string; name: string | null } | null;
     tenant: { id: string; name: string };
     tenants: Array<{ id: string; name: string; role: string }>;
   }>(tempConfig, "/v1/me");
 
-  // Merge with existing credentials so adding a new tenant via
-  // `oma auth login --tenant <id>` (or re-login of a different tenant)
-  // doesn't clobber tokens for tenants the user already authorized.
+  // Merge with existing credentials so previously-authorized tenants
+  // (different login session, different machine sync, etc.) keep their
+  // tokens. New tokens for the same tenant overwrite — last login wins,
+  // which matches how API key rotation already works server-side.
   const existing = readCredentials();
-  const role = me.tenants.find((t) => t.id === me.tenant.id)?.role ?? "owner";
+  const sameUser = existing && existing.user.id === (me.user?.id ?? result.user);
+  const tenantsMap: Record<string, StoredTenantV2> = sameUser ? { ...existing!.tenants } : {};
+  const now = new Date().toISOString();
+  for (const t of result.tokens) {
+    // Look up canonical name + role from the membership list returned by
+    // /v1/me — the callback's tenant_name was a snapshot at click time.
+    const membership = me.tenants.find((m) => m.id === t.tenant_id);
+    tenantsMap[t.tenant_id] = {
+      name: membership?.name ?? t.tenant_name ?? "",
+      role: membership?.role ?? t.role ?? "owner",
+      token: t.token,
+      key_id: t.key_id,
+      created_at: now,
+    };
+  }
+  // Active selection rule:
+  //   - If --tenant was passed and is in the minted set, honor it.
+  //   - Else if the existing active is still valid (re-authed), keep it.
+  //   - Else default to the first minted token.
+  const newActive =
+    (requestedTenant && tenantsMap[requestedTenant] && requestedTenant) ||
+    (sameUser && existing!.tenants[existing!.active_tenant_id] ? existing!.active_tenant_id : "") ||
+    result.tokens[0].tenant_id;
+
   const updated: StoredCredentials = {
     version: 2,
     base_url: baseUrl,
     user: me.user ?? { id: result.user, email: "", name: null },
-    active_tenant_id: me.tenant.id,
-    tenants: {
-      ...(existing && existing.user.id === (me.user?.id ?? result.user) ? existing.tenants : {}),
-      [me.tenant.id]: {
-        name: me.tenant.name,
-        role,
-        token: result.token,
-        key_id: result.key_id,
-        created_at: new Date().toISOString(),
-      },
-    },
+    active_tenant_id: newActive,
+    tenants: tenantsMap,
   };
   writeCredentials(updated);
 
+  const activeProfile = updated.tenants[updated.active_tenant_id];
   console.log(`✓ Signed in as ${me.user?.email ?? me.user?.id}`);
-  console.log(`  Tenant : ${displayTenantName(me.tenant)} (${me.tenant.id})`);
-  console.log(`  Stored : ${credentialsPath()}`);
-  const knownCount = Object.keys(updated.tenants).length;
+  console.log(`  Active tenant : ${activeProfile.name || updated.active_tenant_id} (${updated.active_tenant_id})`);
+  console.log(`  Stored        : ${credentialsPath()}`);
+  const totalStored = Object.keys(tenantsMap).length;
+  if (totalStored > 1) {
+    console.log(`  Authorized for ${totalStored} workspaces — switch with: oma auth tenant use <id>`);
+  }
   const totalAvailable = me.tenants.length;
-  if (totalAvailable > knownCount) {
-    const missing = totalAvailable - knownCount;
-    console.log(`  ${missing} more tenant${missing === 1 ? "" : "s"} available — add with: oma auth login --tenant <id>`);
-  } else if (knownCount > 1) {
-    console.log(`  ${knownCount} tenants stored — switch with: oma auth tenant use <id>`);
+  if (totalAvailable > totalStored) {
+    const missing = totalAvailable - totalStored;
+    console.log(`  ${missing} more workspace${missing === 1 ? "" : "s"} unauthorized — add with: oma auth login --tenant <id>`);
   }
 }
 
