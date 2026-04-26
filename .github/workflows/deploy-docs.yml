@@ -1,0 +1,72 @@
+name: Deploy Docs
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - 'apps/docs/**'
+      - '.github/workflows/deploy-docs.yml'
+      - 'pnpm-workspace.yaml'
+      - 'pnpm-lock.yaml'
+  workflow_dispatch:
+
+concurrency:
+  group: deploy-docs-production
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install pnpm
+        run: npm install -g pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build docs
+        run: pnpm --filter open-managed-agents-docs build
+
+      # Static-asset Worker, no service bindings, no D1 — just upload dist/.
+      # Top-level env (no --env flag) targets the production worker
+      # `openma-docs` routed at docs.openma.dev.
+      - name: Deploy docs worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/docs
+          for i in 1 2 3; do
+            if npx wrangler deploy; then
+              echo "Docs worker deployed successfully"
+              break
+            fi
+            echo "Attempt $i/3 failed, waiting 60s before retry..."
+            sleep 60
+            if [ "$i" = "3" ]; then echo "All attempts failed"; exit 1; fi
+          done
+
+      # First deploy provisions the custom domain cert (~1–2 min). Subsequent
+      # deploys are instant. Retry the verify a few times so first-run cert
+      # provisioning doesn't fail the workflow.
+      - name: Verify deployment
+        run: |
+          for i in 1 2 3 4 5 6; do
+            CODE=$(curl -sk -o /dev/null -w "%{http_code}" --max-time 5 https://docs.openma.dev/ || echo "000")
+            if [ "$CODE" = "200" ]; then
+              echo "docs.openma.dev/ → 200 ✓"
+              exit 0
+            fi
+            echo "Attempt $i/6: docs.openma.dev/ → $CODE, waiting 30s..."
+            sleep 30
+          done
+          echo "docs.openma.dev never returned 200 after deploy" >&2
+          exit 1
