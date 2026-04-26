@@ -58,6 +58,13 @@ jobs:
           # that would override OIDC with a static token.
           registry-url: 'https://registry.npmjs.org'
 
+      # OIDC publishing landed in npm 11.5.1 (mid-2025). Node 22 LTS still
+      # ships with an older npm by default, which falls back to the bogus
+      # NODE_AUTH_TOKEN placeholder setup-node injects and gets a 404 from
+      # the registry. Force the latest npm so OIDC is the auth path.
+      - name: Upgrade npm
+        run: npm install -g npm@latest && npm --version
+
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
@@ -68,15 +75,32 @@ jobs:
       # verify what npm sees vs what the trusted publisher expects. Remove
       # once OIDC publishes are stable.
       - name: Debug OIDC claims
+        if: always()
+        continue-on-error: true
         run: |
-          TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
-            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" \
-            | jq -r .value)
-          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
-            echo "::error::Failed to mint OIDC token"
-            exit 1
+          set +e
+          if [ -z "$ACTIONS_ID_TOKEN_REQUEST_URL" ]; then
+            echo "ACTIONS_ID_TOKEN_REQUEST_URL is not set — id-token: write permission is missing"
+            exit 0
           fi
-          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null || echo "$TOKEN" | cut -d. -f2 | base64 --decode --ignore-garbage 2>/dev/null)
+          RESP=$(curl -sSL \
+            -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            -H "Accept: application/json" \
+            "${ACTIONS_ID_TOKEN_REQUEST_URL}&audience=npm:registry.npmjs.org")
+          TOKEN=$(echo "$RESP" | jq -r '.value // empty')
+          if [ -z "$TOKEN" ]; then
+            echo "Failed to mint OIDC token. Raw response:"
+            echo "$RESP"
+            exit 0
+          fi
+          PAYLOAD_B64=$(echo "$TOKEN" | cut -d. -f2)
+          # JWT base64url → base64 (replace - with +, _ with /, pad with =)
+          PAYLOAD_B64_PADDED="${PAYLOAD_B64}$(printf '%*s' $(( (4 - ${#PAYLOAD_B64} % 4) % 4 )) '' | tr ' ' '=')"
+          PAYLOAD=$(echo "$PAYLOAD_B64_PADDED" | tr '_-' '/+' | base64 -d 2>/dev/null)
+          if [ -z "$PAYLOAD" ]; then
+            echo "Failed to decode JWT payload"
+            exit 0
+          fi
           echo "OIDC claims (sanitized):"
           echo "$PAYLOAD" | jq '{
             sub,
@@ -107,6 +131,11 @@ jobs:
         env:
           # workflow_dispatch input fallback to 'beta' for tag-push runs.
           TAG: ${{ inputs.tag || 'beta' }}
+          # Explicitly clear setup-node's NODE_AUTH_TOKEN placeholder so
+          # npm sees no static token and falls back to OIDC. Without this,
+          # the literal "XXXXX-XXXXX-..." string lands in the Authorization
+          # header and the registry returns a 404-disguised-as-401.
+          NODE_AUTH_TOKEN: ''
 
       - name: Summary
         run: |
