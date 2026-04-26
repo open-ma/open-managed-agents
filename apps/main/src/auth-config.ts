@@ -111,7 +111,7 @@ export function createAuth(env: Env) {
         create: {
           after: async (user) => {
             try {
-              await ensureTenant(env.AUTH_DB, user.id, user.name);
+              await ensureTenant(env.AUTH_DB, user.id, user.name, user.email);
             } catch (err) {
               // Don't block sign-up on tenant creation — auth.ts has a self-heal
               // path that will retry on first authenticated request. Log so the
@@ -152,18 +152,24 @@ export async function getTenantId(db: D1Database, userId: string): Promise<strin
 export async function ensureTenant(
   db: D1Database,
   userId: string,
-  userName: string,
+  userName: string | null | undefined,
+  userEmail: string | null | undefined,
 ): Promise<string> {
   const existing = await getTenantId(db, userId);
   if (existing) return existing;
 
   const tenantId = `tn_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const now = Math.floor(Date.now() / 1000);
-  // Default tenant name: "<name>'s workspace" when name is set, plain
-  // "Workspace" otherwise. OTP and some social signups don't carry a name,
-  // and we don't want the literal string "'s workspace" landing in the DB.
+  // Display name resolution, in priority order:
+  //   1. user.name        (email/password signup with fallback, Google profile)
+  //   2. email local-part (OTP signup, social signups w/o name claim)
+  //   3. literal "User"   (truly empty signup — shouldn't happen, but defensive)
+  // Never produces "'s workspace" — that bug came from blindly substituting
+  // an empty name into the template.
   const trimmedName = (userName ?? "").trim();
-  const tenantName = trimmedName ? `${trimmedName}'s workspace` : "Workspace";
+  const emailPrefix = (userEmail ?? "").split("@")[0]?.trim() ?? "";
+  const display = trimmedName || emailPrefix || "User";
+  const tenantName = `${display}'s workspace`;
   await db
     .prepare("INSERT INTO tenant (id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)")
     .bind(tenantId, tenantName, now, now)
