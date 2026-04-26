@@ -51,19 +51,29 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '22'
+          # Node 24 ships with npm 11.x which has OIDC publish auto-
+          # detection. Node 22 LTS still ships npm 10.x which falls back
+          # to the bogus NODE_AUTH_TOKEN placeholder and gets a 404 from
+          # the registry. Stay on 24 here even if other workflows pin to
+          # 22 — this one needs npm 11.5.1+.
+          node-version: '24'
           # Required for `npm publish` to use the OIDC token. Setting this
           # writes the registry to ~/.npmrc and authenticates via the OIDC
           # flow at publish time. Do NOT set NODE_AUTH_TOKEN env var here —
           # that would override OIDC with a static token.
           registry-url: 'https://registry.npmjs.org'
 
-      # OIDC publishing landed in npm 11.5.1 (mid-2025). Node 22 LTS still
-      # ships with an older npm by default, which falls back to the bogus
-      # NODE_AUTH_TOKEN placeholder setup-node injects and gets a 404 from
-      # the registry. Force the latest npm so OIDC is the auth path.
-      - name: Upgrade npm
-        run: npm install -g npm@latest && npm --version
+      - name: Confirm npm has OIDC support
+        run: |
+          NPM_VER=$(npm --version)
+          echo "npm version: $NPM_VER"
+          # OIDC publish landed in 11.5.1 — fail fast with a useful message
+          # if we somehow got an older npm.
+          node -e "
+            const [maj,min,pat] = process.argv[1].split('.').map(Number);
+            const ok = maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1)));
+            if (!ok) { console.error('Need npm >= 11.5.1 for OIDC publish'); process.exit(1); }
+          " "$NPM_VER"
 
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
