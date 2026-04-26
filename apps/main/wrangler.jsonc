@@ -91,6 +91,20 @@
     { "binding": "ANALYTICS", "dataset": "oma_events" }
   ],
 
+  // Cross-isolate rate limiting via CF Workers Rate Limiting binding.
+  // Replaces a per-isolate Map limiter that under-counted N×isolate.
+  // CF only supports period 10 or 60 (seconds); pick limits accordingly.
+  // namespace_ids are arbitrary tenant-scoped numeric tokens — they only
+  // need to be unique within this worker.
+  "ratelimits": [
+    { "name": "RL_AUTH_IP",         "namespace_id": "1001", "simple": { "limit": 60, "period": 60 } },
+    { "name": "RL_AUTH_SEND_IP",    "namespace_id": "1002", "simple": { "limit": 5,  "period": 60 } },
+    { "name": "RL_AUTH_SEND_EMAIL", "namespace_id": "1003", "simple": { "limit": 1,  "period": 60 } },
+    { "name": "RL_API_USER_WRITE",  "namespace_id": "1004", "simple": { "limit": 60, "period": 60 } },
+    { "name": "RL_API_USER_READ",   "namespace_id": "1005", "simple": { "limit": 600,"period": 60 } },
+    { "name": "RL_SESSIONS_TENANT", "namespace_id": "1006", "simple": { "limit": 5,  "period": 60 } }
+  ],
+
   "triggers": {
     "crons": ["* * * * *"]
   },
@@ -128,6 +142,14 @@
       "observability": { "enabled": true },
       "analytics_engine_datasets": [
         { "binding": "ANALYTICS", "dataset": "oma_events_staging" }
+      ],
+      "ratelimits": [
+        { "name": "RL_AUTH_IP",         "namespace_id": "2001", "simple": { "limit": 60, "period": 60 } },
+        { "name": "RL_AUTH_SEND_IP",    "namespace_id": "2002", "simple": { "limit": 5,  "period": 60 } },
+        { "name": "RL_AUTH_SEND_EMAIL", "namespace_id": "2003", "simple": { "limit": 1,  "period": 60 } },
+        { "name": "RL_API_USER_WRITE",  "namespace_id": "2004", "simple": { "limit": 60, "period": 60 } },
+        { "name": "RL_API_USER_READ",   "namespace_id": "2005", "simple": { "limit": 600,"period": 60 } },
+        { "name": "RL_SESSIONS_TENANT", "namespace_id": "2006", "simple": { "limit": 5,  "period": 60 } }
       ]
     }
   }
