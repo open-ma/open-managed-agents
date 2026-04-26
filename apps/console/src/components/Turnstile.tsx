@@ -15,10 +15,10 @@ interface TurnstileProps {
   siteKey: string | null;
   onToken: (token: string) => void;
   onExpire?: () => void;
-  /** "auto" (default) shows the widget if interaction is needed; "always"
-   *  forces a visible widget; "size: invisible" requires the widget to
-   *  call its action programmatically (we use the simpler default). */
-  appearance?: "auto" | "always-visible";
+  /** Per CF: "interaction-only" (default) shows the widget only when CF
+   *  decides interaction is needed; "always" forces visible; "execute"
+   *  is for invisible widgets that the page calls programmatically. */
+  appearance?: "interaction-only" | "always" | "execute";
 }
 
 declare global {
@@ -31,7 +31,7 @@ declare global {
           callback: (token: string) => void;
           "expired-callback"?: () => void;
           "error-callback"?: () => void;
-          appearance?: "auto" | "always" | "execute";
+          appearance?: "interaction-only" | "always" | "execute";
           theme?: "light" | "dark" | "auto";
         },
       ) => string;
@@ -68,7 +68,7 @@ function loadTurnstileScript(): Promise<void> {
   return scriptLoaded;
 }
 
-export function Turnstile({ siteKey, onToken, onExpire, appearance = "auto" }: TurnstileProps) {
+export function Turnstile({ siteKey, onToken, onExpire, appearance = "interaction-only" }: TurnstileProps) {
   const ref = useRef<HTMLDivElement>(null);
   const widgetId = useRef<string | null>(null);
   const [error, setError] = useState<string>("");
@@ -84,7 +84,7 @@ export function Turnstile({ siteKey, onToken, onExpire, appearance = "auto" }: T
           callback: onToken,
           "expired-callback": onExpire,
           "error-callback": () => setError("Bot challenge failed to load. Please refresh."),
-          appearance: appearance === "always-visible" ? "always" : "auto",
+          appearance,
           theme: "auto",
         });
       })
