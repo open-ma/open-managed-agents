@@ -31,7 +31,8 @@
   // Linear-triggered sessions as the URL of the OMA-hosted Linear MCP
   // server. Override per env via vars.
   "vars": {
-    "INTEGRATIONS_ORIGIN": "https://integrations.openma.dev"
+    "INTEGRATIONS_ORIGIN": "https://integrations.openma.dev",
+    "TURNSTILE_SITE_KEY": "0x4AAAAAADDow0APKUYcuXMp"
   },
 
   "r2_buckets": [
