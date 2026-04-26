@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { servicesMiddleware, tenantDbMiddleware } from "@open-managed-agents/services";
 import { authMiddleware } from "./auth";
-import { rateLimitMiddleware } from "./rate-limit";
+import { rateLimitMiddleware, authRateLimitMiddleware } from "./rate-limit";
 import agentsRoutes from "./routes/agents";
 import environmentsRoutes from "./routes/environments";
 import sessionsRoutes from "./routes/sessions";
@@ -33,8 +33,10 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
-// Auth routes (public — no authMiddleware)
+// Auth routes (public — no authMiddleware, but rate-limited per-IP and
+// per-email so a stranger can't spam OTP sends and burn the mail budget).
 // Lazy import to avoid crashing workerd in test environments
+app.use("/auth/*", authRateLimitMiddleware);
 app.on(["GET", "POST"], "/auth/*", async (c) => {
   if (!c.env.AUTH_DB) return c.json({ error: "Auth not configured" }, 503);
   const { createAuth } = await import("./auth-config");

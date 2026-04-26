@@ -31,6 +31,18 @@ export interface Env {
   KV_NAMESPACE_ID?: string;
   RATE_LIMIT_WRITE?: number;
   RATE_LIMIT_READ?: number;
+  /** Per-IP cap on /auth/* request rate (per minute). Default: 60. */
+  AUTH_RATE_LIMIT_IP_PER_MIN?: number;
+  /** Per-IP cap on email-triggering /auth/* endpoints (per hour).
+   *  Default: 30 — protects the mail budget from a single attacker. */
+  AUTH_RATE_LIMIT_EMAIL_SEND_IP_PER_HOUR?: number;
+  /** Per-email throttle on email-triggering /auth/* endpoints (per minute).
+   *  Default: 1 — prevents spamming any one victim's inbox even across
+   *  rotating IPs. */
+  AUTH_RATE_LIMIT_EMAIL_SEND_PER_MIN?: number;
+  /** Per-email cap on email-triggering /auth/* endpoints (per hour).
+   *  Default: 5. */
+  AUTH_RATE_LIMIT_EMAIL_SEND_PER_HOUR?: number;
   // Shared with apps/integrations gateway. Gates /v1/internal/* endpoints.
   // Must match INTEGRATIONS_INTERNAL_SECRET on the integrations worker.
   INTEGRATIONS_INTERNAL_SECRET?: string;
