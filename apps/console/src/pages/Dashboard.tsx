@@ -104,8 +104,8 @@ export function Dashboard() {
     );
   }
 
-  const cmd = "npx open-managed-agents";
-  const cmdGlobal = "npm i -g open-managed-agents";
+  const cmd = "npx -y -p @openma/cli oma";
+  const cmdGlobal = "npm i -g @openma/cli";
   const examplePrompt =
     "Use oma to create a research agent that monitors arXiv for new ML papers daily";
 
