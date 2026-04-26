@@ -82,7 +82,7 @@ export const authMiddleware = createMiddleware<{
           // Self-heal: legacy users registered before the sign-up hook landed,
           // or hook silently failed at creation time, would otherwise be
           // permanently stuck. Mint a tenant on the fly.
-          tenantId = await ensureTenant(c.env.AUTH_DB, session.user.id, session.user.name ?? session.user.email ?? "user");
+          tenantId = await ensureTenant(c.env.AUTH_DB, session.user.id, session.user.name, session.user.email);
         }
         c.set("tenant_id", tenantId);
         c.set("user_id", session.user.id);
