@@ -1,0 +1,140 @@
+---
+title: Operations
+description: Day-2 concerns for self-hosters — custom domains, observability, multi-tenancy, backups, upgrades, troubleshooting.
+---
+
+import { Aside, Tabs, TabItem, LinkCard } from '@astrojs/starlight/components';
+
+After the deploy works, here's what you need to know to run it.
+
+## Custom domains
+
+Routes are declared in each `wrangler.jsonc`:
+
+```jsonc
+"routes": [
+  { "pattern": "app.yourdomain.com", "custom_domain": true }
+]
+```
+
+When you deploy with `custom_domain: true`, Cloudflare:
+
+1. Auto-creates a DNS record on the zone.
+2. Provisions a TLS cert (~1 min on first deploy).
+3. Routes traffic to the Worker.
+
+If the cert doesn't provision, the zone may not be fully on Cloudflare. Fix the zone, redeploy.
+
+For staging, the `[env.staging]` blocks point at `*.staging.yourdomain.com` — same mechanism.
+
+## Observability
+
+### Logs
+
+Every Worker has `observability: { enabled: true }` set, so logs ship to Cloudflare Logs by default. View live with:
+
+```bash
+npx wrangler tail managed-agents
+npx wrangler tail openma-agent
+npx wrangler tail managed-agents-integrations
+```
+
+Logs are **structured JSON** for things you'd want to query (silent catches, integration dispatches). Plain `console.log` for ad-hoc.
+
+### Analytics Engine
+
+The platform writes to an Analytics Engine dataset (`oma_events`) for high-cardinality events:
+
+- Silent catches (caught errors that didn't surface to the user)
+- Session lifecycle transitions
+- Tool call success/failure
+- Integration dispatches
+
+Query from the dashboard or with the GraphQL API. Useful for "are silent failures spiking?" and "which tool errors most often?".
+
+### Metrics
+
+Workers metrics (requests, CPU time, errors) are in the Cloudflare dashboard per Worker. DO metrics (active instances, storage) are under Durable Objects.
+
+## Multi-tenancy
+
+By default, openma is **multi-tenant on a single D1**. Every user gets a `tenant_id` row; every query is scoped by it. Adequate for most teams.
+
+For stricter isolation (e.g. one D1 per customer, common in B2B SaaS), enable per-tenant DBs:
+
+```bash
+npx wrangler secret put PER_TENANT_DB_ENABLED   # set to "true"
+npx wrangler secret put STORE_BACKENDS          # JSON config of backends
+```
+
+See `packages/storage/README.md` for the full config schema.
+
+## Database backups
+
+D1 supports point-in-time recovery on Workers Paid. Enable in the Cloudflare dashboard → D1 → your database → Backups.
+
+R2 has versioning; enable per bucket in the dashboard if your skill files are mutable and you want history.
+
+## Upgrades
+
+Pull `main`, install, deploy:
+
+```bash
+git pull
+pnpm install
+npx wrangler d1 migrations apply openma-auth --remote
+pnpm deploy
+```
+
+Migrations are forward-only and additive by convention; rollbacks are not supported. Test against staging first.
+
+## Sandbox isolation
+
+Every session gets its own Cloudflare Container instance via the `SANDBOX` Durable Object class. Sessions never share container state. The container's outbound network goes through openma's egress proxy; secrets (Vault entries) are injected per-host so the model never sees raw credentials.
+
+If you want to restrict outbound destinations, edit `apps/agent/src/sandbox/proxy.ts` to add allowlist rules.
+
+## Common troubleshooting
+
+### "1010 Cloudflare Browser Integrity" on POST
+
+CF Bot Fight Mode is rejecting the request. Either:
+- Add a browser-shaped User-Agent header on your client, or
+- Lower Bot Fight Mode for the affected hostname in the dashboard.
+
+This bites self-hosters using `curl` from automation against `*.openma.dev` defaults; the User-Agent path is recorded in the [project memory](/contribute/) for hosted use.
+
+### "Migration failed" on first deploy
+
+Make sure you ran `wrangler d1 migrations apply openma-auth --remote` before `pnpm deploy`. The deploy script doesn't re-apply migrations.
+
+### Container fails to start
+
+Check `wrangler tail openma-agent` for the actual error. Common causes:
+- The base image listed in your Environment doesn't exist or isn't pullable.
+- A package in the Environment's install list doesn't exist (typo'd `pip` package).
+- You're past the Containers free quota — upgrade in the dashboard.
+
+### OAuth callback 404
+
+You probably set the redirect URL on the third-party to a host that doesn't match your `apps/integrations/wrangler.jsonc → routes`. They must match exactly.
+
+### Webhook signature verification fails
+
+Your `LINEAR_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` / `SLACK_SIGNING_SECRET` is wrong, or wasn't set on the integrations Worker. Verify with:
+```bash
+npx wrangler secret list -c apps/integrations/wrangler.jsonc
+```
+
+## Where to go next
+
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="All env vars and binding shapes in one place."
+/>
+<LinkCard
+  title="Glossary"
+  href="/reference/glossary/"
+  description="Every term, alphabetized, with cross-links."
+/>
