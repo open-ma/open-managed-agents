@@ -1,14 +1,15 @@
 // /v1/me — current-user identity, tenants, and CLI token mint.
 //
-// Designed multi-tenant-ready: GET /v1/me/tenants returns an array of all
-// orgs the user belongs to. Today the array always has exactly one entry
-// (1 user = 1 tenant — see auth-config.ts ensureTenant). When membership
-// table lands, the array shape stays the same and the picker on the CLI
-// login page automatically lights up — no client change needed.
+// Pattern A multi-tenant: GET /v1/me/tenants returns every tenant the
+// user belongs to (one row per `membership`). The CLI shows a picker
+// when there's more than one and mints a per-tenant token via
+// POST /v1/me/cli-tokens — switching tenants in the CLI re-runs that
+// flow so each token stays scoped to a single tenant.
 
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import { listMemberships, hasMembership } from "../auth-config";
 
 const app = new Hono<{
   Bindings: Env;
@@ -42,22 +43,9 @@ async function loadTenant(db: D1Database, tenantId: string): Promise<TenantRow |
     .first<TenantRow>();
 }
 
-async function loadUserTenants(
-  db: D1Database,
-  userId: string,
-): Promise<Array<{ id: string; name: string; role: string }>> {
-  // Today every user has exactly one tenant (ensureTenant invariant).
-  // The query is shaped to make the future migration trivial — when a
-  // memberships join table lands, swap this for a JOIN against it and
-  // the response shape stays identical.
-  const user = await loadUser(db, userId);
-  if (!user?.tenantId) return [];
-  const tenant = await loadTenant(db, user.tenantId);
-  if (!tenant) return [];
-  return [{ id: tenant.id, name: tenant.name, role: user.role ?? "member" }];
-}
-
-// GET /v1/me — current user, current tenant, all tenants the user belongs to.
+// GET /v1/me — current user, current tenant (the one resolved by auth
+// middleware for THIS request, honoring x-active-tenant), and every
+// tenant the user belongs to.
 app.get("/", async (c) => {
   const userId = c.get("user_id");
   const tenantId = c.get("tenant_id");
@@ -69,26 +57,29 @@ app.get("/", async (c) => {
       tenants: [{ id: tenantId, name: "", role: "member" }],
     });
   }
-  const [user, tenant, tenants] = await Promise.all([
+  const [user, tenant, memberships] = await Promise.all([
     loadUser(c.env.AUTH_DB, userId),
     loadTenant(c.env.AUTH_DB, tenantId),
-    loadUserTenants(c.env.AUTH_DB, userId),
+    listMemberships(c.env.AUTH_DB, userId),
   ]);
   if (!user) return c.json({ error: "User not found" }, 404);
   return c.json({
     user: { id: user.id, email: user.email, name: user.name },
     tenant: tenant ? { id: tenant.id, name: tenant.name } : { id: tenantId, name: "" },
-    tenants,
+    tenants: memberships,
   });
 });
 
 // GET /v1/me/tenants — list of tenants the user has access to. CLI calls
-// this to populate its tenant picker.
+// this to populate its tenant picker; Console calls it to populate the
+// sidebar tenant switcher.
 app.get("/tenants", async (c) => {
   const userId = c.get("user_id");
-  if (!userId) return c.json({ data: [{ id: c.get("tenant_id"), name: "", role: "member" }] });
-  const tenants = await loadUserTenants(c.env.AUTH_DB, userId);
-  return c.json({ data: tenants });
+  if (!userId) {
+    return c.json({ data: [{ id: c.get("tenant_id"), name: "", role: "member" }] });
+  }
+  const memberships = await listMemberships(c.env.AUTH_DB, userId);
+  return c.json({ data: memberships });
 });
 
 // ─── CLI token mint ──────────────────────────────────────────────────────
@@ -117,16 +108,17 @@ function generateRawKey(): string {
 }
 
 interface CliTokenBody {
-  /** Optional — if omitted, uses the current session's tenant. When multi-
-   *  tenant lands, this MUST be one of the tenants the user belongs to. */
+  /** Optional — if omitted, uses the current session's tenant. Must be a
+   *  tenant the user belongs to (membership table is the source of truth). */
   tenant_id?: string;
   /** Display name shown on the API Keys page so the user knows where the
    *  key is being used (typically "CLI on <hostname>" from the CLI side). */
   name?: string;
 }
 
-// POST /v1/me/cli-tokens — mint a CLI token (reuses the api_keys store).
-// Cookie-auth only: api-key-auth requesters can't mint new keys via this.
+// POST /v1/me/cli-tokens — mint a CLI token bound to a specific tenant.
+// Cookie-auth only: api-key requesters can't mint new keys here (they
+// already have one).
 app.post("/cli-tokens", async (c) => {
   const userId = c.get("user_id");
   const sessionTenantId = c.get("tenant_id");
@@ -138,13 +130,11 @@ app.post("/cli-tokens", async (c) => {
     return {} as CliTokenBody;
   });
 
-  // Validate requested tenant against memberships. Today the membership set
-  // is { user.tenantId }; in the future this is the join-table check that
-  // makes per-tenant access enforcement real.
-  const allowed = await loadUserTenants(c.env.AUTH_DB, userId);
+  // Validate against the membership table — never trust client-claimed
+  // tenant ids without confirming the user actually has access.
   const requested = body.tenant_id ?? sessionTenantId;
-  const match = allowed.find((t) => t.id === requested);
-  if (!match) {
+  const ok = await hasMembership(c.env.AUTH_DB, userId, requested);
+  if (!ok) {
     return c.json({ error: "Not a member of the requested tenant" }, 403);
   }
 
@@ -160,14 +150,14 @@ app.post("/cli-tokens", async (c) => {
     `apikey:${hash}`,
     JSON.stringify({
       id,
-      tenant_id: match.id,
+      tenant_id: requested,
       user_id: userId,
       name,
       created_at: now,
       source: "cli",
     }),
   );
-  const indexKey = `t:${match.id}:apikeys`;
+  const indexKey = `t:${requested}:apikeys`;
   const existingIndex = await c.env.CONFIG_KV.get(indexKey);
   type Meta = { id: string; name: string; prefix: string; hash: string; created_at: string };
   const index: Meta[] = existingIndex ? (JSON.parse(existingIndex) as Meta[]) : [];
@@ -178,7 +168,7 @@ app.post("/cli-tokens", async (c) => {
     {
       key_id: id,
       token: rawKey,
-      tenant_id: match.id,
+      tenant_id: requested,
       user_id: userId,
       created_at: now,
     },
