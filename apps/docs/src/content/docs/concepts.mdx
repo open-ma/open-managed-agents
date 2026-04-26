@@ -1,0 +1,113 @@
+---
+title: Concepts
+description: A one-page tour of every noun in openma — Agent, Session, Environment, Vault, Memory Store, Skill, Tool, Harness, Integration.
+---
+
+import { Aside, LinkCard } from '@astrojs/starlight/components';
+
+openma has nine core concepts. Skim this page once and most of the docs will make sense. Each section ends with a link to where the concept is used in depth.
+
+## Agent
+
+A reusable configuration that defines what model to call, what system prompt to use, what tools and skills are available, and which MCP servers to connect. Agents are versioned: every update creates a new version, so a session always pins the version it was created with.
+
+Stored in D1; mutated through the Console (**Agents** page) or the `/v1/agents` REST endpoint. See the [Configuration reference](/reference/configuration/).
+
+## Session
+
+A single conversation. Sessions are durable — backed by a Cloudflare Durable Object with a per-session SQLite database that holds the **append-only event log**: every model message, tool call, tool result, and lifecycle event. You can resume a session days later and the platform replays the events.
+
+Created via `POST /v1/sessions`. Stream events with `GET /v1/sessions/:id/events` (Server-Sent Events). Detailed API in [REST API](/build/api/).
+
+<Aside type="note">
+  The event log is the source of truth. The Console UI, the SSE stream, and any future replay tooling all read the same log.
+</Aside>
+
+## Environment
+
+The sandbox configuration: which packages to install (`pip`, `npm`, `apt`, `cargo`, `gem`, `go`), networking rules, and which container image to run. When a session needs to execute code (via the `bash` tool, custom tools, or harness logic), the platform spins up a Cloudflare Container based on this environment.
+
+Manage on the Console **Environments** page or via `/v1/environments`.
+
+## Vault
+
+A credential store. Vaults hold **bearer tokens, OAuth tokens, and env vars** that tools and integrations need — but the credentials *never enter the sandbox*. Instead, tools make outbound HTTPS requests through a proxy, and the proxy injects the auth header per-host. The model sees only the response; it never sees the secret.
+
+Vaults are managed in the Console (**Vaults** page) and via `/v1/vaults`. Bound to specific hosts so a leaked or hostile tool can't pivot.
+
+<Aside type="caution">
+  Anything sensitive belongs in a Vault. Never put secrets in an Agent's `system` prompt or in tool inputs.
+</Aside>
+
+## Memory Store
+
+Per-agent semantic memory across sessions. Memory entries are embedded with Workers AI and indexed in Vectorize. The agent can recall earlier conversations or facts via a built-in `memory` tool.
+
+Manage on the Console **Memory** page or via `/v1/memory_stores`.
+
+## Skill
+
+A reusable prompt fragment plus optional files mounted into the sandbox. Two kinds:
+
+- **Built-in skills** — handlers for `xlsx`, `pdf`, `docx`, `pptx`, `json`, `csv`, `sql`, `image`, etc.
+- **Custom skills** — your own. Metadata in D1, files in R2. The platform mounts the files at `/home/user/.skills/{id}/` and injects a system prompt addition that points the model at them.
+
+Manage on the Console **Skills** page or via `/v1/skills`. See [Skills & Tools](/build/skills-and-tools/).
+
+## Tool
+
+Anything the model can call. Three shapes:
+
+- **Built-in tools** — `bash`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch`, `web_search`. Shipped as the `agent_toolset_20260401` toolset.
+- **Custom tools** — defined inline on an Agent with a JSON schema; the platform routes calls to your endpoint or executes them in the sandbox.
+- **MCP tools** — connect any MCP server and the platform auto-generates `mcp_*` tools.
+
+Detailed schemas in [Skills & Tools](/build/skills-and-tools/).
+
+## Harness
+
+The agent loop itself — the code that decides what the model does next given the session events. openma ships a **DefaultHarness** built on the [`ai` SDK](https://sdk.vercel.ai/), but the harness interface is pluggable. You can register a custom harness that:
+
+- Drives a different model loop
+- Handles compaction differently (`shouldCompact`, `compact`)
+- Customizes the system prompt assembly (`deriveModelContext`)
+- Hooks into session lifecycle (`onSessionInit`, `run`)
+
+Two more harness modes are planned: **ContainerAgent** (run an external CLI like Claude Code or Codex inside the sandbox) and **DaemonAgent** (a local daemon connecting to the platform). See [Custom Integrations](/build/integrations/) for the shape.
+
+## Integration
+
+A way to publish an Agent into a third-party platform so users interact with it where they already work. Three integrations ship today:
+
+- **Linear** — agents become workspace members, assignable to issues and mentionable in comments.
+- **GitHub** — agents act on PRs, repos, and issues.
+- **Slack** — agents in channels and threads.
+
+Each integration handles its own OAuth flow, webhook delivery, and exposes its capabilities to the agent as MCP tools. Add your own by implementing `IntegrationProvider` (see [Custom Integrations](/build/integrations/)).
+
+---
+
+## Where these live in the code
+
+If you're reading the source, here's the rough mapping:
+
+| Concept | Source |
+|---|---|
+| Agent / Session / etc. types | `packages/api-types` |
+| REST endpoints | `apps/main/src` |
+| Session DO + sandbox | `apps/agent/src` |
+| Harness interface | `apps/agent/src/harness/interface.ts` |
+| Built-in skills | `apps/agent/src/harness/skills.ts` |
+| Integrations core | `packages/integrations-core` |
+| Linear / GitHub / Slack | `apps/integrations/src/routes/{linear,github,slack}` |
+
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="Schemas for Agent, Environment, Skill, Vault, and friends."
+/>
+<LinkCard
+  title="Glossary"
+  href="/reference/glossary/"
+  description="Every term, alphabetized, with cross-links."
+/>
