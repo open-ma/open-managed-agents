@@ -1,24 +1,36 @@
-import { useEffect, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { useParams, Link } from "react-router";
 import { useApi } from "../lib/api";
 import { Markdown } from "../components/Markdown";
 
 interface Event {
   type: string;
-  content?: Array<{ type: string; text: string }>;
+  content?: Array<{ type: string; text: string }> | string;
   id?: string;
   name?: string;
   input?: Record<string, unknown>;
   tool_use_id?: string;
+  mcp_tool_use_id?: string;
+  mcp_server_name?: string;
   error?: string;
+  source?: string;
+  message?: string;
   stop_reason?: { type: string };
+  /** ISO timestamp. Server sets it for stored events; the client tags streamed
+   *  events on arrival with Date.now() as a best-effort fallback. */
+  ts?: string;
+  /** Server-side monotonic seq. Only set for events fetched from /events. */
+  seq?: number;
   [key: string]: unknown;
 }
+
+type View = "chat" | "timeline";
 
 export function SessionDetail() {
   const { id } = useParams();
   const { api, streamEvents } = useApi();
   const [events, setEvents] = useState<Event[]>([]);
+  const [view, setView] = useState<View>("chat");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
   const [title, setTitle] = useState("");
@@ -51,6 +63,10 @@ export function SessionDetail() {
     if (ev.type === "session.status_idle") { setStatus("idle"); return; }
     if (ev.type?.startsWith("span.") || ev.type === "agent.thinking") return;
 
+    // Tag streamed events with arrival time so the timeline has a usable ts
+    // even before the server-side stored copy round-trips.
+    if (!ev.ts) ev.ts = new Date().toISOString();
+
     setEvents((prev) => [...prev, ev]);
   };
 
@@ -82,9 +98,17 @@ export function SessionDetail() {
       })
       .catch(() => {});
 
-    // Load history
-    api<{ data: Array<{ type: string; data: Event }> }>(`/v1/sessions/${id}/events?limit=1000&order=asc`)
-      .then((res) => { for (const e of res.data) addEvent(e.data || (e as unknown as Event)); })
+    // Load history. The /events endpoint wraps each event as { seq, type, ts,
+    // data }; promote seq + ts onto the inner event so timeline has them.
+    api<{ data: Array<{ seq?: number; type: string; ts?: string; data: Event }> }>(`/v1/sessions/${id}/events?limit=1000&order=asc`)
+      .then((res) => {
+        for (const e of res.data) {
+          const inner = e.data || (e as unknown as Event);
+          if (e.ts && !inner.ts) inner.ts = e.ts;
+          if (e.seq !== undefined && inner.seq === undefined) inner.seq = e.seq;
+          addEvent(inner);
+        }
+      })
       .catch(() => {});
 
     // Connect SSE
@@ -96,8 +120,9 @@ export function SessionDetail() {
   }, [id]);
 
   useEffect(() => {
+    if (view !== "chat") return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [events]);
+  }, [events, view]);
 
   const send = async () => {
     if (!input.trim() || !id) return;
@@ -130,6 +155,15 @@ export function SessionDetail() {
           )}
           <span className="text-xs text-fg-subtle font-mono">{agentId}</span>
         </div>
+      </div>
+
+      {/* View tabs */}
+      <div className="px-8 border-b border-border flex items-center gap-1 shrink-0">
+        <ViewTab label="Conversation" active={view === "chat"} onClick={() => setView("chat")} />
+        <ViewTab label="Timeline" active={view === "timeline"} onClick={() => setView("timeline")} />
+        {view === "timeline" && (
+          <span className="ml-auto text-xs text-fg-subtle font-mono">{events.length} events</span>
+        )}
       </div>
 
       {/* Linear context (when triggered by a Linear webhook) */}
@@ -184,39 +218,60 @@ export function SessionDetail() {
         </div>
       )}
 
-      {/* Events */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
-        {events.map((e, i) => (
-          <EventBubble key={i} event={e} />
-        ))}
-        {status === "running" && (
-          <div className="flex gap-1 py-2">
-            <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-            <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-            <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+      {view === "chat" ? (
+        <>
+          {/* Events */}
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
+            {events.map((e, i) => (
+              <EventBubble key={i} event={e} />
+            ))}
+            {status === "running" && (
+              <div className="flex gap-1 py-2">
+                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
+                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
+                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+              </div>
+            )}
           </div>
-        )}
-      </div>
 
-      {/* Input */}
-      <div className="px-8 py-4 border-t border-border flex gap-2 shrink-0">
-        <input
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
-          placeholder="Send a message..."
-          className="flex-1 border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-border-strong transition-colors bg-bg text-fg"
-          disabled={sending}
-        />
-        <button
-          onClick={send}
-          disabled={sending || !input.trim()}
-          className="px-5 py-2.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover disabled:opacity-40 transition-colors"
-        >
-          Send
-        </button>
-      </div>
+          {/* Input */}
+          <div className="px-8 py-4 border-t border-border flex gap-2 shrink-0">
+            <input
+              value={input}
+              onChange={(e) => setInput(e.target.value)}
+              onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
+              placeholder="Send a message..."
+              className="flex-1 border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-border-strong transition-colors bg-bg text-fg"
+              disabled={sending}
+            />
+            <button
+              onClick={send}
+              disabled={sending || !input.trim()}
+              className="px-5 py-2.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover disabled:opacity-40 transition-colors"
+            >
+              Send
+            </button>
+          </div>
+        </>
+      ) : (
+        <TimelineView events={events} />
+      )}
     </div>
+  );
+}
+
+function ViewTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-2.5 text-sm border-b-2 transition-colors ${
+        active
+          ? "border-brand text-fg font-medium"
+          : "border-transparent text-fg-subtle hover:text-fg-muted"
+      }`}
+    >
+      {label}
+    </button>
   );
 }
 
@@ -230,7 +285,7 @@ function EventBubble({ event }: { event: Event }) {
           <div className="max-w-lg">
             <div className="text-xs text-fg-subtle text-right mb-1">You</div>
             <div className="bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
-              {event.content?.[0]?.text}
+              {Array.isArray(event.content) ? event.content[0]?.text : ""}
             </div>
           </div>
         </div>
@@ -241,7 +296,7 @@ function EventBubble({ event }: { event: Event }) {
         <div className="max-w-2xl">
           <div className="text-xs text-fg-subtle mb-1">Agent</div>
           <div className="bg-bg-surface rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
-            <Markdown>{(event.content || []).map((b) => b.text).join("")}</Markdown>
+            <Markdown>{(Array.isArray(event.content) ? event.content : []).map((b) => b.text).join("")}</Markdown>
           </div>
         </div>
       );
@@ -296,4 +351,261 @@ function EventBubble({ event }: { event: Event }) {
     default:
       return null;
   }
+}
+
+// ─── Timeline (waterfall) ────────────────────────────────────────────────
+//
+// Pure-frontend projection of the event stream into a Gantt-style timeline.
+// Tool/MCP/custom-tool calls become bars (use→result paired by id); model
+// turns are derived as the gap between the last completed event and the next
+// agent.message; messages and session.* events render as instants. We
+// deliberately drop agent.thinking (already filtered upstream) and tool
+// result events (consumed in pairing) to keep one row per logical span.
+
+type SpanFamily = "model" | "tool" | "mcp" | "custom_tool" | "user" | "agent" | "system" | "warn" | "error";
+
+interface Span {
+  key: string;
+  family: SpanFamily;
+  label: string;
+  detail?: string;
+  /** ms since the first event */
+  startMs: number;
+  /** 0 for instants */
+  durationMs: number;
+}
+
+const FAMILY_DOT: Record<SpanFamily, string> = {
+  model: "bg-info",
+  tool: "bg-emerald-500",
+  mcp: "bg-purple-500",
+  custom_tool: "bg-amber-500",
+  user: "bg-brand",
+  agent: "bg-fg-muted",
+  system: "bg-fg-subtle",
+  warn: "bg-warning",
+  error: "bg-danger",
+};
+
+const FAMILY_BAR: Record<SpanFamily, string> = {
+  model: "bg-info/70",
+  tool: "bg-emerald-500/70",
+  mcp: "bg-purple-500/70",
+  custom_tool: "bg-amber-500/70",
+  user: "bg-brand/70",
+  agent: "bg-fg-muted/70",
+  system: "bg-fg-subtle/70",
+  warn: "bg-warning/70",
+  error: "bg-danger/70",
+};
+
+function formatDuration(ms: number): string {
+  if (!Number.isFinite(ms) || ms < 0) return "—";
+  if (ms < 1) return "<1ms";
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
+  const m = Math.floor(ms / 60_000);
+  const s = Math.round((ms % 60_000) / 1000);
+  return `${m}m${s}s`;
+}
+
+function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
+  const timed = events.filter((e) => e.ts);
+  if (timed.length === 0) return { spans: [], totalMs: 0 };
+
+  const t0 = new Date(timed[0].ts!).getTime();
+  const tEnd = new Date(timed[timed.length - 1].ts!).getTime();
+  const totalMs = Math.max(1, tEnd - t0);
+
+  const spans: Span[] = [];
+
+  // Index results by their use-id field for O(1) pairing.
+  const toolResults = new Map<string, Event>();
+  const mcpResults = new Map<string, Event>();
+  const customResults = new Map<string, Event>();
+  for (const e of events) {
+    if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, e);
+    else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, e);
+    else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), e);
+  }
+
+  // Track previous completed-span end so we can derive a "model" span as the
+  // gap between the last result/user.message and the next agent.message.
+  let lastEnd = 0;
+
+  for (let i = 0; i < events.length; i++) {
+    const e = events[i];
+    if (!e.ts) continue;
+    const startMs = new Date(e.ts).getTime() - t0;
+
+    if (e.type === "agent.tool_use" || e.type === "agent.custom_tool_use") {
+      const result = e.type === "agent.tool_use"
+        ? toolResults.get(String(e.id))
+        : customResults.get(String(e.id));
+      const endMs = result?.ts ? new Date(result.ts).getTime() - t0 : startMs;
+      spans.push({
+        key: `tool-${e.id ?? i}`,
+        family: e.type === "agent.tool_use" ? "tool" : "custom_tool",
+        label: String(e.name ?? "tool"),
+        detail: result ? "completed" : "no result",
+        startMs,
+        durationMs: Math.max(0, endMs - startMs),
+      });
+      lastEnd = Math.max(lastEnd, endMs);
+    } else if (e.type === "agent.mcp_tool_use") {
+      const result = mcpResults.get(String(e.id));
+      const endMs = result?.ts ? new Date(result.ts).getTime() - t0 : startMs;
+      spans.push({
+        key: `mcp-${e.id ?? i}`,
+        family: "mcp",
+        label: `${String(e.mcp_server_name ?? "mcp")}:${String(e.name ?? "?")}`,
+        detail: result ? "completed" : "no result",
+        startMs,
+        durationMs: Math.max(0, endMs - startMs),
+      });
+      lastEnd = Math.max(lastEnd, endMs);
+    } else if (
+      e.type === "agent.tool_result" ||
+      e.type === "agent.mcp_tool_result" ||
+      e.type === "user.custom_tool_result"
+    ) {
+      // consumed via pairing above — skip the row
+      continue;
+    } else if (e.type === "user.message") {
+      spans.push({ key: `u-${i}`, family: "user", label: "user.message", startMs, durationMs: 0 });
+      lastEnd = Math.max(lastEnd, startMs);
+    } else if (e.type === "agent.message") {
+      // Derive a model span from the last completed event up to here, so the
+      // chart shows where time was spent waiting on the model vs tools.
+      const modelStart = Math.max(0, Math.min(lastEnd, startMs));
+      if (startMs > modelStart) {
+        spans.push({
+          key: `m-${i}`,
+          family: "model",
+          label: "model",
+          startMs: modelStart,
+          durationMs: startMs - modelStart,
+        });
+      }
+      spans.push({ key: `a-${i}`, family: "agent", label: "agent.message", startMs, durationMs: 0 });
+      lastEnd = startMs;
+    } else if (e.type === "session.error") {
+      spans.push({
+        key: `err-${i}`,
+        family: "error",
+        label: "session.error",
+        detail: typeof e.error === "string" ? e.error : JSON.stringify(e.error),
+        startMs,
+        durationMs: 0,
+      });
+    } else if (e.type === "session.warning") {
+      spans.push({
+        key: `warn-${i}`,
+        family: "warn",
+        label: `warning:${String(e.source ?? "")}`,
+        detail: String(e.message ?? ""),
+        startMs,
+        durationMs: 0,
+      });
+    } else if (e.type.startsWith("session.")) {
+      spans.push({ key: `s-${i}`, family: "system", label: e.type, startMs, durationMs: 0 });
+    }
+  }
+
+  return { spans, totalMs };
+}
+
+function TimelineView({ events }: { events: Event[] }) {
+  const { spans, totalMs } = useMemo(() => deriveSpans(events), [events]);
+
+  if (spans.length === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-sm text-fg-subtle">
+        No timing data yet — send a message to populate the timeline.
+      </div>
+    );
+  }
+
+  // Tick marks at sensible intervals based on total duration.
+  const tickStep = pickTickStep(totalMs);
+  const ticks: number[] = [];
+  for (let t = 0; t <= totalMs; t += tickStep) ticks.push(t);
+
+  return (
+    <div className="flex-1 overflow-y-auto">
+      <div className="px-8 py-3 border-b border-border text-xs text-fg-subtle font-mono flex items-center gap-4">
+        <span>{spans.length} spans</span>
+        <span>·</span>
+        <span>total {formatDuration(totalMs)}</span>
+      </div>
+
+      {/* Time axis */}
+      <div className="px-8 pt-3 sticky top-0 bg-bg z-10">
+        <div className="flex items-center">
+          <div className="w-56 shrink-0" />
+          <div className="flex-1 relative h-5 border-b border-border">
+            {ticks.map((t) => (
+              <div
+                key={t}
+                className="absolute top-0 h-full flex flex-col items-start text-[10px] text-fg-subtle font-mono"
+                style={{ left: `${(t / totalMs) * 100}%` }}
+              >
+                <span className="-translate-x-1/2 px-1">{formatDuration(t)}</span>
+                <div className="w-px flex-1 bg-border" />
+              </div>
+            ))}
+          </div>
+          <div className="w-20 shrink-0" />
+        </div>
+      </div>
+
+      {/* Rows */}
+      <div className="px-8 pb-8">
+        {spans.map((s) => {
+          const left = (s.startMs / totalMs) * 100;
+          const width = s.durationMs > 0 ? Math.max(0.4, (s.durationMs / totalMs) * 100) : 0;
+          return (
+            <div
+              key={s.key}
+              className="flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group"
+              title={
+                s.detail
+                  ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
+                  : `${s.label} — ${formatDuration(s.durationMs)}`
+              }
+            >
+              <div className="w-56 shrink-0 flex items-center gap-2 text-xs">
+                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
+                <span className="truncate text-fg-muted font-mono">{s.label}</span>
+              </div>
+              <div className="flex-1 relative h-5">
+                {width > 0 ? (
+                  <div
+                    className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
+                    style={{ left: `${left}%`, width: `${width}%` }}
+                  />
+                ) : (
+                  <div
+                    className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
+                    style={{ left: `${left}%` }}
+                  />
+                )}
+              </div>
+              <div className="w-20 shrink-0 text-right text-xs font-mono text-fg-subtle pr-1">
+                {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function pickTickStep(totalMs: number): number {
+  // Roughly 6 ticks across the chart, snapped to a friendly unit.
+  const target = totalMs / 6;
+  const candidates = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000];
+  for (const c of candidates) if (c >= target) return c;
+  return candidates[candidates.length - 1];
 }
