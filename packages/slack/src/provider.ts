@@ -492,7 +492,7 @@ export class SlackProvider implements IntegrationProvider {
     if (event.kind === "tokens_revoked" || event.kind === "app_uninstalled") {
       await this.container.installations.markRevoked(installation.id, this.container.clock.nowMs());
       await this.container.webhookEvents.attachPublication(env.event_id, pub.id);
-      return { handled: true, reason: event.kind, publicationId: pub.id };
+      return { handled: true, reason: event.kind, publicationId: pub.id, tenantId: installation.tenantId };
     }
 
     // Skip bot's own messages to avoid loops.
@@ -533,6 +533,7 @@ export class SlackProvider implements IntegrationProvider {
       handled: true,
       reason: event.kind ?? "dispatched",
       publicationId: pub.id,
+      tenantId: installation.tenantId,
       deferredWork: deferred,
     };
   }

@@ -3,6 +3,7 @@ import type { Env } from "@open-managed-agents/shared";
 import { generateFileId, fileR2Key } from "@open-managed-agents/shared";
 import { toFileRecord, FileNotFoundError } from "@open-managed-agents/files-store";
 import type { Services } from "@open-managed-agents/services";
+import { checkUploadFreq, checkUploadSize } from "../quotas";
 
 const app = new Hono<{
   Bindings: Env;
@@ -16,6 +17,13 @@ function ensureBucket(c: { env: Env }): R2Bucket | null {
 // POST /v1/files — upload file (multipart form or JSON body)
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
+  // Cheap upfront rejects so a flood of oversized / over-frequent uploads
+  // doesn't even read the body. Both gates soft-pass when unconfigured.
+  const sizeCheck = checkUploadSize(c.env, c.req.raw);
+  if (sizeCheck) return sizeCheck;
+  const freqCheck = await checkUploadFreq(c.env, t);
+  if (freqCheck) return freqCheck;
+
   const bucket = ensureBucket(c);
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 

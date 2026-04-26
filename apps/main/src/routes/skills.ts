@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
@@ -228,6 +229,14 @@ function validateFiles(files: SkillFileInput[]): string | null {
 // ---------------------------------------------------------------------------
 
 app.post("/", async (c) => {
+  const t = c.get("tenant_id");
+  // Cheap upfront rejects — same gates as POST /v1/files. Both soft-pass
+  // when unconfigured.
+  const sizeCheck = checkUploadSize(c.env, c.req.raw);
+  if (sizeCheck) return sizeCheck;
+  const freqCheck = await checkUploadFreq(c.env, t);
+  if (freqCheck) return freqCheck;
+
   const bucket = ensureBucket(c);
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
@@ -266,7 +275,6 @@ app.post("/", async (c) => {
   const now = new Date().toISOString();
   const id = `skill_${generateId()}`;
   const versionId = Date.now().toString();
-  const t = c.get("tenant_id");
 
   const manifest = await writeFilesToR2(bucket, t, id, versionId, body.files);
 
@@ -382,11 +390,16 @@ app.delete("/:id", async (c) => {
 // ---------------------------------------------------------------------------
 
 app.post("/:id/versions", async (c) => {
+  const t = c.get("tenant_id");
+  const sizeCheck = checkUploadSize(c.env, c.req.raw);
+  if (sizeCheck) return sizeCheck;
+  const freqCheck = await checkUploadFreq(c.env, t);
+  if (freqCheck) return freqCheck;
+
   const bucket = ensureBucket(c);
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   const id = c.req.param("id");
-  const t = c.get("tenant_id");
   const raw = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
   if (!raw) return c.json({ error: "Skill not found" }, 404);
 

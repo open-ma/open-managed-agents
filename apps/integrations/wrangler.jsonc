@@ -36,6 +36,17 @@
 
   "observability": { "enabled": true },
 
+  // Per-IP and per-tenant rate limit on webhook receivers. Public endpoints
+  // (Linear / GitHub / Slack POST here unauthenticated and we sig-verify),
+  // so an attacker can flood with garbage payloads (per-IP catches it) and
+  // a misconfigured legit workspace can flood from real upstream IPs
+  // (per-tenant catches that — applied AFTER sig verify exposes the tenant).
+  // Soft-pass when binding absent (matches OSS / dev convention).
+  "ratelimits": [
+    { "name": "RL_WEBHOOK_IP",     "namespace_id": "3001", "simple": { "limit": 30, "period": 10 } },
+    { "name": "RL_WEBHOOK_TENANT", "namespace_id": "3003", "simple": { "limit": 60, "period": 60 } }
+  ],
+
   "env": {
     "staging": {
       "name": "managed-agents-integrations-staging",
@@ -51,7 +62,11 @@
       "services": [
         { "binding": "MAIN", "service": "managed-agents-staging" }
       ],
-      "observability": { "enabled": true }
+      "observability": { "enabled": true },
+      "ratelimits": [
+        { "name": "RL_WEBHOOK_IP",     "namespace_id": "3002", "simple": { "limit": 30, "period": 10 } },
+        { "name": "RL_WEBHOOK_TENANT", "namespace_id": "3004", "simple": { "limit": 60, "period": 60 } }
+      ]
     }
   }
 }

@@ -105,6 +105,12 @@ export interface WebhookOutcome {
   reason?: string;
   publicationId?: string;
   sessionId?: string;
+  /** The tenant the (verified) webhook belongs to. Set once signature
+   *  verification + installation lookup have succeeded. The route handler
+   *  uses this to apply per-tenant rate limits before triggering the
+   *  expensive deferredWork — without leaking tenant lookup logic into
+   *  the route layer. Absent on sig-fail / unknown-app outcomes. */
+  tenantId?: string;
   /**
    * Optional plain-text body the route handler should echo back in the 200
    * response. Used by Slack's `url_verification` handshake — the gateway must

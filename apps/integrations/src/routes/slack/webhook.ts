@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
 import { buildProviders } from "../../providers";
+import { webhookRateLimitMiddleware, shouldDropForTenantRateLimit } from "../../webhook-rate-limit";
 
 // Webhook receiver:
 //   POST /slack/webhook/app/:appId
@@ -14,6 +15,8 @@ import { buildProviders } from "../../providers";
 // challenge response in the body — we surface those via `challengeResponse`.
 
 const app = new Hono<{ Bindings: Env }>();
+
+app.use("/*", webhookRateLimitMiddleware);
 
 app.post("/app/:appId", async (c) => {
   const appId = c.req.param("appId");
@@ -48,6 +51,14 @@ app.post("/app/:appId", async (c) => {
       status: 200,
       headers: { "content-type": "text/plain" },
     });
+  }
+
+  // Per-tenant rate limit: a misconfigured workspace can spew thousands of
+  // events from a legit Slack IP. Apply AFTER handleWebhook so we know
+  // which tenant — drop the deferred dispatch but still 200 so Slack
+  // doesn't retry and amplify the problem.
+  if (outcome.tenantId && (await shouldDropForTenantRateLimit(c.env, outcome.tenantId))) {
+    return c.json({ ok: false, reason: "tenant_rate_limited" }, 200);
   }
 
   // Defer the heavy lifting (session create/resume) so we 200 within Slack's
