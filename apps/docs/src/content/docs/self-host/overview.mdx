@@ -1,0 +1,97 @@
+---
+title: Self-host Overview
+description: Run openma on your own Cloudflare account. Architecture, requirements, and what you'll need to set up before deploying.
+---
+
+import { Card, CardGrid, Aside, LinkCard } from '@astrojs/starlight/components';
+
+You can run all of openma — the API, the Console, the integrations gateway, and the agent runtime — on your own Cloudflare account. The same code that powers [openma.dev](https://app.openma.dev) is the code in the public repo; nothing is held back.
+
+This page describes what you're getting into. The next page, [Deploy](/self-host/deploy/), is the step-by-step.
+
+## Architecture at a glance
+
+openma deploys as **four Workers** plus a set of bindings:
+
+| Worker | Purpose |
+|---|---|
+| `apps/main` | REST API + Console static assets. The front door. |
+| `apps/agent` | Session Durable Objects + sandbox Containers. Where agents actually run. |
+| `apps/integrations` | OAuth callback + webhook gateway for Linear / GitHub / Slack. |
+| `apps/docs` | This site. (Optional — only if you want your own docs.) |
+
+They talk to each other via **service bindings** (Worker-to-Worker calls, no public hop). State lives in:
+
+- **D1** — auth (users, tenants, sessions), agent configs, skill metadata, integration installs.
+- **KV** — fast-path caches: agent/environment/credential lookups.
+- **R2** — file storage: skill files, session files, workspace.
+- **Durable Objects** — `SESSION_DO` (per-session event log SQLite), `SANDBOX` (per-session container).
+- **Vectorize** — semantic memory index.
+- **Workers AI** — embedding generation.
+- **Cloudflare Containers** — sandbox runtime (the per-session container the `bash` tool runs in).
+- **Email Service** — transactional email for auth.
+- **Analytics Engine** — observability for silent catches and structured logs.
+
+## Requirements
+
+<CardGrid>
+  <Card title="Cloudflare Workers Paid plan" icon="seti:db">
+    Required for Durable Objects and Containers. The free plan won't work.
+  </Card>
+  <Card title="A domain" icon="seti:html">
+    You'll point routes at it. `openma.dev` in our deployment; whatever you own in yours.
+  </Card>
+  <Card title="An LLM provider" icon="puzzle">
+    Anthropic, OpenAI, MiniMax, or any OpenAI-compatible endpoint. You pay them directly.
+  </Card>
+  <Card title="OAuth apps" icon="approve-check">
+    You'll register your own GitHub App, Linear OAuth, and Slack app. Walked through in [OAuth Apps](/self-host/oauth-apps/).
+  </Card>
+</CardGrid>
+
+## What you don't need
+
+- **A separate database server** — D1 is managed.
+- **A queue or task runner** — Durable Object alarms cover scheduling.
+- **A vector database service** — Vectorize is managed.
+- **Container infrastructure** — CF Containers handle it.
+- **Manual scaling** — Workers + DOs scale on demand.
+
+## Cost shape
+
+In rough order of cost (highest first):
+
+1. **LLM API calls** — your Anthropic/OpenAI/MiniMax bill. The biggest variable.
+2. **Containers** — per-session runtime. Pay for active container time.
+3. **Workers** — requests + CPU time. Cheap.
+4. **Storage** — D1 / R2 / KV / Vectorize. Generally negligible until you have lots of long-lived sessions.
+
+There are no openma platform fees because there is no openma platform — it's all your Cloudflare account.
+
+## Multi-tenancy
+
+A single self-hosted deployment supports multiple tenants out of the box (the same code path the hosted product uses). On first sign-up, the `databaseHooks.user.create.after` hook creates a tenant row idempotently. You don't need to seed anything.
+
+If you want stricter isolation (per-tenant D1 databases), set `PER_TENANT_DB_ENABLED=true` and configure `STORE_BACKENDS`. See [Operations](/self-host/operations/).
+
+<Aside type="tip" title="Single-tenant is the default">
+  If it's just you or your team, you don't need to do anything special — the first user becomes the first tenant.
+</Aside>
+
+## Where to go next
+
+<LinkCard
+  title="Deploy"
+  href="/self-host/deploy/"
+  description="Step-by-step: clone, set bindings, set secrets, deploy."
+/>
+<LinkCard
+  title="OAuth Apps"
+  href="/self-host/oauth-apps/"
+  description="Register your own GitHub App, Linear OAuth app, Slack app."
+/>
+<LinkCard
+  title="Operations"
+  href="/self-host/operations/"
+  description="Custom domains, observability, multi-tenant config, troubleshooting."
+/>

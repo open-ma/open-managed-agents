@@ -1,0 +1,239 @@
+---
+title: Configuration Reference
+description: Schemas for Agent, Environment, Skill, Vault, and the full list of environment variables required to run openma.
+---
+
+import { Aside, LinkCard } from '@astrojs/starlight/components';
+
+Authoritative reference for openma's configuration shapes. The TypeScript source of truth lives in `packages/api-types`; the in-repo human-readable schema doc is `AGENTS.md`.
+
+## Agent
+
+```ts
+interface AgentConfig {
+  id: string;                   // assigned by the platform
+  name: string;
+  model: string;                // e.g. "claude-sonnet-4-6"
+  system: string;               // system prompt
+  tools: ToolDefinition[];
+  skills?: string[];            // skill ids
+  environment_id?: string;
+  mcp_servers?: McpServerConfig[];
+  memory_store_id?: string;
+  harness?: string;             // defaults to "default"
+  archived?: boolean;
+  version: number;              // platform-bumped on every update
+  created_at: string;
+  updated_at: string;
+}
+```
+
+### Tool definitions
+
+```ts
+type ToolDefinition =
+  | { type: 'agent_toolset_20260401' }                    // built-in toolset
+  | {
+      type: 'custom';
+      name: string;
+      description: string;
+      input_schema: JsonSchema;
+      execution:
+        | { type: 'http'; endpoint: string; method?: string }
+        | { type: 'sandbox'; command: string };
+    };
+```
+
+### MCP server config
+
+```ts
+interface McpServerConfig {
+  name: string;                 // becomes the prefix: mcp_<name>_<tool>
+  url: string;
+  auth?:
+    | { type: 'none' }
+    | { type: 'bearer'; token: string }
+    | { type: 'vault'; vault_id: string };
+}
+```
+
+## Environment
+
+```ts
+interface EnvironmentConfig {
+  id: string;
+  name: string;
+  base_image: string;            // e.g. "openma/sandbox-base:python-3.12"
+  packages: {
+    pip?: string[];
+    npm?: string[];
+    apt?: string[];
+    cargo?: string[];
+    gem?: string[];
+    go?: string[];
+  };
+  network?: {
+    allowlist?: string[];        // hostnames the sandbox may reach
+    denylist?: string[];
+  };
+  env?: Record<string, string>;
+}
+```
+
+## Vault
+
+```ts
+interface VaultConfig {
+  id: string;
+  name: string;
+  type: 'bearer' | 'oauth' | 'env';
+  hosts: string[];               // hostnames this vault is bound to
+  // Token material is write-only — never returned via the API
+}
+```
+
+## Skill
+
+```ts
+interface SkillMetadata {
+  id: string;
+  display_title: string;
+  description: string;
+  files: string[];               // R2 keys under t:{tenant}:skill:{id}/
+  built_in?: boolean;            // true for shipped skills
+}
+```
+
+The platform mounts the files at `/home/user/.skills/{id}/` and injects:
+
+```
+You have a skill called "{display_title}". Read /home/user/.skills/{id}/SKILL.md for instructions.
+```
+
+into the system prompt.
+
+## Memory store
+
+```ts
+interface MemoryStore {
+  id: string;
+  agent_id: string;
+  embedding_model: string;       // defaults to platform setting
+  vector_index: string;          // Vectorize index name
+}
+```
+
+## Session
+
+```ts
+interface SessionMeta {
+  id: string;
+  agent_id: string;
+  agent_version: number;         // pinned at creation
+  status: 'pending' | 'running' | 'idle' | 'done' | 'failed';
+  created_at: string;
+  updated_at: string;
+}
+
+interface SessionEvent {
+  id: string;
+  session_id: string;
+  type: string;                  // 'message_start', 'tool_use', 'tool_result', etc.
+  data: unknown;
+  created_at: string;
+}
+```
+
+The full event type catalog is in `packages/api-types/src/events.ts`.
+
+## Environment variables
+
+Required for self-host. Set as Worker secrets via `npx wrangler secret put NAME`.
+
+### Required
+
+| Variable | Worker | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | main, agent | LLM provider (or use `OPENAI_API_KEY` / `MINIMAX_API_KEY`) |
+| `BETTER_AUTH_SECRET` | main | better-auth session signing key |
+| `API_KEY` | main | Initial dev API key for the REST API |
+| `INTEGRATIONS_INTERNAL_SECRET` | main, integrations | Shared secret between main and integrations workers |
+| `MCP_SIGNING_KEY` | integrations | Signs outbound MCP tokens |
+
+### Optional integrations
+
+| Variable | Worker | Purpose |
+|---|---|---|
+| `LINEAR_CLIENT_ID` | integrations | Linear OAuth |
+| `LINEAR_CLIENT_SECRET` | integrations | Linear OAuth |
+| `LINEAR_WEBHOOK_SECRET` | integrations | Verify inbound Linear webhooks |
+| `GITHUB_APP_ID` | integrations | GitHub App ID |
+| `GITHUB_PRIVATE_KEY` | integrations | GitHub App private key (.pem contents) |
+| `GITHUB_WEBHOOK_SECRET` | integrations | Verify inbound GitHub webhooks |
+| `SLACK_CLIENT_ID` | integrations | Slack OAuth |
+| `SLACK_CLIENT_SECRET` | integrations | Slack OAuth |
+| `SLACK_SIGNING_SECRET` | integrations | Verify inbound Slack events |
+| `GOOGLE_CLIENT_ID` | main | Google sign-in for Console |
+| `GOOGLE_CLIENT_SECRET` | main | Google sign-in for Console |
+
+### Optional infra
+
+| Variable | Worker | Purpose |
+|---|---|---|
+| `TAVILY_API_KEY` | main, agent | Web search backend for `web_search` built-in |
+| `CLOUDFLARE_API_TOKEN` | main | Programmatic CF resource management (optional) |
+| `CLOUDFLARE_ACCOUNT_ID` | main | Programmatic CF resource management (optional) |
+| `INTEGRATIONS_PUBLIC_URL` | main | Override auto-detected integrations URL |
+| `PER_TENANT_DB_ENABLED` | main | Set `"true"` to enable per-tenant D1 isolation |
+| `STORE_BACKENDS` | main | JSON config for storage backends (advanced) |
+| `DATABASE_URL` | main | External Postgres URL (advanced) |
+
+## Cloudflare bindings
+
+What each Worker needs in its `wrangler.jsonc`:
+
+### `apps/main`
+
+| Binding | Type | Name |
+|---|---|---|
+| `AUTH_DB` | D1 | `openma-auth` |
+| `CONFIG_KV` | KV | (your namespace) |
+| `FILES_BUCKET` | R2 | `managed-agents-files` |
+| `AI` | Workers AI | (built-in) |
+| `VECTORIZE` | Vectorize | `openma-memory` |
+| `SANDBOX_sandbox_default` | Service | → agent worker |
+| `INTEGRATIONS` | Service | → integrations worker |
+| `SEND_EMAIL` | Email | (your sender) |
+| `ANALYTICS` | Analytics Engine | `oma_events` |
+
+### `apps/agent`
+
+| Binding | Type | Name |
+|---|---|---|
+| `SESSION_DO` | Durable Object | `SessionDO` |
+| `SANDBOX` | Durable Object | `Sandbox` (Container class) |
+| `CONFIG_KV` | KV | (shared with main) |
+| `AUTH_DB` | D1 | (shared with main) |
+| `WORKSPACE_BUCKET` | R2 | `managed-agents-workspace` |
+| `FILES_BUCKET` | R2 | (shared with main) |
+| `AI`, `VECTORIZE`, `BROWSER`, `ANALYTICS` | (same as main) | |
+
+### `apps/integrations`
+
+| Binding | Type | Name |
+|---|---|---|
+| `AUTH_DB` | D1 | (shared with main) |
+| `MAIN` | Service | → main worker |
+
+## Where to go next
+
+<LinkCard
+  title="API Endpoints"
+  href="/reference/api/"
+  description="Endpoint-by-endpoint reference."
+/>
+<LinkCard
+  title="Glossary"
+  href="/reference/glossary/"
+  description="Every term, alphabetized."
+/>
