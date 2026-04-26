@@ -20,23 +20,43 @@ interface Config {
 
 // ─── Stored credentials (~/.config/oma/credentials.json) ───
 //
-// File layout is single-profile for now; the structure has room for a
-// multi-profile expansion (one per base_url / tenant) without a breaking
-// change — read paths can grow into `profiles[name]` later.
+// v2 layout (Pattern A multi-tenant): one user identity, one base_url,
+// many tenant entries — each with its own per-tenant token. The
+// `active_tenant_id` selects which token apiFetch uses; switch with
+// `oma auth tenant use <id>`. Per-command override via --tenant flag
+// or OMA_TENANT_ID env var.
+//
+// v1 layout (single-tenant snapshot, beta.0–beta.3) is auto-migrated on
+// read. Existing files keep working.
 
-interface StoredCredentials {
+interface StoredTenantV2 {
+  name: string;
+  role: string;
+  token: string;
+  key_id: string;
+  created_at: string;
+}
+
+interface StoredCredentialsV2 {
+  version: 2;
+  base_url: string;
+  user: { id: string; email: string; name: string | null };
+  active_tenant_id: string;
+  tenants: Record<string, StoredTenantV2>;
+}
+
+interface StoredCredentialsV1 {
   version: 1;
   base_url: string;
   user: { id: string; email: string; name: string | null };
   tenant: { id: string; name: string };
-  /** Forward-compat: today always length 1 (1 user → 1 tenant). When
-   *  multi-tenant lands, this is the full membership list and `oma auth
-   *  tenant use` switches between them. */
   tenants: Array<{ id: string; name: string; role: string }>;
   token: string;
   key_id: string;
   created_at: string;
 }
+
+type StoredCredentials = StoredCredentialsV2;
 
 function credentialsPath(): string {
   // XDG-style on Linux/macOS; HOME/.config on macOS by default.
@@ -45,12 +65,39 @@ function credentialsPath(): string {
   return join(base, "oma", "credentials.json");
 }
 
+function migrateV1ToV2(v1: StoredCredentialsV1): StoredCredentialsV2 {
+  return {
+    version: 2,
+    base_url: v1.base_url,
+    user: v1.user,
+    active_tenant_id: v1.tenant.id,
+    tenants: {
+      [v1.tenant.id]: {
+        name: v1.tenant.name,
+        role: v1.tenants.find((t) => t.id === v1.tenant.id)?.role ?? "owner",
+        token: v1.token,
+        key_id: v1.key_id,
+        created_at: v1.created_at,
+      },
+    },
+  };
+}
+
 function readCredentials(): StoredCredentials | null {
   const path = credentialsPath();
   try {
     if (!existsSync(path)) return null;
     const raw = readFileSync(path, "utf8");
-    return JSON.parse(raw) as StoredCredentials;
+    const parsed = JSON.parse(raw) as StoredCredentialsV1 | StoredCredentialsV2;
+    if (parsed.version === 2) return parsed;
+    if (parsed.version === 1) {
+      const v2 = migrateV1ToV2(parsed);
+      // Persist the migrated file so subsequent reads skip the conversion.
+      // Best-effort — read still succeeds even if write fails (read-only fs).
+      try { writeCredentials(v2); } catch {}
+      return v2;
+    }
+    return null;
   } catch {
     return null;
   }
@@ -71,9 +118,17 @@ function clearCredentials(): boolean {
   return true;
 }
 
+/** Resolve the active tenant for THIS invocation: --tenant flag wins,
+ *  then OMA_TENANT_ID env var, then the credential file's
+ *  active_tenant_id. Validates membership before use elsewhere. */
+function resolveActiveTenant(stored: StoredCredentials, cliFlag?: string): string | null {
+  return cliFlag || process.env.OMA_TENANT_ID || stored.active_tenant_id || null;
+}
+
 function loadConfig(): Config {
   const envBase = process.env.OMA_BASE_URL;
   const envKey = process.env.OMA_API_KEY;
+  const envTenant = process.env.OMA_TENANT_ID;
   const stored = readCredentials();
   if (envKey) {
     return {
@@ -84,9 +139,15 @@ function loadConfig(): Config {
     };
   }
   if (stored) {
+    const activeId = envTenant || stored.active_tenant_id;
+    const profile = stored.tenants[activeId];
+    if (!profile) {
+      console.error(`Error: tenant ${activeId} not in credentials. Run: oma auth tenant ls`);
+      process.exit(1);
+    }
     return {
       baseUrl: envBase || stored.base_url,
-      apiKey: stored.token,
+      apiKey: profile.token,
       json: false,
       source: "stored",
     };
@@ -103,12 +164,17 @@ function loadConfig(): Config {
 function loadConfigOptional(): Config {
   const envBase = process.env.OMA_BASE_URL;
   const envKey = process.env.OMA_API_KEY;
+  const envTenant = process.env.OMA_TENANT_ID;
   const stored = readCredentials();
   if (envKey) {
     return { baseUrl: envBase || stored?.base_url || "https://openma.dev", apiKey: envKey, json: false, source: "env" };
   }
   if (stored) {
-    return { baseUrl: envBase || stored.base_url, apiKey: stored.token, json: false, source: "stored" };
+    const activeId = envTenant || stored.active_tenant_id;
+    const profile = stored.tenants[activeId];
+    if (profile) {
+      return { baseUrl: envBase || stored.base_url, apiKey: profile.token, json: false, source: "stored" };
+    }
   }
   return { baseUrl: envBase || "https://openma.dev", apiKey: "", json: false, source: "missing" };
 }
@@ -263,22 +329,39 @@ async function authLogin(baseUrl: string, requestedTenant?: string): Promise<voi
     tenants: Array<{ id: string; name: string; role: string }>;
   }>(tempConfig, "/v1/me");
 
-  writeCredentials({
-    version: 1,
+  // Merge with existing credentials so adding a new tenant via
+  // `oma auth login --tenant <id>` (or re-login of a different tenant)
+  // doesn't clobber tokens for tenants the user already authorized.
+  const existing = readCredentials();
+  const role = me.tenants.find((t) => t.id === me.tenant.id)?.role ?? "owner";
+  const updated: StoredCredentials = {
+    version: 2,
     base_url: baseUrl,
     user: me.user ?? { id: result.user, email: "", name: null },
-    tenant: me.tenant,
-    tenants: me.tenants,
-    token: result.token,
-    key_id: result.key_id,
-    created_at: new Date().toISOString(),
-  });
+    active_tenant_id: me.tenant.id,
+    tenants: {
+      ...(existing && existing.user.id === (me.user?.id ?? result.user) ? existing.tenants : {}),
+      [me.tenant.id]: {
+        name: me.tenant.name,
+        role,
+        token: result.token,
+        key_id: result.key_id,
+        created_at: new Date().toISOString(),
+      },
+    },
+  };
+  writeCredentials(updated);
 
   console.log(`✓ Signed in as ${me.user?.email ?? me.user?.id}`);
   console.log(`  Tenant : ${displayTenantName(me.tenant)} (${me.tenant.id})`);
   console.log(`  Stored : ${credentialsPath()}`);
-  if (me.tenants.length > 1) {
-    console.log(`  ${me.tenants.length} tenants available — switch with: oma auth tenant use <id>`);
+  const knownCount = Object.keys(updated.tenants).length;
+  const totalAvailable = me.tenants.length;
+  if (totalAvailable > knownCount) {
+    const missing = totalAvailable - knownCount;
+    console.log(`  ${missing} more tenant${missing === 1 ? "" : "s"} available — add with: oma auth login --tenant <id>`);
+  } else if (knownCount > 1) {
+    console.log(`  ${knownCount} tenants stored — switch with: oma auth tenant use <id>`);
   }
 }
 
@@ -326,11 +409,12 @@ const commands: Cmd[] = [
   // Auth
   {
     group: "Auth", match: ["auth", "login"],
-    usage: "oma auth login [--base-url <url>]", desc: "Open browser to authenticate; stores ~/.config/oma/credentials.json",
+    usage: "oma auth login [--base-url <url>] [--tenant <id>]", desc: "Open browser to authenticate; --tenant pre-picks a workspace",
     http: "POST   /v1/me/cli-tokens (browser handoff via /cli/login)",
     async run(_config, args) {
       const baseUrl = (flag(args, "--base-url") ?? process.env.OMA_BASE_URL ?? "https://openma.dev").replace(/\/+$/, "");
-      await authLogin(baseUrl);
+      const tenant = flag(args, "--tenant");
+      await authLogin(baseUrl, tenant);
     },
   },
   {
@@ -344,7 +428,7 @@ const commands: Cmd[] = [
   },
   {
     group: "Auth", match: ["whoami"],
-    usage: "oma whoami", desc: "Show current user, tenant, and base URL",
+    usage: "oma whoami", desc: "Show current user, active tenant, and base URL",
     http: "GET    /v1/me",
     async run(config) {
       try {
@@ -357,9 +441,14 @@ const commands: Cmd[] = [
         console.log(`Base URL : ${config.baseUrl}`);
         console.log(`Source   : ${config.source === "env" ? "OMA_API_KEY env var" : "stored credentials"}`);
         console.log(`User     : ${me.user?.email ?? me.user?.id ?? "(unknown — legacy key without user_id)"}`);
-        console.log(`Tenant   : ${displayTenantName(me.tenant)} (${me.tenant.id})`);
+        // Show tenant only when the user has more than one — single-tenant
+        // users don't need to think about which workspace they're in.
         if (me.tenants.length > 1) {
-          console.log(`Available: ${me.tenants.map((t) => t.id).join(", ")}`);
+          console.log(`Tenant   : ${displayTenantName(me.tenant)} (${me.tenant.id})`);
+          const others = me.tenants.filter((t) => t.id !== me.tenant.id);
+          if (others.length) {
+            console.log(`Available: ${others.map((t) => t.id).join(", ")} — switch with: oma auth tenant use <id>`);
+          }
         }
       } catch (err: any) {
         console.error(`whoami failed: ${err.message}`);
@@ -378,15 +467,26 @@ const commands: Cmd[] = [
       const { data } = await apiFetch<{ data: Array<{ id: string; name: string; role: string }> }>(config, "/v1/me/tenants");
       if (!data.length) { console.log("No tenants on this account."); return; }
       const stored = readCredentials();
-      const current = stored?.tenant.id;
-      table([["", "ID", "NAME", "ROLE"], ...data.map((t) => [t.id === current ? "*" : " ", t.id, t.name || "—", t.role])]);
+      const active = stored?.active_tenant_id;
+      table([
+        ["", "ID", "NAME", "ROLE", "TOKEN"],
+        ...data.map((t) => [
+          t.id === active ? "*" : " ",
+          t.id,
+          t.name || "—",
+          t.role,
+          stored?.tenants[t.id] ? "stored" : "—",
+        ]),
+      ]);
+      console.log(`\n* = active. "stored" = local token cached. To switch active: oma auth tenant use <id>`);
+      console.log(`To add a tenant the CLI hasn't seen yet: oma auth login --tenant <id>`);
     },
   },
   {
     group: "Auth", match: ["auth", "tenant", "use"], needsArg: true,
-    usage: "oma auth tenant use <tenant-id>", desc: "Switch active tenant (mints a new CLI token for that tenant)",
-    http: "POST   /v1/me/cli-tokens {tenant_id}",
-    async run(config, args) {
+    usage: "oma auth tenant use <tenant-id>", desc: "Switch active tenant; if not yet authenticated for it, opens browser to mint",
+    http: "(local file update — or POST /v1/me/cli-tokens via browser if no cached token)",
+    async run(_config, args) {
       const tenantId = args[0];
       if (!tenantId) { console.error("Usage: oma auth tenant use <tenant-id>"); process.exit(1); }
       const stored = readCredentials();
@@ -394,12 +494,16 @@ const commands: Cmd[] = [
         console.error("No stored credentials. Run: oma auth login");
         process.exit(1);
       }
-      // Mint a fresh token bound to the new tenant. Today this works only
-      // because /v1/me/cli-tokens accepts cookie-auth — we don't have that
-      // in the CLI yet, so for now we re-run the browser flow with the
-      // requested tenant pre-selected. When membership-aware tokens land,
-      // we can switch this to a server-side rebind without browser.
-      console.log(`Switching to tenant ${tenantId} — opening browser to confirm…`);
+      if (stored.tenants[tenantId]) {
+        // Cached token exists — just flip active. No network call.
+        const updated = { ...stored, active_tenant_id: tenantId };
+        writeCredentials(updated);
+        const profile = stored.tenants[tenantId];
+        console.log(`✓ Active tenant: ${profile.name || tenantId} (${tenantId})`);
+        return;
+      }
+      // No cached token for this tenant — kick off browser flow to mint.
+      console.log(`No cached token for ${tenantId}. Opening browser to authorize…`);
       await authLogin(stored.base_url, tenantId);
     },
   },
