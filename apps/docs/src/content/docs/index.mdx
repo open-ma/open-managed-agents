@@ -1,0 +1,89 @@
+---
+title: Welcome to openma
+description: An open-source meta-platform for running AI agents on Cloudflare. Sessions, sandboxes, tools, memory, credentials — managed.
+template: splash
+hero:
+  tagline: An open-source meta-platform for AI agents on Cloudflare. Sessions, sandboxes, tools, memory, credentials — managed.
+  image:
+    file: ../../assets/logo.svg
+  actions:
+    - text: Quickstart
+      link: /quickstart/
+      icon: right-arrow
+      variant: primary
+    - text: View on GitHub
+      link: https://github.com/open-ma/open-managed-agents
+      icon: external
+      variant: minimal
+---
+
+import { Card, CardGrid, LinkCard } from '@astrojs/starlight/components';
+
+## What is openma?
+
+**openma** (Open Managed Agents) is the infrastructure layer for AI agents. You bring the harness — the loop that decides what the model does next — and openma takes care of everything else: durable sessions, sandboxed code execution, tool calls, semantic memory, secret-safe credentials, and crash recovery.
+
+It runs entirely on Cloudflare (Workers, Durable Objects, D1, R2, KV, Vectorize, Containers), and you can either use the **hosted product at [openma.dev](https://app.openma.dev)** or **fork and self-host** to your own Cloudflare account.
+
+## Choose your path
+
+<CardGrid>
+  <LinkCard
+    title="I want to use openma.dev"
+    href="/console/getting-started/"
+    description="Sign up, create your first agent in the Console, connect Linear or GitHub. No deploy needed."
+  />
+  <LinkCard
+    title="I want to build agents on the API"
+    href="/build/api/"
+    description="REST endpoints, the CLI, custom skills, custom tools, MCP servers, and the harness interface."
+  />
+  <LinkCard
+    title="I want to self-host"
+    href="/self-host/overview/"
+    description="Fork the repo, deploy to your own Cloudflare account, register your own OAuth apps."
+  />
+  <LinkCard
+    title="I want to contribute"
+    href="/contribute/"
+    description="Repo layout, local dev loop, where the design RFCs live."
+  />
+</CardGrid>
+
+## Why openma?
+
+Most agent frameworks tell you *how* to build an agent — the loop, the prompt format, the orchestration shape. openma is different: it stays out of the harness and instead provides what every long-running agent needs but is painful to build.
+
+<CardGrid>
+  <Card title="Durable sessions" icon="approve-check">
+    Append-only event log per session in a SQLite-backed Durable Object. Resume from anywhere; survive restarts and crashes.
+  </Card>
+  <Card title="Sandboxed execution" icon="seti:docker">
+    Tool calls run in per-session Cloudflare Containers. Pre-install Python / Node / apt packages declaratively.
+  </Card>
+  <Card title="Vault-backed credentials" icon="seti:lock">
+    Secrets never enter the sandbox. An outbound proxy injects auth headers per-host so tools can hit private APIs without ever seeing the key.
+  </Card>
+  <Card title="Built-in memory" icon="document">
+    Per-agent semantic memory across sessions, indexed in Vectorize via Workers AI embeddings.
+  </Card>
+  <Card title="MCP, everywhere" icon="puzzle">
+    Connect any MCP server and openma auto-generates `mcp_*` tools the model can call.
+  </Card>
+  <Card title="Three integrations, day one" icon="rocket">
+    Publish agents into Linear (assignable issues), GitHub (PRs), and Slack (channels) with OAuth-managed auth.
+  </Card>
+</CardGrid>
+
+## Next steps
+
+<LinkCard
+  title="Read the Concepts page"
+  href="/concepts/"
+  description="A one-page tour of every noun: Agent, Session, Environment, Vault, Skill, Tool, Harness, Integration."
+/>
+<LinkCard
+  title="Run the Quickstart"
+  href="/quickstart/"
+  description="Sign up, get an API key, and create a session with curl in five minutes."
+/>

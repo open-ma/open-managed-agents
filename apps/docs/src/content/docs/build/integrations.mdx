@@ -1,0 +1,122 @@
+---
+title: Custom Integrations
+description: Add a new third-party integration (Jira, Discord, your internal tool) by implementing the IntegrationProvider interface.
+---
+
+import { Steps, Aside, LinkCard } from '@astrojs/starlight/components';
+
+The three shipped integrations (Linear, GitHub, Slack) are concrete implementations of a single interface: **`IntegrationProvider`**, defined in `packages/integrations-core/src/provider.ts`. Implement that interface and your integration plugs into the same install / webhook / MCP-tools / publication shape.
+
+## What an integration provides
+
+A provider is a small module that answers four questions:
+
+1. **How do users install it?** OAuth flow or credential paste.
+2. **How do incoming webhooks map to sessions?** Webhook payload → session dispatch.
+3. **What can the agent do?** A list of MCP tool descriptors + their executors.
+4. **How is publication scoped?** Per-workspace, per-issue, per-user, etc.
+
+```ts
+// packages/integrations-core/src/provider.ts (sketch)
+export interface IntegrationProvider {
+  id: string;
+  displayName: string;
+
+  install: {
+    type: 'oauth' | 'credentials';
+    // ...
+  };
+
+  parseWebhook(req: Request): WebhookEvent | null;
+
+  dispatch(event: WebhookEvent, ctx: ProviderContext): Promise<SessionDispatch>;
+
+  tools: McpToolDescriptor[];
+  executeTool(name: string, input: unknown, ctx: PublicationContext): Promise<unknown>;
+
+  publication: {
+    scopes: PublicationScope[];
+  };
+}
+```
+
+## Anatomy of an existing provider
+
+Look at `apps/integrations/src/routes/linear/` for a complete reference:
+
+```
+apps/integrations/src/routes/linear/
+├── install.ts        // OAuth start + callback
+├── webhook.ts        // Verify signature, parse event, dispatch
+├── tools.ts          // mcp_linear_* tool definitions + executors
+└── publication.ts    // Scopes (comment.create, issue.update, etc.)
+```
+
+Each is small: install/callback is ~50 lines; webhook handling is ~80; tools are one block per capability. The interesting design work is in **what scopes you expose** and **how you map webhooks to dispatches**, not in plumbing.
+
+## Build a new provider
+
+<Steps>
+
+1. **Add a folder** under `apps/integrations/src/routes/<your-integration>/`.
+
+2. **Implement `IntegrationProvider`.** Start with `id`, `displayName`, the OAuth flow, and one MCP tool — get a session dispatched end-to-end before adding more.
+
+3. **Register it.** `apps/integrations/src/index.ts` has a registry; add your provider to the list. The gateway exposes `/install/<id>` and `/webhook/<id>` automatically.
+
+4. **Add UI install flow** (optional but recommended). The Console has an `Integrations` page that picks up registered providers from `/v1/integrations`.
+
+5. **Test locally.** `pnpm dev:integrations` runs the gateway against your local main worker. Use a tunneling tool (`cloudflared tunnel`) to receive webhooks from the third-party service.
+
+</Steps>
+
+## Persistence
+
+Use the abstract repos in `packages/integrations-adapters-cf/`. They give you typed CRUD on `installations`, `oauth_state`, `publications`, and `webhook_events` against the shared `AUTH_DB` D1 instance. Don't roll your own — the adapters are the same ones Linear/GitHub/Slack use, and they handle multi-tenant scoping for you.
+
+## Webhook security
+
+The base provider verifies webhook signatures using `MCP_SIGNING_KEY` for outbound delivery and per-provider signing keys for inbound. Don't bypass this. If the third-party service has its own signature scheme, validate it inside `parseWebhook` and return `null` on failure.
+
+<Aside type="caution" title="Tenant isolation">
+  Every webhook event must be resolved to a tenant before dispatching. The adapters expose `findInstallationByExternalId` for this — use it.
+</Aside>
+
+## MCP tool design
+
+Each tool is one capability — favor many small tools over few mega-tools. Names are namespaced as `mcp_<provider>_<tool>`. Input schemas are JSON Schema.
+
+```ts
+{
+  name: 'mcp_jira_update_issue_status',
+  description: 'Move a Jira issue to a new status.',
+  inputSchema: {
+    type: 'object',
+    properties: {
+      issue_key: { type: 'string', description: 'e.g. PROJ-123' },
+      status: { type: 'string', enum: ['Open', 'In Progress', 'Done'] },
+    },
+    required: ['issue_key', 'status'],
+  },
+}
+```
+
+The executor receives a `PublicationContext` with the OAuth token (already validated against the publication's scopes) and the originating session metadata.
+
+## Where to go next
+
+<LinkCard
+  title="Connect Integrations (Console)"
+  href="/console/integrations/"
+  description="What end users see when they install an integration."
+/>
+<LinkCard
+  title="OAuth Apps (self-host)"
+  href="/self-host/oauth-apps/"
+  description="Register external OAuth apps for your own deployment."
+/>
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="Schemas for IntegrationProvider, Publication, and webhook envelopes."
+/>

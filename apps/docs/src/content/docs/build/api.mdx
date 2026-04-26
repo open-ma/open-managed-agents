@@ -1,0 +1,158 @@
+---
+title: REST API
+description: openma exposes a REST API under /v1/* for managing agents, sessions, environments, skills, vaults, integrations, and more. SSE for live session events.
+---
+
+import { Aside, Tabs, TabItem, LinkCard } from '@astrojs/starlight/components';
+
+The REST surface lives under `/v1/*`. Everything the Console does, you can do programmatically — the Console itself is just an API consumer.
+
+## Base URL
+
+| Environment | Base URL |
+|---|---|
+| Hosted (production) | `https://app.openma.dev` |
+| Hosted (staging) | `https://app.staging.openma.dev` |
+| Self-host | Whatever you set in `apps/main/wrangler.jsonc → routes` |
+
+## Authentication
+
+Two auth schemes:
+
+**API key** — for server-to-server and CLI use. Pass as `Authorization: Bearer oma_...`. Create on the Console **API Keys** page.
+
+**Session cookie** — what the Console UI uses (better-auth-issued). Not normally what you'll integrate against unless you're embedding openma in a browser app.
+
+```bash
+export OMA_BASE_URL="https://app.openma.dev"
+export OMA_API_KEY="oma_..."
+```
+
+## Endpoint groups
+
+| Group | Path | Purpose |
+|---|---|---|
+| Agents | `/v1/agents` | Create / read / update / archive agent configurations. Versioned — every update bumps the version. |
+| Sessions | `/v1/sessions` | Create sessions, list, fetch event log. Live events via SSE. |
+| Environments | `/v1/environments` | Sandbox templates: packages, network rules, base image. |
+| Skills | `/v1/skills` | Built-in + custom skill catalog. Custom skill files via R2-backed upload. |
+| Vaults | `/v1/vaults` | Credential stores (bearer tokens, OAuth, env vars). |
+| Memory Stores | `/v1/memory_stores` | Per-agent semantic memory. |
+| Files | `/v1/files` | Per-session file storage. |
+| Model Cards | `/v1/model_cards` | Custom model provider configuration. |
+| Integrations | `/v1/integrations` | Linear / GitHub / Slack install state, webhooks, publications. |
+| Evals | `/v1/evals` | Evaluation framework. |
+| API Keys | `/v1/api_keys` | Manage personal access tokens. |
+| OAuth | `/v1/oauth` | Third-party OAuth flows for the Console UI. |
+
+A full endpoint-by-endpoint reference lives at [Reference → API Endpoints](/reference/api/).
+
+## Common patterns
+
+### Create an agent
+
+```bash
+curl -X POST "$OMA_BASE_URL/v1/agents" \
+  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "name": "research-agent",
+    "model": "claude-sonnet-4-6",
+    "system": "You are a research assistant.",
+    "tools": [{"type": "agent_toolset_20260401"}]
+  }'
+```
+
+### Create a session
+
+```bash
+curl -X POST "$OMA_BASE_URL/v1/sessions" \
+  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "agent_id": "agent_abc123",
+    "input": [
+      {"role": "user", "content": "Summarize the openma docs."}
+    ]
+  }'
+```
+
+### Stream session events (SSE)
+
+```bash
+curl -N "$OMA_BASE_URL/v1/sessions/sess_xyz/events" \
+  -H "Authorization: Bearer $OMA_API_KEY"
+```
+
+The connection stays open. Each `data:` line is a JSON event. Common event types:
+
+- `message_start` / `message_delta` / `message_stop` — model output streaming
+- `tool_use` — model is calling a tool
+- `tool_result` — sandbox returned a result
+- `session_done` — final state
+
+You can reconnect at any time and the platform replays the full event log from the beginning (or from a `?after=<event_id>` cursor).
+
+<Aside type="tip" title="Resumable streams">
+  The session DO holds the canonical event log in SQLite. Drop your connection, reconnect days later — same stream. This is what makes long-running agents safe.
+</Aside>
+
+### Send another turn into an existing session
+
+```bash
+curl -X POST "$OMA_BASE_URL/v1/sessions/sess_xyz/messages" \
+  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "role": "user",
+    "content": "Now also include the integrations."
+  }'
+```
+
+### Upload a file to a session
+
+```bash
+curl -X POST "$OMA_BASE_URL/v1/files" \
+  -H "Authorization: Bearer $OMA_API_KEY" \
+  -F "session_id=sess_xyz" \
+  -F "file=@./report.pdf"
+```
+
+The file lands in R2 and is mounted into the sandbox at `/home/user/files/<id>/report.pdf`.
+
+## Errors
+
+Standard HTTP status codes. Body shape:
+
+```json
+{
+  "error": {
+    "type": "invalid_request",
+    "message": "agent_id is required"
+  }
+}
+```
+
+Common types: `invalid_request`, `not_found`, `unauthorized`, `forbidden`, `rate_limited`, `internal_error`.
+
+## Rate limits
+
+Per-tenant. Limits and current usage are surfaced in response headers `X-RateLimit-Limit`, `X-RateLimit-Remaining`, `X-RateLimit-Reset` (Unix epoch seconds).
+
+## Where to go next
+
+<LinkCard
+  title="CLI & SDK"
+  href="/build/cli-sdk/"
+  description="Skip curl: use the Node CLI or import @open-managed-agents/api-types DTOs."
+/>
+<LinkCard
+  title="Skills & Tools"
+  href="/build/skills-and-tools/"
+  description="Define custom tools, custom skills, and connect MCP servers."
+/>
+<LinkCard
+  title="Reference: API Endpoints"
+  href="/reference/api/"
+  description="Endpoint-by-endpoint with request/response shapes."
+/>

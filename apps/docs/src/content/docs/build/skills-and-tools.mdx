@@ -1,0 +1,158 @@
+---
+title: Skills & Tools
+description: Define custom tools, custom skills, and wire MCP servers into your agent.
+---
+
+import { Aside, Tabs, TabItem, LinkCard } from '@astrojs/starlight/components';
+
+Three ways to give your agent new capabilities: **tools**, **skills**, and **MCP servers**. Each fits a different shape of need.
+
+| Mechanism | Best for | Where it runs |
+|---|---|---|
+| Built-in tools | Filesystem, shell, web | Sandbox container |
+| Custom tools | Your own JSON-schema'd action | Sandbox or your endpoint |
+| Custom skills | Reusable prompt + reference files | Mounted into sandbox |
+| MCP servers | Any MCP-spec capability set | Wherever the MCP server lives |
+
+## Built-in tools
+
+The `agent_toolset_20260401` toolset ships with: `bash`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch`, `web_search`. Add it to your agent and the model can do filesystem and shell work in the per-session container.
+
+```json
+{
+  "name": "my-agent",
+  "model": "claude-sonnet-4-6",
+  "system": "...",
+  "tools": [
+    { "type": "agent_toolset_20260401" }
+  ]
+}
+```
+
+`web_fetch` and `web_search` route through openma's outbound proxy, so they work without the sandbox having direct internet access.
+
+## Custom tools
+
+Define a tool inline on the agent with a JSON schema:
+
+```json
+{
+  "tools": [
+    {
+      "type": "custom",
+      "name": "lookup_user",
+      "description": "Look up a user by their internal ID.",
+      "input_schema": {
+        "type": "object",
+        "properties": {
+          "user_id": { "type": "string" }
+        },
+        "required": ["user_id"]
+      },
+      "execution": {
+        "type": "http",
+        "endpoint": "https://internal.example.com/api/users/lookup",
+        "method": "POST"
+      }
+    }
+  ]
+}
+```
+
+When the model calls the tool:
+
+1. The sandbox sends an outbound HTTPS request to your endpoint.
+2. If the endpoint host is bound to a [Vault](/concepts/#vault), the proxy injects the auth header automatically. The model never sees the credential.
+3. The response is fed back as the tool result.
+
+You can also execute tools entirely inside the sandbox by setting `execution: { type: "sandbox", command: "..." }`.
+
+## Custom skills
+
+A skill is a `SKILL.md` describing the capability, plus any reference files (templates, schemas, examples) the model needs. The platform mounts everything at `/home/user/.skills/{id}/` and adds a system prompt addition pointing the model at it.
+
+### Create a skill
+
+In the Console: **Skills → New skill**. Or via API:
+
+```bash
+curl -X POST "$OMA_BASE_URL/v1/skills" \
+  -H "Authorization: Bearer $OMA_API_KEY" \
+  -F "id=invoice-parser" \
+  -F "display_title=Invoice parser" \
+  -F "description=Extract structured data from supplier invoices." \
+  -F "files=@./SKILL.md" \
+  -F "files=@./schema.json" \
+  -F "files=@./example_invoice.pdf"
+```
+
+### What goes in `SKILL.md`
+
+```md
+# Invoice parser
+
+Use this skill when the user uploads a PDF or image of an invoice.
+
+## How to extract
+
+1. Read `/home/user/.skills/invoice-parser/schema.json` for the target shape.
+2. Use the `pdf` built-in skill to extract text.
+3. Match fields by label (e.g. "Total Due", "Invoice Number").
+4. Return JSON matching the schema.
+
+## Examples
+
+See `/home/user/.skills/invoice-parser/example_invoice.pdf` for a reference layout.
+```
+
+### Attach to an agent
+
+```json
+{
+  "skills": ["invoice-parser"]
+}
+```
+
+### Built-in skills
+
+These ship out of the box and don't need uploading: `xlsx`, `pdf`, `docx`, `pptx`, `json`, `csv`, `sql`, `image`. Reference them by id from your agent.
+
+<Aside type="tip" title="Skill vs tool">
+  Skills are *prompted instructions* + *files* the model reads. Tools are *callable functions* the model invokes with structured input. Use a skill when the value is in *guidance + reference data*; use a tool when the value is in *taking an action with side effects*.
+</Aside>
+
+## MCP servers
+
+Connect any [Model Context Protocol](https://modelcontextprotocol.io) server and openma auto-generates an `mcp_<server>_<tool>` for every capability the server exposes.
+
+```json
+{
+  "mcp_servers": [
+    {
+      "name": "github",
+      "url": "https://mcp.example.com/github",
+      "auth": { "type": "vault", "vault_id": "vault_abc" }
+    }
+  ]
+}
+```
+
+The platform handshakes with the MCP server on agent load, caches the tool definitions, and exposes them on the next session. If the server is reachable behind auth, bind credentials in a Vault and reference it in `auth`.
+
+## Where to go next
+
+<LinkCard
+  title="Custom Integrations"
+  href="/build/integrations/"
+  description="Build a new third-party publication target (e.g. Jira, Discord) by implementing IntegrationProvider."
+/>
+<LinkCard
+  title="REST API"
+  href="/build/api/"
+  description="Endpoints to manage agents, skills, vaults programmatically."
+/>
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="Full Agent / Skill / Vault schemas."
+/>

@@ -1,0 +1,135 @@
+---
+title: Glossary
+description: Every openma term, alphabetized, with cross-links.
+---
+
+import { LinkCard } from '@astrojs/starlight/components';
+
+## Agent
+
+A reusable configuration: model, system prompt, tools, skills, MCP servers. Versioned. See [Concepts → Agent](/concepts/#agent) and [Configuration → Agent](/reference/configuration/#agent).
+
+## API key
+
+Bearer token used to authenticate REST API and CLI calls. Created on the Console **API Keys** page. See [REST API → Authentication](/build/api/#authentication).
+
+## Built-in toolset
+
+The shipped set of tools (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `web_fetch`, `web_search`) referenced as `agent_toolset_20260401`. See [Skills & Tools → Built-in tools](/build/skills-and-tools/#built-in-tools).
+
+## Container
+
+A Cloudflare Container instance, one per session, used to execute tools that need a real OS. Defined by the Environment. See [Self-host → Overview](/self-host/overview/).
+
+## DefaultHarness
+
+The shipped harness implementation, built on the `ai` SDK. Lives in `apps/agent/src/harness/default.ts`. See [Concepts → Harness](/concepts/#harness).
+
+## Durable Object (DO)
+
+Cloudflare primitive providing strong consistency and per-key state. openma uses `SESSION_DO` (per-session SQLite event log) and `SANDBOX` (per-session Container).
+
+## Environment
+
+Sandbox configuration: packages, network rules, base image. See [Concepts → Environment](/concepts/#environment).
+
+## Event log
+
+Append-only sequence of events for a session. Stored in `SESSION_DO`'s SQLite. The source of truth.
+
+## Harness
+
+The agent loop. Ships as `DefaultHarness`; pluggable via `HarnessInterface`. See [Concepts → Harness](/concepts/#harness).
+
+## Hosted
+
+Refers to the openma SaaS at [openma.dev](https://app.openma.dev), as opposed to self-host.
+
+## Integration
+
+A way to publish an agent into a third-party platform (Linear, GitHub, Slack). See [Concepts → Integration](/concepts/#integration) and [Custom Integrations](/build/integrations/).
+
+## IntegrationProvider
+
+The interface every integration implements. Defined in `packages/integrations-core/src/provider.ts`. See [Custom Integrations](/build/integrations/).
+
+## MCP
+
+Model Context Protocol — open standard for connecting language models to tools. openma auto-generates `mcp_<server>_<tool>` for any registered MCP server. See [Skills & Tools → MCP servers](/build/skills-and-tools/#mcp-servers).
+
+## Memory store
+
+Per-agent semantic memory backed by Vectorize + Workers AI embeddings. See [Concepts → Memory Store](/concepts/#memory-store).
+
+## Model card
+
+Bring-your-own-model config: provider, base URL, API key (Vault-backed), allowed models. See [Reference → Model Cards](/reference/api/#model-cards).
+
+## Outbound proxy
+
+The egress proxy through which all sandbox HTTPS requests flow. Injects Vault credentials per-host so the model never sees raw secrets. See [Concepts → Vault](/concepts/#vault).
+
+## Publication
+
+A binding that says "this agent serves this workspace via this integration with these scopes." See [Console → Connect Integrations](/console/integrations/).
+
+## Self-host
+
+Running openma on your own Cloudflare account, as opposed to the hosted SaaS.
+
+## Service binding
+
+Cloudflare primitive for Worker-to-Worker calls without leaving the data plane. openma uses them for `main → integrations`, `main → agent`, etc.
+
+## Session
+
+A single conversation, durable and resumable. See [Concepts → Session](/concepts/#session).
+
+## SSE
+
+Server-Sent Events. The transport for `/v1/sessions/:id/events`. See [REST API → Stream session events](/build/api/#stream-session-events-sse).
+
+## Skill
+
+Reusable prompt fragment + reference files mounted into the sandbox. See [Concepts → Skill](/concepts/#skill) and [Skills & Tools → Custom skills](/build/skills-and-tools/#custom-skills).
+
+## Tenant
+
+A unit of multi-tenancy in openma. Created automatically on first user sign-in. See [Self-host → Operations → Multi-tenancy](/self-host/operations/#multi-tenancy).
+
+## Tool
+
+Anything the model can call. Built-in, custom, or MCP-generated. See [Concepts → Tool](/concepts/#tool).
+
+## Trajectory
+
+The full record of a session's events as a typed sequence. See `docs/trajectory-v1-spec.md` in the repo for the internal spec.
+
+## Vault
+
+A credential store. Bound to specific hosts; injected by the outbound proxy. See [Concepts → Vault](/concepts/#vault).
+
+## Vectorize
+
+Cloudflare's managed vector index. openma uses it to back Memory Stores.
+
+## Workers AI
+
+Cloudflare's managed model service. openma uses it for memory embeddings (not for the agent loop itself — that goes through your configured Model Card).
+
+## Workspace bucket
+
+R2 bucket holding session-scoped files (`/home/user/files/...`).
+
+## Where to go next
+
+<LinkCard
+  title="Concepts"
+  href="/concepts/"
+  description="Long-form explanation of every term."
+/>
+<LinkCard
+  title="Configuration reference"
+  href="/reference/configuration/"
+  description="Schemas for everything above."
+/>
