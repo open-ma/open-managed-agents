@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { authClient } from "../lib/auth-client";
 import { useAuth } from "../lib/auth";
 import { useToast } from "../components/Toast";
+import { Turnstile } from "../components/Turnstile";
 
 type Mode =
   | "login"
@@ -25,6 +26,14 @@ export function Login() {
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const [googleEnabled, setGoogleEnabled] = useState(false);
+  // Turnstile site key (public) is fetched from /auth-info; null when the
+  // backend hasn't been configured yet, in which case the auth middleware
+  // also soft-passes — both sides agree to skip the check.
+  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(null);
+  const [turnstileToken, setTurnstileToken] = useState("");
+  // Bumping this counter re-mounts the Turnstile widget after each form
+  // submission so the next attempt gets a fresh single-use token.
+  const [turnstileNonce, setTurnstileNonce] = useState(0);
   const otpRef = useRef<HTMLInputElement>(null);
 
   // Honor `?next=` so callers (e.g. /cli/login) can bounce through here and
@@ -44,8 +53,9 @@ export function Login() {
   useEffect(() => {
     fetch("/auth-info")
       .then((r) => r.json())
-      .then((data: { providers: string[] }) => {
+      .then((data: { providers: string[]; turnstile_site_key?: string | null }) => {
         if (data.providers?.includes("google")) setGoogleEnabled(true);
+        setTurnstileSiteKey(data.turnstile_site_key ?? null);
       })
       .catch(() => {});
   }, []);
@@ -61,6 +71,25 @@ export function Login() {
 
   const clearOtp = () => setOtp("");
 
+  // Modes that trigger an outbound email — those need a Turnstile token.
+  // Verify modes (verify-signup, verify-login) submit OTP and don't send
+  // mail, so they don't need the widget.
+  const isEmailSendMode =
+    mode === "signup" ||
+    mode === "login" ||
+    mode === "otp-login" ||
+    mode === "forgot";
+  /** Common fetchOptions for every authClient call that may trigger an
+   *  email send. Better-auth forwards this header into the underlying
+   *  fetch; the backend turnstile middleware checks for it. */
+  const turnstileFetchOpts = turnstileToken
+    ? { headers: { "cf-turnstile-token": turnstileToken } }
+    : undefined;
+  const resetTurnstile = () => {
+    setTurnstileToken("");
+    setTurnstileNonce((n) => n + 1);
+  };
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setError("");
@@ -72,6 +101,7 @@ export function Login() {
           email,
           password,
           name: name || email.split("@")[0],
+          fetchOptions: turnstileFetchOpts,
         });
         if (error) throw new Error(error.message);
         clearOtp();
@@ -80,6 +110,7 @@ export function Login() {
         const { error } = await authClient.signIn.email({
           email,
           password,
+          fetchOptions: turnstileFetchOpts,
         });
         if (error) {
           if (
@@ -89,6 +120,7 @@ export function Login() {
             await authClient.emailOtp.sendVerificationOtp({
               email,
               type: "email-verification",
+              fetchOptions: turnstileFetchOpts,
             });
             clearOtp();
             setMode("verify-signup");
@@ -102,6 +134,7 @@ export function Login() {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
           email,
           type: "sign-in",
+          fetchOptions: turnstileFetchOpts,
         });
         if (error) throw new Error(error.message);
         clearOtp();
@@ -122,6 +155,7 @@ export function Login() {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
           email,
           type: "forget-password",
+          fetchOptions: turnstileFetchOpts,
         });
         if (error) throw new Error(error.message);
         clearOtp();
@@ -142,6 +176,9 @@ export function Login() {
     } catch (err: any) {
       setError(err.message || "Authentication failed");
     } finally {
+      // Always reset the Turnstile token after a submit attempt — tokens
+      // are single-use, so we'd 401 on the next try otherwise.
+      if (isEmailSendMode) resetTurnstile();
       setLoading(false);
     }
   };
@@ -158,12 +195,14 @@ export function Login() {
       const { error } = await authClient.emailOtp.sendVerificationOtp({
         email,
         type: typeMap[mode] || "email-verification",
+        fetchOptions: turnstileFetchOpts,
       });
       if (error) throw new Error(error.message);
       clearOtp();
     } catch (err: any) {
       setError(err.message || "Failed to resend code");
     } finally {
+      resetTurnstile();
       setLoading(false);
     }
   };
@@ -366,6 +405,21 @@ export function Login() {
             </div>
           )}
 
+          {/* Turnstile bot challenge — only on email-send modes. When the
+              backend hasn't been configured (turnstileSiteKey === null),
+              widget renders nothing and the submit button doesn't gate on
+              the token (matches the soft-pass middleware behavior). */}
+          {isEmailSendMode && turnstileSiteKey && (
+            <div className="pt-1">
+              <Turnstile
+                key={turnstileNonce}
+                siteKey={turnstileSiteKey}
+                onToken={setTurnstileToken}
+                onExpire={resetTurnstile}
+              />
+            </div>
+          )}
+
           {/* Submit */}
           <button
             type="submit"
@@ -374,7 +428,8 @@ export function Login() {
               (!isOtpMode && !email) ||
               (isOtpMode && otp.length < 6) ||
               ((mode === "login" || mode === "signup") && !password) ||
-              (mode === "reset-otp" && !password)
+              (mode === "reset-otp" && !password) ||
+              (isEmailSendMode && !!turnstileSiteKey && !turnstileToken)
             }
             className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
           >
