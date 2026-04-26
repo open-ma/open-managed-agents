@@ -20,7 +20,7 @@ import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { tickEvalRuns } from "./eval-runner";
-import { log, logError } from "@open-managed-agents/shared";
+import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 
 // Main worker: CRUD + routing layer.
 // SessionDO and Sandbox are in per-environment sandbox workers.
@@ -105,8 +105,18 @@ export default {
   async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
     ctx.waitUntil(
       tickEvalRuns(env).then(
-        (result) => log({}, `[cron] tickEvalRuns advanced=${result.advanced} total=${result.total}`),
-        (err) => logError({}, `[cron] tickEvalRuns failed: ${err instanceof Error ? err.message : String(err)}`),
+        (result) =>
+          log(
+            { op: "cron.tick_eval_runs", advanced: result.advanced, total: result.total },
+            "tickEvalRuns ok",
+          ),
+        (err) => {
+          logError({ op: "cron.tick_eval_runs", err }, "tickEvalRuns failed");
+          recordEvent(env.ANALYTICS, {
+            op: "cron.tick_eval_runs.failed",
+            ...errFields(err),
+          });
+        },
       ),
     );
   },

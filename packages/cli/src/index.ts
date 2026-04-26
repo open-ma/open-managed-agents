@@ -32,6 +32,11 @@ async function apiFetch<T = unknown>(config: Config, path: string, init?: Reques
     headers: {
       "x-api-key": config.apiKey,
       "content-type": "application/json",
+      // Identify as a browser-compatible client. Node's default `node` UA
+      // gets rejected by Cloudflare's bot fight rules on api.openma.dev with
+      // a 1010 ban; a Mozilla-style UA passes the integrity check while
+      // still naming the actual client and product page for log readers.
+      "user-agent": "Mozilla/5.0 (compatible; OpenManagedAgents-CLI/0.1; +https://openma.dev)",
       ...init?.headers,
     },
   });

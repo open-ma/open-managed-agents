@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
 import { generateFileId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
+import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import { getCfServicesForTenant } from "@open-managed-agents/services";
@@ -337,6 +338,17 @@ app.post("/", async (c) => {
     sessionId,
     tenantId: t,
   });
+  // AE write for refresh failures lives here (env in scope; the projection
+  // helper is env-agnostic by design). One row per failure for granular alerts.
+  for (const f of refreshResult.failures) {
+    recordEvent(c.env.ANALYTICS, {
+      op: "session.start.credential_refresh.failed",
+      session_id: sessionId,
+      tenant_id: t,
+      error_name: String(f.httpStatus ?? "exception"),
+      error_message: `${f.provider}:${f.vaultId} ${f.error}`,
+    });
+  }
 
   // Initialize SessionDO via sandbox worker. Resources land before the DO's
   // first warmup reads `listResourcesBySession` — so any resource we add
@@ -521,8 +533,13 @@ app.get("/:id", async (c) => {
       if (fullStatus.outcome_evaluations?.length) {
         response.outcome_evaluations = fullStatus.outcome_evaluations;
       }
-    } catch {
-      // Sandbox worker unreachable — keep stored status
+    } catch (err) {
+      // Sandbox worker unreachable — keep stored status. This is the read
+      // path; failing soft is correct, but we still need visibility.
+      logWarn(
+        { op: "session.get.full_status_fetch", session_id: id, tenant_id: c.get("tenant_id"), err },
+        "sandbox unreachable; falling back to stored status",
+      );
     }
   }
 
@@ -581,8 +598,21 @@ app.delete("/:id", async (c) => {
       if (statusBody.status === "running") {
         return c.json({ error: "Cannot delete a running session. Send an interrupt event first." }, 409);
       }
-    } catch {}
-    await forwardToSandbox(binding, `/sessions/${id}/destroy`, c.req.raw, "DELETE").catch(() => {});
+    } catch (err) {
+      // Sandbox unreachable on the running-check — proceed with delete and let
+      // the destroy call below handle it. Logged because if this happens
+      // consistently the running-gate is effectively bypassed.
+      logWarn(
+        { op: "session.delete.running_check", session_id: id, tenant_id: t, err },
+        "running-status check failed; bypassing gate",
+      );
+    }
+    await forwardToSandbox(binding, `/sessions/${id}/destroy`, c.req.raw, "DELETE").catch((err) => {
+      logWarn(
+        { op: "session.delete.sandbox_destroy", session_id: id, tenant_id: t, err },
+        "sandbox destroy failed; row will still be removed",
+      );
+    });
   }
 
   // Cascade-delete the session row + every session_resources row in one
@@ -605,12 +635,22 @@ app.delete("/:id", async (c) => {
     if (c.env.FILES_BUCKET && orphanedFiles.length) {
       await Promise.all(
         orphanedFiles.map((f) =>
-          c.env.FILES_BUCKET!.delete(f.r2_key).catch(() => undefined),
+          c.env.FILES_BUCKET!.delete(f.r2_key).catch((err) => {
+            logWarn(
+              { op: "session.delete.r2_cleanup", session_id: id, tenant_id: t, r2_key: f.r2_key, err },
+              "orphan R2 file delete failed",
+            );
+            return undefined;
+          }),
         ),
       );
     }
-  } catch {
+  } catch (err) {
     // best-effort; metadata cleanup never blocks the session delete itself
+    logWarn(
+      { op: "session.delete.metadata_cleanup", session_id: id, tenant_id: t, err },
+      "metadata cleanup failed; session row already removed",
+    );
   }
 
   // Best-effort secret cleanup — cascade all per-resource secrets for this
@@ -722,7 +762,13 @@ app.post("/:id/files", async (c) => {
     "GET",
   );
   if (!fileRes.ok) {
-    const msg = await fileRes.text().catch(() => "sandbox read failed");
+    const msg = await fileRes.text().catch((err) => {
+      logWarn(
+        { op: "session.file.body_read", session_id: id, tenant_id: t, http_status: fileRes.status, err },
+        "sandbox file response body unreadable",
+      );
+      return "sandbox read failed";
+    });
     return c.json({ error: `Cannot read sandbox path: ${msg}` }, 400);
   }
   const buf = await fileRes.arrayBuffer();
@@ -1178,8 +1224,13 @@ async function refreshProviderCredentialsForSession(
           let bodyText: string | undefined;
           try {
             bodyText = (await res.text()).slice(0, 200);
-          } catch {
-            // ignore body-read failures — status code is the load-bearing signal
+          } catch (err) {
+            // Body-read failure is non-fatal — status code is the load-bearing
+            // signal — but log so we don't lose visibility on response shape.
+            logWarn(
+              { op: "session.start.refresh_body_read", provider, vault_id: vaultId, http_status: res.status, err },
+              "refresh body read failed",
+            );
           }
           failures.push({
             provider,
@@ -1219,15 +1270,28 @@ function refreshResultToInitEvents(
   ctx: { sessionId: string; tenantId: string },
 ): SessionEvent[] {
   if (result.skippedReason) {
-    console.warn(
-      `[session-start] credential refresh skipped: reason=${result.skippedReason} session=${ctx.sessionId} tenant=${ctx.tenantId}`,
+    logWarn(
+      {
+        op: "session.start.credential_refresh.skipped",
+        session_id: ctx.sessionId,
+        tenant_id: ctx.tenantId,
+        reason: result.skippedReason,
+      },
+      "credential refresh skipped",
     );
     return [];
   }
   if (!result.failures.length) return [];
-  console.warn(
-    `[session-start] credential refresh: ${result.failures.length}/${result.attempted} failed session=${ctx.sessionId} tenant=${ctx.tenantId}`,
-    result.failures,
+  logWarn(
+    {
+      op: "session.start.credential_refresh",
+      session_id: ctx.sessionId,
+      tenant_id: ctx.tenantId,
+      failed: result.failures.length,
+      attempted: result.attempted,
+      failures: result.failures,
+    },
+    "credential refresh had failures; tools using these creds may 401 mid-task",
   );
   return result.failures.map((f) => ({
     type: "session.warning",
@@ -1298,7 +1362,18 @@ async function tryGitHubBindingFastPath(
     const data = (await res.json()) as { token?: string };
     if (!data.token) return null;
     return { token: data.token, vaultId: row.vault_id };
-  } catch {
+  } catch (err) {
+    // Fast-path is best-effort — the regular per-session credential refresh
+    // path is the source of truth. But this fires on every Linear→GitHub
+    // session start, so persistent failures here mean tokens are rotting.
+    logError(
+      { op: "session.start.github_fastpath", user_id: userId, org, err },
+      "GitHub fast-path token mint failed",
+    );
+    recordEvent(env.ANALYTICS, {
+      op: "session.start.github_fastpath.failed",
+      ...errFields(err),
+    });
     return null;
   }
 }

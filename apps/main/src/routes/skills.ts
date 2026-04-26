@@ -1,6 +1,7 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
@@ -308,7 +309,11 @@ app.get("/", async (c) => {
           if (!data) return null;
           try {
             return JSON.parse(data) as SkillMeta;
-          } catch {
+          } catch (err) {
+            logWarn(
+              { op: "skills.list.parse", tenant_id: t, kv_key: k.name, err },
+              "skill metadata JSON parse failed; skipping entry",
+            );
             return null;
           }
         }),
@@ -355,7 +360,12 @@ app.delete("/:id", async (c) => {
       try {
         const v = JSON.parse(verData) as SkillVersion;
         await deleteFilesFromR2(bucket, t, id, v.version, v.files);
-      } catch {}
+      } catch (err) {
+        logWarn(
+          { op: "skills.delete.r2_cleanup", tenant_id: t, skill_id: id, kv_key: k.name, err },
+          "skill version R2 cleanup failed; KV row will still be deleted",
+        );
+      }
     }
   }
 
@@ -443,7 +453,11 @@ app.get("/:id/versions", async (c) => {
             file_count: v.files.length,
             created_at: v.created_at,
           };
-        } catch {
+        } catch (err) {
+          logWarn(
+            { op: "skills.versions.parse", kv_key: k.name, err },
+            "skill version JSON parse failed; skipping",
+          );
           return null;
         }
       }),

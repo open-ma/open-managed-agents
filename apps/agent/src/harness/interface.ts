@@ -85,7 +85,8 @@ export interface HarnessContext {
   model: LanguageModel;
 
   /**
-   * Platform-augmented system prompt: agent.system + authenticatedCommandGuidance.
+   * Platform-augmented system prompt: agent.system + platform guidance
+   * (authenticatedCommandGuidance + loopStopGuidance).
    * Skill/memory/appendable_prompt content is NOT here — that's injected as
    * <system-reminder> user.message events via onSessionInit (default behavior).
    * Use this directly to inherit platform defaults; ignore and use

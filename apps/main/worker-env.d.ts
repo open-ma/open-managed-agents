@@ -6,6 +6,9 @@ declare namespace Cloudflare {
     WORKSPACE_BUCKET?: R2Bucket;
     FILES_BUCKET?: R2Bucket;
     ASSETS?: { fetch: (req: Request) => Promise<Response> };
+    /** Analytics Engine binding for structured error/event metrics.
+     *  See packages/shared/src/metrics.ts for the schema convention. */
+    ANALYTICS?: AnalyticsEngineDataset;
     API_KEY: string;
     ANTHROPIC_API_KEY: string;
     ANTHROPIC_BASE_URL?: string;

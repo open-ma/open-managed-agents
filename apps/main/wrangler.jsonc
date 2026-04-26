@@ -83,6 +83,14 @@
   "limits": { "cpu_ms": 300000 },
   "observability": { "enabled": true },
 
+  // Analytics Engine for structured error/event metrics. Dataset is created
+  // automatically on first write — no dashboard pre-step needed. Query via
+  // Cloudflare's SQL API or the Grafana plugin. Schema convention lives in
+  // packages/shared/src/metrics.ts (column positions are load-bearing).
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "oma_events" }
+  ],
+
   "triggers": {
     "crons": ["* * * * *"]
   },
@@ -117,7 +125,10 @@
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
       ],
       "limits": { "cpu_ms": 300000 },
-      "observability": { "enabled": true }
+      "observability": { "enabled": true },
+      "analytics_engine_datasets": [
+        { "binding": "ANALYTICS", "dataset": "oma_events_staging" }
+      ]
     }
   }
 }
