@@ -25,6 +25,16 @@ export interface Env {
   RL_API_USER_WRITE?: RateLimit;
   RL_API_USER_READ?: RateLimit;
   RL_SESSIONS_TENANT?: RateLimit;
+  /** Per-tenant cap on R2-writing endpoints (POST /v1/files,
+   *  POST /v1/skills/:id/versions). Soft-passes when absent. */
+  RL_UPLOAD_TENANT?: RateLimit;
+  /** Daily session-creation budget per tenant. KV-backed counter — see
+   *  apps/main/src/quotas.ts. The number is the cap; absent or "0" =
+   *  feature off (OSS-friendly). Counter key auto-expires next day. */
+  SESSION_DAILY_CAP_PER_TENANT?: number;
+  /** Single-upload body size cap in bytes for POST /v1/files and
+   *  POST /v1/skills/:id/versions. Default 25MB if unset. */
+  UPLOAD_MAX_BYTES?: number;
   /** Cloudflare Turnstile public site key. Surfaced to the Console via
    *  /auth-info; the Login page renders the widget when this is present
    *  and skips it (insecure!) when absent. Per CF, this is public —
