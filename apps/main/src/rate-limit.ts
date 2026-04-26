@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import { verifyTurnstile } from "./turnstile";
 
 // Rate limiting via CF Workers Rate Limiting bindings (declared in
 // wrangler.jsonc). Bindings give cross-isolate accuracy that the previous
@@ -112,6 +113,24 @@ export const authRateLimitMiddleware = createMiddleware<{ Bindings: Env }>(
     }
 
     if (!EMAIL_SEND_PATHS.has(path)) return next();
+
+    // Bot-challenge gate: any email-triggering request must carry a valid
+    // Turnstile token. This sits BEFORE the per-IP and per-email rate
+    // limits so a flooding bot doesn't even get to consume the budget —
+    // it gets a fast 401 and goes away. Verification soft-passes when
+    // TURNSTILE_SECRET_KEY isn't configured (dev / pre-rollout).
+    const turnstileToken = c.req.header("cf-turnstile-token");
+    const ts = await verifyTurnstile(c.env.TURNSTILE_SECRET_KEY, turnstileToken, ip);
+    if (!ts.ok) {
+      logWarn(
+        { op: "auth.turnstile.reject", ip, path, reason: ts.reason },
+        "Turnstile verification rejected request",
+      );
+      return c.json(
+        { error: "Bot challenge failed — refresh the page and try again" },
+        401,
+      );
+    }
 
     // Layer 2: per-IP cap on email-triggering endpoints.
     if (await exceeded(c.env.RL_AUTH_SEND_IP, ip)) {

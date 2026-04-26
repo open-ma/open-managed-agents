@@ -43,13 +43,17 @@ app.on(["GET", "POST"], "/auth/*", async (c) => {
   return createAuth(c.env).handler(c.req.raw);
 });
 
-// Auth info endpoint (public — tells the frontend which providers are enabled)
+// Auth info endpoint (public — tells the frontend which providers are enabled
+// and surfaces the Turnstile site key so the Login page can render the widget).
 app.get("/auth-info", (c) => {
   const providers: string[] = ["email", "email-otp"];
   if (c.env.GOOGLE_CLIENT_ID && c.env.GOOGLE_CLIENT_SECRET) {
     providers.push("google");
   }
-  return c.json({ providers });
+  return c.json({
+    providers,
+    turnstile_site_key: c.env.TURNSTILE_SITE_KEY ?? null,
+  });
 });
 
 // API routes (require authentication)

@@ -25,6 +25,16 @@ export interface Env {
   RL_API_USER_WRITE?: RateLimit;
   RL_API_USER_READ?: RateLimit;
   RL_SESSIONS_TENANT?: RateLimit;
+  /** Cloudflare Turnstile public site key. Surfaced to the Console via
+   *  /auth-info; the Login page renders the widget when this is present
+   *  and skips it (insecure!) when absent. Per CF, this is public —
+   *  domain-bound, no secret. */
+  TURNSTILE_SITE_KEY?: string;
+  /** Cloudflare Turnstile secret key (wrangler secret put). The /auth/*
+   *  middleware verifies tokens against CF's siteverify with this. When
+   *  absent the middleware soft-passes — used during the brief window
+   *  between deploying the code and provisioning the secret. */
+  TURNSTILE_SECRET_KEY?: string;
   API_KEY: string;
   BETTER_AUTH_SECRET: string;
   GOOGLE_CLIENT_ID?: string;
