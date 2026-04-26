@@ -64,6 +64,35 @@ jobs:
       - name: Build CLI
         run: pnpm --filter @openma/cli build
 
+      # Debug: dump the OIDC token claims (not the token itself) so we can
+      # verify what npm sees vs what the trusted publisher expects. Remove
+      # once OIDC publishes are stable.
+      - name: Debug OIDC claims
+        run: |
+          TOKEN=$(curl -sSL -H "Authorization: bearer $ACTIONS_ID_TOKEN_REQUEST_TOKEN" \
+            "$ACTIONS_ID_TOKEN_REQUEST_URL&audience=npm:registry.npmjs.org" \
+            | jq -r .value)
+          if [ -z "$TOKEN" ] || [ "$TOKEN" = "null" ]; then
+            echo "::error::Failed to mint OIDC token"
+            exit 1
+          fi
+          PAYLOAD=$(echo "$TOKEN" | cut -d. -f2 | base64 -d 2>/dev/null || echo "$TOKEN" | cut -d. -f2 | base64 --decode --ignore-garbage 2>/dev/null)
+          echo "OIDC claims (sanitized):"
+          echo "$PAYLOAD" | jq '{
+            sub,
+            aud,
+            iss,
+            repository,
+            repository_owner,
+            workflow,
+            workflow_ref,
+            job_workflow_ref,
+            environment,
+            ref,
+            ref_type,
+            event_name
+          }'
+
       - name: Publish to npm
         # --provenance signs the package with a Sigstore attestation linking
         # it to this workflow run + commit SHA. Users can verify with
