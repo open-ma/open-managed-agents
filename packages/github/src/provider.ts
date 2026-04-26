@@ -680,6 +680,7 @@ export class GitHubProvider implements IntegrationProvider {
       reason: "dedicated_install",
       publicationId: publication.id,
       sessionId,
+      tenantId: app.tenantId,
     };
   }
 

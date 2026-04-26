@@ -496,6 +496,7 @@ export class LinearProvider implements IntegrationProvider {
         reason: "comment_reply_to_bot",
         publicationId: publication.id,
         sessionId: authored.omaSessionId,
+        tenantId: installation.tenantId,
       };
     }
 
@@ -509,6 +510,7 @@ export class LinearProvider implements IntegrationProvider {
       reason: routingReason,
       publicationId: publication.id,
       sessionId,
+      tenantId: installation.tenantId,
     };
   }
 

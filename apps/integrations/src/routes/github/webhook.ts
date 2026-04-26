@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../../env";
 import { buildContainer } from "../../wire";
 import { buildProviders } from "../../providers";
+import { webhookRateLimitMiddleware, shouldDropForTenantRateLimit } from "../../webhook-rate-limit";
 
 // Webhook receiver for GitHub Apps:
 //   POST /github/webhook/app/:appOmaId
@@ -11,6 +12,8 @@ import { buildProviders } from "../../providers";
 // rows from all providers; the table just hasn't been renamed yet).
 
 const app = new Hono<{ Bindings: Env }>();
+
+app.use("/*", webhookRateLimitMiddleware);
 
 app.post("/app/:appOmaId", async (c) => {
   const appOmaId = c.req.param("appOmaId");
@@ -37,6 +40,13 @@ app.post("/app/:appOmaId", async (c) => {
   console.log(
     `[github-webhook] appOmaId=${appOmaId} event=${eventType} delivery=${deliveryId} handled=${outcome.handled} reason=${outcome.reason ?? "ok"}`,
   );
+
+  // Per-tenant rate limit. GitHub dispatches inline so this gate stops the
+  // NEXT request in a sustained burst rather than the current one. Sliding
+  // window converges within seconds.
+  if (outcome.tenantId) {
+    await shouldDropForTenantRateLimit(c.env, outcome.tenantId);
+  }
 
   // GitHub contract: always 200. Body is informational.
   return c.json({ ok: outcome.handled, reason: outcome.reason ?? null }, 200);

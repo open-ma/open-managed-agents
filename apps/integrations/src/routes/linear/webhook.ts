@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "../../env";
 import { buildContainer } from "../../wire";
 import { buildProviders } from "../../providers";
+import { webhookRateLimitMiddleware, shouldDropForTenantRateLimit } from "../../webhook-rate-limit";
 
 // Webhook receiver:
 //   POST /linear/webhook/app/:appId       — A1 per-publication App
@@ -10,6 +11,8 @@ import { buildProviders } from "../../providers";
 // chose not to act on. Drops are logged in linear_webhook_events.
 
 const app = new Hono<{ Bindings: Env }>();
+
+app.use("/*", webhookRateLimitMiddleware);
 
 app.post("/app/:appId", async (c) => {
   const appId = c.req.param("appId");
@@ -49,6 +52,14 @@ app.post("/app/:appId", async (c) => {
   console.log(
     `[linear-webhook] appId=${appId} delivery=${deliveryId} event=${headers["linear-event"]} handled=${outcome.handled} reason=${outcome.reason ?? "ok"} sessionId=${outcome.sessionId ?? "-"}`,
   );
+
+  // Per-tenant rate limit. Linear dispatches inline so the work for THIS
+  // request already happened — but the gate stops the next ones in the
+  // burst. CF binding is sliding-window so a sustained flood converges
+  // within seconds.
+  if (outcome.tenantId) {
+    await shouldDropForTenantRateLimit(c.env, outcome.tenantId);
+  }
   // TEMP: dump body for AgentSessionEvent so we can extend the parser.
   // wrangler tail truncates each line ~600 bytes — split into chunks.
   if (headers["linear-event"] === "AgentSessionEvent") {
