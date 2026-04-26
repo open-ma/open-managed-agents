@@ -1,5 +1,9 @@
 import { createServer } from "node:http";
 import { execSync } from "node:child_process";
+import { homedir, hostname } from "node:os";
+import { join, dirname } from "node:path";
+import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
+import { randomBytes } from "node:crypto";
 import type { AgentConfig, ModelCard, SessionMeta } from "@open-managed-agents/api-types";
 
 // ─── Config ───
@@ -9,18 +13,104 @@ interface Config {
   apiKey: string;
   /** When true, commands print machine-readable JSON instead of human tables. */
   json: boolean;
+  /** Whether the apiKey came from stored credentials (vs env var). Used by
+   *  `oma whoami` so it can show the source — env vars override stored creds. */
+  source: "env" | "stored" | "missing";
+}
+
+// ─── Stored credentials (~/.config/oma/credentials.json) ───
+//
+// File layout is single-profile for now; the structure has room for a
+// multi-profile expansion (one per base_url / tenant) without a breaking
+// change — read paths can grow into `profiles[name]` later.
+
+interface StoredCredentials {
+  version: 1;
+  base_url: string;
+  user: { id: string; email: string; name: string | null };
+  tenant: { id: string; name: string };
+  /** Forward-compat: today always length 1 (1 user → 1 tenant). When
+   *  multi-tenant lands, this is the full membership list and `oma auth
+   *  tenant use` switches between them. */
+  tenants: Array<{ id: string; name: string; role: string }>;
+  token: string;
+  key_id: string;
+  created_at: string;
+}
+
+function credentialsPath(): string {
+  // XDG-style on Linux/macOS; HOME/.config on macOS by default.
+  const xdg = process.env.XDG_CONFIG_HOME;
+  const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".config");
+  return join(base, "oma", "credentials.json");
+}
+
+function readCredentials(): StoredCredentials | null {
+  const path = credentialsPath();
+  try {
+    if (!existsSync(path)) return null;
+    const raw = readFileSync(path, "utf8");
+    return JSON.parse(raw) as StoredCredentials;
+  } catch {
+    return null;
+  }
+}
+
+function writeCredentials(creds: StoredCredentials): void {
+  const path = credentialsPath();
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  writeFileSync(path, JSON.stringify(creds, null, 2), { mode: 0o600 });
+  // chmod again in case the file pre-existed with looser perms.
+  try { chmodSync(path, 0o600); } catch {}
+}
+
+function clearCredentials(): boolean {
+  const path = credentialsPath();
+  if (!existsSync(path)) return false;
+  unlinkSync(path);
+  return true;
 }
 
 function loadConfig(): Config {
-  const baseUrl = process.env.OMA_BASE_URL || "http://localhost:8787";
-  const apiKey = process.env.OMA_API_KEY || "";
-  if (!apiKey) {
-    console.error("Error: OMA_API_KEY environment variable is required");
-    console.error("  export OMA_API_KEY=your-api-key");
-    console.error("\n  Generate one at: " + baseUrl + " → API Keys");
-    process.exit(1);
+  const envBase = process.env.OMA_BASE_URL;
+  const envKey = process.env.OMA_API_KEY;
+  const stored = readCredentials();
+  if (envKey) {
+    return {
+      baseUrl: envBase || stored?.base_url || "http://localhost:8787",
+      apiKey: envKey,
+      json: false,
+      source: "env",
+    };
   }
-  return { baseUrl, apiKey, json: false };
+  if (stored) {
+    return {
+      baseUrl: envBase || stored.base_url,
+      apiKey: stored.token,
+      json: false,
+      source: "stored",
+    };
+  }
+  console.error("Error: not authenticated.");
+  console.error("  Run: oma auth login");
+  console.error("  Or:  export OMA_API_KEY=<your-key>  (mint at /api-keys page)");
+  process.exit(1);
+}
+
+/** Like loadConfig but never exits — for commands that must run pre-auth
+ *  (oma auth login itself). Returns a minimal Config with a possibly-empty
+ *  apiKey; callers check Config.source before making authenticated calls. */
+function loadConfigOptional(): Config {
+  const envBase = process.env.OMA_BASE_URL;
+  const envKey = process.env.OMA_API_KEY;
+  const stored = readCredentials();
+  if (envKey) {
+    return { baseUrl: envBase || stored?.base_url || "http://localhost:8787", apiKey: envKey, json: false, source: "env" };
+  }
+  if (stored) {
+    return { baseUrl: envBase || stored.base_url, apiKey: stored.token, json: false, source: "stored" };
+  }
+  return { baseUrl: envBase || "http://localhost:8787", apiKey: "", json: false, source: "missing" };
 }
 
 // ─── API Client ───
@@ -80,6 +170,131 @@ function isPubliclyReachable(url: string): boolean {
   }
 }
 
+// ─── Auth login (browser handoff) ───
+//
+// CLI starts a loopback HTTP server on a random port, opens the browser to
+// the console's /cli/login page, and waits for the page to redirect back
+// with a freshly-minted token. The `state` nonce is generated here and
+// validated on the callback so a stray inbound request can't inject a token.
+
+async function authLogin(baseUrl: string, requestedTenant?: string): Promise<void> {
+  const state = randomBytes(16).toString("hex");
+  const port = 19500 + Math.floor(Math.random() * 500);
+  const callback = `http://127.0.0.1:${port}/callback`;
+  const params = new URLSearchParams({
+    callback,
+    state,
+    hostname: hostname(),
+  });
+  if (requestedTenant) params.set("tenant", requestedTenant);
+  const loginUrl = `${baseUrl}/cli/login?${params.toString()}`;
+
+  const result = await new Promise<{ token: string; tenant: string; user: string; key_id: string }>((resolve, reject) => {
+    const timeout = setTimeout(() => {
+      server.close();
+      reject(new Error("Timed out after 5 minutes waiting for browser approval."));
+    }, 5 * 60_000);
+
+    const server = createServer((req: any, res: any) => {
+      try {
+        const u = new URL(req.url || "/", `http://127.0.0.1:${port}`);
+        if (u.pathname !== "/callback") {
+          res.writeHead(404).end();
+          return;
+        }
+        const got = u.searchParams;
+        if (got.get("error")) {
+          const err = String(got.get("error"));
+          res.writeHead(400, { "Content-Type": "text/html" }).end(approvalPage("Cancelled", `Login was cancelled: ${err}. You can close this tab.`));
+          clearTimeout(timeout);
+          server.close();
+          reject(new Error(`Login cancelled: ${err}`));
+          return;
+        }
+        if (got.get("state") !== state) {
+          res.writeHead(400, { "Content-Type": "text/html" }).end(approvalPage("State mismatch", "The login response didn't match what this CLI session expected. Please try again."));
+          clearTimeout(timeout);
+          server.close();
+          reject(new Error("State mismatch — refusing the callback"));
+          return;
+        }
+        const token = got.get("token");
+        const tenant = got.get("tenant");
+        const user = got.get("user");
+        const key_id = got.get("key_id");
+        if (!token || !tenant || !user || !key_id) {
+          res.writeHead(400, { "Content-Type": "text/html" }).end(approvalPage("Incomplete callback", "The browser handoff is missing required fields."));
+          clearTimeout(timeout);
+          server.close();
+          reject(new Error("Callback missing required fields"));
+          return;
+        }
+        res.writeHead(200, { "Content-Type": "text/html" }).end(approvalPage("Signed in", "You can close this tab and return to your terminal."));
+        clearTimeout(timeout);
+        server.close();
+        resolve({ token, tenant, user, key_id });
+      } catch (err) {
+        res.writeHead(500).end();
+        clearTimeout(timeout);
+        server.close();
+        reject(err);
+      }
+    });
+    server.listen(port, "127.0.0.1");
+
+    console.log(`Opening browser to authorize CLI…`);
+    console.log(`  ${loginUrl}\n`);
+    console.log(`(If the browser doesn't open, copy the URL above into one manually.)`);
+    openBrowser(loginUrl);
+  });
+
+  // Use the freshly-minted token to fetch full identity + tenant list, so
+  // the credentials file carries useful display fields for `oma whoami`.
+  const tempConfig: Config = { baseUrl, apiKey: result.token, json: false, source: "stored" };
+  const me = await apiFetch<{
+    user: { id: string; email: string; name: string | null } | null;
+    tenant: { id: string; name: string };
+    tenants: Array<{ id: string; name: string; role: string }>;
+  }>(tempConfig, "/v1/me");
+
+  writeCredentials({
+    version: 1,
+    base_url: baseUrl,
+    user: me.user ?? { id: result.user, email: "", name: null },
+    tenant: me.tenant,
+    tenants: me.tenants,
+    token: result.token,
+    key_id: result.key_id,
+    created_at: new Date().toISOString(),
+  });
+
+  console.log(`✓ Signed in as ${me.user?.email ?? me.user?.id}`);
+  console.log(`  Tenant : ${me.tenant.name || me.tenant.id} (${me.tenant.id})`);
+  console.log(`  Stored : ${credentialsPath()}`);
+  if (me.tenants.length > 1) {
+    console.log(`  ${me.tenants.length} tenants available — switch with: oma auth tenant use <id>`);
+  }
+}
+
+function openBrowser(url: string): void {
+  try {
+    const p = process.platform;
+    if (p === "darwin") execSync(`open "${url}"`);
+    else if (p === "linux") execSync(`xdg-open "${url}"`);
+    else if (p === "win32") execSync(`start "" "${url}"`);
+  } catch {
+    // The URL is already printed above; user can copy-paste manually.
+  }
+}
+
+function approvalPage(title: string, body: string): string {
+  return `<!DOCTYPE html><html><head><meta charset="utf-8"><title>oma — ${title}</title><style>
+body{font-family:-apple-system,system-ui,sans-serif;max-width:480px;margin:80px auto;padding:0 24px;color:#222}
+h1{font-size:20px;margin-bottom:12px} p{color:#555;line-height:1.5}
+.card{border:1px solid #e5e5e5;border-radius:12px;padding:32px;background:#fff;box-shadow:0 1px 3px rgba(0,0,0,0.04)}
+</style></head><body><div class="card"><h1>${title}</h1><p>${body}</p></div></body></html>`;
+}
+
 // ─── Command Registry ───
 
 interface Cmd {
@@ -93,6 +308,86 @@ interface Cmd {
 }
 
 const commands: Cmd[] = [
+  // Auth
+  {
+    group: "Auth", match: ["auth", "login"],
+    usage: "oma auth login [--base-url <url>]", desc: "Open browser to authenticate; stores ~/.config/oma/credentials.json",
+    http: "POST   /v1/me/cli-tokens (browser handoff via /cli/login)",
+    async run(_config, args) {
+      const baseUrl = (flag(args, "--base-url") ?? process.env.OMA_BASE_URL ?? "https://app.openma.dev").replace(/\/+$/, "");
+      await authLogin(baseUrl);
+    },
+  },
+  {
+    group: "Auth", match: ["auth", "logout"],
+    usage: "oma auth logout", desc: "Delete stored credentials (does not revoke the token; use `oma keys revoke <id>` for that)",
+    http: "(local file delete)",
+    async run() {
+      const removed = clearCredentials();
+      console.log(removed ? `Cleared ${credentialsPath()}` : "No stored credentials.");
+    },
+  },
+  {
+    group: "Auth", match: ["whoami"],
+    usage: "oma whoami", desc: "Show current user, tenant, and base URL",
+    http: "GET    /v1/me",
+    async run(config) {
+      try {
+        const me = await apiFetch<{
+          user: { id: string; email: string; name: string | null } | null;
+          tenant: { id: string; name: string };
+          tenants: Array<{ id: string; name: string; role: string }>;
+        }>(config, "/v1/me");
+        if (config.json) { console.log(JSON.stringify({ ...me, base_url: config.baseUrl, source: config.source }, null, 2)); return; }
+        console.log(`Base URL : ${config.baseUrl}`);
+        console.log(`Source   : ${config.source === "env" ? "OMA_API_KEY env var" : "stored credentials"}`);
+        console.log(`User     : ${me.user?.email ?? me.user?.id ?? "(unknown — legacy key without user_id)"}`);
+        console.log(`Tenant   : ${me.tenant.name || me.tenant.id} (${me.tenant.id})`);
+        if (me.tenants.length > 1) {
+          console.log(`Available: ${me.tenants.map((t) => t.id).join(", ")}`);
+        }
+      } catch (err: any) {
+        console.error(`whoami failed: ${err.message}`);
+        if (config.source === "stored") {
+          console.error("Stored token may have been revoked. Try: oma auth login");
+        }
+        process.exit(1);
+      }
+    },
+  },
+  {
+    group: "Auth", match: ["auth", "tenant", "ls"],
+    usage: "oma auth tenant ls", desc: "List tenants the current user belongs to",
+    http: "GET    /v1/me/tenants",
+    async run(config) {
+      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; role: string }> }>(config, "/v1/me/tenants");
+      if (!data.length) { console.log("No tenants on this account."); return; }
+      const stored = readCredentials();
+      const current = stored?.tenant.id;
+      table([["", "ID", "NAME", "ROLE"], ...data.map((t) => [t.id === current ? "*" : " ", t.id, t.name || "—", t.role])]);
+    },
+  },
+  {
+    group: "Auth", match: ["auth", "tenant", "use"], needsArg: true,
+    usage: "oma auth tenant use <tenant-id>", desc: "Switch active tenant (mints a new CLI token for that tenant)",
+    http: "POST   /v1/me/cli-tokens {tenant_id}",
+    async run(config, args) {
+      const tenantId = args[0];
+      if (!tenantId) { console.error("Usage: oma auth tenant use <tenant-id>"); process.exit(1); }
+      const stored = readCredentials();
+      if (!stored) {
+        console.error("No stored credentials. Run: oma auth login");
+        process.exit(1);
+      }
+      // Mint a fresh token bound to the new tenant. Today this works only
+      // because /v1/me/cli-tokens accepts cookie-auth — we don't have that
+      // in the CLI yet, so for now we re-run the browser flow with the
+      // requested tenant pre-selected. When membership-aware tokens land,
+      // we can switch this to a server-side rebind without browser.
+      console.log(`Switching to tenant ${tenantId} — opening browser to confirm…`);
+      await authLogin(stored.base_url, tenantId);
+    },
+  },
   // Agents
   {
     group: "Agents", match: ["agents", "list"],
@@ -1114,7 +1409,11 @@ function usage() {
 
 Environment:
   OMA_BASE_URL   API base (default: http://localhost:8787)
-  OMA_API_KEY    API key (required)
+  OMA_API_KEY    API key — overrides stored credentials when set
+  XDG_CONFIG_HOME  Base dir for credentials (default: ~/.config)
+
+Stored credentials live at ~/.config/oma/credentials.json (created by
+'oma auth login', mode 0600). Delete with 'oma auth logout'.
 `);
 }
 
@@ -1129,7 +1428,12 @@ async function main() {
   const wantJson = args.includes("--json");
   args = args.filter((a) => a !== "--json");
 
-  const config = loadConfig();
+  // Pre-auth commands: `auth login` runs before any credentials exist;
+  // `auth logout` is a local file delete and shouldn't error if logged out.
+  // Both bypass the strict loadConfig that exits on missing key.
+  const isPreAuth =
+    (args[0] === "auth" && (args[1] === "login" || args[1] === "logout"));
+  const config = isPreAuth ? loadConfigOptional() : loadConfig();
   config.json = wantJson;
 
   // Matcher: track the best partial match so we can give a useful hint when

@@ -27,8 +27,18 @@ export function Login() {
   const [googleEnabled, setGoogleEnabled] = useState(false);
   const otpRef = useRef<HTMLInputElement>(null);
 
+  // Honor `?next=` so callers (e.g. /cli/login) can bounce through here and
+  // land back where they started after sign-in. Restricted to same-origin
+  // paths so a malicious link can't trick the user into redirecting offsite.
+  const nextUrl = (() => {
+    const raw = new URLSearchParams(window.location.search).get("next");
+    if (!raw) return "/";
+    if (raw.startsWith("/") && !raw.startsWith("//")) return raw;
+    return "/";
+  })();
+
   useEffect(() => {
-    if (isAuthenticated) nav("/", { replace: true });
+    if (isAuthenticated) nav(nextUrl, { replace: true });
   }, [isAuthenticated]);
 
   useEffect(() => {
@@ -86,7 +96,7 @@ export function Login() {
             throw new Error(error.message);
           }
         } else {
-          nav("/", { replace: true });
+          nav(nextUrl, { replace: true });
         }
       } else if (mode === "otp-login") {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
@@ -102,12 +112,12 @@ export function Login() {
           otp,
         });
         if (error) throw new Error(error.message);
-        nav("/", { replace: true });
+        nav(nextUrl, { replace: true });
       } else if (mode === "verify-login") {
         const signInOtp = authClient.signIn.emailOtp as any;
         const { data, error } = await signInOtp({ email, otp });
         if (error) throw new Error(error.message);
-        if (data) nav("/", { replace: true });
+        if (data) nav(nextUrl, { replace: true });
       } else if (mode === "forgot") {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
           email,
@@ -161,7 +171,7 @@ export function Login() {
   const handleGoogle = async () => {
     await authClient.signIn.social({
       provider: "google",
-      callbackURL: "/",
+      callbackURL: nextUrl,
     });
   };
 
