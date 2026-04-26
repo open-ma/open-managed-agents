@@ -77,7 +77,7 @@ function loadConfig(): Config {
   const stored = readCredentials();
   if (envKey) {
     return {
-      baseUrl: envBase || stored?.base_url || "http://localhost:8787",
+      baseUrl: envBase || stored?.base_url || "https://openma.dev",
       apiKey: envKey,
       json: false,
       source: "env",
@@ -105,12 +105,12 @@ function loadConfigOptional(): Config {
   const envKey = process.env.OMA_API_KEY;
   const stored = readCredentials();
   if (envKey) {
-    return { baseUrl: envBase || stored?.base_url || "http://localhost:8787", apiKey: envKey, json: false, source: "env" };
+    return { baseUrl: envBase || stored?.base_url || "https://openma.dev", apiKey: envKey, json: false, source: "env" };
   }
   if (stored) {
     return { baseUrl: envBase || stored.base_url, apiKey: stored.token, json: false, source: "stored" };
   }
-  return { baseUrl: envBase || "http://localhost:8787", apiKey: "", json: false, source: "missing" };
+  return { baseUrl: envBase || "https://openma.dev", apiKey: "", json: false, source: "missing" };
 }
 
 // ─── API Client ───
@@ -314,7 +314,7 @@ const commands: Cmd[] = [
     usage: "oma auth login [--base-url <url>]", desc: "Open browser to authenticate; stores ~/.config/oma/credentials.json",
     http: "POST   /v1/me/cli-tokens (browser handoff via /cli/login)",
     async run(_config, args) {
-      const baseUrl = (flag(args, "--base-url") ?? process.env.OMA_BASE_URL ?? "https://app.openma.dev").replace(/\/+$/, "");
+      const baseUrl = (flag(args, "--base-url") ?? process.env.OMA_BASE_URL ?? "https://openma.dev").replace(/\/+$/, "");
       await authLogin(baseUrl);
     },
   },
@@ -1408,7 +1408,7 @@ function usage() {
     oma api <resource>                         Show endpoints for a resource
 
 Environment:
-  OMA_BASE_URL   API base (default: http://localhost:8787)
+  OMA_BASE_URL   API base (default: https://openma.dev)
   OMA_API_KEY    API key — overrides stored credentials when set
   XDG_CONFIG_HOME  Base dir for credentials (default: ~/.config)
 
