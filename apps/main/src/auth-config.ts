@@ -159,9 +159,14 @@ export async function ensureTenant(
 
   const tenantId = `tn_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const now = Math.floor(Date.now() / 1000);
+  // Default tenant name: "<name>'s workspace" when name is set, plain
+  // "Workspace" otherwise. OTP and some social signups don't carry a name,
+  // and we don't want the literal string "'s workspace" landing in the DB.
+  const trimmedName = (userName ?? "").trim();
+  const tenantName = trimmedName ? `${trimmedName}'s workspace` : "Workspace";
   await db
     .prepare("INSERT INTO tenant (id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)")
-    .bind(tenantId, `${userName}'s workspace`, now, now)
+    .bind(tenantId, tenantName, now, now)
     .run();
   await db
     .prepare("UPDATE user SET tenantId = ?, role = ? WHERE id = ? AND tenantId IS NULL")
