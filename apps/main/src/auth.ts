@@ -1,5 +1,6 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "@open-managed-agents/shared";
+import { logWarn, logError } from "@open-managed-agents/shared";
 
 async function sha256(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -53,9 +54,13 @@ export const authMiddleware = createMiddleware<{
         if (r.results?.length === 1) {
           c.set("user_id", r.results[0].id);
         }
-      } catch {
+      } catch (err) {
         // AUTH_DB query failed — proceed without user_id; downstream
         // user-scoped routes will reject with their own clear message.
+        logWarn(
+          { op: "auth.tenant_user_lookup", tenant_id, err },
+          "AUTH_DB user lookup failed; proceeding without user_id",
+        );
       }
     }
     return next();
@@ -83,8 +88,13 @@ export const authMiddleware = createMiddleware<{
         c.set("user_id", session.user.id);
         return next();
       }
-    } catch {
-      // fall through to 401
+    } catch (err) {
+      // fall through to 401 — but log first so we can tell "no session" from
+      // "session check threw" in prod (better-auth import / DB errors etc.).
+      logError(
+        { op: "auth.session_check", err },
+        "session cookie auth threw; returning 401",
+      );
     }
   }
 

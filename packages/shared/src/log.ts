@@ -1,54 +1,104 @@
-// Structured log helper.
+// Structured JSON-line logger for OMA workers.
 //
-// Every log line in main worker / SessionDO / sandbox / model proxy should
-// carry session_id (and seq when in event-loop scope) so production logs
-// (`wrangler tail | grep session=sess-xxx`) cross-reference precisely with the
-// trajectory's events array (look up `seq=N` to find the event that triggered
-// the log line).
+// One JSON object per line so Workers Logs / Logpush consumers (Datadog,
+// Honeycomb, BigQuery, etc.) can index by field instead of regex-parsing
+// freeform strings. Bind `wrangler tail --format json` to view locally.
 //
 // Usage:
-//   import { log } from "@open-managed-agents/shared";
-//   log({ session_id: "sess-xxx", seq: 42, attempt: 3 }, "model retry");
-//   // → [session=sess-xxx seq=42] model retry attempt=3
+//   import { log, logWarn, logError } from "@open-managed-agents/shared";
+//   log({ op: "session.create", session_id, tenant_id }, "session created");
+//   logError({ op: "session.delete.cleanup", session_id, err }, "cleanup failed");
+//
+// Conventions:
+//   - `op` is "<area>.<verb>" — the primary grouping key for dashboards.
+//   - `err` is auto-normalized: Error → {message, name, stack[:6]}, string passes
+//     through, anything else gets JSON.stringify. Never log a raw Error directly
+//     because `String(err)` collapses the stack.
+//   - Always include the IDs you have in scope (session_id, tenant_id, agent_id)
+//     so post-hoc grep can correlate to a specific request.
 
 export interface LogContext {
+  /** Structured operation tag, e.g. "session.delete.cleanup". The primary
+   *  field used for dashboards / alerts / metric grouping. */
+  op?: string;
   session_id?: string;
+  tenant_id?: string;
+  agent_id?: string;
   seq?: number;
+  /** Any thrown value. Errors get message/name/stack extracted; other values
+   *  are stringified. Never include raw Errors elsewhere — they collapse. */
+  err?: unknown;
   [key: string]: unknown;
 }
 
-function fmtPrefix(ctx: LogContext): string {
-  const parts: string[] = [];
-  if (ctx.session_id) parts.push(`session=${ctx.session_id}`);
-  if (ctx.seq !== undefined) parts.push(`seq=${ctx.seq}`);
-  return parts.length > 0 ? `[${parts.join(" ")}]` : "";
+interface NormalizedErr {
+  message: string;
+  name: string;
+  stack?: string;
+  cause?: string;
 }
 
-function fmtFields(ctx: LogContext): string {
-  const fields: string[] = [];
-  for (const [key, value] of Object.entries(ctx)) {
-    if (key === "session_id" || key === "seq") continue;
-    if (value === undefined) continue;
-    const v = typeof value === "string" ? value : JSON.stringify(value);
-    fields.push(`${key}=${v}`);
+function normalizeErr(err: unknown): NormalizedErr | string {
+  if (err instanceof Error) {
+    const out: NormalizedErr = {
+      message: err.message || "(empty)",
+      name: err.name,
+    };
+    if (err.stack) {
+      // Top 6 frames keeps lines readable; full stack lives in source maps.
+      out.stack = err.stack.split("\n").slice(0, 6).join("\n");
+    }
+    if ("cause" in err && err.cause !== undefined) {
+      out.cause = String(err.cause);
+    }
+    return out;
   }
-  return fields.length > 0 ? " " + fields.join(" ") : "";
+  if (typeof err === "string") return err;
+  try {
+    return JSON.stringify(err);
+  } catch {
+    return String(err);
+  }
+}
+
+function emit(level: "info" | "warn" | "error", ctx: LogContext, msg: string): void {
+  const entry: Record<string, unknown> = {
+    ts: new Date().toISOString(),
+    level,
+    msg,
+  };
+  for (const [k, v] of Object.entries(ctx)) {
+    if (v === undefined) continue;
+    entry[k] = k === "err" ? normalizeErr(v) : v;
+  }
+  let line: string;
+  try {
+    line = JSON.stringify(entry);
+  } catch {
+    // Last-ditch: a context value isn't serializable. Fall back to a
+    // hand-built record so we at least get level + msg.
+    line = JSON.stringify({ ts: entry.ts, level, msg, _serialize_failed: true });
+  }
+  switch (level) {
+    case "error":
+      console.error(line);
+      break;
+    case "warn":
+      console.warn(line);
+      break;
+    default:
+      console.log(line);
+  }
 }
 
 export function log(ctx: LogContext, msg: string): void {
-  const prefix = fmtPrefix(ctx);
-  const fields = fmtFields(ctx);
-  console.log(`${prefix} ${msg}${fields}`.trim());
-}
-
-export function logError(ctx: LogContext, msg: string): void {
-  const prefix = fmtPrefix(ctx);
-  const fields = fmtFields(ctx);
-  console.error(`${prefix} ${msg}${fields}`.trim());
+  emit("info", ctx, msg);
 }
 
 export function logWarn(ctx: LogContext, msg: string): void {
-  const prefix = fmtPrefix(ctx);
-  const fields = fmtFields(ctx);
-  console.warn(`${prefix} ${msg}${fields}`.trim());
+  emit("warn", ctx, msg);
+}
+
+export function logError(ctx: LogContext, msg: string): void {
+  emit("error", ctx, msg);
 }

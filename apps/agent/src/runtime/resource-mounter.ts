@@ -1,5 +1,6 @@
 import type { SandboxExecutor } from "../harness/interface";
 import { fileR2Key } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 
 /**
  * Mount session resources into the sandbox during warmup.
@@ -40,8 +41,14 @@ export async function mountResources(
           break;
         }
       }
-    } catch {
-      // Best-effort: skip failed resource, don't crash session
+    } catch (err) {
+      // Best-effort: skip failed resource, don't crash session. Resources are
+      // fungible during a session so a bad mount degrades gracefully — but a
+      // user whose repo silently failed to mount needs to know why.
+      logWarn(
+        { op: "resource.mount", resource_type: res.type, resource_id: res.id, err },
+        "resource mount failed; skipping",
+      );
     }
   }
 
@@ -57,8 +64,12 @@ export async function mountResources(
   if (hasGitRepo) {
     try {
       await ensureGhCli(sandbox);
-    } catch {
+    } catch (err) {
       // Best-effort: agent can still use git + curl as fallback
+      logWarn(
+        { op: "resource.gh_cli_install", err },
+        "gh CLI install failed; agent will fall back to git + curl",
+      );
     }
   }
 }

@@ -13,6 +13,7 @@
 
 import type { Env, AgentConfig, EnvironmentConfig, StoredEvent } from "@open-managed-agents/shared";
 import { buildTrajectory } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import { buildCfServices, getCfServicesForTenant, type Services } from "@open-managed-agents/services";
 import type { EvalRunRow, EvalRunStatus } from "@open-managed-agents/evals-store";
@@ -199,7 +200,11 @@ async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string)
     if (!res.ok) return null;
     const data = (await res.json()) as { status: string };
     return data.status;
-  } catch {
+  } catch (err) {
+    logWarn(
+      { op: "eval.fetch_session_status", session_id: sessionId, err },
+      "session status fetch failed; treating as unknown",
+    );
     return null;
   }
 }

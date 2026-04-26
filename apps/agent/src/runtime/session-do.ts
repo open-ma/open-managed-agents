@@ -1,5 +1,6 @@
 import { Agent } from "agents";
 import type { Env } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -227,8 +228,13 @@ export class SessionDO extends Agent<Env, SessionState> {
         if (!credData) continue;
         try {
           out.push(JSON.parse(credData) as CredentialConfig);
-        } catch {
-          // skip malformed
+        } catch (err) {
+          // skip malformed — but flag because vault data corruption silently
+          // disables outbound auth injection for whatever this credential covered.
+          logWarn(
+            { op: "session_do.vault_cred_parse", session_id: this.state.session_id, vault_id: vaultId, kv_key: k.name, err },
+            "skipping malformed credential entry",
+          );
         }
       }
     }
@@ -511,13 +517,17 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
-        try { await this.sandbox.destroy(); } catch {}
+        try { await this.sandbox.destroy(); } catch (err) {
+          logWarn({ op: "session_do.destroy.sandbox", session_id: this.state.session_id, err }, "sandbox destroy failed");
+        }
       }
       this.sandbox = null;
       this.sandboxWarmupPromise = null;
       // Close the browser session if one was created
       if (this.browserSession) {
-        try { await this.browserSession.close(); } catch {}
+        try { await this.browserSession.close(); } catch (err) {
+          logWarn({ op: "session_do.destroy.browser", session_id: this.state.session_id, err }, "browser session close failed");
+        }
         this.browserSession = null;
       }
       // Drop the outbound credential snapshot — its TTL would clean it up
@@ -530,7 +540,12 @@ export class SessionDO extends Agent<Env, SessionState> {
           await buildCfServices(this.env, this.env.AUTH_DB).outboundSnapshots.delete({
             sessionId: this.state.session_id,
           });
-        } catch {}
+        } catch (err) {
+          logWarn(
+            { op: "session_do.destroy.snapshot_delete", session_id: this.state.session_id, err },
+            "outbound snapshot delete failed; plaintext OAuth lingers until TTL",
+          );
+        }
       }
       this.setState({ ...this.state, status: "terminated" });
 
@@ -581,7 +596,10 @@ export class SessionDO extends Agent<Env, SessionState> {
               );
             }
           } catch (err) {
-            console.warn(`[auto-mount] file_id=${fid} failed:`, err);
+            logWarn(
+              { op: "session_do.auto_mount.file", session_id: this.state.session_id, file_id: fid, err },
+              "auto-mount file write failed",
+            );
           }
         }
       }
@@ -1417,8 +1435,12 @@ export class SessionDO extends Agent<Env, SessionState> {
 
         // Re-trigger harness
         await this.drainEventQueue();
-      } catch {
+      } catch (err) {
         anyPending = true;
+        logWarn(
+          { op: "session_do.background_task.reap", session_id: this.state.session_id, task_id, err },
+          "background task reap failed; will retry next poll",
+        );
       }
     }
 
@@ -1482,7 +1504,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     let harness: HarnessInterface;
     try {
       harness = resolveHarness(subAgent.harness);
-    } catch {
+    } catch (err) {
+      logWarn(
+        { op: "session_do.subagent.harness_resolve", session_id: this.state.session_id, agent_id: subAgent.id, requested: subAgent.harness, err },
+        "sub-agent harness unknown; falling back to default",
+      );
       harness = resolveHarness("default");
     }
 
@@ -1640,7 +1666,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     let harness: HarnessInterface;
     try {
       harness = resolveHarness(agent.harness);
-    } catch {
+    } catch (err) {
+      logWarn(
+        { op: "session_do.harness_resolve", session_id: this.state.session_id, agent_id: agent.id, requested: agent.harness, err },
+        "agent harness unknown; falling back to default",
+      );
       harness = resolveHarness("default");
     }
 
@@ -1687,7 +1717,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const creds = await this.resolveModelCardCredentials(effectiveModelId, agent.model_card_id);
     const model = resolveModel(effectiveModelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
 
-    // Build system prompt: ONLY agent.system + authenticatedCommandGuidance.
+    // Build system prompt: agent.system + platform guidance (auth + loop-stop).
     // Skill / memory_store / appendable_prompt content is NOT appended here —
     // those are collected as platformReminders and injected by the harness's
     // onSessionInit hook as <system-reminder> user.message events. This keeps
@@ -1696,9 +1726,16 @@ export class SessionDO extends Agent<Env, SessionState> {
     const rawSystemPrompt = agent.system || "";
     const authenticatedCommandGuidance =
       "For commands that may require authentication, prefer issuing a single command instead of a chained shell command. If an authenticated chained command fails, retry with a simpler single-command form.";
+    // Loop-stop guidance: prod incidents have shown agents retrying the same
+    // failing tool call indefinitely when an upstream credential is missing or
+    // an external API is down. Cap retries explicitly and require a structured
+    // failure report so the human (or calling system) can intervene.
+    const loopStopGuidance =
+      "If the same tool call fails three times in a row with substantively the same error, stop retrying. Report (a) what you were trying to do, (b) the exact error, and (c) what you would need to make progress (a missing credential, a corrected input, an upstream service to recover), then end the turn instead of looping.";
+    const platformGuidance = `${authenticatedCommandGuidance}\n\n${loopStopGuidance}`;
     const systemPrompt = rawSystemPrompt
-      ? `${rawSystemPrompt}\n\n${authenticatedCommandGuidance}`
-      : authenticatedCommandGuidance;
+      ? `${rawSystemPrompt}\n\n${platformGuidance}`
+      : platformGuidance;
 
     // Collect platformReminders for harness.onSessionInit. These get
     // resolved ONCE at session-init and become part of the events stream.
@@ -1739,8 +1776,12 @@ export class SessionDO extends Agent<Env, SessionState> {
               platformReminders.push({ source: `skill:${s.id}`, text: s.system_prompt_addition });
             }
           }
-        } catch {
+        } catch (err) {
           // Best-effort
+          logWarn(
+            { op: "session_do.custom_skills.resolve", session_id: this.state.session_id, agent_id: agent.id, err },
+            "custom skill resolve failed; skipping skill prompt additions",
+          );
         }
       }
 
@@ -1773,13 +1814,21 @@ export class SessionDO extends Agent<Env, SessionState> {
                     new TextDecoder("utf-8").decode(file.bytes),
                   );
                 }
-              } catch {
+              } catch (err) {
                 // Best-effort: skip individual file write failures
+                logWarn(
+                  { op: "session_do.skill_file.write", session_id: this.state.session_id, skill: sf.skillName, filename: file.filename, err },
+                  "skill file write failed; skipping",
+                );
               }
             }
           }
-        } catch {
+        } catch (err) {
           // Best-effort
+          logWarn(
+            { op: "session_do.skill_files.mount", session_id: this.state.session_id, agent_id: agent.id, err },
+            "skill files mount failed",
+          );
         }
       }
     }

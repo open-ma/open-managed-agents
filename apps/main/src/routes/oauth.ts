@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import type { CredentialAuth } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
@@ -111,7 +112,14 @@ async function dynamicClientRegistration(
     if (!res.ok) return null;
     const data = (await res.json()) as { client_id: string; client_secret?: string };
     return { client_id: data.client_id, client_secret: data.client_secret };
-  } catch {
+  } catch (err) {
+    // Dynamic Client Registration is best-effort — caller falls back to a
+    // pre-registered client_id. But persistent failures here block per-server
+    // OAuth onboarding entirely, so we want visibility.
+    logWarn(
+      { op: "oauth.dcr_register", err },
+      "OAuth DCR register failed; caller will fall back",
+    );
     return null;
   }
 }

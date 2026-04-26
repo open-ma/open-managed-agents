@@ -12,6 +12,10 @@ export interface Env {
   AI?: Ai;
   VECTORIZE?: VectorizeIndex;
   ASSETS?: { fetch: (req: Request) => Promise<Response> };
+  /** Analytics Engine binding for structured error/event metrics. Optional —
+   *  observability writes degrade to no-op when absent (dev / tests). See
+   *  packages/shared/src/metrics.ts for the schema convention. */
+  ANALYTICS?: AnalyticsEngineDataset;
   API_KEY: string;
   BETTER_AUTH_SECRET: string;
   GOOGLE_CLIENT_ID?: string;

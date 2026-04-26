@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
+import { logWarn } from "@open-managed-agents/shared";
 import {
   MemoryContentTooLargeError,
   MemoryEmbeddingFailedError,
@@ -123,7 +124,15 @@ app.post("/_reconcile", async (c) => {
   type ReconcileBody = { store_id?: string; limit?: number };
   const body = await c.req
     .json<ReconcileBody>()
-    .catch(() => ({} as ReconcileBody));
+    .catch((err) => {
+      // Empty body is allowed — log only when a malformed body comes in
+      // (truncated JSON, wrong content-type) so we don't lose signal.
+      logWarn(
+        { op: "memory.reconcile.body_parse", tenant_id: t, err },
+        "reconcile body parse failed; treating as empty",
+      );
+      return {} as ReconcileBody;
+    });
   try {
     const result = await c.var.services.memory.reconcile({
       tenantId: t,
