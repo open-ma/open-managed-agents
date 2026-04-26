@@ -130,6 +130,10 @@ export function createAuth(env: Env) {
 
 /**
  * Look up a user's tenantId from D1.
+ *
+ * Returns the user.tenantId column (legacy "default tenant"). For
+ * multi-tenant aware code paths, prefer listMemberships() — this helper
+ * only returns the user's first/default tenant.
  */
 export async function getTenantId(db: D1Database, userId: string): Promise<string | null> {
   const result = await db
@@ -137,6 +141,49 @@ export async function getTenantId(db: D1Database, userId: string): Promise<strin
     .bind(userId)
     .first<{ tenantId: string | null }>();
   return result?.tenantId ?? null;
+}
+
+/**
+ * List every tenant the user belongs to. Returns one row per membership
+ * with role; empty array when the user has no memberships (shouldn't
+ * happen post-signup but defended).
+ *
+ * Joined against `tenant` so callers get display names without a second
+ * roundtrip. The query order is stable (created_at ASC then id ASC) so
+ * UI lists don't reshuffle on repeat fetches.
+ */
+export async function listMemberships(
+  db: D1Database,
+  userId: string,
+): Promise<Array<{ id: string; name: string; role: string; created_at: number }>> {
+  const { results } = await db
+    .prepare(
+      `SELECT t.id AS id, t.name AS name, m.role AS role, m.created_at AS created_at
+         FROM membership m
+         JOIN tenant t ON t.id = m.tenant_id
+        WHERE m.user_id = ?
+        ORDER BY m.created_at ASC, t.id ASC`,
+    )
+    .bind(userId)
+    .all<{ id: string; name: string; role: string; created_at: number }>();
+  return results ?? [];
+}
+
+/**
+ * Verify a (user, tenant) membership exists. Hot-path call used by the
+ * auth middleware on every cookie-authenticated request — small enough
+ * that a single primary-key lookup is fine.
+ */
+export async function hasMembership(
+  db: D1Database,
+  userId: string,
+  tenantId: string,
+): Promise<boolean> {
+  const row = await db
+    .prepare("SELECT 1 AS one FROM membership WHERE user_id = ? AND tenant_id = ? LIMIT 1")
+    .bind(userId, tenantId)
+    .first<{ one: number }>();
+  return row !== null;
 }
 
 /**
@@ -148,6 +195,9 @@ export async function getTenantId(db: D1Database, userId: string): Promise<strin
  *   - databaseHooks.user.create.after (sign-up path)
  *   - apps/main/src/auth.ts cookie path (self-heal for legacy users whose
  *     sign-up predated this hook, or whose hook-time INSERT failed silently)
+ *
+ * Also writes a `membership` row so multi-tenant code paths see the new
+ * tenant immediately. user.tenantId stays in sync for legacy callers.
  */
 export async function ensureTenant(
   db: D1Database,
@@ -177,6 +227,14 @@ export async function ensureTenant(
   await db
     .prepare("UPDATE user SET tenantId = ?, role = ? WHERE id = ? AND tenantId IS NULL")
     .bind(tenantId, "owner", userId)
+    .run();
+  // Write the membership row too. INSERT OR IGNORE so a concurrent caller
+  // that lost the tenantId race doesn't double-insert.
+  await db
+    .prepare(
+      "INSERT OR IGNORE INTO membership (user_id, tenant_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+    )
+    .bind(userId, tenantId, now)
     .run();
   // Re-read in case a concurrent caller won the race — UPDATE's WHERE clause
   // ensures we never overwrite an existing tenantId with our orphan.

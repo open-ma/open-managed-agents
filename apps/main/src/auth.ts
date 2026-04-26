@@ -71,13 +71,31 @@ export const authMiddleware = createMiddleware<{
   // where better-auth's Node.js deps aren't available
   if (c.env.AUTH_DB) {
     try {
-      const { createAuth, getTenantId, ensureTenant } = await import("./auth-config");
+      const { createAuth, getTenantId, ensureTenant, hasMembership } = await import("./auth-config");
       const auth = createAuth(c.env);
       const session = await auth.api.getSession({
         headers: c.req.raw.headers,
       });
       if (session?.user) {
-        let tenantId = await getTenantId(c.env.AUTH_DB, session.user.id);
+        // Pattern A multi-tenant: cookie auth resolves tenant from
+        //   1. x-active-tenant header (set by Console after user picks),
+        //      validated against membership table — never trust the header
+        //      blindly or a logged-in user could read any tenant's data.
+        //   2. user.tenantId default (legacy / single-tenant users).
+        //   3. ensureTenant on demand for never-onboarded users.
+        const requested = c.req.header("x-active-tenant") || "";
+        let tenantId: string | null = null;
+        if (requested) {
+          const ok = await hasMembership(c.env.AUTH_DB, session.user.id, requested);
+          if (ok) {
+            tenantId = requested;
+          } else {
+            return c.json({ error: "Not a member of the requested tenant" }, 403);
+          }
+        }
+        if (!tenantId) {
+          tenantId = await getTenantId(c.env.AUTH_DB, session.user.id);
+        }
         if (!tenantId) {
           // Self-heal: legacy users registered before the sign-up hook landed,
           // or hook silently failed at creation time, would otherwise be
