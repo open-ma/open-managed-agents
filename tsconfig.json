@@ -19,5 +19,5 @@
     "apps/*/src/**/*.ts",
     "apps/main/worker-env.d.ts"
   ],
-  "exclude": ["node_modules", "test", "apps/console", "packages/cli", "packages/integrations-ui"]
+  "exclude": ["node_modules", "test", "apps/console", "apps/docs", "packages/cli", "packages/integrations-ui"]
 }

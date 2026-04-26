@@ -1,0 +1,186 @@
+---
+title: CLI & SDK
+description: The open-managed-agents Node CLI and the @open-managed-agents/api-types package — your two ways to talk to the API without curl.
+---
+
+import { Tabs, TabItem, Aside, LinkCard } from '@astrojs/starlight/components';
+
+openma ships two developer-facing packages:
+
+- **`open-managed-agents`** — a Node CLI for scripting against the API.
+- **`@open-managed-agents/api-types`** — pure-TypeScript DTOs of the wire format. Zero workspace dependencies; safe to import from a CLI, a Worker, the Console, or your own integrations.
+
+Both live in this repo (`packages/cli`, `packages/api-types`).
+
+## CLI
+
+### Install
+
+<Tabs syncKey="pkg-mgr">
+  <TabItem label="npm">
+    ```bash
+    npm i -g open-managed-agents
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```bash
+    pnpm add -g open-managed-agents
+    ```
+  </TabItem>
+  <TabItem label="bun">
+    ```bash
+    bun add -g open-managed-agents
+    ```
+  </TabItem>
+</Tabs>
+
+### Configure
+
+The CLI reads two env vars:
+
+```bash
+export OMA_BASE_URL="https://app.openma.dev"
+export OMA_API_KEY="oma_..."
+```
+
+For self-hosters, point `OMA_BASE_URL` at your own deployment.
+
+### Common commands
+
+```bash
+# List agents
+oma agents list
+
+# Create an agent from a JSON file
+oma agents create -f ./my-agent.json
+
+# Start a session
+oma sessions create --agent agent_abc123 \
+  --input "Summarize the openma docs."
+
+# Tail a session's event stream (SSE under the hood)
+oma sessions tail sess_xyz
+
+# Replay a session's full event log
+oma sessions logs sess_xyz
+
+# Show your usage
+oma usage
+```
+
+Run `oma --help` or `oma <command> --help` for the full surface.
+
+<Aside type="tip" title="Pipe-friendly">
+  CLI subcommands accept `--json` and emit machine-readable output. Pipe into `jq` for ad-hoc analysis.
+</Aside>
+
+## SDK (api-types)
+
+`@open-managed-agents/api-types` is a tiny package: just the TypeScript types for every request and response shape. No HTTP client, no runtime — bring your own `fetch`.
+
+### Install
+
+<Tabs syncKey="pkg-mgr">
+  <TabItem label="npm">
+    ```bash
+    npm i @open-managed-agents/api-types
+    ```
+  </TabItem>
+  <TabItem label="pnpm">
+    ```bash
+    pnpm add @open-managed-agents/api-types
+    ```
+  </TabItem>
+  <TabItem label="bun">
+    ```bash
+    bun add @open-managed-agents/api-types
+    ```
+  </TabItem>
+</Tabs>
+
+### Use
+
+```ts
+import type {
+  AgentConfig,
+  CreateAgentRequest,
+  CreateAgentResponse,
+  SessionEvent,
+  SessionMeta,
+  ContentBlock,
+} from '@open-managed-agents/api-types';
+
+const baseUrl = process.env.OMA_BASE_URL!;
+const apiKey = process.env.OMA_API_KEY!;
+
+async function createAgent(req: CreateAgentRequest): Promise<CreateAgentResponse> {
+  const res = await fetch(`${baseUrl}/v1/agents`, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${apiKey}`,
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify(req),
+  });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.json();
+}
+```
+
+### Why no client library?
+
+Because everything is HTTP and SSE — well-supported in every runtime (Node, Bun, Deno, browsers, Workers). Wrapping it would just hide what's actually happening. The DTOs give you autocomplete and compile-time safety; the wire format is documented in [REST API](/build/api/) and [Reference → API Endpoints](/reference/api/).
+
+If you want a typed wrapper, the CLI source (`packages/cli/src/`) is a small reference implementation you can lift.
+
+## Talking to the SSE stream
+
+```ts
+import type { SessionEvent } from '@open-managed-agents/api-types';
+
+const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/events`, {
+  headers: { 'Authorization': `Bearer ${apiKey}` },
+});
+
+const reader = res.body!.getReader();
+const decoder = new TextDecoder();
+let buffer = '';
+
+while (true) {
+  const { done, value } = await reader.read();
+  if (done) break;
+  buffer += decoder.decode(value, { stream: true });
+
+  let i;
+  while ((i = buffer.indexOf('\n\n')) !== -1) {
+    const chunk = buffer.slice(0, i);
+    buffer = buffer.slice(i + 2);
+
+    const dataLine = chunk.split('\n').find(l => l.startsWith('data: '));
+    if (!dataLine) continue;
+
+    const event = JSON.parse(dataLine.slice(6)) as SessionEvent;
+    handleEvent(event);
+  }
+}
+```
+
+For most use cases the CLI's `oma sessions tail` does this for you.
+
+## Where to go next
+
+<LinkCard
+  title="REST API"
+  href="/build/api/"
+  description="The full REST surface — what the CLI and SDK call under the hood."
+/>
+<LinkCard
+  title="Skills & Tools"
+  href="/build/skills-and-tools/"
+  description="Add custom tools and skills programmatically."
+/>
+<LinkCard
+  title="Custom Integrations"
+  href="/build/integrations/"
+  description="Implement IntegrationProvider for a new third-party platform."
+/>

@@ -13,6 +13,9 @@
     "dev:agent": "wrangler dev -c apps/agent/wrangler.dev.jsonc",
     "dev:console": "cd apps/console && npx vite",
     "build:console": "cd apps/console && npx vite build",
+    "dev:docs": "pnpm --filter open-managed-agents-docs dev",
+    "build:docs": "pnpm --filter open-managed-agents-docs build",
+    "deploy:docs": "pnpm --filter open-managed-agents-docs deploy",
     "deploy": "./scripts/deploy.sh",
     "typecheck": "tsc --noEmit",
     "test": "vitest run"
