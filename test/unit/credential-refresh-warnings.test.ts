@@ -43,8 +43,12 @@ describe("refreshResultToInitEvents — silent failures eliminated", () => {
     expect(events).toEqual([]);
     // Skipped is a config/infra signal — log to stderr, don't pollute event stream.
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/credential refresh skipped/i);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/no_integrations_binding/);
+    // Logger now emits structured JSON; assert by parsing the line.
+    const parsed = JSON.parse(warnSpy.mock.calls[0][0] as string);
+    expect(parsed.op).toBe("session.start.credential_refresh.skipped");
+    expect(parsed.reason).toBe("no_integrations_binding");
+    expect(parsed.session_id).toBe(CTX.sessionId);
+    expect(parsed.tenant_id).toBe(CTX.tenantId);
   });
 
   it("emits one warning event per failure (replaces silent .catch)", () => {
@@ -62,7 +66,11 @@ describe("refreshResultToInitEvents — silent failures eliminated", () => {
       expect(ev.type).toBe("session.warning");
     }
     expect(warnSpy).toHaveBeenCalledTimes(1);
-    expect(warnSpy.mock.calls[0][0]).toMatch(/2\/2 failed/);
+    // Structured JSON now — parse and check fields instead of string match.
+    const parsed = JSON.parse(warnSpy.mock.calls[0][0] as string);
+    expect(parsed.op).toBe("session.start.credential_refresh");
+    expect(parsed.failed).toBe(2);
+    expect(parsed.attempted).toBe(2);
   });
 
   it("warning event carries provider + vault + http status in details", () => {

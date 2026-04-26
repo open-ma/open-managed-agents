@@ -7,6 +7,7 @@
 // API reference: https://developers.cloudflare.com/changelog/post/2026-04-13-sandbox-outbound-workers-tls-auth/
 
 import { Sandbox } from "@cloudflare/sandbox";
+import { logWarn } from "@open-managed-agents/shared";
 
 // Match the SDK's OutboundHandlerContext shape (see @cloudflare/containers).
 // We accept `unknown` env + cast params, so we don't need a direct import.
@@ -48,8 +49,13 @@ function pickAuthHeader(
         if (cred.auth.type === "mcp_oauth" && cred.auth.access_token) {
           return `Bearer ${cred.auth.access_token}`;
         }
-      } catch {
-        // skip malformed url
+      } catch (err) {
+        // skip malformed url — but flag because a malformed mcp_server_url in
+        // vault data means outbound auth injection silently fails for that host.
+        logWarn(
+          { op: "oma_sandbox.cred_url_parse", err },
+          "skipping credential with malformed url",
+        );
       }
     }
   }
