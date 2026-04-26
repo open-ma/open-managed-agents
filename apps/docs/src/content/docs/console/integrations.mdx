@@ -1,0 +1,118 @@
+---
+title: Connect Integrations
+description: Publish your agent into Linear, GitHub, or Slack from the Console — install the app, grant scopes, and pick which agent serves which workspace.
+---
+
+import { Tabs, TabItem, Steps, Aside, LinkCard } from '@astrojs/starlight/components';
+
+Integrations let your agent live where your users already are. openma ships three out of the box; each follows the same shape: **install the app**, **grant scopes**, **publish an agent**.
+
+This page is for the **hosted product**. If you self-host, the OAuth apps are yours to register — see [Self-host → OAuth Apps](/self-host/oauth-apps/).
+
+## How integrations work
+
+For every connected workspace, the platform stores OAuth credentials in a Vault, listens to the platform's webhooks, and exposes a set of MCP tools to the agent. When a triggering event happens (a Linear issue is assigned to your agent, a Slack `@mention`, a GitHub PR comment), the platform creates a new session and dispatches it.
+
+Webhooks are signed by the platform; openma verifies them. Outbound calls back to the third-party use the OAuth token — never exposed to the model directly.
+
+## Connect Linear
+
+<Tabs>
+  <TabItem label="Hosted (openma.dev)">
+
+<Steps>
+
+1. **Integrations → Linear → Install**.
+2. Authorize openma in the Linear OAuth screen (you must be a Linear workspace admin).
+3. Pick which agent serves this workspace.
+4. Choose capabilities: comment on issues, change status, create issues, etc.
+
+</Steps>
+
+The agent now appears as a **workspace member** in Linear. Mention it in a comment or assign an issue — both create a new session.
+
+  </TabItem>
+  <TabItem label="Self-host">
+
+You need your own Linear OAuth app first. See [Self-host → OAuth Apps → Linear](/self-host/oauth-apps/#linear).
+
+  </TabItem>
+</Tabs>
+
+## Connect GitHub
+
+<Tabs>
+  <TabItem label="Hosted (openma.dev)">
+
+<Steps>
+
+1. **Integrations → GitHub → Install**.
+2. Pick the org or user account. Pick which repos the GitHub App can access.
+3. Pick which agent serves these repos.
+4. Grant capabilities: read PRs, comment on PRs, push branches, open PRs, etc.
+
+</Steps>
+
+The agent can now be triggered by PR comments or issue assignments.
+
+<Aside type="caution" title="Repo scope">
+  By default, agents only act on repos you explicitly grant. Adding more repos later requires re-authorizing the GitHub App.
+</Aside>
+
+  </TabItem>
+  <TabItem label="Self-host">
+
+You need your own GitHub App first. See [Self-host → OAuth Apps → GitHub](/self-host/oauth-apps/#github).
+
+  </TabItem>
+</Tabs>
+
+## Connect Slack
+
+<Tabs>
+  <TabItem label="Hosted (openma.dev)">
+
+<Steps>
+
+1. **Integrations → Slack → Install**.
+2. Pick the Slack workspace and the channels you want the agent to appear in.
+3. Pick which agent serves this workspace.
+
+</Steps>
+
+`@mention` the agent or DM it; both create sessions. Threaded replies stay in the same session.
+
+  </TabItem>
+  <TabItem label="Self-host">
+
+You need your own Slack OAuth app. See [Self-host → OAuth Apps → Slack](/self-host/oauth-apps/#slack).
+
+  </TabItem>
+</Tabs>
+
+## Publication scopes
+
+Each integration lets you scope what the agent can do. These are enforced at the API gateway, not just in the model's prompt — even if the model decides to misbehave, scopes the publication didn't grant simply aren't exposed as tools.
+
+| Integration | Common scopes |
+|---|---|
+| Linear | `comment.create`, `issue.update`, `issue.create`, `issue.read` |
+| GitHub | `pr.read`, `pr.comment`, `pr.create`, `branch.push`, `issue.read` |
+| Slack | `chat.write`, `channels.history`, `files.upload` |
+
+## Generic MCP
+
+Beyond the three shipped integrations, any MCP-compatible server works. Add it on the **Agent → MCP servers** field; openma generates `mcp_<server>_<tool>` for each capability.
+
+## Where to go next
+
+<LinkCard
+  title="Custom Integrations"
+  href="/build/integrations/"
+  description="Implement IntegrationProvider to add a new third-party platform (Jira, Discord, your internal tool)."
+/>
+<LinkCard
+  title="OAuth App Setup (self-host)"
+  href="/self-host/oauth-apps/"
+  description="Step-by-step for registering Linear, GitHub, and Slack apps against your own deployment."
+/>

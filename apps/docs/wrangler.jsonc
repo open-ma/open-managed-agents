@@ -1,0 +1,34 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "openma-docs",
+  "compatibility_date": "2025-04-01",
+
+  // Keep the *.workers.dev URL alive alongside the custom domain — useful
+  // for incident debugging when the zone is having issues.
+  "workers_dev": true,
+
+  // Pure-static Worker (no `main`), so the `assets` binding is not needed.
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  },
+
+  // Custom Domain: Cloudflare auto-creates the DNS record + worker route
+  // when this is in place. Requires openma.dev to be on the same Cloudflare
+  // account.
+  "routes": [
+    { "pattern": "docs.openma.dev", "custom_domain": true }
+  ],
+
+  "observability": { "enabled": true },
+
+  "env": {
+    "staging": {
+      "name": "openma-docs-staging",
+      "routes": [
+        { "pattern": "docs.staging.openma.dev", "custom_domain": true }
+      ],
+      "observability": { "enabled": true }
+    }
+  }
+}

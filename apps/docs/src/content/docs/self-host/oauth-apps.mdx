@@ -1,0 +1,164 @@
+---
+title: OAuth Apps
+description: Register your own GitHub App, Linear OAuth app, and Slack app for a self-hosted openma deployment.
+---
+
+import { Steps, Aside, Tabs, TabItem, LinkCard } from '@astrojs/starlight/components';
+
+Each integration needs its own OAuth app in your account, registered against the third-party. This is unavoidable — the hosted openma.dev uses Anthropic's app credentials, you need yours.
+
+Skip the integrations you don't plan to use. The platform works fine with zero integrations.
+
+## Linear
+
+<Steps>
+
+1. **Create the OAuth app.**
+
+   Go to [linear.app/settings/api](https://linear.app/settings/api) → **OAuth Applications → New**.
+
+2. **Fill in:**
+   - **Name** — anything (e.g. "openma self-hosted")
+   - **Redirect URLs** — `https://integrations.yourdomain.com/linear/oauth/callback`
+   - **Developer URL** — anything
+   - **Webhook URL** — `https://integrations.yourdomain.com/linear/webhook`
+   - **Scopes** — `read`, `write`, `issues:create`, `comments:create`
+
+3. **Capture credentials:**
+   - Client ID
+   - Client secret
+   - Webhook signing secret
+
+4. **Set as Worker secrets:**
+
+   ```bash
+   npx wrangler secret put LINEAR_CLIENT_ID -c apps/integrations/wrangler.jsonc
+   npx wrangler secret put LINEAR_CLIENT_SECRET -c apps/integrations/wrangler.jsonc
+   npx wrangler secret put LINEAR_WEBHOOK_SECRET -c apps/integrations/wrangler.jsonc
+   ```
+
+5. **Test by installing.**
+
+   In your Console at `https://app.yourdomain.com`, **Integrations → Linear → Install**. The OAuth round-trip should land you back on the Console with the integration green.
+
+</Steps>
+
+## GitHub
+
+<Steps>
+
+1. **Create the GitHub App.**
+
+   Go to [github.com/settings/apps/new](https://github.com/settings/apps/new) (or for an org, the equivalent `https://github.com/organizations/<org>/settings/apps/new`).
+
+2. **Fill in:**
+   - **Name** — globally unique (e.g. `openma-yourcompany`)
+   - **Homepage URL** — `https://app.yourdomain.com`
+   - **Callback URL** — `https://integrations.yourdomain.com/github/oauth/callback`
+   - **Webhook URL** — `https://integrations.yourdomain.com/github/webhook`
+   - **Webhook secret** — generate with `openssl rand -hex 32`
+   - **Permissions:**
+     - Contents: Read & Write
+     - Issues: Read & Write
+     - Pull requests: Read & Write
+     - Metadata: Read
+   - **Subscribe to events** — `pull_request`, `pull_request_review_comment`, `issue_comment`, `issues`
+
+3. **After creation:**
+   - Note the **App ID**.
+   - **Generate a private key** — downloads a `.pem` file.
+   - Optionally, install the app on your repos.
+
+4. **Set as Worker secrets:**
+
+   ```bash
+   npx wrangler secret put GITHUB_APP_ID -c apps/integrations/wrangler.jsonc
+   npx wrangler secret put GITHUB_WEBHOOK_SECRET -c apps/integrations/wrangler.jsonc
+   # Paste the .pem contents (multi-line) when prompted:
+   npx wrangler secret put GITHUB_PRIVATE_KEY -c apps/integrations/wrangler.jsonc
+   ```
+
+5. **Test by installing on a test repo and triggering a webhook** (e.g. open a PR and tag the bot).
+
+</Steps>
+
+<Aside type="tip" title="GitHub App vs OAuth App">
+  Use a GitHub *App* (not OAuth App). Apps install per-repo, scope tokens narrowly, and produce installation tokens you can rotate.
+</Aside>
+
+## Slack
+
+<Steps>
+
+1. **Create the Slack app.**
+
+   Go to [api.slack.com/apps](https://api.slack.com/apps) → **Create New App → From scratch**.
+
+2. **Fill in:**
+   - **App name** — anything
+   - **Workspace** — your dev workspace
+
+3. **Configure OAuth & Permissions:**
+   - **Redirect URLs** — `https://integrations.yourdomain.com/slack/oauth/callback`
+   - **Bot Token Scopes:**
+     - `app_mentions:read`
+     - `chat:write`
+     - `channels:history`
+     - `groups:history`
+     - `im:history`
+     - `mpim:history`
+     - `files:read`
+     - `files:write`
+
+4. **Enable Event Subscriptions:**
+   - **Request URL** — `https://integrations.yourdomain.com/slack/events`
+   - **Subscribe to bot events:** `app_mention`, `message.channels`, `message.im`
+
+5. **Capture credentials:**
+   - Client ID, Client Secret (from Basic Information)
+   - Signing Secret (from Basic Information)
+
+6. **Set as Worker secrets:**
+
+   ```bash
+   npx wrangler secret put SLACK_CLIENT_ID -c apps/integrations/wrangler.jsonc
+   npx wrangler secret put SLACK_CLIENT_SECRET -c apps/integrations/wrangler.jsonc
+   npx wrangler secret put SLACK_SIGNING_SECRET -c apps/integrations/wrangler.jsonc
+   ```
+
+7. **Install to your workspace** through the Console: **Integrations → Slack → Install**.
+
+</Steps>
+
+## Custom OAuth (Google sign-in)
+
+If you want Google sign-in for the Console (in addition to email + OTP):
+
+<Steps>
+
+1. Go to [console.cloud.google.com/apis/credentials](https://console.cloud.google.com/apis/credentials) → **Create Credentials → OAuth client ID → Web application**.
+
+2. **Authorized redirect URI:** `https://app.yourdomain.com/api/auth/callback/google`
+
+3. Capture client ID + secret. Set:
+   ```bash
+   npx wrangler secret put GOOGLE_CLIENT_ID
+   npx wrangler secret put GOOGLE_CLIENT_SECRET
+   ```
+
+4. Redeploy main worker.
+
+</Steps>
+
+## Where to go next
+
+<LinkCard
+  title="Operations"
+  href="/self-host/operations/"
+  description="Custom domains, observability, multi-tenant config, troubleshooting."
+/>
+<LinkCard
+  title="Custom Integrations"
+  href="/build/integrations/"
+  description="Add a non-shipped integration (Jira, Discord, your internal tool)."
+/>

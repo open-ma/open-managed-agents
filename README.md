@@ -16,6 +16,8 @@
 
 Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, and crash recovery out of the box.
 
+📖 **Full documentation:** [docs.openma.dev](https://docs.openma.dev)
+
 ---
 
 ## Getting Started
@@ -419,6 +421,20 @@ open-managed-agents/
 npm test          # unit + integration suite
 npm run typecheck # zero errors
 ```
+
+---
+
+## Documentation
+
+The user-facing docs site lives at [`apps/docs`](apps/docs/) (Astro Starlight) and is published to **[docs.openma.dev](https://docs.openma.dev)**.
+
+```bash
+pnpm dev:docs       # local preview at http://localhost:4321
+pnpm build:docs     # static build into apps/docs/dist/
+pnpm deploy:docs    # build + wrangler deploy (Cloudflare Worker static assets)
+```
+
+The `docs/` folder at the repo root contains **internal design RFCs** — not the user-facing site.
 
 ---
 

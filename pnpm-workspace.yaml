@@ -4,3 +4,4 @@ packages:
   - 'apps/agent'
   - 'apps/console'
   - 'apps/integrations'
+  - 'apps/docs'

@@ -1,0 +1,22 @@
+{
+  "name": "open-managed-agents-docs",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "deploy": "astro build && wrangler deploy",
+    "deploy:staging": "astro build && wrangler deploy --env staging"
+  },
+  "dependencies": {
+    "@astrojs/mdx": "^5.0.4",
+    "@astrojs/starlight": "^0.38.4",
+    "astro": "^6.1.9",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "wrangler": "^4.83.0"
+  }
+}
