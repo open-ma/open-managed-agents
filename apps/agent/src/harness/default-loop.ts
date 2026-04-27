@@ -362,6 +362,13 @@ export class DefaultHarness implements HarnessInterface {
     // can swap chunk display for canonical content.
     const result = await withRetry(async (signal) => {
       let currentMessageId: string | null = null;
+      // Per-step thinking and tool-input streams keyed by the AI SDK
+      // chunk's id (reasoning) or toolCallId (tool input). Multiple
+      // can be in flight simultaneously within one step (parallel
+      // tool calls). Cleared between steps via onStepFinish, but the
+      // canonical event landing is what tells the client to swap.
+      const liveThinking = new Set<string>();
+      const liveToolInput = new Set<string>();
 
       const r = streamText({
       model,
@@ -381,6 +388,32 @@ export class DefaultHarness implements HarnessInterface {
             void runtime.broadcastStreamStart(currentMessageId);
           }
           void runtime.broadcastChunk(currentMessageId, chunk.text);
+        } else if (chunk.type === "reasoning-delta") {
+          // AI SDK assigns a stable id per reasoning block. Use it as
+          // the thinking_id so the client can correlate with the
+          // matching agent.thinking event landing in onStepFinish.
+          const tid = (chunk as { id: string; text: string }).id;
+          if (!liveThinking.has(tid)) {
+            liveThinking.add(tid);
+            void runtime.broadcastThinkingStart(tid);
+          }
+          void runtime.broadcastThinkingChunk(tid, (chunk as { text: string }).text);
+        } else if (chunk.type === "tool-input-start") {
+          // toolCallId here matches the eventual tool-call's id, which
+          // becomes agent.tool_use.id. Same correlation contract.
+          const c = chunk as { id: string; toolName: string };
+          if (!liveToolInput.has(c.id)) {
+            liveToolInput.add(c.id);
+            void runtime.broadcastToolInputStart(c.id, c.toolName);
+          }
+        } else if (chunk.type === "tool-input-delta") {
+          const c = chunk as { id: string; delta: string };
+          if (!liveToolInput.has(c.id)) {
+            // Some providers skip the start event; mint lazily.
+            liveToolInput.add(c.id);
+            void runtime.broadcastToolInputStart(c.id);
+          }
+          void runtime.broadcastToolInputChunk(c.id, c.delta);
         }
       },
 
@@ -396,13 +429,30 @@ export class DefaultHarness implements HarnessInterface {
         // determinism rests on.
         for (const part of step.content as ReadonlyArray<ContentPart<any>>) {
           switch (part.type) {
-            case "reasoning":
+            case "reasoning": {
+              // AI SDK reasoning parts in step.content[] don't carry the
+              // chunk id directly, but onChunk minted at most one stream
+              // per step in practice. Drain whichever streams are live so
+              // the client closes their pulsing bubbles. The canonical
+              // agent.thinking carries thinking_id only when we can
+              // correlate (single-stream case); multi-stream steps just
+              // see the stream_end + a thinking event without correlation
+              // (renderer falls back to dropping all live streams when
+              // any thinking lands — see frontend).
+              const partWithId = part as { type: "reasoning"; text: string; id?: string; providerMetadata?: unknown };
+              const tid = partWithId.id ?? (liveThinking.size === 1 ? [...liveThinking][0] : undefined);
+              if (tid) {
+                await runtime.broadcastThinkingEnd(tid, "completed");
+                liveThinking.delete(tid);
+              }
               runtime.broadcast({
                 type: "agent.thinking",
                 text: part.text,
                 providerOptions: part.providerMetadata as Record<string, unknown> | undefined,
-              });
+                ...(tid ? { thinking_id: tid } : {}),
+              } as SessionEvent);
               break;
+            }
             case "text": {
               // Trim trailing whitespace at write time. Anthropic's @ai-sdk
               // provider trims the LAST text of the LAST assistant message
@@ -422,9 +472,15 @@ export class DefaultHarness implements HarnessInterface {
               currentMessageId = null; // reset for next step
               break;
             }
-            case "tool-call":
+            case "tool-call": {
+              const partTC = part as { type: "tool-call"; toolCallId: string };
+              if (liveToolInput.has(partTC.toolCallId)) {
+                await runtime.broadcastToolInputEnd(partTC.toolCallId, "completed");
+                liveToolInput.delete(partTC.toolCallId);
+              }
               emitToolCallEvent(runtime, tools, part);
               break;
+            }
             case "tool-result":
             case "tool-error":
               emitToolResultEvent(runtime, part);
@@ -435,6 +491,17 @@ export class DefaultHarness implements HarnessInterface {
             // matching wire event.
           }
         }
+        // Defensive: any thinking/tool-input streams that didn't pair
+        // with a step.content entry get aborted so the client doesn't
+        // leave bubbles spinning forever.
+        for (const tid of liveThinking) {
+          await runtime.broadcastThinkingEnd(tid, "aborted");
+        }
+        liveThinking.clear();
+        for (const tid of liveToolInput) {
+          await runtime.broadcastToolInputEnd(tid, "aborted");
+        }
+        liveToolInput.clear();
       },
     });
       // streamText returns a StreamTextResult; consumeStream forces the

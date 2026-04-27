@@ -40,6 +40,14 @@ export function SessionDetail() {
    *  the deltas accumulated so far. Wiped on the matching agent.message
    *  (same message_id), which becomes the canonical render. */
   const [streams, setStreams] = useState<Map<string, string>>(new Map());
+  /** In-flight reasoning streams keyed by thinking_id. Same lifecycle
+   *  as messages — drained on matching agent.thinking. */
+  const [thinkingStreams, setThinkingStreams] = useState<Map<string, string>>(new Map());
+  /** In-flight tool-input streams keyed by tool_use_id. Wiped when the
+   *  canonical agent.tool_use / mcp_tool_use / custom_tool_use lands
+   *  with the same id (toolCallId on the AI SDK side). The accumulated
+   *  string is partial JSON — render as a code block, not Markdown. */
+  const [toolInputStreams, setToolInputStreams] = useState<Map<string, { name?: string; partial: string }>>(new Map());
   const [view, setView] = useState<View>("chat");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -100,6 +108,59 @@ export function SessionDetail() {
       return;
     }
 
+    // Thinking stream lifecycle. Same pattern as message stream:
+    // start opens an entry, chunk appends, end is held, canonical
+    // agent.thinking with same thinking_id closes it.
+    if (ev.type === "agent.thinking_stream_start" && ev.thinking_id) {
+      const tid = ev.thinking_id;
+      setThinkingStreams((prev) => {
+        if (prev.has(tid)) return prev;
+        const next = new Map(prev);
+        next.set(tid, "");
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "agent.thinking_chunk" && ev.thinking_id && typeof ev.delta === "string") {
+      const tid = ev.thinking_id;
+      const delta = ev.delta;
+      setThinkingStreams((prev) => {
+        const next = new Map(prev);
+        next.set(tid, (next.get(tid) ?? "") + delta);
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "agent.thinking_stream_end") return;
+
+    // Tool-input stream lifecycle. The accumulated string is partial
+    // JSON; once tool_use lands with the same id, drop the in-flight
+    // render and let the EventBubble's collapsed tool widget take over.
+    if (ev.type === "agent.tool_use_input_stream_start" && ev.tool_use_id) {
+      const tid = ev.tool_use_id;
+      const name = (ev as { tool_name?: string }).tool_name;
+      setToolInputStreams((prev) => {
+        if (prev.has(tid)) return prev;
+        const next = new Map(prev);
+        next.set(tid, { name, partial: "" });
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "agent.tool_use_input_chunk" && ev.tool_use_id && typeof ev.delta === "string") {
+      const tid = ev.tool_use_id;
+      const delta = ev.delta;
+      setToolInputStreams((prev) => {
+        const cur = prev.get(tid);
+        if (!cur) return prev;
+        const next = new Map(prev);
+        next.set(tid, { ...cur, partial: cur.partial + delta });
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "agent.tool_use_input_stream_end") return;
+
     // Canonical agent.message lands → drop the in-flight render so
     // we don't double-show the same content.
     if (ev.type === "agent.message" && ev.message_id) {
@@ -108,6 +169,37 @@ export function SessionDetail() {
         if (!prev.has(mid)) return prev;
         const next = new Map(prev);
         next.delete(mid);
+        return next;
+      });
+    }
+
+    // Canonical agent.thinking → drop the in-flight reasoning entry.
+    // If the canonical event has thinking_id we use it; otherwise we
+    // bail-clear all live thinking streams (multi-stream-per-step is
+    // rare and safer to err on closing them all).
+    if (ev.type === "agent.thinking") {
+      const tid = ev.thinking_id;
+      setThinkingStreams((prev) => {
+        if (prev.size === 0) return prev;
+        if (tid && !prev.has(tid)) return prev;
+        const next = new Map(prev);
+        if (tid) next.delete(tid);
+        else next.clear();
+        return next;
+      });
+    }
+
+    // Canonical tool_use of any kind (built-in, MCP, custom) → drop
+    // in-flight tool input. The canonical id field equals the AI SDK
+    // toolCallId we used as tool_use_id.
+    if ((ev.type === "agent.tool_use"
+      || ev.type === "agent.mcp_tool_use"
+      || ev.type === "agent.custom_tool_use") && ev.id) {
+      const tid = ev.id;
+      setToolInputStreams((prev) => {
+        if (!prev.has(tid)) return prev;
+        const next = new Map(prev);
+        next.delete(tid);
         return next;
       });
     }
@@ -131,6 +223,8 @@ export function SessionDetail() {
     if (!id) return;
     seenKeys.current.clear();
     setStreams(new Map());
+    setThinkingStreams(new Map());
+    setToolInputStreams(new Map());
 
     // Load session info
     api<{
@@ -180,7 +274,7 @@ export function SessionDetail() {
   useEffect(() => {
     if (view !== "chat") return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [events, streams, view]);
+  }, [events, streams, thinkingStreams, toolInputStreams, view]);
 
   const send = async () => {
     if (!input.trim() || !id) return;
@@ -283,13 +377,26 @@ export function SessionDetail() {
             {events.map((e, i) => (
               <EventBubble key={i} event={e} />
             ))}
-            {/* In-flight assistant streams. Each entry is one LLM step
-                whose canonical agent.message hasn't landed yet — render
-                like a normal assistant bubble with a soft pulsing cursor. */}
+            {/* In-flight thinking streams. Render before message/tool
+                streams so the visual order roughly matches what the
+                LLM produced (Anthropic emits reasoning before text/tool). */}
+            {Array.from(thinkingStreams.entries()).map(([tid, text]) => (
+              <ThinkingStreamingBubble key={`think-${tid}`} text={text} />
+            ))}
+            {/* In-flight tool inputs — partial JSON shown in a code box. */}
+            {Array.from(toolInputStreams.entries()).map(([tid, { name, partial }]) => (
+              <ToolInputStreamingBubble key={`tin-${tid}`} name={name} partial={partial} />
+            ))}
+            {/* In-flight assistant message text streams. */}
             {Array.from(streams.entries()).map(([mid, text]) => (
               <StreamingBubble key={`stream-${mid}`} text={text} />
             ))}
-            {status === "running" && streams.size === 0 && (
+            {/* Typing dots only when the agent is running and nothing
+                else is streaming — avoids duplicate activity indicators. */}
+            {status === "running"
+              && streams.size === 0
+              && thinkingStreams.size === 0
+              && toolInputStreams.size === 0 && (
               <div className="flex gap-1 py-2">
                 <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                 <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -350,6 +457,53 @@ function StreamingBubble({ text }: { text: string }) {
       <div className="bg-bg-surface rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
         <Markdown>{text}</Markdown>
         <span className="inline-block w-1.5 h-3.5 bg-fg-subtle/50 align-middle ml-0.5 animate-pulse" />
+      </div>
+    </div>
+  );
+}
+
+/** In-progress reasoning block. Rendered as a faded, italicized
+ *  bubble so it's visually distinct from canonical assistant
+ *  messages. Replaced when the matching agent.thinking lands (or
+ *  swept on first agent.thinking arrival when correlation is lost). */
+function ThinkingStreamingBubble({ text }: { text: string }) {
+  return (
+    <div className="max-w-2xl">
+      <div className="text-xs text-fg-subtle mb-1 flex items-center gap-1.5">
+        <svg className="w-3 h-3" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v1m0 14v1m8-8h-1M5 12H4m13.66-5.66l-.7.7M6.34 17.66l-.7.7M17.66 17.66l-.7-.7M6.34 6.34l-.7-.7" />
+        </svg>
+        <span>Thinking…</span>
+      </div>
+      <div className="bg-bg-surface/60 rounded-2xl rounded-bl-sm px-4 py-3 text-xs leading-relaxed text-fg-subtle italic whitespace-pre-wrap">
+        {text}
+        <span className="inline-block w-1 h-3 bg-fg-subtle/50 align-middle ml-0.5 animate-pulse" />
+      </div>
+    </div>
+  );
+}
+
+/** In-progress tool-input bubble. The accumulated string is partial
+ *  JSON streamed by the model — render as a code block (NOT Markdown).
+ *  Disappears when the canonical agent.tool_use lands and the regular
+ *  collapsible tool widget takes over. */
+function ToolInputStreamingBubble({ name, partial }: { name?: string; partial: string }) {
+  return (
+    <div className="max-w-2xl">
+      <div className="border border-border rounded-lg overflow-hidden">
+        <div className="flex items-center gap-2 px-3 py-2 bg-bg-surface">
+          <svg className="w-3.5 h-3.5 text-info shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
+          </svg>
+          <span className="text-sm font-medium">{name ?? "tool"}</span>
+          <span className="text-xs text-fg-subtle ml-auto">preparing…</span>
+          <span className="inline-block w-1 h-3 bg-fg-subtle/50 align-middle animate-pulse" />
+        </div>
+        {partial && (
+          <pre className="text-xs px-3 py-2 font-mono text-fg-subtle overflow-x-auto whitespace-pre-wrap break-all">
+            {partial}
+          </pre>
+        )}
       </div>
     </div>
   );

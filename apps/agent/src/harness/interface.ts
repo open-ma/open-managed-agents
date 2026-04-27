@@ -98,6 +98,32 @@ export interface HarnessRuntime {
     status: "completed" | "aborted",
     errorText?: string,
   ) => Promise<void>;
+  /**
+   * Live thinking-block streaming. Broadcast-only — the eventual
+   * `agent.thinking` event with the same `thinking_id` is the
+   * persisted record. If the runtime dies mid-thinking, the
+   * agent.thinking never lands and the harness retries the step (no
+   * recovery work needed because nothing was committed).
+   */
+  broadcastThinkingStart: (thinkingId: string) => Promise<void>;
+  broadcastThinkingChunk: (thinkingId: string, delta: string) => Promise<void>;
+  broadcastThinkingEnd: (
+    thinkingId: string,
+    status: "completed" | "aborted",
+  ) => Promise<void>;
+  /**
+   * Live tool-input streaming. `toolUseId` matches the eventual
+   * `agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use`
+   * id. Broadcast-only — the canonical tool_use event lands once the
+   * model commits the call, and recovery handles missing tool_results
+   * via the existing scan (see recovery.ts).
+   */
+  broadcastToolInputStart: (toolUseId: string, toolName?: string) => Promise<void>;
+  broadcastToolInputChunk: (toolUseId: string, delta: string) => Promise<void>;
+  broadcastToolInputEnd: (
+    toolUseId: string,
+    status: "completed" | "aborted",
+  ) => Promise<void>;
   reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
   pendingConfirmations?: string[];
   abortSignal?: AbortSignal;
