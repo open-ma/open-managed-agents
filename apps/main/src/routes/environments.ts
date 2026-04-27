@@ -64,50 +64,16 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
   }
 }
 
-/** Run the base_snapshot prepare path: POST to the agent worker's
- *  /__internal/prepare-env over the SANDBOX_sandbox_default service
- *  binding. The agent worker writes the install script + startProcess
- *  inside the sandbox container, returns 202 immediately. The main
- *  worker cron tick (apps/main/src/index.ts scheduled()) drives the
- *  rest — checking for completion + triggering createBackup. */
-async function dispatchBaseSnapshotPrepare(
-  env: Env,
-  envConfig: EnvironmentConfig,
-  tenantId: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
-  const binding = (env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
-  if (!binding) {
-    return { ok: false, error: "SANDBOX_sandbox_default binding not configured" };
-  }
-  const internalToken = (env as unknown as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
-  if (!internalToken) {
-    return { ok: false, error: "INTERNAL_TOKEN secret not configured" };
-  }
-  const res = await binding.fetch("https://internal/__internal/prepare-env", {
-    method: "POST",
-    headers: {
-      "content-type": "application/json",
-      "x-internal-token": internalToken,
-    },
-    body: JSON.stringify({
-      env_id: envConfig.id,
-      tenant_id: tenantId,
-      config: envConfig.config,
-    }),
-  });
-  if (!res.ok) {
-    const text = await res.text();
-    return { ok: false, error: `dispatch returned ${res.status}: ${text.slice(0, 500)}` };
-  }
-  // 202 with {status: "building"} or 200 with {status: "error", ...}
-  // (apt rejection comes back with status=error inside a 200 — surface
-  // as a dispatch failure here).
-  const body = (await res.json()) as { status: string; error?: string };
-  if (body.status === "error") {
-    return { ok: false, error: body.error ?? "agent worker reported error without detail" };
-  }
-  return { ok: true };
-}
+/** Run the base_snapshot prepare path: REMOVED.
+ *
+ *  The earlier "kickoff in agent worker → cron poll → createBackup"
+ *  pattern fundamentally fought CF's DO-bound container lifecycle —
+ *  prep containers were evicted between kickoff and tick because no DO
+ *  request held them alive. Lazy prepare in SessionDO replaces it:
+ *  env create just sets status=ready + image_handle=null; the FIRST
+ *  session boot for the env runs install + createBackup inline in
+ *  SessionDO (which already holds requests open for harness loops).
+ *  See apps/agent/src/runtime/session-do.ts lazyPrepareBaseSnapshot. */
 
 // POST /v1/environments — create environment
 app.post("/", async (c) => {
@@ -125,33 +91,27 @@ app.post("/", async (c) => {
 
   const strategy = pickStrategy(body.image_strategy);
 
-  // Create the row first so we have an env_id to pass to the strategy.
-  // status starts at "building"; the strategy result flips it to ready/error.
+  // base_snapshot is fully lazy — env starts ready with no image_handle.
+  // The first session boot's SessionDO.lazyPrepareBaseSnapshot does the
+  // install + createBackup + persists the handle. dockerfile mode still
+  // dispatches the CI build (status=building until callback).
+  const initialStatus = strategy === "base_snapshot" ? "ready" : "building";
+  const initialWorker = strategy === "base_snapshot" ? "sandbox-default" : null;
+
   const initialRow = await c.var.services.environments.create({
     tenantId: t,
     name: body.name,
     description: body.description,
     config: body.config || { type: "cloud" },
-    status: "building",
-    sandboxWorkerName: null,
+    status: initialStatus,
+    sandboxWorkerName: initialWorker,
     imageStrategy: strategy,
   });
 
   let row = initialRow;
-  if (strategy === "base_snapshot") {
-    const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t);
-    if (!dispatch.ok) {
-      row = await c.var.services.environments.update({
-        tenantId: t,
-        environmentId: row.id,
-        status: "error",
-        buildError: dispatch.error,
-      });
-    }
-    // status stays "building" — agent worker callbacks /build-complete with the handle.
-  } else {
-    // dockerfile strategy: dispatch CI as before. status stays "building"
-    // until /build-complete callback flips it.
+  if (strategy === "dockerfile") {
+    // Dispatch CI build. status stays "building" until /build-complete
+    // callback flips it.
     const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
     if (!canBuild) {
       row = await c.var.services.environments.update({
@@ -309,37 +269,32 @@ app.put("/:id", async (c) => {
   if (strategyChanged) patch.imageStrategy = strategy;
 
   if (configChanged || strategyChanged) {
-    patch.status = "building";
+    // base_snapshot: just invalidate the cached snapshot — next session
+    // for this env runs lazyPrepareBaseSnapshot in SessionDO.
+    // dockerfile: re-trigger CI build, status flips on callback.
     patch.buildError = null;
     patch.imageHandle = null;
-    if (strategy === "dockerfile") patch.sandboxWorkerName = null;
+    if (strategy === "base_snapshot") {
+      patch.status = "ready";
+      patch.sandboxWorkerName = "sandbox-default";
+    } else {
+      patch.status = "building";
+      patch.sandboxWorkerName = null;
+    }
   }
 
   let row = await c.var.services.environments.update(patch);
 
-  if (configChanged || strategyChanged) {
-    if (strategy === "base_snapshot") {
-      const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t);
-      if (!dispatch.ok) {
-        row = await c.var.services.environments.update({
-          tenantId: t,
-          environmentId: id,
-          status: "error",
-          buildError: dispatch.error,
-        });
-      }
-      // else: status stays "building" — callback flips it.
-    } else {
-      try {
-        await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
-      } catch (e) {
-        row = await c.var.services.environments.update({
-          tenantId: t,
-          environmentId: id,
-          status: "error",
-          buildError: e instanceof Error ? e.message : String(e),
-        });
-      }
+  if ((configChanged || strategyChanged) && strategy === "dockerfile") {
+    try {
+      await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
+    } catch (e) {
+      row = await c.var.services.environments.update({
+        tenantId: t,
+        environmentId: id,
+        status: "error",
+        buildError: e instanceof Error ? e.message : String(e),
+      });
     }
   }
 
