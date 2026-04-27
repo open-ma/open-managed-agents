@@ -89,8 +89,14 @@ app.post("/__internal/prepare-env", async (c) => {
   }
 
   const installScript = buildInstallScript(cacheDir, pkgs);
+  // keepAlive: true tells the SDK to mark the container as long-lived
+  // so CF doesn't evict it the moment our handler returns. Without
+  // this, CF Sandbox containers idle out within seconds — our install
+  // script vanishes mid-flight and the cron tick finds an empty
+  // fresh container. prep-tick's sandbox.destroy() at the end frees
+  // the slot when the snapshot is committed.
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${body.env_id}`) as any;
+  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${body.env_id}`, { keepAlive: true } as any) as any;
   try {
     await sandbox.writeFile("/tmp/openma-prep.sh", installScript);
     await sandbox.startProcess("sh /tmp/openma-prep.sh");
@@ -132,7 +138,7 @@ app.post("/__internal/prep-tick/:env_id", async (c) => {
 
   const { getSandbox: cfGetSandbox } = await import("@cloudflare/sandbox");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${envId}`) as any;
+  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${envId}`, { keepAlive: true } as any) as any;
 
   let probe: { exitCode: number; stdout: string; stderr: string };
   try {
@@ -222,7 +228,7 @@ app.get("/__internal/prep-debug/:env_id", async (c) => {
   const envId = c.req.param("env_id");
   const { getSandbox: cfGetSandbox } = await import("@cloudflare/sandbox");
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${envId}`) as any;
+  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${envId}`, { keepAlive: true } as any) as any;
 
   // Single composite exec keeps it one round-trip — multiple sandbox
   // calls in this handler would risk the same Canceled-mid-chain
