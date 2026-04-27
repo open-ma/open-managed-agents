@@ -65,6 +65,8 @@ export class EnvironmentService {
     status?: EnvironmentStatus;
     sandboxWorkerName?: string | null;
     metadata?: Record<string, unknown> | null;
+    imageStrategy?: "base_snapshot" | "dockerfile" | null;
+    imageHandle?: Record<string, unknown> | null;
   }): Promise<EnvironmentRow> {
     const input: NewEnvironmentInput = {
       id: this.ids.environmentId(),
@@ -76,6 +78,8 @@ export class EnvironmentService {
       buildError: null,
       config: opts.config,
       metadata: opts.metadata ?? null,
+      imageStrategy: opts.imageStrategy ?? null,
+      imageHandle: opts.imageHandle ?? null,
       createdAt: this.clock.nowMs(),
     };
     return await this.repo.insert(input);
@@ -83,8 +87,8 @@ export class EnvironmentService {
 
   /**
    * Generic update — every field is optional. Pass `null` to clear a nullable
-   * field (description / sandboxWorkerName / buildError / metadata). Pass
-   * `undefined` (omit) to leave it untouched.
+   * field (description / sandboxWorkerName / buildError / metadata /
+   * imageStrategy / imageHandle). Pass `undefined` (omit) to leave it untouched.
    *
    * `updated_at` is bumped automatically on every call; callers don't pass it.
    */
@@ -98,6 +102,8 @@ export class EnvironmentService {
     sandboxWorkerName?: string | null;
     buildError?: string | null;
     metadata?: Record<string, unknown> | null;
+    imageStrategy?: "base_snapshot" | "dockerfile" | null;
+    imageHandle?: Record<string, unknown> | null;
   }): Promise<EnvironmentRow> {
     await this.requireEnvironment(opts);
     const update: EnvironmentUpdateFields = { updatedAt: this.clock.nowMs() };
@@ -110,6 +116,8 @@ export class EnvironmentService {
     }
     if (opts.buildError !== undefined) update.buildError = opts.buildError;
     if (opts.metadata !== undefined) update.metadata = opts.metadata;
+    if (opts.imageStrategy !== undefined) update.imageStrategy = opts.imageStrategy;
+    if (opts.imageHandle !== undefined) update.imageHandle = opts.imageHandle;
     return this.repo.update(opts.tenantId, opts.environmentId, update);
   }
 
@@ -199,6 +207,7 @@ export function toEnvironmentConfig(row: EnvironmentRow): EnvironmentConfig {
     env.sandbox_worker_name = row.sandbox_worker_name;
   }
   if (row.build_error !== null) env.build_error = row.build_error;
+  if (row.image_strategy !== null) env.image_strategy = row.image_strategy;
   if (row.metadata !== null) env.metadata = row.metadata;
   if (row.updated_at !== null) env.updated_at = row.updated_at;
   if (row.archived_at !== null) env.archived_at = row.archived_at;
