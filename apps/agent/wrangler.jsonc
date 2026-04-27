@@ -10,7 +10,7 @@
       "class_name": "Sandbox",
       "image": "./Dockerfile.sandbox",
       "instance_type": "basic",
-      "max_instances": 10
+      "max_instances": 50
     }
   ],
 
@@ -89,7 +89,7 @@
           "class_name": "Sandbox",
           "image": "./Dockerfile.sandbox",
           "instance_type": "basic",
-          "max_instances": 10
+          "max_instances": 50
         }
       ],
       "durable_objects": {
