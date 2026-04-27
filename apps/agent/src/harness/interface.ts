@@ -68,6 +68,36 @@ export interface HarnessRuntime {
    * compaction marker, custom marker, etc.).
    */
   broadcast: (event: SessionEvent) => void;
+  /**
+   * Mark the start of an in-flight LLM stream and broadcast a lifecycle
+   * event to subscribers. The runtime persists the stream state to the
+   * `streams` table (separate from the events log) so a deploy mid-
+   * stream can be detected and the partial finalized. Lifecycle events
+   * are NOT persisted to the events log — the eventual `agent.message`
+   * with the same `id` is the canonical record. Idempotent on duplicate
+   * start with the same id (e.g. harness retry minted a fresh id).
+   */
+  broadcastStreamStart: (messageId: string) => Promise<void>;
+  /**
+   * Append a token delta to an in-flight stream's buffer and broadcast
+   * an `agent.message_chunk` event with the same message_id. Chunks are
+   * buffered for restart recovery; they are NOT persisted to the events
+   * log (would pollute history — the final agent.message is the source
+   * of truth).
+   */
+  broadcastChunk: (messageId: string, delta: string) => Promise<void>;
+  /**
+   * Mark a stream as finished and broadcast an end lifecycle event.
+   * `completed` = LLM finished cleanly; `aborted` = explicit abort or
+   * harness retry minting a new id. The recovery scan uses `interrupted`
+   * for streams left dangling by a runtime restart — callers shouldn't
+   * pass that themselves.
+   */
+  broadcastStreamEnd: (
+    messageId: string,
+    status: "completed" | "aborted",
+    errorText?: string,
+  ) => Promise<void>;
   reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
   pendingConfirmations?: string[];
   abortSignal?: AbortSignal;
