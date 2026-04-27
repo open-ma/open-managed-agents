@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
-import { generateFileId, buildTrajectory, fileR2Key } from "@open-managed-agents/shared";
+import { generateFileId, buildTrajectory, fileR2Key, generateEventId } from "@open-managed-agents/shared";
 import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { rateLimitSessionCreate } from "../rate-limit";
 import { checkDailySessionCap } from "../quotas";
@@ -920,23 +920,30 @@ app.post("/:id/messages", async (c) => {
   }
 
   // Forward the user.message into the SessionDO, which appends + drains
-  // (kicking the harness). The DO assigns the seq; we don't need it here
-  // because we filter on session.status_idle to detect end-of-turn.
+  // (kicking the harness). We mint the event id ourselves so the SSE
+  // bridge below can identify "our" turn boundary even when the WS
+  // replay surfaces every prior event in this session.
+  const userMessageId = generateEventId();
   const userMessageReq = new Request(`https://sandbox/sessions/${id}/event`, {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ type: "user.message", content }),
+    body: JSON.stringify({ type: "user.message", id: userMessageId, content }),
   });
   const postRes = await binding.fetch(userMessageReq);
   if (!postRes.ok) {
     return c.json({ error: `Failed to enqueue user message: ${postRes.status}` }, 500);
   }
 
-  // Open the WS bridge same as handleSSEStream, but wrap the controller
-  // so we close on the FIRST session.status_idle event we see — that
-  // signals "this turn finished, all subsequent events belong to a
-  // future turn the client didn't ask for". Multiple back-to-back POSTs
-  // each get their own stream that auto-closes at their own idle.
+  // Open the WS bridge same as handleSSEStream. The bridge sends the
+  // full event history on connect, then live broadcasts. We need to
+  // suppress the historical noise and close exactly once on this
+  // turn's idle. State machine:
+  //   - PRE_TURN: drop every event until we observe a `user.message`
+  //     whose id matches `userMessageId`.
+  //   - IN_TURN: forward every event; close on the first
+  //     `session.status_idle`.
+  // Multiple back-to-back POSTs each carry their own id, so each call
+  // gets exactly its own turn back even if calls overlap on the wire.
   const wsHeaders = new Headers(c.req.raw.headers);
   wsHeaders.set("Upgrade", "websocket");
   wsHeaders.set("Connection", "Upgrade");
@@ -954,6 +961,7 @@ app.post("/:id/messages", async (c) => {
   const encoder = new TextEncoder();
   const stream = new ReadableStream({
     start(controller) {
+      let inTurn = false;
       let closed = false;
       const closeOnce = () => {
         if (closed) return;
@@ -963,16 +971,19 @@ app.post("/:id/messages", async (c) => {
       };
       ws.addEventListener("message", (event: MessageEvent) => {
         if (closed) return;
-        controller.enqueue(encoder.encode(`data: ${event.data}\n\n`));
-        // Peek the type field to detect end-of-turn. Cheap parse — events
-        // are JSON objects with `type` near the start. Bail on parse error.
-        try {
-          const parsed = JSON.parse(event.data as string) as { type?: string };
-          if (parsed.type === "session.status_idle") {
-            closeOnce();
+        const raw = event.data as string;
+        let parsed: { type?: string; id?: string } | null = null;
+        try { parsed = JSON.parse(raw); } catch { /* malformed — ignore for state, still skip */ }
+        if (!inTurn) {
+          if (parsed?.type === "user.message" && parsed.id === userMessageId) {
+            inTurn = true;
+            controller.enqueue(encoder.encode(`data: ${raw}\n\n`));
           }
-        } catch {
-          // ignore — keep the byte forwarded but skip close detection
+          return;
+        }
+        controller.enqueue(encoder.encode(`data: ${raw}\n\n`));
+        if (parsed?.type === "session.status_idle") {
+          closeOnce();
         }
       });
       ws.addEventListener("close", closeOnce);
