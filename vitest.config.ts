@@ -61,6 +61,10 @@ export default defineConfig({
       "@open-managed-agents/event-log/cf-do": "./packages/event-log/src/cf-do/index.ts",
       "@open-managed-agents/event-log/pg": "./packages/event-log/src/pg/index.ts",
       "@open-managed-agents/event-log": "./packages/event-log/src/index.ts",
+      "@open-managed-agents/environment-images/memory": "./packages/environment-images/src/adapters/memory/index.ts",
+      "@open-managed-agents/environment-images/cf-base-snapshot": "./packages/environment-images/src/adapters/cf-base-snapshot/index.ts",
+      "@open-managed-agents/environment-images/cf-dockerfile": "./packages/environment-images/src/adapters/cf-dockerfile/index.ts",
+      "@open-managed-agents/environment-images": "./packages/environment-images/src/index.ts",
     },
   },
   test: {
