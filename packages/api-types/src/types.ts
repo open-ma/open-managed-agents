@@ -113,10 +113,34 @@ export interface EnvironmentConfig {
       allow_mcp_servers?: boolean;
       allow_package_managers?: boolean;
     };
+    /** Free-form Dockerfile body — RUN/COPY/ENV lines only. Required
+     *  when `image_strategy === "dockerfile"`. The platform PREPENDS
+     *  `FROM openma/sandbox-base:latest` and REJECTS user-supplied
+     *  FROM/WORKDIR/USER/ENTRYPOINT/CMD (it owns those to keep the
+     *  harness runtime hooks intact). */
+    dockerfile?: string;
   };
   status?: "building" | "ready" | "error";
   build_error?: string;
   sandbox_worker_name?: string;
+  /** How this env's sandbox image is produced.
+   *
+   *  - `base_snapshot` (default for new envs): packages installed once
+   *    into a CF Sandbox snapshot, restored on every session boot. All
+   *    envs share the `sandbox-default` worker. Fast cold-create
+   *    (~30-60s once, then 1-2s per session). REJECTS apt packages —
+   *    they install system-wide and can't snapshot under /home.
+   *
+   *  - `dockerfile` (opt-in): per-env GitHub Actions build of a
+   *    Dockerfile (always FROM openma/sandbox-base) that gets deployed
+   *    as its own `sandbox-<env_id>` worker. Use when you need apt
+   *    packages, custom binaries, or full image control. Slower
+   *    create (~90s CI) but no per-session install.
+   *
+   *  Omitted = legacy (pre-migration) — readers should treat as
+   *  `dockerfile` for back-compat.
+   */
+  image_strategy?: "base_snapshot" | "dockerfile";
   metadata?: Record<string, unknown>;
   created_at: string;
   updated_at?: string;

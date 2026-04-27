@@ -40,6 +40,21 @@ export interface EnvironmentRow {
   config: EnvironmentConfig["config"];
   /** Caller-supplied free-form metadata (publication context, eval-run id, etc.). */
   metadata: Record<string, unknown> | null;
+  /** Image-build strategy. `base_snapshot` (default for new envs) installs
+   *  packages once into a CF Sandbox snapshot under /home/env-cache/<id>/
+   *  and restores on session boot. `dockerfile` is opt-in for users who
+   *  need apt packages or full image control — it goes through the
+   *  existing per-env CI build pipeline. Null = legacy (treated as
+   *  `dockerfile` for back-compat with envs created before this field
+   *  existed). */
+  image_strategy: "base_snapshot" | "dockerfile" | null;
+  /** Strategy-specific opaque blob (the `ImageHandle` returned by
+   *  EnvironmentImageStrategy.prepare). For `base_snapshot` it carries
+   *  the CF DirectoryBackup + cached env vars; for `dockerfile` it
+   *  carries the per-env worker name + dockerfile hash. JSON-encoded
+   *  in D1; deserialized to `unknown` here so the platform doesn't
+   *  need to know the per-strategy shape. */
+  image_handle: Record<string, unknown> | null;
   created_at: string;
   updated_at: string | null;
   archived_at: string | null;

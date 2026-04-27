@@ -25,6 +25,8 @@ interface InMemEnvironment {
   build_error: string | null;
   config: EnvironmentConfig["config"];
   metadata: Record<string, unknown> | null;
+  image_strategy: "base_snapshot" | "dockerfile" | null;
+  image_handle: Record<string, unknown> | null;
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
@@ -44,6 +46,8 @@ export class InMemoryEnvironmentRepo implements EnvironmentRepo {
       build_error: input.buildError,
       config: input.config,
       metadata: input.metadata,
+      image_strategy: input.imageStrategy ?? null,
+      image_handle: input.imageHandle ?? null,
       created_at: input.createdAt,
       updated_at: null,
       archived_at: null,
@@ -90,6 +94,8 @@ export class InMemoryEnvironmentRepo implements EnvironmentRepo {
     if (update.buildError !== undefined) row.build_error = update.buildError;
     if (update.config !== undefined) row.config = update.config;
     if (update.metadata !== undefined) row.metadata = update.metadata;
+    if (update.imageStrategy !== undefined) row.image_strategy = update.imageStrategy;
+    if (update.imageHandle !== undefined) row.image_handle = update.imageHandle;
     row.updated_at = update.updatedAt;
     return toRow(row);
   }
@@ -174,6 +180,8 @@ function toRow(e: InMemEnvironment): EnvironmentRow {
     build_error: e.build_error,
     config: e.config,
     metadata: e.metadata,
+    image_strategy: e.image_strategy,
+    image_handle: e.image_handle,
     created_at: msToIso(e.created_at),
     updated_at: e.updated_at !== null ? msToIso(e.updated_at) : null,
     archived_at: e.archived_at !== null ? msToIso(e.archived_at) : null,
