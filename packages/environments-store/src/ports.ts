@@ -21,6 +21,10 @@ export interface NewEnvironmentInput {
   buildError: string | null;
   config: EnvironmentConfig["config"];
   metadata: Record<string, unknown> | null;
+  /** Image-build strategy. Null = legacy (treated as `dockerfile`). */
+  imageStrategy?: "base_snapshot" | "dockerfile" | null;
+  /** Strategy-specific opaque blob — see EnvironmentRow.image_handle. */
+  imageHandle?: Record<string, unknown> | null;
   createdAt: number;
 }
 
@@ -42,6 +46,8 @@ export interface EnvironmentUpdateFields {
   buildError?: string | null;
   config?: EnvironmentConfig["config"];
   metadata?: Record<string, unknown> | null;
+  imageStrategy?: "base_snapshot" | "dockerfile" | null;
+  imageHandle?: Record<string, unknown> | null;
   updatedAt: number;
 }
 
