@@ -5,7 +5,7 @@ description: Endpoint-by-endpoint REST reference for openma's /v1/* surface.
 
 import { Aside, LinkCard } from '@astrojs/starlight/components';
 
-Every endpoint requires `Authorization: Bearer <api_key>` unless noted. JSON request and response bodies. Errors follow the shape in [REST API → Errors](/build/api/#errors).
+Every endpoint requires the `x-api-key: <api_key>` header unless noted. JSON request and response bodies. Errors follow the shape in [REST API → Errors](/build/api/#errors).
 
 ## Agents
 
@@ -49,13 +49,15 @@ List sessions. Query: `agent_id`, `status`, `limit`, `cursor`.
 Get session metadata + status.
 
 ### `GET /v1/sessions/:id/events`
-**SSE.** Live event stream. Reconnect-safe (`?after=<event_id>`).
+JSON-paginated event log. Query: `limit` (1–1000, default 100), `order` (`asc`|`desc`), `after_seq`. Returns `{ data: SessionEvent[], has_more, next_page }`.
+
+Pass `Accept: text/event-stream` to switch to the SSE variant (or call `/v1/sessions/:id/events/stream` directly). On SSE the server replays the persisted log on connect, then live-broadcasts new events. Stream-lifecycle deltas (`agent.message_chunk` and friends) are broadcast-only and never appear in the JSON variant — see [REST API → Stream session events](/build/api/#stream-session-events-sse).
 
 ### `GET /v1/sessions/:id/log`
 Full event log as a JSON array (non-streaming).
 
 ### `POST /v1/sessions/:id/messages`
-Send another user turn into an existing session.
+Chatbot one-shot: post a user turn AND stream the response in one HTTP call. Body: `{ "content": string | ContentBlock[] }`. Returns `text/event-stream` and auto-closes when the turn finishes (`session.status_idle`). For the fire-and-forget variant (when you already have a separate SSE consumer open), POST to `/v1/sessions/:id/events` instead with the user.message wrapped in `{events:[...]}` — returns `202`.
 
 ### `POST /v1/sessions/:id/cancel`
 Cancel a running session.
