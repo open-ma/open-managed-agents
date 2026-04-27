@@ -1,0 +1,19 @@
+{
+  "name": "@open-managed-agents/acp-runtime",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./node-spawner": "./src/spawners/node.ts",
+    "./registry": "./src/registry.ts"
+  },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.20.0",
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.8.0"
+  }
+}
