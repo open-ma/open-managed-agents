@@ -1,0 +1,15 @@
+{
+  "name": "@open-managed-agents/event-log",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cf-do": "./src/cf-do/index.ts",
+    "./memory": "./src/memory/index.ts",
+    "./pg": "./src/pg/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*"
+  }
+}

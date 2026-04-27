@@ -1,5 +1,7 @@
 import type { ModelMessage, ToolModelMessage, AssistantModelMessage } from "ai";
 import type { HistoryStore } from "../harness/interface";
+import { CfDoEventLog, ensureSchema as ensureCfDoSchema } from "@open-managed-agents/event-log/cf-do";
+import { InMemoryEventLog } from "@open-managed-agents/event-log/memory";
 import type {
   SessionEvent,
   AgentMessageEvent,
@@ -433,35 +435,35 @@ function stampEvent(event: SessionEvent): SessionEvent {
   return event;
 }
 
+/**
+ * SqliteHistory now composes the CFless `CfDoEventLog` adapter from
+ * @open-managed-agents/event-log/cf-do — kept the class name for back-
+ * compat with existing call sites in SessionDO. To swap backends
+ * (Postgres / in-memory / etc.) construct an `InMemoryHistory` or a
+ * future `PgHistory` instead — they all expose the same `HistoryStore`
+ * interface (append + getEvents + getMessages).
+ *
+ * `getMessages` lives on the consumer side rather than in the event-log
+ * port because the events→messages projection is harness-specific
+ * (different harnesses may want different projections — see
+ * eventsToMessages above for the canonical OMA mapping).
+ */
 export class SqliteHistory implements HistoryStore {
-  constructor(private sql: SqlStorage) {}
+  private repo: CfDoEventLog;
+
+  constructor(sql: SqlStorage) {
+    this.repo = new CfDoEventLog(sql, stampEvent);
+    // Idempotent — first construction in a DO bootstraps the schema; later
+    // ones see CREATE TABLE IF NOT EXISTS as a no-op.
+    ensureCfDoSchema(sql);
+  }
 
   append(event: SessionEvent): void {
-    stampEvent(event);
-    this.sql.exec(
-      "INSERT INTO events (type, data) VALUES (?, ?)",
-      event.type,
-      JSON.stringify(event)
-    );
+    this.repo.append(event);
   }
 
   getEvents(afterSeq?: number): SessionEvent[] {
-    let cursor;
-    if (afterSeq !== undefined) {
-      cursor = this.sql.exec(
-        "SELECT seq, type, data, ts FROM events WHERE seq > ? ORDER BY seq",
-        afterSeq
-      );
-    } else {
-      cursor = this.sql.exec(
-        "SELECT seq, type, data, ts FROM events ORDER BY seq"
-      );
-    }
-    const results: SessionEvent[] = [];
-    for (const row of cursor) {
-      results.push(JSON.parse(row.data as string) as SessionEvent);
-    }
-    return results;
+    return this.repo.getEvents(afterSeq);
   }
 
   getMessages(): ModelMessage[] {
@@ -475,18 +477,17 @@ export class SqliteHistory implements HistoryStore {
  * of the sub-agent run and is discarded afterwards.
  */
 export class InMemoryHistory implements HistoryStore {
-  private events: SessionEvent[] = [];
+  private repo = new InMemoryEventLog(stampEvent);
 
   append(event: SessionEvent): void {
-    stampEvent(event);
-    this.events.push(event);
+    this.repo.append(event);
   }
 
   getEvents(afterSeq?: number): SessionEvent[] {
-    return afterSeq ? this.events.slice(afterSeq) : [...this.events];
+    return this.repo.getEvents(afterSeq);
   }
 
   getMessages(): ModelMessage[] {
-    return eventsToMessages(this.events);
+    return eventsToMessages(this.getEvents());
   }
 }
