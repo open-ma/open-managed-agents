@@ -229,6 +229,88 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Lazy prepare for base_snapshot envs whose image_handle is null
+   * (first session ever for this env, OR config.packages just changed
+   * and someone cleared the handle).
+   *
+   * Runs in this SessionDO's request context — same lifetime budget
+   * the harness loop uses (5+ min wall-clock, no Worker subrequest
+   * 30s cap), so install + createBackup fits without the cron-poll +
+   * keep-alive dance we tried earlier.
+   *
+   * Concurrent-session race: if N sessions of the same env boot
+   * simultaneously, each does its own install + createBackup. Latest
+   * writer wins on D1; earlier handles dangle until R2 TTL (90 days).
+   * Wasteful but correct; cheaper than locking.
+   */
+  private async lazyPrepareBaseSnapshot(envId: string, sandbox: CloudflareSandbox): Promise<void> {
+    const envConfig = await this.getEnvConfig(envId);
+    const pkgs = (envConfig?.config.packages ?? {}) as { pip?: string[]; npm?: string[]; cargo?: string[]; gem?: string[]; go?: string[]; apt?: string[] };
+    if (pkgs.apt && pkgs.apt.length > 0) {
+      // Same policy as the dispatch layer: apt installs system-wide,
+      // can't be snapshotted under /home. Surface the error early.
+      throw new Error(
+        `base_snapshot does not support apt packages (${pkgs.apt.join(", ")}). Either bake into the base image or switch to image_strategy: "dockerfile".`,
+      );
+    }
+
+    const cacheDir = `/home/env-cache/${envId}`;
+
+    // Run install commands sequentially — these are sandbox.exec
+    // round-trips into the SessionDO's sandbox. Inside a DO request,
+    // they're not subject to the 30s subrequest cap.
+    await sandbox.exec(`mkdir -p ${cacheDir} && chmod -R u+rw ${cacheDir}`, 60_000);
+    if (pkgs.pip && pkgs.pip.length > 0) {
+      await sandbox.exec(`uv venv ${cacheDir}/.venv --python 3.12`, 120_000);
+      await sandbox.exec(
+        `uv pip install --python ${cacheDir}/.venv/bin/python ${pkgs.pip.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`,
+        600_000,
+      );
+    }
+    if (pkgs.npm && pkgs.npm.length > 0) {
+      await sandbox.exec(`npm install --prefix ${cacheDir} --no-audit --no-fund ${pkgs.npm.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`, 600_000);
+    }
+    if (pkgs.cargo && pkgs.cargo.length > 0) {
+      await sandbox.exec(`CARGO_HOME=${cacheDir}/.cargo cargo install ${pkgs.cargo.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`, 600_000);
+    }
+    if (pkgs.gem && pkgs.gem.length > 0) {
+      await sandbox.exec(`GEM_HOME=${cacheDir}/.gem gem install --no-document ${pkgs.gem.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`, 600_000);
+    }
+    if (pkgs.go && pkgs.go.length > 0) {
+      await sandbox.exec(`GOPATH=${cacheDir}/.go go install ${pkgs.go.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`, 600_000);
+    }
+
+    const envVars: Record<string, string> = {
+      PATH: `${cacheDir}/.venv/bin:${cacheDir}/node_modules/.bin:${cacheDir}/.cargo/bin:${cacheDir}/.gem/bin:${cacheDir}/.go/bin:/usr/local/bin:/usr/bin:/bin`,
+      VIRTUAL_ENV: `${cacheDir}/.venv`,
+      NODE_PATH: `${cacheDir}/node_modules`,
+      CARGO_HOME: `${cacheDir}/.cargo`,
+      GEM_HOME: `${cacheDir}/.gem`,
+      GOPATH: `${cacheDir}/.go`,
+      PYTHONPATH: `${cacheDir}/.venv/lib/python3.12/site-packages`,
+    };
+    await sandbox.writeFile(`${cacheDir}/env.json`, JSON.stringify(envVars, null, 2));
+
+    // Snapshot the cache dir. createBackup completes in seconds for
+    // ~50MB pip install — fits in DO request budget.
+    const backup = await sandbox.createImageSnapshot(cacheDir, `env-${envId}`, 90 * 24 * 60 * 60);
+
+    // Persist the handle so future sessions of this env restore
+    // instead of re-installing.
+    const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
+    await services.environments.update({
+      tenantId: this.state.tenant_id,
+      environmentId: envId,
+      imageHandle: { backup, env_vars: envVars, cache_dir: cacheDir, prepared_at: Date.now() },
+    });
+
+    // Activate for THIS session — install just happened, no need to
+    // restoreBackup. setEnvVars is enough to put the cached binaries
+    // on PATH for the harness's subsequent execs.
+    await sandbox.setEnvVars(envVars);
+  }
+
+  /**
    * Resolve all credentials for the listed vaults. Prefers the pre-fetched
    * snapshot from /init; falls back to KV list/get loops if absent.
    */
@@ -471,10 +553,11 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     const fireAt = typeof sched.time === "number" ? new Date(sched.time * 1000).toISOString() : undefined;
 
-    // Trajectory event mirroring span.background_task_scheduled (line 1532).
-    // Untyped wire type — the SessionEvent union doesn't list span.* events;
-    // they pass through broadcast/SSE without strict checks.
-    this.broadcastEvent({
+    // Trajectory event mirroring span.background_task_scheduled. Use the
+    // persisting variant so the event lands in the events table — the agent
+    // (and operators) can later see when wakeups were registered, without
+    // relying on WS subscribers being attached at schedule time.
+    this.persistAndBroadcastEvent({
       type: "span.wakeup_scheduled",
       schedule_id: sched.id,
       fire_at: fireAt,
@@ -1287,39 +1370,54 @@ export class SessionDO extends Agent<Env, SessionState> {
         await sandbox.mountWorkspace();
       }
 
-      // Apply image strategy. base_snapshot = restore the env's
-      // pre-installed package cache from the CF snapshot; dockerfile
-      // (or legacy null) = skip — packages were baked into the per-env
-      // worker image. The packages-install loop below only runs for
-      // legacy / dockerfile envs that didn't have a snapshot path.
+      // Apply image strategy.
+      //
+      //   base_snapshot + handle present: restore the env's pre-installed
+      //                                   package cache from the snapshot.
+      //   base_snapshot + handle null:    LAZY PREPARE — first session
+      //                                   for this env. Install packages
+      //                                   into /home/env-cache/<id>/,
+      //                                   createBackup, persist handle to
+      //                                   D1. SessionDO holds the request
+      //                                   open for as long as harness loops
+      //                                   already do (5+ min); install +
+      //                                   backup fits there.
+      //   dockerfile / null:              fall through to the legacy
+      //                                   install-on-every-boot loop below.
+      //                                   Packages are baked into per-env
+      //                                   worker image; the loop is the
+      //                                   safety net for envs missing config.
       const envId = this.state.environment_id;
-      let snapshotRestored = false;
+      let imagePathHandled = false;
       if (envId && sandbox instanceof CloudflareSandbox) {
         try {
           const handleRow = await this.getEnvImageHandle(envId);
-          if (
-            handleRow?.image_strategy === "base_snapshot"
-            && handleRow.image_handle
-            && (handleRow.image_handle as { backup?: unknown }).backup
-          ) {
-            await sandbox.restoreImageSnapshot(
-              handleRow.image_handle as { backup: { id: string; dir: string }; env_vars: Record<string, string> },
-            );
-            snapshotRestored = true;
+          if (handleRow?.image_strategy === "base_snapshot") {
+            if (handleRow.image_handle && (handleRow.image_handle as { backup?: unknown }).backup) {
+              // Cache hit — restore.
+              await sandbox.restoreImageSnapshot(
+                handleRow.image_handle as { backup: { id: string; dir: string }; env_vars: Record<string, string> },
+              );
+              imagePathHandled = true;
+            } else {
+              // Cache miss — lazy prepare in this DO.
+              await this.lazyPrepareBaseSnapshot(envId, sandbox);
+              imagePathHandled = true;
+            }
           }
         } catch (err) {
           logWarn(
-            { op: "session_do.restore_image_snapshot", env_id: envId, err },
-            "image snapshot restore failed; falling back to install-on-boot",
+            { op: "session_do.image_strategy", env_id: envId, err },
+            "image strategy handler failed; falling back to install-on-boot",
           );
           // Fall through to the install loop below.
         }
       }
 
       // Install environment packages if configured. Skipped when the
-      // base_snapshot restore above succeeded — the packages are
-      // already in the cache dir.
-      if (envId && !snapshotRestored) {
+      // base_snapshot path above handled it (restored from snapshot or
+      // just lazy-prepared).
+      if (envId && !imagePathHandled) {
         const envConfig = await this.getEnvConfig(envId);
         if (envConfig) {
           const pkgs = envConfig.config?.packages;
