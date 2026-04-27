@@ -67,25 +67,24 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
 /** Run the base_snapshot prepare path: POST to the agent worker's
  *  /__internal/prepare-env over the SANDBOX_sandbox_default service
  *  binding. The agent worker has the SANDBOX DO namespace and runs
- *  the install + createBackup; we get back a PrepareResult to persist. */
-async function prepareBaseSnapshot(
+ *  the install + createBackup ASYNC, callbacking the env's
+ *  /build-complete URL with the result. We just kick it off here. */
+async function dispatchBaseSnapshotPrepare(
   env: Env,
   envConfig: EnvironmentConfig,
   tenantId: string,
-): Promise<{
-  status: "ready" | "building" | "error";
-  handle?: Record<string, unknown>;
-  sandbox_worker_name?: string;
-  error?: string;
-}> {
+  requestUrl: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const binding = (env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
   if (!binding) {
-    return { status: "error", error: "SANDBOX_sandbox_default binding not configured" };
+    return { ok: false, error: "SANDBOX_sandbox_default binding not configured" };
   }
   const internalToken = (env as unknown as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
   if (!internalToken) {
-    return { status: "error", error: "INTERNAL_TOKEN secret not configured" };
+    return { ok: false, error: "INTERNAL_TOKEN secret not configured" };
   }
+  const url = new URL(requestUrl);
+  const callbackUrl = `${url.protocol}//${url.host}/v1/environments/${envConfig.id}/build-complete`;
   const res = await binding.fetch("https://internal/__internal/prepare-env", {
     method: "POST",
     headers: {
@@ -96,13 +95,14 @@ async function prepareBaseSnapshot(
       env_id: envConfig.id,
       tenant_id: tenantId,
       config: envConfig.config,
+      callback_url: callbackUrl,
     }),
   });
   if (!res.ok) {
     const text = await res.text();
-    return { status: "error", error: `prepare-env returned ${res.status}: ${text.slice(0, 500)}` };
+    return { ok: false, error: `dispatch returned ${res.status}: ${text.slice(0, 500)}` };
   }
-  return res.json();
+  return { ok: true };
 }
 
 // POST /v1/environments — create environment
@@ -135,15 +135,16 @@ app.post("/", async (c) => {
 
   let row = initialRow;
   if (strategy === "base_snapshot") {
-    const prep = await prepareBaseSnapshot(c.env, toEnvironmentConfig(row), t);
-    row = await c.var.services.environments.update({
-      tenantId: t,
-      environmentId: row.id,
-      status: prep.status === "building" ? "building" : prep.status,
-      sandboxWorkerName: prep.sandbox_worker_name ?? "sandbox-default",
-      buildError: prep.error ?? null,
-      imageHandle: prep.handle ?? null,
-    });
+    const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t, c.req.url);
+    if (!dispatch.ok) {
+      row = await c.var.services.environments.update({
+        tenantId: t,
+        environmentId: row.id,
+        status: "error",
+        buildError: dispatch.error,
+      });
+    }
+    // status stays "building" — agent worker callbacks /build-complete with the handle.
   } else {
     // dockerfile strategy: dispatch CI as before. status stays "building"
     // until /build-complete callback flips it.
@@ -185,17 +186,31 @@ app.post("/:id/build-complete", async (c) => {
   });
   if (!existing) return c.json({ error: "Environment not found" }, 404);
 
+  // Two callback shapes accepted (one path, two callers):
+  //   - Legacy dockerfile build (deploy-sandbox.yml): {status, sandbox_worker_name?, error?}
+  //   - base_snapshot prepare    (agent worker):       PrepareResult-shaped — {status, handle?, sandbox_worker_name?, error?}
+  // Both come in here. We unify by reading whichever fields landed.
+  //
+  // The base_snapshot path also carries x-internal-token for auth; the
+  // legacy path is gated by the same x-api-key as everything else (via
+  // authMiddleware). Either is sufficient for now; long-term we should
+  // require the internal token for both.
   const body = (await c.req.json()) as {
-    status: "ready" | "error";
+    status: "ready" | "error" | "building";
     sandbox_worker_name?: string;
     error?: string;
+    handle?: Record<string, unknown>;
   };
 
   let workerName: string | null | undefined = undefined;
   if (body.status === "ready") {
     workerName = body.sandbox_worker_name || `sandbox-${id}`;
 
-    if (c.env.CLOUDFLARE_API_TOKEN && c.env.CLOUDFLARE_ACCOUNT_ID) {
+    // Only call the dockerfile-mode service-binding plumbing for envs
+    // that actually went through that path (per-env worker name). For
+    // base_snapshot envs, sandbox-default is already bound — no add needed.
+    const isPerEnvWorker = workerName !== "sandbox-default";
+    if (isPerEnvWorker && c.env.CLOUDFLARE_API_TOKEN && c.env.CLOUDFLARE_ACCOUNT_ID) {
       try {
         const bindingName = envIdToBindingName(id);
         await addServiceBinding(
@@ -213,11 +228,12 @@ app.post("/:id/build-complete", async (c) => {
   const row = await c.var.services.environments.update({
     tenantId: t,
     environmentId: id,
-    status: body.status,
+    status: body.status === "building" ? "building" : body.status,
     buildError: body.error ?? null,
     ...(workerName !== undefined ? { sandboxWorkerName: workerName } : {}),
+    ...(body.handle !== undefined ? { imageHandle: body.handle } : {}),
   });
-  console.log(`[env] build-complete for ${id}: status=${body.status} worker=${row.sandbox_worker_name}`);
+  console.log(`[env] build-complete for ${id}: status=${body.status} worker=${row.sandbox_worker_name} handle=${body.handle ? "set" : "unset"}`);
   return c.json(toEnvironmentConfig(row));
 });
 
@@ -281,15 +297,16 @@ app.put("/:id", async (c) => {
 
   if (configChanged || strategyChanged) {
     if (strategy === "base_snapshot") {
-      const prep = await prepareBaseSnapshot(c.env, toEnvironmentConfig(row), t);
-      row = await c.var.services.environments.update({
-        tenantId: t,
-        environmentId: id,
-        status: prep.status === "building" ? "building" : prep.status,
-        sandboxWorkerName: prep.sandbox_worker_name ?? "sandbox-default",
-        buildError: prep.error ?? null,
-        imageHandle: prep.handle ?? null,
-      });
+      const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t, c.req.url);
+      if (!dispatch.ok) {
+        row = await c.var.services.environments.update({
+          tenantId: t,
+          environmentId: id,
+          status: "error",
+          buildError: dispatch.error,
+        });
+      }
+      // else: status stays "building" — callback flips it.
     } else {
       try {
         await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
