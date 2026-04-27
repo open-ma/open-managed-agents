@@ -55,10 +55,15 @@ oma agents list
 oma agents create -f ./my-agent.json
 
 # Start a session
-oma sessions create --agent agent_abc123 \
-  --input "Summarize the openma docs."
+oma sessions create --agent agent_abc123 --env env_abc123 --title "research"
 
-# Tail a session's event stream (SSE under the hood)
+# Chat — post a turn AND stream the reply token-by-token to your terminal
+oma sessions chat sess_xyz "Summarize the openma docs."
+
+# Fire-and-forget message (no streaming back; useful when something else is tailing)
+oma sessions message sess_xyz "Now also include the integrations."
+
+# Tail a session's full event stream (SSE under the hood)
 oma sessions tail sess_xyz
 
 # Replay a session's full event log
@@ -117,7 +122,7 @@ async function createAgent(req: CreateAgentRequest): Promise<CreateAgentResponse
   const res = await fetch(`${baseUrl}/v1/agents`, {
     method: 'POST',
     headers: {
-      'Authorization': `Bearer ${apiKey}`,
+      'x-api-key': apiKey,
       'Content-Type': 'application/json',
     },
     body: JSON.stringify(req),
@@ -135,37 +140,73 @@ If you want a typed wrapper, the CLI source (`packages/cli/src/`) is a small ref
 
 ## Talking to the SSE stream
 
+Two ways to drive a turn:
+
+**(a) Chatbot one-shot**: post the user message *and* receive the response stream in a single request. Auto-closes when the turn ends.
+
 ```ts
 import type { SessionEvent } from '@open-managed-agents/api-types';
 
-const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/events`, {
-  headers: { 'Authorization': `Bearer ${apiKey}` },
+const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/messages`, {
+  method: 'POST',
+  headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
+  body: JSON.stringify({ content: 'Hello!' }),
 });
 
-const reader = res.body!.getReader();
-const decoder = new TextDecoder();
-let buffer = '';
+for await (const event of parseSSE<SessionEvent>(res)) {
+  switch (event.type) {
+    case 'agent.message_chunk':
+      // Live token deltas — render incrementally; replace at the end
+      // when the canonical agent.message lands with the same message_id.
+      process.stdout.write(event.delta);
+      break;
+    case 'agent.thinking_chunk':
+      // Live extended-thinking deltas. Same idea, correlate by thinking_id.
+      process.stderr.write(event.delta);
+      break;
+    case 'agent.tool_use_input_chunk':
+      // Live tool-input JSON deltas. Partial JSON; render in a code block.
+      // Drop the in-flight render when agent.tool_use lands with the same id.
+      break;
+    case 'agent.message':
+      // Canonical text message — same message_id as the chunks above.
+      // Drop your in-flight buffer; this content is the source of truth.
+      break;
+    case 'session.status_idle':
+      return; // turn done; the server will also close the stream
+  }
+}
 
-while (true) {
-  const { done, value } = await reader.read();
-  if (done) break;
-  buffer += decoder.decode(value, { stream: true });
-
-  let i;
-  while ((i = buffer.indexOf('\n\n')) !== -1) {
-    const chunk = buffer.slice(0, i);
-    buffer = buffer.slice(i + 2);
-
-    const dataLine = chunk.split('\n').find(l => l.startsWith('data: '));
-    if (!dataLine) continue;
-
-    const event = JSON.parse(dataLine.slice(6)) as SessionEvent;
-    handleEvent(event);
+async function* parseSSE<T>(res: Response): AsyncIterable<T> {
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = '';
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buf += dec.decode(value, { stream: true });
+    let i;
+    while ((i = buf.indexOf('\n\n')) !== -1) {
+      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
+      const line = chunk.split('\n').find(l => l.startsWith('data: '));
+      if (line) yield JSON.parse(line.slice(6)) as T;
+    }
   }
 }
 ```
 
-For most use cases the CLI's `oma sessions tail` does this for you.
+**(b) Tail a long-lived session**: same `parseSSE` helper, but use `GET /v1/sessions/:id/events/stream` instead — never closes, replays history on connect, sees every future event.
+
+```ts
+const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/events/stream`, {
+  headers: { 'x-api-key': apiKey, 'Accept': 'text/event-stream' },
+});
+for await (const event of parseSSE<SessionEvent>(res)) {
+  // ...same switch as above
+}
+```
+
+The CLI's `oma sessions chat` and `oma sessions tail` are both small wrappers around this pattern.
 
 ## Where to go next
 

@@ -19,7 +19,7 @@ The REST surface lives under `/v1/*`. Everything the Console does, you can do pr
 
 Two auth schemes:
 
-**API key** — for server-to-server and CLI use. Pass as `Authorization: Bearer oma_...`. Create on the Console **API Keys** page.
+**API key** — for server-to-server and CLI use. Pass as the `x-api-key` header (`x-api-key: oma_...`). Create on the Console **API Keys** page.
 
 **Session cookie** — what the Console UI uses (better-auth-issued). Not normally what you'll integrate against unless you're embedding openma in a browser app.
 
@@ -53,7 +53,7 @@ A full endpoint-by-endpoint reference lives at [Reference → API Endpoints](/re
 
 ```bash
 curl -X POST "$OMA_BASE_URL/v1/agents" \
-  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "x-api-key: $OMA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
     "name": "research-agent",
@@ -67,53 +67,78 @@ curl -X POST "$OMA_BASE_URL/v1/agents" \
 
 ```bash
 curl -X POST "$OMA_BASE_URL/v1/sessions" \
-  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "x-api-key: $OMA_API_KEY" \
   -H "Content-Type: application/json" \
   -d '{
-    "agent_id": "agent_abc123",
-    "input": [
-      {"role": "user", "content": "Summarize the openma docs."}
-    ]
+    "agent": "agent_abc123",
+    "environment_id": "env_lvqed06glbi3ent0",
+    "title": "research session"
   }'
 ```
+
+The response includes the new session's `id` (e.g. `sess_xyz`). Send the first user turn separately — see "Send a turn" below.
 
 ### Stream session events (SSE)
 
 ```bash
-curl -N "$OMA_BASE_URL/v1/sessions/sess_xyz/events" \
-  -H "Authorization: Bearer $OMA_API_KEY"
+curl -N "$OMA_BASE_URL/v1/sessions/sess_xyz/events/stream" \
+  -H "x-api-key: $OMA_API_KEY"
 ```
 
-The connection stays open. Each `data:` line is a JSON event. Common event types:
+The connection stays open. Each `data:` line is a single JSON event. The full event taxonomy is in [Reference → API Endpoints](/reference/api/); the streaming-specific ones are:
 
-- `message_start` / `message_delta` / `message_stop` — model output streaming
-- `tool_use` — model is calling a tool
-- `tool_result` — sandbox returned a result
-- `session_done` — final state
+| Event | When |
+|---|---|
+| `user.message` | Echo of the turn you posted |
+| `session.status_running` / `_idle` | Turn boundaries |
+| `agent.thinking_stream_start` / `_chunk` / `_stream_end` | Live extended-thinking deltas — chunk events carry `{ thinking_id, delta }` |
+| `agent.thinking` | Canonical thinking block (same `thinking_id` correlates) |
+| `agent.message_stream_start` / `_chunk` / `_stream_end` | Live assistant-text deltas — chunk events carry `{ message_id, delta }` |
+| `agent.message` | Canonical message (same `message_id` correlates) |
+| `agent.tool_use_input_stream_start` / `_chunk` / `_stream_end` | Live tool-input JSON streaming — chunk events carry `{ tool_use_id, delta }` |
+| `agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use` | Canonical tool call (id matches `tool_use_id`) |
+| `agent.tool_result` / `agent.mcp_tool_result` | Tool execution result |
+| `session.warning` | Recovery scan reconciled an interrupted stream / orphan tool_use after a runtime restart |
 
-You can reconnect at any time and the platform replays the full event log from the beginning (or from a `?after=<event_id>` cursor).
+Stream-lifecycle events (`*_stream_start`, `*_chunk`, `*_stream_end`) are broadcast over the wire but **not** persisted to the events log — the canonical event with the same correlation id is the source of truth. Replay clients only see the canonical events; live subscribers see both.
+
+You can reconnect at any time and the platform replays the persisted event log from the beginning (or pass `?after_seq=N` on `/v1/sessions/:id/events` for cursored JSON paging).
 
 <Aside type="tip" title="Resumable streams">
-  The session DO holds the canonical event log in SQLite. Drop your connection, reconnect days later — same stream. This is what makes long-running agents safe.
+  The session DO holds the canonical event log in SQLite. Drop your connection, reconnect days later — same stream. If a deploy / runtime restart kills a turn mid-stream, the cold-start recovery scan finalizes the partial as a single `agent.message` (with whatever chunks were buffered) and emits a `session.warning` so clients can flag it. Tool calls left without a result get a placeholder `agent.tool_result` injected so the next LLM turn doesn't 400.
 </Aside>
 
-### Send another turn into an existing session
+### Send a turn (chatbot one-shot)
+
+The chatbot-friendly endpoint posts the user message and streams the response in one HTTP call. The connection auto-closes when the turn finishes (`session.status_idle`).
 
 ```bash
-curl -X POST "$OMA_BASE_URL/v1/sessions/sess_xyz/messages" \
-  -H "Authorization: Bearer $OMA_API_KEY" \
+curl -N -X POST "$OMA_BASE_URL/v1/sessions/sess_xyz/messages" \
+  -H "x-api-key: $OMA_API_KEY" \
   -H "Content-Type: application/json" \
-  -d '{
-    "role": "user",
-    "content": "Now also include the integrations."
-  }'
+  -d '{ "content": "Now also include the integrations." }'
 ```
+
+`content` accepts a plain string (wrapped as a single text block) or a `ContentBlock[]` array (mix text + image + document). Returns `text/event-stream`.
+
+### Send a turn into a session that's already streaming elsewhere
+
+When you want fire-and-forget instead (e.g. you have a separate SSE consumer):
+
+```bash
+curl -X POST "$OMA_BASE_URL/v1/sessions/sess_xyz/events" \
+  -H "x-api-key: $OMA_API_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{ "events": [{ "type": "user.message", "content": [{ "type": "text", "text": "Now also include the integrations." }] }] }'
+```
+
+Returns `202` with no body — the SSE stream you already have open will receive the response events.
 
 ### Upload a file to a session
 
 ```bash
 curl -X POST "$OMA_BASE_URL/v1/files" \
-  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "x-api-key: $OMA_API_KEY" \
   -F "session_id=sess_xyz" \
   -F "file=@./report.pdf"
 ```

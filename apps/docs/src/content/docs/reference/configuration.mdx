@@ -138,7 +138,7 @@ interface SessionMeta {
 interface SessionEvent {
   id: string;
   session_id: string;
-  type: string;                  // 'message_start', 'tool_use', 'tool_result', etc.
+  type: string;                  // 'agent.message', 'agent.tool_use', 'agent.thinking', etc.
   data: unknown;
   created_at: string;
 }

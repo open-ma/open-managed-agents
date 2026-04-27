@@ -203,6 +203,134 @@ async function apiFetch<T = unknown>(config: Config, path: string, init?: Reques
   return res.json() as Promise<T>;
 }
 
+// ─── SSE helpers ───
+//
+// Two streaming endpoints, two helpers:
+//
+//   streamChat   — POST /v1/sessions/:id/messages with one user turn,
+//                  read text/event-stream until session.status_idle,
+//                  render text deltas inline + thinking deltas dimmed
+//                  + tool calls as one-line headers. Auto-closes on
+//                  the FIRST status_idle (server scopes the SSE to the
+//                  just-posted turn). Drops back to the prompt when done.
+//
+//   tailSession  — GET /v1/sessions/:id/events/stream, never closes;
+//                  prints every event as one JSON line. Pipe into jq.
+
+async function rawStream(
+  config: Config,
+  path: string,
+  init?: RequestInit,
+): Promise<Response> {
+  const res = await fetch(`${config.baseUrl}${path}`, {
+    ...init,
+    headers: {
+      "x-api-key": config.apiKey,
+      "user-agent": "Mozilla/5.0 (compatible; OpenManagedAgents-CLI/0.1; +https://openma.dev)",
+      ...init?.headers,
+    },
+  });
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`${res.status} ${res.statusText}: ${body}`);
+  }
+  return res;
+}
+
+async function* parseSSE(res: Response): AsyncIterable<Record<string, unknown>> {
+  const reader = res.body!.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return;
+    buf += dec.decode(value, { stream: true });
+    let i: number;
+    while ((i = buf.indexOf("\n\n")) !== -1) {
+      const chunk = buf.slice(0, i);
+      buf = buf.slice(i + 2);
+      const line = chunk.split("\n").find((l) => l.startsWith("data: "));
+      if (!line) continue;
+      try { yield JSON.parse(line.slice(6)) as Record<string, unknown>; }
+      catch { /* malformed — skip */ }
+    }
+  }
+}
+
+// ANSI styling — only when stdout is a tty; piped output stays plain so
+// `oma sessions chat ... | tee transcript.txt` produces a clean file.
+const tty = !!process.stdout.isTTY;
+const dim = (s: string) => (tty ? `\x1b[2m${s}\x1b[0m` : s);
+const cyan = (s: string) => (tty ? `\x1b[36m${s}\x1b[0m` : s);
+const yellow = (s: string) => (tty ? `\x1b[33m${s}\x1b[0m` : s);
+
+async function streamChat(config: Config, sessionId: string, text: string): Promise<void> {
+  const res = await rawStream(config, `/v1/sessions/${sessionId}/messages`, {
+    method: "POST",
+    headers: { "content-type": "application/json", accept: "text/event-stream" },
+    body: JSON.stringify({ content: text }),
+  });
+  let textOpen = false;       // are we mid-message-text on the current line?
+  let thinkOpen = false;      // are we mid-thinking on stderr?
+  for await (const ev of parseSSE(res)) {
+    const t = ev.type as string;
+    switch (t) {
+      case "agent.message_chunk":
+        process.stdout.write(String(ev.delta ?? ""));
+        textOpen = true;
+        break;
+      case "agent.message_stream_end":
+      case "agent.message":
+        if (textOpen) { process.stdout.write("\n"); textOpen = false; }
+        break;
+      case "agent.thinking_chunk":
+        if (!thinkOpen) {
+          process.stderr.write(dim("💭 "));
+          thinkOpen = true;
+        }
+        process.stderr.write(dim(String(ev.delta ?? "")));
+        break;
+      case "agent.thinking_stream_end":
+      case "agent.thinking":
+        if (thinkOpen) { process.stderr.write("\n"); thinkOpen = false; }
+        break;
+      case "agent.tool_use_input_stream_start":
+        process.stdout.write(cyan(`→ tool: ${(ev as { tool_name?: string }).tool_name ?? "?"}`) + dim(" preparing…\n"));
+        break;
+      case "agent.tool_use":
+      case "agent.mcp_tool_use":
+      case "agent.custom_tool_use":
+        process.stdout.write(cyan(`→ tool: ${ev.name}`) + " " + dim(JSON.stringify(ev.input ?? {})) + "\n");
+        break;
+      case "agent.tool_result":
+      case "agent.mcp_tool_result": {
+        const out = typeof ev.content === "string" ? ev.content : JSON.stringify(ev.content ?? "");
+        const trimmed = out.length > 280 ? out.slice(0, 280) + "…" : out;
+        process.stdout.write(dim("← ") + trimmed + "\n");
+        break;
+      }
+      case "session.warning":
+        process.stderr.write(yellow(`⚠ ${ev.source}: ${ev.message}`) + "\n");
+        break;
+      case "session.error":
+        process.stderr.write(yellow(`✗ error: ${ev.error}`) + "\n");
+        break;
+      case "session.status_idle":
+        if (textOpen) { process.stdout.write("\n"); textOpen = false; }
+        return;
+    }
+  }
+}
+
+async function tailSession(config: Config, sessionId: string): Promise<void> {
+  const res = await rawStream(config, `/v1/sessions/${sessionId}/events/stream`, {
+    headers: { accept: "text/event-stream" },
+  });
+  for await (const ev of parseSSE(res)) {
+    process.stdout.write(JSON.stringify(ev) + "\n");
+  }
+}
+
 // ─── Helpers ───
 
 function flag(args: string[], name: string): string | undefined {
@@ -620,12 +748,42 @@ const commands: Cmd[] = [
   },
   {
     group: "Sessions", match: ["sessions", "message"], needsArg: true,
-    usage: "oma sessions message <id> <text>", desc: "Send message to session",
+    usage: "oma sessions message <id> <text>", desc: "Fire-and-forget user message (no streaming back)",
     http: "POST   /v1/sessions/:id/events {events:[{type:\"user.message\",content:[{type:\"text\",text:\"...\"}]}]}",
     async run(config, args) {
       const text = args.slice(1).join(" ");
       await apiFetch(config, `/v1/sessions/${args[0]}/events`, { method: "POST", body: JSON.stringify({ events: [{ type: "user.message", content: [{ type: "text", text }] }] }) });
       console.log("Message sent.");
+    },
+  },
+  {
+    group: "Sessions", match: ["sessions", "chat"], needsArg: true,
+    usage: "oma sessions chat <id> <text>", desc: "Send a turn AND stream the reply token-by-token",
+    http: "POST   /v1/sessions/:id/messages {content:\"...\"}  (text/event-stream)",
+    async run(config, args) {
+      const text = args.slice(1).join(" ");
+      if (!text) { console.error("Usage: oma sessions chat <id> <text>"); process.exit(1); }
+      await streamChat(config, args[0], text);
+    },
+  },
+  {
+    group: "Sessions", match: ["sessions", "tail"], needsArg: true,
+    usage: "oma sessions tail <id>", desc: "Tail a session's full event stream (never closes)",
+    http: "GET    /v1/sessions/:id/events/stream  (text/event-stream)",
+    async run(config, args) {
+      await tailSession(config, args[0]);
+    },
+  },
+  {
+    group: "Sessions", match: ["sessions", "logs"], needsArg: true,
+    usage: "oma sessions logs <id>", desc: "Dump the full persisted event log as JSON",
+    http: "GET    /v1/sessions/:id/events?limit=1000",
+    async run(config, args) {
+      const { data } = await apiFetch<{ data: Array<{ seq: number; type: string; data: unknown; ts: number }> }>(
+        config,
+        `/v1/sessions/${args[0]}/events?limit=1000&order=asc`,
+      );
+      for (const e of data) console.log(JSON.stringify(e));
     },
   },
 
@@ -1419,7 +1577,8 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Agents", http: "POST   /v1/agents/:id/archive                  Archive agent" },
   { group: "Sessions", http: "GET    /v1/sessions/:id                        Get session (status, usage)" },
   { group: "Sessions", http: "GET    /v1/sessions/:id/events?limit=N         Get events (JSON)" },
-  { group: "Sessions", http: "GET    /v1/sessions/:id/stream                 Stream events (SSE)" },
+  { group: "Sessions", http: "GET    /v1/sessions/:id/events/stream          Tail events (SSE; never closes)" },
+  { group: "Sessions", http: "POST   /v1/sessions/:id/messages               Chat one-shot: post turn + stream reply (SSE; closes on idle)" },
   { group: "Sessions", http: "POST   /v1/sessions/:id/archive                Archive session" },
   { group: "Sessions", http: "DELETE /v1/sessions/:id                        Delete session" },
   { group: "Sessions", http: "POST   /v1/sessions/:id/files                  Promote sandbox file {path}" },
