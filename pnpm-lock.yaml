@@ -75,6 +75,9 @@ importers:
       '@open-managed-agents/environments-store':
         specifier: workspace:*
         version: link:../../packages/environments-store
+      '@open-managed-agents/event-log':
+        specifier: workspace:*
+        version: link:../../packages/event-log
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../../packages/files-store
@@ -344,6 +347,12 @@ importers:
         version: 5.1.9
 
   packages/evals-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/event-log:
     dependencies:
       '@open-managed-agents/shared':
         specifier: workspace:*
