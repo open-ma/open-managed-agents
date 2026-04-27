@@ -66,14 +66,14 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
 
 /** Run the base_snapshot prepare path: POST to the agent worker's
  *  /__internal/prepare-env over the SANDBOX_sandbox_default service
- *  binding. The agent worker has the SANDBOX DO namespace and runs
- *  the install + createBackup ASYNC, callbacking the env's
- *  /build-complete URL with the result. We just kick it off here. */
+ *  binding. The agent worker writes the install script + startProcess
+ *  inside the sandbox container, returns 202 immediately. The main
+ *  worker cron tick (apps/main/src/index.ts scheduled()) drives the
+ *  rest — checking for completion + triggering createBackup. */
 async function dispatchBaseSnapshotPrepare(
   env: Env,
   envConfig: EnvironmentConfig,
   tenantId: string,
-  requestUrl: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const binding = (env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
   if (!binding) {
@@ -83,8 +83,6 @@ async function dispatchBaseSnapshotPrepare(
   if (!internalToken) {
     return { ok: false, error: "INTERNAL_TOKEN secret not configured" };
   }
-  const url = new URL(requestUrl);
-  const callbackUrl = `${url.protocol}//${url.host}/v1/environments/${envConfig.id}/build-complete`;
   const res = await binding.fetch("https://internal/__internal/prepare-env", {
     method: "POST",
     headers: {
@@ -95,12 +93,18 @@ async function dispatchBaseSnapshotPrepare(
       env_id: envConfig.id,
       tenant_id: tenantId,
       config: envConfig.config,
-      callback_url: callbackUrl,
     }),
   });
   if (!res.ok) {
     const text = await res.text();
     return { ok: false, error: `dispatch returned ${res.status}: ${text.slice(0, 500)}` };
+  }
+  // 202 with {status: "building"} or 200 with {status: "error", ...}
+  // (apt rejection comes back with status=error inside a 200 — surface
+  // as a dispatch failure here).
+  const body = (await res.json()) as { status: string; error?: string };
+  if (body.status === "error") {
+    return { ok: false, error: body.error ?? "agent worker reported error without detail" };
   }
   return { ok: true };
 }
@@ -135,7 +139,7 @@ app.post("/", async (c) => {
 
   let row = initialRow;
   if (strategy === "base_snapshot") {
-    const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t, c.req.url);
+    const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t);
     if (!dispatch.ok) {
       row = await c.var.services.environments.update({
         tenantId: t,
@@ -297,7 +301,7 @@ app.put("/:id", async (c) => {
 
   if (configChanged || strategyChanged) {
     if (strategy === "base_snapshot") {
-      const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t, c.req.url);
+      const dispatch = await dispatchBaseSnapshotPrepare(c.env, toEnvironmentConfig(row), t);
       if (!dispatch.ok) {
         row = await c.var.services.environments.update({
           tenantId: t,

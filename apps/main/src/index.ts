@@ -129,5 +129,59 @@ export default {
         },
       ),
     );
+    // base_snapshot env-prep tick: scan envs that the prepare-env handler
+    // kicked off, probe each via the agent worker's /__internal/prep-tick,
+    // which runs createBackup once install.done is present and POSTs the
+    // handle to /v1/environments/:id/build-complete.
+    ctx.waitUntil(
+      tickBaseSnapshotPreps(env).then(
+        (n) => log({ op: "cron.tick_base_snapshot", checked: n }, "tickBaseSnapshotPreps ok"),
+        (err) => logError({ op: "cron.tick_base_snapshot", err }, "tickBaseSnapshotPreps failed"),
+      ),
+    );
   },
 };
+
+/**
+ * One cron tick over base_snapshot envs sitting in `building`. For each,
+ * fire-and-forget POST to the agent worker's prep-tick endpoint; the
+ * agent worker probes the prep sandbox, runs createBackup if ready, and
+ * callbacks `/v1/environments/:id/build-complete` with the handle.
+ *
+ * Does NOT await each tick — they're independent, and the cron
+ * waitUntil budget is shared with eval ticks. We dispatch all in
+ * parallel and let the agent worker's response come whenever.
+ */
+async function tickBaseSnapshotPreps(env: Env): Promise<number> {
+  const internalToken = (env as unknown as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
+  if (!internalToken) return 0;
+  const binding = (env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
+  if (!binding) return 0;
+
+  const result = await env.AUTH_DB
+    .prepare(
+      `SELECT id, tenant_id FROM environments
+        WHERE status = 'building' AND image_strategy = 'base_snapshot'
+        ORDER BY created_at ASC LIMIT 50`,
+    )
+    .all<{ id: string; tenant_id: string }>();
+  const rows = result.results ?? [];
+
+  await Promise.allSettled(
+    rows.map(async (r) => {
+      // Use a fake host since the binding routes by service, not URL.
+      const callbackUrl = `https://openma.dev/v1/environments/${r.id}/build-complete`;
+      const url = `https://internal/__internal/prep-tick/${r.id}?callback_url=${encodeURIComponent(callbackUrl)}`;
+      try {
+        await binding.fetch(url, {
+          method: "POST",
+          headers: { "x-internal-token": internalToken },
+        });
+      } catch {
+        // Surface failure summary at next tick — single-tick error
+        // shouldn't block other envs from advancing.
+      }
+    }),
+  );
+  return rows.length;
+}
