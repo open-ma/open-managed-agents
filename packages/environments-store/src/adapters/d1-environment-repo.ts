@@ -23,8 +23,8 @@ export class D1EnvironmentRepo implements EnvironmentRepo {
       .prepare(
         `INSERT INTO environments
            (id, tenant_id, name, description, status, sandbox_worker_name,
-            build_error, config, metadata, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+            build_error, config, metadata, image_strategy, image_handle, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         input.id,
@@ -36,6 +36,8 @@ export class D1EnvironmentRepo implements EnvironmentRepo {
         input.buildError,
         JSON.stringify(input.config),
         input.metadata !== null ? JSON.stringify(input.metadata) : null,
+        input.imageStrategy ?? null,
+        input.imageHandle !== undefined && input.imageHandle !== null ? JSON.stringify(input.imageHandle) : null,
         input.createdAt,
       )
       .run();
@@ -51,7 +53,8 @@ export class D1EnvironmentRepo implements EnvironmentRepo {
     const row = await this.db
       .prepare(
         `SELECT id, tenant_id, name, description, status, sandbox_worker_name,
-                build_error, config, metadata, created_at, updated_at, archived_at
+                build_error, config, metadata, image_strategy, image_handle,
+                created_at, updated_at, archived_at
          FROM environments
          WHERE id = ? AND tenant_id = ?`,
       )
@@ -66,10 +69,12 @@ export class D1EnvironmentRepo implements EnvironmentRepo {
   ): Promise<EnvironmentRow[]> {
     const sql = opts.includeArchived
       ? `SELECT id, tenant_id, name, description, status, sandbox_worker_name,
-                build_error, config, metadata, created_at, updated_at, archived_at
+                build_error, config, metadata, image_strategy, image_handle,
+                created_at, updated_at, archived_at
          FROM environments WHERE tenant_id = ? ORDER BY created_at ASC`
       : `SELECT id, tenant_id, name, description, status, sandbox_worker_name,
-                build_error, config, metadata, created_at, updated_at, archived_at
+                build_error, config, metadata, image_strategy, image_handle,
+                created_at, updated_at, archived_at
          FROM environments WHERE tenant_id = ? AND archived_at IS NULL
          ORDER BY created_at ASC`;
     const result = await this.db.prepare(sql).bind(tenantId).all<DbEnvironment>();
@@ -110,6 +115,14 @@ export class D1EnvironmentRepo implements EnvironmentRepo {
     if (update.metadata !== undefined) {
       sets.push("metadata = ?");
       binds.push(update.metadata !== null ? JSON.stringify(update.metadata) : null);
+    }
+    if (update.imageStrategy !== undefined) {
+      sets.push("image_strategy = ?");
+      binds.push(update.imageStrategy);
+    }
+    if (update.imageHandle !== undefined) {
+      sets.push("image_handle = ?");
+      binds.push(update.imageHandle !== null ? JSON.stringify(update.imageHandle) : null);
     }
     sets.push("updated_at = ?");
     binds.push(update.updatedAt);
@@ -164,6 +177,8 @@ interface DbEnvironment {
   build_error: string | null;
   config: string; // JSON
   metadata: string | null; // JSON
+  image_strategy: string | null;
+  image_handle: string | null; // JSON
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
@@ -180,6 +195,8 @@ function toRow(r: DbEnvironment): EnvironmentRow {
     build_error: r.build_error,
     config: JSON.parse(r.config) as EnvironmentConfig["config"],
     metadata: r.metadata !== null ? (JSON.parse(r.metadata) as Record<string, unknown>) : null,
+    image_strategy: (r.image_strategy as EnvironmentRow["image_strategy"]) ?? null,
+    image_handle: r.image_handle !== null ? (JSON.parse(r.image_handle) as Record<string, unknown>) : null,
     created_at: msToIso(r.created_at),
     updated_at: r.updated_at !== null ? msToIso(r.updated_at) : null,
     archived_at: r.archived_at !== null ? msToIso(r.archived_at) : null,
