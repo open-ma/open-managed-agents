@@ -7,7 +7,7 @@ import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
 import { buildBrowserTools, type BrowserSession } from "./browser-tools";
 
-const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "browser"];
+const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "browser", "schedule", "cancel_schedule", "list_schedules"];
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
@@ -326,6 +326,26 @@ export async function buildTools(
     /** Emit a SessionEvent into the trajectory stream. Used to record
      *  aux.model_call events from inside tool execution. */
     broadcastEvent?: (event: SessionEvent) => void;
+    /** Schedule a future wake-up of the current session. Backed by the
+     *  agents framework's durable scheduler in SessionDO. Exactly one of
+     *  delay_seconds | at | cron must be supplied. */
+    scheduleWakeup?: (args: {
+      delay_seconds?: number;
+      at?: string;
+      cron?: string;
+      prompt: string;
+    }) => Promise<{ id: string; fire_at?: string; cron?: string; kind: "one_shot" | "cron" }>;
+    /** Cancel a previously scheduled wakeup by id. */
+    cancelWakeup?: (id: string) => Promise<{ cancelled: boolean }>;
+    /** List pending wakeup schedules for THIS session. Filters out the
+     *  framework's internal recoverEventQueue / pollBackgroundTasks rows. */
+    listWakeups?: () => Array<{
+      id: string;
+      fire_at?: string;
+      cron?: string;
+      prompt: string;
+      kind: "one_shot" | "cron";
+    }>;
   }
 ): Promise<Record<string, any>> {
   const enabled = getEnabledTools(agentConfig.tools);
@@ -862,6 +882,73 @@ export async function buildTools(
         // ── Step 3: No aux configured (or content too small) — return raw ──
         return truncate(markdown);
       }),
+    });
+  }
+
+  // --- Schedule (self-wakeup) ---
+  // Lets an agent pause-and-resume itself without holding a sandbox open:
+  // schedule a future user.message + drainEventQueue, backed by the agents
+  // framework's durable scheduler on SessionDO. Reminder flows, follow-ups,
+  // periodic monitors. Cron schedules recur until cancel_schedule.
+  if (env?.scheduleWakeup && enabled.has("schedule")) {
+    tools.schedule = tool({
+      description:
+        "Schedule THIS session to wake up later. Provide exactly one of delay_seconds, at (ISO-8601 timestamp), or cron (5-field cron). " +
+        "When the timer fires, `prompt` is injected as a user message and the agent loop resumes from there. " +
+        "Use for reminders (\"check the build in 10 minutes\"), follow-ups, or periodic monitors. " +
+        "Cron schedules repeat until cancelled via cancel_schedule. Returns the schedule id.",
+      inputSchema: z
+        .object({
+          delay_seconds: z
+            .number()
+            .int()
+            .min(5)
+            .max(7 * 24 * 3600)
+            .optional()
+            .describe("Wake up after this many seconds (5 .. 7d)."),
+          at: z
+            .string()
+            .datetime()
+            .optional()
+            .describe("Wake up at this ISO-8601 timestamp (UTC, e.g. 2026-04-28T09:00:00Z)."),
+          cron: z
+            .string()
+            .min(9)
+            .max(120)
+            .optional()
+            .describe("Recurring schedule, 5-field cron (e.g. \"0 9 * * *\" = 9am daily)."),
+          prompt: z
+            .string()
+            .min(1)
+            .max(4000)
+            .describe("Message injected on wakeup — tell future-you why."),
+        })
+        .refine(
+          (v) => [v.delay_seconds, v.at, v.cron].filter((x) => x != null).length === 1,
+          "Provide exactly one of delay_seconds | at | cron",
+        ),
+      execute: safe(async (args) => env.scheduleWakeup!(args)),
+    });
+  }
+
+  if (env?.cancelWakeup && enabled.has("cancel_schedule")) {
+    tools.cancel_schedule = tool({
+      description:
+        "Cancel a previously scheduled wakeup by id. Returns { cancelled: true } if a wakeup row was removed, " +
+        "or false if the id is unknown / already fired / not a wakeup schedule.",
+      inputSchema: z.object({
+        id: z.string().min(1).describe("Schedule id returned by the schedule tool"),
+      }),
+      execute: safe(async ({ id }) => env.cancelWakeup!(id)),
+    });
+  }
+
+  if (env?.listWakeups && enabled.has("list_schedules")) {
+    tools.list_schedules = tool({
+      description:
+        "List all pending wakeup schedules for THIS session: id, fire_at, cron (if recurring), prompt, kind.",
+      inputSchema: z.object({}),
+      execute: safe(async () => ({ schedules: env.listWakeups!() })),
     });
   }
 
