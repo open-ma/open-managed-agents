@@ -1,6 +1,7 @@
 import { Agent } from "agents";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import { ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/cf-do";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -265,14 +266,10 @@ export class SessionDO extends Agent<Env, SessionState> {
 
   private ensureSchema() {
     if (this.initialized) return;
-    this.ctx.storage.sql.exec(`
-      CREATE TABLE IF NOT EXISTS events (
-        seq INTEGER PRIMARY KEY AUTOINCREMENT,
-        type TEXT NOT NULL,
-        data TEXT NOT NULL,
-        ts TEXT DEFAULT (datetime('now'))
-      )
-    `);
+    // Schema lives in the cf-do adapter so OMA's SessionDO doesn't have
+    // to know SQLite syntax. Adapter is idempotent — CREATE TABLE IF NOT
+    // EXISTS — so calling on every fetch hot path is fine.
+    ensureEventLogSchema(this.ctx.storage.sql);
     this.initialized = true;
   }
 
