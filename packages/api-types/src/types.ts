@@ -221,6 +221,41 @@ export interface UserCustomToolResultEvent extends EventBase {
 export interface AgentMessageEvent extends EventBase {
   type: "agent.message";
   content: ContentBlock[];
+  /** Identifier shared with the in-flight stream events
+   *  (`agent.message_chunk` / `_stream_start` / `_stream_end`) that
+   *  produced this final committed message. Clients group all four
+   *  event types by this id to render a single message. Set when the
+   *  message came from a streaming step (the common case); legacy /
+   *  non-streamed messages may omit it. */
+  message_id?: string;
+}
+
+export interface AgentMessageStreamStartEvent extends EventBase {
+  type: "agent.message_stream_start";
+  message_id: string;
+}
+
+/** A token-level delta emitted while an LLM step's text is being
+ *  generated. NOT persisted to the events log (`runtime.broadcastChunk`
+ *  bypasses `history.append`); only broadcast over WS/SSE and buffered
+ *  in the streams table for restart recovery. Clients append `delta` to
+ *  the in-progress text for `message_id`; once the matching
+ *  `agent.message` (same id) lands, replace the in-progress text with
+ *  the final canonical content. */
+export interface AgentMessageChunkEvent extends EventBase {
+  type: "agent.message_chunk";
+  message_id: string;
+  delta: string;
+}
+
+export interface AgentMessageStreamEndEvent extends EventBase {
+  type: "agent.message_stream_end";
+  message_id: string;
+  /** completed = LLM finished cleanly. aborted = explicit abort
+   *  (user.interrupt or harness retry). interrupted = recovery scan on
+   *  cold start detected the runtime was killed mid-stream. */
+  status: "completed" | "aborted" | "interrupted";
+  error_text?: string;
 }
 
 export interface AgentThinkingEvent extends EventBase {
@@ -504,6 +539,9 @@ export type SessionEvent =
   | UserCustomToolResultEvent
   | UserDefineOutcomeEvent
   | AgentMessageEvent
+  | AgentMessageStreamStartEvent
+  | AgentMessageChunkEvent
+  | AgentMessageStreamEndEvent
   | AgentThinkingEvent
   | AgentCustomToolUseEvent
   | AgentToolUseEvent

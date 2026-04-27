@@ -1,27 +1,49 @@
 // Postgres adapter — interface declared so consumers can wire it via
-// factory but the actual implementation lands in a follow-up.
+// factory but the actual implementation lands when a self-hosted
+// deployment actually needs it.
 //
-// Notes for whoever fills this in:
+// Schema notes (suggested):
 //
-// - Schema (suggested): one shared `session_events` table partitioned
-//   by session_id, NOT a per-session table. Indexes:
+//   CREATE TABLE session_events (
+//     session_id TEXT NOT NULL,
+//     seq        INTEGER NOT NULL,             -- per-session counter
+//     type       TEXT NOT NULL,
+//     data       JSONB NOT NULL,
+//     ts         BIGINT NOT NULL,              -- unix ms
 //     PRIMARY KEY (session_id, seq)
-//     INDEX idx_session_events_type (session_id, type, seq DESC)
+//   );
+//   CREATE INDEX idx_session_events_type
+//     ON session_events (session_id, type, seq DESC);
 //
-// - `seq` should be assigned via a per-session counter, not the global
-//   serial — otherwise sessions interleave their seqs which breaks
-//   recovery logic that depends on dense seq order. Use a small
-//   subquery: `(SELECT COALESCE(MAX(seq),0)+1 FROM session_events
-//   WHERE session_id=$1)`. Acceptable race for OMA's use (single-
-//   threaded SessionDO equivalents in Postgres deployments).
+//   -- seq via per-session subquery on insert; OK race for OMA's single-
+//   -- threaded SessionDO equivalent. Acceptable conflict semantics:
+//   -- INSERT ... ON CONFLICT (session_id, seq) DO NOTHING + retry.
 //
-// - Stream buffer should live in a separate table
-//   (`session_stream_buffers`) with one row per session — ON CONFLICT
-//   DO UPDATE for the put path. Adapter is free to batch puts
-//   internally to amortize the network roundtrip cost; the contract
-//   is "the latest put wins, eventually".
+//   CREATE TABLE session_streams (
+//     session_id   TEXT NOT NULL,
+//     message_id   TEXT NOT NULL,
+//     status       TEXT NOT NULL,
+//     chunks_json  JSONB NOT NULL DEFAULT '[]'::JSONB,
+//     started_at   BIGINT NOT NULL,
+//     completed_at BIGINT,
+//     error_text   TEXT,
+//     PRIMARY KEY (session_id, message_id)
+//   );
+//   CREATE INDEX idx_session_streams_status
+//     ON session_streams (session_id, status);
+//
+//   -- appendChunk via:
+//   --   UPDATE session_streams
+//   --      SET chunks_json = chunks_json || to_jsonb($1::TEXT)
+//   --    WHERE session_id = $2 AND message_id = $3 AND status = 'streaming';
+//
+// The PG adapter is free to batch appendChunk internally to amortize the
+// cross-network roundtrip cost; the contract is "the latest put wins,
+// eventually". In CF's case the cf-do adapter has ms-level latency so
+// batching is unnecessary; in PG with a 50ms roundtrip, batching every
+// 100ms keeps streaming feel intact.
 
-import type { EventLogRepo, StreamBufferRepo } from "../ports";
+import type { EventLogRepo, StreamRepo } from "../ports";
 
 export class PgEventLog implements EventLogRepo {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
@@ -37,15 +59,17 @@ export class PgEventLog implements EventLogRepo {
   getFirstEventAfter(): never { throw new Error("not implemented"); }
 }
 
-export class PgStreamBuffer implements StreamBufferRepo {
+export class PgStreamRepo implements StreamRepo {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   constructor(_dbUrl: string, _sessionId: string) {
     throw new Error(
-      "PgStreamBuffer: not implemented yet — see packages/event-log/src/pg/index.ts header for schema notes",
+      "PgStreamRepo: not implemented yet — see packages/event-log/src/pg/index.ts header for schema notes",
     );
   }
 
-  async put(): Promise<void> { throw new Error("not implemented"); }
+  async start(): Promise<void> { throw new Error("not implemented"); }
+  async appendChunk(): Promise<void> { throw new Error("not implemented"); }
+  async finalize(): Promise<void> { throw new Error("not implemented"); }
   async get(): Promise<never> { throw new Error("not implemented"); }
-  async clear(): Promise<void> { throw new Error("not implemented"); }
+  async listByStatus(): Promise<never> { throw new Error("not implemented"); }
 }

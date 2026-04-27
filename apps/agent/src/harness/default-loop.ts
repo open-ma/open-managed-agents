@@ -1,7 +1,8 @@
-import { generateText, stepCountIs } from "ai";
+import { streamText, stepCountIs } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { HarnessInterface, HarnessContext, HarnessRuntime } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
+import { generateEventId } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
@@ -345,15 +346,43 @@ export class DefaultHarness implements HarnessInterface {
     const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
     runtime.broadcast({ type: "span.model_request_start", model: modelId });
 
-    // 5. Run agent loop with retry + timeout + prompt caching
+    // 5. Run agent loop with retry + timeout + prompt caching.
+    //
+    // Streaming mode: streamText emits text-delta chunks via onChunk as
+    // tokens arrive. We forward each delta through `runtime.broadcastChunk`
+    // (broadcast + persist to streams table; NOT to events log) so chatbot
+    // clients see live token-by-token rendering.
+    //
+    // Message boundary: one logical "message" = one step's text part.
+    // We mint a fresh `currentMessageId` lazily on first text-delta of
+    // each step, broadcast a stream_start, accumulate chunks, then on
+    // onStepFinish (which still owns the persisted `agent.message`)
+    // broadcast stream_end with the same id and finalize the stream
+    // row. The same id lands on the `agent.message` event so clients
+    // can swap chunk display for canonical content.
     const result = await withRetry(async (signal) => {
-      const r = await generateText({
+      let currentMessageId: string | null = null;
+
+      const r = streamText({
       model,
       system: cached.system,
       messages: finalMessages,
       tools: cached.tools,
       stopWhen: stepCountIs(100),
       abortSignal: signal,
+
+      onChunk: ({ chunk }) => {
+        if (chunk.type === "text-delta") {
+          if (!currentMessageId) {
+            currentMessageId = generateEventId();
+            // Fire-and-forget: AI SDK doesn't await onChunk. The stream_start
+            // event lands at clients via WS broadcast before chunks via the
+            // same single-threaded DO send queue.
+            void runtime.broadcastStreamStart(currentMessageId);
+          }
+          void runtime.broadcastChunk(currentMessageId, chunk.text);
+        }
+      },
 
       onStepFinish: async (step) => {
         // Iterate step.content[] in order to preserve LLM output ordering
@@ -374,18 +403,25 @@ export class DefaultHarness implements HarnessInterface {
                 providerOptions: part.providerMetadata as Record<string, unknown> | undefined,
               });
               break;
-            case "text":
+            case "text": {
               // Trim trailing whitespace at write time. Anthropic's @ai-sdk
               // provider trims the LAST text of the LAST assistant message
               // before sending; without our normalization, the same stored
               // assistant text would render with vs. without `\n` depending on
               // whether it's the tail of the conversation, busting the cache
               // on the next turn.
+              const messageId = currentMessageId ?? generateEventId();
+              if (currentMessageId) {
+                await runtime.broadcastStreamEnd(currentMessageId, "completed");
+              }
               runtime.broadcast({
                 type: "agent.message",
+                message_id: messageId,
                 content: [{ type: "text", text: part.text.replace(/\s+$/, "") }],
-              });
+              } as SessionEvent);
+              currentMessageId = null; // reset for next step
               break;
+            }
             case "tool-call":
               emitToolCallEvent(runtime, tools, part);
               break;
@@ -401,19 +437,33 @@ export class DefaultHarness implements HarnessInterface {
         }
       },
     });
+      // streamText returns a StreamTextResult; consumeStream forces the
+      // pipeline to drain so onChunk + onStepFinish fully fire before
+      // we read final fields.
+      await r.consumeStream();
+      const finishReason = await r.finishReason;
+      const finalText = await r.text;
+      const toolCalls = await r.toolCalls;
+      const toolResults = await r.toolResults;
+      const usage = await r.usage;
+
       // Silent-stop detection: model returned finish_reason="stop" with empty
       // text and no tool calls mid-conversation. Empirically a transient model
       // hiccup (seen on MiniMax). Throw with a "silent_stop" message so withRetry's
       // isTransient regex catches it and retries the call. Same level as a
       // network error; uses the same MAX_RETRIES + backoff budget.
       if (
-        r.finishReason === "stop"
-        && (!r.text || r.text.trim().length === 0)
-        && (!r.toolCalls || r.toolCalls.length === 0)
+        finishReason === "stop"
+        && (!finalText || finalText.trim().length === 0)
+        && (!toolCalls || toolCalls.length === 0)
       ) {
+        // The current stream (if any) is bogus — abort it before retry mints a fresh id.
+        if (currentMessageId) {
+          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
+        }
         throw new Error("silent_stop: model returned finish_reason=stop with empty text and no tool calls");
       }
-      return r;
+      return { finishReason, text: finalText, toolCalls, toolResults, usage };
     }, MAX_RETRIES, runtime.abortSignal);
 
 

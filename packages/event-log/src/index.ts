@@ -1,5 +1,5 @@
 export type {
   EventLogRepo,
-  StreamBufferRepo,
-  StreamBuffer,
+  StreamRepo,
+  StreamRow,
 } from "./ports";

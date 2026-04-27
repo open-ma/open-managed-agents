@@ -1,10 +1,10 @@
-// In-memory adapter — for unit tests and the in-memory thread history
+// In-memory adapters — for unit tests and the in-memory thread history
 // case (sub-agent runs that don't need persistence). Faster than the CF
 // SQLite adapter in tests because there's no SQL round-trip; same shape
 // so consumer code is identical.
 
 import type { SessionEvent } from "@open-managed-agents/shared";
-import type { EventLogRepo, StreamBufferRepo, StreamBuffer } from "../ports";
+import type { EventLogRepo, StreamRepo, StreamRow } from "../ports";
 
 export class InMemoryEventLog implements EventLogRepo {
   private events: Array<{ seq: number; type: string; data: string }> = [];
@@ -48,18 +48,47 @@ export class InMemoryEventLog implements EventLogRepo {
   }
 }
 
-export class InMemoryStreamBuffer implements StreamBufferRepo {
-  private buffer: StreamBuffer | null = null;
+export class InMemoryStreamRepo implements StreamRepo {
+  private rows = new Map<string, StreamRow>();
 
-  async put(buffer: StreamBuffer): Promise<void> {
-    this.buffer = { ...buffer, chunks: [...buffer.chunks] };
+  async start(messageId: string, startedAt: number): Promise<void> {
+    if (this.rows.has(messageId)) return; // idempotent
+    this.rows.set(messageId, {
+      message_id: messageId,
+      status: "streaming",
+      chunks: [],
+      started_at: startedAt,
+    });
   }
 
-  async get(): Promise<StreamBuffer | null> {
-    return this.buffer ? { ...this.buffer, chunks: [...this.buffer.chunks] } : null;
+  async appendChunk(messageId: string, delta: string): Promise<void> {
+    const row = this.rows.get(messageId);
+    if (!row || row.status !== "streaming") return;
+    row.chunks.push(delta);
   }
 
-  async clear(): Promise<void> {
-    this.buffer = null;
+  async finalize(
+    messageId: string,
+    status: "completed" | "aborted" | "interrupted",
+    errorText?: string,
+  ): Promise<void> {
+    const row = this.rows.get(messageId);
+    if (!row) return;
+    row.status = status;
+    row.completed_at = Date.now();
+    row.error_text = errorText;
+  }
+
+  async get(messageId: string): Promise<StreamRow | null> {
+    const r = this.rows.get(messageId);
+    if (!r) return null;
+    return { ...r, chunks: [...r.chunks] };
+  }
+
+  async listByStatus(status: StreamRow["status"]): Promise<StreamRow[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.status === status)
+      .sort((a, b) => a.started_at - b.started_at)
+      .map((r) => ({ ...r, chunks: [...r.chunks] }));
   }
 }
