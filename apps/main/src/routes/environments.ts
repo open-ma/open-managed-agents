@@ -178,8 +178,26 @@ app.post("/", async (c) => {
   return c.json(toEnvironmentConfig(row), 201);
 });
 
+// GET /v1/environments/:id/__debug — pull the prep sandbox's filesystem
+// + log + process snapshot. Gated by INTERNAL_TOKEN — same secret the
+// build-complete callback uses. For ops use only.
+app.get("/:id/__debug", async (c) => {
+  const internalToken = (c.env as unknown as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
+  const provided = c.req.header("x-internal-token");
+  if (!internalToken || !provided || provided !== internalToken) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  const id = c.req.param("id");
+  const binding = (c.env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
+  if (!binding) return c.json({ error: "no SANDBOX_sandbox_default binding" }, 500);
+  const res = await binding.fetch(`https://internal/__internal/prep-debug/${id}`, {
+    method: "GET",
+    headers: { "x-internal-token": internalToken },
+  });
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // POST /v1/environments/:id/build-complete — callback from GitHub Actions
-// Authenticated by the same x-api-key as all other endpoints (via authMiddleware)
 app.post("/:id/build-complete", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");

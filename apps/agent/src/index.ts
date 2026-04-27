@@ -203,6 +203,64 @@ app.post("/__internal/prep-tick/:env_id", async (c) => {
   return c.json({ status: "callback_sent_ready" });
 });
 
+/**
+ * GET /__internal/prep-debug/:env_id — read-only inspector for an
+ * in-flight prep sandbox. Pulls the install log + filesystem state +
+ * running processes so we can see what the container is actually
+ * doing instead of guessing from outside silence.
+ *
+ * Auth: x-internal-token (same as the other internal endpoints).
+ * Side effect: spins up the prep sandbox if it was evicted (one
+ * exec is enough). Doesn't destroy.
+ */
+app.get("/__internal/prep-debug/:env_id", async (c) => {
+  const expected = (c.env as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
+  const provided = c.req.header("x-internal-token");
+  if (!expected || !provided || provided !== expected) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  const envId = c.req.param("env_id");
+  const { getSandbox: cfGetSandbox } = await import("@cloudflare/sandbox");
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const sandbox = cfGetSandbox(c.env.SANDBOX as any, `prep-${envId}`) as any;
+
+  // Single composite exec keeps it one round-trip — multiple sandbox
+  // calls in this handler would risk the same Canceled-mid-chain
+  // pattern we already debugged.
+  const cmd = [
+    "echo '=== ls /home/env-cache/" + envId + " ==='",
+    `ls -la /home/env-cache/${envId} 2>&1 || echo '(not found)'`,
+    "echo '=== install.done | install.failed ==='",
+    `[ -f /home/env-cache/${envId}/install.done ]   && echo 'done   YES' || echo 'done   NO'`,
+    `[ -f /home/env-cache/${envId}/install.failed ] && echo 'failed YES' || echo 'failed NO'`,
+    "echo '=== install.failed contents ==='",
+    `[ -f /home/env-cache/${envId}/install.failed ] && cat /home/env-cache/${envId}/install.failed || echo '(no failure marker)'`,
+    "echo '=== /tmp/openma-prep.log (last 4KB) ==='",
+    `[ -f /tmp/openma-prep.log ] && tail -c 4096 /tmp/openma-prep.log || echo '(no log)'`,
+    "echo '=== /tmp/openma-prep.sh ==='",
+    `[ -f /tmp/openma-prep.sh ] && cat /tmp/openma-prep.sh || echo '(no script)'`,
+    "echo '=== ps -e (running) ==='",
+    `ps -e o pid,etime,comm 2>&1 | head -40`,
+    "echo '=== uv / pip versions ==='",
+    "which uv && uv --version 2>&1 || echo '(no uv)'",
+  ].join(" && ");
+
+  try {
+    const result = await sandbox.exec(cmd, { timeout: 30_000 });
+    return c.json({
+      env_id: envId,
+      exit_code: result.exitCode,
+      stdout: result.stdout,
+      stderr: result.stderr,
+    });
+  } catch (err) {
+    return c.json({
+      env_id: envId,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+});
+
 /** Compose the shell script that installs all per-env packages into
  *  /home/env-cache/<env_id>/, writes env.json + activate.sh, and
  *  flips install.done | install.failed for the cron tick to read.
