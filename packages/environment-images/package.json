@@ -1,0 +1,15 @@
+{
+  "name": "@open-managed-agents/environment-images",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./memory": "./src/adapters/memory/index.ts",
+    "./cf-base-snapshot": "./src/adapters/cf-base-snapshot/index.ts",
+    "./cf-dockerfile": "./src/adapters/cf-dockerfile/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/api-types": "workspace:*"
+  }
+}

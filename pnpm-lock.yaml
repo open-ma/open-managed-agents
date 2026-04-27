@@ -331,6 +331,12 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/environment-images:
+    dependencies:
+      '@open-managed-agents/api-types':
+        specifier: workspace:*
+        version: link:../api-types
+
   packages/environments-store:
     dependencies:
       '@open-managed-agents/shared':
