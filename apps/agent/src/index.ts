@@ -95,6 +95,11 @@ app.post("/__internal/prepare-env", async (c) => {
     await sandbox.writeFile("/tmp/openma-prep.sh", installScript);
     await sandbox.startProcess("sh /tmp/openma-prep.sh");
   } catch (err) {
+    // Kickoff failed — destroy the prep sandbox immediately so the
+    // container slot doesn't leak. Without this, every transient
+    // error here costs us a slot until CF eviction (which is opaque
+    // and slow).
+    try { await sandbox.destroy?.(); } catch { /* swallow */ }
     return c.json({
       status: "error",
       error: `kickoff failed: ${err instanceof Error ? err.message : String(err)}`,
