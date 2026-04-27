@@ -244,6 +244,7 @@ export class SessionDO extends Agent<Env, SessionState> {
    * Wasteful but correct; cheaper than locking.
    */
   private async lazyPrepareBaseSnapshot(envId: string, sandbox: CloudflareSandbox): Promise<void> {
+    console.log(`[lazyPrepare] start env=${envId}`);
     const envConfig = await this.getEnvConfig(envId);
     const pkgs = (envConfig?.config.packages ?? {}) as { pip?: string[]; npm?: string[]; cargo?: string[]; gem?: string[]; go?: string[]; apt?: string[] };
     if (pkgs.apt && pkgs.apt.length > 0) {
@@ -255,19 +256,19 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
 
     const cacheDir = `/home/env-cache/${envId}`;
-
-    // Run install commands sequentially — these are sandbox.exec
-    // round-trips into the SessionDO's sandbox. Inside a DO request,
-    // they're not subject to the 30s subrequest cap.
+    console.log(`[lazyPrepare] mkdir ${cacheDir}`);
     await sandbox.exec(`mkdir -p ${cacheDir} && chmod -R u+rw ${cacheDir}`, 60_000);
     if (pkgs.pip && pkgs.pip.length > 0) {
+      console.log(`[lazyPrepare] uv venv`);
       await sandbox.exec(`uv venv ${cacheDir}/.venv --python 3.12`, 120_000);
+      console.log(`[lazyPrepare] uv pip install ${pkgs.pip.join(",")}`);
       await sandbox.exec(
         `uv pip install --python ${cacheDir}/.venv/bin/python ${pkgs.pip.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`,
         600_000,
       );
     }
     if (pkgs.npm && pkgs.npm.length > 0) {
+      console.log(`[lazyPrepare] npm install ${pkgs.npm.join(",")}`);
       await sandbox.exec(`npm install --prefix ${cacheDir} --no-audit --no-fund ${pkgs.npm.map((p) => `'${p.replace(/'/g, "'\\''")}'`).join(" ")}`, 600_000);
     }
     if (pkgs.cargo && pkgs.cargo.length > 0) {
@@ -289,25 +290,25 @@ export class SessionDO extends Agent<Env, SessionState> {
       GOPATH: `${cacheDir}/.go`,
       PYTHONPATH: `${cacheDir}/.venv/lib/python3.12/site-packages`,
     };
+    console.log(`[lazyPrepare] writeFile env.json`);
     await sandbox.writeFile(`${cacheDir}/env.json`, JSON.stringify(envVars, null, 2));
 
-    // Snapshot the cache dir. createBackup completes in seconds for
-    // ~50MB pip install — fits in DO request budget.
+    console.log(`[lazyPrepare] createImageSnapshot`);
     const backup = await sandbox.createImageSnapshot(cacheDir, `env-${envId}`, 90 * 24 * 60 * 60);
+    console.log(`[lazyPrepare] createImageSnapshot ok backup_id=${backup.id}`);
 
-    // Persist the handle so future sessions of this env restore
-    // instead of re-installing.
+    console.log(`[lazyPrepare] persist handle to D1`);
     const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
     await services.environments.update({
       tenantId: this.state.tenant_id,
       environmentId: envId,
       imageHandle: { backup, env_vars: envVars, cache_dir: cacheDir, prepared_at: Date.now() },
     });
+    console.log(`[lazyPrepare] D1 updated`);
 
-    // Activate for THIS session — install just happened, no need to
-    // restoreBackup. setEnvVars is enough to put the cached binaries
-    // on PATH for the harness's subsequent execs.
+    console.log(`[lazyPrepare] setEnvVars`);
     await sandbox.setEnvVars(envVars);
+    console.log(`[lazyPrepare] DONE env=${envId}`);
   }
 
   /**
@@ -1406,6 +1407,7 @@ export class SessionDO extends Agent<Env, SessionState> {
             }
           }
         } catch (err) {
+          console.log(`[image_strategy] FAILED env=${envId}: ${err instanceof Error ? err.message : err}\n${err instanceof Error ? err.stack : ""}`);
           logWarn(
             { op: "session_do.image_strategy", env_id: envId, err },
             "image strategy handler failed; falling back to install-on-boot",
