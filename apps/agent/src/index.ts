@@ -320,6 +320,14 @@ function buildInstallScript(cacheDir: string, pkgs: Record<string, string[] | un
     `  ( echo "exitcode=$rc"; tail -c 4096 /tmp/openma-prep.log ) > ${cacheDir}/install.failed`,
     "fi",
     "",
+    "# CRITICAL — keep the container warm. CF Sandbox containers are",
+    "# evicted when no process is running (idle), and /home + /tmp are",
+    "# ephemeral — eviction wipes our cached install. Block forever in",
+    "# a sleep loop so the container stays alive until prep-tick's",
+    "# sandbox.destroy() kills this process. The sleep here is wide",
+    "# (60s × forever) — the loop just needs to exist, not poll fast.",
+    "while sleep 60; do :; done",
+    "",
   ].join("\n");
 }
 
