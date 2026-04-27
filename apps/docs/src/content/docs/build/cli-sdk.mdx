@@ -1,16 +1,16 @@
 ---
 title: CLI & SDK
-description: The open-managed-agents Node CLI and the @open-managed-agents/api-types package — your two ways to talk to the API without curl.
+description: The open-managed-agents Node CLI and the @openma/sdk TypeScript client — your two ways to talk to the API without curl.
 ---
 
 import { Tabs, TabItem, Aside, LinkCard } from '@astrojs/starlight/components';
 
 openma ships two developer-facing packages:
 
-- **`open-managed-agents`** — a Node CLI for scripting against the API.
-- **`@open-managed-agents/api-types`** — pure-TypeScript DTOs of the wire format. Zero workspace dependencies; safe to import from a CLI, a Worker, the Console, or your own integrations.
+- **`@openma/cli`** — a Node CLI for scripting against the API.
+- **`@openma/sdk`** — a typed TypeScript client. Wraps REST + SSE; one async iterator per turn; runs anywhere `fetch` exists (Node ≥ 20, Bun, Deno, browsers, Cloudflare Workers).
 
-Both live in this repo (`packages/cli`, `packages/api-types`).
+Both live in this repo (`packages/cli`, `packages/sdk`).
 
 ## CLI
 
@@ -19,17 +19,17 @@ Both live in this repo (`packages/cli`, `packages/api-types`).
 <Tabs syncKey="pkg-mgr">
   <TabItem label="npm">
     ```bash
-    npm i -g open-managed-agents
+    npm i -g @openma/cli
     ```
   </TabItem>
   <TabItem label="pnpm">
     ```bash
-    pnpm add -g open-managed-agents
+    pnpm add -g @openma/cli
     ```
   </TabItem>
   <TabItem label="bun">
     ```bash
-    bun add -g open-managed-agents
+    bun add -g @openma/cli
     ```
   </TabItem>
 </Tabs>
@@ -79,134 +79,119 @@ Run `oma --help` or `oma <command> --help` for the full surface.
   CLI subcommands accept `--json` and emit machine-readable output. Pipe into `jq` for ad-hoc analysis.
 </Aside>
 
-## SDK (api-types)
+## SDK
 
-`@open-managed-agents/api-types` is a tiny package: just the TypeScript types for every request and response shape. No HTTP client, no runtime — bring your own `fetch`.
+`@openma/sdk` is a typed TypeScript client. Discriminated-union events, async-iterator streaming, runs on Node ≥ 20, Bun, Deno, browsers, and Cloudflare Workers (anywhere `fetch` exists).
 
 ### Install
 
 <Tabs syncKey="pkg-mgr">
   <TabItem label="npm">
     ```bash
-    npm i @open-managed-agents/api-types
+    npm i @openma/sdk
     ```
   </TabItem>
   <TabItem label="pnpm">
     ```bash
-    pnpm add @open-managed-agents/api-types
+    pnpm add @openma/sdk
     ```
   </TabItem>
   <TabItem label="bun">
     ```bash
-    bun add @open-managed-agents/api-types
+    bun add @openma/sdk
     ```
   </TabItem>
 </Tabs>
 
-### Use
+### Quick start
 
 ```ts
-import type {
-  AgentConfig,
-  CreateAgentRequest,
-  CreateAgentResponse,
-  SessionEvent,
-  SessionMeta,
-  ContentBlock,
-} from '@open-managed-agents/api-types';
+import { OpenMA } from "@openma/sdk";
 
-const baseUrl = process.env.OMA_BASE_URL!;
-const apiKey = process.env.OMA_API_KEY!;
+const oma = new OpenMA({ apiKey: process.env.OMA_API_KEY! });
 
-async function createAgent(req: CreateAgentRequest): Promise<CreateAgentResponse> {
-  const res = await fetch(`${baseUrl}/v1/agents`, {
-    method: 'POST',
-    headers: {
-      'x-api-key': apiKey,
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(req),
-  });
-  if (!res.ok) throw new Error(`HTTP ${res.status}`);
-  return res.json();
+// Streaming chat — async iterator over typed events.
+for await (const ev of oma.sessions.chat(sessionId, "Hello")) {
+  if (ev.type === "agent.message_chunk") process.stdout.write(ev.delta);
 }
 ```
 
-### Why no client library?
+### Three streams, one channel
 
-Because everything is HTTP and SSE — well-supported in every runtime (Node, Bun, Deno, browsers, Workers). Wrapping it would just hide what's actually happening. The DTOs give you autocomplete and compile-time safety; the wire format is documented in [REST API](/build/api/) and [Reference → API Endpoints](/reference/api/).
-
-If you want a typed wrapper, the CLI source (`packages/cli/src/`) is a small reference implementation you can lift.
-
-## Talking to the SSE stream
-
-Two ways to drive a turn:
-
-**(a) Chatbot one-shot**: post the user message *and* receive the response stream in a single request. Auto-closes when the turn ends.
+Text, thinking, and tool-input deltas all flow over the same SSE iterator. Each carries a correlation id (`message_id`, `thinking_id`, `tool_use_id`) that matches the eventually-committed canonical event:
 
 ```ts
-import type { SessionEvent } from '@open-managed-agents/api-types';
-
-const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/messages`, {
-  method: 'POST',
-  headers: { 'x-api-key': apiKey, 'Content-Type': 'application/json' },
-  body: JSON.stringify({ content: 'Hello!' }),
-});
-
-for await (const event of parseSSE<SessionEvent>(res)) {
-  switch (event.type) {
-    case 'agent.message_chunk':
-      // Live token deltas — render incrementally; replace at the end
-      // when the canonical agent.message lands with the same message_id.
-      process.stdout.write(event.delta);
-      break;
-    case 'agent.thinking_chunk':
-      // Live extended-thinking deltas. Same idea, correlate by thinking_id.
-      process.stderr.write(event.delta);
-      break;
-    case 'agent.tool_use_input_chunk':
-      // Live tool-input JSON deltas. Partial JSON; render in a code block.
-      // Drop the in-flight render when agent.tool_use lands with the same id.
-      break;
-    case 'agent.message':
-      // Canonical text message — same message_id as the chunks above.
-      // Drop your in-flight buffer; this content is the source of truth.
-      break;
-    case 'session.status_idle':
-      return; // turn done; the server will also close the stream
-  }
-}
-
-async function* parseSSE<T>(res: Response): AsyncIterable<T> {
-  const reader = res.body!.getReader();
-  const dec = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) return;
-    buf += dec.decode(value, { stream: true });
-    let i;
-    while ((i = buf.indexOf('\n\n')) !== -1) {
-      const chunk = buf.slice(0, i); buf = buf.slice(i + 2);
-      const line = chunk.split('\n').find(l => l.startsWith('data: '));
-      if (line) yield JSON.parse(line.slice(6)) as T;
-    }
+for await (const ev of oma.sessions.chat(sessionId, "Use bash to print uptime")) {
+  switch (ev.type) {
+    case "agent.message_chunk":      // live text delta
+      process.stdout.write(ev.delta); break;
+    case "agent.thinking_chunk":     // live extended-thinking delta
+      process.stderr.write(`💭 ${ev.delta}`); break;
+    case "agent.tool_use":           // canonical tool call (id matches any prior input chunks)
+      console.log(`→ ${ev.name}`, ev.input); break;
+    case "agent.tool_result":
+      console.log(`← ${ev.content}`); break;
+    case "session.warning":          // recovery scan flagged an interrupted stream
+      console.warn(`⚠ ${ev.source}: ${ev.message}`); break;
+    case "session.status_idle":
+      return;                        // turn done; server closes the stream
   }
 }
 ```
 
-**(b) Tail a long-lived session**: same `parseSSE` helper, but use `GET /v1/sessions/:id/events/stream` instead — never closes, replays history on connect, sees every future event.
+### chatComplete — accumulated turn
+
+When you don't need token-by-token rendering:
 
 ```ts
-const res = await fetch(`${baseUrl}/v1/sessions/${sessionId}/events/stream`, {
-  headers: { 'x-api-key': apiKey, 'Accept': 'text/event-stream' },
+const reply = await oma.sessions.chatComplete(sessionId, "Hello", {
+  onText: (delta) => process.stdout.write(delta), // optional incremental hook
 });
-for await (const event of parseSSE<SessionEvent>(res)) {
-  // ...same switch as above
+
+console.log(reply.text);          // assembled assistant text
+console.log(reply.thinking);      // string[] — one per reasoning block
+console.log(reply.toolCalls);     // {id, name, input}[]
+console.log(reply.toolResults);   // {tool_use_id, content, is_error?}[]
+```
+
+### tail — long-lived monitor
+
+```ts
+// Replays history on connect, then streams every future event. Never
+// closes; pass an AbortSignal or break out to stop.
+for await (const ev of oma.sessions.tail(sessionId, { signal: ac.signal })) {
+  console.log(ev.type, ev);
 }
 ```
 
-The CLI's `oma sessions chat` and `oma sessions tail` are both small wrappers around this pattern.
+### Errors
+
+```ts
+import { OpenMAError } from "@openma/sdk";
+
+try {
+  await oma.sessions.get("sess-bogus");
+} catch (err) {
+  if (err instanceof OpenMAError) {
+    console.error(err.status, err.body); // typed body when the server returns JSON
+    if (err.status === 404) { /* ... */ }
+  }
+}
+```
+
+### Resources covered
+
+| Resource | Methods |
+|---|---|
+| `oma.agents` | `list`, `get`, `create`, `update`, `delete` |
+| `oma.sessions` | `list`, `get`, `create`, `chat`, `chatComplete`, `tail`, `events`, `message`, `interrupt`, `archive`, `delete` |
+| `oma.environments` | `list`, `get`, `create`, `delete` |
+
+More resources land per release — file an issue if something you need is missing.
+
+<Aside type="tip" title="Or just call fetch">
+  Every endpoint is plain JSON or SSE. If you want zero dependencies, point `fetch` at the [REST API](/build/api/) directly — the SDK is sugar, not a requirement. The `@openma/cli` source (`packages/cli/src/`) is a small reference implementation you can lift.
+</Aside>
 
 ## Where to go next
 

@@ -1,0 +1,92 @@
+name: Publish SDK
+
+# Publishes @openma/sdk to npm via OIDC trusted publisher (no NPM_TOKEN
+# required). The trust relationship is configured on npmjs.com:
+#   Package: @openma/sdk
+#   Repo:    open-ma/open-managed-agents
+#   Workflow filename: publish-sdk.yml
+#   Environment: production
+#
+# To use:
+#   - Manual: Actions → "Publish SDK" → Run workflow → pick dist-tag
+#   - Tag push: git tag sdk-v0.1.0-beta.0 && git push --tags
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'npm dist-tag (beta, latest, next, etc.)'
+        type: string
+        default: 'beta'
+        required: true
+  push:
+    tags:
+      - 'sdk-v*'
+
+concurrency:
+  group: publish-sdk-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # Same constraint as the CLI workflow: npm 11.5.1+ for OIDC
+          # publish auto-detection. Node 24 ships with that npm by default.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Confirm npm has OIDC support
+        run: |
+          NPM_VER=$(npm --version)
+          echo "npm version: $NPM_VER"
+          node -e "
+            const [maj,min,pat] = process.argv[1].split('.').map(Number);
+            const ok = maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1)));
+            if (!ok) { console.error('Need npm >= 11.5.1 for OIDC publish'); process.exit(1); }
+          " "$NPM_VER"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build SDK
+        run: pnpm --filter @openma/sdk build
+
+      - name: Publish to npm
+        run: |
+          cd packages/sdk
+          npm publish --tag "${TAG}" --provenance --access public
+        env:
+          TAG: ${{ inputs.tag || 'beta' }}
+          # Clear the placeholder NODE_AUTH_TOKEN setup-node writes so
+          # npm falls back to OIDC (otherwise it sends "XXXXX-XXXXX-..."
+          # as a literal token and the registry returns a 404).
+          NODE_AUTH_TOKEN: ''
+
+      - name: Summary
+        run: |
+          {
+            echo "## Published @openma/sdk"
+            echo ""
+            echo "- **Version**: \`$(node -p "require('./packages/sdk/package.json').version")\`"
+            echo "- **Tag**: \`${TAG}\`"
+            echo "- **Install**: \`npm i @openma/sdk@${TAG}\`"
+            echo "- **Page**: https://www.npmjs.com/package/@openma/sdk"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          TAG: ${{ inputs.tag || 'beta' }}
