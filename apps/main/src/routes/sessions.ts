@@ -888,6 +888,31 @@ app.get("/:id/events", async (c) => {
   return handleJSONEvents(c, c.req.param("id"));
 });
 
+// POST /v1/sessions/:id/__debug_recovery__ — ops-only forwarder for the
+// SessionDO recovery probe. Body forwards as-is. Both layers re-check
+// X-Debug-Token against env.DEBUG_TOKEN — the main-worker check fails
+// fast on stack traces / errors before any DO state is touched.
+app.post("/:id/__debug_recovery__", async (c) => {
+  const expected = (c.env as { DEBUG_TOKEN?: string }).DEBUG_TOKEN;
+  const provided = c.req.header("x-debug-token");
+  if (!expected || !provided || expected !== provided) {
+    return c.json({ error: "Forbidden" }, 403);
+  }
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
+  if (!binding) return c.json({ error }, status ?? 500);
+  const fwd = new Request(`https://sandbox/sessions/${id}/__debug_recovery__`, {
+    method: "POST",
+    headers: { "content-type": "application/json", "x-debug-token": provided },
+    body: await c.req.text(),
+  });
+  const res = await binding.fetch(fwd);
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
 // POST /v1/sessions/:id/messages — combined "send user message + stream
 // response" in one HTTP call. Chatbot-friendly. Body: { content: string |
 // ContentBlock[] }. Response: text/event-stream of every event from this

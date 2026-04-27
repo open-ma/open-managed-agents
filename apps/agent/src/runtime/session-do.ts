@@ -748,6 +748,58 @@ export class SessionDO extends Agent<Env, SessionState> {
       return new Response("Unknown event type", { status: 400 });
     }
 
+    // POST /__debug_recovery__ — gated test endpoint that lets ops verify
+    // recoverInterruptedState fires correctly against a real production
+    // SessionDO. Body lists orphan rows to inject (streaming row with
+    // chunks, builtin/mcp/custom tool_use), then the recovery scan runs
+    // synchronously and the report is returned in the response. The next
+    // GET /events shows the resulting reconciliation events.
+    //
+    // Auth: requires the X-Debug-Token header to match env.DEBUG_TOKEN
+    // (set as a wrangler secret in environments where this should work).
+    // 401s if either side is unset, so prod-without-secret is safe.
+    if (request.method === "POST" && url.pathname === "/__debug_recovery__") {
+      const expected = (this.env as { DEBUG_TOKEN?: string }).DEBUG_TOKEN;
+      const provided = request.headers.get("x-debug-token");
+      if (!expected || !provided || expected !== provided) {
+        return new Response("Forbidden", { status: 403 });
+      }
+      this.ensureSchema();
+      if (!this.streams) {
+        return new Response("streams unavailable", { status: 500 });
+      }
+      type Seed =
+        | { kind: "stream"; message_id: string; chunks?: string[] }
+        | { kind: "tool_use"; id: string; name?: string; tool_kind?: "builtin" | "mcp" | "custom" };
+      const body = (await request.json().catch(() => ({}))) as { seed?: Seed[] };
+      const seeds = body.seed ?? [];
+      const history = new SqliteHistory(this.ctx.storage.sql);
+      for (const s of seeds) {
+        if (s.kind === "stream") {
+          await this.streams.start(s.message_id, Date.now());
+          for (const ch of s.chunks ?? []) await this.streams.appendChunk(s.message_id, ch);
+        } else {
+          const k = s.tool_kind ?? "builtin";
+          const evType =
+            k === "mcp" ? "agent.mcp_tool_use" :
+            k === "custom" ? "agent.custom_tool_use" :
+            "agent.tool_use";
+          history.append({ type: evType, id: s.id, name: s.name ?? "test_tool" } as SessionEvent);
+        }
+      }
+      const report = await runRecovery(this.streams, history);
+      // Broadcast warnings same as the cold-start path.
+      for (const w of report.warnings) {
+        this.broadcastEvent({
+          type: "session.warning",
+          source: w.source,
+          message: w.message,
+          details: w.details,
+        } as SessionEvent);
+      }
+      return Response.json({ seeded: seeds.length, ...report });
+    }
+
     // GET /ws — WebSocket upgrade
     if (request.method === "GET" && url.pathname === "/ws") {
       if (request.headers.get("Upgrade") !== "websocket") {
