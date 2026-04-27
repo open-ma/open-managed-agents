@@ -14,10 +14,21 @@ const app = new Hono<{
   Variables: { tenant_id: string; services: Services };
 }>();
 
+/** Resolve which image strategy a request asks for. New envs default
+ *  to `base_snapshot`. Existing envs (from before this field existed)
+ *  read `null` and we treat as `dockerfile` for back-compat — they
+ *  already have per-env workers deployed. */
+type ImageStrategy = "base_snapshot" | "dockerfile";
+function pickStrategy(requested?: string | null, existing?: string | null): ImageStrategy {
+  if (requested === "base_snapshot" || requested === "dockerfile") return requested;
+  if (existing === "base_snapshot" || existing === "dockerfile") return existing;
+  return "base_snapshot";
+}
+
 /**
- * Trigger sandbox worker build via GitHub Actions.
- * Dispatches deploy-sandbox.yml with callback_url.
- * CI calls back to /build-complete when done, authenticated by shared secret.
+ * Trigger sandbox worker build via GitHub Actions (legacy / dockerfile mode).
+ * Dispatches deploy-sandbox.yml with callback_url. CI calls back to
+ * /build-complete when done.
  */
 async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: string): Promise<void> {
   if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) return;
@@ -53,6 +64,47 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
   }
 }
 
+/** Run the base_snapshot prepare path: POST to the agent worker's
+ *  /__internal/prepare-env over the SANDBOX_sandbox_default service
+ *  binding. The agent worker has the SANDBOX DO namespace and runs
+ *  the install + createBackup; we get back a PrepareResult to persist. */
+async function prepareBaseSnapshot(
+  env: Env,
+  envConfig: EnvironmentConfig,
+  tenantId: string,
+): Promise<{
+  status: "ready" | "building" | "error";
+  handle?: Record<string, unknown>;
+  sandbox_worker_name?: string;
+  error?: string;
+}> {
+  const binding = (env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
+  if (!binding) {
+    return { status: "error", error: "SANDBOX_sandbox_default binding not configured" };
+  }
+  const internalToken = (env as unknown as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
+  if (!internalToken) {
+    return { status: "error", error: "INTERNAL_TOKEN secret not configured" };
+  }
+  const res = await binding.fetch("https://internal/__internal/prepare-env", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-internal-token": internalToken,
+    },
+    body: JSON.stringify({
+      env_id: envConfig.id,
+      tenant_id: tenantId,
+      config: envConfig.config,
+    }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    return { status: "error", error: `prepare-env returned ${res.status}: ${text.slice(0, 500)}` };
+  }
+  return res.json();
+}
+
 // POST /v1/environments — create environment
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
@@ -60,35 +112,61 @@ app.post("/", async (c) => {
     name: string;
     description?: string;
     config: EnvironmentConfig["config"];
+    image_strategy?: "base_snapshot" | "dockerfile";
   };
 
   if (!body.name) {
     return c.json({ error: "name is required" }, 400);
   }
 
-  const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
+  const strategy = pickStrategy(body.image_strategy);
 
+  // Create the row first so we have an env_id to pass to the strategy.
+  // status starts at "building"; the strategy result flips it to ready/error.
   const initialRow = await c.var.services.environments.create({
     tenantId: t,
     name: body.name,
     description: body.description,
     config: body.config || { type: "cloud" },
-    status: canBuild ? "building" : "ready",
-    sandboxWorkerName: canBuild ? null : "sandbox-default",
+    status: "building",
+    sandboxWorkerName: null,
+    imageStrategy: strategy,
   });
 
   let row = initialRow;
-  if (canBuild) {
-    try {
-      await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
-    } catch (e) {
-      console.log(`[env] triggerBuild failed: ${e instanceof Error ? e.message : String(e)}`);
+  if (strategy === "base_snapshot") {
+    const prep = await prepareBaseSnapshot(c.env, toEnvironmentConfig(row), t);
+    row = await c.var.services.environments.update({
+      tenantId: t,
+      environmentId: row.id,
+      status: prep.status === "building" ? "building" : prep.status,
+      sandboxWorkerName: prep.sandbox_worker_name ?? "sandbox-default",
+      buildError: prep.error ?? null,
+      imageHandle: prep.handle ?? null,
+    });
+  } else {
+    // dockerfile strategy: dispatch CI as before. status stays "building"
+    // until /build-complete callback flips it.
+    const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
+    if (!canBuild) {
       row = await c.var.services.environments.update({
         tenantId: t,
         environmentId: row.id,
-        status: "error",
-        buildError: e instanceof Error ? e.message : String(e),
+        status: "ready",
+        sandboxWorkerName: "sandbox-default",
       });
+    } else {
+      try {
+        await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
+      } catch (e) {
+        console.log(`[env] triggerBuild failed: ${e instanceof Error ? e.message : String(e)}`);
+        row = await c.var.services.environments.update({
+          tenantId: t,
+          environmentId: row.id,
+          status: "error",
+          buildError: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
   }
 
@@ -159,7 +237,7 @@ app.get("/:id", async (c) => {
   return c.json(toEnvironmentConfig(row));
 });
 
-// PUT /v1/environments/:id — update environment (re-triggers build if config changed)
+// PUT /v1/environments/:id — update environment (re-prepares image if config changed)
 app.put("/:id", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
@@ -170,6 +248,7 @@ app.put("/:id", async (c) => {
     name?: string;
     description?: string;
     config?: EnvironmentConfig["config"];
+    image_strategy?: "base_snapshot" | "dockerfile";
   };
 
   const patch: Parameters<typeof c.var.services.environments.update>[0] = {
@@ -186,30 +265,42 @@ app.put("/:id", async (c) => {
     patch.config = body.config;
   }
 
-  if (configChanged) {
-    const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
-    if (canBuild) {
-      patch.status = "building";
-      patch.sandboxWorkerName = null;
-      patch.buildError = null;
-    } else {
-      patch.status = "ready";
-      patch.sandboxWorkerName = existing.sandbox_worker_name ?? "sandbox-default";
-    }
+  // Strategy switch is a re-prepare too — different code path = new image.
+  const strategyChanged = body.image_strategy !== undefined && body.image_strategy !== existing.image_strategy;
+  const strategy = pickStrategy(body.image_strategy, existing.image_strategy);
+  if (strategyChanged) patch.imageStrategy = strategy;
+
+  if (configChanged || strategyChanged) {
+    patch.status = "building";
+    patch.buildError = null;
+    patch.imageHandle = null;
+    if (strategy === "dockerfile") patch.sandboxWorkerName = null;
   }
 
   let row = await c.var.services.environments.update(patch);
 
-  if (configChanged && row.status === "building") {
-    try {
-      await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
-    } catch (e) {
+  if (configChanged || strategyChanged) {
+    if (strategy === "base_snapshot") {
+      const prep = await prepareBaseSnapshot(c.env, toEnvironmentConfig(row), t);
       row = await c.var.services.environments.update({
         tenantId: t,
         environmentId: id,
-        status: "error",
-        buildError: e instanceof Error ? e.message : String(e),
+        status: prep.status === "building" ? "building" : prep.status,
+        sandboxWorkerName: prep.sandbox_worker_name ?? "sandbox-default",
+        buildError: prep.error ?? null,
+        imageHandle: prep.handle ?? null,
       });
+    } else {
+      try {
+        await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
+      } catch (e) {
+        row = await c.var.services.environments.update({
+          tenantId: t,
+          environmentId: id,
+          status: "error",
+          buildError: e instanceof Error ? e.message : String(e),
+        });
+      }
     }
   }
 

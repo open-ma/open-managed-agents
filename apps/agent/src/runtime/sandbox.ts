@@ -143,6 +143,19 @@ export class CloudflareSandbox implements SandboxExecutor {
     await sandbox.setEnvVars(envVars);
   }
 
+  /**
+   * Restore a snapshot created by CfBaseSnapshotStrategy.prepare().
+   * Called once at boot for envs using image_strategy=base_snapshot.
+   * The handle's `backup` field is the {id, dir} pair from
+   * createBackup(); the platform stored it in env_row.image_handle
+   * and SessionDO passes it back here.
+   */
+  async restoreImageSnapshot(handle: { backup: { id: string; dir: string }; env_vars: Record<string, string> }): Promise<void> {
+    const sandbox = await this.getSandbox();
+    await sandbox.restoreBackup(handle.backup);
+    await sandbox.setEnvVars(handle.env_vars);
+  }
+
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {
     this.commandSecrets.set(commandPrefix, secrets);
   }
