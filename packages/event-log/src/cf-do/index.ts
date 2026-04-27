@@ -191,4 +191,8 @@ export function ensureSchema(sql: SqlStorage): void {
   sql.exec(`
     CREATE INDEX IF NOT EXISTS idx_streams_status ON streams(status, started_at)
   `);
+  // Idempotent cleanup of the previous single-row stream buffer table
+  // that the prior StreamBufferRepo adapter created. Safe no-op when the
+  // DO never had it.
+  sql.exec(`DROP TABLE IF EXISTS stream_buffer`);
 }
