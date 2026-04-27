@@ -209,6 +209,26 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
+   * Fetch the env's CURRENT image_handle from the live DB. NOT cached
+   * in environment_snapshot — the snapshot is frozen at session
+   * create, but the handle moves with re-prepare (env packages
+   * change). Always restore from the latest handle so old sessions
+   * of a re-prepared env don't try to restore from a deleted backup.
+   */
+  private async getEnvImageHandle(envId: string): Promise<{
+    image_strategy: "base_snapshot" | "dockerfile" | null;
+    image_handle: Record<string, unknown> | null;
+  } | null> {
+    const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
+    const row = await services.environments.get({
+      tenantId: this.state.tenant_id,
+      environmentId: envId,
+    });
+    if (!row) return null;
+    return { image_strategy: row.image_strategy, image_handle: row.image_handle };
+  }
+
+  /**
    * Resolve all credentials for the listed vaults. Prefers the pre-fetched
    * snapshot from /init; falls back to KV list/get loops if absent.
    */
@@ -398,6 +418,150 @@ export class SessionDO extends Agent<Env, SessionState> {
   async recoverEventQueue(): Promise<void> {
     this.ensureSchema();
     await this.drainEventQueue();
+  }
+
+  /**
+   * Schedule a future wake-up of THIS session. Backed by the agents framework's
+   * durable scheduler (SQLite-persisted, survives DO eviction). When the timer
+   * fires, `onScheduledWakeup` injects a synthetic user.message tagged with
+   * `metadata.harness="schedule"`, which kicks the harness loop back into
+   * "running" via the same path /event POST takes for user messages
+   * (lines 721-730).
+   *
+   * Exactly one of delay_seconds | at | cron must be supplied. Cron schedules
+   * recur until cancelled via cancelWakeup(id).
+   */
+  async scheduleWakeup(args: {
+    delay_seconds?: number;
+    at?: string;
+    cron?: string;
+    prompt: string;
+  }): Promise<{ id: string; fire_at?: string; cron?: string; kind: "one_shot" | "cron" }> {
+    if (this.state.status === "terminated") {
+      throw new Error("session is terminated; cannot schedule wakeup");
+    }
+    const provided = [args.delay_seconds, args.at, args.cron].filter((x) => x != null);
+    if (provided.length !== 1) {
+      throw new Error("must provide exactly one of delay_seconds | at | cron");
+    }
+    if (!args.prompt || !args.prompt.trim()) {
+      throw new Error("prompt is required");
+    }
+
+    let when: number | Date | string;
+    let kind: "one_shot" | "cron";
+    if (typeof args.delay_seconds === "number") {
+      when = args.delay_seconds;
+      kind = "one_shot";
+    } else if (args.at) {
+      const d = new Date(args.at);
+      if (Number.isNaN(d.getTime())) throw new Error(`invalid 'at' timestamp: ${args.at}`);
+      when = d;
+      kind = "one_shot";
+    } else {
+      when = args.cron!;
+      kind = "cron";
+    }
+
+    const sched = await this.schedule(when, "onScheduledWakeup" as keyof this, {
+      prompt: args.prompt,
+      scheduled_at: new Date().toISOString(),
+      kind,
+    });
+
+    const fireAt = typeof sched.time === "number" ? new Date(sched.time * 1000).toISOString() : undefined;
+
+    // Trajectory event mirroring span.background_task_scheduled (line 1532).
+    // Untyped wire type — the SessionEvent union doesn't list span.* events;
+    // they pass through broadcast/SSE without strict checks.
+    this.broadcastEvent({
+      type: "span.wakeup_scheduled",
+      schedule_id: sched.id,
+      fire_at: fireAt,
+      cron: kind === "cron" ? args.cron : undefined,
+      kind,
+    } as unknown as SessionEvent);
+
+    return {
+      id: sched.id,
+      fire_at: fireAt,
+      cron: kind === "cron" ? args.cron : undefined,
+      kind,
+    };
+  }
+
+  /**
+   * Callback invoked by the agents framework when a wakeup schedule fires.
+   * Mirrors the /event POST handler's user.message path (lines 721-730):
+   * persist the synthetic message, arm a recoverEventQueue safety net, and
+   * kick drain (no-await — drain handles its own concurrency guard).
+   */
+  async onScheduledWakeup(payload: {
+    prompt: string;
+    scheduled_at: string;
+    kind: "one_shot" | "cron";
+  }): Promise<void> {
+    if (this.state.status === "terminated") {
+      // Skip silently — terminated sessions should not be resurrected.
+      // For cron schedules the row stays in agents-fw storage; ops can
+      // cancel via list/cancel tools or a future REST surface.
+      return;
+    }
+    const event: UserMessageEvent = {
+      type: "user.message",
+      content: [{ type: "text", text: payload.prompt }],
+      metadata: {
+        harness: "schedule",
+        kind: "wakeup",
+        wakeup_kind: payload.kind,
+        scheduled_at: payload.scheduled_at,
+        fired_at: new Date().toISOString(),
+      },
+    };
+    this.persistAndBroadcastEvent(event);
+    try { await this.schedule(5, "recoverEventQueue" as keyof this); } catch {}
+    this.drainEventQueue();
+  }
+
+  /**
+   * Cancel a previously scheduled wakeup by id. Returns whether a row was
+   * actually removed (false = id not found / already fired / not a wakeup).
+   */
+  async cancelWakeup(id: string): Promise<{ cancelled: boolean }> {
+    if (!id) return { cancelled: false };
+    // Defense: only cancel if it's a wakeup schedule, so an agent can't
+    // cancel internal recoverEventQueue / pollBackgroundTasks rows.
+    const sched = this.getSchedule(id);
+    if (!sched || sched.callback !== "onScheduledWakeup") {
+      return { cancelled: false };
+    }
+    const ok = await this.cancelSchedule(id);
+    return { cancelled: !!ok };
+  }
+
+  /**
+   * List pending wakeup schedules for THIS session. Filters on
+   * `callback === "onScheduledWakeup"` so the agent never sees the
+   * framework's internal recoverEventQueue / pollBackgroundTasks rows.
+   */
+  listWakeups(): Array<{
+    id: string;
+    fire_at?: string;
+    cron?: string;
+    prompt: string;
+    kind: "one_shot" | "cron";
+  }> {
+    type WakeupPayload = { prompt?: string; kind?: "one_shot" | "cron" };
+    const schedules = this.getSchedules<WakeupPayload>();
+    return schedules
+      .filter((s) => s.callback === "onScheduledWakeup")
+      .map((s) => ({
+        id: s.id,
+        fire_at: typeof s.time === "number" ? new Date(s.time * 1000).toISOString() : undefined,
+        cron: s.type === "cron" ? s.cron : undefined,
+        prompt: s.payload?.prompt ?? "",
+        kind: s.payload?.kind ?? "one_shot",
+      }));
   }
 
   /**
@@ -1123,9 +1287,39 @@ export class SessionDO extends Agent<Env, SessionState> {
         await sandbox.mountWorkspace();
       }
 
-      // Install environment packages if configured
+      // Apply image strategy. base_snapshot = restore the env's
+      // pre-installed package cache from the CF snapshot; dockerfile
+      // (or legacy null) = skip — packages were baked into the per-env
+      // worker image. The packages-install loop below only runs for
+      // legacy / dockerfile envs that didn't have a snapshot path.
       const envId = this.state.environment_id;
-      if (envId) {
+      let snapshotRestored = false;
+      if (envId && sandbox instanceof CloudflareSandbox) {
+        try {
+          const handleRow = await this.getEnvImageHandle(envId);
+          if (
+            handleRow?.image_strategy === "base_snapshot"
+            && handleRow.image_handle
+            && (handleRow.image_handle as { backup?: unknown }).backup
+          ) {
+            await sandbox.restoreImageSnapshot(
+              handleRow.image_handle as { backup: { id: string; dir: string }; env_vars: Record<string, string> },
+            );
+            snapshotRestored = true;
+          }
+        } catch (err) {
+          logWarn(
+            { op: "session_do.restore_image_snapshot", env_id: envId, err },
+            "image snapshot restore failed; falling back to install-on-boot",
+          );
+          // Fall through to the install loop below.
+        }
+      }
+
+      // Install environment packages if configured. Skipped when the
+      // base_snapshot restore above succeeded — the packages are
+      // already in the cache dir.
+      if (envId && !snapshotRestored) {
         const envConfig = await this.getEnvConfig(envId);
         if (envConfig) {
           const pkgs = envConfig.config?.packages;
@@ -1408,6 +1602,9 @@ export class SessionDO extends Agent<Env, SessionState> {
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
           broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
+          scheduleWakeup: (a) => this.scheduleWakeup(a),
+          cancelWakeup: (id) => this.cancelWakeup(id),
+          listWakeups: () => this.listWakeups(),
         });
 
         // Find the original tool definition (before always_ask stripping)
@@ -1689,6 +1886,9 @@ export class SessionDO extends Agent<Env, SessionState> {
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
+      scheduleWakeup: (a) => this.scheduleWakeup(a),
+      cancelWakeup: (id) => this.cancelWakeup(id),
+      listWakeups: () => this.listWakeups(),
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
       },
@@ -1855,6 +2055,9 @@ export class SessionDO extends Agent<Env, SessionState> {
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
+      scheduleWakeup: (a) => this.scheduleWakeup(a),
+      cancelWakeup: (id) => this.cancelWakeup(id),
+      listWakeups: () => this.listWakeups(),
       delegateToAgent: async (agentId: string, message: string) => {
         return this.runSubAgent(agentId, message, history, sandbox);
       },
