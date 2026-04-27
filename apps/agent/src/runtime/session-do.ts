@@ -6,6 +6,7 @@ import {
   ensureSchema as ensureEventLogSchema,
 } from "@open-managed-agents/event-log/cf-do";
 import type { StreamRepo } from "@open-managed-agents/event-log";
+import { recoverInterruptedState as runRecovery } from "./recovery";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -335,123 +336,26 @@ export class SessionDO extends Agent<Env, SessionState> {
     };
   }
 
-  /** Cold-start reconciliation. Two kinds of orphans:
-   *
-   *   1. Streaming `agent.message` runs that died mid-LLM. The chunks
-   *      are in the streams table but the final `agent.message` event
-   *      never landed. Append a partial message + warning so the
-   *      harness sees a clean turn boundary.
-   *
-   *   2. `agent.tool_use` (built-in or MCP) without a matching
-   *      `tool_result` event. Anthropic strictly requires every tool
-   *      use be followed by a result; without one, the next LLM call
-   *      400s. Inject an "interrupted by maintenance restart"
-   *      placeholder result + warning. The agent's loop-stop guidance
-   *      caps any retry storm.
-   *
-   * Custom tool uses (`agent.custom_tool_use` paired with
-   * `user.custom_tool_result`) are NOT auto-resolved here — those are
-   * driven by the user/SDK and shouldn't be silently completed by the
-   * server. They surface as a separate warning so the client can act.
-   */
+  /** Cold-start reconciliation. Pure logic lives in `recoverInterruptedState`
+   *  (see ./recovery.ts) so it's testable end-to-end with in-memory adapters.
+   *  This wrapper just glues it to DO storage + WS broadcast. */
   private async recoverInterruptedState(): Promise<void> {
     if (!this.streams) return;
     const history = new SqliteHistory(this.ctx.storage.sql);
-
-    // 1. Stream recovery
     try {
-      const interrupted = await this.streams.listByStatus("streaming");
-      for (const s of interrupted) {
-        const partial = s.chunks.join("");
-        history.append({
-          type: "agent.message",
-          message_id: s.message_id,
-          content: [
-            { type: "text", text: partial || "(interrupted by maintenance restart)" },
-          ],
-        } as SessionEvent);
-        await this.streams.finalize(s.message_id, "interrupted");
+      const { warnings } = await runRecovery(this.streams, history);
+      for (const w of warnings) {
         this.broadcastEvent({
           type: "session.warning",
-          source: "stream_interrupted",
-          message: "LLM stream was cut short by a server restart",
-          details: { message_id: s.message_id, partial_length: partial.length },
+          source: w.source,
+          message: w.message,
+          details: w.details,
         } as SessionEvent);
       }
     } catch (err) {
       logWarn(
-        { op: "session_do.recover.stream_scan", err },
-        "stream recovery scan failed; continuing",
-      );
-    }
-
-    // 2. Orphan tool_use recovery
-    try {
-      const all = history.getEvents();
-      const useTypes = new Map<
-        string,
-        { type: "agent.tool_use" | "agent.mcp_tool_use" | "agent.custom_tool_use"; name?: string }
-      >();
-      const resolved = new Set<string>();
-      for (const e of all) {
-        const ev = e as { type: string; id?: string; name?: string; tool_use_id?: string; mcp_tool_use_id?: string };
-        switch (ev.type) {
-          case "agent.tool_use":
-          case "agent.mcp_tool_use":
-          case "agent.custom_tool_use":
-            if (ev.id) {
-              useTypes.set(ev.id, { type: ev.type as "agent.tool_use" | "agent.mcp_tool_use" | "agent.custom_tool_use", name: ev.name });
-            }
-            break;
-          case "agent.tool_result":
-            if (ev.tool_use_id) resolved.add(ev.tool_use_id);
-            break;
-          case "agent.mcp_tool_result":
-            if (ev.mcp_tool_use_id) resolved.add(ev.mcp_tool_use_id);
-            break;
-          case "user.custom_tool_result":
-            if (ev.id) resolved.add(ev.id);
-            break;
-        }
-      }
-
-      for (const [useId, info] of useTypes) {
-        if (resolved.has(useId)) continue;
-        const placeholder = "(interrupted by maintenance restart — retry if needed)";
-        if (info.type === "agent.tool_use") {
-          history.append({
-            type: "agent.tool_result",
-            tool_use_id: useId,
-            content: placeholder,
-          } as SessionEvent);
-        } else if (info.type === "agent.mcp_tool_use") {
-          history.append({
-            type: "agent.mcp_tool_result",
-            mcp_tool_use_id: useId,
-            content: placeholder,
-            is_error: true,
-          } as SessionEvent);
-        } else {
-          // custom_tool_use is user-driven — don't auto-resolve. Just warn.
-          this.broadcastEvent({
-            type: "session.warning",
-            source: "custom_tool_call_interrupted",
-            message: `Custom tool call was interrupted; client should resend the result`,
-            details: { tool_use_id: useId, tool_name: info.name },
-          } as SessionEvent);
-          continue;
-        }
-        this.broadcastEvent({
-          type: "session.warning",
-          source: "tool_call_interrupted",
-          message: `${info.type} cut short by a server restart`,
-          details: { tool_use_id: useId, tool_name: info.name },
-        } as SessionEvent);
-      }
-    } catch (err) {
-      logWarn(
-        { op: "session_do.recover.tool_use_scan", err },
-        "tool_use recovery scan failed; continuing",
+        { op: "session_do.recover", err },
+        "recovery scan failed; continuing",
       );
     }
   }

@@ -40,6 +40,10 @@ export default defineConfig({
       "@open-managed-agents/tenant-db": "./packages/tenant-db/src/index.ts",
       "@open-managed-agents/tenant-dbs-store/test-fakes": "./packages/tenant-dbs-store/src/test-fakes.ts",
       "@open-managed-agents/tenant-dbs-store": "./packages/tenant-dbs-store/src/index.ts",
+      "@open-managed-agents/event-log/memory": "./packages/event-log/src/memory/index.ts",
+      "@open-managed-agents/event-log/cf-do": "./packages/event-log/src/cf-do/index.ts",
+      "@open-managed-agents/event-log/pg": "./packages/event-log/src/pg/index.ts",
+      "@open-managed-agents/event-log": "./packages/event-log/src/index.ts",
     },
   },
   test: {
