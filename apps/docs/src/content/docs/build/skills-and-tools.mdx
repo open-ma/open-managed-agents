@@ -77,7 +77,7 @@ In the Console: **Skills → New skill**. Or via API:
 
 ```bash
 curl -X POST "$OMA_BASE_URL/v1/skills" \
-  -H "Authorization: Bearer $OMA_API_KEY" \
+  -H "x-api-key: $OMA_API_KEY" \
   -F "id=invoice-parser" \
   -F "display_title=Invoice parser" \
   -F "description=Extract structured data from supplier invoices." \

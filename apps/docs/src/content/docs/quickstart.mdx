@@ -34,7 +34,7 @@ This walks you through the **hosted path** — fastest way from zero to a runnin
 
    ```bash
    curl -X POST "$OMA_BASE_URL/v1/agents" \
-     -H "Authorization: Bearer $OMA_API_KEY" \
+     -H "x-api-key: $OMA_API_KEY" \
      -H "Content-Type: application/json" \
      -d '{
        "name": "hello-agent",
@@ -46,30 +46,30 @@ This walks you through the **hosted path** — fastest way from zero to a runnin
 
    Save the returned `id` — you'll need it next.
 
-4. **Start a session and stream events.**
+4. **Start a session and stream a turn.**
 
    ```bash
    AGENT_ID="agent_..."   # from previous step
+   ENV_ID="env_..."       # any environment in your tenant; create one in the Console if you don't have one yet
 
    curl -X POST "$OMA_BASE_URL/v1/sessions" \
-     -H "Authorization: Bearer $OMA_API_KEY" \
+     -H "x-api-key: $OMA_API_KEY" \
      -H "Content-Type: application/json" \
-     -d "{
-       \"agent_id\": \"$AGENT_ID\",
-       \"input\": [{ \"role\": \"user\", \"content\": \"What is 2+2?\" }]
-     }"
+     -d "{ \"agent\": \"$AGENT_ID\", \"environment_id\": \"$ENV_ID\", \"title\": \"hello\" }"
    ```
 
-   The response includes a `session_id`. Stream live events with:
+   The response includes a session `id`. Post a user turn AND stream the reply token-by-token in one shot:
 
    ```bash
    SESSION_ID="sess_..."
 
-   curl -N "$OMA_BASE_URL/v1/sessions/$SESSION_ID/events" \
-     -H "Authorization: Bearer $OMA_API_KEY"
+   curl -N -X POST "$OMA_BASE_URL/v1/sessions/$SESSION_ID/messages" \
+     -H "x-api-key: $OMA_API_KEY" \
+     -H "Content-Type: application/json" \
+     -d '{ "content": "What is 2+2?" }'
    ```
 
-   You'll see Server-Sent Events for each model turn, tool call, and tool result.
+   You'll see Server-Sent Events for the user echo, every model token, every tool call, and every tool result. The connection auto-closes when the turn finishes (`session.status_idle`). For long-lived sessions use `GET /v1/sessions/$SESSION_ID/events/stream` instead — never closes, replays history on connect.
 
 5. **Check it in the Console.**
 
