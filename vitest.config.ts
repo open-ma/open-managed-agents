@@ -1,7 +1,24 @@
 import { defineConfig } from "vitest/config";
-import { cloudflarePool } from "@cloudflare/vitest-pool-workers";
+import { cloudflarePool, cloudflareTest } from "@cloudflare/vitest-pool-workers";
+
+const cfWorkerOptions = {
+  wrangler: { configPath: "./wrangler.test.jsonc" },
+  miniflare: {
+    bindings: {
+      API_KEY: "test-key",
+      ANTHROPIC_API_KEY: "sk-ant-test-key",
+      BETTER_AUTH_SECRET: "test-auth-secret-for-vitest",
+      RATE_LIMIT_WRITE: 10000,
+      RATE_LIMIT_READ: 10000,
+    },
+  },
+};
 
 export default defineConfig({
+  // cloudflareTest registers the `cloudflare:test` virtual module
+  // (runInDurableObject, listDurableObjectIds, etc.) — the pool runner
+  // alone doesn't expose it, only the plugin does.
+  plugins: [cloudflareTest(cfWorkerOptions)],
   resolve: {
     alias: {
       // Stub out @cloudflare/sandbox in tests — the real module depends on
@@ -49,17 +66,6 @@ export default defineConfig({
   test: {
     testTimeout: 30000,
     exclude: ["**/node_modules/**", "**/.git/**", "**/.claude/worktrees/**", "test/e2e/**"],
-    pool: cloudflarePool({
-      wrangler: { configPath: "./wrangler.test.jsonc" },
-      miniflare: {
-        bindings: {
-          API_KEY: "test-key",
-          ANTHROPIC_API_KEY: "sk-ant-test-key",
-          BETTER_AUTH_SECRET: "test-auth-secret-for-vitest",
-          RATE_LIMIT_WRITE: 10000,
-          RATE_LIMIT_READ: 10000,
-        },
-      },
-    }),
+    pool: cloudflarePool(cfWorkerOptions),
   },
 });
