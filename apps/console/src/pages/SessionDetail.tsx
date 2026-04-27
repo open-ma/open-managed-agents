@@ -16,6 +16,12 @@ interface Event {
   source?: string;
   message?: string;
   stop_reason?: { type: string };
+  /** Canonical id for streamed assistant messages — set on
+   *  agent.message_stream_start / _chunk / _stream_end and on the
+   *  matching final agent.message. Lets the renderer correlate
+   *  in-flight chunks with the eventually-committed message. */
+  message_id?: string;
+  delta?: string;
   /** ISO timestamp. Server sets it for stored events; the client tags streamed
    *  events on arrival with Date.now() as a best-effort fallback. */
   ts?: string;
@@ -30,6 +36,10 @@ export function SessionDetail() {
   const { id } = useParams();
   const { api, streamEvents } = useApi();
   const [events, setEvents] = useState<Event[]>([]);
+  /** In-flight assistant streams keyed by message_id. Each entry holds
+   *  the deltas accumulated so far. Wiped on the matching agent.message
+   *  (same message_id), which becomes the canonical render. */
+  const [streams, setStreams] = useState<Map<string, string>>(new Map());
   const [view, setView] = useState<View>("chat");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
@@ -55,6 +65,53 @@ export function SessionDetail() {
 
   const addEvent = (e: Record<string, unknown>) => {
     const ev = e as Event;
+
+    // Streaming chunk lifecycle. None of these go into the events list
+    // (would pollute history once the canonical agent.message lands);
+    // they drive the `streams` map that the renderer overlays after
+    // committed events. The matching agent.message arrives with the
+    // same message_id and replaces the in-flight render.
+    if (ev.type === "agent.message_stream_start" && ev.message_id) {
+      const mid = ev.message_id;
+      setStreams((prev) => {
+        if (prev.has(mid)) return prev;
+        const next = new Map(prev);
+        next.set(mid, "");
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "agent.message_chunk" && ev.message_id && typeof ev.delta === "string") {
+      const mid = ev.message_id;
+      const delta = ev.delta;
+      setStreams((prev) => {
+        const next = new Map(prev);
+        next.set(mid, (next.get(mid) ?? "") + delta);
+        return next;
+      });
+      return;
+    }
+    if (ev.type === "agent.message_stream_end") {
+      // Hold the in-flight render until the canonical agent.message
+      // arrives — keeps UI stable through the brief gap between the
+      // SSE stream_end and the events-log commit. If the run was
+      // aborted/interrupted, the canonical event will land via the
+      // recovery path and clean up the same way.
+      return;
+    }
+
+    // Canonical agent.message lands → drop the in-flight render so
+    // we don't double-show the same content.
+    if (ev.type === "agent.message" && ev.message_id) {
+      const mid = ev.message_id;
+      setStreams((prev) => {
+        if (!prev.has(mid)) return prev;
+        const next = new Map(prev);
+        next.delete(mid);
+        return next;
+      });
+    }
+
     const key = eventKey(ev);
     if (seenKeys.current.has(key)) return;
     seenKeys.current.add(key);
@@ -73,6 +130,7 @@ export function SessionDetail() {
   useEffect(() => {
     if (!id) return;
     seenKeys.current.clear();
+    setStreams(new Map());
 
     // Load session info
     api<{
@@ -122,7 +180,7 @@ export function SessionDetail() {
   useEffect(() => {
     if (view !== "chat") return;
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
-  }, [events, view]);
+  }, [events, streams, view]);
 
   const send = async () => {
     if (!input.trim() || !id) return;
@@ -225,7 +283,13 @@ export function SessionDetail() {
             {events.map((e, i) => (
               <EventBubble key={i} event={e} />
             ))}
-            {status === "running" && (
+            {/* In-flight assistant streams. Each entry is one LLM step
+                whose canonical agent.message hasn't landed yet — render
+                like a normal assistant bubble with a soft pulsing cursor. */}
+            {Array.from(streams.entries()).map(([mid, text]) => (
+              <StreamingBubble key={`stream-${mid}`} text={text} />
+            ))}
+            {status === "running" && streams.size === 0 && (
               <div className="flex gap-1 py-2">
                 <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
                 <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
@@ -272,6 +336,22 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
     >
       {label}
     </button>
+  );
+}
+
+/** In-progress assistant message rendered from accumulated chunk
+ *  deltas. Looks like a normal agent bubble but ends in a soft
+ *  pulsing block cursor so it reads as live. Replaced by a real
+ *  EventBubble once the canonical agent.message lands. */
+function StreamingBubble({ text }: { text: string }) {
+  return (
+    <div className="max-w-2xl">
+      <div className="text-xs text-fg-subtle mb-1">Agent</div>
+      <div className="bg-bg-surface rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
+        <Markdown>{text}</Markdown>
+        <span className="inline-block w-1.5 h-3.5 bg-fg-subtle/50 align-middle ml-0.5 animate-pulse" />
+      </div>
+    </div>
   );
 }
 
