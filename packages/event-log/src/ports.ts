@@ -1,72 +1,79 @@
-// Per-session runtime data: the event log + transient stream buffer.
+// Per-session runtime data: the event log + in-flight LLM stream state.
 //
-// The two are split into separate repos because they have different
-// durability semantics:
+// Two separate ports because they have different durability semantics:
 //
-//   - EventLogRepo: append-only history of the session. Source of truth
-//     for "what happened". Written once per logical step (not per stream
-//     chunk). Frontends + harness recovery read from here.
+//   - EventLogRepo: append-only history. Source of truth for "what
+//     happened". Written once per logical step (final agent.message,
+//     tool_use, tool_result, etc.). Frontends + harness recovery read
+//     from here.
 //
-//   - StreamBufferRepo: transient buffer for the chunks of an in-flight
-//     LLM stream. Wiped on completion. Only there so that, on a runtime
-//     restart mid-stream, we can either recover the partial or finalize
-//     it as a single agent.message event without re-running the LLM.
+//   - StreamRepo: in-flight LLM stream state, indexed by message_id.
+//     One row per active streaming message — sub-agents and parallel
+//     turns can have multiple concurrent streams. On normal completion
+//     the row is finalized but kept (for short-window read-after-write
+//     by clients reconnecting); on DO restart the recovery scan finds
+//     status='streaming' rows and finalizes the partial as a single
+//     agent.message event so the events log stays consistent.
 //
-// Both are runtime-agnostic ports — the SessionDO consumes them via
-// constructor injection, factories pick the right adapter per
-// deployment (CF Workers DO SQLite, Postgres, in-memory for tests).
-// This is the same Ports/Adapters pattern used elsewhere in OMA — see
-// packages/sessions-store, packages/agents-store, etc.
+// Both are runtime-agnostic ports — SessionDO consumes via constructor
+// injection, factories pick the right adapter per deployment (CF Workers
+// DO SQLite, Postgres, in-memory for tests). Same Ports/Adapters pattern
+// as packages/sessions-store, packages/agents-store, etc.
 
 import type { SessionEvent } from "@open-managed-agents/shared";
 
 export interface EventLogRepo {
-  /** Append a SessionEvent to the log. The implementation MUST stamp
-   *  the event with a monotonic seq + ts before persisting. Returns
-   *  void for back-compat with the existing SqliteHistory shape — the
-   *  stamping happens via stampEvent() in the impl. */
+  /** Append a SessionEvent. Implementation MUST stamp seq + ts. */
   append(event: SessionEvent): void;
 
-  /** Return all events strictly after `afterSeq`, in seq order. Omit
-   *  the parameter to get the entire log. Used both by routes (HTTP
-   *  paginated event read) and by the harness (to rebuild messages). */
+  /** All events strictly after `afterSeq` in seq order. Omit for full log. */
   getEvents(afterSeq?: number): SessionEvent[];
 
-  /** Look up the highest seq for an event of the given type. Used by
-   *  detection logic (e.g. "what was the last agent.message?"). Returns
-   *  -1 when no such event exists. */
+  /** Highest seq for an event of this type. Returns -1 when none. */
   getLastEventSeq(type: string): number;
 
-  /** First event with one of the given types after `afterSeq`. Returns
-   *  null when none exists. Used to find the next event matching a
-   *  filter (e.g. recovery: "what's the next event after this tool_use
-   *  that could be its result?"). */
+  /** First event of one of these types after `afterSeq`. null when none. */
   getFirstEventAfter(
     afterSeq: number,
     types: string[],
   ): { seq: number; data: string } | null;
 }
 
-/** Snapshot of an in-flight LLM stream — chunks accumulated so far,
- *  keyed by a logical message_id. Wiped when the message finalizes. */
-export interface StreamBuffer {
+/** One row of the streams table — represents one in-flight or recently-
+ *  completed LLM stream, identified by the eventual agent.message id. */
+export interface StreamRow {
   message_id: string;
+  status: "streaming" | "completed" | "aborted" | "interrupted";
   chunks: string[];
-  /** Unix ms — when the stream started, useful for idle detection. */
   started_at: number;
+  completed_at?: number;
+  error_text?: string;
 }
 
-export interface StreamBufferRepo {
-  /** Replace the active buffer (or set it for the first time). The
-   *  whole object is overwritten — callers pass the full updated state.
-   *  Adapters MAY batch / debounce internally; semantics from the
-   *  caller's perspective is "this is the latest known buffer". */
-  put(buffer: StreamBuffer): Promise<void>;
+export interface StreamRepo {
+  /** Open a new stream. Idempotent — a second start with the same id is
+   *  a no-op (handles redundant onChunk-fires-before-state-write race). */
+  start(messageId: string, startedAt: number): Promise<void>;
 
-  /** Read the current buffer, or null if none. Used on runtime restart
-   *  to detect whether a stream was in flight. */
-  get(): Promise<StreamBuffer | null>;
+  /** Append a token delta to the in-flight buffer. Adapters MAY batch
+   *  internally to amortize write cost (esp. PG); the contract is "all
+   *  appended deltas are eventually visible in order via get()". */
+  appendChunk(messageId: string, delta: string): Promise<void>;
 
-  /** Clear the buffer (LLM completed, partial no longer needed). */
-  clear(): Promise<void>;
+  /** Transition status away from 'streaming'. completed = LLM finished
+   *  cleanly. aborted = explicit abort (user.interrupt or harness retry).
+   *  interrupted = recovery-scan detected the runtime was killed mid-stream. */
+  finalize(
+    messageId: string,
+    status: "completed" | "aborted" | "interrupted",
+    errorText?: string,
+  ): Promise<void>;
+
+  /** Read the current state of one stream, or null if unknown. */
+  get(messageId: string): Promise<StreamRow | null>;
+
+  /** All streams currently in this status. The recovery scan calls this
+   *  with 'streaming' on cold start to find streams the previous runtime
+   *  was in the middle of when it died. */
+  listByStatus(status: StreamRow["status"]): Promise<StreamRow[]>;
 }

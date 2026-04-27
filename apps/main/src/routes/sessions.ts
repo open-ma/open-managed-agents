@@ -888,6 +888,110 @@ app.get("/:id/events", async (c) => {
   return handleJSONEvents(c, c.req.param("id"));
 });
 
+// POST /v1/sessions/:id/messages — combined "send user message + stream
+// response" in one HTTP call. Chatbot-friendly. Body: { content: string |
+// ContentBlock[] }. Response: text/event-stream of every event from this
+// turn (filtered by seq > startSeq), closing on the first session.status_idle.
+//
+// Why this exists: the current /events + /events/stream split forces
+// clients to fire two HTTP calls + correlate the cursor. SDK consumers
+// (and Linear/Slack-style chatbots) want one shot: post a message, get
+// a stream back, render until done. The streaming chunk events from the
+// new harness pipeline (agent.message_stream_start / chunk / stream_end
+// + agent.message) flow through the same WS bridge that handleSSEStream
+// already uses — no extra plumbing.
+app.post("/:id/messages", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
+  if (!binding) return c.json({ error }, status ?? 500);
+
+  const body = await c.req.json<{
+    content: string | ContentBlock[];
+  }>().catch(() => ({ content: "" as string | ContentBlock[] }));
+  const content: ContentBlock[] = typeof body.content === "string"
+    ? [{ type: "text", text: body.content }]
+    : Array.isArray(body.content) ? body.content : [];
+  if (content.length === 0) {
+    return c.json({ error: "content is required (string or ContentBlock[])" }, 400);
+  }
+
+  // Forward the user.message into the SessionDO, which appends + drains
+  // (kicking the harness). The DO assigns the seq; we don't need it here
+  // because we filter on session.status_idle to detect end-of-turn.
+  const userMessageReq = new Request(`https://sandbox/sessions/${id}/event`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ type: "user.message", content }),
+  });
+  const postRes = await binding.fetch(userMessageReq);
+  if (!postRes.ok) {
+    return c.json({ error: `Failed to enqueue user message: ${postRes.status}` }, 500);
+  }
+
+  // Open the WS bridge same as handleSSEStream, but wrap the controller
+  // so we close on the FIRST session.status_idle event we see — that
+  // signals "this turn finished, all subsequent events belong to a
+  // future turn the client didn't ask for". Multiple back-to-back POSTs
+  // each get their own stream that auto-closes at their own idle.
+  const wsHeaders = new Headers(c.req.raw.headers);
+  wsHeaders.set("Upgrade", "websocket");
+  wsHeaders.set("Connection", "Upgrade");
+  const wsReq = new Request(`https://sandbox/sessions/${id}/ws`, {
+    method: "GET",
+    headers: wsHeaders,
+  });
+  const wsRes = await binding.fetch(wsReq);
+  const ws = (wsRes as { webSocket?: WebSocket }).webSocket;
+  if (!ws) {
+    return c.json({ error: "Failed to establish WebSocket to session" }, 500);
+  }
+  ws.accept();
+
+  const encoder = new TextEncoder();
+  const stream = new ReadableStream({
+    start(controller) {
+      let closed = false;
+      const closeOnce = () => {
+        if (closed) return;
+        closed = true;
+        try { controller.close(); } catch {}
+        try { ws.close(); } catch {}
+      };
+      ws.addEventListener("message", (event: MessageEvent) => {
+        if (closed) return;
+        controller.enqueue(encoder.encode(`data: ${event.data}\n\n`));
+        // Peek the type field to detect end-of-turn. Cheap parse — events
+        // are JSON objects with `type` near the start. Bail on parse error.
+        try {
+          const parsed = JSON.parse(event.data as string) as { type?: string };
+          if (parsed.type === "session.status_idle") {
+            closeOnce();
+          }
+        } catch {
+          // ignore — keep the byte forwarded but skip close detection
+        }
+      });
+      ws.addEventListener("close", closeOnce);
+      ws.addEventListener("error", closeOnce);
+    },
+    cancel() {
+      try { ws.close(); } catch {}
+    },
+  });
+
+  return new Response(stream, {
+    headers: {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+    },
+  });
+});
+
 // GET /v1/sessions/:id/trajectory — full Trajectory v1 envelope
 app.get("/:id/trajectory", async (c) => {
   const t = c.get("tenant_id");
