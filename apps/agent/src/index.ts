@@ -55,18 +55,47 @@ app.post("/__internal/prepare-env", async (c) => {
     env_id: string;
     tenant_id: string;
     config: Record<string, unknown>;
+    callback_url: string;
   }>();
   const strategy = new CfBaseSnapshotStrategy({
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     getSandbox: (id: string) => cfGetSandbox(c.env.SANDBOX as any, id) as any,
   });
-  const result = await strategy.prepare({
-    env_id: body.env_id,
-    tenant_id: body.tenant_id,
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    config: body.config as any,
-  });
-  return c.json(result);
+
+  // Fire-and-forget. prepare() can take 1-5 minutes (install + R2 upload
+  // of squashfs); main-worker fetch would time out long before that.
+  // We return 202 immediately and POST the result to the callback URL
+  // when done. Same pattern as the dockerfile build callback.
+  c.executionCtx.waitUntil((async () => {
+    let result;
+    try {
+      result = await strategy.prepare({
+        env_id: body.env_id,
+        tenant_id: body.tenant_id,
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        config: body.config as any,
+      });
+    } catch (err) {
+      result = {
+        status: "error" as const,
+        error: `prepare threw: ${err instanceof Error ? err.message : String(err)}`,
+      };
+    }
+    try {
+      await fetch(body.callback_url, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "x-internal-token": expected,
+        },
+        body: JSON.stringify(result),
+      });
+    } catch (err) {
+      console.error("[prepare-env] callback failed:", err instanceof Error ? err.message : err);
+    }
+  })());
+
+  return c.json({ status: "building" }, 202);
 });
 
 app.all("/sessions/:id/*", async (c) => {
