@@ -258,6 +258,50 @@ export interface AgentMessageStreamEndEvent extends EventBase {
   error_text?: string;
 }
 
+/** Live thinking-block streaming. Anthropic's extended-thinking can sit
+ *  for 5–30s before the canonical `agent.thinking` lands; these
+ *  lifecycle + delta events let the client render reasoning as it
+ *  arrives. NOT persisted to the events log — only `agent.thinking`
+ *  with the same `thinking_id` is canonical history. */
+export interface AgentThinkingStreamStartEvent extends EventBase {
+  type: "agent.thinking_stream_start";
+  thinking_id: string;
+}
+
+export interface AgentThinkingChunkEvent extends EventBase {
+  type: "agent.thinking_chunk";
+  thinking_id: string;
+  delta: string;
+}
+
+export interface AgentThinkingStreamEndEvent extends EventBase {
+  type: "agent.thinking_stream_end";
+  thinking_id: string;
+  status: "completed" | "aborted" | "interrupted";
+}
+
+/** Live tool-input streaming. `tool_use_id` is the same id the eventual
+ *  `agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use`
+ *  carries, so the client can swap the in-flight bubble for the
+ *  canonical tool widget once the model commits the call. NOT persisted. */
+export interface AgentToolUseInputStreamStartEvent extends EventBase {
+  type: "agent.tool_use_input_stream_start";
+  tool_use_id: string;
+  tool_name?: string;
+}
+
+export interface AgentToolUseInputChunkEvent extends EventBase {
+  type: "agent.tool_use_input_chunk";
+  tool_use_id: string;
+  delta: string;
+}
+
+export interface AgentToolUseInputStreamEndEvent extends EventBase {
+  type: "agent.tool_use_input_stream_end";
+  tool_use_id: string;
+  status: "completed" | "aborted" | "interrupted";
+}
+
 export interface AgentThinkingEvent extends EventBase {
   type: "agent.thinking";
   /** Reasoning text emitted by the model. Must be preserved verbatim when
@@ -269,6 +313,12 @@ export interface AgentThinkingEvent extends EventBase {
    *  Anthropic: { anthropic: { signature: "...", redactedData: "..." } }.
    *  Other providers may store opaque token IDs. Pass through verbatim. */
   providerOptions?: Record<string, unknown>;
+  /** Same id as the matching `agent.thinking_chunk` /
+   *  `_stream_start` / `_stream_end` events. Lets the renderer swap the
+   *  in-flight reasoning bubble for the canonical event. Set when the
+   *  thinking came from a streaming step; legacy/non-streamed
+   *  thinking events may omit it. */
+  thinking_id?: string;
 }
 
 export interface AgentCustomToolUseEvent extends EventBase {
@@ -542,6 +592,12 @@ export type SessionEvent =
   | AgentMessageStreamStartEvent
   | AgentMessageChunkEvent
   | AgentMessageStreamEndEvent
+  | AgentThinkingStreamStartEvent
+  | AgentThinkingChunkEvent
+  | AgentThinkingStreamEndEvent
+  | AgentToolUseInputStreamStartEvent
+  | AgentToolUseInputChunkEvent
+  | AgentToolUseInputStreamEndEvent
   | AgentThinkingEvent
   | AgentCustomToolUseEvent
   | AgentToolUseEvent

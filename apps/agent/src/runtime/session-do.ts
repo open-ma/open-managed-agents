@@ -303,35 +303,65 @@ export class SessionDO extends Agent<Env, SessionState> {
       status: "completed" | "aborted",
       errorText?: string,
     ) => Promise<void>;
+    broadcastThinkingStart: (thinkingId: string) => Promise<void>;
+    broadcastThinkingChunk: (thinkingId: string, delta: string) => Promise<void>;
+    broadcastThinkingEnd: (thinkingId: string, status: "completed" | "aborted") => Promise<void>;
+    broadcastToolInputStart: (toolUseId: string, toolName?: string) => Promise<void>;
+    broadcastToolInputChunk: (toolUseId: string, delta: string) => Promise<void>;
+    broadcastToolInputEnd: (toolUseId: string, status: "completed" | "aborted") => Promise<void>;
   } {
     const tag = (event: SessionEvent): SessionEvent =>
       threadId ? ({ ...event, session_thread_id: threadId } as SessionEvent) : event;
+    const fire = (event: SessionEvent) => {
+      this.broadcastEvent(event);
+      this.fanOutToHooks(event);
+    };
     return {
       broadcastStreamStart: async (messageId: string) => {
         if (!this.streams) this.ensureSchema();
         await this.streams!.start(messageId, Date.now());
-        const ev = tag({ type: "agent.message_stream_start", message_id: messageId } as SessionEvent);
-        this.broadcastEvent(ev);
-        this.fanOutToHooks(ev);
+        fire(tag({ type: "agent.message_stream_start", message_id: messageId } as SessionEvent));
       },
       broadcastChunk: async (messageId: string, delta: string) => {
         if (!this.streams) this.ensureSchema();
         await this.streams!.appendChunk(messageId, delta);
-        const ev = tag({ type: "agent.message_chunk", message_id: messageId, delta } as SessionEvent);
-        this.broadcastEvent(ev);
-        this.fanOutToHooks(ev);
+        fire(tag({ type: "agent.message_chunk", message_id: messageId, delta } as SessionEvent));
       },
       broadcastStreamEnd: async (messageId: string, status, errorText?: string) => {
         if (!this.streams) this.ensureSchema();
         await this.streams!.finalize(messageId, status, errorText);
-        const ev = tag({
+        fire(tag({
           type: "agent.message_stream_end",
           message_id: messageId,
           status,
           error_text: errorText,
-        } as SessionEvent);
-        this.broadcastEvent(ev);
-        this.fanOutToHooks(ev);
+        } as SessionEvent));
+      },
+      // Thinking + tool-input streams are broadcast-only — see notes
+      // in interface.ts. No streams-table writes; if the runtime dies
+      // before the canonical event lands, the harness retry path
+      // produces a fresh attempt with new ids.
+      broadcastThinkingStart: async (thinkingId: string) => {
+        fire(tag({ type: "agent.thinking_stream_start", thinking_id: thinkingId } as SessionEvent));
+      },
+      broadcastThinkingChunk: async (thinkingId: string, delta: string) => {
+        fire(tag({ type: "agent.thinking_chunk", thinking_id: thinkingId, delta } as SessionEvent));
+      },
+      broadcastThinkingEnd: async (thinkingId: string, status) => {
+        fire(tag({ type: "agent.thinking_stream_end", thinking_id: thinkingId, status } as SessionEvent));
+      },
+      broadcastToolInputStart: async (toolUseId: string, toolName?: string) => {
+        fire(tag({
+          type: "agent.tool_use_input_stream_start",
+          tool_use_id: toolUseId,
+          tool_name: toolName,
+        } as SessionEvent));
+      },
+      broadcastToolInputChunk: async (toolUseId: string, delta: string) => {
+        fire(tag({ type: "agent.tool_use_input_chunk", tool_use_id: toolUseId, delta } as SessionEvent));
+      },
+      broadcastToolInputEnd: async (toolUseId: string, status) => {
+        fire(tag({ type: "agent.tool_use_input_stream_end", tool_use_id: toolUseId, status } as SessionEvent));
       },
     };
   }
