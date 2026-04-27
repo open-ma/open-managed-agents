@@ -72,6 +72,9 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../../packages/credentials-store
+      '@open-managed-agents/environment-images':
+        specifier: workspace:*
+        version: link:../../packages/environment-images
       '@open-managed-agents/environments-store':
         specifier: workspace:*
         version: link:../../packages/environments-store
@@ -254,6 +257,9 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../../packages/credentials-store
+      '@open-managed-agents/environment-images':
+        specifier: workspace:*
+        version: link:../../packages/environment-images
       '@open-managed-agents/environments-store':
         specifier: workspace:*
         version: link:../../packages/environments-store
