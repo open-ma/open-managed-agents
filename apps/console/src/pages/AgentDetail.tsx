@@ -8,6 +8,7 @@ interface Agent {
   system?: string; harness?: string; version: number; description?: string;
   tools?: unknown[]; callable_agents?: unknown[]; mcp_servers?: unknown[];
   skills?: unknown[]; created_at: string; updated_at?: string; archived_at?: string;
+  runtime_binding?: { runtime_id: string; acp_agent_id: string };
 }
 
 /** Shared publication shape across Linear / GitHub / Slack — they all
@@ -83,6 +84,16 @@ export function AgentDetail() {
         <span className="text-fg-muted">ID</span><span className="font-mono text-xs">{agent.id}</span>
         <span className="text-fg-muted">Model</span><span>{modelStr(agent.model)}</span>
         <span className="text-fg-muted">Harness</span><span>{agent.harness || "default"}</span>
+        {agent.runtime_binding && (
+          <>
+            <span className="text-fg-muted">Local Runtime</span>
+            <span className="text-xs">
+              <span className="font-mono">{agent.runtime_binding.runtime_id.slice(0, 8)}…</span>
+              <span className="text-fg-subtle"> · ACP agent: </span>
+              <span className="font-mono">{agent.runtime_binding.acp_agent_id}</span>
+            </span>
+          </>
+        )}
         <span className="text-fg-muted">Version</span><span>v{agent.version}</span>
         <span className="text-fg-muted">Tools</span>
         <span>{(agent.tools || []).map((t: any) => t.type === "custom" ? `Custom: ${t.name}` : t.type).join(", ") || "None"}</span>
