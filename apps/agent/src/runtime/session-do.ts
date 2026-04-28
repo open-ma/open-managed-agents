@@ -261,6 +261,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   observability = null as unknown as Agent<Env, SessionState>["observability"];
   private initialized = false;
   private sandbox: SandboxExecutor | null = null;
+  private wrappedSandbox: SandboxExecutor | null = null;
   private sandboxWarmupPromise: Promise<void> | null = null;
   /**
    * Browser session backed by Cloudflare Browser Rendering binding. Lazy-created
@@ -826,6 +827,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
       }
       this.sandbox = null;
+      this.wrappedSandbox = null;
       this.sandboxWarmupPromise = null;
       // Close the browser session if one was created
       if (this.browserSession) {
@@ -881,8 +883,8 @@ export class SessionDO extends Agent<Env, SessionState> {
       // managed-agents dual path. Best-effort — failure does not block the
       // event from being processed.
       if (mountFileIds && mountFileIds.length > 0 && this.env.FILES_BUCKET) {
+        // Wrapped sandbox: first .exec/.writeFileBytes will await warmup.
         const sandbox = this.getOrCreateSandbox();
-        try { await this.warmUpSandbox(); } catch {}
         const tenantId = this.state.tenant_id;
         try { await sandbox.exec("mkdir -p /mnt/session/uploads", 5000); } catch {}
         for (const fid of mountFileIds) {
@@ -1203,12 +1205,58 @@ export class SessionDO extends Agent<Env, SessionState> {
    * across turns so files persist within the session lifetime.
    */
   private getOrCreateSandbox(): SandboxExecutor {
+    this.ensureSandboxCreated();
+    return this.wrappedSandbox!;
+  }
+
+  /** Used inside warmup itself to avoid the wrap → warmup → wrap recursion. */
+  private getRawSandbox(): SandboxExecutor {
+    this.ensureSandboxCreated();
+    return this.sandbox!;
+  }
+
+  private ensureSandboxCreated() {
     if (!this.sandbox) {
       // Sandbox ID must be 1-63 chars; DO hex ID is 64 chars — truncate to fit
       const sandboxId = this.ctx.id.toString().slice(0, 63);
       this.sandbox = createSandbox(this.env, sandboxId);
+      this.wrappedSandbox = this.wrapSandboxWithLazyWarmup(this.sandbox);
     }
-    return this.sandbox;
+  }
+
+  /**
+   * Returns a Proxy of the sandbox where any "real-work" method (exec,
+   * readFile, etc.) awaits sandboxWarmupPromise before delegating. Lets us
+   * remove the blocking `await warmUpSandbox()` from the user-message hot
+   * path: turns that never touch the sandbox (e.g. cron-only flows, pure
+   * answer turns) skip the 3s container cold-start entirely; turns that do
+   * use tools overlap the warmup with model fetch/TTFT.
+   *
+   * The non-method properties and helpers like setEnvVars are passed
+   * through synchronously — they don't talk to the container itself.
+   */
+  private wrapSandboxWithLazyWarmup(raw: SandboxExecutor): SandboxExecutor {
+    const needsWarm = new Set<string>([
+      "exec",
+      "startProcess",
+      "readFile",
+      "writeFile",
+      "writeFileBytes",
+      "readFileBytes",
+      "mountWorkspace",
+      "gitCheckout",
+    ]);
+    return new Proxy(raw, {
+      get: (target, prop, receiver) => {
+        const value = Reflect.get(target, prop, receiver);
+        if (typeof value !== "function") return value;
+        if (!needsWarm.has(prop as string)) return value.bind(target);
+        return async (...args: unknown[]) => {
+          await this.warmUpSandbox();
+          return (value as (...a: unknown[]) => unknown).apply(target, args);
+        };
+      },
+    }) as SandboxExecutor;
   }
 
   /**
@@ -1286,7 +1334,8 @@ export class SessionDO extends Agent<Env, SessionState> {
   private async doWarmUpSandbox(): Promise<void> {
 
     try {
-      const sandbox = this.getOrCreateSandbox();
+      // Raw sandbox — wrapped one would recurse back into warmUpSandbox here.
+      const sandbox = this.getRawSandbox();
 
       // Trigger container startup with retries — local dev containers can take
       // 30-60s to start. SDK returns 503 while container port isn't listening.
@@ -1575,13 +1624,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     confirmation: UserToolConfirmationEvent,
     history: HistoryStore
   ): Promise<void> {
+    // Wrapped sandbox: per-method warmup happens inside any actual call.
+    // Confirmation handlers may not even touch the sandbox depending on
+    // tool type, so eager warmup is wasted; lazy is the right default.
     const sandbox = this.getOrCreateSandbox();
-    try {
-      await this.warmUpSandbox();
-    } catch {
-      this.broadcastEvent({ type: "session.error", error: "Sandbox not available" });
-      return;
-    }
+    void this.warmUpSandbox().catch(() => { /* surfaces via tool exec */ });
 
     // Retrieve the pending tool call from session metadata
     const pendingCalls = this.state.pending_tool_calls;
@@ -1997,22 +2044,19 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     const history = new SqliteHistory(this.ctx.storage.sql);
 
-    // Reuse session-level sandbox (singleton) — files persist across turns
+    // Reuse session-level sandbox (singleton) — files persist across turns.
+    // Returned object is a lazy proxy: the underlying container is warmed up
+    // on first method call, in parallel with model fetch / TTFT. Cron-only
+    // turns or pure-answer turns skip the cold-start entirely. Errors from
+    // warmup will surface from the first sandbox tool's execute().
     const sandbox = this.getOrCreateSandbox();
 
-    // Pre-warm sandbox on first use (container cold start + package install)
-    try {
-      await this.warmUpSandbox();
-    } catch (err) {
-      const errorEvent: SessionEvent = {
-        type: "session.error",
-        error: `Sandbox failed to start: ${err instanceof Error ? err.message : String(err)}`,
-      };
-      history.append(errorEvent);
-      this.broadcastEvent(errorEvent);
-      this.setState({ ...this.state, status: "terminated" });
-      return;
-    }
+    // Kick off warmup so it overlaps with the rest of pre-streamText setup
+    // and the first model fetch. Result is cached on sandboxWarmupPromise,
+    // so the proxy's per-method `await this.warmUpSandbox()` becomes free
+    // once this resolves. Catch detached so the unhandled-rejection logger
+    // doesn't yell — the per-method await re-throws to the caller.
+    void this.warmUpSandbox().catch(() => { /* surfaces via tool exec */ });
 
     // Fetch environment config for networking restrictions
     const envId = this.state.environment_id;
