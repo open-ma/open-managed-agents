@@ -77,6 +77,17 @@ export interface AgentConfig {
   /** Companion to aux_model — explicit model card binding when needed. */
   aux_model_card_id?: string;
   harness?: string;
+  /**
+   * When set, agent runs on a user-registered local ACP runtime instead of
+   * OMA's cloud SessionDO loop. `harness` MUST be "acp-proxy" for this to
+   * take effect; SessionDO routes the AcpProxyHarness which proxies via the
+   * RuntimeRoom DO addressed by `runtime_id` to the daemon, which spawns the
+   * ACP child identified by `acp_agent_id` (matching KNOWN_ACP_AGENTS).
+   */
+  runtime_binding?: {
+    runtime_id: string;
+    acp_agent_id: string;
+  };
   description?: string;
   metadata?: Record<string, unknown>;
   /**

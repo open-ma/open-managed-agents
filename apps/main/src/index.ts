@@ -21,6 +21,8 @@ import evalsRoutes from "./routes/evals";
 import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
+import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
+import mcpProxyRoutes from "./routes/mcp-proxy";
 import { tickEvalRuns } from "./eval-runner";
 import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 
@@ -84,6 +86,35 @@ app.route("/v1/tenants", tenantsRoutes);
 app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/integrations", integrationsRoutes);
+app.route("/v1/runtimes", runtimesRoutes);
+// MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a
+// path-prefix skip) — auth is the Bearer oma_* the ACP child sends.
+app.route("/v1/mcp-proxy", mcpProxyRoutes);
+// Daemon-facing routes — outside /v1/* so authMiddleware doesn't run.
+// Apply tenantDbMiddleware + servicesMiddleware so daemon endpoints (like
+// /agents/runtime/sessions/:sid/bundle) can use c.get("services").
+app.use("/agents/runtime/*", tenantDbMiddleware);
+app.use("/agents/runtime/*", servicesMiddleware);
+app.route("/agents/runtime", runtimeDaemonRoutes);
+
+// /agents/runtime/_attach — WebSocket upgrade for `oma bridge daemon`. We
+// validate the runtime bearer token here, then forward to the RuntimeRoom
+// DO with x-runtime-id / x-runtime-user headers it trusts.
+app.get("/agents/runtime/_attach", async (c) => {
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.text("WebSocket only", 400);
+  }
+  if (!c.env.RUNTIME_ROOM) return c.text("RUNTIME_ROOM binding missing", 503);
+  const auth = c.req.header("authorization") ?? "";
+  const ok = await authenticateRuntimeToken(c.env, auth);
+  if (!ok) return c.text("unauthorized", 401);
+  const stub = c.env.RUNTIME_ROOM.get(c.env.RUNTIME_ROOM.idFromName(ok.runtime_id));
+  const fwd = new Request(c.req.raw);
+  fwd.headers.set("x-attach-role", "daemon");
+  fwd.headers.set("x-runtime-id", ok.runtime_id);
+  fwd.headers.set("x-runtime-user", ok.user_id);
+  return stub.fetch(fwd);
+});
 
 // Internal endpoints (NOT auth-middleware'd; secured by header secret inside
 // the route file). Called only by the integrations gateway worker via service
@@ -135,3 +166,7 @@ export default {
     // too — dockerfile/CI is now the only build path.
   },
 };
+
+// DO classes must be re-exported from the worker entry so wrangler can find
+// them by class_name in durable_objects.bindings + migrations.
+export { RuntimeRoom } from "./runtime-room";

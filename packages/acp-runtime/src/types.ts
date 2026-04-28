@@ -33,8 +33,12 @@ export interface AgentSpec {
   /** Executable name or absolute path. The spawner is responsible for $PATH lookup. */
   command: string;
   args?: string[];
-  /** Process env. Inherits the spawner's env unless explicitly overridden. */
-  env?: Record<string, string>;
+  /** Process env. Inherits the spawner's env; spec entries override. An entry
+   *  with `undefined` value EXPLICITLY UNSETS the inherited key — useful for
+   *  scrubbing variables like `CLAUDECODE` that mark the parent as already
+   *  inside a Claude Code session and would make a nested ACP child refuse
+   *  to start. */
+  env?: Record<string, string | undefined>;
   /** Working directory. Defaults to the spawner's cwd if omitted. */
   cwd?: string;
 }
@@ -121,6 +125,16 @@ export interface SessionOptions {
    * ACP request and surfaces a timeout error if exceeded. Default: 10 min.
    */
   perTurnTimeoutMs?: number;
+  /**
+   * If set, init() calls ACP `session/load` with this id instead of
+   * `session/new`. Powers cross-process resume — the agent re-hydrates
+   * a previous conversation from its on-disk transcript.
+   *
+   * Agents that don't support `session/load` (capability check at init
+   * fails) fall back to a fresh `session/new` and the caller is expected
+   * to surface the loss of history.
+   */
+  resumeAcpSessionId?: string;
 }
 
 /**
@@ -134,6 +148,8 @@ export interface SessionOptions {
 export interface AcpSession {
   /** Stable identifier for logging / pairing / multiplex routing. */
   readonly id: string;
+  /** The ACP-side session id (returned by `session/new` or echoed by `session/load`). */
+  readonly acpSessionId: string;
   /** Read-only snapshot of how this session was started. */
   readonly options: SessionOptions;
 
