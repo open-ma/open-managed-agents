@@ -144,11 +144,11 @@ export class CloudflareSandbox implements SandboxExecutor {
   }
 
   /**
-   * Restore a snapshot created by CfBaseSnapshotStrategy.prepare().
-   * Called once at boot for envs using image_strategy=base_snapshot.
-   * The handle's `backup` field is the {id, dir} pair from
-   * createBackup(); the platform stored it in env_row.image_handle
-   * and SessionDO passes it back here.
+   * SDK-based snapshot helpers — currently UNUSED. Were drivers for the
+   * base_snapshot lazy-prepare path that was reverted because CF Sandbox
+   * SDK calls run inside blockConcurrencyWhile (canceled at ~10-15s,
+   * which the createBackup mutex blew through). Kept as scaffolding for
+   * if/when CF exposes an out-of-DO snapshot primitive.
    */
   async restoreImageSnapshot(handle: { backup: { id: string; dir: string }; env_vars: Record<string, string> }): Promise<void> {
     const sandbox = await this.getSandbox();
@@ -156,17 +156,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     await sandbox.setEnvVars(handle.env_vars);
   }
 
-  /**
-   * Create a snapshot of `dir` for later restoreImageSnapshot. Returns
-   * the {id, dir} handle the platform persists in env_row.image_handle.
-   * Called by SessionDO.lazyPrepareBaseSnapshot on a first session for
-   * a not-yet-snapshotted env.
-   *
-   * `localBucket: true` (SDK 0.9.x) routes the upload via the worker's
-   * BACKUP_BUCKET R2 binding instead of presigned-URL + s3fs mount in
-   * the container. Bypasses the slow s3fs setup that previously hit
-   * CF's blockConcurrencyWhile cap on the SDK side.
-   */
   async createImageSnapshot(dir: string, name: string, ttl_seconds: number): Promise<{ id: string; dir: string; localBucket?: boolean }> {
     const sandbox = await this.getSandbox();
     return sandbox.createBackup({ dir, name, ttl: ttl_seconds, localBucket: true });
