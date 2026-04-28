@@ -530,6 +530,19 @@ export interface SpanModelRequestStartEvent extends EventBase {
   model?: string;
 }
 
+/**
+ * OMA extension (not in Anthropic's wire spec). Fires at the first chunk of a
+ * model response, between span.model_request_start and span.model_request_end.
+ * Lets the timeline split TTFT (start → first_token) from generation
+ * (first_token → end). Pair via model_request_start_id, same as
+ * span.model_request_end.
+ */
+export interface SpanModelFirstTokenEvent extends EventBase {
+  type: "span.model_first_token";
+  model?: string;
+  model_request_start_id?: string;
+}
+
 export interface SpanModelRequestEndEvent extends EventBase {
   type: "span.model_request_end";
   model?: string;
@@ -656,6 +669,7 @@ export type SessionEvent =
   | SessionThreadCreatedEvent
   | SessionThreadIdleEvent
   | SpanModelRequestStartEvent
+  | SpanModelFirstTokenEvent
   | SpanModelRequestEndEvent
   | SpanOutcomeEvaluationStartEvent
   | SpanOutcomeEvaluationOngoingEvent
