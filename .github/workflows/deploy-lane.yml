@@ -143,8 +143,12 @@ jobs:
           set_secret BETTER_AUTH_SECRET           "$MAIN" "${{ secrets.BETTER_AUTH_SECRET }}"
           set_secret INTEGRATIONS_INTERNAL_SECRET "$MAIN" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
           set_secret MCP_SIGNING_KEY              "$MAIN" "${{ secrets.MCP_SIGNING_KEY }}"
-          set_secret TURNSTILE_SECRET_KEY         "$MAIN" "${{ secrets.TURNSTILE_SECRET_KEY }}"
           set_secret INTERNAL_TOKEN               "$MAIN" "${{ secrets.INTERNAL_TOKEN }}"
+          # Cloudflare-published always-pass Turnstile secret. Paired with the
+          # always-pass site key set via vars in lane-generate.mjs. Lanes are
+          # dev-only; prod's real Turnstile secret stays out of the lane.
+          # https://developers.cloudflare.com/turnstile/troubleshooting/testing/
+          set_secret TURNSTILE_SECRET_KEY         "$MAIN" "1x0000000000000000000000000000000AA"
 
           echo "Setting secrets on $AGENT:"
           set_secret API_KEY                      "$AGENT" "${{ secrets.API_KEY }}"

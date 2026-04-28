@@ -104,8 +104,15 @@ Required CI vars/secrets (already used by `deploy.yml`):
 - `secrets.CLOUDFLARE_API_TOKEN`
 - `secrets.API_KEY`, `secrets.ANTHROPIC_API_KEY`, `secrets.BETTER_AUTH_SECRET`,
   `secrets.INTEGRATIONS_INTERNAL_SECRET`, `secrets.MCP_SIGNING_KEY`,
-  `secrets.TURNSTILE_SECRET_KEY`, `secrets.INTERNAL_TOKEN`
+  `secrets.INTERNAL_TOKEN`
 - Optional: `secrets.ANTHROPIC_BASE_URL`, `secrets.TAVILY_API_KEY`
+
+Lanes use Cloudflare's published always-pass Turnstile keys (site
+`1x00000000000000000000AA` / secret `1x0000000000000000000000000000000AA`)
+hardcoded into `lane-generate.mjs` and `deploy-lane.yml` so `/auth/*`
+flows work without exposing prod's real Turnstile secret to lane workers.
+Don't sign up with sensitive credentials on a lane — AUTH_DB is shared
+with prod, so the user record persists.
 
 If a secret isn't in the repo, the deploy step skips it silently and the
 lane comes up without that capability — you can `wrangler secret put` it

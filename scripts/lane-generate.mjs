@@ -154,6 +154,11 @@ main.vars = {
   // Linear / GitHub / Slack OAuth callbacks land here; must be the lane's
   // own integrations worker, not prod's.
   INTEGRATIONS_ORIGIN: INT_ORIGIN,
+  // Cloudflare-published "always-pass" Turnstile site key — paired with the
+  // matching always-pass secret set on lane workers via deploy-lane.yml.
+  // Lanes are dev-only; prod's real Turnstile keys never get exposed.
+  // https://developers.cloudflare.com/turnstile/troubleshooting/testing/
+  TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
 };
 main.services = [
   { binding: "SANDBOX_sandbox_default", service: NAMES.agent },
