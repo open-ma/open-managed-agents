@@ -1,34 +1,12 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useState, useRef } from "react";
 import { useParams, Link } from "react-router";
 import { useApi } from "../lib/api";
 import { Markdown } from "../components/Markdown";
-
-interface Event {
-  type: string;
-  content?: Array<{ type: string; text: string }> | string;
-  id?: string;
-  name?: string;
-  input?: Record<string, unknown>;
-  tool_use_id?: string;
-  mcp_tool_use_id?: string;
-  mcp_server_name?: string;
-  error?: string;
-  source?: string;
-  message?: string;
-  stop_reason?: { type: string };
-  /** Canonical id for streamed assistant messages — set on
-   *  agent.message_stream_start / _chunk / _stream_end and on the
-   *  matching final agent.message. Lets the renderer correlate
-   *  in-flight chunks with the eventually-committed message. */
-  message_id?: string;
-  delta?: string;
-  /** ISO timestamp. Server sets it for stored events; the client tags streamed
-   *  events on arrival with Date.now() as a best-effort fallback. */
-  ts?: string;
-  /** Server-side monotonic seq. Only set for events fetched from /events. */
-  seq?: number;
-  [key: string]: unknown;
-}
+import { formatDuration, formatRelative, shortenId } from "../lib/format";
+import { Badge, StatusPill } from "../components/Badge";
+import { AgentIcon, ClockIcon, DurationIcon, EnvIcon, VaultIcon } from "../components/icons";
+import { TimelineView } from "../components/timeline/TimelineView";
+import type { Event } from "../lib/events";
 
 type View = "chat" | "timeline";
 
@@ -53,6 +31,20 @@ export function SessionDetail() {
   const [sending, setSending] = useState(false);
   const [title, setTitle] = useState("");
   const [agentId, setAgentId] = useState("");
+  const [sessionMeta, setSessionMeta] = useState<{
+    environmentId?: string;
+    vaultIds?: string[];
+    vaults?: Array<{ id: string; display_name?: string }>;
+    createdAt?: string;
+    agentSnapshot?: { id?: string; name?: string; model?: string | { id: string }; description?: string; version?: number };
+    envSnapshot?: { id?: string; name?: string; description?: string };
+  }>({});
+  const [resourcePanel, setResourcePanel] = useState<
+    | { kind: "agent"; id: string }
+    | { kind: "environment"; id: string }
+    | { kind: "vault"; id: string }
+    | null
+  >(null);
   const [linear, setLinear] = useState<{
     issueId?: string;
     issueIdentifier?: string;
@@ -208,9 +200,17 @@ export function SessionDetail() {
     if (seenKeys.current.has(key)) return;
     seenKeys.current.add(key);
 
-    if (ev.type === "session.status_running") { setStatus("running"); return; }
-    if (ev.type === "session.status_idle") { setStatus("idle"); return; }
-    if (ev.type?.startsWith("span.") || ev.type === "agent.thinking") return;
+    if (ev.type === "session.status_running") setStatus("running");
+    if (ev.type === "session.status_idle") setStatus("idle");
+    // Don't return — Timeline's bucketIntoTurns uses these as the close
+    // boundary of a turn. Conversation view's EventBubble switch silently
+    // skips unknown types so leaving them in `events` is harmless there.
+    // Previously this dropped every span.* and agent.thinking event before
+    // they reached `events` state, so Timeline saw none of model/wakeup/
+    // compaction/outcome spans (entire reason waterfall looked empty).
+    // Conversation view's EventBubble silently ignores unknown types via
+    // its switch — keeping the events here costs the chat view nothing
+    // and gives Timeline the full trajectory it needs.
 
     // Tag streamed events with arrival time so the timeline has a usable ts
     // even before the server-side stored copy round-trips.
@@ -230,11 +230,41 @@ export function SessionDetail() {
     api<{
       title?: string;
       agent_id?: string;
+      environment_id?: string;
+      vault_ids?: string[];
+      created_at?: string;
+      agent?: { id?: string; name?: string; model?: string | { id: string }; description?: string; version?: number };
       metadata?: Record<string, unknown>;
     }>(`/v1/sessions/${id}`)
       .then((s) => {
         setTitle(s.title || id);
         setAgentId(s.agent_id || "");
+        setSessionMeta({
+          environmentId: s.environment_id,
+          vaultIds: s.vault_ids,
+          createdAt: s.created_at,
+          agentSnapshot: s.agent,
+        });
+
+        // Live-resolve env + vault names by id. Per the id-only ref decision
+        // (memory: session-resource-refs), the session API does not pre-bake
+        // display data — clients fetch resources on demand. Names appear a
+        // tick later than the badge frame; until then the badge falls back
+        // to the short-id label.
+        if (s.environment_id) {
+          api<{ id: string; name?: string; description?: string }>(`/v1/environments/${s.environment_id}`)
+            .then((env) => setSessionMeta((prev) => ({ ...prev, envSnapshot: env })))
+            .catch(() => {});
+        }
+        if (s.vault_ids?.length) {
+          Promise.all(
+            s.vault_ids.map((vid) =>
+              api<{ id: string; display_name?: string }>(`/v1/vaults/${vid}`)
+                .then((v) => ({ id: v.id, display_name: v.display_name }))
+                .catch(() => ({ id: vid })),
+            ),
+          ).then((vaults) => setSessionMeta((prev) => ({ ...prev, vaults })));
+        }
         const linearMeta = s.metadata?.linear as
           | { issueId?: string; issueIdentifier?: string; workspaceId?: string }
           | undefined;
@@ -295,17 +325,46 @@ export function SessionDetail() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-8 py-4 border-b border-border flex items-center gap-3 shrink-0">
-        <Link to="/sessions" className="text-fg-subtle hover:text-fg-muted text-sm">&larr; Sessions</Link>
-        <h2 className="font-display text-lg font-semibold flex-1">{title}</h2>
-        <div className="flex items-center gap-2">
-          {status === "running" && (
-            <span className="flex items-center gap-1.5 text-xs text-info">
-              <span className="w-2 h-2 rounded-full bg-info animate-pulse" />
-              Running
-            </span>
+      <div className="px-8 py-3 border-b border-border flex flex-col gap-2 shrink-0">
+        <div className="flex items-center gap-3">
+          <Link to="/sessions" className="text-fg-subtle hover:text-fg-muted text-sm">&larr; Sessions</Link>
+          <span className="text-fg-subtle">/</span>
+          <h2 className="font-mono text-sm text-fg-muted truncate flex-1" title={id}>{title}</h2>
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <StatusPill status={status as "idle" | "running" | "terminated" | "error" | string} />
+          {/* Always render env + agent + vault badges so an operator can
+              see what makes up this session at a glance. Name falls back
+              to a short ID slice if the snapshot didn't carry one — better
+              "agent_…XYZ" than nothing. */}
+          {(sessionMeta.agentSnapshot?.id || agentId) && (
+            <Badge
+              icon={<AgentIcon />}
+              label={sessionMeta.agentSnapshot?.name || shortenId(sessionMeta.agentSnapshot?.id || agentId)}
+              onClick={() =>
+                setResourcePanel({ kind: "agent", id: sessionMeta.agentSnapshot?.id || agentId })
+              }
+            />
           )}
-          <span className="text-xs text-fg-subtle font-mono">{agentId}</span>
+          {sessionMeta.environmentId && (
+            <Badge
+              icon={<EnvIcon />}
+              label={sessionMeta.envSnapshot?.name || shortenId(sessionMeta.environmentId)}
+              onClick={() =>
+                setResourcePanel({ kind: "environment", id: sessionMeta.environmentId! })
+              }
+            />
+          )}
+          {(sessionMeta.vaults ?? sessionMeta.vaultIds?.map((id) => ({ id, display_name: undefined })) ?? []).map((v) => (
+            <Badge
+              key={v.id}
+              icon={<VaultIcon />}
+              label={v.display_name || shortenId(v.id)}
+              onClick={() => setResourcePanel({ kind: "vault", id: v.id })}
+            />
+          ))}
+          <SessionDurationBadge events={events} />
+          {sessionMeta.createdAt && <RelativeTimeBadge iso={sessionMeta.createdAt} />}
         </div>
       </div>
 
@@ -370,6 +429,8 @@ export function SessionDetail() {
         </div>
       )}
 
+      <div className="flex-1 flex min-h-0">
+        <div className="flex-1 flex flex-col min-w-0">
       {view === "chat" ? (
         <>
           {/* Events */}
@@ -427,6 +488,14 @@ export function SessionDetail() {
       ) : (
         <TimelineView events={events} />
       )}
+        </div>
+        {resourcePanel && (
+          <ResourcePanel
+            panel={resourcePanel}
+            onClose={() => setResourcePanel(null)}
+          />
+        )}
+      </div>
     </div>
   );
 }
@@ -443,6 +512,127 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
     >
       {label}
     </button>
+  );
+}
+
+function SessionDurationBadge({ events }: { events: Event[] }) {
+  if (events.length === 0) return null;
+  let first = Infinity;
+  let last = -Infinity;
+  for (const e of events) {
+    const ts = (e as { processed_at?: string }).processed_at;
+    if (typeof ts !== "string") continue;
+    const t = new Date(ts).getTime();
+    if (!Number.isFinite(t)) continue;
+    if (t < first) first = t;
+    if (t > last) last = t;
+  }
+  if (!Number.isFinite(first) || last <= first) return null;
+  return (
+    <Badge
+      icon={<DurationIcon />}
+      label={formatDuration(last - first)}
+      title="Wall-clock from first to last event"
+    />
+  );
+}
+
+function RelativeTimeBadge({ iso }: { iso: string }) {
+  const t = new Date(iso).getTime();
+  if (!Number.isFinite(t)) return null;
+  return (
+    <Badge
+      icon={<ClockIcon />}
+      label={formatRelative(Date.now() - t)}
+      title={new Date(iso).toLocaleString()}
+    />
+  );
+}
+
+function ResourcePanel({
+  panel,
+  onClose,
+}: {
+  panel: { kind: "agent" | "environment" | "vault"; id: string };
+  onClose: () => void;
+}) {
+  // useApi returns { api, streamEvents } — destructure the call function
+  // explicitly. A previous version assigned the whole object to `api` and
+  // then called `api(url)`, which threw "api is not a function" and white-
+  // screened the page on first badge click.
+  const { api } = useApi();
+  const [data, setData] = useState<Record<string, unknown> | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setData(null);
+    setErr(null);
+    const url =
+      panel.kind === "agent"
+        ? `/v1/agents/${panel.id}`
+        : panel.kind === "environment"
+        ? `/v1/environments/${panel.id}`
+        : `/v1/vaults/${panel.id}`;
+    api<Record<string, unknown>>(url)
+      .then((d) => setData(d))
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+    // `api` from useApi() is a fresh closure every render — including it in
+    // deps caused setData → re-render → new api → effect refire → infinite
+    // loop. The stable inputs are kind + id; api itself is callable as-is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panel.kind, panel.id]);
+
+  const linkPath =
+    panel.kind === "agent"
+      ? `/agents/${panel.id}`
+      : panel.kind === "environment"
+      ? `/environments/${panel.id}`
+      : `/vaults/${panel.id}`;
+  const titleKind = panel.kind[0].toUpperCase() + panel.kind.slice(1);
+
+  // For agent / env, prefer name + description in the visible header.
+  const displayName = (data?.name as string | undefined) ?? panel.id;
+  const description = (data?.description as string | undefined) ?? null;
+
+  return (
+    <aside className="w-[420px] shrink-0 border-l border-border bg-bg flex flex-col min-h-0">
+      <div className="px-4 py-3 border-b border-border flex items-start gap-3 shrink-0">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono">
+            {titleKind}
+          </div>
+          <div className="text-base font-semibold text-fg truncate">{displayName}</div>
+          {description && (
+            <div className="text-xs text-fg-muted mt-0.5 line-clamp-2">{description}</div>
+          )}
+          <div className="text-[10px] font-mono text-fg-subtle mt-1 truncate">{panel.id}</div>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none px-1"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-3 text-xs">
+        {err && <div className="text-danger">Failed to load: {err}</div>}
+        {!data && !err && <div className="text-fg-subtle">Loading…</div>}
+        {data && (
+          <pre className="font-mono text-fg-muted bg-bg-surface/40 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all text-[11px]">
+            {JSON.stringify(data, null, 2)}
+          </pre>
+        )}
+      </div>
+      <div className="px-4 py-3 border-t border-border shrink-0">
+        <Link
+          to={linkPath}
+          className="inline-flex items-center gap-1.5 text-sm text-info hover:text-info/80 font-medium"
+        >
+          Go to {panel.kind} →
+        </Link>
+      </div>
+    </aside>
   );
 }
 
@@ -513,17 +703,50 @@ function EventBubble({ event }: { event: Event }) {
   const [toolOpen, setToolOpen] = useState(false);
 
   switch (event.type) {
-    case "user.message":
+    case "user.message": {
+      // Wakeups synthesized by the schedule tool's onScheduledWakeup callback
+      // also wire-type as user.message (per EventBase metadata convention),
+      // but the user did NOT send them — visually distinguish so operators
+      // don't get confused. metadata.harness === "schedule" + kind === "wakeup"
+      // is the contract: see apps/agent/src/runtime/session-do.ts:onScheduledWakeup.
+      const metadata = (event as { metadata?: { harness?: string; kind?: string; scheduled_at?: string } }).metadata;
+      const isWakeup = metadata?.harness === "schedule" && metadata?.kind === "wakeup";
+      const text = Array.isArray(event.content) ? event.content[0]?.text : "";
+
+      if (isWakeup) {
+        // System-origin: left-aligned (not "You"), info-toned bubble + clock
+        // glyph + "Scheduled wakeup" label. Title bar tooltips the schedule
+        // time from metadata for traceability.
+        const scheduledAt = metadata?.scheduled_at;
+        return (
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-1.5 text-xs text-fg-subtle mb-1">
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-info-subtle text-info px-2 py-0.5 font-medium text-[11px]"
+                title={scheduledAt ? `Scheduled at ${scheduledAt}` : undefined}
+              >
+                <span aria-hidden>🕒</span>
+                Scheduled wakeup
+              </span>
+            </div>
+            <div className="bg-bg-surface border border-info/30 rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
+              {text}
+            </div>
+          </div>
+        );
+      }
+
       return (
         <div className="flex justify-end">
           <div className="max-w-lg">
             <div className="text-xs text-fg-subtle text-right mb-1">You</div>
             <div className="bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
-              {Array.isArray(event.content) ? event.content[0]?.text : ""}
+              {text}
             </div>
           </div>
         </div>
       );
+    }
 
     case "agent.message":
       return (
@@ -534,6 +757,26 @@ function EventBubble({ event }: { event: Event }) {
           </div>
         </div>
       );
+
+    case "agent.thinking": {
+      // Canonical reasoning block — keep it visible after streaming
+      // finishes. Without a case here, ThinkingStreamingBubble disappears
+      // when the canonical event lands and EventBubble silently drops the
+      // canonical event, so the user sees thinking → vanish. Render as a
+      // collapsed-by-default disclosure since reasoning can be long.
+      const text = (event as { text?: string }).text ?? "";
+      if (!text) return null;
+      return (
+        <details className="max-w-2xl">
+          <summary className="text-xs text-fg-subtle mb-1 cursor-pointer hover:text-fg-muted select-none">
+            Thinking
+          </summary>
+          <div className="border-l-2 border-border pl-3 text-xs text-fg-muted italic leading-relaxed whitespace-pre-wrap">
+            {text}
+          </div>
+        </details>
+      );
+    }
 
     case "agent.tool_use":
       return (
@@ -587,259 +830,4 @@ function EventBubble({ event }: { event: Event }) {
   }
 }
 
-// ─── Timeline (waterfall) ────────────────────────────────────────────────
-//
-// Pure-frontend projection of the event stream into a Gantt-style timeline.
-// Tool/MCP/custom-tool calls become bars (use→result paired by id); model
-// turns are derived as the gap between the last completed event and the next
-// agent.message; messages and session.* events render as instants. We
-// deliberately drop agent.thinking (already filtered upstream) and tool
-// result events (consumed in pairing) to keep one row per logical span.
 
-type SpanFamily = "model" | "tool" | "mcp" | "custom_tool" | "user" | "agent" | "system" | "warn" | "error";
-
-interface Span {
-  key: string;
-  family: SpanFamily;
-  label: string;
-  detail?: string;
-  /** ms since the first event */
-  startMs: number;
-  /** 0 for instants */
-  durationMs: number;
-}
-
-const FAMILY_DOT: Record<SpanFamily, string> = {
-  model: "bg-info",
-  tool: "bg-emerald-500",
-  mcp: "bg-purple-500",
-  custom_tool: "bg-amber-500",
-  user: "bg-brand",
-  agent: "bg-fg-muted",
-  system: "bg-fg-subtle",
-  warn: "bg-warning",
-  error: "bg-danger",
-};
-
-const FAMILY_BAR: Record<SpanFamily, string> = {
-  model: "bg-info/70",
-  tool: "bg-emerald-500/70",
-  mcp: "bg-purple-500/70",
-  custom_tool: "bg-amber-500/70",
-  user: "bg-brand/70",
-  agent: "bg-fg-muted/70",
-  system: "bg-fg-subtle/70",
-  warn: "bg-warning/70",
-  error: "bg-danger/70",
-};
-
-function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 1) return "<1ms";
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.round((ms % 60_000) / 1000);
-  return `${m}m${s}s`;
-}
-
-function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
-  const timed = events.filter((e) => e.ts);
-  if (timed.length === 0) return { spans: [], totalMs: 0 };
-
-  const t0 = new Date(timed[0].ts!).getTime();
-  const tEnd = new Date(timed[timed.length - 1].ts!).getTime();
-  const totalMs = Math.max(1, tEnd - t0);
-
-  const spans: Span[] = [];
-
-  // Index results by their use-id field for O(1) pairing.
-  const toolResults = new Map<string, Event>();
-  const mcpResults = new Map<string, Event>();
-  const customResults = new Map<string, Event>();
-  for (const e of events) {
-    if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, e);
-    else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, e);
-    else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), e);
-  }
-
-  // Track previous completed-span end so we can derive a "model" span as the
-  // gap between the last result/user.message and the next agent.message.
-  let lastEnd = 0;
-
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
-    if (!e.ts) continue;
-    const startMs = new Date(e.ts).getTime() - t0;
-
-    if (e.type === "agent.tool_use" || e.type === "agent.custom_tool_use") {
-      const result = e.type === "agent.tool_use"
-        ? toolResults.get(String(e.id))
-        : customResults.get(String(e.id));
-      const endMs = result?.ts ? new Date(result.ts).getTime() - t0 : startMs;
-      spans.push({
-        key: `tool-${e.id ?? i}`,
-        family: e.type === "agent.tool_use" ? "tool" : "custom_tool",
-        label: String(e.name ?? "tool"),
-        detail: result ? "completed" : "no result",
-        startMs,
-        durationMs: Math.max(0, endMs - startMs),
-      });
-      lastEnd = Math.max(lastEnd, endMs);
-    } else if (e.type === "agent.mcp_tool_use") {
-      const result = mcpResults.get(String(e.id));
-      const endMs = result?.ts ? new Date(result.ts).getTime() - t0 : startMs;
-      spans.push({
-        key: `mcp-${e.id ?? i}`,
-        family: "mcp",
-        label: `${String(e.mcp_server_name ?? "mcp")}:${String(e.name ?? "?")}`,
-        detail: result ? "completed" : "no result",
-        startMs,
-        durationMs: Math.max(0, endMs - startMs),
-      });
-      lastEnd = Math.max(lastEnd, endMs);
-    } else if (
-      e.type === "agent.tool_result" ||
-      e.type === "agent.mcp_tool_result" ||
-      e.type === "user.custom_tool_result"
-    ) {
-      // consumed via pairing above — skip the row
-      continue;
-    } else if (e.type === "user.message") {
-      spans.push({ key: `u-${i}`, family: "user", label: "user.message", startMs, durationMs: 0 });
-      lastEnd = Math.max(lastEnd, startMs);
-    } else if (e.type === "agent.message") {
-      // Derive a model span from the last completed event up to here, so the
-      // chart shows where time was spent waiting on the model vs tools.
-      const modelStart = Math.max(0, Math.min(lastEnd, startMs));
-      if (startMs > modelStart) {
-        spans.push({
-          key: `m-${i}`,
-          family: "model",
-          label: "model",
-          startMs: modelStart,
-          durationMs: startMs - modelStart,
-        });
-      }
-      spans.push({ key: `a-${i}`, family: "agent", label: "agent.message", startMs, durationMs: 0 });
-      lastEnd = startMs;
-    } else if (e.type === "session.error") {
-      spans.push({
-        key: `err-${i}`,
-        family: "error",
-        label: "session.error",
-        detail: typeof e.error === "string" ? e.error : JSON.stringify(e.error),
-        startMs,
-        durationMs: 0,
-      });
-    } else if (e.type === "session.warning") {
-      spans.push({
-        key: `warn-${i}`,
-        family: "warn",
-        label: `warning:${String(e.source ?? "")}`,
-        detail: String(e.message ?? ""),
-        startMs,
-        durationMs: 0,
-      });
-    } else if (e.type.startsWith("session.")) {
-      spans.push({ key: `s-${i}`, family: "system", label: e.type, startMs, durationMs: 0 });
-    }
-  }
-
-  return { spans, totalMs };
-}
-
-function TimelineView({ events }: { events: Event[] }) {
-  const { spans, totalMs } = useMemo(() => deriveSpans(events), [events]);
-
-  if (spans.length === 0) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-sm text-fg-subtle">
-        No timing data yet — send a message to populate the timeline.
-      </div>
-    );
-  }
-
-  // Tick marks at sensible intervals based on total duration.
-  const tickStep = pickTickStep(totalMs);
-  const ticks: number[] = [];
-  for (let t = 0; t <= totalMs; t += tickStep) ticks.push(t);
-
-  return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="px-8 py-3 border-b border-border text-xs text-fg-subtle font-mono flex items-center gap-4">
-        <span>{spans.length} spans</span>
-        <span>·</span>
-        <span>total {formatDuration(totalMs)}</span>
-      </div>
-
-      {/* Time axis */}
-      <div className="px-8 pt-3 sticky top-0 bg-bg z-10">
-        <div className="flex items-center">
-          <div className="w-56 shrink-0" />
-          <div className="flex-1 relative h-5 border-b border-border">
-            {ticks.map((t) => (
-              <div
-                key={t}
-                className="absolute top-0 h-full flex flex-col items-start text-[10px] text-fg-subtle font-mono"
-                style={{ left: `${(t / totalMs) * 100}%` }}
-              >
-                <span className="-translate-x-1/2 px-1">{formatDuration(t)}</span>
-                <div className="w-px flex-1 bg-border" />
-              </div>
-            ))}
-          </div>
-          <div className="w-20 shrink-0" />
-        </div>
-      </div>
-
-      {/* Rows */}
-      <div className="px-8 pb-8">
-        {spans.map((s) => {
-          const left = (s.startMs / totalMs) * 100;
-          const width = s.durationMs > 0 ? Math.max(0.4, (s.durationMs / totalMs) * 100) : 0;
-          return (
-            <div
-              key={s.key}
-              className="flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group"
-              title={
-                s.detail
-                  ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
-                  : `${s.label} — ${formatDuration(s.durationMs)}`
-              }
-            >
-              <div className="w-56 shrink-0 flex items-center gap-2 text-xs">
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
-                <span className="truncate text-fg-muted font-mono">{s.label}</span>
-              </div>
-              <div className="flex-1 relative h-5">
-                {width > 0 ? (
-                  <div
-                    className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
-                    style={{ left: `${left}%`, width: `${width}%` }}
-                  />
-                ) : (
-                  <div
-                    className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
-                    style={{ left: `${left}%` }}
-                  />
-                )}
-              </div>
-              <div className="w-20 shrink-0 text-right text-xs font-mono text-fg-subtle pr-1">
-                {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </div>
-  );
-}
-
-function pickTickStep(totalMs: number): number {
-  // Roughly 6 ticks across the chart, snapped to a friendly unit.
-  const target = totalMs / 6;
-  const candidates = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000];
-  for (const c of candidates) if (c >= target) return c;
-  return candidates[candidates.length - 1];
-}

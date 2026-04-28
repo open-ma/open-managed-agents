@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
-import { buildContainer } from "../../wire";
 import { buildProviders } from "../../providers";
 
 // GitHub App Manifest flow:
@@ -26,8 +25,7 @@ app.get("/start/:formToken", async (c) => {
   if (!formToken) {
     return c.html(errorPage("missing form token"), 400);
   }
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const { github } = buildProviders(c.env);
 
   let prepared;
   try {
@@ -56,8 +54,7 @@ app.get("/callback", async (c) => {
     return c.html(errorPage("missing code or state in GitHub redirect"), 400);
   }
 
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const { github } = buildProviders(c.env);
 
   let result;
   try {

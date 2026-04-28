@@ -1,0 +1,169 @@
+name: Reclaim Stale Lanes
+
+# Daily sweep: delete lane workers (main + agent + integrations) whose newest
+# revision is older than MAX_AGE_DAYS. Lane shared data in KV / D1 / R2 is
+# left intact — only the per-lane worker scripts and their DO storage go away.
+#
+# An exemption list (repo var LANE_KEEP_LIST, comma-separated lane names)
+# spares specific lanes from the sweep.
+
+on:
+  schedule:
+    # 03:17 UTC daily. Off-peak; off the :00 / :30 minute marks where
+    # everyone else's crons cluster.
+    - cron: '17 3 * * *'
+  workflow_dispatch:
+    inputs:
+      max_age_days:
+        description: 'Reclaim lanes whose newest revision is older than N days'
+        required: false
+        type: string
+        default: '7'
+      dry_run:
+        description: 'List what would be reclaimed; do not actually delete'
+        required: false
+        type: boolean
+        default: false
+
+concurrency:
+  group: reclaim-lanes
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  reclaim:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install pnpm deps (for wrangler binary)
+        # We only need wrangler; no app code needs to build. --ignore-scripts
+        # skips per-package postinstalls (sharp, esbuild, etc.) that the
+        # reclaim job doesn't touch.
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Discover and reclaim stale lanes
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          MAX_AGE_DAYS: ${{ inputs.max_age_days || '7' }}
+          DRY_RUN: ${{ inputs.dry_run && 'true' || 'false' }}
+          KEEP_LIST: ${{ vars.LANE_KEEP_LIST }}
+        run: |
+          set -euo pipefail
+
+          NOW_EPOCH=$(date -u +%s)
+          MAX_AGE_SECS=$(( MAX_AGE_DAYS * 86400 ))
+
+          echo "─── config ──────────────────────────────────────"
+          echo "  threshold:  ${MAX_AGE_DAYS}d (${MAX_AGE_SECS}s)"
+          echo "  mode:       $([ "$DRY_RUN" = "true" ] && echo dry-run || echo destructive)"
+          echo "  keep list:  ${KEEP_LIST:-(none)}"
+          echo "  now (epoch):$NOW_EPOCH"
+          echo ""
+
+          # Fetch all worker scripts (CF API max 100/page; we paginate).
+          # Each script row carries `created_on` and `modified_on` as ISO-8601
+          # with fractional seconds — strip the fraction before fromdateiso8601.
+          PAGE=1
+          ALL_SCRIPTS_FILE=$(mktemp)
+          while :; do
+            RESP=$(curl -fsS \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts?per_page=100&page=$PAGE")
+            COUNT=$(echo "$RESP" | jq '.result | length')
+            echo "$RESP" | jq -c '.result[]' >> "$ALL_SCRIPTS_FILE"
+            if [ "$COUNT" -lt 100 ]; then break; fi
+            PAGE=$(( PAGE + 1 ))
+          done
+
+          TOTAL=$(wc -l < "$ALL_SCRIPTS_FILE" | tr -d ' ')
+          echo "Discovered $TOTAL workers in account."
+
+          # Identify lane MAIN workers (anchored regex) and compute age.
+          # Anchoring on `^managed-agents-lane-...$` (no `-integrations-`)
+          # avoids matching the integrations-lane workers and the
+          # sandbox-default-lane workers.
+          STALE_FILE=$(mktemp)
+          jq -r --argjson now "$NOW_EPOCH" --argjson max "$MAX_AGE_SECS" --arg keep "$KEEP_LIST" '
+            select(.id | test("^managed-agents-lane-[a-z0-9][a-z0-9-]+$"))
+            | (.id | sub("^managed-agents-lane-"; "")) as $lane
+            | (.modified_on // .created_on // "") as $ts
+            | (if $ts == "" then 0 else ($ts | sub("\\.[0-9]+Z$"; "Z") | fromdateiso8601) end) as $epoch
+            | ($now - $epoch) as $age
+            | (
+                ($keep | split(",") | map(gsub("^\\s+|\\s+$"; ""))) as $kl
+                | $kl | index($lane)
+              ) as $kept
+            | select($age > $max and $kept == null)
+            | "\($lane)|\($age)|\($ts)"
+          ' "$ALL_SCRIPTS_FILE" > "$STALE_FILE"
+
+          STALE_COUNT=$(wc -l < "$STALE_FILE" | tr -d ' ')
+          echo ""
+          echo "Stale lanes (>${MAX_AGE_DAYS}d, not in keep list): $STALE_COUNT"
+
+          if [ "$STALE_COUNT" -eq 0 ]; then
+            echo "Nothing to do."
+            echo "STALE_COUNT=0" >> "$GITHUB_ENV"
+            echo "RECLAIMED=" >> "$GITHUB_ENV"
+            exit 0
+          fi
+
+          RECLAIMED=""
+          while IFS='|' read -r lane age ts; do
+            age_days=$(( age / 86400 ))
+            echo ""
+            echo "─── $lane ──────────────────────────────────────"
+            echo "  age:        ${age_days}d"
+            echo "  modified:   $ts"
+            if [ "$DRY_RUN" = "true" ]; then
+              echo "  [dry-run] would delete:"
+              echo "    - managed-agents-lane-$lane"
+              echo "    - sandbox-default-lane-$lane"
+              echo "    - managed-agents-integrations-lane-$lane"
+            else
+              for worker in "managed-agents-lane-$lane" "sandbox-default-lane-$lane" "managed-agents-integrations-lane-$lane"; do
+                echo "  → wrangler delete $worker"
+                # `|| true` so a single missing worker (partial deploy) doesn't
+                # abort the rest of the cleanup loop. wrangler prints the error.
+                npx wrangler delete --name "$worker" --force 2>&1 | tail -3 || true
+              done
+            fi
+            RECLAIMED="${RECLAIMED}${lane},"
+          done < "$STALE_FILE"
+
+          echo "STALE_COUNT=$STALE_COUNT" >> "$GITHUB_ENV"
+          echo "RECLAIMED=${RECLAIMED%,}" >> "$GITHUB_ENV"
+
+      - name: Summary
+        if: always()
+        run: |
+          MODE="$([ "${{ inputs.dry_run }}" = "true" ] && echo "dry-run" || echo "destructive")"
+          {
+            echo "## Lane reclaim sweep"
+            echo ""
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Threshold | ${{ inputs.max_age_days || '7' }} days |"
+            echo "| Mode | $MODE |"
+            echo "| Keep list | \`${{ vars.LANE_KEEP_LIST || '(none)' }}\` |"
+            echo "| Stale found | ${STALE_COUNT:-0} |"
+            if [ -n "${RECLAIMED:-}" ]; then
+              echo "| Reclaimed | \`${RECLAIMED}\` |"
+            fi
+          } >> $GITHUB_STEP_SUMMARY

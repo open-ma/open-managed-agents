@@ -2,13 +2,14 @@ import type { EmbeddingProvider } from "../ports";
 
 /**
  * Cloudflare Workers AI implementation of {@link EmbeddingProvider}.
- * Uses Google's embedding-gemma model (matches what apps/main was already
- * doing pre-refactor; tweak the model id here to swap globally).
+ * Uses Google's EmbeddingGemma-300m (multilingual, ~768-dim). The model id
+ * is `embeddinggemma-300m` (one word, sized suffix) — `embedding-gemma`
+ * with a hyphen is a 5007 "no such model" error on the AI binding.
  */
 export class WorkersAiEmbeddingProvider implements EmbeddingProvider {
   constructor(
     private readonly ai: Ai,
-    private readonly model: string = "@cf/google/embedding-gemma",
+    private readonly model: string = "@cf/google/embeddinggemma-300m",
   ) {}
 
   async embed(text: string): Promise<number[] | null> {

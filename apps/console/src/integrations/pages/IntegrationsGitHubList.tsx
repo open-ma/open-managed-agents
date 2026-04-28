@@ -20,11 +20,11 @@ export function IntegrationsGitHubList() {
     setLoading(true);
     setError(null);
     try {
-      const installs = await api.listGitHubInstallations();
+      const installs = await api.github.listInstallations();
       const withPubs = await Promise.all(
         installs.map(async (installation) => ({
           installation,
-          publications: await api.listGitHubPublications(installation.id),
+          publications: await api.github.listPublications(installation.id),
         })),
       );
       setItems(withPubs);

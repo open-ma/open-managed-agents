@@ -614,6 +614,7 @@ app.get("/:id", async (c) => {
     response.agent = session.agent_snapshot;
     delete response.agent_snapshot;
   }
+
   return c.json(response);
 });
 

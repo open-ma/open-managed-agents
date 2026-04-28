@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { A1FormStep, A1InstallLink } from "../api/types";
+import { SecretInput, TextInput } from "../../components/Input";
 
 const api = new IntegrationsApi();
 
@@ -299,7 +300,7 @@ function PickStep(props: {
 
       <div className="grid md:grid-cols-2 gap-4">
         <Field label="Persona name (shown in Linear)">
-          <input
+          <TextInput
             value={props.personaName}
             onChange={(e) => props.setPersonaName(e.target.value)}
             placeholder="e.g. Coder, Designer, Triage"
@@ -308,7 +309,7 @@ function PickStep(props: {
         </Field>
 
         <Field label="Avatar URL (optional)">
-          <input
+          <TextInput
             value={props.personaAvatar}
             onChange={(e) => props.setPersonaAvatar(e.target.value)}
             placeholder="https://…"
@@ -389,23 +390,21 @@ function A1CredentialsStep(props: {
         </p>
         <div className="grid md:grid-cols-2 gap-4">
           <Field label="Client ID">
-            <input
+            <TextInput
               value={props.clientId}
               onChange={(e) => props.setClientId(e.target.value)}
               className={inputCls}
             />
           </Field>
           <Field label="Client Secret">
-            <input
-              type="password"
+            <SecretInput
               value={props.clientSecret}
               onChange={(e) => props.setClientSecret(e.target.value)}
               className={inputCls}
             />
           </Field>
           <Field label="Webhook signing secret (lin_wh_…)">
-            <input
-              type="password"
+            <SecretInput
               value={props.webhookSecret}
               onChange={(e) => props.setWebhookSecret(e.target.value)}
               placeholder="lin_wh_…"

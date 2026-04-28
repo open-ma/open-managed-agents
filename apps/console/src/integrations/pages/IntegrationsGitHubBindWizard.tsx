@@ -104,7 +104,7 @@ export function IntegrationsGitHubBindWizard({ loadAgents, loadEnvironments }: P
     setError(null);
     setPhase("registering");
     try {
-      const r = await api.startGitHubA1({
+      const r = await api.github.startA1({
         agentId,
         environmentId: envId,
         personaName: persona,
@@ -143,9 +143,9 @@ export function IntegrationsGitHubBindWizard({ loadAgents, loadEnvironments }: P
         return;
       }
       try {
-        const all = await api.listGitHubInstallations();
+        const all = await api.github.listInstallations();
         for (const inst of all) {
-          const pubs = await api.listGitHubPublications(inst.id);
+          const pubs = await api.github.listPublications(inst.id);
           const live = pubs.find(
             (p) => p.agent_id === agentId && p.status === "live",
           );
@@ -166,9 +166,9 @@ export function IntegrationsGitHubBindWizard({ loadAgents, loadEnvironments }: P
   async function refresh() {
     if (!form) return;
     try {
-      const all = await api.listGitHubInstallations();
+      const all = await api.github.listInstallations();
       for (const inst of all) {
-        const pubs = await api.listGitHubPublications(inst.id);
+        const pubs = await api.github.listPublications(inst.id);
         const live = pubs.find(
           (p) => p.agent_id === agentId && p.status === "live",
         );
