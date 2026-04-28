@@ -1,0 +1,185 @@
+name: Deploy Lane
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane_name:
+        description: 'Lane name (lowercase alphanumeric + dashes, e.g. pr-123 or feat-foo)'
+        required: true
+        type: string
+      git_ref:
+        description: 'Git ref to deploy (branch/tag/SHA). Defaults to the workflow run ref.'
+        required: false
+        type: string
+      confirm_shared_data:
+        description: 'Confirm: this lane WRITES TO PROD KV / D1 / R2 (data is shared)'
+        required: true
+        type: boolean
+        default: false
+
+# Allow concurrent deploys of different lanes; serialize within a single lane.
+concurrency:
+  group: deploy-lane-${{ inputs.lane_name }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirm
+        run: |
+          if [ "${{ inputs.confirm_shared_data }}" != "true" ]; then
+            echo "::error::Must check confirm_shared_data — lanes write to prod KV/D1/R2."
+            exit 1
+          fi
+
+      - name: Validate lane name
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          if ! echo "$LANE" | grep -qE '^[a-z0-9][a-z0-9-]{1,30}$'; then
+            echo "::error::lane_name must match ^[a-z0-9][a-z0-9-]{1,30}$ (got: '$LANE')"
+            exit 1
+          fi
+
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.git_ref || github.ref }}
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: 'pnpm'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build console
+        # apps/main/wrangler.lane-*.jsonc has assets.directory = ../console/dist;
+        # the lane main worker won't deploy without these built artifacts.
+        run: pnpm --filter managed-agents-console build
+
+      - name: Generate lane wrangler configs
+        env:
+          CF_SUBDOMAIN: ${{ vars.CF_SUBDOMAIN }}
+        run: node scripts/lane-generate.mjs '${{ inputs.lane_name }}'
+
+      # Deploy order matters: a worker's `services` binding fails to resolve at
+      # deploy time if the target worker doesn't yet exist. integrations has no
+      # service bindings, so it goes first; agent binds to integrations; main
+      # binds to both.
+      - name: Deploy integrations worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/integrations
+          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+
+      - name: Deploy agent worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/agent
+          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+
+      - name: Deploy main worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/main
+          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+
+      # Propagate the secrets a lane needs to come up green. Skip empty values
+      # silently — operators can `wrangler secret put` per worker post-hoc for
+      # anything not in repo secrets.
+      - name: Set worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          MAIN="managed-agents-lane-$LANE"
+          AGENT="sandbox-default-lane-$LANE"
+          INT="managed-agents-integrations-lane-$LANE"
+
+          set_secret() {
+            local name="$1" worker="$2" value="$3"
+            if [ -z "$value" ]; then
+              echo "  · skip $name → $worker (no value in repo secrets)"
+              return
+            fi
+            echo "$value" | npx wrangler secret put "$name" --name "$worker" >/dev/null
+            echo "  ✓ set $name → $worker"
+          }
+
+          echo "Setting secrets on $MAIN:"
+          set_secret API_KEY                      "$MAIN" "${{ secrets.API_KEY }}"
+          set_secret ANTHROPIC_API_KEY            "$MAIN" "${{ secrets.ANTHROPIC_API_KEY }}"
+          set_secret ANTHROPIC_BASE_URL           "$MAIN" "${{ secrets.ANTHROPIC_BASE_URL }}"
+          set_secret BETTER_AUTH_SECRET           "$MAIN" "${{ secrets.BETTER_AUTH_SECRET }}"
+          set_secret INTEGRATIONS_INTERNAL_SECRET "$MAIN" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+          set_secret MCP_SIGNING_KEY              "$MAIN" "${{ secrets.MCP_SIGNING_KEY }}"
+          set_secret TURNSTILE_SECRET_KEY         "$MAIN" "${{ secrets.TURNSTILE_SECRET_KEY }}"
+          set_secret INTERNAL_TOKEN               "$MAIN" "${{ secrets.INTERNAL_TOKEN }}"
+
+          echo "Setting secrets on $AGENT:"
+          set_secret API_KEY                      "$AGENT" "${{ secrets.API_KEY }}"
+          set_secret ANTHROPIC_API_KEY            "$AGENT" "${{ secrets.ANTHROPIC_API_KEY }}"
+          set_secret ANTHROPIC_BASE_URL           "$AGENT" "${{ secrets.ANTHROPIC_BASE_URL }}"
+          set_secret INTERNAL_TOKEN               "$AGENT" "${{ secrets.INTERNAL_TOKEN }}"
+          set_secret TAVILY_API_KEY               "$AGENT" "${{ secrets.TAVILY_API_KEY }}"
+
+          echo "Setting secrets on $INT:"
+          set_secret API_KEY                      "$INT" "${{ secrets.API_KEY }}"
+          set_secret INTEGRATIONS_INTERNAL_SECRET "$INT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+
+      - name: Health check
+        run: |
+          URL="https://managed-agents-lane-${{ inputs.lane_name }}.${{ vars.CF_SUBDOMAIN }}.workers.dev"
+          sleep 10
+          for i in 1 2 3 4 5; do
+            if curl -fsS "$URL/health" > /dev/null; then
+              echo "✓ lane main healthy at $URL"
+              exit 0
+            fi
+            echo "  attempt $i/5 — not ready, sleep 5s"
+            sleep 5
+          done
+          echo "::error::lane main health check failed for $URL"
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          SUB='${{ vars.CF_SUBDOMAIN }}'
+          MAIN_URL="https://managed-agents-lane-$LANE.$SUB.workers.dev"
+          INT_URL="https://managed-agents-integrations-lane-$LANE.$SUB.workers.dev"
+          AGENT_NAME="sandbox-default-lane-$LANE"
+          {
+            echo "## Lane \`$LANE\` deployed"
+            echo ""
+            echo "| Worker | URL / Name |"
+            echo "|---|---|"
+            echo "| Main | $MAIN_URL |"
+            echo "| Integrations | $INT_URL |"
+            echo "| Agent (service binding) | \`$AGENT_NAME\` |"
+            echo ""
+            echo "**Health**: \`$MAIN_URL/health\`"
+            echo ""
+            echo "⚠️  This lane writes to **production** KV / D1 / R2 / Vectorize. Treat its writes as prod writes."
+            echo ""
+            echo "Tear down with:"
+            echo '```'
+            echo "gh workflow run teardown-lane.yml -F lane_name=$LANE -F confirm=true"
+            echo '```'
+          } >> $GITHUB_STEP_SUMMARY
