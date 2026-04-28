@@ -70,17 +70,24 @@ jobs:
           CF_SUBDOMAIN: ${{ vars.CF_SUBDOMAIN }}
         run: node scripts/lane-generate.mjs '${{ inputs.lane_name }}'
 
-      # Deploy order matters: a worker's `services` binding fails to resolve at
-      # deploy time if the target worker doesn't yet exist. integrations has no
-      # service bindings, so it goes first; agent binds to integrations; main
-      # binds to both.
-      - name: Deploy integrations worker
+      # Deploy order is constrained by a circular dependency: integrations
+      # binds MAIN→main, main binds INTEGRATIONS→integrations and
+      # SANDBOX_sandbox_default→agent. Cloudflare rejects service bindings
+      # whose target worker doesn't yet exist, so we stage:
+      #   1. integrations (stubbed: services array stripped) — workers exist
+      #   2. agent (binds integrations, which now exists)
+      #   3. main (binds integrations + agent, both exist)
+      #   4. integrations re-deploy (now with MAIN binding to lane main)
+      # jq is preinstalled on ubuntu-latest.
+      - name: Deploy integrations worker (stub, no service bindings yet)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/integrations
-          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+          jq 'del(.services)' "wrangler.lane-${{ inputs.lane_name }}.jsonc" \
+            > "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
+          npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
 
       - name: Deploy agent worker
         env:
@@ -96,6 +103,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/main
+          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+
+      - name: Re-deploy integrations worker (full config, MAIN binding live)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/integrations
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       # Propagate the secrets a lane needs to come up green. Skip empty values
