@@ -73,6 +73,30 @@ export function useApi() {
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
       const message = (body as { error?: string }).error || `HTTP ${res.status}`;
+
+      // Self-heal stale-tenant lockout: if we sent x-active-tenant and the
+      // backend says we're not a member, the localStorage value is wrong
+      // (tenant deleted, membership revoked, or — common on lanes — the user
+      // signed in to a different upstream where their tenant_id differs).
+      // Clearing localStorage + reloading once lets the request retry without
+      // the header; backend then falls back to user.tenantId default. The
+      // sessionStorage guard prevents reload loops if 403 is from some other
+      // membership check (e.g. /v1/me/cli-tokens with an explicit body
+      // tenant_id that's not ours).
+      if (
+        res.status === 403 &&
+        activeTenant &&
+        message.includes("Not a member") &&
+        !sessionStorage.getItem("oma_tenant_self_heal")
+      ) {
+        sessionStorage.setItem("oma_tenant_self_heal", "1");
+        setActiveTenantId(null);
+        toast("Reset stored workspace pin (was unrecognized) — reloading", "info");
+        // Give the toast a tick to render before navigation.
+        setTimeout(() => location.reload(), 250);
+        throw new Error(message);
+      }
+
       // Surface non-OK responses to the user. Silently dropped errors had us
       // chasing "why don't I see anything" issues for far too long; almost
       // every endpoint failure here is something the user could act on
@@ -82,6 +106,9 @@ export function useApi() {
       }
       throw new Error(message);
     }
+    // Successful response — clear the self-heal sentinel so a future stale
+    // tenant can self-heal again later in the same browser session.
+    sessionStorage.removeItem("oma_tenant_self_heal");
     return res.json() as Promise<T>;
   }
 
