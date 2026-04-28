@@ -51,17 +51,21 @@ export function RuntimesList() {
 
   return (
     <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6">
+      <div className="flex items-start justify-between mb-6 gap-4">
         <div>
           <h1 className="font-display text-xl font-semibold tracking-tight text-fg">
             Local Runtimes
           </h1>
           <p className="text-fg-muted text-sm">
-            Registered machines running <code className="text-xs bg-bg-surface px-1 py-0.5 rounded">oma bridge daemon</code>.
-            Bind an agent to a runtime to delegate its loop to a local Claude Code (or other ACP) child.
+            Machines running <code className="text-xs bg-bg-surface px-1 py-0.5 rounded">oma bridge daemon</code> — bind an agent to one to delegate its loop to a local Claude Code child.
           </p>
         </div>
-        <Button onClick={() => setShowInstructions(true)}>+ Connect machine</Button>
+        <Button
+          onClick={() => setShowInstructions(true)}
+          className="shrink-0 whitespace-nowrap"
+        >
+          + Connect machine
+        </Button>
       </div>
 
       {loading ? (
