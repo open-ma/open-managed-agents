@@ -156,6 +156,15 @@ const INITIAL_SESSION_STATE: SessionState = {
  * Sandbox lifecycle: one sandbox per session, created on first event,
  * reused across turns, destroyed on session delete/terminate.
  */
+
+// Per-session cap on pending schedule-tool wakeups. Each pending wakeup, when
+// it fires, injects a user.message and spawns a model turn — without a cap a
+// runaway agent (cron loop, repeated tight delays) burns token quota until
+// human intervention. 20 is comfortably above legitimate use (handful of
+// reminders + a couple of cron schedules) and low enough that wedging it is
+// obvious within seconds of the first model call.
+const MAX_PENDING_WAKEUPS = 20;
+
 export class SessionDO extends Agent<Env, SessionState> {
   // 30s keepAlive heartbeat (also the agents-lib default) — held automatically
   // for the duration of any runFiber() callback. Prevents idle DO eviction
@@ -426,6 +435,21 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
     if (!args.prompt || !args.prompt.trim()) {
       throw new Error("prompt is required");
+    }
+
+    // Failsafe vs runaway cron loops: cap pending wakeups per session.
+    // Without this, an agent that misuses cron (`*/1 * * * *` repeated, or a
+    // tight delay_seconds=5 loop) can pile up unbounded schedules — each
+    // fire injects a user.message + spawns a model turn, burning token quota
+    // until someone notices. Filter to onScheduledWakeup callbacks so the
+    // framework's internal recoverEventQueue / pollBackgroundTasks rows
+    // don't count against the budget.
+    const pending = this.getSchedules().filter((s) => s.callback === "onScheduledWakeup").length;
+    if (pending >= MAX_PENDING_WAKEUPS) {
+      throw new Error(
+        `pending wakeup cap reached (${pending}/${MAX_PENDING_WAKEUPS}); ` +
+        `call list_schedules to inspect, cancel_schedule to free a slot`,
+      );
     }
 
     let when: number | Date | string;
