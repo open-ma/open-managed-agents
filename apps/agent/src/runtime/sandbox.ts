@@ -161,10 +161,15 @@ export class CloudflareSandbox implements SandboxExecutor {
    * the {id, dir} handle the platform persists in env_row.image_handle.
    * Called by SessionDO.lazyPrepareBaseSnapshot on a first session for
    * a not-yet-snapshotted env.
+   *
+   * `localBucket: true` (SDK 0.9.x) routes the upload via the worker's
+   * BACKUP_BUCKET R2 binding instead of presigned-URL + s3fs mount in
+   * the container. Bypasses the slow s3fs setup that previously hit
+   * CF's blockConcurrencyWhile cap on the SDK side.
    */
-  async createImageSnapshot(dir: string, name: string, ttl_seconds: number): Promise<{ id: string; dir: string }> {
+  async createImageSnapshot(dir: string, name: string, ttl_seconds: number): Promise<{ id: string; dir: string; localBucket?: boolean }> {
     const sandbox = await this.getSandbox();
-    return sandbox.createBackup({ dir, name, ttl: ttl_seconds });
+    return sandbox.createBackup({ dir, name, ttl: ttl_seconds, localBucket: true });
   }
 
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {
