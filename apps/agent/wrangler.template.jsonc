@@ -2,7 +2,7 @@
   "$schema": "../node_modules/wrangler/config-schema.json",
   "name": "sandbox-__ENV_ID__",
   "main": "src/index.ts",
-  "compatibility_date": "2025-09-15",
+  "compatibility_date": "2026-04-13",
   "compatibility_flags": ["nodejs_compat"],
 
   "containers": [
