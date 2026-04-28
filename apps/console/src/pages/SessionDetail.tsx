@@ -56,6 +56,7 @@ export function SessionDetail() {
   const [sessionMeta, setSessionMeta] = useState<{
     environmentId?: string;
     vaultIds?: string[];
+    vaults?: Array<{ id: string; display_name?: string }>;
     createdAt?: string;
     agentSnapshot?: { id?: string; name?: string; model?: string | { id: string }; description?: string; version?: number };
     envSnapshot?: { id?: string; name?: string; description?: string };
@@ -255,7 +256,6 @@ export function SessionDetail() {
       vault_ids?: string[];
       created_at?: string;
       agent?: { id?: string; name?: string; model?: string | { id: string }; description?: string; version?: number };
-      environment?: { id?: string; name?: string; description?: string };
       metadata?: Record<string, unknown>;
     }>(`/v1/sessions/${id}`)
       .then((s) => {
@@ -266,8 +266,27 @@ export function SessionDetail() {
           vaultIds: s.vault_ids,
           createdAt: s.created_at,
           agentSnapshot: s.agent,
-          envSnapshot: s.environment,
         });
+
+        // Live-resolve env + vault names by id. Per the id-only ref decision
+        // (memory: session-resource-refs), the session API does not pre-bake
+        // display data — clients fetch resources on demand. Names appear a
+        // tick later than the badge frame; until then the badge falls back
+        // to the short-id label.
+        if (s.environment_id) {
+          api<{ id: string; name?: string; description?: string }>(`/v1/environments/${s.environment_id}`)
+            .then((env) => setSessionMeta((prev) => ({ ...prev, envSnapshot: env })))
+            .catch(() => {});
+        }
+        if (s.vault_ids?.length) {
+          Promise.all(
+            s.vault_ids.map((vid) =>
+              api<{ id: string; display_name?: string }>(`/v1/vaults/${vid}`)
+                .then((v) => ({ id: v.id, display_name: v.display_name }))
+                .catch(() => ({ id: vid })),
+            ),
+          ).then((vaults) => setSessionMeta((prev) => ({ ...prev, vaults })));
+        }
         const linearMeta = s.metadata?.linear as
           | { issueId?: string; issueIdentifier?: string; workspaceId?: string }
           | undefined;
@@ -336,30 +355,34 @@ export function SessionDetail() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <StatusPill status={status as "idle" | "running" | "terminated" | "error" | string} />
-          {sessionMeta.agentSnapshot?.name && (
+          {/* Always render env + agent + vault badges so an operator can
+              see what makes up this session at a glance. Name falls back
+              to a short ID slice if the snapshot didn't carry one — better
+              "agent_…XYZ" than nothing. */}
+          {(sessionMeta.agentSnapshot?.id || agentId) && (
             <ResourceBadge
               icon={<AgentIcon />}
-              label={sessionMeta.agentSnapshot.name}
+              label={sessionMeta.agentSnapshot?.name || shortenId(sessionMeta.agentSnapshot?.id || agentId)}
               onClick={() =>
                 setResourcePanel({ kind: "agent", id: sessionMeta.agentSnapshot?.id || agentId })
               }
             />
           )}
-          {sessionMeta.envSnapshot?.name && sessionMeta.environmentId && (
+          {sessionMeta.environmentId && (
             <ResourceBadge
               icon={<EnvIcon />}
-              label={sessionMeta.envSnapshot.name}
+              label={sessionMeta.envSnapshot?.name || shortenId(sessionMeta.environmentId)}
               onClick={() =>
                 setResourcePanel({ kind: "environment", id: sessionMeta.environmentId! })
               }
             />
           )}
-          {(sessionMeta.vaultIds ?? []).map((vid) => (
+          {(sessionMeta.vaults ?? sessionMeta.vaultIds?.map((id) => ({ id, display_name: undefined })) ?? []).map((v) => (
             <ResourceBadge
-              key={vid}
+              key={v.id}
               icon={<VaultIcon />}
-              label={vid.slice(0, 12) + "…"}
-              onClick={() => setResourcePanel({ kind: "vault", id: vid })}
+              label={v.display_name || shortenId(v.id)}
+              onClick={() => setResourcePanel({ kind: "vault", id: v.id })}
             />
           ))}
           <SessionDurationBadge events={events} />
@@ -618,6 +641,15 @@ function ClockIcon() {
       <polyline points="12 6 12 12 16 14" />
     </svg>
   );
+}
+
+/** Truncate a long ID like `agt_01ABC…XYZ` to a few-char prefix + ellipsis,
+ *  used as a fallback label when the resource's display name hasn't loaded
+ *  yet. Better than rendering 30 chars of opaque hex. */
+function shortenId(id: string | undefined): string {
+  if (!id) return "—";
+  if (id.length <= 12) return id;
+  return id.slice(0, 8) + "…" + id.slice(-3);
 }
 
 function formatRelative(diffMs: number): string {
