@@ -1,5 +1,6 @@
 import {
   IntegrationsLinearList,
+  IntegrationsLinearPatInstall,
   IntegrationsLinearPublishWizard,
   IntegrationsLinearWorkspace,
 } from "../integrations";
@@ -13,6 +14,27 @@ export function IntegrationsLinearPublishPage() {
   const { api } = useApi();
   return (
     <IntegrationsLinearPublishWizard
+      loadAgents={async () => {
+        const r = await api<{ data: Array<{ id: string; name: string }> }>(
+          "/v1/agents?limit=200",
+        );
+        return r.data;
+      }}
+      loadEnvironments={async () => {
+        const r = await api<{ data: Array<{ id: string; name: string }> }>(
+          "/v1/environments?limit=200",
+        );
+        return r.data;
+      }}
+    />
+  );
+}
+
+/** Fast-path install via Personal API Key — bypasses OAuth dance. */
+export function IntegrationsLinearPatInstallPage() {
+  const { api } = useApi();
+  return (
+    <IntegrationsLinearPatInstall
       loadAgents={async () => {
         const r = await api<{ data: Array<{ id: string; name: string }> }>(
           "/v1/agents?limit=200",
