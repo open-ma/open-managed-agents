@@ -209,178 +209,6 @@ export class SessionDO extends Agent<Env, SessionState> {
   }
 
   /**
-   * Fetch the env's CURRENT image_handle from the live DB. NOT cached
-   * in environment_snapshot — the snapshot is frozen at session
-   * create, but the handle moves with re-prepare (env packages
-   * change). Always restore from the latest handle so old sessions
-   * of a re-prepared env don't try to restore from a deleted backup.
-   */
-  private async getEnvImageHandle(envId: string): Promise<{
-    image_strategy: "base_snapshot" | "dockerfile" | null;
-    image_handle: Record<string, unknown> | null;
-  } | null> {
-    const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
-    const row = await services.environments.get({
-      tenantId: this.state.tenant_id,
-      environmentId: envId,
-    });
-    if (!row) return null;
-    return { image_strategy: row.image_strategy, image_handle: row.image_handle };
-  }
-
-  /**
-   * Lazy prepare via SHELL — bypasses SDK createBackup entirely.
-   *
-   * We learned the hard way that @cloudflare/sandbox's createBackup
-   * (both 0.8.x and 0.9.x, with or without localBucket) takes a
-   * blockConcurrencyWhile lock on the Sandbox DO that CF cancels at
-   * ~10-15s. For ~150MB pip installs that exceed the cap, every
-   * createBackup call returns Canceled and the handle never persists.
-   *
-   * Workaround: do the entire install + tar + upload as ONE
-   * sandbox.exec — a normal HTTP request to the container, no SDK
-   * mutex involved. The shell script:
-   *   1. Installs packages into /home/env-cache/<env_id>/
-   *   2. Writes env.json
-   *   3. tars the cache dir
-   *   4. curl PUTs the tar to a presigned R2 URL we sign here in the worker
-   *
-   * Restore is the mirror: signR2Url('GET'), curl + tar -xf.
-   *
-   * Concurrent first-sessions race; latest-writer wins on D1; old
-   * R2 objects orphan (cleaned by R2 lifecycle rule, not us).
-   */
-  private async lazyPrepareBaseSnapshot(envId: string, sandbox: CloudflareSandbox): Promise<void> {
-    console.log(`[lazyPrepare] start env=${envId}`);
-    const envConfig = await this.getEnvConfig(envId);
-    const pkgs = (envConfig?.config.packages ?? {}) as { pip?: string[]; npm?: string[]; cargo?: string[]; gem?: string[]; go?: string[]; apt?: string[] };
-    if (pkgs.apt && pkgs.apt.length > 0) {
-      throw new Error(
-        `base_snapshot does not support apt packages (${pkgs.apt.join(", ")}). Either bake into the base image or switch to image_strategy: "dockerfile".`,
-      );
-    }
-
-    const cacheDir = `/home/env-cache/${envId}`;
-    const storageKey = `env-snapshots/${envId}.tar`;
-    const sh = (s: string) => `'${s.replace(/'/g, "'\\''")}'`;
-
-    const envVars: Record<string, string> = {
-      PATH: `${cacheDir}/.venv/bin:${cacheDir}/node_modules/.bin:${cacheDir}/.cargo/bin:${cacheDir}/.gem/bin:${cacheDir}/.go/bin:/usr/local/bin:/usr/bin:/bin`,
-      VIRTUAL_ENV: `${cacheDir}/.venv`,
-      NODE_PATH: `${cacheDir}/node_modules`,
-      CARGO_HOME: `${cacheDir}/.cargo`,
-      GEM_HOME: `${cacheDir}/.gem`,
-      GOPATH: `${cacheDir}/.go`,
-      PYTHONPATH: `${cacheDir}/.venv/lib/python3.12/site-packages`,
-    };
-
-    // Worker-side: sign a one-shot presigned PUT URL the container can curl.
-    console.log(`[lazyPrepare] signing presigned PUT URL`);
-    const putUrl = await this.signR2Url("PUT", storageKey);
-
-    const installSteps: string[] = [
-      `mkdir -p ${cacheDir} && chmod -R u+rw ${cacheDir}`,
-    ];
-    if (pkgs.pip && pkgs.pip.length > 0) {
-      installSteps.push(`uv venv ${cacheDir}/.venv --python 3.12`);
-      installSteps.push(`uv pip install --python ${cacheDir}/.venv/bin/python ${pkgs.pip.map(sh).join(" ")}`);
-    }
-    if (pkgs.npm && pkgs.npm.length > 0) installSteps.push(`npm install --prefix ${cacheDir} --no-audit --no-fund ${pkgs.npm.map(sh).join(" ")}`);
-    if (pkgs.cargo && pkgs.cargo.length > 0) installSteps.push(`CARGO_HOME=${cacheDir}/.cargo cargo install ${pkgs.cargo.map(sh).join(" ")}`);
-    if (pkgs.gem && pkgs.gem.length > 0) installSteps.push(`GEM_HOME=${cacheDir}/.gem gem install --no-document ${pkgs.gem.map(sh).join(" ")}`);
-    if (pkgs.go && pkgs.go.length > 0) installSteps.push(`GOPATH=${cacheDir}/.go go install ${pkgs.go.map(sh).join(" ")}`);
-
-    const script = [
-      "set -e",
-      ...installSteps,
-      // env.json — written via heredoc to avoid escaping pain
-      `cat > ${cacheDir}/env.json <<'OPENMA_ENV'`,
-      JSON.stringify(envVars),
-      "OPENMA_ENV",
-      // Tar the cache dir (cd to parent so paths are relative)
-      `cd /home/env-cache && tar -cf /tmp/snap-${envId}.tar ${envId}`,
-      `SIZE=$(stat -c%s /tmp/snap-${envId}.tar)`,
-      `echo "[shell] archive bytes=$SIZE"`,
-      // curl PUT — fail fast on non-2xx, retry up to 3 times on transient
-      `curl -fsS --retry 3 --retry-connrefused -X PUT --upload-file /tmp/snap-${envId}.tar '${putUrl}'`,
-      `rm -f /tmp/snap-${envId}.tar`,
-      `echo "[shell] uploaded key=${storageKey}"`,
-    ].join("\n");
-
-    console.log(`[lazyPrepare] running install+tar+upload script (~1-3min)`);
-    const result = await sandbox.exec(script, 600_000);
-    console.log(`[lazyPrepare] script result: ${result.slice(0, 500)}`);
-    if (!result.includes("[shell] uploaded")) {
-      throw new Error(`shell script failed: ${result.slice(0, 500)}`);
-    }
-
-    console.log(`[lazyPrepare] persist handle to D1`);
-    const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
-    await services.environments.update({
-      tenantId: this.state.tenant_id,
-      environmentId: envId,
-      imageHandle: { storage_key: storageKey, env_vars: envVars, cache_dir: cacheDir, prepared_at: Date.now() },
-    });
-
-    console.log(`[lazyPrepare] setEnvVars`);
-    await sandbox.setEnvVars(envVars);
-    console.log(`[lazyPrepare] DONE env=${envId}`);
-  }
-
-  /** Restore a shell-uploaded snapshot for subsequent sessions of the
-   *  same env. Mirror of lazyPrepareBaseSnapshot's upload step. */
-  private async restoreShellSnapshot(
-    storageKey: string,
-    cacheDir: string,
-    envVars: Record<string, string>,
-    sandbox: CloudflareSandbox,
-  ): Promise<void> {
-    const getUrl = await this.signR2Url("GET", storageKey);
-    const script = [
-      "set -e",
-      `mkdir -p /home/env-cache`,
-      `curl -fsS --retry 3 --retry-connrefused -o /tmp/snap.tar '${getUrl}'`,
-      `cd /home/env-cache && tar -xf /tmp/snap.tar`,
-      `rm -f /tmp/snap.tar`,
-      `echo "[shell] restored ${storageKey}"`,
-    ].join("\n");
-    const result = await sandbox.exec(script, 120_000);
-    if (!result.includes("[shell] restored")) {
-      throw new Error(`restore script failed: ${result.slice(0, 500)}`);
-    }
-    await sandbox.setEnvVars(envVars);
-  }
-
-  /** Sign an R2 URL using the same secrets the (failed) SDK path used.
-   *  aws4fetch's signQuery mode puts the signature in the URL query
-   *  string so curl just hits it as a plain HTTP URL. */
-  private async signR2Url(method: "PUT" | "GET", key: string): Promise<string> {
-    const env = this.env as unknown as {
-      CLOUDFLARE_ACCOUNT_ID?: string;
-      R2_ACCESS_KEY_ID?: string;
-      R2_SECRET_ACCESS_KEY?: string;
-      BACKUP_BUCKET_NAME?: string;
-    };
-    if (!env.CLOUDFLARE_ACCOUNT_ID || !env.R2_ACCESS_KEY_ID || !env.R2_SECRET_ACCESS_KEY || !env.BACKUP_BUCKET_NAME) {
-      throw new Error("base_snapshot shell uploader needs CLOUDFLARE_ACCOUNT_ID + R2_ACCESS_KEY_ID + R2_SECRET_ACCESS_KEY + BACKUP_BUCKET_NAME");
-    }
-    const { AwsClient } = await import("aws4fetch");
-    const aws = new AwsClient({
-      accessKeyId: env.R2_ACCESS_KEY_ID,
-      secretAccessKey: env.R2_SECRET_ACCESS_KEY,
-      service: "s3",
-      region: "auto",
-    });
-    const url = `https://${env.CLOUDFLARE_ACCOUNT_ID}.r2.cloudflarestorage.com/${env.BACKUP_BUCKET_NAME}/${key}`;
-    // 1-hour TTL is plenty for one-shot upload/download
-    const signed = await aws.sign(`${url}?X-Amz-Expires=3600`, {
-      method,
-      aws: { signQuery: true },
-    });
-    return signed.url;
-  }
-
-  /**
    * Resolve all credentials for the listed vaults. Prefers the pre-fetched
    * snapshot from /init; falls back to KV list/get loops if absent.
    */
@@ -934,11 +762,9 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       // NO ctx.waitUntil(this.warmUpSandbox()) — that pattern dies on
       // DO reset (which happens regularly under our concurrent traffic
-      // pattern). lazyPrepareBaseSnapshot has expensive sandbox.exec +
-      // createBackup calls that get canceled mid-flight when the DO
-      // resets. Instead let warmUp fire lazily on the first /event
-      // handler (line 1667 below) where it runs as part of the user's
-      // request, holding the DO alive for its full duration. First user
+      // pattern). Let warmUp fire lazily on the first /event handler
+      // below, where it runs as part of the user's request and holds the
+      // DO alive for the full duration. First user
       // message pays the cold-start cost (~1-3 min for an env that
       // needs install + snapshot); subsequent messages restore in
       // seconds from the persisted handle.
@@ -1447,49 +1273,21 @@ export class SessionDO extends Agent<Env, SessionState> {
         await sandbox.mountWorkspace();
       }
 
-      // Apply image strategy.
+      // image_strategy fast path REMOVED. Was a base_snapshot lazy-prepare
+      // path that ran a multi-minute install + tar + R2 upload via a single
+      // sandbox.exec — the SDK wraps each exec in blockConcurrencyWhile,
+      // which CF cancels at ~10-15s. Every retry restarted the install
+      // from scratch, zombie SessionDOs alarmed in a loop, and the
+      // container pool capped at max_instances starved real sessions.
       //
-      //   base_snapshot + handle present: restore the env's pre-installed
-      //                                   package cache from the snapshot.
-      //   base_snapshot + handle null:    LAZY PREPARE — first session
-      //                                   for this env. Install packages
-      //                                   into /home/env-cache/<id>/,
-      //                                   createBackup, persist handle to
-      //                                   D1. SessionDO holds the request
-      //                                   open for as long as harness loops
-      //                                   already do (5+ min); install +
-      //                                   backup fits there.
-      //   dockerfile / null:              fall through to the legacy
-      //                                   install-on-every-boot loop below.
-      //                                   Packages are baked into per-env
-      //                                   worker image; the loop is the
-      //                                   safety net for envs missing config.
+      // Until the platform exposes a primitive for "snapshot a container
+      // filesystem outside the DO request loop," base_snapshot envs fall
+      // through to the install-on-every-boot loop below — same path as
+      // dockerfile/null. The base image already has python/uv/requests/
+      // httpx/pandas/pytest/Go/Rust pre-baked, so envs without extra
+      // packages skip install entirely.
       const envId = this.state.environment_id;
-      let imagePathHandled = false;
-      if (envId && sandbox instanceof CloudflareSandbox) {
-        try {
-          const handleRow = await this.getEnvImageHandle(envId);
-          if (handleRow?.image_strategy === "base_snapshot") {
-            const h = handleRow.image_handle as { storage_key?: string; env_vars?: Record<string, string>; cache_dir?: string } | null;
-            if (h && h.storage_key && h.env_vars && h.cache_dir) {
-              // Cache hit — pull our shell-uploaded tar from R2 + extract.
-              await this.restoreShellSnapshot(h.storage_key, h.cache_dir, h.env_vars, sandbox);
-              imagePathHandled = true;
-            } else {
-              // Cache miss — install + tar + upload in one exec.
-              await this.lazyPrepareBaseSnapshot(envId, sandbox);
-              imagePathHandled = true;
-            }
-          }
-        } catch (err) {
-          console.log(`[image_strategy] FAILED env=${envId}: ${err instanceof Error ? err.message : err}\n${err instanceof Error ? err.stack : ""}`);
-          logWarn(
-            { op: "session_do.image_strategy", env_id: envId, err },
-            "image strategy handler failed; falling back to install-on-boot",
-          );
-          // Fall through to the install loop below.
-        }
-      }
+      const imagePathHandled = false;
 
       // Install environment packages if configured. Skipped when the
       // base_snapshot path above handled it (restored from snapshot or
