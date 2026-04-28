@@ -332,4 +332,64 @@ describe("schedule tool — agent tool-call → alarm → wakeup event", () => {
     expect(wakeup.data.metadata.kind).toBe("wakeup");
     expect(wakeup.data.metadata.wakeup_kind).toBe("one_shot");
   }, 25_000);
+
+  it("pending wakeup cap: scheduling beyond 20 throws; cancelling frees a slot", async () => {
+    // Failsafe vs runaway cron loops. Without the cap, an agent can pile up
+    // unbounded schedules and burn token quota on each fire. See
+    // session-do.ts:MAX_PENDING_WAKEUPS (20).
+    const { stub, sessionId } = newStub("cap");
+    await ensureAlive(stub, sessionId);
+
+    let firstId: string;
+    let lastIdAtCap: string;
+    let capError: unknown;
+    let postCancelOk: { id: string };
+
+    await runInDurableObject(stub, async (instance) => {
+      // Use far-future absolute timestamps so nothing fires during the test.
+      const baseTs = Date.now() + 6 * 60 * 60 * 1000; // +6h
+      // Schedule exactly the cap (20)
+      let firstResult: any = null;
+      let lastResult: any = null;
+      for (let i = 0; i < 20; i++) {
+        const r = await instance.scheduleWakeup({
+          at: new Date(baseTs + i * 60_000).toISOString(),
+          prompt: `slot ${i}`,
+        });
+        if (i === 0) firstResult = r;
+        if (i === 19) lastResult = r;
+      }
+      firstId = firstResult.id;
+      lastIdAtCap = lastResult.id;
+
+      // 21st should throw
+      try {
+        await instance.scheduleWakeup({
+          at: new Date(baseTs + 60 * 60_000).toISOString(),
+          prompt: "over the cap",
+        });
+        capError = new Error("expected throw, got success");
+      } catch (e) {
+        capError = e;
+      }
+
+      // Free a slot, then a fresh schedule should succeed
+      await instance.cancelWakeup(firstId);
+      postCancelOk = await instance.scheduleWakeup({
+        at: new Date(baseTs + 61 * 60_000).toISOString(),
+        prompt: "after cancel",
+      });
+
+      // Cleanup so we don't leave 20 future alarms hanging
+      const remaining = instance.listWakeups();
+      for (const s of remaining) {
+        await instance.cancelWakeup(s.id);
+      }
+    });
+
+    expect(capError).toBeInstanceOf(Error);
+    expect((capError as Error).message).toMatch(/pending wakeup cap reached/);
+    expect((capError as Error).message).toMatch(/20\/20/);
+    expect(postCancelOk.id).toMatch(/.+/);
+  }, 30_000);
 });

@@ -904,7 +904,9 @@ export async function buildTools(
         "Schedule THIS session to wake up later. Provide exactly one of delay_seconds, at (ISO-8601 timestamp), or cron (5-field cron). " +
         "When the timer fires, `prompt` is injected as a user message and the agent loop resumes from there. " +
         "Use for reminders (\"check the build in 10 minutes\"), follow-ups, or periodic monitors. " +
-        "Cron schedules repeat until cancelled via cancel_schedule. Returns the schedule id.",
+        "Cron schedules repeat until cancelled via cancel_schedule. Returns the schedule id. " +
+        "Each session has a cap of 20 pending wakeups (cron schedules count as one slot regardless of recurrences) — " +
+        "if the cap is reached, list_schedules to see what's queued and cancel_schedule any you no longer need.",
       inputSchema: z
         .object({
           delay_seconds: z
