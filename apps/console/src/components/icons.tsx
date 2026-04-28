@@ -2,54 +2,49 @@
  * Inline SVG icons used across the console. Stroke-based, currentColor
  * inheritance — drop in any text-color context, dark mode handles itself.
  *
- * Style matches the rest of the codebase: stroke 1.8, rounded caps/joins,
- * 24×24 viewBox, no fills. Add new icons here rather than inlining at
+ * Style + path data match the sidebar (Layout.tsx) icons so the same
+ * resource family looks the same wherever it appears (sidebar nav, page
+ * header, badges, etc.). Add new icons here rather than inlining at
  * call sites.
  */
 
 const cls = "w-3.5 h-3.5";
 
-export function AgentIcon() {
+function Icon({ d }: { d: string }) {
   return (
-    <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 8V4H8" />
-      <rect width="16" height="12" x="4" y="8" rx="2" />
-      <path d="M2 14h2M20 14h2M15 13v2M9 13v2" />
+    <svg
+      className={cls}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={2}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      viewBox="0 0 24 24"
+    >
+      <path d={d} />
     </svg>
   );
+}
+
+// Paths copied from Layout.tsx so header badges line up with the sidebar
+// nav icons for the same resource kind.
+export function AgentIcon() {
+  return <Icon d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />;
 }
 
 export function EnvIcon() {
-  return (
-    <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17.5 19a4.5 4.5 0 1 0-1.18-8.85 6 6 0 1 0-11.32 4.34A4 4 0 0 0 6.5 19h11Z" />
-    </svg>
-  );
+  return <Icon d="M5 12h14M5 12a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v4a2 2 0 01-2 2M5 12a2 2 0 00-2 2v4a2 2 0 002 2h14a2 2 0 002-2v-4a2 2 0 00-2-2" />;
 }
 
 export function VaultIcon() {
-  return (
-    <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="7.5" cy="15.5" r="5.5" />
-      <path d="m21 2-9.6 9.6" />
-      <path d="m15.5 7.5 3 3L22 7l-3-3" />
-    </svg>
-  );
+  return <Icon d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z" />;
 }
 
 export function DurationIcon() {
-  return (
-    <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M5 22h14M5 2h14M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
-    </svg>
-  );
+  return <Icon d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />;
 }
 
 export function ClockIcon() {
-  return (
-    <svg className={cls} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <polyline points="12 6 12 12 16 14" />
-    </svg>
-  );
+  return <Icon d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z" />;
 }
+

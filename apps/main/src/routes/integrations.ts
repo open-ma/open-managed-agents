@@ -422,6 +422,19 @@ app.get("/slack/installations/:id/publications", async (c) => {
   return c.json({ data: publications.map(serializePublication) });
 });
 
+// ─── GET /v1/integrations/slack/agents/:id/publications ──────────────────
+// Reverse lookup: list every Slack publication that references this agent.
+// Console's AgentDetail page calls this to render "Published to Slack" chips.
+// Without it the request 404s and the chip silently disappears.
+app.get("/slack/agents/:id/publications", async (c) => {
+  const userId = c.get("user_id")!;
+  const agentId = c.req.param("id");
+  const { repos, err } = slackReposOr503(c);
+  if (err) return err;
+  const publications = await repos.publications.listByUserAndAgent(userId, agentId);
+  return c.json({ data: publications.map(serializePublication) });
+});
+
 app.get("/slack/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
