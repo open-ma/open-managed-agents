@@ -338,7 +338,7 @@ export function SessionDetail() {
           <StatusPill status={status as "idle" | "running" | "terminated" | "error" | string} />
           {sessionMeta.agentSnapshot?.name && (
             <ResourceBadge
-              icon="🤖"
+              icon={<AgentIcon />}
               label={sessionMeta.agentSnapshot.name}
               onClick={() =>
                 setResourcePanel({ kind: "agent", id: sessionMeta.agentSnapshot?.id || agentId })
@@ -347,7 +347,7 @@ export function SessionDetail() {
           )}
           {sessionMeta.envSnapshot?.name && sessionMeta.environmentId && (
             <ResourceBadge
-              icon="☁️"
+              icon={<EnvIcon />}
               label={sessionMeta.envSnapshot.name}
               onClick={() =>
                 setResourcePanel({ kind: "environment", id: sessionMeta.environmentId! })
@@ -357,7 +357,7 @@ export function SessionDetail() {
           {(sessionMeta.vaultIds ?? []).map((vid) => (
             <ResourceBadge
               key={vid}
-              icon="🔑"
+              icon={<VaultIcon />}
               label={vid.slice(0, 12) + "…"}
               onClick={() => setResourcePanel({ kind: "vault", id: vid })}
             />
@@ -531,14 +531,14 @@ function StatusPill({ status }: { status: string }) {
   );
 }
 
-function ResourceBadge({ icon, label, onClick }: { icon: string; label: string; onClick: () => void }) {
+function ResourceBadge({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
   return (
     <button
       onClick={onClick}
       className="text-[11px] px-2 py-0.5 rounded border border-border hover:border-border-strong hover:bg-bg-surface text-fg-muted flex items-center gap-1.5 font-mono max-w-xs"
       title={label}
     >
-      <span>{icon}</span>
+      <span className="text-fg-subtle shrink-0 flex">{icon}</span>
       <span className="truncate">{label}</span>
     </button>
   );
@@ -559,7 +559,7 @@ function SessionDurationBadge({ events }: { events: Event[] }) {
   if (!Number.isFinite(first) || last <= first) return null;
   return (
     <span className="text-[11px] px-2 py-0.5 text-fg-subtle font-mono flex items-center gap-1.5" title="Wall-clock from first to last event">
-      <span aria-hidden>⏱</span>
+      <DurationIcon />
       {formatDuration(last - first)}
     </span>
   );
@@ -572,9 +572,51 @@ function RelativeTimeBadge({ iso }: { iso: string }) {
   const text = formatRelative(diffMs);
   return (
     <span className="text-[11px] px-2 py-0.5 text-fg-subtle font-mono flex items-center gap-1.5" title={new Date(iso).toLocaleString()}>
-      <span aria-hidden>🕐</span>
+      <ClockIcon />
       {text}
     </span>
+  );
+}
+
+const iconBase = "w-3.5 h-3.5";
+function AgentIcon() {
+  return (
+    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M12 8V4H8" />
+      <rect width="16" height="12" x="4" y="8" rx="2" />
+      <path d="M2 14h2M20 14h2M15 13v2M9 13v2" />
+    </svg>
+  );
+}
+function EnvIcon() {
+  return (
+    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M17.5 19a4.5 4.5 0 1 0-1.18-8.85 6 6 0 1 0-11.32 4.34A4 4 0 0 0 6.5 19h11Z" />
+    </svg>
+  );
+}
+function VaultIcon() {
+  return (
+    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="7.5" cy="15.5" r="5.5" />
+      <path d="m21 2-9.6 9.6" />
+      <path d="m15.5 7.5 3 3L22 7l-3-3" />
+    </svg>
+  );
+}
+function DurationIcon() {
+  return (
+    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <path d="M5 22h14M5 2h14M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
+    </svg>
+  );
+}
+function ClockIcon() {
+  return (
+    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
+      <circle cx="12" cy="12" r="10" />
+      <polyline points="12 6 12 12 16 14" />
+    </svg>
   );
 }
 
@@ -616,7 +658,11 @@ function ResourcePanel({
     api<Record<string, unknown>>(url)
       .then((d) => setData(d))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
-  }, [panel.kind, panel.id, api]);
+    // `api` from useApi() is a fresh closure every render — including it in
+    // deps caused setData → re-render → new api → effect refire → infinite
+    // loop. The stable inputs are kind + id; api itself is callable as-is.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [panel.kind, panel.id]);
 
   const linkPath =
     panel.kind === "agent"
