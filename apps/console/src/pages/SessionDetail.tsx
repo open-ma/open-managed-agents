@@ -3,6 +3,8 @@ import { useParams, Link } from "react-router";
 import { useApi } from "../lib/api";
 import { Markdown } from "../components/Markdown";
 import { formatDuration, formatRelative, pickTickStep, shortenId } from "../lib/format";
+import { Badge, StatusPill } from "../components/Badge";
+import { AgentIcon, ClockIcon, DurationIcon, EnvIcon, VaultIcon } from "../components/icons";
 
 interface Event {
   type: string;
@@ -361,7 +363,7 @@ export function SessionDetail() {
               to a short ID slice if the snapshot didn't carry one — better
               "agent_…XYZ" than nothing. */}
           {(sessionMeta.agentSnapshot?.id || agentId) && (
-            <ResourceBadge
+            <Badge
               icon={<AgentIcon />}
               label={sessionMeta.agentSnapshot?.name || shortenId(sessionMeta.agentSnapshot?.id || agentId)}
               onClick={() =>
@@ -370,7 +372,7 @@ export function SessionDetail() {
             />
           )}
           {sessionMeta.environmentId && (
-            <ResourceBadge
+            <Badge
               icon={<EnvIcon />}
               label={sessionMeta.envSnapshot?.name || shortenId(sessionMeta.environmentId)}
               onClick={() =>
@@ -379,7 +381,7 @@ export function SessionDetail() {
             />
           )}
           {(sessionMeta.vaults ?? sessionMeta.vaultIds?.map((id) => ({ id, display_name: undefined })) ?? []).map((v) => (
-            <ResourceBadge
+            <Badge
               key={v.id}
               icon={<VaultIcon />}
               label={v.display_name || shortenId(v.id)}
@@ -538,36 +540,6 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
   );
 }
 
-function StatusPill({ status }: { status: string }) {
-  const tone =
-    status === "running"
-      ? "bg-info-subtle text-info"
-      : status === "terminated" || status === "error"
-      ? "bg-danger-subtle text-danger"
-      : "bg-bg-surface text-fg-muted";
-  return (
-    <span className={`text-[11px] px-2 py-0.5 rounded font-medium ${tone}`}>
-      {status === "running" && (
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-info animate-pulse mr-1.5 align-middle" />
-      )}
-      {status[0]?.toUpperCase() + status.slice(1)}
-    </span>
-  );
-}
-
-function ResourceBadge({ icon, label, onClick }: { icon: React.ReactNode; label: string; onClick: () => void }) {
-  return (
-    <button
-      onClick={onClick}
-      className="text-[11px] px-2 py-0.5 rounded border border-border hover:border-border-strong hover:bg-bg-surface text-fg-muted flex items-center gap-1.5 font-mono max-w-xs"
-      title={label}
-    >
-      <span className="text-fg-subtle shrink-0 flex">{icon}</span>
-      <span className="truncate">{label}</span>
-    </button>
-  );
-}
-
 function SessionDurationBadge({ events }: { events: Event[] }) {
   if (events.length === 0) return null;
   let first = Infinity;
@@ -582,65 +554,23 @@ function SessionDurationBadge({ events }: { events: Event[] }) {
   }
   if (!Number.isFinite(first) || last <= first) return null;
   return (
-    <span className="text-[11px] px-2 py-0.5 text-fg-subtle font-mono flex items-center gap-1.5" title="Wall-clock from first to last event">
-      <DurationIcon />
-      {formatDuration(last - first)}
-    </span>
+    <Badge
+      icon={<DurationIcon />}
+      label={formatDuration(last - first)}
+      title="Wall-clock from first to last event"
+    />
   );
 }
 
 function RelativeTimeBadge({ iso }: { iso: string }) {
   const t = new Date(iso).getTime();
   if (!Number.isFinite(t)) return null;
-  const diffMs = Date.now() - t;
-  const text = formatRelative(diffMs);
   return (
-    <span className="text-[11px] px-2 py-0.5 text-fg-subtle font-mono flex items-center gap-1.5" title={new Date(iso).toLocaleString()}>
-      <ClockIcon />
-      {text}
-    </span>
-  );
-}
-
-const iconBase = "w-3.5 h-3.5";
-function AgentIcon() {
-  return (
-    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M12 8V4H8" />
-      <rect width="16" height="12" x="4" y="8" rx="2" />
-      <path d="M2 14h2M20 14h2M15 13v2M9 13v2" />
-    </svg>
-  );
-}
-function EnvIcon() {
-  return (
-    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M17.5 19a4.5 4.5 0 1 0-1.18-8.85 6 6 0 1 0-11.32 4.34A4 4 0 0 0 6.5 19h11Z" />
-    </svg>
-  );
-}
-function VaultIcon() {
-  return (
-    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="7.5" cy="15.5" r="5.5" />
-      <path d="m21 2-9.6 9.6" />
-      <path d="m15.5 7.5 3 3L22 7l-3-3" />
-    </svg>
-  );
-}
-function DurationIcon() {
-  return (
-    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <path d="M5 22h14M5 2h14M17 22v-4.172a2 2 0 0 0-.586-1.414L12 12l-4.414 4.414A2 2 0 0 0 7 17.828V22M7 2v4.172a2 2 0 0 0 .586 1.414L12 12l4.414-4.414A2 2 0 0 0 17 6.172V2" />
-    </svg>
-  );
-}
-function ClockIcon() {
-  return (
-    <svg className={iconBase} viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round">
-      <circle cx="12" cy="12" r="10" />
-      <polyline points="12 6 12 12 16 14" />
-    </svg>
+    <Badge
+      icon={<ClockIcon />}
+      label={formatRelative(Date.now() - t)}
+      title={new Date(iso).toLocaleString()}
+    />
   );
 }
 
