@@ -1859,9 +1859,16 @@ export class SessionDO extends Agent<Env, SessionState> {
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
-      scheduleWakeup: (a) => this.scheduleWakeup(a),
-      cancelWakeup: (id) => this.cancelWakeup(id),
-      listWakeups: () => this.listWakeups(),
+      // Subagents do NOT get the schedule tool. onScheduledWakeup is a
+      // SessionDO-level callback with no per-thread routing — a wakeup
+      // injected by a subagent lands in the parent session's main event
+      // stream, where the parent agent (different model + system prompt)
+      // sees a user.message it didn't trigger and behaves erratically. If
+      // we ever want subagent-scoped cron, the wakeup payload needs to
+      // carry a thread_id and onScheduledWakeup needs to dispatch into
+      // the right subHistory. Until then, omit the closures entirely so
+      // tools.schedule / cancel_schedule / list_schedules don't get
+      // registered into subTools at all.
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
         return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
       },
