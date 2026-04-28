@@ -146,7 +146,29 @@ export function MemoryStoresList() {
               </thead>
               <tbody>
                 {memories.map(m => (
-                  <tr key={m.id} onClick={() => setSelectedMemory(selectedMemory?.id === m.id ? null : m)}
+                  <tr
+                    key={m.id}
+                    onClick={async () => {
+                      // Toggle: if this row is already open, close it; otherwise
+                      // fetch the full memory (LIST endpoint strips `content` for
+                      // payload size; per-row GET is the only way to get the body).
+                      if (selectedMemory?.id === m.id) {
+                        setSelectedMemory(null);
+                        return;
+                      }
+                      // Render path immediately so the panel shows up; content
+                      // fills in once the fetch lands.
+                      setSelectedMemory(m);
+                      try {
+                        const full = await api<Memory>(
+                          `/v1/memory_stores/${selectedStore!.id}/memories/${m.id}`,
+                        );
+                        setSelectedMemory(full);
+                      } catch {
+                        // Leave the metadata-only row; pre block will be empty
+                        // until next click.
+                      }
+                    }}
                     className={`border-t border-border cursor-pointer hover:bg-bg-surface transition-colors ${selectedMemory?.id === m.id ? "bg-brand-subtle" : ""}`}>
                     <td className="px-4 py-3 font-mono text-xs">{m.path}</td>
                     <td className="px-4 py-3">{m.size_bytes} B</td>
