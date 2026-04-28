@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
+import { GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
@@ -9,15 +10,9 @@ interface Agent {
   skills?: unknown[]; created_at: string; updated_at?: string; archived_at?: string;
 }
 
-interface LinearPub {
-  id: string;
-  status: string;
-  mode: string;
-  persona: { name: string; avatarUrl: string | null };
-  workspace_name: string | null;
-}
-
-interface SlackPub {
+/** Shared publication shape across Linear / GitHub / Slack — they all
+ *  expose the same id / status / mode / persona / workspace_name fields. */
+interface Pub {
   id: string;
   status: string;
   mode: string;
@@ -31,18 +26,25 @@ export function AgentDetail() {
   const nav = useNavigate();
   const [agent, setAgent] = useState<Agent | null>(null);
   const [versions, setVersions] = useState<Agent[]>([]);
-  const [linearPubs, setLinearPubs] = useState<LinearPub[]>([]);
-  const [slackPubs, setSlackPubs] = useState<SlackPub[]>([]);
+  const [linearPubs, setLinearPubs] = useState<Pub[]>([]);
+  const [githubPubs, setGithubPubs] = useState<Pub[]>([]);
+  const [slackPubs, setSlackPubs] = useState<Pub[]>([]);
   const [error, setError] = useState("");
 
   useEffect(() => {
     if (!id) return;
     api<Agent>(`/v1/agents/${id}`).then(setAgent).catch((e) => setError(e.message));
     api<{ data: Agent[] }>(`/v1/agents/${id}/versions`).then((d) => setVersions(d.data)).catch(() => {});
-    api<{ data: LinearPub[] }>(`/v1/integrations/linear/agents/${id}/publications`)
+    // Reverse-lookup publications per provider. Each endpoint exists thanks
+    // to the /linear/agents/:id/publications + /slack/agents/:id/publications
+    // + /github/agents/:id/publications routes added on the main worker.
+    api<{ data: Pub[] }>(`/v1/integrations/linear/agents/${id}/publications`)
       .then((r) => setLinearPubs(r.data.filter((p) => p.status === "live")))
       .catch(() => {});
-    api<{ data: SlackPub[] }>(`/v1/integrations/slack/agents/${id}/publications`)
+    api<{ data: Pub[] }>(`/v1/integrations/github/agents/${id}/publications`)
+      .then((r) => setGithubPubs(r.data.filter((p) => p.status === "live")))
+      .catch(() => {});
+    api<{ data: Pub[] }>(`/v1/integrations/slack/agents/${id}/publications`)
       .then((r) => setSlackPubs(r.data.filter((p) => p.status === "live")))
       .catch(() => {});
   }, [id]);
@@ -89,79 +91,35 @@ export function AgentDetail() {
         {agent.archived_at && <><span className="text-fg-muted">Archived</span><span className="text-warning">{new Date(agent.archived_at).toLocaleString()}</span></>}
       </div>
 
-      {/* Linear integrations — show live publications, link to manage page. */}
+      {/* Integrations — one fold per provider so adding a 4th / 5th doesn't
+          push the rest of the page below the viewport. Default-open when
+          there's at least one live publication so the user sees what's wired
+          up at a glance; otherwise default-closed. */}
       <div className="mt-6 max-w-2xl">
-        <h2 className="font-display text-base font-semibold mb-2">Linear</h2>
-        {linearPubs.length === 0 ? (
-          <Link
-            to={`/integrations/linear/publish?agent_id=${agent.id}`}
-            className="inline-flex items-center gap-1.5 text-sm text-brand hover:underline"
-          >
-            🔗 Publish to Linear →
-          </Link>
-        ) : (
-          <div className="space-y-1.5">
-            {linearPubs.map((p) => (
-              <Link
-                key={p.id}
-                to="/integrations/linear"
-                className="flex items-center gap-2 text-sm text-fg-muted hover:text-fg"
-              >
-                <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700">
-                  🔗 Live
-                </span>
-                <span>
-                  as <strong>{p.persona.name}</strong> in {p.workspace_name ?? "Linear workspace"}
-                </span>
-                <span className="text-xs text-fg-subtle">
-                  {p.mode === "full" ? "(full identity)" : "(shared bot)"}
-                </span>
-              </Link>
-            ))}
-            <Link
-              to={`/integrations/linear/publish?agent_id=${agent.id}`}
-              className="inline-block text-xs text-brand hover:underline"
-            >
-              + Publish to another workspace
-            </Link>
-          </div>
-        )}
-      </div>
-
-      {/* Slack integrations — same shape as Linear. */}
-      <div className="mt-6 max-w-2xl">
-        <h2 className="font-display text-base font-semibold mb-2">Slack</h2>
-        {slackPubs.length === 0 ? (
-          <Link
-            to={`/integrations/slack/publish?agent_id=${agent.id}`}
-            className="inline-flex items-center gap-1.5 text-sm text-brand hover:underline"
-          >
-            💬 Publish to Slack →
-          </Link>
-        ) : (
-          <div className="space-y-1.5">
-            {slackPubs.map((p) => (
-              <Link
-                key={p.id}
-                to="/integrations/slack"
-                className="flex items-center gap-2 text-sm text-fg-muted hover:text-fg"
-              >
-                <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700">
-                  💬 Live
-                </span>
-                <span>
-                  as <strong>{p.persona.name}</strong> in {p.workspace_name ?? "Slack workspace"}
-                </span>
-              </Link>
-            ))}
-            <Link
-              to={`/integrations/slack/publish?agent_id=${agent.id}`}
-              className="inline-block text-xs text-brand hover:underline"
-            >
-              + Publish to another workspace
-            </Link>
-          </div>
-        )}
+        <h2 className="font-display text-base font-semibold mb-2">Integrations</h2>
+        <div className="space-y-2">
+          <IntegrationFold
+            kind="linear"
+            label="Linear"
+            icon={<LinearIcon className="w-4 h-4" />}
+            pubs={linearPubs}
+            agentId={agent.id}
+          />
+          <IntegrationFold
+            kind="github"
+            label="GitHub"
+            icon={<GitHubIcon className="w-4 h-4" />}
+            pubs={githubPubs}
+            agentId={agent.id}
+          />
+          <IntegrationFold
+            kind="slack"
+            label="Slack"
+            icon={<SlackIcon className="w-4 h-4" />}
+            pubs={slackPubs}
+            agentId={agent.id}
+          />
+        </div>
       </div>
 
       {/* System prompt */}
@@ -201,5 +159,75 @@ export function AgentDetail() {
         </div>
       )}
     </div>
+  );
+}
+
+/**
+ * One foldable provider section. Default-open when there's a live
+ * publication, default-closed otherwise — opening an empty section
+ * just to find the "Publish to X" link is wasteful.
+ */
+function IntegrationFold({
+  kind,
+  label,
+  icon,
+  pubs,
+  agentId,
+}: {
+  kind: "linear" | "github" | "slack";
+  label: string;
+  icon: React.ReactNode;
+  pubs: Pub[];
+  agentId: string;
+}) {
+  return (
+    <details
+      open={pubs.length > 0}
+      className="border border-border rounded-lg bg-bg-surface/30 [&_summary::-webkit-details-marker]:hidden"
+    >
+      <summary className="px-4 py-2.5 flex items-center gap-3 text-sm cursor-pointer hover:bg-bg-surface/60 list-none">
+        <span className="text-fg-muted shrink-0">{icon}</span>
+        <span className="font-medium text-fg">{label}</span>
+        <span className="ml-auto text-xs text-fg-subtle">
+          {pubs.length === 0 ? "Not published" : `${pubs.length} live`}
+        </span>
+      </summary>
+      <div className="px-4 pb-3 pt-2 border-t border-border/40 space-y-1.5 text-sm">
+        {pubs.length === 0 ? (
+          <Link
+            to={`/integrations/${kind}/publish?agent_id=${agentId}`}
+            className="inline-flex items-center gap-1.5 text-brand hover:underline"
+          >
+            Publish to {label} →
+          </Link>
+        ) : (
+          <>
+            {pubs.map((p) => (
+              <Link
+                key={p.id}
+                to={`/integrations/${kind}`}
+                className="flex items-center gap-2 text-fg-muted hover:text-fg"
+              >
+                <span className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-success-subtle text-success">
+                  Live
+                </span>
+                <span>
+                  as <strong>{p.persona.name}</strong> in {p.workspace_name ?? `${label} workspace`}
+                </span>
+                {p.mode === "full" && (
+                  <span className="text-xs text-fg-subtle">(full identity)</span>
+                )}
+              </Link>
+            ))}
+            <Link
+              to={`/integrations/${kind}/publish?agent_id=${agentId}`}
+              className="inline-block text-xs text-brand hover:underline pt-1"
+            >
+              + Publish to another workspace
+            </Link>
+          </>
+        )}
+      </div>
+    </details>
   );
 }
