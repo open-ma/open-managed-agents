@@ -26,12 +26,42 @@
     { "binding": "CONFIG_KV", "id": "__KV_ID__" }
   ],
 
+  // SessionDO reads agent / environment / session / credential rows from
+  // the same D1 the main worker uses; without this binding every
+  // services.*.get() call hits "Cannot read properties of undefined
+  // (reading 'prepare')" on db.prepare().
+  "d1_databases": [
+    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" }
+  ],
+
+  // Outbound proxy on-401 token refresh path delegates to the integrations
+  // gateway (App-JWT signing for GitHub installation tokens etc.). Without
+  // this binding, refreshes silently no-op.
+  "services": [
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+  ],
+
+  // Workers AI for embedding generation (memory tools).
+  "ai": { "binding": "AI" },
+
+  // Vectorize index used by semantic memory search.
+  "vectorize": [
+    { "binding": "VECTORIZE", "index_name": "memory-search" }
+  ],
+
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
-    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
+    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" }
   ],
 
   "browser": { "binding": "BROWSER" },
+
+  // Analytics Engine — same dataset as main worker so dashboards see
+  // events from per-env sandboxes alongside the shared sandbox.
+  "analytics_engine_datasets": [
+    { "binding": "ANALYTICS", "dataset": "oma_events" }
+  ],
 
   "migrations": [
     {
