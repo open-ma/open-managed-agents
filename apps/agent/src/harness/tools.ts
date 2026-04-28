@@ -7,7 +7,15 @@ import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
 import { buildBrowserTools, type BrowserSession } from "./browser-tools";
 
-const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "browser", "schedule", "cancel_schedule", "list_schedules"];
+// Source of truth for which tool names are part of the agent_toolset_20260401
+// built-in suite. Used by buildTools() below to decide which tool entries to
+// include AND by harness/default-loop.ts to classify tool-use events as
+// `agent.tool_use` (built-in) vs `agent.custom_tool_use`. Keep this in sync
+// with the actual `tools.<name> = tool({...})` registrations below — the
+// classification list and the registration list MUST be the same set, or
+// downstream consumers (Console UI, SDK event filters, billing) will see
+// mis-typed events.
+export const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "browser", "schedule", "cancel_schedule", "list_schedules"];
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)

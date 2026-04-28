@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { describe, it, expect, vi } from "vitest";
-import { buildTools } from "../../apps/agent/src/harness/tools";
+import { buildTools, ALL_TOOLS } from "../../apps/agent/src/harness/tools";
 import { TestSandbox } from "../../apps/agent/src/runtime/sandbox";
 import type { AgentConfig } from "@open-managed-agents/shared";
 
@@ -251,5 +251,37 @@ describe("cancel_schedule + list_schedules — execution", () => {
         },
       ],
     });
+  });
+});
+
+describe("event classification — schedule tool emits agent.tool_use, not agent.custom_tool_use", () => {
+  it("ALL_TOOLS exports schedule + cancel_schedule + list_schedules as builtin names", () => {
+    // Drift guard: harness/default-loop.ts imports ALL_TOOLS to decide
+    // whether a tool call emits as `agent.tool_use` (built-in) or
+    // `agent.custom_tool_use`. If schedule tools fall out of this list,
+    // Console UI / SDK event filters / billing dashboards see mis-typed
+    // events. Repro before the fix: a fresh `schedule` call landed as
+    // `agent.custom_tool_use`.
+    expect(ALL_TOOLS).toEqual(
+      expect.arrayContaining(["schedule", "cancel_schedule", "list_schedules"]),
+    );
+  });
+
+  it("isBuiltinTool classifies schedule tools as built-in", async () => {
+    // Direct test of the function default-loop uses to pick the event type.
+    // If this returns false for "schedule", a real model call would emit
+    // agent.custom_tool_use and break the wire contract for downstream
+    // consumers.
+    const { isBuiltinTool } = await import("../../apps/agent/src/harness/default-loop");
+    for (const name of ["schedule", "cancel_schedule", "list_schedules", "browser", "bash", "read"]) {
+      expect(isBuiltinTool(name), `${name} must be built-in`).toBe(true);
+    }
+    // Negative checks — verify the classifier hasn't gone too broad.
+    expect(isBuiltinTool("totally_made_up_tool")).toBe(false);
+    expect(isBuiltinTool("send_email")).toBe(false);
+    // MCP / call_agent / memory prefixes still classify as built-in
+    expect(isBuiltinTool("mcp_github_get_issue")).toBe(true);
+    expect(isBuiltinTool("call_agent_researcher")).toBe(true);
+    expect(isBuiltinTool("memory_search")).toBe(true);
   });
 });
