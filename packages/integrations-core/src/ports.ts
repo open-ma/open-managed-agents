@@ -11,10 +11,11 @@
 import type { SessionId, AgentId, UserId } from "./domain";
 import type {
   AppRepo,
-  AuthoredCommentRepo,
+  DispatchRuleRepo,
   GitHubAppRepo,
   InstallationRepo,
   IssueSessionRepo,
+  PendingEventRepo,
   PublicationRepo,
   SessionScopeRepo,
   SetupLinkRepo,
@@ -269,10 +270,11 @@ export interface Container {
   webhookEvents: WebhookEventStore;
   /** Per-issue session reuse (Linear/GitHub). */
   issueSessions: IssueSessionRepo;
+  /** Cron autopilot rules — Linear only for now. */
+  dispatchRules: DispatchRuleRepo;
+  /** Async webhook event queue — drained by cron. */
+  pendingEvents: PendingEventRepo;
   /** Per-thread / per-channel session reuse (Slack). */
   sessionScopes: SessionScopeRepo;
-  /** Bot-authored top-level Linear comments — used to route reply webhooks
-   *  back to the originating OMA session. Phase 1 of M7. */
-  authoredComments: AuthoredCommentRepo;
   setupLinks: SetupLinkRepo;
 }
