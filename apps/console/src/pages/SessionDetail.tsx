@@ -754,6 +754,26 @@ function EventBubble({ event }: { event: Event }) {
         </div>
       );
 
+    case "agent.thinking": {
+      // Canonical reasoning block — keep it visible after streaming
+      // finishes. Without a case here, ThinkingStreamingBubble disappears
+      // when the canonical event lands and EventBubble silently drops the
+      // canonical event, so the user sees thinking → vanish. Render as a
+      // collapsed-by-default disclosure since reasoning can be long.
+      const text = (event as { text?: string }).text ?? "";
+      if (!text) return null;
+      return (
+        <details className="max-w-2xl">
+          <summary className="text-xs text-fg-subtle mb-1 cursor-pointer hover:text-fg-muted select-none">
+            Thinking
+          </summary>
+          <div className="border-l-2 border-border pl-3 text-xs text-fg-muted italic leading-relaxed whitespace-pre-wrap">
+            {text}
+          </div>
+        </details>
+      );
+    }
+
     case "agent.tool_use":
       return (
         <div className="max-w-2xl">
