@@ -352,9 +352,13 @@ export class DefaultHarness implements HarnessInterface {
     const cached = applyProviderCacheStrategy(model, systemPrompt, tools, messages);
     const finalMessages = cached.messages;
 
-    // 4. Emit span event: model request start
+    // 4. Resolve model id (used by per-step span events emitted in onStepFinish).
+    //    The OUTER span.model_request_start/end pair around streamText() that
+    //    used to live here was removed: ai-sdk's streamText loops internally
+    //    (one call per tool round-trip), so a single outer span hid the actual
+    //    per-call timing + per-call usage that Anthropic's Managed Agents wire
+    //    spec exposes. Per-step spans are emitted in onStepFinish below.
     const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
-    runtime.broadcast({ type: "span.model_request_start", model: modelId });
 
     // 5. Run agent loop with retry + timeout + prompt caching.
     //
@@ -379,6 +383,18 @@ export class DefaultHarness implements HarnessInterface {
       // canonical event landing is what tells the client to swap.
       const liveThinking = new Set<string>();
       const liveToolInput = new Set<string>();
+
+      // Per-step span tracking: each ai-sdk step is one model API call.
+      // We emit span.model_request_start at the moment the step begins
+      // (which equals streamText() start for step 0, and the previous
+      // onStepFinish wall-time for steps ≥ 1) and span.model_request_end
+      // in onStepFinish, paired by id via model_request_start_id.
+      let stepStartId = generateEventId();
+      runtime.broadcast({
+        type: "span.model_request_start",
+        id: stepStartId,
+        model: modelId,
+      });
 
       const r = streamText({
       model,
@@ -512,6 +528,41 @@ export class DefaultHarness implements HarnessInterface {
           await runtime.broadcastToolInputEnd(tid, "aborted");
         }
         liveToolInput.clear();
+
+        // Per-step span.model_request_end. Carries this step's usage and
+        // finishReason — Anthropic's wire format puts model_usage at this
+        // granularity (per actual model API call), not aggregated across
+        // the whole streamText loop. Pair via model_request_start_id so
+        // consumers don't have to FIFO-match.
+        const stepText = (step.content as ReadonlyArray<{ type: string; text?: string }>)
+          .filter((p) => p.type === "text")
+          .map((p) => p.text ?? "")
+          .join("");
+        runtime.broadcast({
+          type: "span.model_request_end",
+          model: modelId,
+          model_request_start_id: stepStartId,
+          model_usage: step.usage ? {
+            input_tokens: step.usage.inputTokens ?? 0,
+            output_tokens: step.usage.outputTokens ?? 0,
+            cache_read_input_tokens: step.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+            cache_creation_input_tokens: step.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+          } : undefined,
+          finish_reason: step.finishReason,
+          final_text_length: stepText.length,
+        });
+
+        // If ai-sdk decides to run another step (because finishReason is
+        // "tool-calls" and stepCountIs(100) hasn't tripped), open the next
+        // span pair right away so the outer model API call latency is
+        // captured. If this was the last step the next start is unused
+        // and that's fine — no end will pair against it.
+        stepStartId = generateEventId();
+        runtime.broadcast({
+          type: "span.model_request_start",
+          id: stepStartId,
+          model: modelId,
+        });
       },
     });
       // streamText returns a StreamTextResult; consumeStream forces the
@@ -558,19 +609,11 @@ export class DefaultHarness implements HarnessInterface {
       }
     }
 
-    // 9. Emit span event: model request end
-    runtime.broadcast({
-      type: "span.model_request_end",
-      model: modelId,
-      model_usage: result.usage ? {
-        input_tokens: result.usage.inputTokens ?? 0,
-        output_tokens: result.usage.outputTokens ?? 0,
-        cache_read_input_tokens: result.usage.inputTokenDetails?.cacheReadTokens ?? 0,
-        cache_creation_input_tokens: result.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
-      } : undefined,
-      finish_reason: result.finishReason,
-      final_text_length: typeof result.text === "string" ? result.text.length : 0,
-    });
+    // 9. Per-step model_request span pairs are emitted in onStepFinish above.
+    //    The aggregate-around-streamText pair that used to live here was
+    //    removed — Anthropic's wire format puts model_usage at per-call
+    //    granularity, so we track it the same way. The session state still
+    //    aggregates total token spend below via reportUsage(result.usage).
 
     // 10. Report token usage
     if (result.usage && runtime.reportUsage) {

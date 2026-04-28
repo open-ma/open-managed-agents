@@ -745,7 +745,12 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
   const toolResults = new Map<string, number>();
   const mcpResults = new Map<string, number>();
   const customResults = new Map<string, number>();
-  const modelEnds: number[] = [];
+  // model_request_start_id → end's timestamp + usage. Anthropic's wire
+  // format pairs the per-call span pair this way (rather than positional
+  // FIFO), so multiple parallel or nested model calls stay correctly
+  // associated. FIFO fallback below for events that predate the field.
+  const modelEndsById = new Map<string, { t: number; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finishReason?: string }>();
+  const modelEndsFifo: number[] = [];
   const compactEnds: number[] = [];
   const outcomeEnds: number[] = [];
   // parent_event_id → child timestamp. Used to pair span.wakeup_scheduled
@@ -758,7 +763,12 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
     if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, t);
     else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, t);
     else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), t);
-    else if (e.type === "span.model_request_end") modelEnds.push(t);
+    else if (e.type === "span.model_request_end") {
+      modelEndsFifo.push(t);
+      const data = (e.data as { model_request_start_id?: string; model_usage?: any; finish_reason?: string } | undefined);
+      const sid = (e as { model_request_start_id?: string }).model_request_start_id ?? data?.model_request_start_id;
+      if (sid) modelEndsById.set(sid, { t, usage: data?.model_usage, finishReason: data?.finish_reason });
+    }
     else if (e.type === "span.compaction_summarize_end") compactEnds.push(t);
     else if (e.type === "span.outcome_evaluation_end") outcomeEnds.push(t);
     const pid = (e as { parent_event_id?: string }).parent_event_id
@@ -766,8 +776,8 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
     if (pid) childByParent.set(pid, t);
   }
 
-  // Match each *_start with the next *_end in order.
-  let modelEndIdx = 0;
+  // FIFO fallback indices for events that lack id-based pairing.
+  let modelEndFifoIdx = 0;
   let compactEndIdx = 0;
   let outcomeEndIdx = 0;
 
@@ -824,14 +834,22 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       // consumed via pairing above — no row
       continue;
     } else if (e.type === "span.model_request_start") {
-      // Wraps everything the model loop did (thinking + tool calls + final
-      // text) for one turn. This is what answers "how long did the agent
-      // take to respond?" — the next agent.message lands at the end.
-      const end = modelEnds[modelEndIdx++] ?? t;
+      // One pair per ai-sdk step (= one model API call). Pair via the
+      // start event id; old data without ids falls back to FIFO order.
+      const sid = String((e as { id?: string }).id ?? (e.data as { id?: string } | undefined)?.id ?? "");
+      const matched = sid ? modelEndsById.get(sid) : undefined;
+      const end = matched?.t ?? modelEndsFifo[modelEndFifoIdx++] ?? t;
+      const usage = matched?.usage;
+      // Bar label gets a token count when we have it — useful at-a-glance
+      // ("did this turn read 100k tokens or 1k?") without opening details.
+      const tokSummary = usage
+        ? `${usage.input_tokens}↓ ${usage.output_tokens}↑${usage.cache_read_input_tokens ? ` ⚡${usage.cache_read_input_tokens}` : ""}`
+        : undefined;
       spans.push({
-        key: `model-${i}`,
+        key: `model-${sid || i}`,
         family: "model",
-        label: "model turn",
+        label: "model call",
+        detail: [matched?.finishReason, tokSummary].filter(Boolean).join(" · ") || undefined,
         startMs,
         durationMs: Math.max(0, end - t0 - startMs),
       });

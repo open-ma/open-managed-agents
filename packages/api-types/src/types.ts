@@ -533,6 +533,11 @@ export interface SpanModelRequestStartEvent extends EventBase {
 export interface SpanModelRequestEndEvent extends EventBase {
   type: "span.model_request_end";
   model?: string;
+  /** Event id of the matching span.model_request_start. Mirrors the
+   *  Anthropic Managed Agents wire field — explicit pairing instead of
+   *  positional/FIFO matching. Optional for backwards compat with older
+   *  events written before this field landed. */
+  model_request_start_id?: string;
   model_usage?: {
     input_tokens: number;
     output_tokens: number;
@@ -546,6 +551,8 @@ export interface SpanModelRequestEndEvent extends EventBase {
   /** Length of the final assistant text (may be 0 even when finish_reason="stop").
    *  Helps spot the case where the model claims to be done but emits no text. */
   final_text_length?: number;
+  /** True if the model returned an error. Mirrors Anthropic's is_error wire field. */
+  is_error?: boolean;
 }
 
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {
