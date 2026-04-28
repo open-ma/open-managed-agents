@@ -208,8 +208,11 @@ export function SessionDetail() {
     if (seenKeys.current.has(key)) return;
     seenKeys.current.add(key);
 
-    if (ev.type === "session.status_running") { setStatus("running"); return; }
-    if (ev.type === "session.status_idle") { setStatus("idle"); return; }
+    if (ev.type === "session.status_running") setStatus("running");
+    if (ev.type === "session.status_idle") setStatus("idle");
+    // Don't return — Timeline's bucketIntoTurns uses these as the close
+    // boundary of a turn. Conversation view's EventBubble switch silently
+    // skips unknown types so leaving them in `events` is harmless there.
     // Previously this dropped every span.* and agent.thinking event before
     // they reached `events` state, so Timeline saw none of model/wakeup/
     // compaction/outcome spans (entire reason waterfall looked empty).
@@ -1243,8 +1246,12 @@ function TurnCard({ turn }: { turn: Turn }) {
     setPxPerMs(null);
   };
 
+  // Tick spacing: aim for ~120px between labels at the current pixel
+  // density. pickTickStep takes a "total span across 6 ticks" arg, so
+  // multiply the target step by 6 to get a step matching ~120px gaps.
   const targetTickPx = 120;
-  const tickStep = pickTickStep(targetTickPx / effectivePxPerMs);
+  const desiredStepMs = targetTickPx / effectivePxPerMs;
+  const tickStep = pickTickStep(desiredStepMs * 6);
   const ticks: number[] = [];
   for (let t = 0; t <= totalMs; t += tickStep) ticks.push(t);
 
