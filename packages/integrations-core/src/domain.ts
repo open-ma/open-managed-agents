@@ -79,7 +79,123 @@ export type CapabilityKey =
 
 export type CapabilitySet = ReadonlySet<CapabilityKey>;
 
-export type InstallKind = "dedicated";
+/**
+ * How an installation was provisioned. Drives credential type, trigger
+ * mechanism, and toolset capabilities.
+ *
+ * - `dedicated`: BYO Linear OAuth App registered by the user. OAuth-app
+ *   token in vault, bot identity is the OAuth app's auto-created bot user,
+ *   webhook-driven, AgentSession panel available.
+ * - `personal_token`: User pasted a Linear Personal API Key (PAT). Token
+ *   in vault, bot identity is the PAT owner (a real user account), no
+ *   webhook source — driven exclusively by linear_dispatch_rules cron
+ *   sweep. No AgentSession panel.
+ *
+ * The DB column `linear_installations.install_kind` stores this verbatim.
+ */
+export type InstallKind = "dedicated" | "personal_token";
+
+/**
+ * Cron-driven autopilot rule. The dispatch sweep loops periodically, picks
+ * rules whose `lastPolledAt` is older than `pollIntervalSeconds`, runs a
+ * Linear GraphQL query bounded by the filter fields, and assigns up to
+ * `maxConcurrent` matching issues to the publication's bot user.
+ *
+ * Filter fields are AND-combined. `filterStates: null` means "any active
+ * state". `filterLabel: null` means "no label filter" — Symphony's default
+ * but a footgun for new tenants, so the admin API rejects creating a rule
+ * with no filter at all.
+ *
+ * Behavior diverges by installation kind:
+ *   - `dedicated`:      sweep calls issueUpdate(assignee=botUserId), Linear
+ *                       fires IssueAssignedToYou, existing webhook path
+ *                       handles dispatch. Idempotency: assignee=null filter
+ *                       + linear_issue_sessions dedup at create time.
+ *   - `personal_token`: no webhook source. Sweep CAS-claims via
+ *                       IssueSessionRepo.claim(), then directly invokes
+ *                       sessions.create(). Optionally also issueUpdate for
+ *                       Linear UI visibility.
+ */
+export interface DispatchRule {
+  id: string;
+  tenantId: string;
+  publicationId: string;
+  name: string;
+  enabled: boolean;
+  filterLabel: string | null;
+  filterStates: readonly string[] | null;
+  filterProjectId: string | null;
+  maxConcurrent: number;
+  pollIntervalSeconds: number;
+  lastPolledAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}
+
+/** Insert payload — id and timestamps assigned by the repo. */
+export interface NewDispatchRule {
+  tenantId: string;
+  publicationId: string;
+  name: string;
+  enabled: boolean;
+  filterLabel: string | null;
+  filterStates: readonly string[] | null;
+  filterProjectId: string | null;
+  maxConcurrent: number;
+  pollIntervalSeconds: number;
+}
+
+/** Patch payload — only mutable fields. tenantId/publicationId are immutable. */
+export type DispatchRulePatch = Partial<{
+  name: string;
+  enabled: boolean;
+  filterLabel: string | null;
+  filterStates: readonly string[] | null;
+  filterProjectId: string | null;
+  maxConcurrent: number;
+  pollIntervalSeconds: number;
+}>;
+
+/**
+ * Webhook event awaiting async dispatch. Webhook handler persists, returns
+ * 200 immediately, and the cron sweep drains the table on each tick.
+ *
+ * `payload` is a JSON-serialized NormalizedWebhookEvent — drain code
+ * re-parses and processes via LinearProvider.processPendingEvent. Storing
+ * the normalized form (vs raw Linear payload) keeps drain code decoupled
+ * from envelope-shape changes.
+ *
+ * Lifecycle:
+ *   - inserted with processedAt=null
+ *   - on successful dispatch: processedAt=nowMs, processedSessionId=<id>
+ *   - on dispatch failure: processedAt=nowMs, errorMessage=<reason>
+ *     (no automatic retry — operator decides)
+ */
+export interface PendingEvent {
+  id: string;
+  tenantId: string;
+  publicationId: string;
+  eventKind: string;
+  issueId: string | null;
+  issueIdentifier: string | null;
+  workspaceId: string | null;
+  payload: string;
+  receivedAt: number;
+  processedAt: number | null;
+  processedSessionId: string | null;
+  errorMessage: string | null;
+}
+
+/** Insert payload — id and receivedAt are assigned by the repo. */
+export interface NewPendingEvent {
+  tenantId: string;
+  publicationId: string;
+  eventKind: string;
+  issueId: string | null;
+  issueIdentifier: string | null;
+  workspaceId: string | null;
+  payload: string;
+}
 
 export type PublicationMode = "full";
 
@@ -95,7 +211,11 @@ export type SessionScopeStatus =
   | "completed"
   | "human_handoff"
   | "rerouted"
-  | "escalated";
+  | "escalated"
+  /** PAT-mode dispatch sweep claimed the slot but sessions.create then
+   *  threw. The slot is logically free for the next sweep tick to retry,
+   *  but we keep the row so audits can spot repeated failures. */
+  | "failed";
 
 export type SessionGranularity = "per_issue" | "per_thread" | "per_event";
 

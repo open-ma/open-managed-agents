@@ -10,6 +10,7 @@
 import type {
   Container,
   ContinueInstallInput,
+  DispatchRule,
   IntegrationProvider,
   InstallComplete,
   InstallStep,
@@ -85,6 +86,106 @@ export class LinearProvider implements IntegrationProvider {
     throw new Error(
       `LinearProvider.continueInstall: unknown payload kind '${payload.kind}'`,
     );
+  }
+
+  // ─── PAT install (Symphony-equivalent, no OAuth app) ────────────────
+
+  /**
+   * Install a Linear connection backed by a Personal API Key. Equivalent
+   * to Symphony's `LINEAR_API_KEY` model — the bot acts as the PAT
+   * owner. No webhook source, so triggering relies on dispatch rules.
+   *
+   * One-shot vs the OAuth dance: validate via viewer query, persist,
+   * return InstallComplete in a single call. No formToken, no callback.
+   *
+   * Returns InstallComplete with the new publicationId on success.
+   * Throws on validation failure or workspace conflicts.
+   */
+  async installPersonalToken(input: {
+    userId: string;
+    agentId: string;
+    environmentId: string;
+    persona: Persona;
+    /** Linear PAT, format `lin_api_…`. */
+    patToken: string;
+  }): Promise<InstallComplete> {
+    if (!input.patToken || !input.patToken.trim()) {
+      throw new Error("patToken required");
+    }
+    const token = input.patToken.trim();
+
+    // Validate token + capture the user this PAT acts as. Linear PATs are
+    // sent as the raw token in `Authorization: <token>` (no Bearer prefix
+    // for some endpoints) but our client always sends Bearer; Linear's
+    // GraphQL accepts both.
+    let viewer: { id: string; name: string };
+    let organization: { id: string; name: string; urlKey: string };
+    try {
+      const result = await this.graphql.fetchViewerAndOrg(token);
+      viewer = result.viewer;
+      organization = result.organization;
+    } catch (err) {
+      throw new Error(
+        `Linear PAT validation failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+
+    const tenantId = await this.container.tenants.resolveByUserId(input.userId);
+
+    // Reject conflicting active install (same workspace + same install_kind).
+    // Two PAT installs of the same workspace by the same OMA tenant would
+    // race on dispatch and look identical in audit logs.
+    const existing = await this.container.installations.findByWorkspace(
+      PROVIDER_ID,
+      organization.id,
+      "personal_token",
+      null,
+    );
+    if (existing) {
+      throw new Error(
+        `Linear workspace ${organization.name} already has an active personal-token install (id=${existing.id})`,
+      );
+    }
+
+    const installation = await this.container.installations.insert({
+      tenantId,
+      userId: input.userId,
+      providerId: PROVIDER_ID,
+      workspaceId: organization.id,
+      workspaceName: organization.name,
+      installKind: "personal_token",
+      appId: null,
+      accessToken: token,
+      refreshToken: null,
+      scopes: ["personal_api_key"],
+      botUserId: viewer.id,
+    });
+
+    const { vaultId } = await this.container.vaults.createCredentialForUser({
+      userId: input.userId,
+      vaultName: `Linear · ${organization.name} · ${input.persona.name} (PAT)`,
+      displayName: `Linear PAT (${input.persona.name})`,
+      mcpServerUrl: LINEAR_MCP_URL,
+      bearerToken: token,
+    });
+    await this.container.installations.setVaultId(installation.id, vaultId);
+
+    const publication = await this.container.publications.insert({
+      tenantId,
+      userId: input.userId,
+      agentId: input.agentId,
+      installationId: installation.id,
+      environmentId: input.environmentId,
+      mode: "full",
+      status: "live",
+      persona: input.persona,
+      capabilities: new Set<CapabilityKey>(
+        this.config.defaultCapabilities ?? ALL_CAPABILITIES,
+      ),
+      sessionGranularity: "per_issue",
+    });
+
+    return { kind: "complete", publicationId: publication.id };
   }
 
   // ─── A1 (full identity, BYO Linear App) ─────────────────────────────
@@ -451,67 +552,154 @@ export class LinearProvider implements IntegrationProvider {
       publication.id,
     );
 
-    // Comment-reply path (M7): when a human posts a thread reply to a
-    // bot-authored comment, deliver it as a user.message into the bot's OMA
-    // session. The bot then chooses how to respond — call linear_post_comment
-    // to reply in the same thread, or stay silent. There's no panel binding
-    // for thread replies (Linear doesn't auto-spawn one), so the bot's
-    // assistant text won't render anywhere unless it explicitly calls a tool.
-    if (event.kind === "commentReply" && event.parentCommentId) {
-      const authored = await this.container.authoredComments.get(event.parentCommentId);
-      if (!authored) {
-        return { handled: false, reason: "comment_reply_to_non_bot" };
-      }
-      // Don't bounce the bot's own thread replies back at itself.
+    // Comment-on-active-issue path: when ANY human (not the bot itself)
+    // posts a comment on an issue with an active OMA session bound to it,
+    // resume that session synchronously with the comment as a user message.
+    // Routing key is issueId (not parentCommentId) — drops the
+    // authored_comments lookup we used to maintain per-comment, in favor
+    // of the simpler issue-level binding kept in linear_issue_sessions.
+    //
+    // Bots post comments via Linear's hosted MCP `save_comment`; replies
+    // come back here naturally because Linear webhooks all comments on
+    // issues in workspaces our app is installed in.
+    if (event.kind === "commentReply" && event.issueId) {
+      // Don't bounce the bot's own comments back at itself.
       if (event.actorUserId && installation.botUserId === event.actorUserId) {
-        return { handled: false, reason: "comment_reply_from_bot_self" };
+        return { handled: false, reason: "comment_from_bot_self" };
+      }
+      const existing = await this.container.issueSessions.getByIssue(
+        publication.id,
+        event.issueId,
+      );
+      if (!existing || existing.status !== "active") {
+        return { handled: false, reason: "comment_on_issue_with_no_active_session" };
       }
       const actorDisplayName = await this.resolveActorDisplayName(installation.id, event.actorUserId);
       const handle = actorDisplayName ? `@${actorDisplayName}` : "(unknown user)";
       const replyText = [
-        `# Linear thread reply`,
+        `# Linear comment activity`,
         ``,
         `**Issue:** ${event.issueIdentifier ?? "?"}`,
         ...(event.issueId ? [`**Issue UUID:** \`${event.issueId}\``] : []),
-        `**Thread anchor comment:** ${authored.commentId}`,
-        `**Replier:** ${handle}`,
+        `**Author:** ${handle}`,
+        ...(event.commentId ? [`**Comment id:** \`${event.commentId}\``] : []),
+        ...(event.parentCommentId ? [`**Parent comment id:** \`${event.parentCommentId}\` (this is a thread reply)`] : []),
         ``,
         `> ${(event.commentBody ?? "").replace(/\n/g, "\n> ")}`,
         ``,
-        `No Linear AgentSession panel is open for this turn. To respond visibly, call`,
-        `\`linear_post_comment(body=..., parentId="${authored.commentId}")\` — that posts a sibling`,
-        `comment in the same thread. Otherwise stay silent (your assistant text won't`,
-        `appear anywhere on Linear unless you explicitly call a tool).`,
+        `Reply via the Linear hosted MCP \`save_comment\` tool — pass \`parentId\``,
+        `to reply within the same thread, or omit it to start a new top-level comment.`,
       ].join("\n");
-      await this.container.sessions.resume(publication.userId, authored.omaSessionId, {
-        type: "user.message",
-        content: [{ type: "text", text: replyText }],
-        // Metadata only carries the immutable wiring fields the MCP server
-        // needs to authenticate. Everything else lives in the prompt body.
-        metadata: { linear: { publicationId: publication.id } },
-      });
-      await this.container.webhookEvents.attachSession(req.deliveryId, authored.omaSessionId);
+      try {
+        await this.container.sessions.resume(publication.userId, existing.sessionId, {
+          type: "user.message",
+          content: [{ type: "text", text: replyText }],
+          metadata: { linear: { publicationId: publication.id } },
+        });
+      } catch (err) {
+        // Bot session was archived/deleted between webhook and now. Comment
+        // is dropped; operator can react via Linear if it matters.
+        console.warn(
+          `[linear-comment-route] resume failed session=${existing.sessionId} issue=${event.issueId} — dropping. err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+        return { handled: false, reason: "comment_resume_failed_session_gone" };
+      }
+      await this.container.webhookEvents.attachSession(req.deliveryId, existing.sessionId);
       return {
         handled: true,
-        reason: "comment_reply_to_bot",
+        reason: "comment_on_active_issue",
         publicationId: publication.id,
-        sessionId: authored.omaSessionId,
+        sessionId: existing.sessionId,
         tenantId: installation.tenantId,
       };
     }
 
-    // Dispatch to OMA. per_issue mode resumes the existing session; per_event
-    // (and the first hit on per_issue) creates a fresh one.
-    const sessionId = await this.dispatchEvent(publication, event);
-    await this.container.webhookEvents.attachSession(req.deliveryId, sessionId);
+    // Dispatch path: persist event into pending_events queue, optionally
+    // synchronously ack the panel (AgentSessionEvent only), return 200.
+    // The cron sweep drains the queue and calls processPendingEvent which
+    // does sessions.create/resume.
+    //
+    // Why async: Linear gives webhook handlers ~30s deadline, but spawning
+    // a SessionDO + booting the sandbox container can take 10-30s on a
+    // cold start. Persisting + 200ing in <500ms is safer; the panel ack
+    // (when applicable) gives the user immediate UX feedback while the
+    // real work is being prepared.
+    if (event.kind === "agentSessionCreated" || event.kind === "agentSessionPrompted") {
+      // Best-effort ack-and-close: post a single AgentActivity (kind=response)
+      // that finalizes the panel UI. Bot's actual work then happens via
+      // comments + state changes (no more linear_say). If this fails we
+      // still continue — the queue entry exists, bot will pick it up via
+      // cron and post a comment instead.
+      if (event.agentSessionId) {
+        try {
+          await this.ackAgentSessionPanel(installation.id, event.agentSessionId);
+        } catch (err) {
+          console.warn(
+            `[linear-ack] panel ack failed session=${event.agentSessionId} err=${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+        }
+      }
+    }
+
+    const persisted = await this.container.pendingEvents.insert(
+      {
+        tenantId: publication.tenantId,
+        publicationId: publication.id,
+        eventKind: event.kind ?? "unknown",
+        issueId: event.issueId,
+        issueIdentifier: event.issueIdentifier,
+        workspaceId: event.workspaceId || null,
+        payload: JSON.stringify(event),
+      },
+      this.container.clock.nowMs(),
+    );
 
     return {
       handled: true,
-      reason: routingReason,
+      reason: `${routingReason}_queued`,
       publicationId: publication.id,
-      sessionId,
+      // No sessionId yet — created by the drain. Caller logs this as null.
+      sessionId: persisted.id,
       tenantId: installation.tenantId,
     };
+  }
+
+  /**
+   * Synchronously POST a `kind=response` AgentActivity to finalize the
+   * panel Linear opened for this AgentSessionEvent. After this, the panel
+   * is in `complete` state and any further linear_say-style writes won't
+   * render — the bot does its real work via comments instead.
+   *
+   * Auth: uses the installation's stored access token. Returns once Linear
+   * confirms 200; throws on transport / GraphQL errors so the caller can
+   * decide whether to log and continue.
+   */
+  private async ackAgentSessionPanel(
+    installationId: string,
+    agentSessionId: string,
+  ): Promise<void> {
+    const accessToken = await this.container.installations.getAccessToken(installationId);
+    if (!accessToken) throw new Error(`no access token for installation ${installationId}`);
+    await this.graphql.query<{ agentActivityCreate: { success: boolean } }>(
+      accessToken,
+      `mutation AckPanel($input: AgentActivityCreateInput!) {
+         agentActivityCreate(input: $input) { success }
+       }`,
+      {
+        input: {
+          agentSessionId,
+          content: {
+            type: "response",
+            body:
+              "Acknowledged — picking this up. I'll respond in the comment thread (this panel is now complete).",
+          },
+        },
+      },
+    );
   }
 
   private async dispatchEvent(
@@ -521,10 +709,14 @@ export class LinearProvider implements IntegrationProvider {
     // Look up the installation to find the vault holding the access token.
     const installation = await this.container.installations.get(publication.installationId);
     const vaultIds = installation?.vaultId ? [installation.vaultId] : [];
-    // We no longer pass mcp.linear.app here — apps/main wires the hosted
-    // OMA-side Linear MCP (integrations.openma.dev/linear/mcp/<sessionId>)
-    // when it sees metadata.linear, so sandbox never talks to Linear directly.
-    const mcpServers: Array<{ name: string; url: string }> = [];
+    // Hand the bot Linear's hosted MCP server. The outbound MITM
+    // Bearer-wraps the vaulted token (PAT or OAuth-app developer token);
+    // both work against mcp.linear.app/mcp. Together with our own minimal
+    // MCP (see apps/integrations/src/routes/linear/mcp.ts) the bot has
+    // ~30 hosted tools + our routing tools.
+    const mcpServers: Array<{ name: string; url: string }> = [
+      { name: "linear", url: LINEAR_MCP_URL },
+    ];
 
     const actorDisplayName = await this.resolveActorDisplayName(
       installation?.id ?? null,
@@ -541,8 +733,7 @@ export class LinearProvider implements IntegrationProvider {
       ],
       // Metadata only carries the immutable wiring fields the MCP server
       // needs. The bot owns all "where am I right now" decisions via the
-      // linear_enter_panel / linear_exit_panel tools (D1-backed). No more
-      // mutating fields like currentAgentSessionId / triggerCommentId here.
+      // tool semantics (issueId is in the prompt body for the bot to read).
       metadata: { linear: { publicationId: publication.id } },
     };
 
@@ -551,9 +742,22 @@ export class LinearProvider implements IntegrationProvider {
         publication.id,
         event.issueId,
       );
-      if (existing && existing.status === "active") {
-        await this.container.sessions.resume(publication.userId, existing.sessionId, sessionEvent);
-        return existing.sessionId;
+      if (existing) {
+        // Linear is the source of truth; we don't track session lifecycle in
+        // our DB. The row's status field is just a "claim marker" — assume
+        // any existing row points at a still-resumable session. If resume
+        // fails (session was archived/deleted), fall through to create.
+        try {
+          await this.container.sessions.resume(publication.userId, existing.sessionId, sessionEvent);
+          return existing.sessionId;
+        } catch (err) {
+          console.warn(
+            `[linear-dispatch] resume failed for session=${existing.sessionId} issue=${event.issueId} — falling through to create. err=${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          );
+          // fall through
+        }
       }
       const created = await this.container.sessions.create({
         userId: publication.userId,
@@ -634,12 +838,11 @@ export class LinearProvider implements IntegrationProvider {
     if (event.agentSessionId) {
       lines.push("");
       lines.push(
-        `Linear opened panel \`${event.agentSessionId}\` for this turn. ` +
-          `Speak in the panel via \`linear_say(body, panelId="${event.agentSessionId}", kind=...)\` ` +
-          `— kind=thought for narration, kind=action for tool-call cards, ` +
-          `kind=elicitation for a reply box, kind=response to finalize. ` +
-          `Without explicit tool calls, you stay silent in the panel — ` +
-          `internal reasoning is private and never auto-mirrored.`,
+        `Linear opened a panel for this trigger but OMA already acknowledged ` +
+          `and finalized it. Do all your work via comments + issue state ` +
+          `changes — use \`linear_post_comment\` (OMA tool) for top-level ` +
+          `progress notes and final results, and the Linear hosted MCP ` +
+          `(\`save_issue\`, \`save_comment\` for replies, etc.) for everything else.`,
       );
     }
     return lines.join("\n");
@@ -931,4 +1134,366 @@ export class LinearProvider implements IntegrationProvider {
     const trimmed = redirectBase.replace(/\/+$/, "");
     return `${trimmed}/linear/oauth/app/${appId}/callback`;
   }
+
+  // ─── Cron sweep + queue drain ─────────────────────────────────
+
+  /**
+   * Drain the pending_events queue. Each event is parsed back into a
+   * NormalizedWebhookEvent and processed via dispatchEvent. Per-event
+   * failures are caught so one bad row doesn't poison the whole tick.
+   *
+   * `limit` caps work per tick to share cron CPU with runDispatchSweep.
+   */
+  async drainPendingEvents(nowMs: number, limit = 25): Promise<{
+    drainedEvents: number;
+    succeeded: number;
+    failed: number;
+  }> {
+    const rows = await this.container.pendingEvents.listUnprocessed(limit);
+    let succeeded = 0;
+    let failed = 0;
+    for (const row of rows) {
+      try {
+        const publication = await this.container.publications.get(row.publicationId);
+        if (!publication || publication.status !== "live") {
+          await this.container.pendingEvents.markFailed(
+            row.id,
+            "publication not found or not live",
+            nowMs,
+          );
+          failed++;
+          continue;
+        }
+        const event = JSON.parse(row.payload) as NormalizedWebhookEvent;
+        await this.dispatchEvent(publication, event);
+        // Linear stays the source of truth for issue state. Once dispatched
+        // (the user.message is in the OMA session event log) we have no
+        // reason to keep this row around. Drop it.
+        await this.container.pendingEvents.delete(row.id);
+        succeeded++;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        try {
+          await this.container.pendingEvents.markFailed(row.id, msg, nowMs);
+        } catch {
+          // best-effort
+        }
+        failed++;
+        console.warn(`[linear-drain] event=${row.id} kind=${row.eventKind} err=${msg}`);
+      }
+    }
+    return { drainedEvents: rows.length, succeeded, failed };
+  }
+
+  /**
+   * Cron entry point. Picks rules whose `lastPolledAt` is older than the
+   * configured interval, runs each, and marks polled. Per-rule errors are
+   * caught so one bad rule doesn't poison the whole tick.
+   *
+   * `ruleLimit` caps how many rules a single tick processes — a noisy
+   * Linear workspace (lots of due rules) shouldn't starve other tenants.
+   * Default 50 leaves plenty of cron-tick budget.
+   */
+  async runDispatchSweep(nowMs: number, ruleLimit = 50): Promise<{
+    sweptRules: number;
+    assignedIssues: number;
+    errors: ReadonlyArray<{ ruleId: string; message: string }>;
+  }> {
+    const rules = await this.container.dispatchRules.listDueForSweep(nowMs, ruleLimit);
+    const errors: Array<{ ruleId: string; message: string }> = [];
+    let assignedIssues = 0;
+    for (const rule of rules) {
+      try {
+        const n = await this.processDispatchRule(rule, nowMs);
+        assignedIssues += n;
+      } catch (err) {
+        errors.push({
+          ruleId: rule.id,
+          message: err instanceof Error ? err.message : String(err),
+        });
+      } finally {
+        // Always advance lastPolledAt so a permanently broken rule
+        // doesn't get retried every tick. Operator can re-enable by
+        // patching the rule (which doesn't reset lastPolledAt — that's
+        // fine, next interval will fire normally).
+        try {
+          await this.container.dispatchRules.markPolled(rule.id, nowMs);
+        } catch {
+          // markPolled failing is not fatal — sweep retries next tick.
+        }
+      }
+    }
+    return { sweptRules: rules.length, assignedIssues, errors };
+  }
+
+  private async processDispatchRule(
+    rule: DispatchRule,
+    nowMs: number,
+  ): Promise<number> {
+    const publication = await this.container.publications.get(rule.publicationId);
+    if (!publication || publication.status !== "live") return 0;
+    const installation = await this.container.installations.get(publication.installationId);
+    if (!installation || installation.revokedAt !== null) return 0;
+    const accessToken = await this.container.installations.getAccessToken(
+      installation.id,
+    );
+    if (!accessToken) return 0;
+
+    // Combined query: candidate issues + current bot load (for max_concurrent
+    // enforcement) in one Linear round trip. We don't trust local DB rows
+    // for "is the bot still working" — Linear is the source of truth.
+    const initialSlots = Math.min(rule.maxConcurrent * 2, 25);
+    const { candidates, currentLoad } = await this.queryDispatchCandidates(
+      accessToken,
+      rule,
+      installation.botUserId,
+      initialSlots,
+    );
+    const slots = Math.max(0, rule.maxConcurrent - currentLoad);
+    if (slots === 0 || candidates.length === 0) return 0;
+
+    let assigned = 0;
+    for (const issue of candidates) {
+      if (assigned >= slots) break;
+      try {
+        if (installation.installKind === "personal_token") {
+          const ok = await this.dispatchPatModeIssue({
+            rule,
+            publication,
+            installation,
+            accessToken,
+            issue,
+            nowMs,
+          });
+          if (ok) assigned++;
+        } else {
+          // OAuth-app mode: assign and let Linear's IssueAssignedToYou
+          // webhook fire dispatchEvent. linear_issue_sessions dedup
+          // protects us from races.
+          await this.linearIssueAssign(accessToken, issue.id, installation.botUserId);
+          assigned++;
+        }
+      } catch (err) {
+        // Per-issue failures don't poison the rule — log and continue.
+        console.warn(
+          `[linear-dispatch] rule=${rule.id} issue=${issue.identifier} kind=${installation.installKind} err=${
+            err instanceof Error ? err.message : String(err)
+          }`,
+        );
+      }
+    }
+    return assigned;
+  }
+
+  /**
+   * PAT mode has no webhook source, so the sweep claims atomically and
+   * spawns the session itself. Order matters:
+   *   1. CAS-claim with sentinel sessionId — wins the race or aborts.
+   *   2. sessions.create() — actual session id assigned by host.
+   *   3. issueSessions.insert() — UPSERTs the real sessionId over the
+   *      sentinel (status remains 'active').
+   *   4. issueUpdate(assignee) — best-effort, only for Linear UI
+   *      visibility. Failure here doesn't unwind the session.
+   *
+   * If sessions.create throws after claim, we mark the row 'inactive' so
+   * the next sweep tick can retry the issue.
+   */
+  private async dispatchPatModeIssue(args: {
+    rule: DispatchRule;
+    publication: Publication;
+    installation: { id: string; tenantId: string; botUserId: string; vaultId: string | null };
+    accessToken: string;
+    issue: DispatchCandidate;
+    nowMs: number;
+  }): Promise<boolean> {
+    const { rule, publication, installation, accessToken, issue, nowMs } = args;
+    const claimed = await this.container.issueSessions.claim({
+      tenantId: publication.tenantId,
+      publicationId: publication.id,
+      issueId: issue.id,
+      sessionId: "_supervisor_claim",
+      nowMs,
+    });
+    if (!claimed) return false;
+
+    let sessionId: string | null = null;
+    try {
+      const sessionEvent = {
+        type: "user.message" as const,
+        content: [
+          {
+            type: "text" as const,
+            text: this.renderSupervisorPickupAsUserMessage(rule, issue),
+          },
+        ],
+        metadata: { linear: { publicationId: publication.id } },
+      };
+      const created = await this.container.sessions.create({
+        userId: publication.userId,
+        agentId: publication.agentId,
+        environmentId: publication.environmentId,
+        vaultIds: installation.vaultId ? [installation.vaultId] : [],
+        mcpServers: [{ name: "linear", url: LINEAR_MCP_URL }],
+        metadata: {
+          linear: {
+            publicationId: publication.id,
+            issueId: issue.id,
+            workspaceId: null,
+          },
+        },
+        initialEvent: sessionEvent,
+        githubRepoUrl: PROD_GITHUB_REPO_URL,
+      });
+      sessionId = created.sessionId;
+
+      // UPSERT the row with the real session id (replaces the sentinel).
+      await this.container.issueSessions.insert({
+        tenantId: publication.tenantId,
+        publicationId: publication.id,
+        issueId: issue.id,
+        sessionId,
+        status: "active",
+        createdAt: nowMs,
+      });
+    } catch (err) {
+      // Roll back the claim so next tick can retry.
+      try {
+        await this.container.issueSessions.updateStatus(
+          publication.id,
+          issue.id,
+          "failed",
+        );
+      } catch {
+        // best-effort
+      }
+      throw err;
+    }
+
+    // Best-effort visibility update — humans browsing the board should
+    // see the bot has picked the issue up. Failure here is a UX papercut,
+    // not a correctness issue.
+    try {
+      await this.linearIssueAssign(accessToken, issue.id, installation.botUserId);
+    } catch (err) {
+      console.warn(
+        `[linear-dispatch] PAT visibility-assign failed issue=${issue.identifier} session=${sessionId} err=${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    return true;
+  }
+
+  private async queryDispatchCandidates(
+    accessToken: string,
+    rule: DispatchRule,
+    botUserId: string,
+    first: number,
+  ): Promise<{ candidates: DispatchCandidate[]; currentLoad: number }> {
+    const candidateFilter: Record<string, unknown> = {
+      assignee: { null: true },
+    };
+    if (rule.filterStates && rule.filterStates.length > 0) {
+      candidateFilter.state = { name: { in: rule.filterStates } };
+    }
+    if (rule.filterLabel) {
+      candidateFilter.labels = { some: { name: { eq: rule.filterLabel } } };
+    }
+    if (rule.filterProjectId) {
+      candidateFilter.project = { id: { eq: rule.filterProjectId } };
+    }
+    // Linear is the source of truth for "is the bot still working on this"
+    // — we do NOT track session lifecycle in our DB. Count by querying for
+    // the bot's own non-terminal assigned issues. Combined with the
+    // candidate query in one round trip.
+    const loadFilter = {
+      assignee: { id: { eq: botUserId } },
+      state: { type: { nin: ["completed", "canceled"] } },
+    };
+    const data = await this.graphql.query<{
+      candidates: { nodes: DispatchCandidate[] };
+      load: { nodes: Array<{ id: string }> };
+    }>(
+      accessToken,
+      `query DispatchCandidatesAndLoad(
+         $candidateFilter: IssueFilter, $loadFilter: IssueFilter,
+         $first: Int!, $loadFirst: Int!
+       ) {
+         candidates: issues(filter: $candidateFilter, first: $first) {
+           nodes { id identifier title url description }
+         }
+         load: issues(filter: $loadFilter, first: $loadFirst) {
+           nodes { id }
+         }
+       }`,
+      {
+        candidateFilter,
+        loadFilter,
+        first,
+        // Cap load query at maxConcurrent — we only need to know whether
+        // we're at/over the cap, not the exact count if it's huge.
+        loadFirst: rule.maxConcurrent,
+      },
+    );
+    return {
+      candidates: data.candidates.nodes ?? [],
+      currentLoad: (data.load.nodes ?? []).length,
+    };
+  }
+
+  private async linearIssueAssign(
+    accessToken: string,
+    issueId: string,
+    assigneeId: string,
+  ): Promise<void> {
+    await this.graphql.query<{ issueUpdate: { success: boolean } }>(
+      accessToken,
+      `mutation AssignIssue($id: String!, $assigneeId: String!) {
+         issueUpdate(id: $id, input: { assigneeId: $assigneeId }) { success }
+       }`,
+      { id: issueId, assigneeId },
+    );
+  }
+
+  private renderSupervisorPickupAsUserMessage(
+    rule: DispatchRule,
+    issue: DispatchCandidate,
+  ): string {
+    const filters: string[] = [];
+    if (rule.filterLabel) filters.push(`label="${rule.filterLabel}"`);
+    if (rule.filterStates) filters.push(`state in [${rule.filterStates.join(", ")}]`);
+    if (rule.filterProjectId) filters.push(`project=${rule.filterProjectId}`);
+    const filterDesc = filters.length > 0 ? filters.join(" AND ") : "(no filter)";
+    const lines: string[] = [
+      `# Linear supervisor pickup`,
+      ``,
+      `**Issue:** ${issue.identifier}`,
+      `**Issue UUID:** \`${issue.id}\` (use this when a tool asks for issueId)`,
+      `**Title:** ${issue.title}`,
+    ];
+    if (issue.url) {
+      lines.push(`**URL:** ${issue.url}`);
+    }
+    if (issue.description) {
+      lines.push("");
+      lines.push(`**Description:**`);
+      lines.push(issue.description);
+    }
+    lines.push("");
+    lines.push(
+      `You were auto-assigned by the dispatch rule "${rule.name}" (${filterDesc}). ` +
+        `Move the issue to In Progress (Linear hosted MCP: \`save_issue(id, state)\`), ` +
+        `do the work, post progress comments via OMA's \`linear_post_comment\`, ` +
+        `and when done set state to Done + clear assignee via \`save_issue\`.`,
+    );
+    return lines.join("\n");
+  }
+}
+
+interface DispatchCandidate {
+  id: string;
+  identifier: string;
+  title: string;
+  url: string | null;
+  description: string | null;
 }
