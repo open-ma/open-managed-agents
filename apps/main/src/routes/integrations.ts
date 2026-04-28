@@ -191,6 +191,160 @@ app.delete("/linear/publications/:id", async (c) => {
   return c.json({ id, status: "unpublished" });
 });
 
+// ─── Dispatch rules CRUD ─────────────────────────────────────────────────
+//
+// Cron-driven autopilot rules per publication. The sweep in apps/integrations
+// (scheduled handler) reads `enabled=1` rules whose interval has elapsed,
+// queries Linear for matching unassigned issues, and assigns them to the
+// publication's bot user — the existing webhook → SessionDO path takes over.
+//
+// Auth: per-publication, gated by publication.userId. Rules carry tenant_id
+// inherited from the publication.
+
+interface DispatchRulePostBody {
+  name?: string;
+  enabled?: boolean;
+  filter_label?: string | null;
+  filter_states?: string[] | null;
+  filter_project_id?: string | null;
+  max_concurrent?: number;
+  poll_interval_seconds?: number;
+}
+
+function serializeDispatchRule(r: {
+  id: string;
+  publicationId: string;
+  name: string;
+  enabled: boolean;
+  filterLabel: string | null;
+  filterStates: readonly string[] | null;
+  filterProjectId: string | null;
+  maxConcurrent: number;
+  pollIntervalSeconds: number;
+  lastPolledAt: number | null;
+  createdAt: number;
+  updatedAt: number;
+}) {
+  return {
+    id: r.id,
+    publication_id: r.publicationId,
+    name: r.name,
+    enabled: r.enabled,
+    filter_label: r.filterLabel,
+    filter_states: r.filterStates,
+    filter_project_id: r.filterProjectId,
+    max_concurrent: r.maxConcurrent,
+    poll_interval_seconds: r.pollIntervalSeconds,
+    last_polled_at: r.lastPolledAt,
+    created_at: r.createdAt,
+    updated_at: r.updatedAt,
+  };
+}
+
+app.get("/linear/publications/:id/dispatch-rules", async (c) => {
+  const userId = c.get("user_id")!;
+  const id = c.req.param("id");
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
+  const pub = await repos.publications.get(id);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+  const rules = await repos.dispatchRules.listByPublication(id);
+  return c.json({ rules: rules.map(serializeDispatchRule) });
+});
+
+app.post("/linear/publications/:id/dispatch-rules", async (c) => {
+  const userId = c.get("user_id")!;
+  const id = c.req.param("id");
+  const body = await c.req.json<DispatchRulePostBody>();
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
+  const pub = await repos.publications.get(id);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+
+  // Reject "match everything" rules — a footgun that would have the bot
+  // claim the entire workspace's active backlog. At least one filter required.
+  const hasFilter =
+    (body.filter_label && body.filter_label.trim().length > 0) ||
+    (body.filter_states && body.filter_states.length > 0) ||
+    (body.filter_project_id && body.filter_project_id.trim().length > 0);
+  if (!hasFilter) {
+    return c.json(
+      {
+        error: "at least one of filter_label, filter_states, filter_project_id required",
+        hint:
+          "An unfiltered rule would assign every active issue in the workspace to the bot. " +
+          "Start with filter_label (e.g. 'bot-ready') to scope to opted-in issues.",
+      },
+      400,
+    );
+  }
+
+  const maxConcurrent = body.max_concurrent ?? 5;
+  if (maxConcurrent < 1 || maxConcurrent > 100) {
+    return c.json({ error: "max_concurrent must be 1..100" }, 400);
+  }
+  const pollIntervalSeconds = body.poll_interval_seconds ?? 600;
+  if (pollIntervalSeconds < 60 || pollIntervalSeconds > 86400) {
+    return c.json({ error: "poll_interval_seconds must be 60..86400" }, 400);
+  }
+
+  const rule = await repos.dispatchRules.insert({
+    tenantId: pub.tenantId,
+    publicationId: pub.id,
+    name: body.name?.trim() || "Auto-pickup",
+    enabled: body.enabled ?? true,
+    filterLabel: body.filter_label?.trim() || null,
+    filterStates: body.filter_states ?? null,
+    filterProjectId: body.filter_project_id?.trim() || null,
+    maxConcurrent,
+    pollIntervalSeconds,
+  });
+  return c.json(serializeDispatchRule(rule), 201);
+});
+
+app.patch("/linear/publications/:id/dispatch-rules/:ruleId", async (c) => {
+  const userId = c.get("user_id")!;
+  const pubId = c.req.param("id");
+  const ruleId = c.req.param("ruleId");
+  const body = await c.req.json<DispatchRulePostBody>();
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
+  const pub = await repos.publications.get(pubId);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+  const existing = await repos.dispatchRules.get(ruleId);
+  if (!existing || existing.publicationId !== pubId) {
+    return c.json({ error: "not found" }, 404);
+  }
+  const updated = await repos.dispatchRules.update(ruleId, {
+    name: body.name?.trim(),
+    enabled: body.enabled,
+    filterLabel: body.filter_label === undefined ? undefined : body.filter_label?.trim() || null,
+    filterStates: body.filter_states,
+    filterProjectId:
+      body.filter_project_id === undefined ? undefined : body.filter_project_id?.trim() || null,
+    maxConcurrent: body.max_concurrent,
+    pollIntervalSeconds: body.poll_interval_seconds,
+  });
+  if (!updated) return c.json({ error: "not found" }, 404);
+  return c.json(serializeDispatchRule(updated));
+});
+
+app.delete("/linear/publications/:id/dispatch-rules/:ruleId", async (c) => {
+  const userId = c.get("user_id")!;
+  const pubId = c.req.param("id");
+  const ruleId = c.req.param("ruleId");
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
+  const pub = await repos.publications.get(pubId);
+  if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
+  const existing = await repos.dispatchRules.get(ruleId);
+  if (!existing || existing.publicationId !== pubId) {
+    return c.json({ error: "not found" }, 404);
+  }
+  await repos.dispatchRules.delete(ruleId);
+  return c.json({ id: ruleId, status: "deleted" });
+});
+
 // ─── Install proxy endpoints ─────────────────────────────────────────────
 //
 // The install/OAuth flow is implemented in apps/integrations (which holds
@@ -206,6 +360,29 @@ app.post("/linear/start-a1", async (c) => {
   if (!internalSecret) return c.json({ error: "INTEGRATIONS_INTERNAL_SECRET not configured" }, 503);
   const res = await c.env.INTEGRATIONS.fetch(
     `http://gateway/linear/publications/start-a1`,
+    {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-internal-secret": internalSecret,
+      },
+      body: JSON.stringify({ ...body, userId }),
+    },
+  );
+  return new Response(res.body, { status: res.status, headers: res.headers });
+});
+
+// PAT (Symphony-equivalent) install — one shot, no OAuth dance. Returns
+// { publicationId } directly. Requires user to have generated a Linear
+// personal API key and pasted it.
+app.post("/linear/personal-token", async (c) => {
+  const userId = c.get("user_id")!;
+  const body = await c.req.json();
+  if (!c.env.INTEGRATIONS) return c.json({ error: "INTEGRATIONS binding missing" }, 503);
+  const internalSecret = c.env.INTEGRATIONS_INTERNAL_SECRET;
+  if (!internalSecret) return c.json({ error: "INTEGRATIONS_INTERNAL_SECRET not configured" }, 503);
+  const res = await c.env.INTEGRATIONS.fetch(
+    `http://gateway/linear/publications/personal-token`,
     {
       method: "POST",
       headers: {

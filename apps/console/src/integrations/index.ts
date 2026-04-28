@@ -6,6 +6,7 @@
 export { IntegrationsLinearList } from "./pages/IntegrationsLinearList";
 export { IntegrationsLinearWorkspace } from "./pages/IntegrationsLinearWorkspace";
 export { IntegrationsLinearPublishWizard } from "./pages/IntegrationsLinearPublishWizard";
+export { IntegrationsLinearPatInstall } from "./pages/IntegrationsLinearPatInstall";
 export { IntegrationsGitHubList } from "./pages/IntegrationsGitHubList";
 export { IntegrationsGitHubWorkspace } from "./pages/IntegrationsGitHubWorkspace";
 export { IntegrationsGitHubBindWizard } from "./pages/IntegrationsGitHubBindWizard";
@@ -19,6 +20,10 @@ export type {
   LinearInstallation,
   LinearPublication,
   LinearSubmitCredentialsInput,
+  LinearPersonalTokenInput,
+  LinearPersonalTokenResult,
+  LinearDispatchRule,
+  LinearDispatchRuleInput,
   SlackInstallation,
   SlackPublication,
   SlackSubmitCredentialsInput,

@@ -10,6 +10,8 @@
 import type {
   AppCredentials,
   CapabilitySet,
+  DispatchRule,
+  DispatchRulePatch,
   GitHubAppCredentials,
   Installation,
   IssueSession,
@@ -25,6 +27,10 @@ import type {
   UserId,
   WorkspaceId,
   InstallKind,
+  NewDispatchRule,
+  NewPendingEvent,
+  PendingEvent,
+  SessionId,
   PublicationMode,
   AgentId,
 } from "./domain";
@@ -222,31 +228,25 @@ export interface IssueSessionRepo {
     status: IssueSessionStatus,
   ): Promise<void>;
   listActive(publicationId: string): Promise<ReadonlyArray<IssueSession>>;
-}
-
-/**
- * Tracks comments the bot authored via the OMA-hosted Linear MCP server's
- * `linear_post_comment` tool. Lets us route a Linear `Comment` webhook with
- * a `parentId` back to the bot's OMA session.
- *
- * Slim schema by design: anything derivable from the omaSessionId
- * (publication / installation / vault) is fetched on demand at webhook
- * time. Only `issueId` is kept inline — it's used by the bot's
- * thread-context tools without needing a session record round-trip.
- */
-export interface AuthoredComment {
-  commentId: string;
-  /** OMA tenant that owns the bot session this comment was authored from.
-   *  NOT NULL in storage; backfilled from sessions.tenant_id. */
-  tenantId: string;
-  omaSessionId: string;
-  issueId: string;
-  createdAt: number;
-}
-
-export interface AuthoredCommentRepo {
-  get(commentId: string): Promise<AuthoredComment | null>;
-  insert(row: AuthoredComment): Promise<void>;
+  /**
+   * PAT-mode atomic claim. Used by the dispatch sweep when there is no
+   * webhook source to deduplicate against — we must guarantee at most one
+   * worker per (publication, issue) across concurrent ticks.
+   *
+   * Inserts the row if no row exists for (publicationId, issueId), or
+   * updates an existing row if its status is `inactive` (a prior worker
+   * finished). Returns true only when this caller successfully claimed.
+   *
+   * Implementations must be atomic — typically a single
+   * `INSERT ... ON CONFLICT DO UPDATE WHERE status = 'inactive' RETURNING ...`.
+   */
+  claim(input: {
+    tenantId: string;
+    publicationId: string;
+    issueId: string;
+    sessionId: SessionId;
+    nowMs: number;
+  }): Promise<boolean>;
 }
 
 export interface NewSetupLink {
@@ -262,4 +262,51 @@ export interface SetupLinkRepo {
   insert(row: NewSetupLink): Promise<SetupLink>;
   markUsed(token: string, usedByEmail: string, usedAt: number): Promise<void>;
   deleteExpired(now: number): Promise<number>;
+}
+
+/**
+ * Dispatch-rule storage. Backs the cron sweep (autopilot) and the admin
+ * API. One rule belongs to exactly one publication; multiple rules per
+ * publication are allowed for different filter combinations.
+ *
+ * `listDueForSweep` is the hot path — called every cron tick. It must be
+ * cheap; the index `(enabled, last_polled_at)` is sized for it.
+ */
+export interface DispatchRuleRepo {
+  get(id: string): Promise<DispatchRule | null>;
+  insert(input: NewDispatchRule): Promise<DispatchRule>;
+  update(id: string, patch: DispatchRulePatch): Promise<DispatchRule | null>;
+  delete(id: string): Promise<boolean>;
+  listByPublication(publicationId: string): Promise<ReadonlyArray<DispatchRule>>;
+  /**
+   * For the cron sweep: enabled rules whose `lastPolledAt` is older than
+   * `nowMs - pollIntervalSeconds * 1000`, ordered by oldest first. `limit`
+   * caps a single tick's work to avoid one slow Linear workspace blocking
+   * others.
+   */
+  listDueForSweep(nowMs: number, limit: number): Promise<ReadonlyArray<DispatchRule>>;
+  /** Mark a sweep as completed. Updates `lastPolledAt` only. */
+  markPolled(id: string, polledAtMs: number): Promise<void>;
+}
+
+/**
+ * Queue of webhook-triggered events awaiting async dispatch. Webhook
+ * handler persists rows here; the cron sweep drains them on each tick.
+ */
+export interface PendingEventRepo {
+  insert(input: NewPendingEvent, nowMs: number): Promise<PendingEvent>;
+  /**
+   * Fetch up to `limit` unprocessed events, oldest first. Drain caller
+   * is responsible for calling delete (success) or markFailed (failure)
+   * per row.
+   */
+  listUnprocessed(limit: number): Promise<ReadonlyArray<PendingEvent>>;
+  /** Successful drain → delete the row outright (Linear is the system of
+   *  record; the dispatched user.message lives in the OMA session event log
+   *  from here on). Keeping processed rows would just bloat the table. */
+  delete(id: string): Promise<void>;
+  /** Failed drain → keep the row with error_message for ops audit. */
+  markFailed(id: string, errorMessage: string, processedAtMs: number): Promise<void>;
+  /** Ops introspection. */
+  listByPublication(publicationId: string, limit: number): Promise<ReadonlyArray<PendingEvent>>;
 }
