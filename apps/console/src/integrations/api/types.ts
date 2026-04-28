@@ -115,6 +115,46 @@ export interface LinearSubmitCredentialsInput {
   webhookSecret: string;
 }
 
+/** Symphony-equivalent install — Personal API Key in one shot, no OAuth dance. */
+export interface LinearPersonalTokenInput {
+  agentId: string;
+  environmentId: string;
+  personaName: string;
+  personaAvatarUrl?: string | null;
+  /** Linear PAT, format `lin_api_…`. Validated via viewer query before vault write. */
+  patToken: string;
+}
+
+export interface LinearPersonalTokenResult {
+  publicationId: string;
+}
+
+/** Cron-driven autopilot rule. One rule belongs to one publication. */
+export interface LinearDispatchRule {
+  id: string;
+  publication_id: string;
+  name: string;
+  enabled: boolean;
+  filter_label: string | null;
+  filter_states: string[] | null;
+  filter_project_id: string | null;
+  max_concurrent: number;
+  poll_interval_seconds: number;
+  last_polled_at: number | null;
+  created_at: number;
+  updated_at: number;
+}
+
+export interface LinearDispatchRuleInput {
+  name?: string;
+  enabled?: boolean;
+  filter_label?: string | null;
+  filter_states?: string[] | null;
+  filter_project_id?: string | null;
+  max_concurrent?: number;
+  poll_interval_seconds?: number;
+}
+
 // ─── GitHub ────────────────────────────────────────────────────────────
 
 export interface GitHubInstallation {

@@ -51,13 +51,22 @@ export function IntegrationsLinearList() {
               in comments, watch them push status.
             </p>
           </div>
-          <Link
-            to="/integrations/linear/publish"
-            className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors whitespace-nowrap"
-          >
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
-            Publish agent
-          </Link>
+          <div className="shrink-0 flex items-center gap-2">
+            <Link
+              to="/integrations/linear/install-pat"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-border rounded-md text-[13px] font-medium hover:border-brand transition-colors whitespace-nowrap"
+              title="Symphony-equivalent: paste a Linear PAT, no OAuth dance"
+            >
+              Install via PAT
+            </Link>
+            <Link
+              to="/integrations/linear/publish"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors whitespace-nowrap"
+            >
+              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
+              Publish agent
+            </Link>
+          </div>
         </header>
 
         {loading && <p className="text-sm text-fg-muted">Loading…</p>}

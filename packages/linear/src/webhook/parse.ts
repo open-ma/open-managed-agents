@@ -192,6 +192,7 @@ function parseCommentCreate(
   const parent = pickObject(data, "parent");
   // Linear webhook payload sometimes nests the parent comment id under
   // `data.parent.id`, sometimes flattens to `data.parentId`. Accept either.
+  // We surface it for the prompt body but no longer route on it.
   const parentCommentId =
     pickString(data, "parentId") ??
     (parent ? pickString(parent, "id") : null);
@@ -199,11 +200,11 @@ function parseCommentCreate(
   const commentId = pickString(data, "id");
   const body = pickString(data, "body");
   const userId = pickString(data, "userId");
-  // The router decides whether this reply should wake a bot session by
-  // looking up parentCommentId — kind=commentReply just means "Comment was
-  // created with a non-null parent and is a candidate". Top-level comments
-  // (no parent) get kind=null because we don't act on them.
-  const kind: NotificationKind | null = parentCommentId ? "commentReply" : null;
+  // Any Comment.create with an issueId is a candidate to wake an active
+  // session. The router does the bot-self-check + active-session lookup
+  // via linear_issue_sessions (issueId-keyed). Top-level vs threaded
+  // doesn't matter at this layer.
+  const kind: NotificationKind | null = issueId ? "commentReply" : null;
   return {
     kind,
     workspaceId: raw.organizationId ?? "",
