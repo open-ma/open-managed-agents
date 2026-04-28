@@ -1014,7 +1014,12 @@ function TimelineView({ events }: { events: Event[] }) {
             >
               <div className="w-56 shrink-0 flex items-center gap-2 text-xs">
                 <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
-                <span className="truncate text-fg-muted font-mono">{s.label}</span>
+                <div className="min-w-0 flex-1">
+                  <div className="truncate text-fg-muted font-mono">{s.label}</div>
+                  {s.detail && (
+                    <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+                  )}
+                </div>
               </div>
               <div className="flex-1 relative h-5">
                 {width > 0 ? (
