@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState, useRef } from "react";
+import { useEffect, useMemo, useState, useRef, Fragment } from "react";
 import { useParams, Link } from "react-router";
 import { useApi } from "../lib/api";
 import { Markdown } from "../components/Markdown";
@@ -1002,26 +1002,204 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
   return { spans, totalMs };
 }
 
-function TimelineView({ events }: { events: Event[] }) {
-  const { spans, totalMs } = useMemo(() => deriveSpans(events), [events]);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+/**
+ * A "turn" is the unit of agent work between a user trigger event
+ * (user.message / user.tool_confirmation / user.custom_tool_result) and
+ * the next session.status_idle / .status_terminated / .error. This is the
+ * same definition the harness uses internally (see drainEventQueue in
+ * apps/agent/src/runtime/session-do.ts) and matches Conversation view's
+ * notion of a turn — so a Timeline burst card lines up 1:1 with a chat
+ * exchange. Time-based bucketing breaks under both fast follow-ups and
+ * 40-minute cron gaps; semantic bucketing handles both uniformly.
+ */
+type TurnTriggerKind =
+  | "user_message"
+  | "wakeup"
+  | "tool_confirmation"
+  | "custom_tool_result"
+  | "init";
 
-  // Time scale in px per millisecond. Default is auto-picked by event
-  // density (median consecutive interval) so dense bursts stay legible
-  // even when the trace spans many minutes. The mode flag lets a user
-  // zoom action freeze the value — without it, every new streamed event
-  // would yank the chart back to "auto" mid-inspection.
+type TurnStatus = "completed" | "running" | "errored" | "terminated";
+
+interface Turn {
+  id: string;
+  triggerKind: TurnTriggerKind;
+  trigger?: Event;
+  /** Wall-clock ms epoch of the trigger (or first event for init turn). */
+  triggerTs: number;
+  /** Inclusive: trigger event + everything until the closing status event. */
+  events: Event[];
+  status: TurnStatus;
+  /** Wall-clock ms epoch when the turn closed; undefined while still running. */
+  endedAt?: number;
+}
+
+function parseEventTs(e: Event): number {
+  const ts = (e as { processed_at?: string }).processed_at;
+  if (typeof ts === "string") {
+    const t = new Date(ts).getTime();
+    if (Number.isFinite(t)) return t;
+  }
+  return 0;
+}
+
+function bucketIntoTurns(events: Event[]): Turn[] {
+  const turns: Turn[] = [];
+  let current: Turn | null = null;
+
+  // user.message metadata.harness === "schedule" + kind === "wakeup" is
+  // the wire convention for cron-fired turns (see SessionDO.onScheduledWakeup).
+  // Distinguish them in the trigger badge so an operator scanning the
+  // timeline can tell at a glance "the agent woke itself" from "the user
+  // sent something".
+  const triggerKindOf = (e: Event): TurnTriggerKind | null => {
+    if (e.type === "user.message") {
+      const md = (e as { metadata?: { harness?: string; kind?: string } }).metadata;
+      if (md?.harness === "schedule" && md?.kind === "wakeup") return "wakeup";
+      return "user_message";
+    }
+    if (e.type === "user.tool_confirmation") return "tool_confirmation";
+    if (e.type === "user.custom_tool_result") return "custom_tool_result";
+    return null;
+  };
+
+  for (const e of events) {
+    const k = triggerKindOf(e);
+    if (k) {
+      current = {
+        id: `turn-${turns.length}`,
+        triggerKind: k,
+        trigger: e,
+        triggerTs: parseEventTs(e),
+        events: [e],
+        status: "running",
+      };
+      turns.push(current);
+      continue;
+    }
+    if (!current) {
+      // Pre-trigger init events (init_events injected by /init handler,
+      // platform reminders, etc.) — bucket into a synthetic init turn so
+      // they get a card rather than being silently dropped.
+      current = {
+        id: `turn-init`,
+        triggerKind: "init",
+        triggerTs: parseEventTs(e),
+        events: [e],
+        status: "running",
+      };
+      turns.push(current);
+      continue;
+    }
+    current.events.push(e);
+    if (e.type === "session.status_idle") {
+      current.status = "completed";
+      current.endedAt = parseEventTs(e);
+    } else if (e.type === "session.status_terminated") {
+      current.status = "terminated";
+      current.endedAt = parseEventTs(e);
+    } else if (e.type === "session.error") {
+      current.status = "errored";
+      current.endedAt = parseEventTs(e);
+    }
+  }
+
+  return turns;
+}
+
+const TRIGGER_LABEL: Record<TurnTriggerKind, string> = {
+  user_message: "user message",
+  wakeup: "scheduled wakeup",
+  tool_confirmation: "tool confirmation",
+  custom_tool_result: "custom tool result",
+  init: "session init",
+};
+
+const TRIGGER_DOT: Record<TurnTriggerKind, string> = {
+  user_message: "bg-brand",
+  wakeup: "bg-info",
+  tool_confirmation: "bg-amber-500",
+  custom_tool_result: "bg-amber-500",
+  init: "bg-fg-subtle",
+};
+
+const STATUS_TEXT: Record<TurnStatus, string> = {
+  completed: "text-fg-subtle",
+  running: "text-info",
+  errored: "text-danger",
+  terminated: "text-danger",
+};
+
+function TimelineView({ events }: { events: Event[] }) {
+  const turns = useMemo(() => bucketIntoTurns(events), [events]);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+
+  // Auto-scroll to the latest turn when new ones land. Skip if user has
+  // scrolled up (we can detect this with scrollHeight - scrollTop ≈ clientHeight)
+  // — they're inspecting an older turn and shouldn't get yanked.
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const el = containerRef.current;
+    const nearBottom = el.scrollHeight - el.scrollTop - el.clientHeight < 200;
+    if (nearBottom) {
+      el.scrollTo({ top: el.scrollHeight, behavior: "auto" });
+    }
+  }, [turns.length]);
+
+  if (turns.length === 0) {
+    return (
+      <div className="flex-1 flex items-center justify-center text-sm text-fg-subtle">
+        No timing data yet — send a message to populate the timeline.
+      </div>
+    );
+  }
+
+  return (
+    <div ref={containerRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-3">
+      {turns.map((turn, i) => {
+        const prev = i > 0 ? turns[i - 1] : null;
+        const idleMs =
+          prev && prev.endedAt && turn.triggerTs && turn.triggerTs > prev.endedAt
+            ? turn.triggerTs - prev.endedAt
+            : 0;
+        return (
+          <Fragment key={turn.id}>
+            {idleMs > 0 && <IdleDivider ms={idleMs} nextKind={turn.triggerKind} />}
+            <TurnCard turn={turn} />
+          </Fragment>
+        );
+      })}
+    </div>
+  );
+}
+
+function IdleDivider({ ms, nextKind }: { ms: number; nextKind: TurnTriggerKind }) {
+  return (
+    <div className="flex items-center gap-3 text-xs text-fg-subtle font-mono py-1">
+      <div className="flex-1 border-t border-dashed border-border" />
+      <span>
+        ↓ {formatDuration(ms)} idle
+        {nextKind === "wakeup" && " · scheduled wakeup"}
+      </span>
+      <div className="flex-1 border-t border-dashed border-border" />
+    </div>
+  );
+}
+
+function TurnCard({ turn }: { turn: Turn }) {
+  const [collapsed, setCollapsed] = useState(false);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
+  const { spans, totalMs } = useMemo(() => deriveSpans(turn.events), [turn.events]);
+
+  // Per-card scroll + zoom state (same shape as the old global TimelineView,
+  // now scoped to one turn — each card auto-densifies independently so a
+  // 30-min turn doesn't impose its scale on a 2-second turn next to it).
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pxPerMs, setPxPerMs] = useState<number | null>(null);
   const [mode, setMode] = useState<"auto" | "manual">("auto");
 
-  // Compute auto scale: aim for the typical activity gap to be ~25px wide.
-  // Median gap (not mean) so a single 40-min idle stretch doesn't drag the
-  // typical scale down. Falls back to a viewport fit if there's only one
-  // event, then enforces a min/max ceiling so the chart neither overflows
-  // by 100× nor leaves giant blank space.
   useEffect(() => {
-    if (mode === "manual" || !scrollRef.current || totalMs <= 0) return;
+    if (collapsed || mode === "manual" || !scrollRef.current || totalMs <= 0) return;
     const viewportChartPx = scrollRef.current.clientWidth - 224 - 80 - 64;
     if (viewportChartPx <= 0) return;
     const times: number[] = [];
@@ -1041,33 +1219,14 @@ function TimelineView({ events }: { events: Event[] }) {
     } else {
       const sorted = [...gaps].sort((a, b) => a - b);
       const median = sorted[Math.floor(sorted.length / 2)] || 1;
-      candidate = 25 / median; // 25px per typical gap
+      candidate = 25 / median;
     }
-    // If the resulting chart fits inside viewport with room to spare, scale
-    // up to fit (avoids "content squeezed left, big blank right"). Cap so
-    // auto never picks more than ~5px/ms.
     const auto = Math.min(5, Math.max(candidate, viewportChartPx / totalMs));
-    // Cap from below at the viewport-fit value too — never narrower than fit.
     setPxPerMs(Math.max(auto, viewportChartPx / totalMs));
-  }, [mode, spans, totalMs]);
+  }, [collapsed, mode, spans, totalMs]);
 
   const effectivePxPerMs = pxPerMs ?? 0.05;
   const chartPx = Math.max(200, totalMs * effectivePxPerMs);
-
-  // Auto-scroll to the most recent activity on first load (and again after
-  // a fresh "fit"). Skip if user is mid-manual-zoom — they're focused
-  // somewhere specific and shouldn't get yanked. We position the last span
-  // such that it sits ~75% across the viewport (so the user sees the
-  // recent activity plus some leading context).
-  useEffect(() => {
-    if (mode === "manual") return;
-    if (!scrollRef.current || spans.length === 0) return;
-    const last = spans[spans.length - 1];
-    const lastEndPx = (last.startMs + last.durationMs) * effectivePxPerMs;
-    const viewportChartPx = scrollRef.current.clientWidth - 224 - 80;
-    const target = Math.max(0, lastEndPx - viewportChartPx * 0.75);
-    scrollRef.current.scrollTo({ left: target, behavior: "auto" });
-  }, [mode, spans, effectivePxPerMs]);
 
   const zoomBy = (factor: number) => {
     setMode("manual");
@@ -1084,16 +1243,6 @@ function TimelineView({ events }: { events: Event[] }) {
     setPxPerMs(null);
   };
 
-  if (spans.length === 0) {
-    return (
-      <div className="flex-1 flex items-center justify-center text-sm text-fg-subtle">
-        No timing data yet — send a message to populate the timeline.
-      </div>
-    );
-  }
-
-  // Tick marks at sensible intervals based on the current pixel density.
-  // Aim for a tick every ~120px so labels never collide.
   const targetTickPx = 120;
   const tickStep = pickTickStep(targetTickPx / effectivePxPerMs);
   const ticks: number[] = [];
@@ -1106,144 +1255,209 @@ function TimelineView({ events }: { events: Event[] }) {
     return `${pps.toFixed(2)} px/s`;
   };
 
+  // Aggregate per-turn cost / token totals from span events that carry
+  // model_usage. Cheap walk — span events are already in memory.
+  const tokens = useMemo(() => {
+    let input = 0;
+    let output = 0;
+    let cacheRead = 0;
+    let calls = 0;
+    for (const e of turn.events) {
+      if (e.type !== "span.model_request_end") continue;
+      const usage =
+        (e as { model_usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number } }).model_usage ??
+        (e.data as { model_usage?: { input_tokens?: number; output_tokens?: number; cache_read_input_tokens?: number } } | undefined)?.model_usage;
+      if (usage) {
+        input += usage.input_tokens ?? 0;
+        output += usage.output_tokens ?? 0;
+        cacheRead += usage.cache_read_input_tokens ?? 0;
+        calls += 1;
+      }
+    }
+    return { input, output, cacheRead, calls };
+  }, [turn.events]);
+
+  const turnDurationMs =
+    turn.endedAt && turn.triggerTs ? turn.endedAt - turn.triggerTs : totalMs;
+
+  const triggerTitleText = (() => {
+    if (!turn.trigger) return null;
+    const c = (turn.trigger as { content?: Array<{ type: string; text?: string }> }).content;
+    if (!Array.isArray(c)) return null;
+    const t = c.find((b) => b.type === "text")?.text;
+    return t ? t.slice(0, 80) : null;
+  })();
+
+  const borderClass =
+    turn.status === "errored" || turn.status === "terminated"
+      ? "border-danger/50"
+      : "border-border";
+
   return (
-    <div className="flex-1 overflow-y-auto">
-      <div className="px-8 py-3 border-b border-border text-xs text-fg-subtle font-mono flex items-center gap-4">
-        <span>{spans.length} spans</span>
-        <span>·</span>
-        <span>total {formatDuration(totalMs)}</span>
-        <div className="ml-auto flex items-center gap-1">
-          <button
-            onClick={() => zoomBy(0.5)}
-            className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
-            title="Zoom out"
-          >
-            −
-          </button>
-          <button
-            onClick={resetAuto}
-            className={`px-2 py-0.5 rounded border hover:bg-bg-surface ${mode === "auto" ? "border-info text-info" : "border-border text-fg-muted"}`}
-            title="Auto-pick scale by event density and re-center on latest activity"
-          >
-            auto
-          </button>
-          <button
-            onClick={fitToViewport}
-            className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
-            title="Fit total duration to viewport (no horizontal scroll)"
-          >
-            fit
-          </button>
-          <button
-            onClick={() => zoomBy(2)}
-            className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
-            title="Zoom in"
-          >
-            +
-          </button>
-          <span className="ml-2 text-fg-subtle">{fmtRate(effectivePxPerMs)}</span>
-        </div>
+    <div className={`border ${borderClass} rounded-lg bg-bg-surface/30`}>
+      {/* Header */}
+      <div className="px-4 py-2.5 flex items-center gap-3 text-xs">
+        <button
+          onClick={() => setCollapsed((c) => !c)}
+          className="text-fg-subtle hover:text-fg-muted font-mono w-4 text-center"
+          title={collapsed ? "Expand" : "Collapse"}
+        >
+          {collapsed ? "▸" : "▾"}
+        </button>
+        <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${TRIGGER_DOT[turn.triggerKind]}`} />
+        <span className="font-mono text-fg-muted">{TRIGGER_LABEL[turn.triggerKind]}</span>
+        {triggerTitleText && (
+          <span className="text-fg-subtle truncate max-w-md italic">"{triggerTitleText}"</span>
+        )}
+        <span className="ml-auto flex items-center gap-3 font-mono text-fg-subtle">
+          <span>{spans.length} spans</span>
+          <span>{formatDuration(turnDurationMs)}</span>
+          {tokens.calls > 0 && (
+            <span title={`${tokens.calls} model call${tokens.calls === 1 ? "" : "s"}`}>
+              {tokens.input}↓ {tokens.output}↑
+              {tokens.cacheRead > 0 && ` ⚡${tokens.cacheRead}`}
+            </span>
+          )}
+          <span className={STATUS_TEXT[turn.status]}>{turn.status}</span>
+        </span>
       </div>
 
-      {/* Horizontal scroller — label + duration columns are sticky so they
-          stay pinned to the viewport edges even when the chart overflows. */}
-      <div ref={scrollRef} className="overflow-x-auto pb-8">
-        {/* Time axis */}
-        <div className="pt-3 sticky top-0 bg-bg z-10" style={{ width: 224 + chartPx + 80 }}>
-          <div className="flex items-center">
-            <div className="w-56 shrink-0 sticky left-0 bg-bg z-30" />
-            <div className="relative h-5 border-b border-border" style={{ width: chartPx }}>
-              {ticks.map((t) => (
-                <div
-                  key={t}
-                  className="absolute top-0 h-full flex flex-col items-start text-[10px] text-fg-subtle font-mono"
-                  style={{ left: `${t * effectivePxPerMs}px` }}
-                >
-                  <span className="-translate-x-1/2 px-1">{formatDuration(t)}</span>
-                  <div className="w-px flex-1 bg-border" />
-                </div>
-              ))}
-            </div>
-            <div className="w-20 shrink-0 sticky right-0 bg-bg z-30" />
+      {!collapsed && spans.length > 0 && (
+        <>
+          {/* Zoom controls — per-card, since each card has its own pxPerMs */}
+          <div className="px-4 pb-2 flex items-center gap-1 text-xs">
+            <button
+              onClick={() => zoomBy(0.5)}
+              className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
+              title="Zoom out"
+            >
+              −
+            </button>
+            <button
+              onClick={resetAuto}
+              className={`px-2 py-0.5 rounded border hover:bg-bg-surface ${mode === "auto" ? "border-info text-info" : "border-border text-fg-muted"}`}
+              title="Auto-pick scale by event density"
+            >
+              auto
+            </button>
+            <button
+              onClick={fitToViewport}
+              className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
+              title="Fit turn duration to viewport"
+            >
+              fit
+            </button>
+            <button
+              onClick={() => zoomBy(2)}
+              className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
+              title="Zoom in"
+            >
+              +
+            </button>
+            <span className="ml-2 font-mono text-fg-subtle">{fmtRate(effectivePxPerMs)}</span>
           </div>
-        </div>
 
-        {/* Rows */}
-        <div className="px-0">
-          {spans.map((s) => {
-            const left = s.startMs * effectivePxPerMs;
-            const width = s.durationMs > 0 ? Math.max(2, s.durationMs * effectivePxPerMs) : 0;
-            const isSelected = selectedKey === s.key;
-            return (
-              <div key={s.key} style={{ width: 224 + chartPx + 80 }}>
-                <div
-                  className={`flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group cursor-pointer ${isSelected ? "bg-bg-surface/60" : ""}`}
-                  title={
-                    s.detail
-                      ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
-                      : `${s.label} — ${formatDuration(s.durationMs)}`
-                  }
-                  onClick={() => setSelectedKey(isSelected ? null : s.key)}
-                >
-                  <div className="w-56 shrink-0 sticky left-0 bg-bg group-hover:bg-bg-surface/60 z-20 flex items-center gap-2 text-xs px-8">
-                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
-                    <div className="min-w-0 flex-1">
-                      <div className="truncate text-fg-muted font-mono">{s.label}</div>
-                      {s.detail && (
-                        <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+          {/* Chart — same waterfall layout as before, scoped to this turn */}
+          <div ref={scrollRef} className="overflow-x-auto pb-3 border-t border-border/40">
+            {/* Time axis */}
+            <div className="pt-2 sticky top-0 bg-bg-surface/30 z-10" style={{ width: 224 + chartPx + 80 }}>
+              <div className="flex items-center">
+                <div className="w-56 shrink-0 sticky left-0 bg-bg-surface/30 z-30" />
+                <div className="relative h-5 border-b border-border" style={{ width: chartPx }}>
+                  {ticks.map((t) => (
+                    <div
+                      key={t}
+                      className="absolute top-0 h-full flex flex-col items-start text-[10px] text-fg-subtle font-mono"
+                      style={{ left: `${t * effectivePxPerMs}px` }}
+                    >
+                      <span className="-translate-x-1/2 px-1">{formatDuration(t)}</span>
+                      <div className="w-px flex-1 bg-border" />
+                    </div>
+                  ))}
+                </div>
+                <div className="w-20 shrink-0 sticky right-0 bg-bg-surface/30 z-30" />
+              </div>
+            </div>
+
+            {/* Rows */}
+            {spans.map((s) => {
+              const left = s.startMs * effectivePxPerMs;
+              const width = s.durationMs > 0 ? Math.max(2, s.durationMs * effectivePxPerMs) : 0;
+              const isSelected = selectedKey === s.key;
+              return (
+                <div key={s.key} style={{ width: 224 + chartPx + 80 }}>
+                  <div
+                    className={`flex items-center py-1 border-b border-border/30 hover:bg-bg/40 group cursor-pointer ${isSelected ? "bg-bg/40" : ""}`}
+                    title={
+                      s.detail
+                        ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
+                        : `${s.label} — ${formatDuration(s.durationMs)}`
+                    }
+                    onClick={() => setSelectedKey(isSelected ? null : s.key)}
+                  >
+                    <div className="w-56 shrink-0 sticky left-0 bg-bg-surface/30 group-hover:bg-bg/40 z-20 flex items-center gap-2 text-xs px-4">
+                      <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
+                      <div className="min-w-0 flex-1">
+                        <div className="truncate text-fg-muted font-mono">{s.label}</div>
+                        {s.detail && (
+                          <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+                        )}
+                      </div>
+                    </div>
+                    <div className="relative h-5 shrink-0" style={{ width: chartPx }}>
+                      {width > 0 ? (
+                        <>
+                          <div
+                            className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
+                            style={{ left: `${left}px`, width: `${width}px` }}
+                          />
+                          {typeof s.ttftMs === "number" && s.durationMs > 0 && (
+                            <div
+                              className="absolute h-3 top-1 w-px bg-bg-surface"
+                              style={{ left: `${left + s.ttftMs * effectivePxPerMs}px` }}
+                              title={`TTFT ${formatDuration(s.ttftMs)}`}
+                            />
+                          )}
+                        </>
+                      ) : (
+                        <div
+                          className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
+                          style={{ left: `${left}px` }}
+                        />
                       )}
                     </div>
+                    <div className="w-20 shrink-0 sticky right-0 bg-bg-surface/30 group-hover:bg-bg/40 z-20 text-right text-xs font-mono text-fg-subtle pr-3">
+                      {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
+                    </div>
                   </div>
-                  <div className="relative h-5 shrink-0" style={{ width: chartPx }}>
-                    {width > 0 ? (
-                      <>
-                        <div
-                          className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
-                          style={{ left: `${left}px`, width: `${width}px` }}
-                        />
-                        {typeof s.ttftMs === "number" && s.durationMs > 0 && (
-                          <div
-                            className="absolute h-3 top-1 w-px bg-bg"
-                            style={{ left: `${left + s.ttftMs * effectivePxPerMs}px` }}
-                            title={`TTFT ${formatDuration(s.ttftMs)}`}
-                          />
-                        )}
-                      </>
-                    ) : (
-                      <div
-                        className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
-                        style={{ left: `${left}px` }}
-                      />
-                    )}
-                  </div>
-                  <div className="w-20 shrink-0 sticky right-0 bg-bg group-hover:bg-bg-surface/60 z-20 text-right text-xs font-mono text-fg-subtle pr-1">
-                    {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
-                  </div>
+                  {isSelected && s.events.length > 0 && (
+                    <div
+                      className="border-b border-border/30 bg-bg/60 px-4 py-3 sticky left-0"
+                      style={{ width: scrollRef.current?.clientWidth ?? "100%" }}
+                    >
+                      <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono mb-2">
+                        {s.events.length === 1
+                          ? "source event"
+                          : `source events (${s.events.length})`}
+                      </div>
+                      <div className="space-y-2">
+                        {s.events.map((ev, idx) => (
+                          <pre
+                            key={idx}
+                            className="text-[11px] font-mono text-fg-muted bg-bg/60 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all"
+                          >
+                            {JSON.stringify(ev, null, 2)}
+                          </pre>
+                        ))}
+                      </div>
+                    </div>
+                  )}
                 </div>
-                {isSelected && s.events.length > 0 && (
-                  <div className="border-b border-border/40 bg-bg-surface/30 px-4 py-3 sticky left-0" style={{ width: scrollRef.current?.clientWidth ?? "100%" }}>
-                    <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono mb-2">
-                      {s.events.length === 1
-                        ? "source event"
-                        : `source events (${s.events.length})`}
-                    </div>
-                    <div className="space-y-2">
-                      {s.events.map((ev, idx) => (
-                        <pre
-                          key={idx}
-                          className="text-[11px] font-mono text-fg-muted bg-bg/60 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all"
-                        >
-                          {JSON.stringify(ev, null, 2)}
-                        </pre>
-                      ))}
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </div>
+              );
+            })}
+          </div>
+        </>
+      )}
     </div>
   );
 }
