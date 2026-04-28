@@ -513,17 +513,50 @@ function EventBubble({ event }: { event: Event }) {
   const [toolOpen, setToolOpen] = useState(false);
 
   switch (event.type) {
-    case "user.message":
+    case "user.message": {
+      // Wakeups synthesized by the schedule tool's onScheduledWakeup callback
+      // also wire-type as user.message (per EventBase metadata convention),
+      // but the user did NOT send them — visually distinguish so operators
+      // don't get confused. metadata.harness === "schedule" + kind === "wakeup"
+      // is the contract: see apps/agent/src/runtime/session-do.ts:onScheduledWakeup.
+      const metadata = (event as { metadata?: { harness?: string; kind?: string; scheduled_at?: string } }).metadata;
+      const isWakeup = metadata?.harness === "schedule" && metadata?.kind === "wakeup";
+      const text = Array.isArray(event.content) ? event.content[0]?.text : "";
+
+      if (isWakeup) {
+        // System-origin: left-aligned (not "You"), info-toned bubble + clock
+        // glyph + "Scheduled wakeup" label. Title bar tooltips the schedule
+        // time from metadata for traceability.
+        const scheduledAt = metadata?.scheduled_at;
+        return (
+          <div className="max-w-2xl">
+            <div className="flex items-center gap-1.5 text-xs text-fg-subtle mb-1">
+              <span
+                className="inline-flex items-center gap-1 rounded-full bg-info-subtle text-info px-2 py-0.5 font-medium text-[11px]"
+                title={scheduledAt ? `Scheduled at ${scheduledAt}` : undefined}
+              >
+                <span aria-hidden>🕒</span>
+                Scheduled wakeup
+              </span>
+            </div>
+            <div className="bg-bg-surface border border-info/30 rounded-2xl rounded-bl-sm px-4 py-3 text-sm leading-relaxed">
+              {text}
+            </div>
+          </div>
+        );
+      }
+
       return (
         <div className="flex justify-end">
           <div className="max-w-lg">
             <div className="text-xs text-fg-subtle text-right mb-1">You</div>
             <div className="bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
-              {Array.isArray(event.content) ? event.content[0]?.text : ""}
+              {text}
             </div>
           </div>
         </div>
       );
+    }
 
     case "agent.message":
       return (
