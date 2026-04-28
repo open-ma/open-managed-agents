@@ -863,9 +863,16 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
       }
 
-      // Pre-warm sandbox in background (container start + package install)
-      // Errors are swallowed — warmup is best-effort
-      this.ctx.waitUntil(this.warmUpSandbox());
+      // NO ctx.waitUntil(this.warmUpSandbox()) — that pattern dies on
+      // DO reset (which happens regularly under our concurrent traffic
+      // pattern). lazyPrepareBaseSnapshot has expensive sandbox.exec +
+      // createBackup calls that get canceled mid-flight when the DO
+      // resets. Instead let warmUp fire lazily on the first /event
+      // handler (line 1667 below) where it runs as part of the user's
+      // request, holding the DO alive for its full duration. First user
+      // message pays the cold-start cost (~1-3 min for an env that
+      // needs install + snapshot); subsequent messages restore in
+      // seconds from the persisted handle.
 
       return new Response("ok");
     }
