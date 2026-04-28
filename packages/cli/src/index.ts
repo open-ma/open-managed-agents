@@ -1147,6 +1147,142 @@ const commands: Cmd[] = [
       console.log(`Unpublished: ${args[0]}`);
     },
   },
+  {
+    group: "Linear", match: ["linear", "install-pat"], needsArg: false,
+    usage: "oma linear install-pat --pat <token> --agent <id> --env <id> [--persona <name>]",
+    desc: "Install Linear via Personal API Key (Symphony-equivalent — no OAuth dance)",
+    http: "POST   /v1/integrations/linear/personal-token {agentId, environmentId, personaName, patToken}",
+    async run(config, args) {
+      const pat = flag(args, "--pat") ?? process.env.LINEAR_API_KEY ?? "";
+      const agentId = flag(args, "--agent") ?? "";
+      const envId = flag(args, "--env") ?? "";
+      const persona = flag(args, "--persona") || "Linear bot (PAT)";
+      if (!pat || !agentId || !envId) {
+        console.error("Usage: oma linear install-pat --pat <token> --agent <id> --env <id> [--persona <name>]");
+        console.error("  --pat may also be supplied via LINEAR_API_KEY env var.");
+        process.exit(1);
+      }
+      const result = await apiFetch<{ publicationId: string }>(
+        config,
+        "/v1/integrations/linear/personal-token",
+        {
+          method: "POST",
+          body: JSON.stringify({
+            agentId,
+            environmentId: envId,
+            personaName: persona,
+            personaAvatarUrl: null,
+            patToken: pat,
+          }),
+        },
+      );
+      if (config.json) { console.log(JSON.stringify(result, null, 2)); return; }
+      console.log(`Installed via PAT. Publication: ${result.publicationId}`);
+      console.log(`Next: configure autopilot rules with`);
+      console.log(`  oma linear rules create ${result.publicationId} --label bot-ready`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "rules", "list"], needsArg: true,
+    usage: "oma linear rules list <publication-id>", desc: "List dispatch rules for a publication",
+    http: "GET    /v1/integrations/linear/publications/:id/dispatch-rules",
+    async run(config, args) {
+      const { rules } = await apiFetch<{ rules: Array<any> }>(
+        config,
+        `/v1/integrations/linear/publications/${args[0]}/dispatch-rules`,
+      );
+      if (config.json) { console.log(JSON.stringify(rules, null, 2)); return; }
+      if (!rules.length) { console.log("No rules. Create with: oma linear rules create <pub-id> --label <name>"); return; }
+      table([
+        ["RULE ID", "NAME", "EN", "LABEL", "STATES", "MAX", "POLL", "LAST"],
+        ...rules.map((r: any) => [
+          r.id, r.name, r.enabled ? "y" : "n",
+          r.filter_label ?? "-",
+          (r.filter_states ?? []).join(",") || "-",
+          String(r.max_concurrent),
+          `${r.poll_interval_seconds}s`,
+          r.last_polled_at ? new Date(r.last_polled_at).toLocaleTimeString() : "never",
+        ]),
+      ]);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "rules", "create"], needsArg: true,
+    usage: "oma linear rules create <publication-id> [--name <s>] [--label <s>] [--states <Todo,...>] [--project <id>] [--max <n>] [--poll <s>]",
+    desc: "Create a dispatch rule. At least one of --label, --states, --project required.",
+    http: "POST   /v1/integrations/linear/publications/:id/dispatch-rules",
+    async run(config, args) {
+      const pubId = args[0];
+      const name = flag(args, "--name") || "Auto-pickup";
+      const label = flag(args, "--label") || null;
+      const statesRaw = flag(args, "--states") || "";
+      const states = statesRaw ? statesRaw.split(",").map(s => s.trim()).filter(Boolean) : null;
+      const project = flag(args, "--project") || null;
+      const maxC = parseInt(flag(args, "--max") || "5", 10);
+      const poll = parseInt(flag(args, "--poll") || "600", 10);
+      if (!label && !states && !project) {
+        console.error("At least one of --label, --states, --project is required (matching everything is a footgun).");
+        process.exit(1);
+      }
+      const r = await apiFetch<any>(
+        config,
+        `/v1/integrations/linear/publications/${pubId}/dispatch-rules`,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            name, filter_label: label, filter_states: states,
+            filter_project_id: project, max_concurrent: maxC, poll_interval_seconds: poll,
+          }),
+        },
+      );
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`Created rule ${r.id} (${r.name}). Cron picks up issues matching this rule next tick (~1 min).`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "rules", "patch"], needsArg: true,
+    usage: "oma linear rules patch <publication-id> <rule-id> [--enabled true|false] [--label <s>] [--states <Todo,...>] [--max <n>] [--poll <s>]",
+    desc: "Update a dispatch rule. Pass only fields to change.",
+    http: "PATCH  /v1/integrations/linear/publications/:id/dispatch-rules/:ruleId",
+    async run(config, args) {
+      const pubId = args[0];
+      const ruleId = args[1];
+      if (!pubId || !ruleId) { console.error("Usage: oma linear rules patch <publication-id> <rule-id> [...flags]"); process.exit(1); }
+      const patch: any = {};
+      const name = flag(args, "--name"); if (name !== undefined) patch.name = name;
+      const enabled = flag(args, "--enabled"); if (enabled !== undefined) patch.enabled = enabled === "true";
+      const label = flag(args, "--label"); if (label !== undefined) patch.filter_label = label || null;
+      const statesRaw = flag(args, "--states");
+      if (statesRaw !== undefined) patch.filter_states = statesRaw ? statesRaw.split(",").map(s => s.trim()).filter(Boolean) : null;
+      const project = flag(args, "--project"); if (project !== undefined) patch.filter_project_id = project || null;
+      const maxC = flag(args, "--max"); if (maxC !== undefined) patch.max_concurrent = parseInt(maxC, 10);
+      const poll = flag(args, "--poll"); if (poll !== undefined) patch.poll_interval_seconds = parseInt(poll, 10);
+      const r = await apiFetch<any>(
+        config,
+        `/v1/integrations/linear/publications/${pubId}/dispatch-rules/${ruleId}`,
+        { method: "PATCH", body: JSON.stringify(patch) },
+      );
+      if (config.json) { console.log(JSON.stringify(r, null, 2)); return; }
+      console.log(`Updated rule ${r.id}.`);
+    },
+  },
+  {
+    group: "Linear", match: ["linear", "rules", "delete"], needsArg: true,
+    usage: "oma linear rules delete <publication-id> <rule-id>",
+    desc: "Delete a dispatch rule",
+    http: "DELETE /v1/integrations/linear/publications/:id/dispatch-rules/:ruleId",
+    async run(config, args) {
+      const pubId = args[0];
+      const ruleId = args[1];
+      if (!pubId || !ruleId) { console.error("Usage: oma linear rules delete <publication-id> <rule-id>"); process.exit(1); }
+      await apiFetch(
+        config,
+        `/v1/integrations/linear/publications/${pubId}/dispatch-rules/${ruleId}`,
+        { method: "DELETE" },
+      );
+      console.log(`Deleted rule ${ruleId}.`);
+    },
+  },
 
   // GitHub integration — mirrors `oma linear *` shape exactly.
   {
