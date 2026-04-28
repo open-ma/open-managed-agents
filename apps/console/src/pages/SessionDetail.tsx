@@ -662,6 +662,10 @@ interface Span {
   startMs: number;
   /** 0 for instants */
   durationMs: number;
+  /** Source events that contributed to this span (1 for instants,
+   *  2 for paired spans, possibly more for tool calls with streaming
+   *  input chunks). Click-to-expand renders the raw JSON of these. */
+  events: Event[];
 }
 
 const FAMILY_DOT: Record<SpanFamily, string> = {
@@ -742,38 +746,40 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
   const spans: Span[] = [];
 
   // Index look-ahead pairings. O(1) instead of nested scans.
-  const toolResults = new Map<string, number>();
-  const mcpResults = new Map<string, number>();
-  const customResults = new Map<string, number>();
+  // Each map stores both timestamp (for span math) and the source Event
+  // (for click-to-expand JSON inspection).
+  const toolResults = new Map<string, { t: number; e: Event }>();
+  const mcpResults = new Map<string, { t: number; e: Event }>();
+  const customResults = new Map<string, { t: number; e: Event }>();
   // model_request_start_id → end's timestamp + usage. Anthropic's wire
   // format pairs the per-call span pair this way (rather than positional
   // FIFO), so multiple parallel or nested model calls stay correctly
   // associated. FIFO fallback below for events that predate the field.
-  const modelEndsById = new Map<string, { t: number; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finishReason?: string }>();
-  const modelEndsFifo: number[] = [];
-  const compactEnds: number[] = [];
-  const outcomeEnds: number[] = [];
-  // parent_event_id → child timestamp. Used to pair span.wakeup_scheduled
+  const modelEndsById = new Map<string, { t: number; e: Event; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finishReason?: string }>();
+  const modelEndsFifo: { t: number; e: Event }[] = [];
+  const compactEnds: { t: number; e: Event }[] = [];
+  const outcomeEnds: { t: number; e: Event }[] = [];
+  // parent_event_id → child {t, event}. Used to pair span.wakeup_scheduled
   // (parent) with its eventual user.message (child) — same EventBase field
   // tool_result→tool_use uses, so this generalizes to any future
   // schedule→fire / outcome→eval / etc. causal pair without needing custom
   // id fields per kind.
-  const childByParent = new Map<string, number>();
+  const childByParent = new Map<string, { t: number; e: Event }>();
   for (const { e, t } of timed) {
-    if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, t);
-    else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, t);
-    else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), t);
+    if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, { t, e });
+    else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, { t, e });
+    else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), { t, e });
     else if (e.type === "span.model_request_end") {
-      modelEndsFifo.push(t);
+      modelEndsFifo.push({ t, e });
       const data = (e.data as { model_request_start_id?: string; model_usage?: any; finish_reason?: string } | undefined);
       const sid = (e as { model_request_start_id?: string }).model_request_start_id ?? data?.model_request_start_id;
-      if (sid) modelEndsById.set(sid, { t, usage: data?.model_usage, finishReason: data?.finish_reason });
+      if (sid) modelEndsById.set(sid, { t, e, usage: data?.model_usage, finishReason: data?.finish_reason });
     }
-    else if (e.type === "span.compaction_summarize_end") compactEnds.push(t);
-    else if (e.type === "span.outcome_evaluation_end") outcomeEnds.push(t);
+    else if (e.type === "span.compaction_summarize_end") compactEnds.push({ t, e });
+    else if (e.type === "span.outcome_evaluation_end") outcomeEnds.push({ t, e });
     const pid = (e as { parent_event_id?: string }).parent_event_id
       ?? (e.data as { parent_event_id?: string } | undefined)?.parent_event_id;
-    if (pid) childByParent.set(pid, t);
+    if (pid) childByParent.set(pid, { t, e });
   }
 
   // FIFO fallback indices for events that lack id-based pairing.
@@ -796,33 +802,49 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
     "agent.tool_use_input_stream_end",
   ]);
 
+  // Index look-back: event id → original Event so we can attach matched
+  // partner events (the `_end` of a paired span, the tool_result of a
+  // tool_use) to the resulting span row. Click-to-expand renders these.
+  const eventById = new Map<string, Event>();
+  for (const { e } of timed) {
+    const eid = (e as { id?: string }).id ?? (e.data as { id?: string } | undefined)?.id;
+    if (eid) eventById.set(eid, e);
+  }
+
   for (let i = 0; i < timed.length; i++) {
     const { e, t } = timed[i];
     const startMs = t - t0;
 
     if (STREAMING_NOISE.has(e.type)) continue;
 
+    // Default source-events list. Each push site below may extend it with
+    // the matched partner (end / result) when one exists.
+    const sourceEvents: Event[] = [e];
+    const pushSpan = (span: Omit<Span, "events">) => spans.push({ ...span, events: sourceEvents });
+
     if (e.type === "agent.tool_use" || e.type === "agent.custom_tool_use") {
       const result = e.type === "agent.tool_use"
         ? toolResults.get(String(e.id))
         : customResults.get(String(e.id));
-      const endMs = result != null ? result - t0 : startMs;
-      spans.push({
+      const endMs = result ? result.t - t0 : startMs;
+      if (result) sourceEvents.push(result.e);
+      pushSpan({
         key: `tool-${e.id ?? i}`,
         family: e.type === "agent.tool_use" ? "tool" : "custom_tool",
         label: String(e.name ?? "tool"),
-        detail: result != null ? "completed" : "no result",
+        detail: result ? "completed" : "no result",
         startMs,
         durationMs: Math.max(0, endMs - startMs),
       });
     } else if (e.type === "agent.mcp_tool_use") {
       const result = mcpResults.get(String(e.id));
-      const endMs = result != null ? result - t0 : startMs;
-      spans.push({
+      const endMs = result ? result.t - t0 : startMs;
+      if (result) sourceEvents.push(result.e);
+      pushSpan({
         key: `mcp-${e.id ?? i}`,
         family: "mcp",
         label: `${String(e.mcp_server_name ?? "mcp")}:${String(e.name ?? "?")}`,
-        detail: result != null ? "completed" : "no result",
+        detail: result ? "completed" : "no result",
         startMs,
         durationMs: Math.max(0, endMs - startMs),
       });
@@ -837,15 +859,16 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       // One pair per ai-sdk step (= one model API call). Pair via the
       // start event id; old data without ids falls back to FIFO order.
       const sid = String((e as { id?: string }).id ?? (e.data as { id?: string } | undefined)?.id ?? "");
-      const matched = sid ? modelEndsById.get(sid) : undefined;
-      const end = matched?.t ?? modelEndsFifo[modelEndFifoIdx++] ?? t;
+      const matched = sid ? modelEndsById.get(sid) : (modelEndsFifo[modelEndFifoIdx++] ?? undefined);
+      const end = matched?.t ?? t;
       const usage = matched?.usage;
+      if (matched?.e) sourceEvents.push(matched.e);
       // Bar label gets a token count when we have it — useful at-a-glance
       // ("did this turn read 100k tokens or 1k?") without opening details.
       const tokSummary = usage
         ? `${usage.input_tokens}↓ ${usage.output_tokens}↑${usage.cache_read_input_tokens ? ` ⚡${usage.cache_read_input_tokens}` : ""}`
         : undefined;
-      spans.push({
+      pushSpan({
         key: `model-${sid || i}`,
         family: "model",
         label: "model call",
@@ -854,8 +877,10 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
         durationMs: Math.max(0, end - t0 - startMs),
       });
     } else if (e.type === "span.compaction_summarize_start") {
-      const end = compactEnds[compactEndIdx++] ?? t;
-      spans.push({
+      const matched = compactEnds[compactEndIdx++];
+      const end = matched?.t ?? t;
+      if (matched?.e) sourceEvents.push(matched.e);
+      pushSpan({
         key: `compact-${i}`,
         family: "compaction",
         label: "compaction",
@@ -863,8 +888,10 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
         durationMs: Math.max(0, end - t0 - startMs),
       });
     } else if (e.type === "span.outcome_evaluation_start") {
-      const end = outcomeEnds[outcomeEndIdx++] ?? t;
-      spans.push({
+      const matched = outcomeEnds[outcomeEndIdx++];
+      const end = matched?.t ?? t;
+      if (matched?.e) sourceEvents.push(matched.e);
+      pushSpan({
         key: `outcome-${i}`,
         family: "outcome",
         label: "outcome eval",
@@ -887,19 +914,20 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       // waterfall.
       const sid = String((e as { id?: string }).id ?? (e.data as { id?: string } | undefined)?.id ?? "");
       const fired = sid ? childByParent.get(sid) : undefined;
-      const endMs = fired != null ? fired - t0 : startMs;
-      spans.push({
+      const endMs = fired ? fired.t - t0 : startMs;
+      if (fired?.e) sourceEvents.push(fired.e);
+      pushSpan({
         key: `sched-${sid || i}`,
         family: "schedule",
         label: "schedule waiting",
-        detail: fired != null ? "fired" : "pending",
+        detail: fired ? "fired" : "pending",
         startMs,
         durationMs: Math.max(0, endMs - startMs),
       });
     } else if (e.type === "user.message") {
       const md = (e as { metadata?: { harness?: string; kind?: string } }).metadata;
       const isWakeup = md?.harness === "schedule" && md?.kind === "wakeup";
-      spans.push({
+      pushSpan({
         key: `u-${i}`,
         family: isWakeup ? "wakeup" : "user",
         label: isWakeup ? "user.message (wakeup)" : "user.message",
@@ -907,11 +935,11 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
         durationMs: 0,
       });
     } else if (e.type === "agent.message") {
-      spans.push({ key: `a-${i}`, family: "agent", label: "agent.message", startMs, durationMs: 0 });
+      pushSpan({ key: `a-${i}`, family: "agent", label: "agent.message", startMs, durationMs: 0 });
     } else if (e.type === "agent.thinking") {
-      spans.push({ key: `think-${i}`, family: "thinking", label: "agent.thinking", startMs, durationMs: 0 });
+      pushSpan({ key: `think-${i}`, family: "thinking", label: "agent.thinking", startMs, durationMs: 0 });
     } else if (e.type === "aux.model_call") {
-      spans.push({ key: `aux-${i}`, family: "aux", label: "aux.model_call", startMs, durationMs: 0 });
+      pushSpan({ key: `aux-${i}`, family: "aux", label: "aux.model_call", startMs, durationMs: 0 });
     } else if (
       e.type === "agent.thread_message_sent" ||
       e.type === "agent.thread_message_received" ||
@@ -919,11 +947,11 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       e.type === "session.thread_created" ||
       e.type === "session.thread_idle"
     ) {
-      spans.push({ key: `thread-${i}`, family: "thread", label: e.type.replace(/^.*\./, ""), startMs, durationMs: 0 });
+      pushSpan({ key: `thread-${i}`, family: "thread", label: e.type.replace(/^.*\./, ""), startMs, durationMs: 0 });
     } else if (e.type === "agent.thread_context_compacted") {
-      spans.push({ key: `compact-marker-${i}`, family: "compaction", label: "thread compacted", startMs, durationMs: 0 });
+      pushSpan({ key: `compact-marker-${i}`, family: "compaction", label: "thread compacted", startMs, durationMs: 0 });
     } else if (e.type === "session.error") {
-      spans.push({
+      pushSpan({
         key: `err-${i}`,
         family: "error",
         label: "session.error",
@@ -932,7 +960,7 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
         durationMs: 0,
       });
     } else if (e.type === "session.warning") {
-      spans.push({
+      pushSpan({
         key: `warn-${i}`,
         family: "warn",
         label: `warning:${String(e.source ?? "")}`,
@@ -941,12 +969,12 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
         durationMs: 0,
       });
     } else if (e.type.startsWith("session.")) {
-      spans.push({ key: `s-${i}`, family: "system", label: e.type, startMs, durationMs: 0 });
+      pushSpan({ key: `s-${i}`, family: "system", label: e.type, startMs, durationMs: 0 });
     } else {
       // Catch-all: surface unknown types as instant markers rather than
       // silently dropping. New event types added later show up immediately
       // and the operator can decide whether to give them dedicated visuals.
-      spans.push({ key: `mk-${i}`, family: "marker", label: e.type, startMs, durationMs: 0 });
+      pushSpan({ key: `mk-${i}`, family: "marker", label: e.type, startMs, durationMs: 0 });
     }
   }
 
@@ -955,6 +983,7 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
 
 function TimelineView({ events }: { events: Event[] }) {
   const { spans, totalMs } = useMemo(() => deriveSpans(events), [events]);
+  const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
   if (spans.length === 0) {
     return (
@@ -1002,41 +1031,63 @@ function TimelineView({ events }: { events: Event[] }) {
         {spans.map((s) => {
           const left = (s.startMs / totalMs) * 100;
           const width = s.durationMs > 0 ? Math.max(0.4, (s.durationMs / totalMs) * 100) : 0;
+          const isSelected = selectedKey === s.key;
           return (
-            <div
-              key={s.key}
-              className="flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group"
-              title={
-                s.detail
-                  ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
-                  : `${s.label} — ${formatDuration(s.durationMs)}`
-              }
-            >
-              <div className="w-56 shrink-0 flex items-center gap-2 text-xs">
-                <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
-                <div className="min-w-0 flex-1">
-                  <div className="truncate text-fg-muted font-mono">{s.label}</div>
-                  {s.detail && (
-                    <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+            <div key={s.key}>
+              <div
+                className={`flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group cursor-pointer ${isSelected ? "bg-bg-surface/60" : ""}`}
+                title={
+                  s.detail
+                    ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
+                    : `${s.label} — ${formatDuration(s.durationMs)}`
+                }
+                onClick={() => setSelectedKey(isSelected ? null : s.key)}
+              >
+                <div className="w-56 shrink-0 flex items-center gap-2 text-xs">
+                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-fg-muted font-mono">{s.label}</div>
+                    {s.detail && (
+                      <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+                    )}
+                  </div>
+                </div>
+                <div className="flex-1 relative h-5">
+                  {width > 0 ? (
+                    <div
+                      className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
+                      style={{ left: `${left}%`, width: `${width}%` }}
+                    />
+                  ) : (
+                    <div
+                      className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
+                      style={{ left: `${left}%` }}
+                    />
                   )}
                 </div>
+                <div className="w-20 shrink-0 text-right text-xs font-mono text-fg-subtle pr-1">
+                  {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
+                </div>
               </div>
-              <div className="flex-1 relative h-5">
-                {width > 0 ? (
-                  <div
-                    className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
-                    style={{ left: `${left}%`, width: `${width}%` }}
-                  />
-                ) : (
-                  <div
-                    className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
-                    style={{ left: `${left}%` }}
-                  />
-                )}
-              </div>
-              <div className="w-20 shrink-0 text-right text-xs font-mono text-fg-subtle pr-1">
-                {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
-              </div>
+              {isSelected && s.events.length > 0 && (
+                <div className="border-b border-border/40 bg-bg-surface/30 px-4 py-3">
+                  <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono mb-2">
+                    {s.events.length === 1
+                      ? "source event"
+                      : `source events (${s.events.length})`}
+                  </div>
+                  <div className="space-y-2">
+                    {s.events.map((ev, idx) => (
+                      <pre
+                        key={idx}
+                        className="text-[11px] font-mono text-fg-muted bg-bg/60 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all"
+                      >
+                        {JSON.stringify(ev, null, 2)}
+                      </pre>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
           );
         })}
