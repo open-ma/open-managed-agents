@@ -47,7 +47,11 @@ export function TenantSwitcher() {
       .catch(() => {
         // Pre-auth or backend down — sidebar just hides the switcher.
       });
-  }, [api]);
+    // useApi() returns a fresh { api, streamEvents } closure every render,
+    // so listing `api` as a dep would re-fire this effect infinitely and
+    // hammer /v1/me/tenants. Mount-once is the right semantics.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // Close dropdown on outside click.
   useEffect(() => {

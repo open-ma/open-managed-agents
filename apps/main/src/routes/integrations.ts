@@ -114,6 +114,20 @@ app.get("/linear/installations/:id/publications", async (c) => {
   });
 });
 
+// ─── GET /v1/integrations/linear/agents/:id/publications ─────────────────
+// Reverse lookup: list every Linear publication that references this agent.
+// Console's AgentDetail page calls this to render "Published to Linear"
+// chips. Without it the request 404s and the chip silently disappears.
+// (Slack already has the parallel route at /slack/agents/:id/publications.)
+app.get("/linear/agents/:id/publications", async (c) => {
+  const userId = c.get("user_id")!;
+  const agentId = c.req.param("id");
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
+  const publications = await repos.publications.listByUserAndAgent(userId, agentId);
+  return c.json({ data: publications.map(serializePublication) });
+});
+
 // ─── GET /v1/integrations/linear/publications/:id ────────────────────────
 
 app.get("/linear/publications/:id", async (c) => {
