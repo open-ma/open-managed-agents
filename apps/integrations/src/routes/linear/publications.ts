@@ -68,9 +68,7 @@ interface SubmitCredentialsBody {
   clientId: string;
   clientSecret: string;
   webhookSecret: string;
-}
-
-app.post("/credentials", async (c) => {
+}app.post("/credentials", async (c) => {
   const body = await c.req.json<SubmitCredentialsBody>();
   if (!body.formToken || !body.clientId || !body.clientSecret || !body.webhookSecret) {
     return c.json(
@@ -165,6 +163,62 @@ app.post("/handoff-link", async (c) => {
     return c.json({ error: "unexpected handoff result", result }, 500);
   }
   return c.json(result.data);
+});
+
+interface PersonalTokenBody {
+  userId: string;
+  agentId: string;
+  environmentId: string;
+  personaName: string;
+  personaAvatarUrl: string | null;
+  patToken: string;
+}
+
+/**
+ * One-shot install for the PAT path. The user pasted a Linear Personal API
+ * Key — we validate it via viewer query, persist installation+publication
+ * atomically, and return the publicationId so Console can navigate. No
+ * OAuth, no callback page, no wait_for_webhook step.
+ *
+ * Internal-only: apps/main proxies via service binding after authenticating
+ * the user.
+ */
+app.post("/personal-token", async (c) => {
+  if (!requireInternalSecret(c.env, c.req.header("x-internal-secret"))) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  const body = await c.req.json<PersonalTokenBody>();
+  if (
+    !body.userId ||
+    !body.agentId ||
+    !body.environmentId ||
+    !body.personaName ||
+    !body.patToken
+  ) {
+    return c.json(
+      {
+        error:
+          "userId, agentId, environmentId, personaName, patToken required",
+      },
+      400,
+    );
+  }
+
+  const { linear } = buildProviders(c.env);
+
+  try {
+    const result = await linear.installPersonalToken({
+      userId: body.userId,
+      agentId: body.agentId,
+      environmentId: body.environmentId,
+      persona: { name: body.personaName, avatarUrl: body.personaAvatarUrl },
+      patToken: body.patToken,
+    });
+    return c.json({ publicationId: result.publicationId });
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    return c.json({ error: "pat_install_failed", details: msg }, 400);
+  }
 });
 
 export default app;

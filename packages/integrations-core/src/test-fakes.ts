@@ -17,6 +17,11 @@ import type {
   CreateCommandSecretInput,
   CreateCredentialInput,
   CreateSessionInput,
+  DispatchRule,
+  DispatchRulePatch,
+  DispatchRuleRepo,
+  PendingEvent,
+  PendingEventRepo,
   GitHubAppCredentials,
   GitHubAppRepo,
   HmacVerifier,
@@ -30,12 +35,12 @@ import type {
   IssueSession,
   IssueSessionRepo,
   IssueSessionStatus,
-  AuthoredComment,
-  AuthoredCommentRepo,
   JwtSigner,
   NewAppCredentials,
+  NewDispatchRule,
   NewGitHubAppCredentials,
   NewInstallation,
+  NewPendingEvent,
   NewPublication,
   NewSetupLink,
   Persona,
@@ -638,17 +643,26 @@ export class InMemoryIssueSessionRepo implements IssueSessionRepo {
       (r) => r.publicationId === publicationId && r.status === "active",
     );
   }
-}
 
-export class InMemoryAuthoredCommentRepo implements AuthoredCommentRepo {
-  private rows = new Map<string, AuthoredComment>();
-
-  async get(commentId: string): Promise<AuthoredComment | null> {
-    return this.rows.get(commentId) ?? null;
-  }
-
-  async insert(row: AuthoredComment): Promise<void> {
-    this.rows.set(row.commentId, row);
+  async claim(input: {
+    tenantId: string;
+    publicationId: string;
+    issueId: string;
+    sessionId: SessionId;
+    nowMs: number;
+  }): Promise<boolean> {
+    const k = this.key(input.publicationId, input.issueId);
+    const existing = this.rows.get(k);
+    if (existing && existing.status === "active") return false;
+    this.rows.set(k, {
+      tenantId: input.tenantId,
+      publicationId: input.publicationId,
+      issueId: input.issueId,
+      sessionId: input.sessionId,
+      status: "active",
+      createdAt: input.nowMs,
+    });
+    return true;
   }
 }
 
@@ -733,8 +747,9 @@ export interface FakeContainer {
   webhookEvents: InMemoryWebhookEventStore;
   issueSessions: InMemoryIssueSessionRepo;
   sessionScopes: InMemorySessionScopeRepo;
-  authoredComments: InMemoryAuthoredCommentRepo;
   setupLinks: InMemorySetupLinkRepo;
+  dispatchRules: InMemoryDispatchRuleRepo;
+  pendingEvents: InMemoryPendingEventRepo;
 }
 
 export function buildFakeContainer(): FakeContainer {
@@ -756,7 +771,132 @@ export function buildFakeContainer(): FakeContainer {
     webhookEvents: new InMemoryWebhookEventStore(),
     issueSessions: new InMemoryIssueSessionRepo(),
     sessionScopes: new InMemorySessionScopeRepo(),
-    authoredComments: new InMemoryAuthoredCommentRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
+    dispatchRules: new InMemoryDispatchRuleRepo(clock),
+    pendingEvents: new InMemoryPendingEventRepo(),
   };
+}
+
+export class InMemoryDispatchRuleRepo implements DispatchRuleRepo {
+  private rows = new Map<string, DispatchRule>();
+  private seq = 0;
+  constructor(private readonly clock: Clock = new FakeClock(1_700_000_000_000)) {}
+
+  async get(id: string): Promise<DispatchRule | null> {
+    return this.rows.get(id) ?? null;
+  }
+
+  async insert(input: NewDispatchRule): Promise<DispatchRule> {
+    const id = `dr_${++this.seq}`;
+    const now = this.clock.nowMs();
+    const row: DispatchRule = {
+      id,
+      tenantId: input.tenantId,
+      publicationId: input.publicationId,
+      name: input.name,
+      enabled: input.enabled,
+      filterLabel: input.filterLabel,
+      filterStates: input.filterStates,
+      filterProjectId: input.filterProjectId,
+      maxConcurrent: input.maxConcurrent,
+      pollIntervalSeconds: input.pollIntervalSeconds,
+      lastPolledAt: null,
+      createdAt: now,
+      updatedAt: now,
+    };
+    this.rows.set(id, row);
+    return row;
+  }
+
+  async update(id: string, patch: DispatchRulePatch): Promise<DispatchRule | null> {
+    const row = this.rows.get(id);
+    if (!row) return null;
+    const next: DispatchRule = {
+      ...row,
+      ...patch,
+      updatedAt: this.clock.nowMs(),
+    };
+    this.rows.set(id, next);
+    return next;
+  }
+
+  async delete(id: string): Promise<boolean> {
+    return this.rows.delete(id);
+  }
+
+  async listByPublication(publicationId: string): Promise<readonly DispatchRule[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.publicationId === publicationId)
+      .sort((a, b) => b.createdAt - a.createdAt);
+  }
+
+  async listDueForSweep(nowMs: number, limit: number): Promise<readonly DispatchRule[]> {
+    return [...this.rows.values()]
+      .filter((r) => {
+        if (!r.enabled) return false;
+        if (r.lastPolledAt === null) return true;
+        return r.lastPolledAt + r.pollIntervalSeconds * 1000 <= nowMs;
+      })
+      .sort((a, b) => (a.lastPolledAt ?? 0) - (b.lastPolledAt ?? 0))
+      .slice(0, limit);
+  }
+
+  async markPolled(id: string, polledAtMs: number): Promise<void> {
+    const row = this.rows.get(id);
+    if (row) this.rows.set(id, { ...row, lastPolledAt: polledAtMs });
+  }
+}
+
+export class InMemoryPendingEventRepo implements PendingEventRepo {
+  private rows: PendingEvent[] = [];
+  private seq = 0;
+
+  async insert(input: NewPendingEvent, nowMs: number): Promise<PendingEvent> {
+    const row: PendingEvent = {
+      id: `pe_${++this.seq}`,
+      tenantId: input.tenantId,
+      publicationId: input.publicationId,
+      eventKind: input.eventKind,
+      issueId: input.issueId,
+      issueIdentifier: input.issueIdentifier,
+      workspaceId: input.workspaceId,
+      payload: input.payload,
+      receivedAt: nowMs,
+      processedAt: null,
+      processedSessionId: null,
+      errorMessage: null,
+    };
+    this.rows.push(row);
+    return row;
+  }
+
+  async listUnprocessed(limit: number): Promise<readonly PendingEvent[]> {
+    return this.rows
+      .filter((r) => r.processedAt === null)
+      .sort((a, b) => a.receivedAt - b.receivedAt)
+      .slice(0, limit);
+  }
+
+  async delete(id: string): Promise<void> {
+    const idx = this.rows.findIndex((r) => r.id === id);
+    if (idx >= 0) this.rows.splice(idx, 1);
+  }
+
+  async markFailed(id: string, errorMessage: string, processedAtMs: number): Promise<void> {
+    const idx = this.rows.findIndex((r) => r.id === id);
+    if (idx >= 0) {
+      this.rows[idx] = {
+        ...this.rows[idx]!,
+        processedAt: processedAtMs,
+        errorMessage: errorMessage.slice(0, 2000),
+      };
+    }
+  }
+
+  async listByPublication(publicationId: string, limit: number): Promise<readonly PendingEvent[]> {
+    return this.rows
+      .filter((r) => r.publicationId === publicationId)
+      .sort((a, b) => b.receivedAt - a.receivedAt)
+      .slice(0, limit);
+  }
 }

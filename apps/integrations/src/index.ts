@@ -137,6 +137,60 @@ app.route("/slack/webhook", slackWebhook);
 app.route("/slack/publications", slackPublications);
 app.route("/slack-setup", slackSetupPage);
 
+/**
+ * Cron entry point. Wired to wrangler.jsonc `triggers.crons`. Runs the
+ * Linear dispatch sweep — picks rules whose interval has elapsed and
+ * assigns matching unassigned issues to the configured bot user.
+ *
+ * Per-rule failures are caught inside `runDispatchSweep` so a bad rule
+ * doesn't poison the tick. We log a single line per cron invocation so
+ * `wrangler tail` shows tick-level outcomes; the provider also logs
+ * per-issue failures inline.
+ */
+async function scheduled(
+  controller: ScheduledController,
+  env: Env,
+  ctx: ExecutionContext,
+): Promise<void> {
+  const { linear } = buildProviders(env);
+  const startedAt = Date.now();
+  // Cap rules per tick so one tenant with many rules doesn't push past
+  // the cron CPU budget. 50 is generous; raise if needed.
+  const RULE_LIMIT = 50;
+  ctx.waitUntil(
+    (async () => {
+      try {
+        // Sweep first: discovers + assigns new candidate issues. For OAuth-app
+        // installs the assign mutation triggers a Linear webhook which the
+        // webhook handler enqueues — picked up by drainPendingEvents below.
+        // For PAT installs the sweep itself enqueues + spawns sessions inline
+        // (no webhook source for PATs).
+        const sweepSummary = await linear.runDispatchSweep(startedAt, RULE_LIMIT);
+        // Drain queue: webhook-deposited events get their session spawned
+        // here. Cap per-tick (25) so a flood doesn't consume the whole budget.
+        const drainSummary = await linear.drainPendingEvents(startedAt, 25);
+        console.log(
+          `[linear-dispatch-cron] tick=${controller.cron} ` +
+            `swept=${sweepSummary.sweptRules} assigned=${sweepSummary.assignedIssues} ` +
+            `sweep_errors=${sweepSummary.errors.length} ` +
+            `drained=${drainSummary.drainedEvents} ok=${drainSummary.succeeded} fail=${drainSummary.failed} ` +
+            `dur_ms=${Date.now() - startedAt}`,
+        );
+        for (const e of sweepSummary.errors) {
+          console.warn(`[linear-dispatch-cron] rule=${e.ruleId} err=${e.message}`);
+        }
+      } catch (err) {
+        // Top-level failure — usually means container init failed (e.g.,
+        // missing binding). Log loudly so wrangler tail surfaces it.
+        console.error(
+          `[linear-dispatch-cron] fatal err=${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+    })(),
+  );
+}
+
 export default {
   fetch: app.fetch,
+  scheduled,
 };
