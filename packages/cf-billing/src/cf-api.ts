@@ -99,10 +99,13 @@ export async function removeServiceBinding(
 
 /**
  * Convert an environment ID to a safe binding name.
- * e.g. "env-abc123" → "SANDBOX_env_abc123"
+ * Must match the formula sessions.ts:getSandboxBinding uses to look up
+ * `c.env[bindingName]` — that side reads `SANDBOX_${worker.replace(/-/g, "_")}`,
+ * where worker = envIdToWorkerName(envId) = "sandbox-${envId}".
+ * e.g. "env-abc123" → "SANDBOX_sandbox_env_abc123"
  */
 export function envIdToBindingName(envId: string): string {
-  return `SANDBOX_${envId.replace(/-/g, "_")}`;
+  return `SANDBOX_${envIdToWorkerName(envId).replace(/-/g, "_")}`;
 }
 
 /**
