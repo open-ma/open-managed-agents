@@ -53,8 +53,8 @@ export function IntegrationsGitHubWorkspace() {
     setLoading(true);
     try {
       const [insts, pubs] = await Promise.all([
-        api.listGitHubInstallations(),
-        api.listGitHubPublications(id),
+        api.github.listInstallations(),
+        api.github.listPublications(id),
       ]);
       setInstallations(insts);
       setPublications(pubs);
@@ -419,7 +419,7 @@ function PublicationCard({
     setSaving(true);
     setErr(null);
     try {
-      await api.updateGitHubPublication(pub.id, { capabilities: [...caps] });
+      await api.github.updatePublication(pub.id, { capabilities: [...caps] });
       setEditing(false);
       onUpdate();
     } catch (e) {
@@ -432,7 +432,7 @@ function PublicationCard({
   async function unbind() {
     if (!confirm(`Unbind "${pub.persona.name}"? The bot will stop responding to GitHub events.`)) return;
     try {
-      await api.unpublishGitHub(pub.id);
+      await api.github.unpublish(pub.id);
       onUpdate();
     } catch (e) {
       alert(e instanceof Error ? e.message : String(e));

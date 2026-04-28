@@ -25,6 +25,8 @@ import { WebCryptoJwtSigner } from "./jwt";
 import { D1AppRepo } from "./d1/app-repo";
 import { D1DispatchRuleRepo } from "./d1/dispatch-rule-repo";
 import { D1GitHubAppRepo } from "./d1/github-app-repo";
+import { D1GitHubInstallationRepo } from "./d1/github/installation-repo";
+import { D1GitHubPublicationRepo } from "./d1/github/publication-repo";
 import { D1InstallationRepo } from "./d1/installation-repo";
 import { D1IssueSessionRepo } from "./d1/issue-session-repo";
 import { D1PendingEventRepo } from "./d1/pending-event-repo";
@@ -74,8 +76,13 @@ export function buildCfRepos(env: CfReposEnv) {
   // it must work without per-tenant routing being decided yet (e.g. install
   // callbacks know userId before they know tenantId).
   const tenants = new D1TenantResolver(env.controlPlaneDb);
-  const installations = new D1InstallationRepo(env.db, cryptoImpl, ids);
-  const publications = new D1PublicationRepo(env.db, ids);
+  // Linear and GitHub each get their own installations/publications repos
+  // (linear_* vs github_* tables). Slack lives in slack_* and is wired
+  // separately via the slack-specific helpers.
+  const linearInstallations = new D1InstallationRepo(env.db, cryptoImpl, ids);
+  const linearPublications = new D1PublicationRepo(env.db, ids);
+  const githubInstallations = new D1GitHubInstallationRepo(env.db, cryptoImpl, ids);
+  const githubPublications = new D1GitHubPublicationRepo(env.db, ids);
   const apps = new D1AppRepo(env.db, cryptoImpl, ids);
   const githubApps = new D1GitHubAppRepo(env.db, cryptoImpl, ids);
   const webhookEvents = new D1WebhookEventStore(env.db);
@@ -96,8 +103,10 @@ export function buildCfRepos(env: CfReposEnv) {
     jwt,
     http,
     tenants,
-    installations,
-    publications,
+    linearInstallations,
+    linearPublications,
+    githubInstallations,
+    githubPublications,
     apps,
     githubApps,
     webhookEvents,
@@ -113,8 +122,17 @@ export function buildCfRepos(env: CfReposEnv) {
  * Returns the full integrations Container, ready for an IntegrationProvider.
  * Requires the MAIN service binding so SessionCreator/VaultManager can call
  * apps/main's /v1/internal/* endpoints.
+ *
+ * The default Container's `installations`/`publications` slots are bound to
+ * the Linear repos. GitHub callers should swap them for the github-flavored
+ * repos before constructing GitHubProvider — wire.ts in apps/integrations
+ * does this via buildGitHubContainer. The full per-provider bag (linear/
+ * github named repos) is also exposed on the return value so consumers can
+ * pick the right pair without re-running the factory.
  */
-export function buildCfContainer(env: CfContainerEnv): Container {
+export function buildCfContainer(
+  env: CfContainerEnv,
+): Container & ReturnType<typeof buildCfRepos> {
   const repos = buildCfRepos(env);
   const sessions = new ServiceBindingSessionCreator(env.MAIN, {
     internalSecret: env.INTEGRATIONS_INTERNAL_SECRET,
@@ -122,5 +140,11 @@ export function buildCfContainer(env: CfContainerEnv): Container {
   const vaults = new ServiceBindingVaultManager(env.MAIN, {
     internalSecret: env.INTEGRATIONS_INTERNAL_SECRET,
   });
-  return { ...repos, sessions, vaults };
+  return {
+    ...repos,
+    installations: repos.linearInstallations,
+    publications: repos.linearPublications,
+    sessions,
+    vaults,
+  };
 }

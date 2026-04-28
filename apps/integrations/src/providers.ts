@@ -3,9 +3,9 @@
 // Providers are light-weight to construct, but caching avoids rebuilding HTTP
 // clients + reading config on every request.
 //
-// Note on container shape: Linear + GitHub share the standard `Container`
-// (linear_*/github_* tables); Slack runs against parallel `slack_*` tables and
-// builds its own `SlackContainer` internally.
+// Note on container shape: each provider gets its own per-provider Container
+// so the `installations`/`publications` slots resolve to the right backing
+// table (linear_*/github_*/slack_*). See wire.ts.
 
 import { LinearProvider, DEFAULT_LINEAR_SCOPES, ALL_CAPABILITIES } from "@open-managed-agents/linear";
 import {
@@ -20,7 +20,7 @@ import {
   DEFAULT_SLACK_USER_SCOPES,
 } from "@open-managed-agents/slack";
 import type { Container } from "@open-managed-agents/integrations-core";
-import { buildContainer, buildSlackContainer } from "./wire";
+import { buildContainer, buildGitHubContainer, buildSlackContainer } from "./wire";
 import type { Env } from "./env";
 
 export interface ProviderBundle {
@@ -30,25 +30,22 @@ export interface ProviderBundle {
 }
 
 /**
- * Build all providers. The optional `sharedContainer` lets callers reuse a
- * pre-built shared container (Linear + GitHub) — handy when a route handler
- * needs both a provider and direct repo access. If omitted, a fresh shared
- * container is built. The Slack container is always built fresh because it
- * uses the parallel `slack_*` tables.
+ * Build all providers. The optional `linearContainer` lets callers reuse a
+ * pre-built Linear container — handy when a Linear route handler already
+ * built one for direct repo access. The github / slack containers are
+ * always built fresh because they target different per-provider tables.
  */
-export function buildProviders(env: Env, sharedContainer?: Container): ProviderBundle {
+export function buildProviders(env: Env, linearContainer?: Container): ProviderBundle {
   // Trim trailing slash so we can safely concatenate paths.
   const gatewayOrigin = env.GATEWAY_ORIGIN.replace(/\/+$/, "");
 
-  const container = sharedContainer ?? buildContainer(env);
-
-  const linear = new LinearProvider(container, {
+  const linear = new LinearProvider(linearContainer ?? buildContainer(env), {
     gatewayOrigin,
     scopes: DEFAULT_LINEAR_SCOPES,
     defaultCapabilities: ALL_CAPABILITIES,
   });
 
-  const github = new GitHubProvider(container, {
+  const github = new GitHubProvider(buildGitHubContainer(env), {
     gatewayOrigin,
     defaultCapabilities: DEFAULT_GITHUB_CAPABILITIES,
     // Override per-deploy via env to point at a self-hosted MCP if needed.

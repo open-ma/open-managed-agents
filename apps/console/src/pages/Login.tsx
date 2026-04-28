@@ -4,6 +4,17 @@ import { authClient } from "../lib/auth-client";
 import { useAuth } from "../lib/auth";
 import { useToast } from "../components/Toast";
 import { Turnstile } from "../components/Turnstile";
+import { setActiveTenantId } from "../lib/api";
+
+// Clear browser-cached tenant pin on every successful auth transition.
+// The pin is per-user — different login → different membership set →
+// the previous user's tenant id is at best meaningless and at worst
+// triggers "Not a member" 403s on every subsequent request.
+// TenantSwitcher repopulates from /v1/me/tenants on next page load.
+function onLoginSuccess(redirect: () => void) {
+  setActiveTenantId(null);
+  redirect();
+}
 
 type Mode =
   | "login"
@@ -47,7 +58,7 @@ export function Login() {
   })();
 
   useEffect(() => {
-    if (isAuthenticated) nav(nextUrl, { replace: true });
+    if (isAuthenticated) onLoginSuccess(() => nav(nextUrl, { replace: true }));
   }, [isAuthenticated]);
 
   useEffect(() => {
@@ -170,7 +181,7 @@ export function Login() {
             throw new Error(error.message);
           }
         } else {
-          nav(nextUrl, { replace: true });
+          onLoginSuccess(() => nav(nextUrl, { replace: true }));
         }
       } else if (mode === "otp-login") {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
@@ -187,12 +198,12 @@ export function Login() {
           otp,
         });
         if (error) throw new Error(error.message);
-        nav(nextUrl, { replace: true });
+        onLoginSuccess(() => nav(nextUrl, { replace: true }));
       } else if (mode === "verify-login") {
         const signInOtp = authClient.signIn.emailOtp as any;
         const { data, error } = await signInOtp({ email, otp });
         if (error) throw new Error(error.message);
-        if (data) nav(nextUrl, { replace: true });
+        if (data) onLoginSuccess(() => nav(nextUrl, { replace: true }));
       } else if (mode === "forgot") {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
           email,

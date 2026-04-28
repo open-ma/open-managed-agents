@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useSearchParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { A1FormStep, A1InstallLink } from "../api/types";
+import { SecretInput, TextInput } from "../../components/Input";
 
 const api = new IntegrationsApi();
 
@@ -313,7 +314,7 @@ function PickStep(props: {
 
       <div className="grid md:grid-cols-2 gap-4">
         <Field label="Persona name (shown in Slack)">
-          <input
+          <TextInput
             value={props.personaName}
             onChange={(e) => props.setPersonaName(e.target.value)}
             placeholder="e.g. Coder, Designer, Triage"
@@ -322,7 +323,7 @@ function PickStep(props: {
         </Field>
 
         <Field label="Avatar URL (optional)">
-          <input
+          <TextInput
             value={props.personaAvatar}
             onChange={(e) => props.setPersonaAvatar(e.target.value)}
             placeholder="https://…"
@@ -441,23 +442,21 @@ function A1CredentialsStep(props: {
         </p>
         <div className="grid md:grid-cols-2 gap-4">
           <Field label="Client ID">
-            <input
+            <TextInput
               value={props.clientId}
               onChange={(e) => props.setClientId(e.target.value)}
               className={inputCls}
             />
           </Field>
           <Field label="Client Secret">
-            <input
-              type="password"
+            <SecretInput
               value={props.clientSecret}
               onChange={(e) => props.setClientSecret(e.target.value)}
               className={inputCls}
             />
           </Field>
           <Field label="Signing Secret">
-            <input
-              type="password"
+            <SecretInput
               value={props.signingSecret}
               onChange={(e) => props.setSigningSecret(e.target.value)}
               className={inputCls}

@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import { useApi } from "../lib/api";
+import { useAsyncAction } from "../hooks/useAsyncAction";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 
@@ -31,7 +32,10 @@ export function ApiKeysList() {
     load();
   }, []);
 
-  const create = async () => {
+  // useAsyncAction guards re-entry: a fast double-click on the Create
+  // button used to fire two POSTs and produce two records 0.5-1s apart.
+  // The hook + Button loading prop handle this universally now.
+  const create = useAsyncAction(async () => {
     setError("");
     try {
       const result = await api<{ key: string }>("/v1/api_keys", {
@@ -44,7 +48,7 @@ export function ApiKeysList() {
     } catch (e: any) {
       setError(e?.message || "Failed to create key");
     }
-  };
+  });
 
   const remove = async (id: string) => {
     if (!confirm("Revoke this API key? This cannot be undone.")) return;
@@ -142,10 +146,12 @@ export function ApiKeysList() {
             <Button onClick={closeDialog}>Done</Button>
           ) : (
             <>
-              <Button variant="ghost" onClick={closeDialog}>
+              <Button variant="ghost" onClick={closeDialog} disabled={create.loading}>
                 Cancel
               </Button>
-              <Button onClick={create}>Create</Button>
+              <Button onClick={create.run} loading={create.loading} loadingLabel="Creating…">
+                Create
+              </Button>
             </>
           )
         }

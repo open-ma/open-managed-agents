@@ -6,10 +6,20 @@ import { generateEventId } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
+import { ALL_TOOLS } from "./tools";
 
-const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"]);
+// Single source of truth lives in ./tools.ts (ALL_TOOLS). Importing here so
+// adding a new toolset entry can't drift the event-classification list — the
+// previous hard-coded duplicate caused `browser`, `schedule`,
+// `cancel_schedule`, and `list_schedules` to mis-emit as
+// `agent.custom_tool_use` instead of `agent.tool_use`.
+const BUILTIN_TOOLS = new Set(ALL_TOOLS);
 const isMcpTool = (name: string) => name.startsWith("mcp_");
-const isBuiltinTool = (name: string) =>
+// Exported so tests can assert classification directly. Returning true here
+// makes `runtime.broadcast` emit `agent.tool_use`; false routes to
+// `agent.custom_tool_use`. Down-stream consumers (Console UI, SDK event
+// filters, billing dashboards) split on those event types.
+export const isBuiltinTool = (name: string): boolean =>
   BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_") || name.startsWith("memory_");
 
 // LLM call resilience settings (inspired by Claude Code)
@@ -342,9 +352,14 @@ export class DefaultHarness implements HarnessInterface {
     const cached = applyProviderCacheStrategy(model, systemPrompt, tools, messages);
     const finalMessages = cached.messages;
 
-    // 4. Emit span event: model request start
+    // 4. Resolve model id (used by per-step span events emitted via the
+    //    streamText `start-step`/`finish-step` chunk + onStepFinish hooks).
+    //    The OUTER span.model_request_start/end pair around streamText() that
+    //    used to live here was removed: ai-sdk's streamText loops internally
+    //    (one call per tool round-trip), so a single outer span hid the actual
+    //    per-call timing + per-call usage that Anthropic's Managed Agents wire
+    //    spec exposes.
     const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
-    runtime.broadcast({ type: "span.model_request_start", model: modelId });
 
     // 5. Run agent loop with retry + timeout + prompt caching.
     //
@@ -370,6 +385,23 @@ export class DefaultHarness implements HarnessInterface {
       const liveThinking = new Set<string>();
       const liveToolInput = new Set<string>();
 
+      // Per-step model_request span pair. We hook ai-sdk's
+      // `experimental_onStepStart` (fires before each provider call) to mint
+      // an id + broadcast span.model_request_start, and pair via
+      // model_request_start_id from onStepFinish / onError / onAbort.
+      // The `experimental_` prefix means vercel-ai may rename / change
+      // signature without notice; pin the ai-sdk version on dep upgrade.
+      // Anthropic's Managed Agents wire spec uses one pair per actual
+      // model call (not per streamText loop), which is what this gives us.
+      //
+      // OMA extension: between start and end we also emit
+      // span.model_first_token at the first chunk of each step (any chunk
+      // type counts — text, reasoning, tool-input). Splits the bar into
+      // TTFT vs generation in the timeline. `stepSawFirstChunk` is the
+      // per-step latch; reset on each onStepStart.
+      let stepStartId: string | null = null;
+      let stepSawFirstChunk = false;
+
       const r = streamText({
       model,
       system: cached.system,
@@ -379,6 +411,20 @@ export class DefaultHarness implements HarnessInterface {
       abortSignal: signal,
 
       onChunk: ({ chunk }) => {
+        // First chunk of this step → emit span.model_first_token. Pair via
+        // model_request_start_id so consumers can split TTFT (start →
+        // first_token) from generation (first_token → end). Any chunk
+        // counts: text-delta, reasoning-delta, or tool-input-start —
+        // whichever fires first signals "the model has begun responding".
+        if (!stepSawFirstChunk && stepStartId) {
+          stepSawFirstChunk = true;
+          runtime.broadcast({
+            type: "span.model_first_token",
+            model: modelId,
+            model_request_start_id: stepStartId,
+          });
+        }
+
         if (chunk.type === "text-delta") {
           if (!currentMessageId) {
             currentMessageId = generateEventId();
@@ -415,6 +461,20 @@ export class DefaultHarness implements HarnessInterface {
           }
           void runtime.broadcastToolInputChunk(c.id, c.delta);
         }
+      },
+
+      // experimental_: vercel-ai may rename / change signature without
+      // notice. Pin ai-sdk version on dep upgrade. The stable alternative
+      // (consume `result.fullStream` for `start-step` chunks) requires
+      // intercepting the iterator; this is materially simpler.
+      experimental_onStepStart: () => {
+        stepStartId = generateEventId();
+        stepSawFirstChunk = false;
+        runtime.broadcast({
+          type: "span.model_request_start",
+          id: stepStartId,
+          model: modelId,
+        });
       },
 
       onStepFinish: async (step) => {
@@ -502,6 +562,70 @@ export class DefaultHarness implements HarnessInterface {
           await runtime.broadcastToolInputEnd(tid, "aborted");
         }
         liveToolInput.clear();
+
+        // Per-step span.model_request_end. Carries this step's usage and
+        // finishReason — Anthropic's wire format puts model_usage at this
+        // granularity (per actual model API call), not aggregated across
+        // the whole streamText loop. Pair via model_request_start_id so
+        // consumers don't have to FIFO-match.
+        const stepText = (step.content as ReadonlyArray<{ type: string; text?: string }>)
+          .filter((p) => p.type === "text")
+          .map((p) => p.text ?? "")
+          .join("");
+        const providerResponseId = (step.response as { id?: string } | undefined)?.id;
+        runtime.broadcast({
+          type: "span.model_request_end",
+          model: modelId,
+          model_request_start_id: stepStartId ?? undefined,
+          provider_response_id: providerResponseId,
+          model_usage: step.usage ? {
+            input_tokens: step.usage.inputTokens ?? 0,
+            output_tokens: step.usage.outputTokens ?? 0,
+            cache_read_input_tokens: step.usage.inputTokenDetails?.cacheReadTokens ?? 0,
+            cache_creation_input_tokens: step.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
+          } : undefined,
+          finish_reason: step.finishReason,
+          final_text_length: stepText.length,
+          is_error: false,
+        });
+        // Clear so onError / onAbort don't double-close.
+        stepStartId = null;
+      },
+
+      onError: ({ error }) => {
+        // streamText aborts the stream on error before onStepFinish can fire
+        // for the failing step. Without closing here, the span.model_request_start
+        // we emitted in the start-step chunk hangs unpaired. Mirror the
+        // shape of the success-path end so consumers can treat is_error as
+        // the success/fail discriminator.
+        if (!stepStartId) return;
+        const message = error instanceof Error ? error.message : String(error);
+        runtime.broadcast({
+          type: "span.model_request_end",
+          model: modelId,
+          model_request_start_id: stepStartId,
+          finish_reason: "error",
+          final_text_length: 0,
+          is_error: true,
+          error_message: message.slice(0, 500),
+        } as SessionEvent);
+        stepStartId = null;
+      },
+
+      onAbort: () => {
+        // User interrupt or AbortSignal trip. Same dangling-start problem as
+        // onError. is_error stays false — abort is a normal control flow,
+        // not a model failure.
+        if (!stepStartId) return;
+        runtime.broadcast({
+          type: "span.model_request_end",
+          model: modelId,
+          model_request_start_id: stepStartId,
+          finish_reason: "aborted",
+          final_text_length: 0,
+          is_error: false,
+        });
+        stepStartId = null;
       },
     });
       // streamText returns a StreamTextResult; consumeStream forces the
@@ -548,19 +672,11 @@ export class DefaultHarness implements HarnessInterface {
       }
     }
 
-    // 9. Emit span event: model request end
-    runtime.broadcast({
-      type: "span.model_request_end",
-      model: modelId,
-      model_usage: result.usage ? {
-        input_tokens: result.usage.inputTokens ?? 0,
-        output_tokens: result.usage.outputTokens ?? 0,
-        cache_read_input_tokens: result.usage.inputTokenDetails?.cacheReadTokens ?? 0,
-        cache_creation_input_tokens: result.usage.inputTokenDetails?.cacheWriteTokens ?? 0,
-      } : undefined,
-      finish_reason: result.finishReason,
-      final_text_length: typeof result.text === "string" ? result.text.length : 0,
-    });
+    // 9. Per-step model_request span pairs are emitted in onStepFinish above.
+    //    The aggregate-around-streamText pair that used to live here was
+    //    removed — Anthropic's wire format puts model_usage at per-call
+    //    granularity, so we track it the same way. The session state still
+    //    aggregates total token spend below via reportUsage(result.usage).
 
     // 10. Report token usage
     if (result.usage && runtime.reportUsage) {
