@@ -112,7 +112,7 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
           </div>
         )}
 
-        <form onSubmit={handleSubmit} className="space-y-5">
+        <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off">
           <div>
             <label className="block text-[13px] font-medium text-fg mb-1.5">Agent</label>
             <select
@@ -154,6 +154,10 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
               placeholder="e.g. Coder"
               value={personaName}
               onChange={(e) => setPersonaName(e.target.value)}
+              name="persona-display-name"
+              autoComplete="off"
+              data-1p-ignore
+              data-lpignore="true"
             />
           </div>
 
@@ -167,7 +171,10 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
               placeholder="lin_api_…"
               value={pat}
               onChange={(e) => setPat(e.target.value)}
-              autoComplete="off"
+              name="linear-pat"
+              autoComplete="new-password"
+              data-1p-ignore
+              data-lpignore="true"
             />
             <p className="mt-1 text-[12px] text-fg-muted">
               Generate at Linear → Settings → Security &amp; access → Personal API keys.
