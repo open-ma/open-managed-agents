@@ -3,9 +3,9 @@
 // Credentials are sent via session cookie (better-auth). The base path is
 // configurable for tests; defaults to the Console's same-origin "".
 //
-// Each integration provider gets a sub-client (api.linear.*, api.slack.*)
-// with the same method shapes. Provider-specific quirks (e.g. signingSecret
-// vs webhookSecret) live in narrow input types.
+// Each integration provider gets a sub-client (api.linear.*, api.slack.*,
+// api.github.*) with the same method shapes. Provider-specific quirks
+// (e.g. signingSecret vs webhookSecret) live in narrow input types.
 
 import type {
   A1FormStep,
@@ -127,59 +127,68 @@ class LinearClient {
       body: JSON.stringify({ formToken }),
     });
   }
+}
 
-  // ─── GitHub: list + manage ──────────────────────────────────────────
+// ─── GitHub sub-client ─────────────────────────────────────────────────
 
-  async listGitHubInstallations(): Promise<GitHubInstallation[]> {
-    const r = await this.request<{ data: GitHubInstallation[] }>(
+class GitHubClient {
+  constructor(private readonly basePath: string) {}
+
+  async listInstallations(): Promise<GitHubInstallation[]> {
+    const r = await request<{ data: GitHubInstallation[] }>(
+      this.basePath,
       "/v1/integrations/github/installations",
     );
     return r.data;
   }
 
-  async listGitHubPublications(installationId: string): Promise<GitHubPublication[]> {
-    const r = await this.request<{ data: GitHubPublication[] }>(
+  async listPublications(installationId: string): Promise<GitHubPublication[]> {
+    const r = await request<{ data: GitHubPublication[] }>(
+      this.basePath,
       `/v1/integrations/github/installations/${encodeURIComponent(installationId)}/publications`,
     );
     return r.data;
   }
 
-  async getGitHubPublication(id: string): Promise<GitHubPublication> {
-    return this.request<GitHubPublication>(
+  async getPublication(id: string): Promise<GitHubPublication> {
+    return request<GitHubPublication>(
+      this.basePath,
       `/v1/integrations/github/publications/${encodeURIComponent(id)}`,
     );
   }
 
-  async updateGitHubPublication(
+  async updatePublication(
     id: string,
     patch: {
       persona?: Partial<{ name: string; avatarUrl: string | null }>;
       capabilities?: string[];
     },
   ): Promise<GitHubPublication> {
-    return this.request<GitHubPublication>(
+    return request<GitHubPublication>(
+      this.basePath,
       `/v1/integrations/github/publications/${encodeURIComponent(id)}`,
       { method: "PATCH", body: JSON.stringify(patch) },
     );
   }
 
-  async unpublishGitHub(id: string): Promise<void> {
-    await this.request(
+  async unpublish(id: string): Promise<void> {
+    await request(
+      this.basePath,
       `/v1/integrations/github/publications/${encodeURIComponent(id)}`,
       { method: "DELETE" },
     );
   }
 
-  // ─── GitHub: install initiation (proxied through main → integrations gateway) ───
+  // ─── Install initiation (proxied through main → integrations gateway) ───
 
-  async startGitHubA1(input: PublishWizardInput): Promise<GitHubA1FormStep> {
-    return this.request<GitHubA1FormStep>("/v1/integrations/github/start-a1", {
+  async startA1(input: PublishWizardInput): Promise<GitHubA1FormStep> {
+    return request<GitHubA1FormStep>(this.basePath, "/v1/integrations/github/start-a1", {
       method: "POST",
       body: JSON.stringify(input),
     });
   }
 
-  async submitGitHubCredentials(input: {
+  async submitCredentials(input: {
     formToken: string;
     appId: string;
     privateKey: string;
@@ -187,32 +196,17 @@ class LinearClient {
     clientId?: string;
     clientSecret?: string;
   }): Promise<GitHubA1InstallLink> {
-    return this.request<GitHubA1InstallLink>("/v1/integrations/github/credentials", {
+    return request<GitHubA1InstallLink>(this.basePath, "/v1/integrations/github/credentials", {
       method: "POST",
       body: JSON.stringify(input),
     });
   }
 
-  async createGitHubHandoffLink(formToken: string): Promise<HandoffLink> {
-    return this.request<HandoffLink>("/v1/integrations/github/handoff-link", {
+  async createHandoffLink(formToken: string): Promise<HandoffLink> {
+    return request<HandoffLink>(this.basePath, "/v1/integrations/github/handoff-link", {
       method: "POST",
       body: JSON.stringify({ formToken }),
     });
-  }
-
-  // ─── Sessions (used by the integrations activity timeline) ──────────
-  //
-  // /v1/sessions returns the user's full session set with metadata; we
-  // filter client-side. For active integrations this is fine — sessions are
-  // bounded per user — but a future paged endpoint with provider-side
-  // filtering would be cleaner.
-
-  async listSessions(opts: { limit?: number } = {}): Promise<SessionSummary[]> {
-    const limit = opts.limit ?? 50;
-    const r = await this.request<{ data: SessionSummary[] }>(
-      `/v1/sessions?limit=${limit}`,
-    );
-    return r.data;
   }
 }
 
@@ -299,13 +293,17 @@ class SlackClient {
 // ─── Public surface ────────────────────────────────────────────────────
 
 export class IntegrationsApi {
+  private readonly basePath: string;
   readonly linear: LinearClient;
   readonly slack: SlackClient;
+  readonly github: GitHubClient;
 
   constructor(opts: IntegrationsApiOptions = {}) {
     const basePath = opts.basePath ?? "";
+    this.basePath = basePath;
     this.linear = new LinearClient(basePath);
     this.slack = new SlackClient(basePath);
+    this.github = new GitHubClient(basePath);
   }
 
   // ─── Linear backward-compat shims ─────────────────────────────────────
@@ -341,53 +339,20 @@ export class IntegrationsApi {
     return this.linear.createHandoffLink(formToken);
   }
 
-  // ─── GitHub backward-compat shims ─────────────────────────────────────
-  // The GitHub methods are still implemented on LinearClient (legacy: the
-  // class started life as the only client and accumulated everything).
-  // Pages call them as `api.listGitHubInstallations()` etc., so forward
-  // each call onto the linear instance until GitHub gets its own client.
-  //
-  // Without these shims the page hits "is not a function" on a minified
-  // method name and white-screens — see white-screen fix history.
-
-  listGitHubInstallations(): Promise<GitHubInstallation[]> {
-    return this.linear.listGitHubInstallations();
-  }
-  listGitHubPublications(installationId: string): Promise<GitHubPublication[]> {
-    return this.linear.listGitHubPublications(installationId);
-  }
-  getGitHubPublication(id: string): Promise<GitHubPublication> {
-    return this.linear.getGitHubPublication(id);
-  }
-  updateGitHubPublication(
-    id: string,
-    patch: { persona?: Partial<{ name: string; avatarUrl: string | null }>; capabilities?: string[] },
-  ): Promise<GitHubPublication> {
-    return this.linear.updateGitHubPublication(id, patch);
-  }
-  unpublishGitHub(id: string): Promise<void> {
-    return this.linear.unpublishGitHub(id);
-  }
-  startGitHubA1(input: PublishWizardInput): Promise<GitHubA1FormStep> {
-    return this.linear.startGitHubA1(input);
-  }
-  submitGitHubCredentials(input: {
-    formToken: string;
-    appId: string;
-    privateKey: string;
-    webhookSecret: string;
-    clientId?: string;
-    clientSecret?: string;
-  }): Promise<GitHubA1InstallLink> {
-    return this.linear.submitGitHubCredentials(input);
-  }
-  createGitHubHandoffLink(formToken: string): Promise<HandoffLink> {
-    return this.linear.createGitHubHandoffLink(formToken);
-  }
-
   // ─── Sessions (used by the integrations activity timeline) ────────────
+  //
+  // /v1/sessions returns the user's full session set with metadata; we
+  // filter client-side. For active integrations this is fine — sessions are
+  // bounded per user — but a future paged endpoint with provider-side
+  // filtering would be cleaner. Lives on IntegrationsApi directly because
+  // it's not provider-scoped.
 
-  listSessions(opts: { limit?: number } = {}): Promise<SessionSummary[]> {
-    return this.linear.listSessions(opts);
+  async listSessions(opts: { limit?: number } = {}): Promise<SessionSummary[]> {
+    const limit = opts.limit ?? 50;
+    const r = await request<{ data: SessionSummary[] }>(
+      this.basePath,
+      `/v1/sessions?limit=${limit}`,
+    );
+    return r.data;
   }
 }
