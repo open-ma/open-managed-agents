@@ -629,7 +629,24 @@ function EventBubble({ event }: { event: Event }) {
 // deliberately drop agent.thinking (already filtered upstream) and tool
 // result events (consumed in pairing) to keep one row per logical span.
 
-type SpanFamily = "model" | "tool" | "mcp" | "custom_tool" | "user" | "agent" | "system" | "warn" | "error";
+type SpanFamily =
+  | "model"
+  | "tool"
+  | "mcp"
+  | "custom_tool"
+  | "user"
+  | "agent"
+  | "system"
+  | "warn"
+  | "error"
+  | "schedule"     // schedule tool's "waiting for alarm" window (10s, 1h, …)
+  | "wakeup"       // user.message synthesized by onScheduledWakeup
+  | "compaction"   // span.compaction_summarize_*
+  | "outcome"      // span.outcome_evaluation_*
+  | "thread"       // sub-agent thread lifecycle / messages
+  | "aux"          // aux.model_call (web_fetch summarizer etc.)
+  | "thinking"     // agent.thinking marker
+  | "marker";      // catch-all for unrecognized event types
 
 interface Span {
   key: string;
@@ -652,6 +669,14 @@ const FAMILY_DOT: Record<SpanFamily, string> = {
   system: "bg-fg-subtle",
   warn: "bg-warning",
   error: "bg-danger",
+  schedule: "bg-info",
+  wakeup: "bg-info",
+  compaction: "bg-purple-400",
+  outcome: "bg-emerald-400",
+  thread: "bg-fg-muted",
+  aux: "bg-fg-subtle",
+  thinking: "bg-fg-subtle",
+  marker: "bg-fg-subtle",
 };
 
 const FAMILY_BAR: Record<SpanFamily, string> = {
@@ -664,6 +689,14 @@ const FAMILY_BAR: Record<SpanFamily, string> = {
   system: "bg-fg-subtle/70",
   warn: "bg-warning/70",
   error: "bg-danger/70",
+  schedule: "bg-info/40",
+  wakeup: "bg-info/70",
+  compaction: "bg-purple-400/70",
+  outcome: "bg-emerald-400/70",
+  thread: "bg-fg-muted/50",
+  aux: "bg-fg-subtle/70",
+  thinking: "bg-fg-subtle/40",
+  marker: "bg-fg-subtle/40",
 };
 
 function formatDuration(ms: number): string {
@@ -677,85 +710,195 @@ function formatDuration(ms: number): string {
 }
 
 function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
-  const timed = events.filter((e) => e.ts);
+  // Each event carries a millisecond-precision `processed_at` ISO string AND
+  // a `ts` Unix-seconds integer. The seconds-precision ts collapses every
+  // event in the same second to identical timestamps and made schedule's
+  // 10-second wait window render as a 22ms timeline. processed_at (set at
+  // SessionDO write time) is what the rest of the UI uses for ordering and
+  // is the right basis for waterfall timing too.
+  const tsMs = (e: Event): number | null => {
+    const pa = (e.data as { processed_at?: string } | undefined)?.processed_at
+      ?? (e as { processed_at?: string }).processed_at;
+    if (typeof pa === "string") {
+      const t = Date.parse(pa);
+      if (Number.isFinite(t)) return t;
+    }
+    if (typeof e.ts === "number") return e.ts * 1000; // ts is unix SECONDS — multiply
+    return null;
+  };
+
+  const timed = events.map((e) => ({ e, t: tsMs(e) })).filter((x): x is { e: Event; t: number } => x.t !== null);
   if (timed.length === 0) return { spans: [], totalMs: 0 };
 
-  const t0 = new Date(timed[0].ts!).getTime();
-  const tEnd = new Date(timed[timed.length - 1].ts!).getTime();
+  const t0 = timed[0].t;
+  const tEnd = timed[timed.length - 1].t;
   const totalMs = Math.max(1, tEnd - t0);
 
   const spans: Span[] = [];
 
-  // Index results by their use-id field for O(1) pairing.
-  const toolResults = new Map<string, Event>();
-  const mcpResults = new Map<string, Event>();
-  const customResults = new Map<string, Event>();
-  for (const e of events) {
-    if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, e);
-    else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, e);
-    else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), e);
+  // Index look-ahead pairings. O(1) instead of nested scans.
+  const toolResults = new Map<string, number>();
+  const mcpResults = new Map<string, number>();
+  const customResults = new Map<string, number>();
+  const modelEnds: number[] = [];
+  const compactEnds: number[] = [];
+  const outcomeEnds: number[] = [];
+  // parent_event_id → child timestamp. Used to pair span.wakeup_scheduled
+  // (parent) with its eventual user.message (child) — same EventBase field
+  // tool_result→tool_use uses, so this generalizes to any future
+  // schedule→fire / outcome→eval / etc. causal pair without needing custom
+  // id fields per kind.
+  const childByParent = new Map<string, number>();
+  for (const { e, t } of timed) {
+    if (e.type === "agent.tool_result" && e.tool_use_id) toolResults.set(e.tool_use_id, t);
+    else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, t);
+    else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), t);
+    else if (e.type === "span.model_request_end") modelEnds.push(t);
+    else if (e.type === "span.compaction_summarize_end") compactEnds.push(t);
+    else if (e.type === "span.outcome_evaluation_end") outcomeEnds.push(t);
+    const pid = (e as { parent_event_id?: string }).parent_event_id
+      ?? (e.data as { parent_event_id?: string } | undefined)?.parent_event_id;
+    if (pid) childByParent.set(pid, t);
   }
 
-  // Track previous completed-span end so we can derive a "model" span as the
-  // gap between the last result/user.message and the next agent.message.
-  let lastEnd = 0;
+  // Match each *_start with the next *_end in order.
+  let modelEndIdx = 0;
+  let compactEndIdx = 0;
+  let outcomeEndIdx = 0;
 
-  for (let i = 0; i < events.length; i++) {
-    const e = events[i];
-    if (!e.ts) continue;
-    const startMs = new Date(e.ts).getTime() - t0;
+  // Streaming chunks (deltas + start/end markers from incremental rendering)
+  // are broadcast-only; the canonical event (agent.message / agent.thinking)
+  // lands on commit and is what timeline should show.
+  const STREAMING_NOISE = new Set([
+    "agent.message_chunk",
+    "agent.message_stream_start",
+    "agent.message_stream_end",
+    "agent.thinking_chunk",
+    "agent.thinking_stream_start",
+    "agent.thinking_stream_end",
+    "agent.tool_use_input_chunk",
+    "agent.tool_use_input_stream_start",
+    "agent.tool_use_input_stream_end",
+  ]);
+
+  for (let i = 0; i < timed.length; i++) {
+    const { e, t } = timed[i];
+    const startMs = t - t0;
+
+    if (STREAMING_NOISE.has(e.type)) continue;
 
     if (e.type === "agent.tool_use" || e.type === "agent.custom_tool_use") {
       const result = e.type === "agent.tool_use"
         ? toolResults.get(String(e.id))
         : customResults.get(String(e.id));
-      const endMs = result?.ts ? new Date(result.ts).getTime() - t0 : startMs;
+      const endMs = result != null ? result - t0 : startMs;
       spans.push({
         key: `tool-${e.id ?? i}`,
         family: e.type === "agent.tool_use" ? "tool" : "custom_tool",
         label: String(e.name ?? "tool"),
-        detail: result ? "completed" : "no result",
+        detail: result != null ? "completed" : "no result",
         startMs,
         durationMs: Math.max(0, endMs - startMs),
       });
-      lastEnd = Math.max(lastEnd, endMs);
     } else if (e.type === "agent.mcp_tool_use") {
       const result = mcpResults.get(String(e.id));
-      const endMs = result?.ts ? new Date(result.ts).getTime() - t0 : startMs;
+      const endMs = result != null ? result - t0 : startMs;
       spans.push({
         key: `mcp-${e.id ?? i}`,
         family: "mcp",
         label: `${String(e.mcp_server_name ?? "mcp")}:${String(e.name ?? "?")}`,
-        detail: result ? "completed" : "no result",
+        detail: result != null ? "completed" : "no result",
         startMs,
         durationMs: Math.max(0, endMs - startMs),
       });
-      lastEnd = Math.max(lastEnd, endMs);
     } else if (
       e.type === "agent.tool_result" ||
       e.type === "agent.mcp_tool_result" ||
       e.type === "user.custom_tool_result"
     ) {
-      // consumed via pairing above — skip the row
+      // consumed via pairing above — no row
       continue;
+    } else if (e.type === "span.model_request_start") {
+      // Wraps everything the model loop did (thinking + tool calls + final
+      // text) for one turn. This is what answers "how long did the agent
+      // take to respond?" — the next agent.message lands at the end.
+      const end = modelEnds[modelEndIdx++] ?? t;
+      spans.push({
+        key: `model-${i}`,
+        family: "model",
+        label: "model turn",
+        startMs,
+        durationMs: Math.max(0, end - t0 - startMs),
+      });
+    } else if (e.type === "span.compaction_summarize_start") {
+      const end = compactEnds[compactEndIdx++] ?? t;
+      spans.push({
+        key: `compact-${i}`,
+        family: "compaction",
+        label: "compaction",
+        startMs,
+        durationMs: Math.max(0, end - t0 - startMs),
+      });
+    } else if (e.type === "span.outcome_evaluation_start") {
+      const end = outcomeEnds[outcomeEndIdx++] ?? t;
+      spans.push({
+        key: `outcome-${i}`,
+        family: "outcome",
+        label: "outcome eval",
+        startMs,
+        durationMs: Math.max(0, end - t0 - startMs),
+      });
+    } else if (
+      e.type === "span.model_request_end" ||
+      e.type === "span.compaction_summarize_end" ||
+      e.type === "span.outcome_evaluation_end" ||
+      e.type === "span.outcome_evaluation_ongoing"
+    ) {
+      continue; // paired or progress noise
+    } else if (e.type === "span.wakeup_scheduled") {
+      // Pair via parent_event_id: the eventual wakeup user.message sets its
+      // parent_event_id to this span's id (mint-then-emit, see
+      // session-do.ts:scheduleWakeup). Bar runs scheduled → fired and
+      // visualizes the actual wait, which dwarfs everything else (10s, 1h,
+      // 1d…); without it the operator can't see the wait at all on the
+      // waterfall.
+      const sid = String((e as { id?: string }).id ?? (e.data as { id?: string } | undefined)?.id ?? "");
+      const fired = sid ? childByParent.get(sid) : undefined;
+      const endMs = fired != null ? fired - t0 : startMs;
+      spans.push({
+        key: `sched-${sid || i}`,
+        family: "schedule",
+        label: "schedule waiting",
+        detail: fired != null ? "fired" : "pending",
+        startMs,
+        durationMs: Math.max(0, endMs - startMs),
+      });
     } else if (e.type === "user.message") {
-      spans.push({ key: `u-${i}`, family: "user", label: "user.message", startMs, durationMs: 0 });
-      lastEnd = Math.max(lastEnd, startMs);
+      const md = (e as { metadata?: { harness?: string; kind?: string } }).metadata;
+      const isWakeup = md?.harness === "schedule" && md?.kind === "wakeup";
+      spans.push({
+        key: `u-${i}`,
+        family: isWakeup ? "wakeup" : "user",
+        label: isWakeup ? "user.message (wakeup)" : "user.message",
+        startMs,
+        durationMs: 0,
+      });
     } else if (e.type === "agent.message") {
-      // Derive a model span from the last completed event up to here, so the
-      // chart shows where time was spent waiting on the model vs tools.
-      const modelStart = Math.max(0, Math.min(lastEnd, startMs));
-      if (startMs > modelStart) {
-        spans.push({
-          key: `m-${i}`,
-          family: "model",
-          label: "model",
-          startMs: modelStart,
-          durationMs: startMs - modelStart,
-        });
-      }
       spans.push({ key: `a-${i}`, family: "agent", label: "agent.message", startMs, durationMs: 0 });
-      lastEnd = startMs;
+    } else if (e.type === "agent.thinking") {
+      spans.push({ key: `think-${i}`, family: "thinking", label: "agent.thinking", startMs, durationMs: 0 });
+    } else if (e.type === "aux.model_call") {
+      spans.push({ key: `aux-${i}`, family: "aux", label: "aux.model_call", startMs, durationMs: 0 });
+    } else if (
+      e.type === "agent.thread_message_sent" ||
+      e.type === "agent.thread_message_received" ||
+      e.type === "agent.thread_message" ||
+      e.type === "session.thread_created" ||
+      e.type === "session.thread_idle"
+    ) {
+      spans.push({ key: `thread-${i}`, family: "thread", label: e.type.replace(/^.*\./, ""), startMs, durationMs: 0 });
+    } else if (e.type === "agent.thread_context_compacted") {
+      spans.push({ key: `compact-marker-${i}`, family: "compaction", label: "thread compacted", startMs, durationMs: 0 });
     } else if (e.type === "session.error") {
       spans.push({
         key: `err-${i}`,
@@ -776,6 +919,11 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       });
     } else if (e.type.startsWith("session.")) {
       spans.push({ key: `s-${i}`, family: "system", label: e.type, startMs, durationMs: 0 });
+    } else {
+      // Catch-all: surface unknown types as instant markers rather than
+      // silently dropping. New event types added later show up immediately
+      // and the operator can decide whether to give them dedicated visuals.
+      spans.push({ key: `mk-${i}`, family: "marker", label: e.type, startMs, durationMs: 0 });
     }
   }
 

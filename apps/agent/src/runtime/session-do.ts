@@ -1,6 +1,6 @@
 import { Agent } from "agents";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn } from "@open-managed-agents/shared";
+import { logWarn, generateEventId } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
   ensureSchema as ensureEventLogSchema,
@@ -471,6 +471,12 @@ export class SessionDO extends Agent<Env, SessionState> {
       prompt: args.prompt,
       scheduled_at: new Date().toISOString(),
       kind,
+      // Mint the span event id up front so the eventual wakeup user.message
+      // can set parent_event_id = this id. EventBase.parent_event_id is the
+      // existing causal-predecessor field (tool_result→tool_use uses it the
+      // same way) — Console / SDK / dashboards that already understand it
+      // get correct schedule→wakeup linking for free.
+      parent_event_id: generateEventId(),
     });
 
     const fireAt = typeof sched.time === "number" ? new Date(sched.time * 1000).toISOString() : undefined;
@@ -481,6 +487,10 @@ export class SessionDO extends Agent<Env, SessionState> {
     // relying on WS subscribers being attached at schedule time.
     this.persistAndBroadcastEvent({
       type: "span.wakeup_scheduled",
+      // Pre-minted id so onScheduledWakeup can stamp this on the wakeup
+      // user.message's parent_event_id. The schedule_id (framework's) is
+      // exposed separately for cancel/list addressing.
+      id: (sched.payload as { parent_event_id?: string } | undefined)?.parent_event_id,
       schedule_id: sched.id,
       fire_at: fireAt,
       cron: kind === "cron" ? args.cron : undefined,
@@ -505,6 +515,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     prompt: string;
     scheduled_at: string;
     kind: "one_shot" | "cron";
+    parent_event_id?: string;
   }): Promise<void> {
     if (this.state.status === "terminated") {
       // Skip silently — terminated sessions should not be resurrected.
@@ -515,6 +526,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     const event: UserMessageEvent = {
       type: "user.message",
       content: [{ type: "text", text: payload.prompt }],
+      // Causal link back to the span.wakeup_scheduled event whose alarm
+      // just fired. Same field tool_result→tool_use uses; Console waterfall
+      // pairs with it to draw the schedule-waiting bar (and any future
+      // consumer that walks event ancestry gets it for free).
+      ...(payload.parent_event_id ? { parent_event_id: payload.parent_event_id } : {}),
       metadata: {
         harness: "schedule",
         kind: "wakeup",
