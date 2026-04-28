@@ -18,6 +18,15 @@ export interface ClientOptions {
   /** Custom fetch — useful for tests, proxies, or runtimes where the
    *  global fetch is missing. Defaults to `globalThis.fetch`. */
   fetch?: typeof fetch;
+  /** Maximum number of automatic retries when the server returns 503
+   *  with a `Retry-After` header. Set to 0 to disable retries entirely.
+   *  Defaults to 3 — covers the worst case where a freshly-built
+   *  environment needs both binding propagation and container warm-up. */
+  maxRetries?: number;
+  /** Hard cap on a single Retry-After value (seconds). Servers can
+   *  technically request very long waits; clamping protects callers
+   *  from accidental DoS. Defaults to 30. */
+  maxRetryAfterSeconds?: number;
 }
 
 /**
@@ -28,6 +37,8 @@ export class Client {
   readonly baseUrl: string;
   readonly fetcher: typeof fetch;
   private readonly headers: Record<string, string>;
+  private readonly maxRetries: number;
+  private readonly maxRetryAfterSeconds: number;
 
   constructor(opts: ClientOptions) {
     if (!opts.apiKey && !opts.bearer) {
@@ -35,6 +46,8 @@ export class Client {
     }
     this.baseUrl = (opts.baseUrl ?? "https://openma.dev").replace(/\/+$/, "");
     this.fetcher = opts.fetch ?? globalThis.fetch.bind(globalThis);
+    this.maxRetries = opts.maxRetries ?? 3;
+    this.maxRetryAfterSeconds = opts.maxRetryAfterSeconds ?? 30;
     this.headers = {
       "user-agent": opts.userAgent
         ?? "Mozilla/5.0 (compatible; OpenManagedAgents-SDK/0.1; +https://openma.dev)",
@@ -64,7 +77,13 @@ export class Client {
 
   /** Lower-level — returns the raw Response. Used by SSE consumers
    *  (sessions.chat, sessions.tail) so they can drive the byte stream
-   *  themselves. Auth, query-string, and 4xx-throwing are still applied. */
+   *  themselves. Auth, query-string, and 4xx-throwing are still applied.
+   *
+   *  Auto-retries on 503 + Retry-After up to `maxRetries` times. Other
+   *  failures throw immediately. The body is preserved across retries —
+   *  callers that pass a streaming body must clone it themselves before
+   *  the first attempt or pass `{ retryable: false }`.
+   */
   async raw(
     method: string,
     path: string,
@@ -73,20 +92,38 @@ export class Client {
       headers?: Record<string, string>;
       query?: Record<string, string | number | boolean | undefined>;
       signal?: AbortSignal;
+      /** Disable retry logic for this call (e.g. when body is a stream). */
+      retryable?: boolean;
     },
   ): Promise<Response> {
     const url = this.buildUrl(path, init?.query);
-    const res = await this.fetcher(url, {
-      method,
-      headers: { ...this.headers, ...init?.headers },
-      body: init?.body ?? undefined,
-      signal: init?.signal,
-    });
-    if (!res.ok) {
+    const retryable = init?.retryable !== false;
+    let attempt = 0;
+    while (true) {
+      const res = await this.fetcher(url, {
+        method,
+        headers: { ...this.headers, ...init?.headers },
+        body: init?.body ?? undefined,
+        signal: init?.signal,
+      });
+      if (res.ok) return res;
+
+      // 503 + Retry-After — back off and retry. The server uses this for
+      // recoverable conditions: env still building, or the per-env service
+      // binding was just lazy-healed and the new isolate hasn't loaded yet.
+      const retryAfter = res.headers.get("retry-after");
+      if (retryable && res.status === 503 && retryAfter && attempt < this.maxRetries) {
+        const seconds = Math.min(Math.max(parseInt(retryAfter, 10) || 0, 1), this.maxRetryAfterSeconds);
+        // Drain body to free the connection before sleeping
+        await res.body?.cancel().catch(() => undefined);
+        await new Promise(r => setTimeout(r, seconds * 1000));
+        attempt += 1;
+        continue;
+      }
+
       const text = await res.text().catch(() => "");
       throw new OpenMAError(res.status, text, res.url);
     }
-    return res;
   }
 
   private buildUrl(path: string, query?: Record<string, string | number | boolean | undefined>): string {
