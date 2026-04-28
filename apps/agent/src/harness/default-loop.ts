@@ -352,12 +352,13 @@ export class DefaultHarness implements HarnessInterface {
     const cached = applyProviderCacheStrategy(model, systemPrompt, tools, messages);
     const finalMessages = cached.messages;
 
-    // 4. Resolve model id (used by per-step span events emitted in onStepFinish).
+    // 4. Resolve model id (used by per-step span events emitted via the
+    //    streamText `start-step`/`finish-step` chunk + onStepFinish hooks).
     //    The OUTER span.model_request_start/end pair around streamText() that
     //    used to live here was removed: ai-sdk's streamText loops internally
     //    (one call per tool round-trip), so a single outer span hid the actual
     //    per-call timing + per-call usage that Anthropic's Managed Agents wire
-    //    spec exposes. Per-step spans are emitted in onStepFinish below.
+    //    spec exposes.
     const modelId = typeof agent.model === "string" ? agent.model : agent.model.id;
 
     // 5. Run agent loop with retry + timeout + prompt caching.
@@ -384,17 +385,15 @@ export class DefaultHarness implements HarnessInterface {
       const liveThinking = new Set<string>();
       const liveToolInput = new Set<string>();
 
-      // Per-step span tracking: each ai-sdk step is one model API call.
-      // We emit span.model_request_start at the moment the step begins
-      // (which equals streamText() start for step 0, and the previous
-      // onStepFinish wall-time for steps ≥ 1) and span.model_request_end
-      // in onStepFinish, paired by id via model_request_start_id.
-      let stepStartId = generateEventId();
-      runtime.broadcast({
-        type: "span.model_request_start",
-        id: stepStartId,
-        model: modelId,
-      });
+      // Per-step model_request span pair. We hook ai-sdk's
+      // `experimental_onStepStart` (fires before each provider call) to mint
+      // an id + broadcast span.model_request_start, and pair via
+      // model_request_start_id from onStepFinish / onError / onAbort.
+      // The `experimental_` prefix means vercel-ai may rename / change
+      // signature without notice; pin the ai-sdk version on dep upgrade.
+      // Anthropic's Managed Agents wire spec uses one pair per actual
+      // model call (not per streamText loop), which is what this gives us.
+      let stepStartId: string | null = null;
 
       const r = streamText({
       model,
@@ -441,6 +440,19 @@ export class DefaultHarness implements HarnessInterface {
           }
           void runtime.broadcastToolInputChunk(c.id, c.delta);
         }
+      },
+
+      // experimental_: vercel-ai may rename / change signature without
+      // notice. Pin ai-sdk version on dep upgrade. The stable alternative
+      // (consume `result.fullStream` for `start-step` chunks) requires
+      // intercepting the iterator; this is materially simpler.
+      experimental_onStepStart: () => {
+        stepStartId = generateEventId();
+        runtime.broadcast({
+          type: "span.model_request_start",
+          id: stepStartId,
+          model: modelId,
+        });
       },
 
       onStepFinish: async (step) => {
@@ -538,10 +550,12 @@ export class DefaultHarness implements HarnessInterface {
           .filter((p) => p.type === "text")
           .map((p) => p.text ?? "")
           .join("");
+        const providerResponseId = (step.response as { id?: string } | undefined)?.id;
         runtime.broadcast({
           type: "span.model_request_end",
           model: modelId,
-          model_request_start_id: stepStartId,
+          model_request_start_id: stepStartId ?? undefined,
+          provider_response_id: providerResponseId,
           model_usage: step.usage ? {
             input_tokens: step.usage.inputTokens ?? 0,
             output_tokens: step.usage.outputTokens ?? 0,
@@ -550,19 +564,46 @@ export class DefaultHarness implements HarnessInterface {
           } : undefined,
           finish_reason: step.finishReason,
           final_text_length: stepText.length,
+          is_error: false,
         });
+        // Clear so onError / onAbort don't double-close.
+        stepStartId = null;
+      },
 
-        // If ai-sdk decides to run another step (because finishReason is
-        // "tool-calls" and stepCountIs(100) hasn't tripped), open the next
-        // span pair right away so the outer model API call latency is
-        // captured. If this was the last step the next start is unused
-        // and that's fine — no end will pair against it.
-        stepStartId = generateEventId();
+      onError: ({ error }) => {
+        // streamText aborts the stream on error before onStepFinish can fire
+        // for the failing step. Without closing here, the span.model_request_start
+        // we emitted in the start-step chunk hangs unpaired. Mirror the
+        // shape of the success-path end so consumers can treat is_error as
+        // the success/fail discriminator.
+        if (!stepStartId) return;
+        const message = error instanceof Error ? error.message : String(error);
         runtime.broadcast({
-          type: "span.model_request_start",
-          id: stepStartId,
+          type: "span.model_request_end",
           model: modelId,
+          model_request_start_id: stepStartId,
+          finish_reason: "error",
+          final_text_length: 0,
+          is_error: true,
+          error_message: message.slice(0, 500),
+        } as SessionEvent);
+        stepStartId = null;
+      },
+
+      onAbort: () => {
+        // User interrupt or AbortSignal trip. Same dangling-start problem as
+        // onError. is_error stays false — abort is a normal control flow,
+        // not a model failure.
+        if (!stepStartId) return;
+        runtime.broadcast({
+          type: "span.model_request_end",
+          model: modelId,
+          model_request_start_id: stepStartId,
+          finish_reason: "aborted",
+          final_text_length: 0,
+          is_error: false,
         });
+        stepStartId = null;
       },
     });
       // streamText returns a StreamTextResult; consumeStream forces the
