@@ -18,6 +18,10 @@ import type {
   LinearInstallation,
   LinearPublication,
   LinearSubmitCredentialsInput,
+  LinearPersonalTokenInput,
+  LinearPersonalTokenResult,
+  LinearDispatchRule,
+  LinearDispatchRuleInput,
   PublishWizardInput,
   SessionSummary,
   SlackInstallation,
@@ -126,6 +130,56 @@ class LinearClient {
       method: "POST",
       body: JSON.stringify({ formToken }),
     });
+  }
+
+  /** Symphony-equivalent install: paste a Linear PAT, get a publication. */
+  async installPersonalToken(input: LinearPersonalTokenInput): Promise<LinearPersonalTokenResult> {
+    return request<LinearPersonalTokenResult>(
+      this.basePath,
+      "/v1/integrations/linear/personal-token",
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
+  // ─── Linear: dispatch rules CRUD ────────────────────────────────────
+
+  async listDispatchRules(publicationId: string): Promise<LinearDispatchRule[]> {
+    const r = await request<{ rules: LinearDispatchRule[] }>(
+      this.basePath,
+      `/v1/integrations/linear/publications/${encodeURIComponent(publicationId)}/dispatch-rules`,
+    );
+    return r.rules;
+  }
+
+  async createDispatchRule(
+    publicationId: string,
+    input: LinearDispatchRuleInput,
+  ): Promise<LinearDispatchRule> {
+    return request<LinearDispatchRule>(
+      this.basePath,
+      `/v1/integrations/linear/publications/${encodeURIComponent(publicationId)}/dispatch-rules`,
+      { method: "POST", body: JSON.stringify(input) },
+    );
+  }
+
+  async updateDispatchRule(
+    publicationId: string,
+    ruleId: string,
+    patch: LinearDispatchRuleInput,
+  ): Promise<LinearDispatchRule> {
+    return request<LinearDispatchRule>(
+      this.basePath,
+      `/v1/integrations/linear/publications/${encodeURIComponent(publicationId)}/dispatch-rules/${encodeURIComponent(ruleId)}`,
+      { method: "PATCH", body: JSON.stringify(patch) },
+    );
+  }
+
+  async deleteDispatchRule(publicationId: string, ruleId: string): Promise<void> {
+    await request<unknown>(
+      this.basePath,
+      `/v1/integrations/linear/publications/${encodeURIComponent(publicationId)}/dispatch-rules/${encodeURIComponent(ruleId)}`,
+      { method: "DELETE" },
+    );
   }
 
   // ─── GitHub: list + manage ──────────────────────────────────────────
@@ -339,5 +393,20 @@ export class IntegrationsApi {
   }
   createHandoffLink(formToken: string): Promise<HandoffLink> {
     return this.linear.createHandoffLink(formToken);
+  }
+  installPersonalToken(input: LinearPersonalTokenInput): Promise<LinearPersonalTokenResult> {
+    return this.linear.installPersonalToken(input);
+  }
+  listDispatchRules(publicationId: string): Promise<LinearDispatchRule[]> {
+    return this.linear.listDispatchRules(publicationId);
+  }
+  createDispatchRule(publicationId: string, input: LinearDispatchRuleInput): Promise<LinearDispatchRule> {
+    return this.linear.createDispatchRule(publicationId, input);
+  }
+  updateDispatchRule(publicationId: string, ruleId: string, patch: LinearDispatchRuleInput): Promise<LinearDispatchRule> {
+    return this.linear.updateDispatchRule(publicationId, ruleId, patch);
+  }
+  deleteDispatchRule(publicationId: string, ruleId: string): Promise<void> {
+    return this.linear.deleteDispatchRule(publicationId, ruleId);
   }
 }
