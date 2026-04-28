@@ -70,6 +70,22 @@ jobs:
           CF_SUBDOMAIN: ${{ vars.CF_SUBDOMAIN }}
         run: node scripts/lane-generate.mjs '${{ inputs.lane_name }}'
 
+      # Apply D1 migrations to the staging DB before any worker boots. Lanes
+      # share staging data (KV / D1 / R2), so this targets the staging D1
+      # binding via the lane wrangler config (env.staging override). Idempotent:
+      # wrangler skips already-applied migration files. Without this step a new
+      # migration that ships in the same commit hits production code paths
+      # before the schema is in place — last incident: migration 0009 added
+      # github_installations / github_publications, lane code queried them, D1
+      # 500'd until manually applied.
+      - name: Apply D1 migrations (staging)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          cd apps/main
+          npx wrangler d1 migrations apply openma-auth-staging --remote \
+            --config "wrangler.lane-${{ inputs.lane_name }}.jsonc"
+
       # Deploy order is constrained by a circular dependency: integrations
       # binds MAIN→main, main binds INTEGRATIONS→integrations and
       # SANDBOX_sandbox_default→agent. Cloudflare rejects service bindings
