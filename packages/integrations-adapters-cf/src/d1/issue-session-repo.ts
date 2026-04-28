@@ -2,6 +2,7 @@ import type {
   IssueSession,
   IssueSessionRepo,
   IssueSessionStatus,
+  SessionId,
 } from "@open-managed-agents/integrations-core";
 
 interface Row {
@@ -83,5 +84,47 @@ export class D1IssueSessionRepo implements IssueSessionRepo {
       status: row.status as IssueSessionStatus,
       createdAt: row.created_at,
     };
+  }
+
+  /**
+   * PAT-mode atomic claim. We can't use webhooks to dedupe (no app source),
+   * so the dispatch sweep MUST hold an exclusive lock on (publication, issue)
+   * before calling sessions.create() — otherwise two concurrent ticks both
+   * spawn workers for the same issue.
+   *
+   * Pattern: INSERT new row OR overwrite existing inactive row, atomically.
+   * RETURNING tells us whether we actually wrote (= claimed). An existing
+   * 'active' row blocks the WHERE on the conflict path, so RETURNING is
+   * empty for "someone else already owns this".
+   */
+  async claim(input: {
+    tenantId: string;
+    publicationId: string;
+    issueId: string;
+    sessionId: SessionId;
+    nowMs: number;
+  }): Promise<boolean> {
+    const result = await this.db
+      .prepare(
+        `INSERT INTO linear_issue_sessions
+           (tenant_id, publication_id, issue_id, session_id, status, created_at)
+         VALUES (?, ?, ?, ?, 'active', ?)
+         ON CONFLICT(publication_id, issue_id) DO UPDATE SET
+           tenant_id  = excluded.tenant_id,
+           session_id = excluded.session_id,
+           status     = excluded.status,
+           created_at = excluded.created_at
+         WHERE linear_issue_sessions.status != 'active'
+         RETURNING session_id`,
+      )
+      .bind(
+        input.tenantId,
+        input.publicationId,
+        input.issueId,
+        input.sessionId,
+        input.nowMs,
+      )
+      .first<{ session_id: string }>();
+    return result !== null;
   }
 }

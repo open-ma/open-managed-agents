@@ -56,9 +56,13 @@ export class LinearGraphQLClient {
       url: LINEAR_GRAPHQL_URL,
       headers: {
         "content-type": "application/json",
-        authorization: accessToken.startsWith("Bearer ")
-          ? accessToken
-          : `Bearer ${accessToken}`,
+        // Linear has two auth flavors with DIFFERENT framing:
+        //   - OAuth access tokens require `Authorization: Bearer <token>`.
+        //   - Personal API Keys (`lin_api_…`) MUST be sent as the raw token
+        //     with no Bearer prefix. Linear's API explicitly rejects
+        //     `Bearer lin_api_…` with INPUT_ERROR.
+        // Detect by prefix; pass-through if the caller already added Bearer.
+        authorization: formatLinearAuth(accessToken),
       },
       body: JSON.stringify({ query, variables }),
     });
@@ -98,4 +102,19 @@ export class LinearGraphQLError extends Error {
     super(message);
     this.name = "LinearGraphQLError";
   }
+}
+
+/**
+ * Build the Linear `Authorization` header value for a token. Linear's API
+ * has two incompatible framings:
+ *   - OAuth access tokens MUST be sent as `Bearer <token>`.
+ *   - Personal API Keys (PATs, prefix `lin_api_`) MUST be sent raw — Linear
+ *     returns `INPUT_ERROR` if you add `Bearer`.
+ *
+ * Pass-through when caller has already prefixed `Bearer ` themselves.
+ */
+function formatLinearAuth(token: string): string {
+  if (token.startsWith("Bearer ")) return token;
+  if (token.startsWith("lin_api_")) return token;
+  return `Bearer ${token}`;
 }

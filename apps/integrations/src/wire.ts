@@ -57,7 +57,7 @@ export function buildContainer(env: Env): Container {
  * SlackInstallationRepo (adds getUserToken/setUserToken/setBotVaultId/getBotVaultId).
  *
  * Reuses every shared adapter (clock/ids/crypto/hmac/jwt/http/sessions/vaults/
- * tenants/githubApps/issueSessions/authoredComments) from buildCfContainer
+ * tenants/githubApps/issueSessions) from buildCfContainer
  * and only swaps the installations/publications/apps/setupLinks/webhookEvents/
  * sessionScopes ports for slack-specific D1 repos.
  */
