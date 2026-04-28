@@ -1925,9 +1925,7 @@ async function main() {
   // the user typed a real subcommand but forgot the required positional.
   let needsArgMatch: Cmd | null = null;
   for (const c of commands) {
-    const verbMatch = c.match.length === 1
-      ? args[0] === c.match[0]
-      : args[0] === c.match[0] && args[1] === c.match[1];
+    const verbMatch = c.match.every((tok, i) => args[i] === tok);
     if (!verbMatch) continue;
     if (c.needsArg && !args[c.match.length]) {
       needsArgMatch = c;
