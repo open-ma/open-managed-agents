@@ -36,6 +36,15 @@
 
   "observability": { "enabled": true },
 
+  // Linear dispatch sweep — runs every minute. The sweep itself is cheap
+  // (a handful of D1 queries + Linear GraphQL fetches per due rule), but
+  // each rule's `poll_interval_seconds` field gates real work, so most
+  // ticks are no-ops. Bumping to */1 for tight feedback during evaluation;
+  // can relax to */5 later if it ever becomes a noisy-neighbor problem.
+  "triggers": {
+    "crons": ["* * * * *"]
+  },
+
   // Per-IP and per-tenant rate limit on webhook receivers. Public endpoints
   // (Linear / GitHub / Slack POST here unauthenticated and we sig-verify),
   // so an attacker can flood with garbage payloads (per-IP catches it) and
@@ -63,6 +72,9 @@
         { "binding": "MAIN", "service": "managed-agents-staging" }
       ],
       "observability": { "enabled": true },
+      "triggers": {
+        "crons": ["* * * * *"]
+      },
       "ratelimits": [
         { "name": "RL_WEBHOOK_IP",     "namespace_id": "3002", "simple": { "limit": 30, "period": 10 } },
         { "name": "RL_WEBHOOK_TENANT", "namespace_id": "3004", "simple": { "limit": 60, "period": 60 } }

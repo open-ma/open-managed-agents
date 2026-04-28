@@ -23,10 +23,11 @@ import { WorkerHttpClient } from "./http";
 import { CryptoIdGenerator } from "./ids";
 import { WebCryptoJwtSigner } from "./jwt";
 import { D1AppRepo } from "./d1/app-repo";
-import { D1AuthoredCommentRepo } from "./d1/authored-comment-repo";
+import { D1DispatchRuleRepo } from "./d1/dispatch-rule-repo";
 import { D1GitHubAppRepo } from "./d1/github-app-repo";
 import { D1InstallationRepo } from "./d1/installation-repo";
 import { D1IssueSessionRepo } from "./d1/issue-session-repo";
+import { D1PendingEventRepo } from "./d1/pending-event-repo";
 import { D1PublicationRepo } from "./d1/publication-repo";
 import { D1SetupLinkRepo } from "./d1/setup-link-repo";
 import { D1SlackSessionScopeRepo } from "./d1/slack/session-scope-repo";
@@ -79,8 +80,9 @@ export function buildCfRepos(env: CfReposEnv) {
   const githubApps = new D1GitHubAppRepo(env.db, cryptoImpl, ids);
   const webhookEvents = new D1WebhookEventStore(env.db);
   const issueSessions = new D1IssueSessionRepo(env.db);
-  const authoredComments = new D1AuthoredCommentRepo(env.db);
   const setupLinks = new D1SetupLinkRepo(env.db, ids);
+  const dispatchRules = new D1DispatchRuleRepo(env.db, ids);
+  const pendingEvents = new D1PendingEventRepo(env.db, ids);
   // Slack-specific repo also satisfies the Container's `sessionScopes` slot —
   // Linear/GitHub never call into it (they use issueSessions instead). Still
   // required by the Container interface.
@@ -101,8 +103,9 @@ export function buildCfRepos(env: CfReposEnv) {
     webhookEvents,
     issueSessions,
     sessionScopes,
-    authoredComments,
     setupLinks,
+    dispatchRules,
+    pendingEvents,
   };
 }
 
