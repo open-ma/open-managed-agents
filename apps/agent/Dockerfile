@@ -1,8 +1,10 @@
 # OMA Default Sandbox Base Image
-# Based on cloudflare/sandbox:0.8.11 which already has: Node.js 20, npm, git, jq, curl
+# Based on cloudflare/sandbox:0.9.1 which already has: Node.js 20, npm, git, jq, curl
 # We add: Python 3.12, Go, Rust, build tools, ripgrep
+# IMPORTANT: keep this version in lock-step with @cloudflare/sandbox in package.json,
+# otherwise the container's HTTP routes drift from the SDK and exec calls 500.
 
-FROM docker.io/cloudflare/sandbox:0.8.11
+FROM docker.io/cloudflare/sandbox:0.9.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 
