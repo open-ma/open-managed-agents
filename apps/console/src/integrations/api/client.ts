@@ -340,4 +340,54 @@ export class IntegrationsApi {
   createHandoffLink(formToken: string): Promise<HandoffLink> {
     return this.linear.createHandoffLink(formToken);
   }
+
+  // ─── GitHub backward-compat shims ─────────────────────────────────────
+  // The GitHub methods are still implemented on LinearClient (legacy: the
+  // class started life as the only client and accumulated everything).
+  // Pages call them as `api.listGitHubInstallations()` etc., so forward
+  // each call onto the linear instance until GitHub gets its own client.
+  //
+  // Without these shims the page hits "is not a function" on a minified
+  // method name and white-screens — see white-screen fix history.
+
+  listGitHubInstallations(): Promise<GitHubInstallation[]> {
+    return this.linear.listGitHubInstallations();
+  }
+  listGitHubPublications(installationId: string): Promise<GitHubPublication[]> {
+    return this.linear.listGitHubPublications(installationId);
+  }
+  getGitHubPublication(id: string): Promise<GitHubPublication> {
+    return this.linear.getGitHubPublication(id);
+  }
+  updateGitHubPublication(
+    id: string,
+    patch: { persona?: Partial<{ name: string; avatarUrl: string | null }>; capabilities?: string[] },
+  ): Promise<GitHubPublication> {
+    return this.linear.updateGitHubPublication(id, patch);
+  }
+  unpublishGitHub(id: string): Promise<void> {
+    return this.linear.unpublishGitHub(id);
+  }
+  startGitHubA1(input: PublishWizardInput): Promise<GitHubA1FormStep> {
+    return this.linear.startGitHubA1(input);
+  }
+  submitGitHubCredentials(input: {
+    formToken: string;
+    appId: string;
+    privateKey: string;
+    webhookSecret: string;
+    clientId?: string;
+    clientSecret?: string;
+  }): Promise<GitHubA1InstallLink> {
+    return this.linear.submitGitHubCredentials(input);
+  }
+  createGitHubHandoffLink(formToken: string): Promise<HandoffLink> {
+    return this.linear.createGitHubHandoffLink(formToken);
+  }
+
+  // ─── Sessions (used by the integrations activity timeline) ────────────
+
+  listSessions(opts: { limit?: number } = {}): Promise<SessionSummary[]> {
+    return this.linear.listSessions(opts);
+  }
 }
