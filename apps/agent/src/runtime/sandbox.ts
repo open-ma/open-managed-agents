@@ -143,24 +143,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     await sandbox.setEnvVars(envVars);
   }
 
-  /**
-   * SDK-based snapshot helpers — currently UNUSED. Were drivers for the
-   * base_snapshot lazy-prepare path that was reverted because CF Sandbox
-   * SDK calls run inside blockConcurrencyWhile (canceled at ~10-15s,
-   * which the createBackup mutex blew through). Kept as scaffolding for
-   * if/when CF exposes an out-of-DO snapshot primitive.
-   */
-  async restoreImageSnapshot(handle: { backup: { id: string; dir: string }; env_vars: Record<string, string> }): Promise<void> {
-    const sandbox = await this.getSandbox();
-    await sandbox.restoreBackup(handle.backup);
-    await sandbox.setEnvVars(handle.env_vars);
-  }
-
-  async createImageSnapshot(dir: string, name: string, ttl_seconds: number): Promise<{ id: string; dir: string; localBucket?: boolean }> {
-    const sandbox = await this.getSandbox();
-    return sandbox.createBackup({ dir, name, ttl: ttl_seconds, localBucket: true });
-  }
-
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {
     this.commandSecrets.set(commandPrefix, secrets);
   }
