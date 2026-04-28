@@ -393,7 +393,14 @@ export class DefaultHarness implements HarnessInterface {
       // signature without notice; pin the ai-sdk version on dep upgrade.
       // Anthropic's Managed Agents wire spec uses one pair per actual
       // model call (not per streamText loop), which is what this gives us.
+      //
+      // OMA extension: between start and end we also emit
+      // span.model_first_token at the first chunk of each step (any chunk
+      // type counts — text, reasoning, tool-input). Splits the bar into
+      // TTFT vs generation in the timeline. `stepSawFirstChunk` is the
+      // per-step latch; reset on each onStepStart.
       let stepStartId: string | null = null;
+      let stepSawFirstChunk = false;
 
       const r = streamText({
       model,
@@ -404,6 +411,20 @@ export class DefaultHarness implements HarnessInterface {
       abortSignal: signal,
 
       onChunk: ({ chunk }) => {
+        // First chunk of this step → emit span.model_first_token. Pair via
+        // model_request_start_id so consumers can split TTFT (start →
+        // first_token) from generation (first_token → end). Any chunk
+        // counts: text-delta, reasoning-delta, or tool-input-start —
+        // whichever fires first signals "the model has begun responding".
+        if (!stepSawFirstChunk && stepStartId) {
+          stepSawFirstChunk = true;
+          runtime.broadcast({
+            type: "span.model_first_token",
+            model: modelId,
+            model_request_start_id: stepStartId,
+          });
+        }
+
         if (chunk.type === "text-delta") {
           if (!currentMessageId) {
             currentMessageId = generateEventId();
@@ -448,6 +469,7 @@ export class DefaultHarness implements HarnessInterface {
       // intercepting the iterator; this is materially simpler.
       experimental_onStepStart: () => {
         stepStartId = generateEventId();
+        stepSawFirstChunk = false;
         runtime.broadcast({
           type: "span.model_request_start",
           id: stepStartId,

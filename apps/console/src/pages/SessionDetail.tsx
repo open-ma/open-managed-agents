@@ -662,6 +662,9 @@ interface Span {
   startMs: number;
   /** 0 for instants */
   durationMs: number;
+  /** Optional: ms from this span's start to first-token (model spans only).
+   *  Used to render a TTFT divider inside the bar. */
+  ttftMs?: number;
   /** Source events that contributed to this span (1 for instants,
    *  2 for paired spans, possibly more for tool calls with streaming
    *  input chunks). Click-to-expand renders the raw JSON of these. */
@@ -757,6 +760,11 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
   // associated. FIFO fallback below for events that predate the field.
   const modelEndsById = new Map<string, { t: number; e: Event; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finishReason?: string }>();
   const modelEndsFifo: { t: number; e: Event }[] = [];
+  // OMA-extension span — pairs to model_request_start the same way the end
+  // does. Lets the model bar split into TTFT (start→first_token) and
+  // generation (first_token→end). FIFO fallback for events without ids.
+  const modelFirstTokensById = new Map<string, { t: number; e: Event }>();
+  const modelFirstTokensFifo: { t: number; e: Event }[] = [];
   const compactEnds: { t: number; e: Event }[] = [];
   const outcomeEnds: { t: number; e: Event }[] = [];
   // parent_event_id → child {t, event}. Used to pair span.wakeup_scheduled
@@ -775,6 +783,12 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       const sid = (e as { model_request_start_id?: string }).model_request_start_id ?? data?.model_request_start_id;
       if (sid) modelEndsById.set(sid, { t, e, usage: data?.model_usage, finishReason: data?.finish_reason });
     }
+    else if (e.type === "span.model_first_token") {
+      modelFirstTokensFifo.push({ t, e });
+      const data = (e.data as { model_request_start_id?: string } | undefined);
+      const sid = (e as { model_request_start_id?: string }).model_request_start_id ?? data?.model_request_start_id;
+      if (sid) modelFirstTokensById.set(sid, { t, e });
+    }
     else if (e.type === "span.compaction_summarize_end") compactEnds.push({ t, e });
     else if (e.type === "span.outcome_evaluation_end") outcomeEnds.push({ t, e });
     const pid = (e as { parent_event_id?: string }).parent_event_id
@@ -784,6 +798,7 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
 
   // FIFO fallback indices for events that lack id-based pairing.
   let modelEndFifoIdx = 0;
+  let modelFirstTokenFifoIdx = 0;
   let compactEndIdx = 0;
   let outcomeEndIdx = 0;
 
@@ -860,21 +875,26 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       // start event id; old data without ids falls back to FIFO order.
       const sid = String((e as { id?: string }).id ?? (e.data as { id?: string } | undefined)?.id ?? "");
       const matched = sid ? modelEndsById.get(sid) : (modelEndsFifo[modelEndFifoIdx++] ?? undefined);
+      const ftMatch = sid ? modelFirstTokensById.get(sid) : (modelFirstTokensFifo[modelFirstTokenFifoIdx++] ?? undefined);
       const end = matched?.t ?? t;
       const usage = matched?.usage;
       if (matched?.e) sourceEvents.push(matched.e);
+      if (ftMatch?.e) sourceEvents.push(ftMatch.e);
       // Bar label gets a token count when we have it — useful at-a-glance
       // ("did this turn read 100k tokens or 1k?") without opening details.
       const tokSummary = usage
         ? `${usage.input_tokens}↓ ${usage.output_tokens}↑${usage.cache_read_input_tokens ? ` ⚡${usage.cache_read_input_tokens}` : ""}`
         : undefined;
+      const ttftMs = ftMatch ? Math.max(0, ftMatch.t - t) : undefined;
+      const ttftSummary = typeof ttftMs === "number" ? `TTFT ${formatDuration(ttftMs)}` : undefined;
       pushSpan({
         key: `model-${sid || i}`,
         family: "model",
         label: "model call",
-        detail: [matched?.finishReason, tokSummary].filter(Boolean).join(" · ") || undefined,
+        detail: [matched?.finishReason, ttftSummary, tokSummary].filter(Boolean).join(" · ") || undefined,
         startMs,
         durationMs: Math.max(0, end - t0 - startMs),
+        ttftMs,
       });
     } else if (e.type === "span.compaction_summarize_start") {
       const matched = compactEnds[compactEndIdx++];
@@ -900,6 +920,7 @@ function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
       });
     } else if (
       e.type === "span.model_request_end" ||
+      e.type === "span.model_first_token" ||
       e.type === "span.compaction_summarize_end" ||
       e.type === "span.outcome_evaluation_end" ||
       e.type === "span.outcome_evaluation_ongoing"
@@ -1054,10 +1075,19 @@ function TimelineView({ events }: { events: Event[] }) {
                 </div>
                 <div className="flex-1 relative h-5">
                   {width > 0 ? (
-                    <div
-                      className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
-                      style={{ left: `${left}%`, width: `${width}%` }}
-                    />
+                    <>
+                      <div
+                        className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
+                        style={{ left: `${left}%`, width: `${width}%` }}
+                      />
+                      {typeof s.ttftMs === "number" && s.durationMs > 0 && (
+                        <div
+                          className="absolute h-3 top-1 w-px bg-bg"
+                          style={{ left: `${left + (s.ttftMs / totalMs) * 100}%` }}
+                          title={`TTFT ${formatDuration(s.ttftMs)}`}
+                        />
+                      )}
+                    </>
                   ) : (
                     <div
                       className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
