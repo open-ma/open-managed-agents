@@ -184,6 +184,23 @@ integrations.vars = {
 integrations.services = [
   { binding: "MAIN", service: NAMES.main },
 ];
+// Override integrations' AUTH_DB to share main's D1 instance.
+//
+// apps/integrations/wrangler.jsonc carries a stale database_id
+// ("67edb234-...") for the same logical "openma-auth" database; that id was
+// migrated/deleted at some point and the prod config never got re-pointed
+// (commit c537c9b fixed staging only). New deploys against the stale id fail
+// with D1 binding 'AUTH_DB' references database '...' which was not found.
+//
+// Both bindings target the same database_name ("openma-auth"), so reusing
+// main's id here is the right behavior for lanes. Should be a no-op once
+// apps/integrations/wrangler.jsonc itself is fixed.
+const mainAuthDb = (main.d1_databases || []).find((db) => db.binding === "AUTH_DB");
+if (mainAuthDb && Array.isArray(integrations.d1_databases)) {
+  for (const db of integrations.d1_databases) {
+    if (db.binding === "AUTH_DB") db.database_id = mainAuthDb.database_id;
+  }
+}
 writeJson(`apps/integrations/wrangler.lane-${LANE}.jsonc`, integrations);
 
 // ── 6. Summary ──────────────────────────────────────────────────────────────
