@@ -43,15 +43,23 @@ export async function patchScriptSettings(
   token: string,
   settings: Partial<ScriptSettings>,
 ): Promise<void> {
+  // CF /workers/scripts/{name}/settings PATCH requires multipart/form-data
+  // with a "settings" part carrying the JSON body. Sending application/json
+  // gives "Content-Type must be one of: multipart/form-data" (415).
+  const form = new FormData();
+  form.append(
+    "settings",
+    new Blob([JSON.stringify(settings)], { type: "application/json" }),
+  );
   const res = await fetch(
     `${CF_API_BASE}/accounts/${accountId}/workers/scripts/${scriptName}/settings`,
     {
       method: "PATCH",
       headers: {
         Authorization: `Bearer ${token}`,
-        "Content-Type": "application/json",
+        // Do NOT set Content-Type — fetch derives the boundary from FormData.
       },
-      body: JSON.stringify(settings),
+      body: form,
     },
   );
   if (!res.ok) {
