@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
-import { buildContainer } from "../../wire";
+import { buildGitHubContainer } from "../../wire";
 import { buildProviders } from "../../providers";
 
 // GitHub App "Setup URL" callback — where GitHub redirects after the user
@@ -40,8 +40,8 @@ app.get("/:appOmaId/callback", async (c) => {
     );
   }
 
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const container = buildGitHubContainer(c.env);
+  const { github } = buildProviders(c.env);
 
   let result;
   try {
