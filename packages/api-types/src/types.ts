@@ -530,22 +530,48 @@ export interface SpanModelRequestStartEvent extends EventBase {
   model?: string;
 }
 
+/**
+ * OMA extension (not in Anthropic's wire spec). Fires at the first chunk of a
+ * model response, between span.model_request_start and span.model_request_end.
+ * Lets the timeline split TTFT (start → first_token) from generation
+ * (first_token → end). Pair via model_request_start_id, same as
+ * span.model_request_end.
+ */
+export interface SpanModelFirstTokenEvent extends EventBase {
+  type: "span.model_first_token";
+  model?: string;
+  model_request_start_id?: string;
+}
+
 export interface SpanModelRequestEndEvent extends EventBase {
   type: "span.model_request_end";
   model?: string;
+  /** Event id of the matching span.model_request_start. Mirrors the
+   *  Anthropic Managed Agents wire field — explicit pairing instead of
+   *  positional/FIFO matching. Optional for backwards compat with older
+   *  events written before this field landed. */
+  model_request_start_id?: string;
+  /** Upstream provider's response id (Anthropic's `msg_01...`, OpenAI's
+   *  `chatcmpl-...`, etc.). Useful for tracing back to provider dashboards
+   *  / logs when investigating a specific call. */
+  provider_response_id?: string;
   model_usage?: {
     input_tokens: number;
     output_tokens: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
-  /** Why the model stopped: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other".
+  /** Why the model stopped: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "aborted" | "other".
    *  Surfaces silent terminations (e.g. provider returns finish_reason="stop"
    *  with empty text mid-task) for debugging incomplete agent runs. */
   finish_reason?: string;
   /** Length of the final assistant text (may be 0 even when finish_reason="stop").
    *  Helps spot the case where the model claims to be done but emits no text. */
   final_text_length?: number;
+  /** True if the model returned an error. Mirrors Anthropic's is_error wire field. */
+  is_error?: boolean;
+  /** Error message when is_error=true. Truncated to 500 chars. */
+  error_message?: string;
 }
 
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {
@@ -643,6 +669,7 @@ export type SessionEvent =
   | SessionThreadCreatedEvent
   | SessionThreadIdleEvent
   | SpanModelRequestStartEvent
+  | SpanModelFirstTokenEvent
   | SpanModelRequestEndEvent
   | SpanOutcomeEvaluationStartEvent
   | SpanOutcomeEvaluationOngoingEvent

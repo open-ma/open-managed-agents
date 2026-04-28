@@ -1,13 +1,14 @@
 // Composition root.
 //
-// Linear + GitHub run against the shared `linear_*` / `github_*` D1 tables and
-// share one Container built via buildCfContainer. Slack runs against parallel
-// `slack_*` tables (dual-token model doesn't fit the shared installations
-// schema) and gets its own SlackContainer.
+// Each provider gets its own Container so installations/publications point at
+// the right per-provider table. Linear → linear_*, GitHub → github_*, Slack
+// → slack_*. The shared adapters (clock/ids/crypto/hmac/jwt/http/sessions/
+// vaults/tenants/githubApps/issueSessions/etc.) come from buildCfContainer
+// regardless of provider — only the provider-scoped repos differ.
 //
-// To add a provider that fits the shared tables: just instantiate it with
-// the result of buildContainer(env). For one with parallel tables (slack-
-// style), follow buildSlackContainer's pattern below.
+// To add a provider that fits the linear schema verbatim: just instantiate it
+// with buildContainer(env). For one with parallel tables (slack/github-style),
+// follow buildGitHubContainer / buildSlackContainer below.
 //
 // DB routing: integrations always run against env.AUTH_DB. Tenant sharding
 // (when enabled in apps/main) doesn't apply here — webhook entry can't
@@ -28,26 +29,44 @@ import type { Container } from "@open-managed-agents/integrations-core";
 import type { SlackContainer } from "@open-managed-agents/slack";
 import type { Env } from "./env";
 
-/**
- * Shared container — Linear + GitHub use these `linear_*` / `github_*` tables.
- * `provider_id` distinguishes rows in the shared tables.
- *
- * sessionScopes uses D1SlackSessionScopeRepo as the shared impl too — it
- * happens to point at slack_thread_sessions, but Linear/GitHub never call
- * into it (they use issueSessions instead). Concrete impl is required by
- * the Container interface contract.
- */
-export function buildContainer(env: Env): Container {
-  const cfEnv: CfContainerEnv = {
+function cfEnvOf(env: Env): CfContainerEnv {
+  return {
     db: env.AUTH_DB,
     controlPlaneDb: env.AUTH_DB,
     MCP_SIGNING_KEY: env.MCP_SIGNING_KEY,
     MAIN: env.MAIN,
     INTEGRATIONS_INTERNAL_SECRET: env.INTEGRATIONS_INTERNAL_SECRET,
   };
-  const base = buildCfContainer(cfEnv);
+}
+
+/**
+ * Linear container — `installations`/`publications` already point at the
+ * linear_* repos via buildCfContainer's default wiring. sessionScopes is
+ * Linear-irrelevant but required by the Container shape; we hand it the
+ * Slack impl since the slot is unused on the Linear path (Linear uses
+ * issueSessions instead).
+ */
+export function buildContainer(env: Env): Container {
+  const base = buildCfContainer(cfEnvOf(env));
   return {
     ...base,
+    sessionScopes: new D1SlackSessionScopeRepo(env.AUTH_DB),
+  };
+}
+
+/**
+ * GitHub container — swaps in the github_* installations/publications repos
+ * (githubInstallations/githubPublications from buildCfRepos). All other
+ * shared adapters (githubApps, webhookEvents, sessions, vaults, etc.) carry
+ * over unchanged. sessionScopes follows the same unused-but-required pattern
+ * as buildContainer.
+ */
+export function buildGitHubContainer(env: Env): Container {
+  const base = buildCfContainer(cfEnvOf(env));
+  return {
+    ...base,
+    installations: base.githubInstallations,
+    publications: base.githubPublications,
     sessionScopes: new D1SlackSessionScopeRepo(env.AUTH_DB),
   };
 }
@@ -62,14 +81,7 @@ export function buildContainer(env: Env): Container {
  * sessionScopes ports for slack-specific D1 repos.
  */
 export function buildSlackContainer(env: Env): SlackContainer {
-  const cfEnv: CfContainerEnv = {
-    db: env.AUTH_DB,
-    controlPlaneDb: env.AUTH_DB,
-    MCP_SIGNING_KEY: env.MCP_SIGNING_KEY,
-    MAIN: env.MAIN,
-    INTEGRATIONS_INTERNAL_SECRET: env.INTEGRATIONS_INTERNAL_SECRET,
-  };
-  const base = buildCfContainer(cfEnv);
+  const base = buildCfContainer(cfEnvOf(env));
   return {
     ...base,
     installations: new D1SlackInstallationRepo(env.AUTH_DB, base.crypto, base.ids),

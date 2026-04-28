@@ -3,7 +3,7 @@
 A **lane** is a copy of OMA's three Cloudflare Workers (`main`, `agent`,
 `integrations`) deployed under unique names, intended for short-lived
 per-PR / per-feature testing. Lane code is isolated; lane data is **shared
-with production**.
+with staging** (never prod).
 
 ## TL;DR
 
@@ -27,51 +27,59 @@ gh workflow run teardown-lane.yml \
 | Resource | Lane | Note |
 |---|---|---|
 | Worker code | **isolated** | Each lane runs its own `git_ref` |
-| `SESSION_DO` storage | **isolated** | Per-worker DO namespace; lane sessions are not visible to prod |
+| `SESSION_DO` storage | **isolated** | Per-worker DO namespace; lane sessions are not visible to staging or prod |
 | `Sandbox` containers | **isolated** | Each lane builds + runs its own sandbox image |
-| `CONFIG_KV` | shared with prod | Tenant data, agent configs, vault snapshots |
-| `AUTH_DB` (D1) | shared with prod | Users, agents, environments, sessions metadata |
-| Integrations D1 | shared with prod | OAuth tokens, GitHub installation creds |
-| `FILES_BUCKET` / `WORKSPACE_BUCKET` / `BACKUP_BUCKET` (R2) | shared with prod | File uploads, sandbox workspaces, env image backups |
-| `VECTORIZE` (memory-search) | shared with prod | Memory store embeddings |
-| `AI`, `BROWSER`, `SEND_EMAIL` | shared with prod | Account-scoped CF bindings |
-| Rate-limit namespaces | shared with prod | Lane traffic counts against prod RL counters |
-| Analytics dataset (`oma_events`) | shared with prod | Events from all lanes land here |
+| `CONFIG_KV` | shared with staging | Tenant data, agent configs, vault snapshots |
+| `AUTH_DB` (D1) | shared with staging | Users, agents, environments, sessions metadata (`openma-auth-staging`) |
+| Integrations D1 | shared with staging | OAuth tokens, GitHub installation creds |
+| `FILES_BUCKET` / `WORKSPACE_BUCKET` / `BACKUP_BUCKET` (R2) | shared with staging | (R2 buckets are physically the same as prod's, but lane-side mutations originate from the staging code path) |
+| `VECTORIZE` (memory-search) | shared with staging | Memory store embeddings |
+| `AI`, `BROWSER`, `SEND_EMAIL` | shared (account-scoped CF bindings) | |
+| Rate-limit namespaces | shared with staging | Lane traffic counts against staging RL counters, not prod |
+| Analytics dataset (`oma_events_staging`) | shared with staging | Events from all lanes land here, separated from prod's `oma_events` |
 | Cron triggers (`* * * * *`) | **disabled on lanes** | Lane main workers do NOT run eval-runner |
 
 ## Risks (you must understand these before deploying a lane)
 
-1. **A lane writing to prod data is a real prod write.** A buggy migration
-   path on a lane will corrupt prod KV / D1 the same as a buggy prod deploy.
-   Don't run destructive code on a lane that you wouldn't run on prod.
-2. **D1 schema must be backward-compatible.** Lane code only sees columns
-   that already exist in prod's `AUTH_DB`. Don't add a column on a lane and
-   then deploy code that reads it — the lane will 500.
+1. **A lane writing to staging data is a real staging write.** A buggy
+   migration on a lane will corrupt staging KV / D1 the same as a buggy
+   staging deploy. Don't run destructive code on a lane that you wouldn't
+   run on staging.
+2. **D1 schema must be compatible with what's deployed to staging.** Lane
+   code only sees columns that already exist in `openma-auth-staging`.
+   Don't add a column on a lane and then deploy code that reads it — the
+   lane will 500.
 3. **Linear / GitHub / Slack OAuth callbacks** posted by your lane's
-   `integrations` worker write into prod's integrations D1. If your lane
-   code messes with token storage, prod sessions can break.
+   `integrations` worker write into staging's integrations D1. If your
+   lane code messes with token storage, staging sessions can break.
 4. **Rate limits are global per `namespace_id`.** A misbehaving lane that
-   spams `/v1/sessions` will eat into prod's `RL_SESSIONS_TENANT` budget.
+   spams `/v1/sessions` will eat into staging's `RL_SESSIONS_TENANT`
+   budget.
 5. **Sandbox container costs amplify.** Each lane gets its own
    `sandbox-default-lane-<name>` worker with its own container image and
-   `max_instances: 50`. Five live lanes = 250 potential container instances.
-6. **Tear down promptly.** Lanes don't auto-expire. Stale lane workers keep
-   their DO storage rows around indefinitely.
+   `max_instances: 50`. Five live lanes = 250 potential container
+   instances.
+6. **Tear down promptly.** Lanes don't auto-expire (until reclaim-lanes
+   runs at 03:17 UTC daily, 7-day threshold). Stale lane workers keep
+   their DO storage rows around indefinitely otherwise.
 
 ## How it works
 
-`scripts/lane-generate.mjs` reads the prod `wrangler.jsonc` files
-verbatim (so lane configs stay in sync with prod's bindings), then mutates:
+`scripts/lane-generate.mjs` reads each prod `wrangler.jsonc`, deep-merges
+the `env.staging` block over the top-level (replacing resource bindings
+and analytics dataset), then mutates:
 
 - Sets unique `name` per worker (`*-lane-<name>` suffix)
 - Rebinds `services` arrays so lane workers point at lane peers
 - Sets `vars.INTEGRATIONS_ORIGIN` / `vars.GATEWAY_ORIGIN` to the lane's
-  workers.dev URL (lane Linear webhooks land on the lane, not prod)
+  workers.dev URL (lane Linear webhooks land on the lane, not staging)
+- Sets `vars.TURNSTILE_SITE_KEY` to Cloudflare's always-pass test value
 - Strips `routes` (lanes use workers.dev, no custom domain)
 - Strips `triggers.crons` (no eval-runner on lanes)
-- Strips `env.*` (no staging override on a lane)
+- Strips `env.*` (lane configs are flat, no further env nesting)
 
 Output goes to `apps/<worker>/wrangler.lane-<name>.jsonc` (gitignored).
+
 
 ## Local dry-run
 
@@ -104,8 +112,15 @@ Required CI vars/secrets (already used by `deploy.yml`):
 - `secrets.CLOUDFLARE_API_TOKEN`
 - `secrets.API_KEY`, `secrets.ANTHROPIC_API_KEY`, `secrets.BETTER_AUTH_SECRET`,
   `secrets.INTEGRATIONS_INTERNAL_SECRET`, `secrets.MCP_SIGNING_KEY`,
-  `secrets.TURNSTILE_SECRET_KEY`, `secrets.INTERNAL_TOKEN`
+  `secrets.INTERNAL_TOKEN`
 - Optional: `secrets.ANTHROPIC_BASE_URL`, `secrets.TAVILY_API_KEY`
+
+Lanes use Cloudflare's published always-pass Turnstile keys (site
+`1x00000000000000000000AA` / secret `1x0000000000000000000000000000000AA`)
+hardcoded into `lane-generate.mjs` and `deploy-lane.yml` so `/auth/*`
+flows work without exposing prod's real Turnstile secret to lane workers.
+Don't sign up with sensitive credentials on a lane — AUTH_DB is shared
+with prod, so the user record persists.
 
 If a secret isn't in the repo, the deploy step skips it silently and the
 lane comes up without that capability — you can `wrangler secret put` it

@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
-import { buildContainer } from "../../wire";
 import { buildProviders } from "../../providers";
 import { webhookRateLimitMiddleware, shouldDropForTenantRateLimit } from "../../webhook-rate-limit";
 
@@ -25,8 +24,7 @@ app.post("/app/:appOmaId", async (c) => {
   const deliveryId = headers["x-github-delivery"] ?? null;
   const eventType = headers["x-github-event"] ?? null;
 
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const { github } = buildProviders(c.env);
   const outcome = await github.handleWebhook({
     providerId: "github",
     // Reusing the WebhookRequest.installationId field to carry our

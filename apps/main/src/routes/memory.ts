@@ -53,6 +53,10 @@ function handle(err: unknown): Response {
     );
   }
   if (err instanceof MemoryEmbeddingFailedError) {
+    // Surface the underlying cause to logs — embedding failures are upstream
+    // (Workers AI binding missing, model unavailable, quota), and the
+    // operator needs to see WHICH for triage. Public response stays opaque.
+    console.error("memory_embedding_failed:", err.message, err.cause);
     return new Response(
       JSON.stringify({ error: err.code, detail: "embedding service unavailable; try again" }),
       { status: 503, headers: { "content-type": "application/json" } },

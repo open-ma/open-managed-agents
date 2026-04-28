@@ -70,17 +70,40 @@ jobs:
           CF_SUBDOMAIN: ${{ vars.CF_SUBDOMAIN }}
         run: node scripts/lane-generate.mjs '${{ inputs.lane_name }}'
 
-      # Deploy order matters: a worker's `services` binding fails to resolve at
-      # deploy time if the target worker doesn't yet exist. integrations has no
-      # service bindings, so it goes first; agent binds to integrations; main
-      # binds to both.
-      - name: Deploy integrations worker
+      # Apply D1 migrations to the staging DB before any worker boots. Lanes
+      # share staging data (KV / D1 / R2), so this targets the staging D1
+      # binding via the lane wrangler config (env.staging override). Idempotent:
+      # wrangler skips already-applied migration files. Without this step a new
+      # migration that ships in the same commit hits production code paths
+      # before the schema is in place — last incident: migration 0009 added
+      # github_installations / github_publications, lane code queried them, D1
+      # 500'd until manually applied.
+      - name: Apply D1 migrations (staging)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+        run: |
+          cd apps/main
+          npx wrangler d1 migrations apply openma-auth-staging --remote \
+            --config "wrangler.lane-${{ inputs.lane_name }}.jsonc"
+
+      # Deploy order is constrained by a circular dependency: integrations
+      # binds MAIN→main, main binds INTEGRATIONS→integrations and
+      # SANDBOX_sandbox_default→agent. Cloudflare rejects service bindings
+      # whose target worker doesn't yet exist, so we stage:
+      #   1. integrations (stubbed: services array stripped) — workers exist
+      #   2. agent (binds integrations, which now exists)
+      #   3. main (binds integrations + agent, both exist)
+      #   4. integrations re-deploy (now with MAIN binding to lane main)
+      # jq is preinstalled on ubuntu-latest.
+      - name: Deploy integrations worker (stub, no service bindings yet)
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/integrations
-          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+          jq 'del(.services)' "wrangler.lane-${{ inputs.lane_name }}.jsonc" \
+            > "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
+          npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
 
       - name: Deploy agent worker
         env:
@@ -96,6 +119,14 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/main
+          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+
+      - name: Re-deploy integrations worker (full config, MAIN binding live)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/integrations
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       # Propagate the secrets a lane needs to come up green. Skip empty values
@@ -128,8 +159,12 @@ jobs:
           set_secret BETTER_AUTH_SECRET           "$MAIN" "${{ secrets.BETTER_AUTH_SECRET }}"
           set_secret INTEGRATIONS_INTERNAL_SECRET "$MAIN" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
           set_secret MCP_SIGNING_KEY              "$MAIN" "${{ secrets.MCP_SIGNING_KEY }}"
-          set_secret TURNSTILE_SECRET_KEY         "$MAIN" "${{ secrets.TURNSTILE_SECRET_KEY }}"
           set_secret INTERNAL_TOKEN               "$MAIN" "${{ secrets.INTERNAL_TOKEN }}"
+          # Cloudflare-published always-pass Turnstile secret. Paired with the
+          # always-pass site key set via vars in lane-generate.mjs. Lanes are
+          # dev-only; prod's real Turnstile secret stays out of the lane.
+          # https://developers.cloudflare.com/turnstile/troubleshooting/testing/
+          set_secret TURNSTILE_SECRET_KEY         "$MAIN" "1x0000000000000000000000000000000AA"
 
           echo "Setting secrets on $AGENT:"
           set_secret API_KEY                      "$AGENT" "${{ secrets.API_KEY }}"
@@ -141,6 +176,11 @@ jobs:
           echo "Setting secrets on $INT:"
           set_secret API_KEY                      "$INT" "${{ secrets.API_KEY }}"
           set_secret INTEGRATIONS_INTERNAL_SECRET "$INT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+          # MCP_SIGNING_KEY is required by WebCryptoAesGcm in the integrations
+          # gateway (encrypts/decrypts vault tokens); without it any
+          # /linear/publications/* or /github/publications/* call 500s with
+          # "secret must be non-empty".
+          set_secret MCP_SIGNING_KEY              "$INT" "${{ secrets.MCP_SIGNING_KEY }}"
 
       - name: Health check
         run: |
