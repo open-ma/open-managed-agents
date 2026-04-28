@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { IntegrationsApi } from "../api/client";
+import { SecretInput, TextInput } from "../../components/Input";
 
 const api = new IntegrationsApi();
 
@@ -149,15 +150,11 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
             <label className="block text-[13px] font-medium text-fg mb-1.5">
               Persona display name
             </label>
-            <input
+            <TextInput
               className="w-full px-3 py-2 rounded-md border border-border bg-bg text-[14px]"
               placeholder="e.g. Coder"
               value={personaName}
               onChange={(e) => setPersonaName(e.target.value)}
-              name="persona-display-name"
-              autoComplete="off"
-              data-1p-ignore
-              data-lpignore="true"
             />
           </div>
 
@@ -165,16 +162,11 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
             <label className="block text-[13px] font-medium text-fg mb-1.5">
               Linear Personal API Key
             </label>
-            <input
-              type="password"
+            <SecretInput
               className="w-full px-3 py-2 rounded-md border border-border bg-bg text-[14px] font-mono"
               placeholder="lin_api_…"
               value={pat}
               onChange={(e) => setPat(e.target.value)}
-              name="linear-pat"
-              autoComplete="new-password"
-              data-1p-ignore
-              data-lpignore="true"
             />
             <p className="mt-1 text-[12px] text-fg-muted">
               Generate at Linear → Settings → Security &amp; access → Personal API keys.
