@@ -129,11 +129,9 @@ export default {
         },
       ),
     );
-    // base_snapshot env-prep tick: REMOVED. Was previously a cron-driven
-    // poll over building envs that pinged the agent worker's prep-tick
-    // endpoint. Lazy prepare in SessionDO replaced it (env create now
-    // returns ready immediately; first session boot does the install +
-    // createBackup inline). See apps/agent/src/runtime/session-do.ts
-    // lazyPrepareBaseSnapshot.
+    // base_snapshot env-prep tick: REMOVED. Was a cron-driven poll over
+    // building envs feeding the (also-removed) prep-tick endpoint. The
+    // base_snapshot lazy-install path that came after it was reverted
+    // too — dockerfile/CI is now the only build path.
   },
 };
