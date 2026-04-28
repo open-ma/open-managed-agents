@@ -160,6 +160,11 @@ jobs:
           echo "Setting secrets on $INT:"
           set_secret API_KEY                      "$INT" "${{ secrets.API_KEY }}"
           set_secret INTEGRATIONS_INTERNAL_SECRET "$INT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+          # MCP_SIGNING_KEY is required by WebCryptoAesGcm in the integrations
+          # gateway (encrypts/decrypts vault tokens); without it any
+          # /linear/publications/* or /github/publications/* call 500s with
+          # "secret must be non-empty".
+          set_secret MCP_SIGNING_KEY              "$INT" "${{ secrets.MCP_SIGNING_KEY }}"
 
       - name: Health check
         run: |
