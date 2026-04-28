@@ -74,14 +74,17 @@ export function useApi() {
       const body = await res.json().catch(() => ({}));
       const message = (body as { error?: string }).error || `HTTP ${res.status}`;
 
-      // Self-heal stale-tenant lockout: if we sent x-active-tenant and the
-      // backend says we're not a member, the localStorage value is wrong
-      // (tenant deleted, membership revoked, or — common on lanes — the user
-      // signed in to a different upstream where their tenant_id differs).
-      // Clearing localStorage + reloading once lets the request retry without
-      // the header; backend then falls back to user.tenantId default. The
-      // sessionStorage guard prevents reload loops if 403 is from some other
-      // membership check (e.g. /v1/me/cli-tokens with an explicit body
+      // Safety net for stale-tenant lockout. The primary fix is in Login.tsx
+      // (clears localStorage on every successful auth transition). This still
+      // catches edge cases the login fix can't:
+      //   - User opens 2 tabs, signs out + signs in as a different user in
+      //     tab A; tab B still has the old user's tenant pin in localStorage
+      //   - A tenant the user belonged to gets revoked while they're already
+      //     logged in
+      //   - Cross-domain edge cases where localStorage carries over via
+      //     extension / shared profile sync
+      // Reload-loop guard prevents bouncing if 403 is from some unrelated
+      // membership check (e.g. POST /v1/me/cli-tokens with an explicit body
       // tenant_id that's not ours).
       if (
         res.status === 403 &&
