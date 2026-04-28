@@ -1,7 +1,11 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
-import type { LinearInstallation, LinearPublication } from "../api/types";
+import type {
+  LinearInstallation,
+  LinearPublication,
+  LinearDispatchRule,
+} from "../api/types";
 
 const api = new IntegrationsApi();
 
@@ -277,7 +281,184 @@ function PublicationCard({
           </div>
         </div>
       )}
+      {open && <DispatchRulesSection publicationId={pub.id} />}
     </div>
+  );
+}
+
+/**
+ * Cron-driven autopilot rules for a publication. Each rule defines a filter
+ * (label / state / project) — the cron sweep assigns matching unassigned
+ * issues to this bot. Symphony-style "issue lands in Todo → bot picks it up
+ * automatically", scoped per-publication.
+ */
+function DispatchRulesSection({ publicationId }: { publicationId: string }) {
+  const [rules, setRules] = useState<LinearDispatchRule[] | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [showCreate, setShowCreate] = useState(false);
+
+  async function load() {
+    setError(null);
+    try {
+      const r = await api.listDispatchRules(publicationId);
+      setRules(r);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+  useEffect(() => { void load(); }, [publicationId]);
+
+  async function toggle(rule: LinearDispatchRule) {
+    try {
+      await api.updateDispatchRule(publicationId, rule.id, { enabled: !rule.enabled });
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  async function remove(rule: LinearDispatchRule) {
+    if (!confirm(`Delete rule "${rule.name}"?`)) return;
+    try {
+      await api.deleteDispatchRule(publicationId, rule.id);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    }
+  }
+
+  return (
+    <div className="border-t border-border px-5 py-4 bg-bg-surface/30">
+      <div className="flex items-center justify-between mb-3">
+        <div>
+          <h4 className="text-[13px] font-medium text-fg">Autopilot rules</h4>
+          <p className="text-[12px] text-fg-muted">
+            Cron sweep assigns matching unassigned issues to this bot. At least one filter required (matching everything is a footgun).
+          </p>
+        </div>
+        <button
+          onClick={() => setShowCreate((s) => !s)}
+          className="px-3 py-1.5 text-[12px] rounded-md border border-border hover:border-brand transition-colors"
+        >
+          {showCreate ? "Cancel" : "+ Add rule"}
+        </button>
+      </div>
+
+      {error && <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/40 text-[12px] text-red-300">{error}</div>}
+
+      {showCreate && (
+        <CreateRuleForm
+          publicationId={publicationId}
+          onCreated={() => { setShowCreate(false); void load(); }}
+        />
+      )}
+
+      {rules === null && <p className="text-[12px] text-fg-muted">Loading…</p>}
+      {rules?.length === 0 && (
+        <p className="text-[12px] text-fg-muted">No rules. Add one to enable autopilot.</p>
+      )}
+      {rules && rules.length > 0 && (
+        <div className="space-y-2">
+          {rules.map((r) => (
+            <div key={r.id} className="border border-border rounded-md px-3 py-2 bg-bg flex items-center justify-between text-[12px]">
+              <div className="min-w-0">
+                <div className="font-medium text-fg flex items-center gap-2">
+                  {r.name}
+                  {!r.enabled && <span className="text-fg-subtle">(disabled)</span>}
+                </div>
+                <div className="text-fg-muted font-mono text-[11px] mt-0.5">
+                  {r.filter_label && <>label=<code>{r.filter_label}</code> </>}
+                  {r.filter_states && r.filter_states.length > 0 && <>states=<code>{r.filter_states.join(",")}</code> </>}
+                  {r.filter_project_id && <>project=<code>{r.filter_project_id.slice(0, 8)}…</code> </>}
+                  · max={r.max_concurrent} · poll={r.poll_interval_seconds}s
+                  {r.last_polled_at && ` · last=${new Date(r.last_polled_at).toLocaleTimeString()}`}
+                </div>
+              </div>
+              <div className="flex items-center gap-2">
+                <button onClick={() => toggle(r)} className="px-2 py-1 text-[11px] hover:underline">
+                  {r.enabled ? "Disable" : "Enable"}
+                </button>
+                <button onClick={() => remove(r)} className="px-2 py-1 text-[11px] text-danger hover:underline">
+                  Delete
+                </button>
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function CreateRuleForm({
+  publicationId,
+  onCreated,
+}: {
+  publicationId: string;
+  onCreated: () => void;
+}) {
+  const [name, setName] = useState("Auto-pickup");
+  const [label, setLabel] = useState("bot-ready");
+  const [states, setStates] = useState("Todo");
+  const [maxC, setMaxC] = useState(5);
+  const [poll, setPoll] = useState(600);
+  const [working, setWorking] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    setError(null);
+    if (!label.trim() && !states.trim()) {
+      setError("Need at least a label or a state");
+      return;
+    }
+    setWorking(true);
+    try {
+      await api.createDispatchRule(publicationId, {
+        name: name.trim() || "Auto-pickup",
+        filter_label: label.trim() || null,
+        filter_states: states.trim() ? states.split(",").map((s) => s.trim()).filter(Boolean) : null,
+        filter_project_id: null,
+        max_concurrent: maxC,
+        poll_interval_seconds: poll,
+      });
+      onCreated();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  return (
+    <form onSubmit={submit} className="mb-3 border border-border rounded-md p-3 bg-bg space-y-2 text-[12px]">
+      {error && <div className="px-2 py-1.5 rounded bg-red-500/10 border border-red-500/40 text-red-300">{error}</div>}
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex flex-col gap-1">
+          <span className="text-fg-muted">Name</span>
+          <input value={name} onChange={(e) => setName(e.target.value)} className="px-2 py-1 border border-border rounded bg-bg" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-fg-muted">Filter label</span>
+          <input value={label} onChange={(e) => setLabel(e.target.value)} placeholder="bot-ready" className="px-2 py-1 border border-border rounded bg-bg font-mono" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-fg-muted">States (comma)</span>
+          <input value={states} onChange={(e) => setStates(e.target.value)} placeholder="Todo" className="px-2 py-1 border border-border rounded bg-bg font-mono" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-fg-muted">Max concurrent</span>
+          <input type="number" value={maxC} onChange={(e) => setMaxC(parseInt(e.target.value, 10) || 1)} min="1" max="100" className="px-2 py-1 border border-border rounded bg-bg" />
+        </label>
+        <label className="flex flex-col gap-1">
+          <span className="text-fg-muted">Poll interval (s)</span>
+          <input type="number" value={poll} onChange={(e) => setPoll(parseInt(e.target.value, 10) || 60)} min="60" max="86400" className="px-2 py-1 border border-border rounded bg-bg" />
+        </label>
+      </div>
+      <button type="submit" disabled={working} className="px-3 py-1.5 bg-brand text-brand-fg rounded text-[12px] disabled:opacity-50">
+        {working ? "Creating…" : "Create rule"}
+      </button>
+    </form>
   );
 }
 
