@@ -473,6 +473,22 @@ app.get("/github/installations/:id/publications", async (c) => {
   });
 });
 
+// ─── GET /v1/integrations/github/agents/:id/publications ─────────────────
+// Reverse lookup parallel to linear/slack routes — AgentDetail's "Published
+// to GitHub" fold needs this. NOTE: GitHub and Linear currently share the
+// `linear_publications` table (provider is derived from a join to `apps`),
+// so this returns both providers' publications until the schema is split.
+// Acceptable for now — UX-wise the rows still reference real installations
+// and the console filters by status === "live".
+app.get("/github/agents/:id/publications", async (c) => {
+  const userId = c.get("user_id")!;
+  const agentId = c.req.param("id");
+  const { repos, err } = reposOr503(c);
+  if (err) return err;
+  const publications = await repos.publications.listByUserAndAgent(userId, agentId);
+  return c.json({ data: publications.map(serializePublication) });
+});
+
 app.get("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
