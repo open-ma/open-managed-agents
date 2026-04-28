@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState, useRef, Fragment } from "react";
 import { useParams, Link } from "react-router";
 import { useApi } from "../lib/api";
 import { Markdown } from "../components/Markdown";
+import { formatDuration, formatRelative, pickTickStep, shortenId } from "../lib/format";
 
 interface Event {
   type: string;
@@ -643,30 +644,6 @@ function ClockIcon() {
   );
 }
 
-/** Truncate a long ID like `agt_01ABC…XYZ` to a few-char prefix + ellipsis,
- *  used as a fallback label when the resource's display name hasn't loaded
- *  yet. Better than rendering 30 chars of opaque hex. */
-function shortenId(id: string | undefined): string {
-  if (!id) return "—";
-  if (id.length <= 12) return id;
-  return id.slice(0, 8) + "…" + id.slice(-3);
-}
-
-function formatRelative(diffMs: number): string {
-  if (diffMs < 0) diffMs = -diffMs;
-  const sec = Math.floor(diffMs / 1000);
-  if (sec < 60) return `${sec}s ago`;
-  const min = Math.floor(sec / 60);
-  if (min < 60) return `${min}m ago`;
-  const hr = Math.floor(min / 60);
-  if (hr < 24) return `${hr}h ago`;
-  const day = Math.floor(hr / 24);
-  if (day < 30) return `${day}d ago`;
-  const mo = Math.floor(day / 30);
-  if (mo < 12) return `${mo}mo ago`;
-  return `${Math.floor(mo / 12)}y ago`;
-}
-
 function ResourcePanel({
   panel,
   onClose,
@@ -1010,15 +987,6 @@ const FAMILY_BAR: Record<SpanFamily, string> = {
   marker: "bg-fg-subtle/40",
 };
 
-function formatDuration(ms: number): string {
-  if (!Number.isFinite(ms) || ms < 0) return "—";
-  if (ms < 1) return "<1ms";
-  if (ms < 1000) return `${Math.round(ms)}ms`;
-  if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
-  const m = Math.floor(ms / 60_000);
-  const s = Math.round((ms % 60_000) / 1000);
-  return `${m}m${s}s`;
-}
 
 function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number } {
   // Each event carries a millisecond-precision `processed_at` ISO string AND
@@ -1824,10 +1792,3 @@ function TurnCard({
   );
 }
 
-function pickTickStep(totalMs: number): number {
-  // Roughly 6 ticks across the chart, snapped to a friendly unit.
-  const target = totalMs / 6;
-  const candidates = [10, 25, 50, 100, 250, 500, 1000, 2500, 5000, 10_000, 30_000, 60_000, 120_000, 300_000, 600_000];
-  for (const c of candidates) if (c >= target) return c;
-  return candidates[candidates.length - 1];
-}
