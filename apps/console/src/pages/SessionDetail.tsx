@@ -556,7 +556,11 @@ function ResourcePanel({
   panel: { kind: "agent" | "environment" | "vault"; id: string };
   onClose: () => void;
 }) {
-  const api = useApi();
+  // useApi returns { api, streamEvents } — destructure the call function
+  // explicitly. A previous version assigned the whole object to `api` and
+  // then called `api(url)`, which threw "api is not a function" and white-
+  // screened the page on first badge click.
+  const { api } = useApi();
   const [data, setData] = useState<Record<string, unknown> | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
