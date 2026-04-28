@@ -3,6 +3,9 @@ import type { Env } from "@open-managed-agents/shared";
 import {
   buildCfRepos,
   CryptoIdGenerator,
+  D1GitHubAppRepo,
+  D1GitHubInstallationRepo,
+  D1GitHubPublicationRepo,
   D1SlackAppRepo,
   D1SlackInstallationRepo,
   D1SlackPublicationRepo,
@@ -77,13 +80,36 @@ function slackReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Respon
   };
 }
 
+/**
+ * GitHub now lives in github_installations / github_publications (split out
+ * of the shared linear_* tables in migration 0009 so reverse lookups don't
+ * bleed across providers). This builds the github-specific repo bag with
+ * the same shape as `slackReposOr503` so the route handlers stay symmetric.
+ */
+function githubReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response }) {
+  const k = (c.env as unknown as Record<string, unknown>).MCP_SIGNING_KEY;
+  if (typeof k !== "string" || !k) {
+    return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
+  }
+  const crypto = new WebCryptoAesGcm(k, "integrations.tokens");
+  const ids = new CryptoIdGenerator();
+  return {
+    repos: {
+      installations: new D1GitHubInstallationRepo(c.env.AUTH_DB, crypto, ids),
+      publications: new D1GitHubPublicationRepo(c.env.AUTH_DB, ids),
+      apps: new D1GitHubAppRepo(c.env.AUTH_DB, crypto, ids),
+    },
+    err: null,
+  };
+}
+
 // ─── GET /v1/integrations/linear/installations ───────────────────────────
 
 app.get("/linear/installations", async (c) => {
   const userId = c.get("user_id")!;
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const installations = await repos.installations.listByUser(userId, "linear");
+  const installations = await repos.linearInstallations.listByUser(userId, "linear");
   return c.json({
     data: installations.map((i) => ({
       id: i.id,
@@ -104,11 +130,11 @@ app.get("/linear/installations/:id/publications", async (c) => {
   const installationId = c.req.param("id");
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const installation = await repos.installations.get(installationId);
+  const installation = await repos.linearInstallations.get(installationId);
   if (!installation || installation.userId !== userId) {
     return c.json({ error: "not found" }, 404);
   }
-  const publications = await repos.publications.listByInstallation(installationId);
+  const publications = await repos.linearPublications.listByInstallation(installationId);
   return c.json({
     data: publications.map(serializePublication),
   });
@@ -124,7 +150,7 @@ app.get("/linear/agents/:id/publications", async (c) => {
   const agentId = c.req.param("id");
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const publications = await repos.publications.listByUserAndAgent(userId, agentId);
+  const publications = await repos.linearPublications.listByUserAndAgent(userId, agentId);
   return c.json({ data: publications.map(serializePublication) });
 });
 
@@ -135,7 +161,7 @@ app.get("/linear/publications/:id", async (c) => {
   const id = c.req.param("id");
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(id);
+  const pub = await repos.linearPublications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   return c.json(serializePublication(pub));
 });
@@ -154,7 +180,7 @@ app.patch("/linear/publications/:id", async (c) => {
   const body = await c.req.json<PatchBody>();
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(id);
+  const pub = await repos.linearPublications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
 
   if (body.persona) {
@@ -165,16 +191,16 @@ app.patch("/linear/publications/:id", async (c) => {
           ? body.persona.avatarUrl
           : pub.persona.avatarUrl,
     };
-    await repos.publications.updatePersona(id, merged);
+    await repos.linearPublications.updatePersona(id, merged);
   }
   if (body.capabilities) {
-    await repos.publications.updateCapabilities(id, new Set(body.capabilities));
+    await repos.linearPublications.updateCapabilities(id, new Set(body.capabilities));
   }
   // session_granularity intentionally not exposed for update via PATCH yet —
   // changing it mid-flight has lifecycle implications. Add when we model the
   // transition properly (drain in-flight per_issue sessions, etc.).
 
-  const updated = await repos.publications.get(id);
+  const updated = await repos.linearPublications.get(id);
   return c.json(updated ? serializePublication(updated) : { id });
 });
 
@@ -185,9 +211,9 @@ app.delete("/linear/publications/:id", async (c) => {
   const id = c.req.param("id");
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(id);
+  const pub = await repos.linearPublications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
-  await repos.publications.markUnpublished(id, Date.now());
+  await repos.linearPublications.markUnpublished(id, Date.now());
   return c.json({ id, status: "unpublished" });
 });
 
@@ -246,7 +272,7 @@ app.get("/linear/publications/:id/dispatch-rules", async (c) => {
   const id = c.req.param("id");
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(id);
+  const pub = await repos.linearPublications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   const rules = await repos.dispatchRules.listByPublication(id);
   return c.json({ rules: rules.map(serializeDispatchRule) });
@@ -258,7 +284,7 @@ app.post("/linear/publications/:id/dispatch-rules", async (c) => {
   const body = await c.req.json<DispatchRulePostBody>();
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(id);
+  const pub = await repos.linearPublications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
 
   // Reject "match everything" rules — a footgun that would have the bot
@@ -309,7 +335,7 @@ app.patch("/linear/publications/:id/dispatch-rules/:ruleId", async (c) => {
   const body = await c.req.json<DispatchRulePostBody>();
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(pubId);
+  const pub = await repos.linearPublications.get(pubId);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   const existing = await repos.dispatchRules.get(ruleId);
   if (!existing || existing.publicationId !== pubId) {
@@ -335,7 +361,7 @@ app.delete("/linear/publications/:id/dispatch-rules/:ruleId", async (c) => {
   const ruleId = c.req.param("ruleId");
   const { repos, err } = reposOr503(c);
   if (err) return err;
-  const pub = await repos.publications.get(pubId);
+  const pub = await repos.linearPublications.get(pubId);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
   const existing = await repos.dispatchRules.get(ruleId);
   if (!existing || existing.publicationId !== pubId) {
@@ -432,15 +458,15 @@ app.post("/linear/handoff-link", async (c) => {
 
 // ─── GitHub: list + manage ───────────────────────────────────────────────
 //
-// GitHub publications share `linear_installations` / `linear_publications`
-// (those tables already carry a provider_id column for multi-provider use).
-// The github_apps table holds the GitHub-specific App credentials separately
-// from linear_apps because GitHub Apps have extra fields (private key, slug,
-// bot login). See packages/github for the provider implementation.
+// GitHub publications live in their own github_installations / github_publications
+// tables (split out from linear_* in migration 0009 so reverse lookups don't
+// bleed across providers). The github_apps table holds the GitHub-specific
+// App credentials with extra fields (private key, slug, bot login). See
+// packages/github for the provider implementation.
 
 app.get("/github/installations", async (c) => {
   const userId = c.get("user_id")!;
-  const { repos, err } = reposOr503(c);
+  const { repos, err } = githubReposOr503(c);
   if (err) return err;
   const installations = await repos.installations.listByUser(userId, "github");
   return c.json({
@@ -461,7 +487,7 @@ app.get("/github/installations", async (c) => {
 app.get("/github/installations/:id/publications", async (c) => {
   const userId = c.get("user_id")!;
   const installationId = c.req.param("id");
-  const { repos, err } = reposOr503(c);
+  const { repos, err } = githubReposOr503(c);
   if (err) return err;
   const installation = await repos.installations.get(installationId);
   if (!installation || installation.userId !== userId) {
@@ -475,15 +501,12 @@ app.get("/github/installations/:id/publications", async (c) => {
 
 // ─── GET /v1/integrations/github/agents/:id/publications ─────────────────
 // Reverse lookup parallel to linear/slack routes — AgentDetail's "Published
-// to GitHub" fold needs this. NOTE: GitHub and Linear currently share the
-// `linear_publications` table (provider is derived from a join to `apps`),
-// so this returns both providers' publications until the schema is split.
-// Acceptable for now — UX-wise the rows still reference real installations
-// and the console filters by status === "live".
+// to GitHub" fold needs this. Reads from github_publications now (post-0009),
+// so it no longer leaks Linear publications.
 app.get("/github/agents/:id/publications", async (c) => {
   const userId = c.get("user_id")!;
   const agentId = c.req.param("id");
-  const { repos, err } = reposOr503(c);
+  const { repos, err } = githubReposOr503(c);
   if (err) return err;
   const publications = await repos.publications.listByUserAndAgent(userId, agentId);
   return c.json({ data: publications.map(serializePublication) });
@@ -492,7 +515,7 @@ app.get("/github/agents/:id/publications", async (c) => {
 app.get("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
-  const { repos, err } = reposOr503(c);
+  const { repos, err } = githubReposOr503(c);
   if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
@@ -503,7 +526,7 @@ app.patch("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
   const body = await c.req.json<PatchBody>();
-  const { repos, err } = reposOr503(c);
+  const { repos, err } = githubReposOr503(c);
   if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);
@@ -529,7 +552,7 @@ app.patch("/github/publications/:id", async (c) => {
 app.delete("/github/publications/:id", async (c) => {
   const userId = c.get("user_id")!;
   const id = c.req.param("id");
-  const { repos, err } = reposOr503(c);
+  const { repos, err } = githubReposOr503(c);
   if (err) return err;
   const pub = await repos.publications.get(id);
   if (!pub || pub.userId !== userId) return c.json({ error: "not found" }, 404);

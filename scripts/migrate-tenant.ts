@@ -72,6 +72,8 @@ const TENANT_TABLES_BY_TENANT_ID = [
   "linear_issue_sessions",
   "linear_authored_comments",
   "github_apps",
+  "github_installations",
+  "github_publications",
 ] as const;
 
 // Tables that don't have tenant_id directly but cascade from a tenant table.

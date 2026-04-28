@@ -1,6 +1,5 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
-import { buildContainer } from "../../wire";
 import { buildProviders } from "../../providers";
 
 // GitHub publish flow — mirrors the linear/publications.ts shape exactly so
@@ -49,8 +48,7 @@ app.post("/start-a1", async (c) => {
     );
   }
 
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const { github } = buildProviders(c.env);
   const result = await github.startInstall({
     userId: body.userId,
     agentId: body.agentId,
@@ -90,8 +88,7 @@ app.post("/credentials", async (c) => {
     );
   }
 
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const { github } = buildProviders(c.env);
 
   let result;
   try {
@@ -151,8 +148,7 @@ app.post("/handoff-link", async (c) => {
   const body = await c.req.json<HandoffLinkBody>();
   if (!body.formToken) return c.json({ error: "formToken required" }, 400);
 
-  const container = buildContainer(c.env);
-  const { github } = buildProviders(c.env, container);
+  const { github } = buildProviders(c.env);
 
   let result;
   try {

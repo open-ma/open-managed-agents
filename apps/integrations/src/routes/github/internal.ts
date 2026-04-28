@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
-import { buildContainer } from "../../wire";
+import { buildGitHubContainer } from "../../wire";
 import { mintAppJwt, buildInstallationTokenRequest, parseInstallationTokenResponse } from "@open-managed-agents/github";
 
 // GitHub-specific internal endpoints, called via service binding from
@@ -42,7 +42,7 @@ app.post("/refresh-by-vault", async (c) => {
     return c.json({ error: "userId, vaultId required" }, 400);
   }
 
-  const container = buildContainer(c.env);
+  const container = buildGitHubContainer(c.env);
 
   // Find the github installation that owns this vault.
   const installations = await container.installations.listByUser(body.userId, "github");

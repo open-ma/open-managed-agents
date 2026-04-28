@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "../../env";
-import { buildContainer } from "../../wire";
+import { buildGitHubContainer } from "../../wire";
 
 // Public landing page for the non-admin handoff flow. The original publisher
 // generates a /github-setup/<token> URL and shares it with their org owner.
@@ -14,7 +14,7 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/:token", async (c) => {
   const token = c.req.param("token");
-  const container = buildContainer(c.env);
+  const container = buildGitHubContainer(c.env);
 
   let form: {
     persona: { name: string; avatarUrl: string | null };
