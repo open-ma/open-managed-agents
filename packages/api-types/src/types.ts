@@ -538,13 +538,17 @@ export interface SpanModelRequestEndEvent extends EventBase {
    *  positional/FIFO matching. Optional for backwards compat with older
    *  events written before this field landed. */
   model_request_start_id?: string;
+  /** Upstream provider's response id (Anthropic's `msg_01...`, OpenAI's
+   *  `chatcmpl-...`, etc.). Useful for tracing back to provider dashboards
+   *  / logs when investigating a specific call. */
+  provider_response_id?: string;
   model_usage?: {
     input_tokens: number;
     output_tokens: number;
     cache_read_input_tokens?: number;
     cache_creation_input_tokens?: number;
   };
-  /** Why the model stopped: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "other".
+  /** Why the model stopped: "stop" | "length" | "content-filter" | "tool-calls" | "error" | "aborted" | "other".
    *  Surfaces silent terminations (e.g. provider returns finish_reason="stop"
    *  with empty text mid-task) for debugging incomplete agent runs. */
   finish_reason?: string;
@@ -553,6 +557,8 @@ export interface SpanModelRequestEndEvent extends EventBase {
   final_text_length?: number;
   /** True if the model returned an error. Mirrors Anthropic's is_error wire field. */
   is_error?: boolean;
+  /** Error message when is_error=true. Truncated to 500 chars. */
+  error_message?: string;
 }
 
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {
