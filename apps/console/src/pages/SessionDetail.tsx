@@ -1133,9 +1133,18 @@ const STATUS_TEXT: Record<TurnStatus, string> = {
   terminated: "text-danger",
 };
 
+/** What's currently selected for the side detail panel. Lifted up to
+ *  TimelineView so a click in any TurnCard updates one shared panel. */
+interface TimelineSelection {
+  spanKey: string;
+  spanLabel: string;
+  events: Event[];
+}
+
 function TimelineView({ events }: { events: Event[] }) {
   const turns = useMemo(() => bucketIntoTurns(events), [events]);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const [selection, setSelection] = useState<TimelineSelection | null>(null);
 
   // Auto-scroll to the latest turn when new ones land. Skip if user has
   // scrolled up (we can detect this with scrollHeight - scrollTop ≈ clientHeight)
@@ -1158,21 +1167,86 @@ function TimelineView({ events }: { events: Event[] }) {
   }
 
   return (
-    <div ref={containerRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-3">
-      {turns.map((turn, i) => {
-        const prev = i > 0 ? turns[i - 1] : null;
-        const idleMs =
-          prev && prev.endedAt && turn.triggerTs && turn.triggerTs > prev.endedAt
-            ? turn.triggerTs - prev.endedAt
-            : 0;
-        return (
-          <Fragment key={turn.id}>
-            {idleMs > 0 && <IdleDivider ms={idleMs} nextKind={turn.triggerKind} />}
-            <TurnCard turn={turn} />
-          </Fragment>
-        );
-      })}
+    <div className="flex-1 flex min-h-0">
+      <div ref={containerRef} className="flex-1 min-w-0 overflow-y-auto px-8 py-6 space-y-3">
+        {turns.map((turn, i) => {
+          const prev = i > 0 ? turns[i - 1] : null;
+          const idleMs =
+            prev && prev.endedAt && turn.triggerTs && turn.triggerTs > prev.endedAt
+              ? turn.triggerTs - prev.endedAt
+              : 0;
+          return (
+            <Fragment key={turn.id}>
+              {idleMs > 0 && <IdleDivider ms={idleMs} nextKind={turn.triggerKind} />}
+              <TurnCard
+                turn={turn}
+                selection={selection}
+                onSelectSpan={(span) =>
+                  setSelection((prev) =>
+                    prev?.spanKey === span.key
+                      ? null
+                      : { spanKey: span.key, spanLabel: span.label, events: span.events },
+                  )
+                }
+              />
+            </Fragment>
+          );
+        })}
+      </div>
+      {selection && (
+        <DetailPanel
+          selection={selection}
+          onClose={() => setSelection(null)}
+        />
+      )}
     </div>
+  );
+}
+
+function DetailPanel({
+  selection,
+  onClose,
+}: {
+  selection: TimelineSelection;
+  onClose: () => void;
+}) {
+  return (
+    <aside className="w-[420px] shrink-0 border-l border-border bg-bg flex flex-col min-h-0">
+      <div className="px-4 py-3 border-b border-border flex items-center gap-3 shrink-0">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono">
+            {selection.events.length === 1
+              ? "source event"
+              : `source events (${selection.events.length})`}
+          </div>
+          <div className="text-sm font-mono text-fg-muted truncate">{selection.spanLabel}</div>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none px-2"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 space-y-3">
+        {selection.events.map((ev, idx) => (
+          <div key={idx} className="border border-border/60 rounded">
+            <div className="px-3 py-1.5 border-b border-border/60 bg-bg-surface/40 flex items-center gap-2 text-[11px] font-mono">
+              <span className="text-fg-muted">{ev.type}</span>
+              {typeof ev.processed_at === "string" && (
+                <span className="text-fg-subtle ml-auto">
+                  {new Date(ev.processed_at).toISOString().slice(11, 23)}
+                </span>
+              )}
+            </div>
+            <pre className="text-[11px] font-mono text-fg-muted px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all">
+              {JSON.stringify(ev, null, 2)}
+            </pre>
+          </div>
+        ))}
+      </div>
+    </aside>
   );
 }
 
@@ -1189,9 +1263,16 @@ function IdleDivider({ ms, nextKind }: { ms: number; nextKind: TurnTriggerKind }
   );
 }
 
-function TurnCard({ turn }: { turn: Turn }) {
+function TurnCard({
+  turn,
+  selection,
+  onSelectSpan,
+}: {
+  turn: Turn;
+  selection: TimelineSelection | null;
+  onSelectSpan: (span: Span) => void;
+}) {
   const [collapsed, setCollapsed] = useState(false);
-  const [selectedKey, setSelectedKey] = useState<string | null>(null);
   const { spans, totalMs } = useMemo(() => deriveSpans(turn.events), [turn.events]);
 
   // Per-card scroll + zoom state (same shape as the old global TimelineView,
@@ -1390,19 +1471,19 @@ function TurnCard({ turn }: { turn: Turn }) {
             {spans.map((s) => {
               const left = s.startMs * effectivePxPerMs;
               const width = s.durationMs > 0 ? Math.max(2, s.durationMs * effectivePxPerMs) : 0;
-              const isSelected = selectedKey === s.key;
+              const isSelected = selection?.spanKey === s.key;
               return (
                 <div key={s.key} style={{ width: 224 + chartPx + 80 }}>
                   <div
-                    className={`flex items-center py-1 border-b border-border/30 hover:bg-bg/40 group cursor-pointer ${isSelected ? "bg-bg/40" : ""}`}
+                    className={`flex items-center py-1 border-b border-border/30 hover:bg-bg/40 group cursor-pointer ${isSelected ? "bg-info-subtle/40" : ""}`}
                     title={
                       s.detail
                         ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
                         : `${s.label} — ${formatDuration(s.durationMs)}`
                     }
-                    onClick={() => setSelectedKey(isSelected ? null : s.key)}
+                    onClick={() => onSelectSpan(s)}
                   >
-                    <div className="w-56 shrink-0 sticky left-0 bg-bg-surface/30 group-hover:bg-bg/40 z-20 flex items-center gap-2 text-xs px-4">
+                    <div className={`w-56 shrink-0 sticky left-0 group-hover:bg-bg/40 z-20 flex items-center gap-2 text-xs px-4 ${isSelected ? "bg-info-subtle/40" : "bg-bg-surface/30"}`}>
                       <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
                       <div className="min-w-0 flex-1">
                         <div className="truncate text-fg-muted font-mono">{s.label}</div>
@@ -1433,32 +1514,10 @@ function TurnCard({ turn }: { turn: Turn }) {
                         />
                       )}
                     </div>
-                    <div className="w-20 shrink-0 sticky right-0 bg-bg-surface/30 group-hover:bg-bg/40 z-20 text-right text-xs font-mono text-fg-subtle pr-3">
+                    <div className={`w-20 shrink-0 sticky right-0 group-hover:bg-bg/40 z-20 text-right text-xs font-mono text-fg-subtle pr-3 ${isSelected ? "bg-info-subtle/40" : "bg-bg-surface/30"}`}>
                       {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
                     </div>
                   </div>
-                  {isSelected && s.events.length > 0 && (
-                    <div
-                      className="border-b border-border/30 bg-bg/60 px-4 py-3 sticky left-0"
-                      style={{ width: scrollRef.current?.clientWidth ?? "100%" }}
-                    >
-                      <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono mb-2">
-                        {s.events.length === 1
-                          ? "source event"
-                          : `source events (${s.events.length})`}
-                      </div>
-                      <div className="space-y-2">
-                        {s.events.map((ev, idx) => (
-                          <pre
-                            key={idx}
-                            className="text-[11px] font-mono text-fg-muted bg-bg/60 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all"
-                          >
-                            {JSON.stringify(ev, null, 2)}
-                          </pre>
-                        ))}
-                      </div>
-                    </div>
-                  )}
                 </div>
               );
             })}
