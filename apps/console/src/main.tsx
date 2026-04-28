@@ -18,6 +18,8 @@ import { MemoryStoresList } from "./pages/MemoryStoresList";
 import { ModelCardsList } from "./pages/ModelCardsList";
 import { ApiKeysList } from "./pages/ApiKeysList";
 import { CliLogin } from "./pages/CliLogin";
+import { RuntimesList } from "./pages/RuntimesList";
+import { ConnectRuntime } from "./pages/ConnectRuntime";
 import {
   IntegrationsLinearList,
   IntegrationsLinearWorkspace,
@@ -43,6 +45,7 @@ createRoot(document.getElementById("root")!).render(
         <Routes>
           <Route path="login" element={<Login />} />
           <Route path="cli/login" element={<CliLogin />} />
+          <Route path="connect-runtime" element={<ConnectRuntime />} />
           <Route element={<Layout />}>
             <Route index element={<Dashboard />} />
             <Route path="agents" element={<AgentsList />} />
@@ -55,6 +58,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="memory" element={<MemoryStoresList />} />
             <Route path="model-cards" element={<ModelCardsList />} />
             <Route path="api-keys" element={<ApiKeysList />} />
+            <Route path="runtimes" element={<RuntimesList />} />
             <Route path="integrations/linear" element={<IntegrationsLinearList />} />
             <Route
               path="integrations/linear/publish"
