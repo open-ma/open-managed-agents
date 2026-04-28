@@ -1,0 +1,86 @@
+name: Teardown Lane
+
+on:
+  workflow_dispatch:
+    inputs:
+      lane_name:
+        description: 'Lane name to tear down (must match what was deployed)'
+        required: true
+        type: string
+      confirm:
+        description: 'Confirm deletion of the 3 lane workers + their DOs (data in shared KV/D1/R2 stays)'
+        required: true
+        type: boolean
+        default: false
+
+concurrency:
+  group: teardown-lane-${{ inputs.lane_name }}
+  cancel-in-progress: false
+
+jobs:
+  teardown:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify confirm
+        run: |
+          if [ "${{ inputs.confirm }}" != "true" ]; then
+            echo "::error::Must check confirm to proceed."
+            exit 1
+          fi
+
+      - name: Validate lane name
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          if ! echo "$LANE" | grep -qE '^[a-z0-9][a-z0-9-]{1,30}$'; then
+            echo "::error::lane_name must match ^[a-z0-9][a-z0-9-]{1,30}$ (got: '$LANE')"
+            exit 1
+          fi
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # `wrangler delete` removes the worker, its DO storage, all its versions,
+      # routes, and triggers. KV namespaces, D1 databases, R2 buckets, and
+      # Vectorize indexes are NOT deleted — they belong to other workers
+      # (prod) and lanes only borrow them via shared bindings.
+      - name: Delete lane workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          MAIN="managed-agents-lane-$LANE"
+          AGENT="sandbox-default-lane-$LANE"
+          INT="managed-agents-integrations-lane-$LANE"
+
+          # Reverse order from deploy: drop main first so its incoming traffic
+          # stops, then agent (which main was binding to), then integrations.
+          # `|| true` because partial-deploy lanes may have only some of the
+          # three workers; we want best-effort cleanup, not abort on first miss.
+          for worker in "$MAIN" "$AGENT" "$INT"; do
+            echo "→ deleting $worker"
+            npx wrangler delete --name "$worker" --force 2>&1 || echo "  (skip; worker may not exist)"
+          done
+
+      - name: Summary
+        if: always()
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          {
+            echo "## Lane \`$LANE\` teardown complete"
+            echo ""
+            echo "Deleted workers:"
+            echo "- \`managed-agents-lane-$LANE\`"
+            echo "- \`sandbox-default-lane-$LANE\`"
+            echo "- \`managed-agents-integrations-lane-$LANE\`"
+            echo ""
+            echo "Shared resources NOT touched: CONFIG_KV, AUTH_DB (D1), R2 buckets, Vectorize."
+            echo "Any data the lane wrote to those is still in prod."
+          } >> $GITHUB_STEP_SUMMARY
