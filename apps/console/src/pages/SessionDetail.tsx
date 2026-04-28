@@ -1006,30 +1006,82 @@ function TimelineView({ events }: { events: Event[] }) {
   const { spans, totalMs } = useMemo(() => deriveSpans(events), [events]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
-  // Time scale in px per millisecond. Default = fit chart area to viewport
-  // when totalMs is short; large pxPerMs keeps short calls legible. User
-  // can zoom in/out; chart wider than viewport gets a horizontal scrollbar.
+  // Time scale in px per millisecond. Default is auto-picked by event
+  // density (median consecutive interval) so dense bursts stay legible
+  // even when the trace spans many minutes. The mode flag lets a user
+  // zoom action freeze the value — without it, every new streamed event
+  // would yank the chart back to "auto" mid-inspection.
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const [pxPerMs, setPxPerMs] = useState<number | null>(null);
-  // Initialize once we know the container width.
+  const [mode, setMode] = useState<"auto" | "manual">("auto");
+
+  // Compute auto scale: aim for the typical activity gap to be ~25px wide.
+  // Median gap (not mean) so a single 40-min idle stretch doesn't drag the
+  // typical scale down. Falls back to a viewport fit if there's only one
+  // event, then enforces a min/max ceiling so the chart neither overflows
+  // by 100× nor leaves giant blank space.
   useEffect(() => {
-    if (pxPerMs !== null || !scrollRef.current || totalMs <= 0) return;
-    const chartPx = scrollRef.current.clientWidth - 224 - 80 - 64; // - label - duration - padding
-    if (chartPx <= 0) return;
-    const fit = chartPx / totalMs;
-    // Floor so 1ms calls aren't completely invisible (≥ 0.05 px/ms = 50 px/sec).
-    setPxPerMs(Math.max(fit, 0.05));
-  }, [pxPerMs, totalMs]);
+    if (mode === "manual" || !scrollRef.current || totalMs <= 0) return;
+    const viewportChartPx = scrollRef.current.clientWidth - 224 - 80 - 64;
+    if (viewportChartPx <= 0) return;
+    const times: number[] = [];
+    for (const s of spans) {
+      times.push(s.startMs);
+      if (s.durationMs > 0) times.push(s.startMs + s.durationMs);
+    }
+    times.sort((a, b) => a - b);
+    const gaps: number[] = [];
+    for (let i = 1; i < times.length; i++) {
+      const g = times[i] - times[i - 1];
+      if (g > 0) gaps.push(g);
+    }
+    let candidate: number;
+    if (gaps.length === 0) {
+      candidate = viewportChartPx / totalMs;
+    } else {
+      const sorted = [...gaps].sort((a, b) => a - b);
+      const median = sorted[Math.floor(sorted.length / 2)] || 1;
+      candidate = 25 / median; // 25px per typical gap
+    }
+    // If the resulting chart fits inside viewport with room to spare, scale
+    // up to fit (avoids "content squeezed left, big blank right"). Cap so
+    // auto never picks more than ~5px/ms.
+    const auto = Math.min(5, Math.max(candidate, viewportChartPx / totalMs));
+    // Cap from below at the viewport-fit value too — never narrower than fit.
+    setPxPerMs(Math.max(auto, viewportChartPx / totalMs));
+  }, [mode, spans, totalMs]);
+
   const effectivePxPerMs = pxPerMs ?? 0.05;
   const chartPx = Math.max(200, totalMs * effectivePxPerMs);
 
+  // Auto-scroll to the most recent activity on first load (and again after
+  // a fresh "fit"). Skip if user is mid-manual-zoom — they're focused
+  // somewhere specific and shouldn't get yanked. We position the last span
+  // such that it sits ~75% across the viewport (so the user sees the
+  // recent activity plus some leading context).
+  useEffect(() => {
+    if (mode === "manual") return;
+    if (!scrollRef.current || spans.length === 0) return;
+    const last = spans[spans.length - 1];
+    const lastEndPx = (last.startMs + last.durationMs) * effectivePxPerMs;
+    const viewportChartPx = scrollRef.current.clientWidth - 224 - 80;
+    const target = Math.max(0, lastEndPx - viewportChartPx * 0.75);
+    scrollRef.current.scrollTo({ left: target, behavior: "auto" });
+  }, [mode, spans, effectivePxPerMs]);
+
   const zoomBy = (factor: number) => {
+    setMode("manual");
     setPxPerMs((p) => Math.min(50, Math.max(0.0001, (p ?? 0.05) * factor)));
   };
   const fitToViewport = () => {
     if (!scrollRef.current) return;
     const viewportChartPx = scrollRef.current.clientWidth - 224 - 80 - 64;
     if (viewportChartPx > 0 && totalMs > 0) setPxPerMs(viewportChartPx / totalMs);
+    setMode("manual");
+  };
+  const resetAuto = () => {
+    setMode("auto");
+    setPxPerMs(null);
   };
 
   if (spans.length === 0) {
@@ -1069,9 +1121,16 @@ function TimelineView({ events }: { events: Event[] }) {
             −
           </button>
           <button
+            onClick={resetAuto}
+            className={`px-2 py-0.5 rounded border hover:bg-bg-surface ${mode === "auto" ? "border-info text-info" : "border-border text-fg-muted"}`}
+            title="Auto-pick scale by event density and re-center on latest activity"
+          >
+            auto
+          </button>
+          <button
             onClick={fitToViewport}
             className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
-            title="Fit to viewport"
+            title="Fit total duration to viewport (no horizontal scroll)"
           >
             fit
           </button>
