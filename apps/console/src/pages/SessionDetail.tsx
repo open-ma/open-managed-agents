@@ -1006,6 +1006,32 @@ function TimelineView({ events }: { events: Event[] }) {
   const { spans, totalMs } = useMemo(() => deriveSpans(events), [events]);
   const [selectedKey, setSelectedKey] = useState<string | null>(null);
 
+  // Time scale in px per millisecond. Default = fit chart area to viewport
+  // when totalMs is short; large pxPerMs keeps short calls legible. User
+  // can zoom in/out; chart wider than viewport gets a horizontal scrollbar.
+  const scrollRef = useRef<HTMLDivElement | null>(null);
+  const [pxPerMs, setPxPerMs] = useState<number | null>(null);
+  // Initialize once we know the container width.
+  useEffect(() => {
+    if (pxPerMs !== null || !scrollRef.current || totalMs <= 0) return;
+    const chartPx = scrollRef.current.clientWidth - 224 - 80 - 64; // - label - duration - padding
+    if (chartPx <= 0) return;
+    const fit = chartPx / totalMs;
+    // Floor so 1ms calls aren't completely invisible (≥ 0.05 px/ms = 50 px/sec).
+    setPxPerMs(Math.max(fit, 0.05));
+  }, [pxPerMs, totalMs]);
+  const effectivePxPerMs = pxPerMs ?? 0.05;
+  const chartPx = Math.max(200, totalMs * effectivePxPerMs);
+
+  const zoomBy = (factor: number) => {
+    setPxPerMs((p) => Math.min(50, Math.max(0.0001, (p ?? 0.05) * factor)));
+  };
+  const fitToViewport = () => {
+    if (!scrollRef.current) return;
+    const viewportChartPx = scrollRef.current.clientWidth - 224 - 80 - 64;
+    if (viewportChartPx > 0 && totalMs > 0) setPxPerMs(viewportChartPx / totalMs);
+  };
+
   if (spans.length === 0) {
     return (
       <div className="flex-1 flex items-center justify-center text-sm text-fg-subtle">
@@ -1014,10 +1040,19 @@ function TimelineView({ events }: { events: Event[] }) {
     );
   }
 
-  // Tick marks at sensible intervals based on total duration.
-  const tickStep = pickTickStep(totalMs);
+  // Tick marks at sensible intervals based on the current pixel density.
+  // Aim for a tick every ~120px so labels never collide.
+  const targetTickPx = 120;
+  const tickStep = pickTickStep(targetTickPx / effectivePxPerMs);
   const ticks: number[] = [];
   for (let t = 0; t <= totalMs; t += tickStep) ticks.push(t);
+
+  const fmtRate = (ppms: number) => {
+    const pps = ppms * 1000;
+    if (pps >= 100) return `${Math.round(pps)} px/s`;
+    if (pps >= 1) return `${pps.toFixed(1)} px/s`;
+    return `${pps.toFixed(2)} px/s`;
+  };
 
   return (
     <div className="flex-1 overflow-y-auto">
@@ -1025,102 +1060,130 @@ function TimelineView({ events }: { events: Event[] }) {
         <span>{spans.length} spans</span>
         <span>·</span>
         <span>total {formatDuration(totalMs)}</span>
-      </div>
-
-      {/* Time axis */}
-      <div className="px-8 pt-3 sticky top-0 bg-bg z-10">
-        <div className="flex items-center">
-          <div className="w-56 shrink-0" />
-          <div className="flex-1 relative h-5 border-b border-border">
-            {ticks.map((t) => (
-              <div
-                key={t}
-                className="absolute top-0 h-full flex flex-col items-start text-[10px] text-fg-subtle font-mono"
-                style={{ left: `${(t / totalMs) * 100}%` }}
-              >
-                <span className="-translate-x-1/2 px-1">{formatDuration(t)}</span>
-                <div className="w-px flex-1 bg-border" />
-              </div>
-            ))}
-          </div>
-          <div className="w-20 shrink-0" />
+        <div className="ml-auto flex items-center gap-1">
+          <button
+            onClick={() => zoomBy(0.5)}
+            className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
+            title="Zoom out"
+          >
+            −
+          </button>
+          <button
+            onClick={fitToViewport}
+            className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
+            title="Fit to viewport"
+          >
+            fit
+          </button>
+          <button
+            onClick={() => zoomBy(2)}
+            className="px-2 py-0.5 rounded border border-border hover:bg-bg-surface text-fg-muted"
+            title="Zoom in"
+          >
+            +
+          </button>
+          <span className="ml-2 text-fg-subtle">{fmtRate(effectivePxPerMs)}</span>
         </div>
       </div>
 
-      {/* Rows */}
-      <div className="px-8 pb-8">
-        {spans.map((s) => {
-          const left = (s.startMs / totalMs) * 100;
-          const width = s.durationMs > 0 ? Math.max(0.4, (s.durationMs / totalMs) * 100) : 0;
-          const isSelected = selectedKey === s.key;
-          return (
-            <div key={s.key}>
-              <div
-                className={`flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group cursor-pointer ${isSelected ? "bg-bg-surface/60" : ""}`}
-                title={
-                  s.detail
-                    ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
-                    : `${s.label} — ${formatDuration(s.durationMs)}`
-                }
-                onClick={() => setSelectedKey(isSelected ? null : s.key)}
-              >
-                <div className="w-56 shrink-0 flex items-center gap-2 text-xs">
-                  <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
-                  <div className="min-w-0 flex-1">
-                    <div className="truncate text-fg-muted font-mono">{s.label}</div>
-                    {s.detail && (
-                      <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+      {/* Horizontal scroller — label + duration columns are sticky so they
+          stay pinned to the viewport edges even when the chart overflows. */}
+      <div ref={scrollRef} className="overflow-x-auto pb-8">
+        {/* Time axis */}
+        <div className="pt-3 sticky top-0 bg-bg z-10" style={{ width: 224 + chartPx + 80 }}>
+          <div className="flex items-center">
+            <div className="w-56 shrink-0 sticky left-0 bg-bg z-30" />
+            <div className="relative h-5 border-b border-border" style={{ width: chartPx }}>
+              {ticks.map((t) => (
+                <div
+                  key={t}
+                  className="absolute top-0 h-full flex flex-col items-start text-[10px] text-fg-subtle font-mono"
+                  style={{ left: `${t * effectivePxPerMs}px` }}
+                >
+                  <span className="-translate-x-1/2 px-1">{formatDuration(t)}</span>
+                  <div className="w-px flex-1 bg-border" />
+                </div>
+              ))}
+            </div>
+            <div className="w-20 shrink-0 sticky right-0 bg-bg z-30" />
+          </div>
+        </div>
+
+        {/* Rows */}
+        <div className="px-0">
+          {spans.map((s) => {
+            const left = s.startMs * effectivePxPerMs;
+            const width = s.durationMs > 0 ? Math.max(2, s.durationMs * effectivePxPerMs) : 0;
+            const isSelected = selectedKey === s.key;
+            return (
+              <div key={s.key} style={{ width: 224 + chartPx + 80 }}>
+                <div
+                  className={`flex items-center py-1 border-b border-border/40 hover:bg-bg-surface/60 group cursor-pointer ${isSelected ? "bg-bg-surface/60" : ""}`}
+                  title={
+                    s.detail
+                      ? `${s.label} — ${formatDuration(s.durationMs)} — ${s.detail}`
+                      : `${s.label} — ${formatDuration(s.durationMs)}`
+                  }
+                  onClick={() => setSelectedKey(isSelected ? null : s.key)}
+                >
+                  <div className="w-56 shrink-0 sticky left-0 bg-bg group-hover:bg-bg-surface/60 z-20 flex items-center gap-2 text-xs px-8">
+                    <span className={`w-1.5 h-1.5 rounded-full shrink-0 ${FAMILY_DOT[s.family]}`} />
+                    <div className="min-w-0 flex-1">
+                      <div className="truncate text-fg-muted font-mono">{s.label}</div>
+                      {s.detail && (
+                        <div className="truncate text-fg-subtle font-mono text-[10px]">{s.detail}</div>
+                      )}
+                    </div>
+                  </div>
+                  <div className="relative h-5 shrink-0" style={{ width: chartPx }}>
+                    {width > 0 ? (
+                      <>
+                        <div
+                          className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
+                          style={{ left: `${left}px`, width: `${width}px` }}
+                        />
+                        {typeof s.ttftMs === "number" && s.durationMs > 0 && (
+                          <div
+                            className="absolute h-3 top-1 w-px bg-bg"
+                            style={{ left: `${left + s.ttftMs * effectivePxPerMs}px` }}
+                            title={`TTFT ${formatDuration(s.ttftMs)}`}
+                          />
+                        )}
+                      </>
+                    ) : (
+                      <div
+                        className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
+                        style={{ left: `${left}px` }}
+                      />
                     )}
                   </div>
+                  <div className="w-20 shrink-0 sticky right-0 bg-bg group-hover:bg-bg-surface/60 z-20 text-right text-xs font-mono text-fg-subtle pr-1">
+                    {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
+                  </div>
                 </div>
-                <div className="flex-1 relative h-5">
-                  {width > 0 ? (
-                    <>
-                      <div
-                        className={`absolute h-3 top-1 rounded-sm ${FAMILY_BAR[s.family]} group-hover:opacity-100 opacity-90`}
-                        style={{ left: `${left}%`, width: `${width}%` }}
-                      />
-                      {typeof s.ttftMs === "number" && s.durationMs > 0 && (
-                        <div
-                          className="absolute h-3 top-1 w-px bg-bg"
-                          style={{ left: `${left + (s.ttftMs / totalMs) * 100}%` }}
-                          title={`TTFT ${formatDuration(s.ttftMs)}`}
-                        />
-                      )}
-                    </>
-                  ) : (
-                    <div
-                      className={`absolute top-0 bottom-0 w-px ${FAMILY_DOT[s.family]}`}
-                      style={{ left: `${left}%` }}
-                    />
-                  )}
-                </div>
-                <div className="w-20 shrink-0 text-right text-xs font-mono text-fg-subtle pr-1">
-                  {s.durationMs > 0 ? formatDuration(s.durationMs) : "·"}
-                </div>
+                {isSelected && s.events.length > 0 && (
+                  <div className="border-b border-border/40 bg-bg-surface/30 px-4 py-3 sticky left-0" style={{ width: scrollRef.current?.clientWidth ?? "100%" }}>
+                    <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono mb-2">
+                      {s.events.length === 1
+                        ? "source event"
+                        : `source events (${s.events.length})`}
+                    </div>
+                    <div className="space-y-2">
+                      {s.events.map((ev, idx) => (
+                        <pre
+                          key={idx}
+                          className="text-[11px] font-mono text-fg-muted bg-bg/60 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all"
+                        >
+                          {JSON.stringify(ev, null, 2)}
+                        </pre>
+                      ))}
+                    </div>
+                  </div>
+                )}
               </div>
-              {isSelected && s.events.length > 0 && (
-                <div className="border-b border-border/40 bg-bg-surface/30 px-4 py-3">
-                  <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono mb-2">
-                    {s.events.length === 1
-                      ? "source event"
-                      : `source events (${s.events.length})`}
-                  </div>
-                  <div className="space-y-2">
-                    {s.events.map((ev, idx) => (
-                      <pre
-                        key={idx}
-                        className="text-[11px] font-mono text-fg-muted bg-bg/60 border border-border/40 rounded px-3 py-2 overflow-x-auto whitespace-pre-wrap break-all"
-                      >
-                        {JSON.stringify(ev, null, 2)}
-                      </pre>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
-          );
-        })}
+            );
+          })}
+        </div>
       </div>
     </div>
   );
