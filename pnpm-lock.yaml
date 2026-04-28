@@ -72,9 +72,6 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../../packages/credentials-store
-      '@open-managed-agents/environment-images':
-        specifier: workspace:*
-        version: link:../../packages/environment-images
       '@open-managed-agents/environments-store':
         specifier: workspace:*
         version: link:../../packages/environments-store
@@ -257,9 +254,6 @@ importers:
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../../packages/credentials-store
-      '@open-managed-agents/environment-images':
-        specifier: workspace:*
-        version: link:../../packages/environment-images
       '@open-managed-agents/environments-store':
         specifier: workspace:*
         version: link:../../packages/environments-store
@@ -352,12 +346,6 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
-
-  packages/environment-images:
-    dependencies:
-      '@open-managed-agents/api-types':
-        specifier: workspace:*
-        version: link:../api-types
 
   packages/environments-store:
     dependencies:
