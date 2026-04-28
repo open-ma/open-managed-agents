@@ -6,10 +6,20 @@ import { generateEventId } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
+import { ALL_TOOLS } from "./tools";
 
-const BUILTIN_TOOLS = new Set(["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search"]);
+// Single source of truth lives in ./tools.ts (ALL_TOOLS). Importing here so
+// adding a new toolset entry can't drift the event-classification list — the
+// previous hard-coded duplicate caused `browser`, `schedule`,
+// `cancel_schedule`, and `list_schedules` to mis-emit as
+// `agent.custom_tool_use` instead of `agent.tool_use`.
+const BUILTIN_TOOLS = new Set(ALL_TOOLS);
 const isMcpTool = (name: string) => name.startsWith("mcp_");
-const isBuiltinTool = (name: string) =>
+// Exported so tests can assert classification directly. Returning true here
+// makes `runtime.broadcast` emit `agent.tool_use`; false routes to
+// `agent.custom_tool_use`. Down-stream consumers (Console UI, SDK event
+// filters, billing dashboards) split on those event types.
+export const isBuiltinTool = (name: string): boolean =>
   BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_") || name.startsWith("memory_");
 
 // LLM call resilience settings (inspired by Claude Code)
