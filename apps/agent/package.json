@@ -8,7 +8,7 @@
     "@ai-sdk/anthropic": "^3.0.69",
     "@cloudflare/containers": "^0.3.0",
     "@cloudflare/playwright": "^1.3.0",
-    "@cloudflare/sandbox": "^0.8.11",
+    "@cloudflare/sandbox": "^0.9.1",
     "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",
