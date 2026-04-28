@@ -11,6 +11,7 @@ import type { Services } from "@open-managed-agents/services";
 import { getCfServicesForTenant } from "@open-managed-agents/services";
 import { toFileRecord } from "@open-managed-agents/files-store";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
+import { addServiceBinding } from "@open-managed-agents/cf-billing";
 import {
   SessionArchivedError,
   SessionMemoryStoreMaxExceededError,
@@ -47,12 +48,22 @@ function toApiSession<T extends { tenant_id?: string }>(row: T): Omit<T, "tenant
 
 /**
  * Resolve the sandbox worker service binding for a given environment.
+ *
+ * If the per-env service binding is missing on the live worker (which
+ * happens whenever the main worker has been re-deployed since the env
+ * was created — `wrangler deploy` overwrites the bindings list with
+ * the static set in wrangler.jsonc, dropping every dynamic
+ * SANDBOX_sandbox_env_* added at build-complete time), this attempts a
+ * "lazy heal": call CF API to re-add the binding, then return 503 +
+ * Retry-After: 5 so the client retries against a fresh isolate that
+ * sees the new binding. The current isolate cannot pick up the change
+ * synchronously — only the next deploy/reload of the script does.
  */
 async function getSandboxBinding(
   env: Env,
   environmentId: string,
   tenantId: string,
-): Promise<{ binding: Fetcher | null; error?: string; status?: 404 | 500 | 503 }> {
+): Promise<{ binding: Fetcher | null; error?: string; status?: 404 | 500 | 503; retryAfterSeconds?: number }> {
   const services = await getCfServicesForTenant(env, tenantId);
   const envRow = await services.environments.get({ tenantId, environmentId });
   if (!envRow) return { binding: null, error: "Environment not found", status: 404 };
@@ -60,7 +71,7 @@ async function getSandboxBinding(
   const envConfig = toEnvironmentConfig(envRow);
 
   if (envConfig.status === "building") {
-    return { binding: null, error: "Environment is still building", status: 503 };
+    return { binding: null, error: "Environment is still building", status: 503, retryAfterSeconds: 10 };
   }
   if (envConfig.status === "error") {
     return { binding: null, error: `Environment build failed: ${envConfig.build_error || "unknown error"}`, status: 500 };
@@ -102,7 +113,51 @@ async function getSandboxBinding(
     return { binding: localFetcher };
   }
 
-  return { binding: null, error: `Service binding ${bindingName} not found`, status: 500 };
+  // sandbox-default is a static binding in wrangler.jsonc — if it's missing
+  // there's no way to lazy-heal, the deploy is broken. Bail loudly.
+  if (envConfig.sandbox_worker_name === "sandbox-default") {
+    return { binding: null, error: `Static service binding ${bindingName} missing — main worker deploy is broken`, status: 500 };
+  }
+
+  // Per-env worker — try lazy heal via CF API. The current isolate can't
+  // see the new binding, but the next request will hit a fresh one.
+  const cfEnv = env as unknown as { CLOUDFLARE_API_TOKEN?: string; CLOUDFLARE_ACCOUNT_ID?: string };
+  if (cfEnv.CLOUDFLARE_API_TOKEN && cfEnv.CLOUDFLARE_ACCOUNT_ID) {
+    try {
+      await addServiceBinding(
+        cfEnv.CLOUDFLARE_ACCOUNT_ID, "managed-agents", cfEnv.CLOUDFLARE_API_TOKEN,
+        bindingName, envConfig.sandbox_worker_name,
+      );
+      return {
+        binding: null,
+        error: `Environment worker just registered with the gateway. Retry in 5 seconds.`,
+        status: 503,
+        retryAfterSeconds: 5,
+      };
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.log(`[lazy-heal] addServiceBinding ${bindingName} failed: ${msg}`);
+      return { binding: null, error: `Service binding ${bindingName} missing and auto-heal failed: ${msg}`, status: 500 };
+    }
+  }
+
+  return { binding: null, error: `Service binding ${bindingName} not found and no CF API creds for auto-heal`, status: 500 };
+}
+
+/**
+ * Translate a getSandboxBinding failure to a Hono Response. Sets
+ * Retry-After when the underlying error is recoverable (lazy-heal /
+ * still-building), so well-behaved clients back off cleanly.
+ */
+function bindingErrorResponse(
+  c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>,
+  result: { error?: string; status?: 404 | 500 | 503; retryAfterSeconds?: number },
+): Response {
+  const status = (result.status ?? 500) as 404 | 500 | 503;
+  if (result.retryAfterSeconds) {
+    c.header("Retry-After", String(result.retryAfterSeconds));
+  }
+  return c.json({ error: result.error ?? "binding unavailable" }, status);
 }
 
 /**
@@ -237,8 +292,9 @@ app.post("/", async (c) => {
   if (!agentRow) return c.json({ error: "Agent not found" }, 404);
 
   // Resolve sandbox worker binding
-  const { binding, error, status } = await getSandboxBinding(c.env, body.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, body.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   // Pre-fetch snapshots so SessionDO doesn't have to read CONFIG_KV with a
   // tenant-prefixed key (which fails when sandbox-default's KV binding
@@ -687,8 +743,9 @@ app.post("/:id/events", async (c) => {
     return c.json({ error: "Session is archived and cannot receive new events" }, 409);
   }
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const body = await c.req.json<{ events: UserMessageEvent[] }>();
   if (!body.events || !Array.isArray(body.events) || body.events.length === 0) {
@@ -753,8 +810,9 @@ app.post("/:id/files", async (c) => {
   const bucket = c.env.FILES_BUCKET;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const body = await c.req.json<{
     path: string;
@@ -818,8 +876,9 @@ async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_i
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const wsHeaders = new Headers(c.req.raw.headers);
   wsHeaders.set("Upgrade", "websocket");
@@ -871,8 +930,9 @@ async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const url = new URL(c.req.url);
   const res = await forwardToSandbox(binding, `/sessions/${id}/events${url.search}`, c.req.raw, "GET");
@@ -902,8 +962,9 @@ app.post("/:id/__debug_recovery__", async (c) => {
   const id = c.req.param("id");
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
   const fwd = new Request(`https://sandbox/sessions/${id}/__debug_recovery__`, {
     method: "POST",
     headers: { "content-type": "application/json", "x-debug-token": provided },
@@ -931,8 +992,9 @@ app.post("/:id/messages", async (c) => {
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const body = await c.req.json<{
     content: string | ContentBlock[];
@@ -1053,8 +1115,9 @@ app.get("/:id/trajectory", async (c) => {
     environment_snapshot: sessionRow.environment_snapshot ?? undefined,
   } as SessionRecord;
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, t);
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   // Paginate through all events from sandbox /events (max 1000 per page)
   async function fetchAllEvents(): Promise<StoredEvent[]> {
@@ -1123,8 +1186,9 @@ app.get("/:id/threads", async (c) => {
   });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const res = await forwardToSandbox(binding, `/sessions/${id}/threads`, c.req.raw, "GET");
   return c.json(await res.json());
@@ -1140,8 +1204,9 @@ app.get("/:id/threads/:thread_id/events", async (c) => {
   });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const { binding, error, status } = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
-  if (!binding) return c.json({ error }, status ?? 500);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
 
   const res = await forwardToSandbox(binding, `/sessions/${id}/threads/${threadId}/events`, c.req.raw, "GET");
   return c.json(await res.json());
