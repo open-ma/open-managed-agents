@@ -181,9 +181,33 @@ function loadConfigOptional(): Config {
 
 // ─── API Client ───
 
+/** Common fetch wrapper used by both apiFetch and rawStream. Honors
+ *  Retry-After on 503 so a freshly-built env (or one that needs its
+ *  service binding lazy-healed in the gateway) doesn't surface as a
+ *  hard failure to the operator. Caps each wait at 30s and retries
+ *  up to 3 times; longer outages bubble through.
+ */
+async function fetchWithRetry(
+  url: string,
+  init: RequestInit,
+  maxRetries = 3,
+): Promise<Response> {
+  let attempt = 0;
+  while (true) {
+    const res = await fetch(url, init);
+    if (res.ok || res.status !== 503) return res;
+    const retryAfter = res.headers.get("retry-after");
+    if (!retryAfter || attempt >= maxRetries) return res;
+    const seconds = Math.min(Math.max(parseInt(retryAfter, 10) || 0, 1), 30);
+    await res.body?.cancel().catch(() => undefined);
+    await new Promise(r => setTimeout(r, seconds * 1000));
+    attempt += 1;
+  }
+}
+
 async function apiFetch<T = unknown>(config: Config, path: string, init?: RequestInit): Promise<T> {
   const url = `${config.baseUrl}${path}`;
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     ...init,
     headers: {
       "x-api-key": config.apiKey,
@@ -222,7 +246,7 @@ async function rawStream(
   path: string,
   init?: RequestInit,
 ): Promise<Response> {
-  const res = await fetch(`${config.baseUrl}${path}`, {
+  const res = await fetchWithRetry(`${config.baseUrl}${path}`, {
     ...init,
     headers: {
       "x-api-key": config.apiKey,
