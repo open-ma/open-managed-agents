@@ -143,20 +143,42 @@ function writeJson(relPath, obj) {
   writeFileSync(abs, JSON.stringify(obj, null, 2) + "\n");
 }
 
+// Resolve the staging variant of a wrangler config: the top-level fields are
+// prod; env.staging overrides what's different on staging. Lanes share
+// STAGING data (KV, D1, R2) — never prod, even though both physically exist
+// in the same CF account. Without this, lane signups land in prod's AUTH_DB
+// and lane test sessions write to prod CONFIG_KV.
+//
+// Strategy: deep-merge env.staging onto the top-level prod config. Fields
+// listed in env.staging fully replace the corresponding top-level field
+// (Cloudflare's own merge semantics for env overrides).
+function resolveStaging(rel) {
+  const cfg = readWrangler(rel);
+  const staging = cfg.env?.staging;
+  if (!staging) {
+    throw new Error(`${rel} has no env.staging block; lane generator can't safely target staging data`);
+  }
+  // Replace, don't merge — matches Cloudflare's own per-env override semantics
+  // for resource bindings (kv_namespaces, d1_databases, r2_buckets, services,
+  // ratelimits, analytics_engine_datasets).
+  const merged = { ...cfg, ...staging };
+  delete merged.env;
+  return merged;
+}
+
 // ── 3. Build main lane config ───────────────────────────────────────────────
-const main = readWrangler("apps/main/wrangler.jsonc");
+const main = resolveStaging("apps/main/wrangler.jsonc");
 main.name = NAMES.main;
 delete main.routes;
-delete main.triggers; // no cron on lanes — would run against shared prod data
-delete main.env;      // no staging override on a lane
+delete main.triggers; // no cron on lanes — would still hit shared staging data N×
 main.vars = {
   ...(main.vars || {}),
   // Linear / GitHub / Slack OAuth callbacks land here; must be the lane's
-  // own integrations worker, not prod's.
+  // own integrations worker, not staging's shared one.
   INTEGRATIONS_ORIGIN: INT_ORIGIN,
   // Cloudflare-published "always-pass" Turnstile site key — paired with the
   // matching always-pass secret set on lane workers via deploy-lane.yml.
-  // Lanes are dev-only; prod's real Turnstile keys never get exposed.
+  // Lanes are dev-only; real Turnstile keys never get exposed.
   // https://developers.cloudflare.com/turnstile/troubleshooting/testing/
   TURNSTILE_SITE_KEY: "1x00000000000000000000AA",
 };
@@ -167,21 +189,19 @@ main.services = [
 writeJson(`apps/main/wrangler.lane-${LANE}.jsonc`, main);
 
 // ── 4. Build agent lane config ──────────────────────────────────────────────
-const agent = readWrangler("apps/agent/wrangler.jsonc");
+const agent = resolveStaging("apps/agent/wrangler.jsonc");
 agent.name = NAMES.agent;
 delete agent.routes;
 delete agent.triggers;
-delete agent.env;
 agent.services = [
   { binding: "INTEGRATIONS", service: NAMES.integrations },
 ];
 writeJson(`apps/agent/wrangler.lane-${LANE}.jsonc`, agent);
 
 // ── 5. Build integrations lane config ───────────────────────────────────────
-const integrations = readWrangler("apps/integrations/wrangler.jsonc");
+const integrations = resolveStaging("apps/integrations/wrangler.jsonc");
 integrations.name = NAMES.integrations;
 delete integrations.routes;
-delete integrations.env;
 integrations.vars = {
   ...(integrations.vars || {}),
   GATEWAY_ORIGIN: INT_ORIGIN,
@@ -189,23 +209,11 @@ integrations.vars = {
 integrations.services = [
   { binding: "MAIN", service: NAMES.main },
 ];
-// Override integrations' AUTH_DB to share main's D1 instance.
-//
-// apps/integrations/wrangler.jsonc carries a stale database_id
-// ("67edb234-...") for the same logical "openma-auth" database; that id was
-// migrated/deleted at some point and the prod config never got re-pointed
-// (commit c537c9b fixed staging only). New deploys against the stale id fail
-// with D1 binding 'AUTH_DB' references database '...' which was not found.
-//
-// Both bindings target the same database_name ("openma-auth"), so reusing
-// main's id here is the right behavior for lanes. Should be a no-op once
-// apps/integrations/wrangler.jsonc itself is fixed.
-const mainAuthDb = (main.d1_databases || []).find((db) => db.binding === "AUTH_DB");
-if (mainAuthDb && Array.isArray(integrations.d1_databases)) {
-  for (const db of integrations.d1_databases) {
-    if (db.binding === "AUTH_DB") db.database_id = mainAuthDb.database_id;
-  }
-}
+// integrations on staging is already correctly pointed at openma-auth-staging
+// (commit c537c9b), so no D1-id override needed once we resolve from
+// env.staging. The earlier prod-side stale-id workaround (overlay main's
+// AUTH_DB id) is no longer needed; main now points at openma-auth-staging
+// too via the same staging-resolution path.
 writeJson(`apps/integrations/wrangler.lane-${LANE}.jsonc`, integrations);
 
 // ── 6. Summary ──────────────────────────────────────────────────────────────
