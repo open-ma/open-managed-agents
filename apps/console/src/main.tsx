@@ -22,6 +22,7 @@ import {
   IntegrationsLinearList,
   IntegrationsLinearWorkspace,
   IntegrationsLinearPublishPage,
+  IntegrationsLinearPatInstallPage,
 } from "./pages/IntegrationsLinear";
 import {
   IntegrationsGitHubList,
@@ -58,6 +59,10 @@ createRoot(document.getElementById("root")!).render(
             <Route
               path="integrations/linear/publish"
               element={<IntegrationsLinearPublishPage />}
+            />
+            <Route
+              path="integrations/linear/install-pat"
+              element={<IntegrationsLinearPatInstallPage />}
             />
             <Route
               path="integrations/linear/installations/:id"
