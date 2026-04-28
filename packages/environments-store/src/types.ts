@@ -40,13 +40,15 @@ export interface EnvironmentRow {
   config: EnvironmentConfig["config"];
   /** Caller-supplied free-form metadata (publication context, eval-run id, etc.). */
   metadata: Record<string, unknown> | null;
-  /** Image-build strategy. `base_snapshot` (default for new envs) installs
-   *  packages once into a CF Sandbox snapshot under /home/env-cache/<id>/
-   *  and restores on session boot. `dockerfile` is opt-in for users who
-   *  need apt packages or full image control — it goes through the
-   *  existing per-env CI build pipeline. Null = legacy (treated as
-   *  `dockerfile` for back-compat with envs created before this field
-   *  existed). */
+  /** Image-build strategy. `dockerfile` (default for new envs) bakes
+   *  configured packages into a per-env worker image via GitHub Actions
+   *  CI — slow env create, fast session boot. `base_snapshot` is
+   *  reserved as an architectural seam for a future zero-build mode;
+   *  the original lazy-install implementation was reverted because
+   *  CF Sandbox `exec` calls run inside `blockConcurrencyWhile` which
+   *  is canceled at ~10-15s, not enough to finish a non-trivial install.
+   *  Null = legacy (treated as `dockerfile` for back-compat with envs
+   *  created before this field existed). */
   image_strategy: "base_snapshot" | "dockerfile" | null;
   /** Strategy-specific opaque blob (the `ImageHandle` returned by
    *  EnvironmentImageStrategy.prepare). For `base_snapshot` it carries

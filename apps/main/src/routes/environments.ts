@@ -15,14 +15,20 @@ const app = new Hono<{
 }>();
 
 /** Resolve which image strategy a request asks for. New envs default
- *  to `base_snapshot`. Existing envs (from before this field existed)
- *  read `null` and we treat as `dockerfile` for back-compat — they
- *  already have per-env workers deployed. */
+ *  to `dockerfile` — packages get baked into a per-env worker image
+ *  via GitHub Actions CI (slower env create, fast session boot). The
+ *  `base_snapshot` mode (lazy install at first session) was reverted
+ *  because @cloudflare/sandbox wraps each `sandbox.exec` in
+ *  blockConcurrencyWhile, which CF cancels at ~10-15s — not enough
+ *  to finish a non-trivial pip install. Existing envs without the
+ *  field read `null` and are treated as `dockerfile` (they already
+ *  have per-env workers deployed).
+ */
 type ImageStrategy = "base_snapshot" | "dockerfile";
 function pickStrategy(requested?: string | null, existing?: string | null): ImageStrategy {
   if (requested === "base_snapshot" || requested === "dockerfile") return requested;
   if (existing === "base_snapshot" || existing === "dockerfile") return existing;
-  return "base_snapshot";
+  return "dockerfile";
 }
 
 /**
@@ -64,17 +70,6 @@ async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: 
   }
 }
 
-/** Run the base_snapshot prepare path: REMOVED.
- *
- *  The earlier "kickoff in agent worker → cron poll → createBackup"
- *  pattern fundamentally fought CF's DO-bound container lifecycle —
- *  prep containers were evicted between kickoff and tick because no DO
- *  request held them alive. Lazy prepare in SessionDO replaces it:
- *  env create just sets status=ready + image_handle=null; the FIRST
- *  session boot for the env runs install + createBackup inline in
- *  SessionDO (which already holds requests open for harness loops).
- *  See apps/agent/src/runtime/session-do.ts lazyPrepareBaseSnapshot. */
-
 // POST /v1/environments — create environment
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
@@ -91,12 +86,11 @@ app.post("/", async (c) => {
 
   const strategy = pickStrategy(body.image_strategy);
 
-  // base_snapshot is fully lazy — env starts ready with no image_handle.
-  // The first session boot's SessionDO.lazyPrepareBaseSnapshot does the
-  // install + createBackup + persists the handle. dockerfile mode still
-  // dispatches the CI build (status=building until callback).
-  const initialStatus = strategy === "base_snapshot" ? "ready" : "building";
-  const initialWorker = strategy === "base_snapshot" ? "sandbox-default" : null;
+  // Both strategies start in "building" until CI build completes (no
+  // lazy/fast path right now — the prior base_snapshot lazy install
+  // was reverted, see pickStrategy comment).
+  const initialStatus = "building";
+  const initialWorker: string | null = null;
 
   const initialRow = await c.var.services.environments.create({
     tenantId: t,
@@ -269,23 +263,17 @@ app.put("/:id", async (c) => {
   if (strategyChanged) patch.imageStrategy = strategy;
 
   if (configChanged || strategyChanged) {
-    // base_snapshot: just invalidate the cached snapshot — next session
-    // for this env runs lazyPrepareBaseSnapshot in SessionDO.
-    // dockerfile: re-trigger CI build, status flips on callback.
+    // Both strategies need a re-build now (base_snapshot's lazy path is gone).
+    // CI build flips status on /build-complete callback.
     patch.buildError = null;
     patch.imageHandle = null;
-    if (strategy === "base_snapshot") {
-      patch.status = "ready";
-      patch.sandboxWorkerName = "sandbox-default";
-    } else {
-      patch.status = "building";
-      patch.sandboxWorkerName = null;
-    }
+    patch.status = "building";
+    patch.sandboxWorkerName = null;
   }
 
   let row = await c.var.services.environments.update(patch);
 
-  if ((configChanged || strategyChanged) && strategy === "dockerfile") {
+  if (configChanged || strategyChanged) {
     try {
       await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
     } catch (e) {

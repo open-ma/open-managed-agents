@@ -30,11 +30,11 @@ const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok", version: "2" }));
 
-// __internal/prepare-env, /__internal/prep-tick, /__internal/prep-debug,
-// and the buildInstallScript helper were removed: lazy-prepare in
-// SessionDO replaced the cron-poll + container-warm-loop dance, which
-// fundamentally fought CF's DO-bound container lifecycle. See
-// session-do.ts lazyPrepareBaseSnapshot.
+// /__internal/prepare-env, /__internal/prep-tick, /__internal/prep-debug,
+// and the buildInstallScript helper were removed when the per-env CI build
+// (image_strategy=dockerfile) became the only build path. The lazy-prepare
+// branch they fed (base_snapshot) was reverted; see apps/main/src/routes/
+// environments.ts pickStrategy for the rationale.
 
 app.all("/sessions/:id/*", async (c) => {
   const sessionId = c.req.param("id");
