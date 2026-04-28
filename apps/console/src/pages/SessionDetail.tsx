@@ -210,7 +210,12 @@ export function SessionDetail() {
 
     if (ev.type === "session.status_running") { setStatus("running"); return; }
     if (ev.type === "session.status_idle") { setStatus("idle"); return; }
-    if (ev.type?.startsWith("span.") || ev.type === "agent.thinking") return;
+    // Previously this dropped every span.* and agent.thinking event before
+    // they reached `events` state, so Timeline saw none of model/wakeup/
+    // compaction/outcome spans (entire reason waterfall looked empty).
+    // Conversation view's EventBubble silently ignores unknown types via
+    // its switch — keeping the events here costs the chat view nothing
+    // and gives Timeline the full trajectory it needs.
 
     // Tag streamed events with arrival time so the timeline has a usable ts
     // even before the server-side stored copy round-trips.
