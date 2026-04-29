@@ -14,7 +14,8 @@
   ],
 
   "r2_buckets": [
-    { "binding": "FILES_BUCKET", "bucket_name": "test-files" }
+    { "binding": "FILES_BUCKET", "bucket_name": "test-files" },
+    { "binding": "MEMORY_BUCKET", "bucket_name": "test-memory" }
   ],
 
   "durable_objects": {

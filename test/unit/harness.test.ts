@@ -6,7 +6,7 @@ import { registerHarness } from "../../apps/agent/src/harness/registry";
 import { resolveSkills, registerSkill } from "../../apps/agent/src/harness/skills";
 import { SummarizeCompaction } from "../../apps/agent/src/harness/compaction";
 import { TestSandbox, createSandbox, CloudflareSandbox } from "../../apps/agent/src/runtime/sandbox";
-import { buildTools, buildMemoryTools } from "../../apps/agent/src/harness/tools";
+import { buildTools } from "../../apps/agent/src/harness/tools";
 import { InMemoryHistory, eventsToMessages } from "../../apps/agent/src/runtime/history";
 import type { AgentConfig, SessionEvent, SessionThreadCreatedEvent, SessionThreadIdleEvent, AgentThreadMessageEvent, AgentMessageEvent, UserMessageEvent } from "@open-managed-agents/shared";
 
@@ -448,26 +448,10 @@ describe("buildTools integration", () => {
     expect(tools.grep).toBeUndefined();
   });
 
-  it("buildMemoryTools creates all 6 memory tools", () => {
-    // Mock KV namespace
-    const mockKV = { list: async () => ({ keys: [] }), get: async () => null, put: async () => {}, delete: async () => {} } as unknown as KVNamespace;
-    const memTools = buildMemoryTools(
-      ["store_1", "store_2"],
-      mockKV
-    );
-
-    expect(memTools.memory_list).toBeDefined();
-    expect(memTools.memory_read).toBeDefined();
-    expect(memTools.memory_write).toBeDefined();
-    expect(memTools.memory_search).toBeDefined();
-    expect(memTools.memory_delete).toBeDefined();
-  });
-
-  it("buildMemoryTools returns empty object for no store IDs", () => {
-    const mockKV = {} as KVNamespace;
-    const memTools = buildMemoryTools([], mockKV);
-    expect(Object.keys(memTools)).toHaveLength(0);
-  });
+  // buildMemoryTools / memory_* tools were removed in the Anthropic Memory
+  // Store migration — agents use standard file tools on /mnt/memory/<store>/
+  // mounts instead. See test/unit/memory-store-service.test.ts and
+  // test/unit/memory-events-consumer.test.ts for the new coverage.
 });
 
 // ============================================================

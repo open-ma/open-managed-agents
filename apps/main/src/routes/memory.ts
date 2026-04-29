@@ -1,9 +1,8 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn } from "@open-managed-agents/shared";
 import {
+  MemoryBlobStoreError,
   MemoryContentTooLargeError,
-  MemoryEmbeddingFailedError,
   MemoryNotFoundError,
   MemoryPreconditionFailedError,
   MemoryStoreNotFoundError,
@@ -12,9 +11,10 @@ import {
 } from "@open-managed-agents/memory-store";
 import type { Services } from "@open-managed-agents/services";
 
-// REST surface for memory stores. All persistence + Vectorize coordination
-// lives in MemoryStoreService — this file only marshals HTTP↔service.
-// Service surface comes from c.var.services (see packages/services).
+// REST surface for memory stores. Aligned with Anthropic Managed Agents Memory
+// (https://platform.claude.com/docs/en/managed-agents/memory). All persistence
+// + R2 coordination lives in MemoryStoreService — this file only marshals
+// HTTP↔service. Service surface comes from c.var.services (see packages/services).
 
 const app = new Hono<{
   Bindings: Env;
@@ -52,13 +52,10 @@ function handle(err: unknown): Response {
       { status: 400, headers: { "content-type": "application/json" } },
     );
   }
-  if (err instanceof MemoryEmbeddingFailedError) {
-    // Surface the underlying cause to logs — embedding failures are upstream
-    // (Workers AI binding missing, model unavailable, quota), and the
-    // operator needs to see WHICH for triage. Public response stays opaque.
-    console.error("memory_embedding_failed:", err.message, err.cause);
+  if (err instanceof MemoryBlobStoreError) {
+    console.error("memory_blob_store_error:", err.message, err.cause);
     return new Response(
-      JSON.stringify({ error: err.code, detail: "embedding service unavailable; try again" }),
+      JSON.stringify({ error: err.code, detail: "blob store unavailable; try again" }),
       { status: 503, headers: { "content-type": "application/json" } },
     );
   }
@@ -120,36 +117,6 @@ app.delete("/:id", async (c) => {
 });
 
 // ============================================================
-// Reconcile — tenant-scoped maintenance op
-// ============================================================
-
-app.post("/_reconcile", async (c) => {
-  const t = c.get("tenant_id");
-  type ReconcileBody = { store_id?: string; limit?: number };
-  const body = await c.req
-    .json<ReconcileBody>()
-    .catch((err) => {
-      // Empty body is allowed — log only when a malformed body comes in
-      // (truncated JSON, wrong content-type) so we don't lose signal.
-      logWarn(
-        { op: "memory.reconcile.body_parse", tenant_id: t, err },
-        "reconcile body parse failed; treating as empty",
-      );
-      return {} as ReconcileBody;
-    });
-  try {
-    const result = await c.var.services.memory.reconcile({
-      tenantId: t,
-      storeId: body.store_id,
-      limit: body.limit,
-    });
-    return c.json(result);
-  } catch (err) {
-    return handle(err);
-  }
-});
-
-// ============================================================
 // Memories
 // ============================================================
 
@@ -183,8 +150,17 @@ app.get("/:id/memories", async (c) => {
   const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const pathPrefix = c.req.query("path_prefix") ?? c.req.query("prefix");
+  // `depth` is Anthropic-aligned: limits how deep below path_prefix to surface
+  // entries. Implemented client-side over the service's flat list (cheap given
+  // typical store size). depth=undefined → return all.
+  const depthRaw = c.req.query("depth");
+  const depth = depthRaw ? Math.max(0, parseInt(depthRaw, 10)) : undefined;
   try {
-    const memories = await c.var.services.memory.listMemories({ tenantId: t, storeId, pathPrefix });
+    let memories = await c.var.services.memory.listMemories({ tenantId: t, storeId, pathPrefix });
+    if (depth !== undefined && pathPrefix) {
+      const baseDepth = countSlashes(pathPrefix);
+      memories = memories.filter((m) => countSlashes(m.path) - baseDepth <= depth);
+    }
     // List does not include content (mirrors Anthropic semantics).
     return c.json({
       data: memories.map((m) => {
@@ -310,7 +286,7 @@ app.post("/:id/memory_versions/:ver_id/redact", async (c) => {
   }
 });
 
-/** Shape returned to clients — keeps the legacy API field names. */
+/** Shape returned to clients — Anthropic-aligned. */
 function toApiStore(s: import("@open-managed-agents/memory-store").MemoryStoreRow) {
   return {
     id: s.id,
@@ -329,10 +305,10 @@ function toApiMemory(m: import("@open-managed-agents/memory-store").MemoryRow) {
     path: m.path,
     content: m.content,
     content_sha256: m.content_sha256,
+    etag: m.etag,
     size_bytes: m.size_bytes,
     created_at: m.created_at,
     updated_at: m.updated_at,
-    vector_synced_at: m.vector_synced_at ?? undefined,
   };
 }
 
@@ -351,6 +327,12 @@ function toApiVersion(v: import("@open-managed-agents/memory-store").MemoryVersi
     created_at: v.created_at,
     redacted: v.redacted || undefined,
   };
+}
+
+function countSlashes(s: string): number {
+  let n = 0;
+  for (const ch of s) if (ch === "/") n++;
+  return n;
 }
 
 export default app;

@@ -58,7 +58,13 @@
     // Required by @cloudflare/sandbox createBackup/restoreBackup. Holds
     // the squashfs archives the BaseSnapshotStrategy persists per env.
     // The SDK looks for the binding by the literal name BACKUP_BUCKET.
-    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" }
+    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" },
+    // Memory store content. Mounted into the sandbox per attached store via
+    // sandbox.mountBucket("MEMORY_BUCKET", "/mnt/memory/<store_name>",
+    //   { localBucket: true | endpoint+r2, prefix: "/<store_id>/", readOnly })
+    // Agent reads/writes via standard file tools; writes propagate to R2 then
+    // feed the apps/main MEMORY queue consumer for D1 audit.
+    { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
   "browser": { "binding": "BROWSER" },
@@ -118,7 +124,8 @@
       "r2_buckets": [
         { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
         { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
-        { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" }
+        { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" },
+        { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory-staging" }
       ],
       "browser": { "binding": "BROWSER" },
       "limits": { "cpu_ms": 300000 },

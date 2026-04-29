@@ -24,7 +24,10 @@ import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
 import mcpProxyRoutes from "./routes/mcp-proxy";
 import { tickEvalRuns } from "./eval-runner";
+import { handleMemoryEvents } from "./queue/memory-events";
+import { memoryRetentionTick } from "./cron/memory-retention";
 import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
+import type { R2EventMessage } from "@open-managed-agents/shared";
 
 // Main worker: CRUD + routing layer.
 // SessionDO and Sandbox are in per-environment sandbox workers.
@@ -160,10 +163,22 @@ export default {
         },
       ),
     );
+    // Memory versions retention sweep — daily at 03:00 UTC, no-op other minutes.
+    // The cron trigger is `* * * * *` (every minute); the tick gates by hour
+    // + minute internally so we only do work once per day.
+    ctx.waitUntil(memoryRetentionTick(env));
     // base_snapshot env-prep tick: REMOVED. Was a cron-driven poll over
     // building envs feeding the (also-removed) prep-tick endpoint. The
     // base_snapshot lazy-install path that came after it was reverted
     // too — dockerfile/CI is now the only build path.
+  },
+  // Cloudflare Queue consumer for R2 Event Notifications on MEMORY_BUCKET.
+  // R2 → Queue → here: we reflect agent FUSE writes on /mnt/memory/<store>/
+  // back into D1 (memories index + memory_versions audit) since FUSE writes
+  // bypass the REST service. REST writes also produce events but the consumer
+  // dedupes by (store_id, path, etag) so they're no-ops.
+  async queue(batch: MessageBatch<R2EventMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
+    await handleMemoryEvents(batch, env);
   },
 };
 

@@ -1,16 +1,23 @@
+import {
+  generateMemoryId,
+} from "@open-managed-agents/shared";
 import type {
   MemoryRepo,
   MemoryUpdateFields,
   NewMemoryRow,
   NewMemoryVersionInput,
 } from "../ports";
-import type { MemoryRow } from "../types";
+import type { Actor, MemoryRow } from "../types";
 
 /**
  * Cloudflare D1 implementation of {@link MemoryRepo}. Owns the SQL against
- * the memories + memory_versions tables. The `*WithVersion` methods use
- * D1.batch to make memory + version writes atomic — D1 batch is a single
- * transaction in the underlying SQLite.
+ * the `memories` (index only — no content column, see migration 0010) and
+ * `memory_versions` tables.
+ *
+ * The `*WithVersion` methods use D1.batch so the index update + audit row
+ * are atomic in a single SQLite transaction. The `upsertFromEvent` /
+ * `deleteFromEvent` methods are the queue consumer's entry points and must
+ * be idempotent (R2 events deliver at-least-once).
  */
 export class D1MemoryRepo implements MemoryRepo {
   constructor(private readonly db: D1Database) {}
@@ -19,16 +26,16 @@ export class D1MemoryRepo implements MemoryRepo {
     await this.db.batch([
       this.db
         .prepare(
-          `INSERT INTO memories (id, store_id, path, content, content_sha256, size_bytes,
-                                 created_at, updated_at, vector_synced_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL)`,
+          `INSERT INTO memories (id, store_id, path, content_sha256, etag, size_bytes,
+                                 created_at, updated_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
         )
         .bind(
           memory.id,
           memory.storeId,
           memory.path,
-          memory.content,
           memory.contentSha256,
+          memory.etag,
           memory.sizeBytes,
           memory.createdAt,
           memory.updatedAt,
@@ -45,20 +52,13 @@ export class D1MemoryRepo implements MemoryRepo {
     update: MemoryUpdateFields,
     version: NewMemoryVersionInput,
   ): Promise<MemoryRow> {
-    // Build dynamic SET clause based on which fields actually change. This lets
-    // pure-rename updates avoid touching content/sha/size and lets content
-    // updates carry vector_synced_at = NULL through the same statement.
     const sets: string[] = [];
     const binds: unknown[] = [];
     if (update.path !== undefined) { sets.push("path = ?"); binds.push(update.path); }
-    if (update.content !== undefined) { sets.push("content = ?"); binds.push(update.content); }
     if (update.contentSha256 !== undefined) { sets.push("content_sha256 = ?"); binds.push(update.contentSha256); }
+    if (update.etag !== undefined) { sets.push("etag = ?"); binds.push(update.etag); }
     if (update.sizeBytes !== undefined) { sets.push("size_bytes = ?"); binds.push(update.sizeBytes); }
     sets.push("updated_at = ?"); binds.push(update.updatedAt);
-    if (update.vectorSyncedAt !== "unchanged") {
-      sets.push("vector_synced_at = ?");
-      binds.push(update.vectorSyncedAt);
-    }
     binds.push(memoryId);
 
     await this.db.batch([
@@ -80,8 +80,8 @@ export class D1MemoryRepo implements MemoryRepo {
   async findByPath(storeId: string, path: string): Promise<MemoryRow | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, store_id, path, content, content_sha256, size_bytes,
-                created_at, updated_at, vector_synced_at
+        `SELECT id, store_id, path, content_sha256, etag, size_bytes,
+                created_at, updated_at
          FROM memories WHERE store_id = ? AND path = ?`,
       )
       .bind(storeId, path)
@@ -92,8 +92,8 @@ export class D1MemoryRepo implements MemoryRepo {
   async findById(storeId: string, memoryId: string): Promise<MemoryRow | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, store_id, path, content, content_sha256, size_bytes,
-                created_at, updated_at, vector_synced_at
+        `SELECT id, store_id, path, content_sha256, etag, size_bytes,
+                created_at, updated_at
          FROM memories WHERE id = ? AND store_id = ?`,
       )
       .bind(memoryId, storeId)
@@ -109,8 +109,8 @@ export class D1MemoryRepo implements MemoryRepo {
       const upper = prefix.slice(0, -1) + String.fromCharCode(prefix.charCodeAt(prefix.length - 1) + 1);
       stmt = this.db
         .prepare(
-          `SELECT id, store_id, path, content, content_sha256, size_bytes,
-                  created_at, updated_at, vector_synced_at
+          `SELECT id, store_id, path, content_sha256, etag, size_bytes,
+                  created_at, updated_at
            FROM memories WHERE store_id = ? AND path >= ? AND path < ?
            ORDER BY path ASC`,
         )
@@ -118,8 +118,8 @@ export class D1MemoryRepo implements MemoryRepo {
     } else {
       stmt = this.db
         .prepare(
-          `SELECT id, store_id, path, content, content_sha256, size_bytes,
-                  created_at, updated_at, vector_synced_at
+          `SELECT id, store_id, path, content_sha256, etag, size_bytes,
+                  created_at, updated_at
            FROM memories WHERE store_id = ? ORDER BY path ASC`,
         )
         .bind(storeId);
@@ -128,83 +128,101 @@ export class D1MemoryRepo implements MemoryRepo {
     return (result.results ?? []).map(toRow);
   }
 
-  async markSynced(memoryId: string, syncedAt: number): Promise<void> {
-    await this.db
-      .prepare(`UPDATE memories SET vector_synced_at = ? WHERE id = ?`)
-      .bind(syncedAt, memoryId)
-      .run();
-  }
+  async upsertFromEvent(input: {
+    storeId: string;
+    path: string;
+    contentSha256: string;
+    etag: string;
+    sizeBytes: number;
+    actor: Actor;
+    nowMs: number;
+    versionId: string;
+    content: string;
+    memoryId?: string;
+  }): Promise<{ wrote: boolean; row: MemoryRow | null }> {
+    const existing = await this.findByPath(input.storeId, input.path);
 
-  async markUnsynced(memoryId: string): Promise<void> {
-    await this.db
-      .prepare(`UPDATE memories SET vector_synced_at = NULL WHERE id = ?`)
-      .bind(memoryId)
-      .run();
-  }
-
-  async listUnsynced(opts: {
-    tenantId?: string;
-    storeId?: string;
-    limit: number;
-  }): Promise<Array<{ id: string; storeId: string; path: string; content: string }>> {
-    let stmt;
-    if (opts.storeId && opts.tenantId) {
-      stmt = this.db
-        .prepare(
-          `SELECT m.id, m.store_id, m.path, m.content
-           FROM memories m
-           JOIN memory_stores s ON s.id = m.store_id
-           WHERE m.vector_synced_at IS NULL AND m.store_id = ? AND s.tenant_id = ?
-           LIMIT ?`,
-        )
-        .bind(opts.storeId, opts.tenantId, opts.limit);
-    } else if (opts.storeId) {
-      stmt = this.db
-        .prepare(
-          `SELECT id, store_id, path, content FROM memories
-           WHERE vector_synced_at IS NULL AND store_id = ? LIMIT ?`,
-        )
-        .bind(opts.storeId, opts.limit);
-    } else if (opts.tenantId) {
-      stmt = this.db
-        .prepare(
-          `SELECT m.id, m.store_id, m.path, m.content
-           FROM memories m JOIN memory_stores s ON s.id = m.store_id
-           WHERE m.vector_synced_at IS NULL AND s.tenant_id = ? LIMIT ?`,
-        )
-        .bind(opts.tenantId, opts.limit);
-    } else {
-      stmt = this.db
-        .prepare(
-          `SELECT id, store_id, path, content FROM memories
-           WHERE vector_synced_at IS NULL LIMIT ?`,
-        )
-        .bind(opts.limit);
+    // Dedupe: same etag = same R2 object = same logical write. R2 events are
+    // at-least-once; this guards against double-insert on redelivery.
+    if (existing && existing.etag === input.etag) {
+      return { wrote: false, row: existing };
     }
-    const result = await stmt.all<{ id: string; store_id: string; path: string; content: string }>();
-    return (result.results ?? []).map((r) => ({
-      id: r.id,
-      storeId: r.store_id,
-      path: r.path,
-      content: r.content,
-    }));
+
+    if (existing) {
+      const row = await this.updateWithVersion(
+        existing.id,
+        {
+          contentSha256: input.contentSha256,
+          etag: input.etag,
+          sizeBytes: input.sizeBytes,
+          updatedAt: input.nowMs,
+        },
+        {
+          id: input.versionId,
+          memoryId: existing.id,
+          storeId: input.storeId,
+          operation: "modified",
+          path: input.path,
+          content: input.content,
+          contentSha256: input.contentSha256,
+          sizeBytes: input.sizeBytes,
+          actor: input.actor,
+          createdAt: input.nowMs,
+        },
+      );
+      return { wrote: true, row };
+    }
+
+    const memoryId = input.memoryId ?? generateMemoryId();
+    const row = await this.createWithVersion(
+      {
+        id: memoryId,
+        storeId: input.storeId,
+        path: input.path,
+        contentSha256: input.contentSha256,
+        etag: input.etag,
+        sizeBytes: input.sizeBytes,
+        createdAt: input.nowMs,
+        updatedAt: input.nowMs,
+      },
+      {
+        id: input.versionId,
+        memoryId,
+        storeId: input.storeId,
+        operation: "created",
+        path: input.path,
+        content: input.content,
+        contentSha256: input.contentSha256,
+        sizeBytes: input.sizeBytes,
+        actor: input.actor,
+        createdAt: input.nowMs,
+      },
+    );
+    return { wrote: true, row };
   }
 
-  async countUnsynced(opts: { tenantId?: string }): Promise<number> {
-    let stmt;
-    if (opts.tenantId) {
-      stmt = this.db
-        .prepare(
-          `SELECT COUNT(*) AS c FROM memories m
-           JOIN memory_stores s ON s.id = m.store_id
-           WHERE m.vector_synced_at IS NULL AND s.tenant_id = ?`,
-        )
-        .bind(opts.tenantId);
-    } else {
-      stmt = this.db.prepare(`SELECT COUNT(*) AS c FROM memories WHERE vector_synced_at IS NULL`);
-    }
-    const row = await stmt.first<{ c: number }>();
-    return row?.c ?? 0;
+  async deleteFromEvent(input: {
+    storeId: string;
+    path: string;
+    actor: Actor;
+    nowMs: number;
+    versionId: string;
+  }): Promise<{ wrote: boolean }> {
+    const existing = await this.findByPath(input.storeId, input.path);
+    if (!existing) return { wrote: false };
+    await this.deleteWithVersion(existing.id, {
+      id: input.versionId,
+      memoryId: existing.id,
+      storeId: input.storeId,
+      operation: "deleted",
+      path: input.path,
+      content: "",
+      contentSha256: existing.content_sha256,
+      sizeBytes: existing.size_bytes,
+      actor: input.actor,
+      createdAt: input.nowMs,
+    });
+    return { wrote: true };
   }
 }
 
@@ -235,12 +253,11 @@ interface DbMemory {
   id: string;
   store_id: string;
   path: string;
-  content: string;
   content_sha256: string;
+  etag: string | null;
   size_bytes: number;
   created_at: number;
   updated_at: number;
-  vector_synced_at: number | null;
 }
 
 function toRow(r: DbMemory): MemoryRow {
@@ -248,12 +265,15 @@ function toRow(r: DbMemory): MemoryRow {
     id: r.id,
     store_id: r.store_id,
     path: r.path,
-    content: r.content,
     content_sha256: r.content_sha256,
+    // etag column is NOT NULL going forward, but the migration adds it as
+    // nullable (existing rows back-filled by the data migration script).
+    // Coerce to "" for index rows that haven't been touched since 0010 yet —
+    // CAS reads will fail for those rows until the migration script runs.
+    etag: r.etag ?? "",
     size_bytes: r.size_bytes,
     created_at: msToIso(r.created_at),
     updated_at: msToIso(r.updated_at),
-    vector_synced_at: r.vector_synced_at ? msToIso(r.vector_synced_at) : null,
   };
 }
 

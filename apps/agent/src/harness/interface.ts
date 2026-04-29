@@ -235,6 +235,17 @@ export interface SandboxExecutor {
    * UTF-8 round-tripping.
    */
   writeFileBytes?(path: string, bytes: Uint8Array): Promise<string>;
+  /**
+   * Mount a memory store into the sandbox at /mnt/memory/<storeName>/.
+   * Backed by the MEMORY_BUCKET R2 binding with prefix scoping. Read-only
+   * mounts reject writes. The agent uses standard file tools to interact;
+   * no memory-specific tools are registered (Anthropic-aligned).
+   */
+  mountMemoryStore?(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void>;
   /** Destroy the sandbox container — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
 }

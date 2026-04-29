@@ -28,7 +28,11 @@
 
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
-    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
+    // Memory store mount target. In wrangler dev this resolves to the local
+    // wrangler R2 simulator; sandbox.mountBucket(..., { localBucket: true })
+    // performs bidirectional sync via the binding.
+    { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
   // MAIN service binding so AcpProxyHarness can call into the main worker's

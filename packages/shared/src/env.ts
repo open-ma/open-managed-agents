@@ -7,6 +7,17 @@ export interface Env {
   SANDBOX?: DurableObjectNamespace;
   WORKSPACE_BUCKET?: R2Bucket;
   FILES_BUCKET?: R2Bucket;
+  /** Memory store content bucket (Anthropic Managed Agents Memory model).
+   *  Each memory keyed `<store_id>/<memory_path>`. R2 Event Notifications
+   *  on this bucket route to the memory-events queue (see MEMORY_QUEUE).
+   *  Mounted into agent sandboxes per attached store via
+   *  sandbox.mountBucket(..., { prefix: "/<store_id>/", readOnly?: true }). */
+  MEMORY_BUCKET?: R2Bucket;
+  /** Optional producer binding for the memory-events queue. The queue is
+   *  primarily fed by R2 Event Notifications (configured out-of-band via
+   *  `wrangler r2 bucket notification create`); this binding only exists
+   *  if some code path needs to enqueue messages directly (none today). */
+  MEMORY_QUEUE?: Queue<R2EventMessage>;
   // Cloudflare Browser Rendering — only bound on agent worker (sandbox-default)
   BROWSER?: Fetcher;
   AI?: Ai;
@@ -98,4 +109,30 @@ export interface Env {
    *  through HTTP keeps the auth surface narrow (one internal-secret-gated
    *  endpoint) and avoids a cross-script DO binding. Bound on apps/agent. */
   MAIN?: Fetcher;
+}
+
+/**
+ * Cloudflare R2 Event Notification message body. R2 publishes one of these
+ * per object mutation when the bucket is wired to a Queue via
+ * `wrangler r2 bucket notification create <bucket> --event-type ... --queue ...`.
+ * The shape mirrors the public R2 events spec; if/when @cloudflare/workers-types
+ * exports an official type for this, switch to it.
+ */
+export interface R2EventMessage {
+  account: string;
+  action:
+    | "PutObject"
+    | "CopyObject"
+    | "CompleteMultipartUpload"
+    | "DeleteObject"
+    | "LifecycleDeletion";
+  bucket: string;
+  object: {
+    key: string;
+    size?: number;
+    eTag?: string;
+    version?: string;
+  };
+  eventTime: string;
+  copySource?: { bucket: string; object: string };
 }

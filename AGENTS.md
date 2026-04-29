@@ -215,13 +215,13 @@ These tools are automatically generated based on session configuration:
 
 | Tool | Generated When | Purpose |
 |---|---|---|
-| `memory_list` | Memory store attached | List memories in a store |
-| `memory_search` | Memory store attached | Semantic search over memories |
-| `memory_read` | Memory store attached | Read a specific memory |
-| `memory_write` | Memory store attached | Create or update a memory |
-| `memory_delete` | Memory store attached | Delete a memory |
 | `call_agent_*` | `callable_agents` configured | Delegate work to another agent |
 | `mcp_*` | `mcp_servers` configured | Call MCP server tools |
+
+(Memory stores do **not** generate bespoke tools. Each attached store is
+mounted at `/mnt/memory/<store_name>/` in the sandbox and the agent uses the
+standard file tools — `bash`/`read`/`write`/`edit`/`glob`/`grep` — to access
+it. See [Memory Stores](#memory-stores) below.)
 
 ---
 
@@ -424,7 +424,12 @@ curl -s $BASE/v1/vaults/$VAULT_ID/credentials \
 
 ## Memory Stores
 
-Memory stores provide persistent, semantic memory across sessions:
+Memory stores provide persistent storage for agents across sessions, aligned
+with the [Anthropic Managed Agents Memory contract](https://platform.claude.com/docs/en/managed-agents/memory).
+Each attached store is mounted into the sandbox at `/mnt/memory/<store_name>/`.
+The agent reads and writes it with the **standard file tools**
+(`bash` / `read` / `write` / `edit` / `glob` / `grep`) — there are no
+bespoke `memory_*` tools.
 
 ```bash
 # Create a memory store
@@ -432,15 +437,49 @@ curl -s $BASE/v1/memory_stores \
   -H "x-api-key: $KEY" -H "content-type: application/json" \
   -d '{"name": "project-knowledge", "description": "Learnings about the codebase"}'
 
-# Attach to a session via resources
+# Attach to a session (Anthropic-aligned `instructions` field, 4096 char cap)
 curl -s $BASE/v1/sessions/$SESSION_ID/resources \
   -H "x-api-key: $KEY" -H "content-type: application/json" \
-  -d '{"type": "memory_store", "memory_store_id": "ms_xxx"}'
+  -d '{"type": "memory_store", "memory_store_id": "ms_xxx",
+       "access": "read_write",
+       "instructions": "Your project notes. Check before starting any task."}'
 ```
 
-When a memory store is attached, the agent automatically gets `memory_*` tools for reading, writing, searching, and deleting memories. Searches use embedding-based semantic similarity via Workers AI + Vectorize.
+Then inside the session the agent does:
+```bash
+ls /mnt/memory/project-knowledge/
+cat /mnt/memory/project-knowledge/architecture.md
+echo "..." > /mnt/memory/project-knowledge/notes/2026-04-29.md
+```
 
-Memory items are versioned — every write creates a new version, enabling audit trails.
+**Storage:** R2 holds the bytes-of-truth (key `<store_id>/<memory_path>`);
+D1 holds the index + audit, kept eventually consistent via R2 Event
+Notifications → Cloudflare Queue → Consumer in `apps/main`. REST API writes
+update the audit row inline (strong-consistent); agent FUSE writes audit
+asynchronously (typically <30s). Local dev (`wrangler dev`) does not fire
+R2 events — REST writes still audit, agent FUSE writes don't.
+
+**Versioning + rollback:** Every mutation creates an immutable
+`memory_versions` row with the content snapshot inline (capped at 100KB).
+30-day retention with the most-recent version per memory always preserved.
+Rollback = retrieve the desired version's content and write it back via
+`memories.update` — produces a new version naturally.
+
+**Redact:** wipes content/path/sha on a prior version, leaving the audit
+row. Refuses to redact the live head — write a new version first.
+
+**CAS:** pass `precondition: { type: "content_sha256", content_sha256 }` on
+update to refuse stale-write clobbers. Use `precondition: { type: "not_exists" }`
+on create to refuse occupied paths.
+
+**CLI:**
+```bash
+oma memory stores create "User Preferences" --description "Per-user prefs"
+oma memory write <store-id> /preferences/formatting.md --from-file local.md
+oma memory ls <store-id> --prefix /preferences/
+oma memory versions <store-id> --memory-id <mem-id>
+oma memory redact <store-id> <version-id>
+```
 
 ---
 
