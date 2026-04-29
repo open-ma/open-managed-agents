@@ -118,19 +118,28 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
   // If `claude` (Claude Code itself) is on PATH but its ACP wrapper isn't,
   // install the wrapper for the user. Anyone running `oma bridge setup` is
   // already opting into running a daemon on their box; needing them to also
-  // remember a separate `npm i -g @zed-industries/claude-code-acp` step is
+  // remember a separate `npm i -g @agentclientprotocol/claude-agent-acp` step is
   // friction with no upside. We only do this when `claude` is present —
   // we're not pre-installing wrappers for users who haven't picked
   // Claude Code as their day-to-day CLI.
-  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-code-acp");
+  //
+  // Package history: this used to be `@zed-industries/claude-code-acp` (binary
+  // name `claude-code-acp`). The project moved to `agentclientprotocol` org
+  // and renamed both the npm package and the binary in v0.31.x; the old name
+  // is npm-deprecated and stuck on agent-sdk 0.2.44, which has an internal
+  // capability/handler inconsistency that makes Linear-style MCP servers
+  // (anything that triggers the elicitation handler-registration path) fail
+  // with `Client does not support elicitation capability`. The new name is
+  // on agent-sdk 0.2.121+ where that path is fixed.
+  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-agent-acp");
   if (!hasClaudeAcp && (await isOnPath("claude"))) {
-    log.step("found `claude` on PATH — installing ACP wrapper @zed-industries/claude-code-acp");
-    const ok = await npmInstallGlobal("@zed-industries/claude-code-acp");
+    log.step("found `claude` on PATH — installing ACP wrapper @agentclientprotocol/claude-agent-acp");
+    const ok = await npmInstallGlobal("@agentclientprotocol/claude-agent-acp");
     if (ok) {
-      log.ok("claude-code-acp installed");
+      log.ok("claude-agent-acp installed");
       agents = await detectAll();
     } else {
-      log.warn("auto-install failed — install manually: npm i -g @zed-industries/claude-code-acp");
+      log.warn("auto-install failed — install manually: npm i -g @agentclientprotocol/claude-agent-acp");
     }
   }
 
@@ -138,7 +147,7 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
     log.ok(`agents detected  ${c.dim(agents.map((a: { id: string }) => a.id).join(", "))}`);
   } else {
     log.warn("no ACP agents on PATH yet");
-    log.hint("install one, e.g. `npm i -g @zed-industries/claude-code-acp`");
+    log.hint("install one, e.g. `npm i -g @agentclientprotocol/claude-agent-acp`");
   }
 
   if (opts.noService || currentPlatform() !== "darwin") {

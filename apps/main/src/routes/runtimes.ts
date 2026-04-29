@@ -384,12 +384,12 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
  * Render the spawn-cwd file bundle for a given (OMA agent config, ACP agent).
  *
  * The split between AGENTS.md and `.claude/skills/...` is agent-aware:
- *   - claude-code-acp: skills get their own discoverable directory tree;
+ *   - claude-agent-acp: skills get their own discoverable directory tree;
  *     AGENTS.md only carries the system prompt + appendable_prompts.
  *   - everyone else: no native skill mechanism we can rely on, so skills
  *     get inlined into AGENTS.md as a `## Available Skills` section.
  *
- * Skill content for claude-code-acp is fetched from KV (manifest) + R2
+ * Skill content for claude-agent-acp is fetched from KV (manifest) + R2
  * (file bytes), keyed off the same `t:{tenant}:skillver:{id}:{ver}` /
  * `skillFileR2Key()` schema apps/agent uses (see skills.ts:91). Falls
  * back to a stub when content can't be fetched (skill metadata missing,
@@ -404,7 +404,7 @@ async function renderSessionBundle(
 ): Promise<Array<{ path: string; content: string }>> {
   const files: Array<{ path: string; content: string }> = [];
   const skills = (agent.skills ?? []) as Array<{ skill_id: string; type: string; version?: string }>;
-  const supportsClaudeSkillsDir = acpAgentId === "claude-code-acp";
+  const supportsClaudeSkillsDir = acpAgentId === "claude-agent-acp";
 
   let agentsMd = `# ${agent.name ?? "OMA Agent"}\n\n`;
   if (agent.description) agentsMd += `${agent.description}\n\n`;
