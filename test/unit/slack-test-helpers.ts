@@ -7,7 +7,10 @@
 // scenario.
 
 import { SlackProvider, type SlackContainer } from "../../packages/slack/src/provider";
-import type { SlackInstallationRepo } from "../../packages/slack/src/ports";
+import type {
+  SlackInstallationRepo,
+  SlackSessionScopeRepo,
+} from "../../packages/slack/src/ports";
 import {
   buildFakeContainer,
   InMemoryInstallationRepo,
@@ -18,6 +21,7 @@ import {
   DEFAULT_SLACK_BOT_SCOPES,
   DEFAULT_SLACK_USER_SCOPES,
 } from "../../packages/slack/src/config";
+import type { SessionGranularity } from "../../packages/integrations-core/src/domain";
 
 /**
  * Slack-flavored InMemoryInstallationRepo: extends the base with the two
@@ -48,24 +52,123 @@ export class FakeSlackInstallationRepo
   }
 }
 
-export interface FakeSlackBundle extends Omit<FakeContainer, "installations"> {
+/**
+ * Slack-flavored in-memory SessionScopeRepo with per_channel methods
+ * (armPendingScan / clearPendingScan / updateChannelName) on top of the base
+ * SessionScopeRepo contract. Doesn't extend InMemorySessionScopeRepo because
+ * the base stores plain SessionScope rows that lose the per_channel fields
+ * across updateStatus; cleaner to own the Map directly.
+ */
+export class FakeSlackSessionScopeRepo implements SlackSessionScopeRepo {
+  private rows = new Map<
+    string,
+    import("../../packages/integrations-core/src/domain").SessionScope
+  >();
+
+  private key(publicationId: string, scopeKey: string): string {
+    return `${publicationId}:${scopeKey}`;
+  }
+
+  async getByScope(
+    publicationId: string,
+    scopeKey: string,
+  ): Promise<import("../../packages/integrations-core/src/domain").SessionScope | null> {
+    return this.rows.get(this.key(publicationId, scopeKey)) ?? null;
+  }
+
+  async insert(
+    row: import("../../packages/integrations-core/src/domain").SessionScope,
+  ): Promise<boolean> {
+    const k = this.key(row.publicationId, row.scopeKey);
+    if (this.rows.has(k)) return false;
+    this.rows.set(k, row);
+    return true;
+  }
+
+  async updateStatus(
+    publicationId: string,
+    scopeKey: string,
+    status: import("../../packages/integrations-core/src/domain").SessionScopeStatus,
+  ): Promise<void> {
+    const k = this.key(publicationId, scopeKey);
+    const row = this.rows.get(k);
+    if (row) this.rows.set(k, { ...row, status });
+  }
+
+  async listActive(
+    publicationId: string,
+  ): Promise<readonly import("../../packages/integrations-core/src/domain").SessionScope[]> {
+    return [...this.rows.values()].filter(
+      (r) => r.publicationId === publicationId && r.status === "active",
+    );
+  }
+
+  async armPendingScan(
+    publicationId: string,
+    scopeKey: string,
+    until: number,
+    now: number,
+  ): Promise<{ armed: boolean; currentUntil: number | null }> {
+    const k = this.key(publicationId, scopeKey);
+    const row = this.rows.get(k);
+    if (!row) return { armed: false, currentUntil: null };
+    const current = row.pendingScanUntil ?? null;
+    if (current === null || current <= now) {
+      this.rows.set(k, { ...row, pendingScanUntil: until });
+      return { armed: true, currentUntil: null };
+    }
+    return { armed: false, currentUntil: current };
+  }
+
+  async clearPendingScan(publicationId: string, scopeKey: string): Promise<void> {
+    const k = this.key(publicationId, scopeKey);
+    const row = this.rows.get(k);
+    if (row) this.rows.set(k, { ...row, pendingScanUntil: null });
+  }
+
+  async updateChannelName(
+    publicationId: string,
+    scopeKey: string,
+    channelName: string,
+  ): Promise<void> {
+    const k = this.key(publicationId, scopeKey);
+    const row = this.rows.get(k);
+    if (row) this.rows.set(k, { ...row, channelName });
+  }
+
+  async closeAllForPublication(publicationId: string): Promise<void> {
+    for (const [k, row] of this.rows.entries()) {
+      if (row.publicationId === publicationId && row.status === "active") {
+        this.rows.set(k, { ...row, status: "completed", pendingScanUntil: null });
+      }
+    }
+  }
+}
+
+export interface FakeSlackBundle extends Omit<FakeContainer, "installations" | "sessionScopes"> {
   installations: FakeSlackInstallationRepo;
+  sessionScopes: FakeSlackSessionScopeRepo;
 }
 
 export function buildFakeSlackContainer(): FakeSlackBundle {
   const base = buildFakeContainer();
-  return { ...base, installations: new FakeSlackInstallationRepo(base.clock) };
+  return {
+    ...base,
+    installations: new FakeSlackInstallationRepo(base.clock),
+    sessionScopes: new FakeSlackSessionScopeRepo(),
+  };
 }
 
 export function makeSlackProvider(
   c: FakeSlackBundle,
-  overrides?: Partial<{ gatewayOrigin: string }>,
+  overrides?: Partial<{ gatewayOrigin: string; defaultSessionGranularity: SessionGranularity }>,
 ): SlackProvider {
   return new SlackProvider(c as SlackContainer, {
     gatewayOrigin: overrides?.gatewayOrigin ?? "https://gw",
     botScopes: DEFAULT_SLACK_BOT_SCOPES,
     userScopes: DEFAULT_SLACK_USER_SCOPES,
     defaultCapabilities: ALL_SLACK_CAPABILITIES,
+    defaultSessionGranularity: overrides?.defaultSessionGranularity,
   });
 }
 
@@ -106,7 +209,7 @@ export function tokenResponseBody(opts?: {
  */
 export async function seedDedicatedSlackPublication(
   c: FakeSlackBundle,
-  opts: { signingSecret: string },
+  opts: { signingSecret: string; sessionGranularity?: SessionGranularity },
 ): Promise<{ instId: string; pubId: string; appId: string }> {
   const app = await c.apps.insert({
     publicationId: null,
@@ -137,7 +240,7 @@ export async function seedDedicatedSlackPublication(
     status: "live",
     persona: { name: "Triage", avatarUrl: null },
     capabilities: new Set(),
-    sessionGranularity: "per_thread",
+    sessionGranularity: opts.sessionGranularity ?? "per_thread",
   });
   await c.apps.setPublicationId(app.id, pub.id);
   return { instId: inst.id, pubId: pub.id, appId: app.id };
@@ -207,6 +310,121 @@ export function messagePayload(opts: {
       user: opts.user ?? "U0USER",
       text: opts.text ?? "hello",
       event_ts: opts.ts,
+    },
+  });
+}
+
+/** member_joined_channel envelope. user defaults to bot id. */
+export function memberJoinedChannelPayload(opts: {
+  channel: string;
+  eventId: string;
+  user?: string;
+}): string {
+  return JSON.stringify({
+    type: "event_callback",
+    event_id: opts.eventId,
+    event_time: 1_700_000_000,
+    team_id: "T07TEAM",
+    api_app_id: "A07APP",
+    event: {
+      type: "member_joined_channel",
+      channel: opts.channel,
+      user: opts.user ?? "U07BOT",
+      event_ts: "1700000000.000100",
+    },
+  });
+}
+
+/** member_left_channel envelope. */
+export function memberLeftChannelPayload(opts: {
+  channel: string;
+  eventId: string;
+  user?: string;
+}): string {
+  return JSON.stringify({
+    type: "event_callback",
+    event_id: opts.eventId,
+    event_time: 1_700_000_000,
+    team_id: "T07TEAM",
+    api_app_id: "A07APP",
+    event: {
+      type: "member_left_channel",
+      channel: opts.channel,
+      user: opts.user ?? "U07BOT",
+      event_ts: "1700000000.000200",
+    },
+  });
+}
+
+/** channel_archive / channel_unarchive envelope. */
+export function channelLifecyclePayload(opts: {
+  type: "channel_archive" | "channel_unarchive";
+  channel: string;
+  eventId: string;
+  user?: string;
+}): string {
+  return JSON.stringify({
+    type: "event_callback",
+    event_id: opts.eventId,
+    event_time: 1_700_000_000,
+    team_id: "T07TEAM",
+    api_app_id: "A07APP",
+    event: {
+      type: opts.type,
+      channel: opts.channel,
+      user: opts.user ?? "U07ADMIN",
+      event_ts: "1700000000.000300",
+    },
+  });
+}
+
+/** channel_rename envelope — channel field is `{ id, name }`. */
+export function channelRenamePayload(opts: {
+  channelId: string;
+  newName: string;
+  eventId: string;
+}): string {
+  return JSON.stringify({
+    type: "event_callback",
+    event_id: opts.eventId,
+    event_time: 1_700_000_000,
+    team_id: "T07TEAM",
+    api_app_id: "A07APP",
+    event: {
+      type: "channel_rename",
+      channel: { id: opts.channelId, name: opts.newName, created: 1_700_000_000 },
+      event_ts: "1700000000.000400",
+    },
+  });
+}
+
+/** reaction_added / reaction_removed envelope. */
+export function reactionPayload(opts: {
+  type: "reaction_added" | "reaction_removed";
+  channel: string;
+  itemTs: string;
+  itemUser?: string;
+  reaction?: string;
+  eventId: string;
+  user?: string;
+}): string {
+  return JSON.stringify({
+    type: "event_callback",
+    event_id: opts.eventId,
+    event_time: 1_700_000_000,
+    team_id: "T07TEAM",
+    api_app_id: "A07APP",
+    event: {
+      type: opts.type,
+      user: opts.user ?? "U0USER",
+      reaction: opts.reaction ?? "thumbsup",
+      item: {
+        type: "message",
+        channel: opts.channel,
+        ts: opts.itemTs,
+      },
+      item_user: opts.itemUser ?? "U07BOT",
+      event_ts: "1700000000.000500",
     },
   });
 }

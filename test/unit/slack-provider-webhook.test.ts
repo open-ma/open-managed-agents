@@ -295,6 +295,113 @@ describe("SlackProvider — handleWebhook", () => {
     expect(out.reason).toBe("app_uninstalled");
   });
 
+  it("tokens_revoked closes all active channel sessions for the publication and clears their pending_scan_until, leaving other publications' sessions untouched", async () => {
+    // Two active per_channel sessions on the revoked publication, one with
+    // an armed scan watermark.
+    await c.sessionScopes.insert({
+      tenantId: "tnt_a",
+      publicationId: pubId,
+      scopeKey: "channel:C0CHAN_A",
+      sessionId: "sess-a",
+      status: "active",
+      createdAt: 1_700_000_000_000,
+      pendingScanUntil: 1_700_000_090_000,
+      lastScanAt: null,
+      channelName: "general",
+    });
+    await c.sessionScopes.insert({
+      tenantId: "tnt_a",
+      publicationId: pubId,
+      scopeKey: "channel:C0CHAN_B",
+      sessionId: "sess-b",
+      status: "active",
+      createdAt: 1_700_000_000_000,
+      pendingScanUntil: null,
+      lastScanAt: null,
+      channelName: "random",
+    });
+    // An unrelated publication's session — must NOT be touched.
+    await c.sessionScopes.insert({
+      tenantId: "tnt_other",
+      publicationId: "pub_other",
+      scopeKey: "channel:C0OTHER",
+      sessionId: "sess-other",
+      status: "active",
+      createdAt: 1_700_000_000_000,
+      pendingScanUntil: 1_700_000_090_000,
+      lastScanAt: null,
+      channelName: null,
+    });
+
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "Ev_REVOKE_CLEANUP",
+      event_time: 1_700_000_000,
+      team_id: "T07TEAM",
+      api_app_id: "A07APP",
+      event: {
+        type: "tokens_revoked",
+        tokens: { oauth: ["U07USER"], bot: ["U07BOT"] },
+      },
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out.handled).toBe(true);
+
+    const a = await c.sessionScopes.getByScope(pubId, "channel:C0CHAN_A");
+    expect(a?.status).toBe("completed");
+    expect(a?.pendingScanUntil).toBeNull();
+    const b = await c.sessionScopes.getByScope(pubId, "channel:C0CHAN_B");
+    expect(b?.status).toBe("completed");
+    expect(b?.pendingScanUntil).toBeNull();
+
+    const other = await c.sessionScopes.getByScope("pub_other", "channel:C0OTHER");
+    expect(other?.status).toBe("active");
+    expect(other?.pendingScanUntil).toBe(1_700_000_090_000);
+  });
+
+  it("app_uninstalled closes all active channel sessions for the publication", async () => {
+    await c.sessionScopes.insert({
+      tenantId: "tnt_a",
+      publicationId: pubId,
+      scopeKey: "channel:C0CHAN_X",
+      sessionId: "sess-x",
+      status: "active",
+      createdAt: 1_700_000_000_000,
+      pendingScanUntil: 1_700_000_090_000,
+      lastScanAt: null,
+      channelName: null,
+    });
+
+    const body = JSON.stringify({
+      type: "event_callback",
+      event_id: "Ev_UNINSTALL_CLEANUP",
+      event_time: 1_700_000_000,
+      team_id: "T07TEAM",
+      api_app_id: "A07APP",
+      event: { type: "app_uninstalled" },
+    });
+    const ts = "1700000000";
+    const out = await provider.handleWebhook({
+      providerId: "slack",
+      installationId: appId,
+      deliveryId: null,
+      headers: { "x-slack-signature": validSig(body, ts), "x-slack-request-timestamp": ts },
+      rawBody: body,
+    });
+    expect(out.handled).toBe(true);
+
+    const x = await c.sessionScopes.getByScope(pubId, "channel:C0CHAN_X");
+    expect(x?.status).toBe("completed");
+    expect(x?.pendingScanUntil).toBeNull();
+  });
+
   it("drops the redundant `message` Slack delivers alongside `app_mention`", async () => {
     // Slack always sends BOTH message.channels and app_mention for an @-bot
     // post in a channel. They reference the same Slack message ts. The

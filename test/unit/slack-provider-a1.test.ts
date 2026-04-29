@@ -147,7 +147,7 @@ describe("SlackProvider — A1 (full identity) install flow", () => {
     const pub = await c.publications.get(complete.publicationId);
     expect(pub).toBeTruthy();
     expect(pub?.mode).toBe("full");
-    expect(pub?.sessionGranularity).toBe("per_thread");
+    expect(pub?.sessionGranularity).toBe("per_channel");
 
     const installs = await c.installations.listByUser("usr_a", "slack");
     expect(installs).toHaveLength(1);
