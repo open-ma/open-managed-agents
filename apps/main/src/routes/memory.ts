@@ -150,16 +150,24 @@ app.get("/:id/memories", async (c) => {
   const t = c.get("tenant_id");
   const storeId = c.req.param("id");
   const pathPrefix = c.req.query("path_prefix") ?? c.req.query("prefix");
-  // `depth` is Anthropic-aligned: limits how deep below path_prefix to surface
-  // entries. Implemented client-side over the service's flat list (cheap given
-  // typical store size). depth=undefined → return all.
+  // `depth` is Anthropic-aligned: `depth=N` shows entries at most N path
+  // segments below the prefix. Implemented client-side over the service's
+  // flat list (cheap given typical store size). depth=undefined → return all.
+  // Examples (prefix=/preferences/):
+  //   depth=1 → /preferences/foo.md          ✓
+  //             /preferences/colors/dark.md  ✗
+  //   depth=2 → both ✓
   const depthRaw = c.req.query("depth");
   const depth = depthRaw ? Math.max(0, parseInt(depthRaw, 10)) : undefined;
   try {
     let memories = await c.var.services.memory.listMemories({ tenantId: t, storeId, pathPrefix });
     if (depth !== undefined && pathPrefix) {
-      const baseDepth = countSlashes(pathPrefix);
-      memories = memories.filter((m) => countSlashes(m.path) - baseDepth <= depth);
+      memories = memories.filter((m) => {
+        if (!m.path.startsWith(pathPrefix)) return false;
+        const remainder = m.path.slice(pathPrefix.length);
+        const segments = remainder.split("/").filter(Boolean).length;
+        return segments <= depth;
+      });
     }
     // List does not include content (mirrors Anthropic semantics).
     return c.json({
@@ -327,12 +335,6 @@ function toApiVersion(v: import("@open-managed-agents/memory-store").MemoryVersi
     created_at: v.created_at,
     redacted: v.redacted || undefined,
   };
-}
-
-function countSlashes(s: string): number {
-  let n = 0;
-  for (const ch of s) if (ch === "/") n++;
-  return n;
 }
 
 export default app;
