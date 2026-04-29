@@ -358,8 +358,13 @@ async function tailSession(config: Config, sessionId: string): Promise<void> {
 // ─── Helpers ───
 
 function flag(args: string[], name: string): string | undefined {
-  const idx = args.indexOf(name);
-  return idx !== -1 ? args[idx + 1] : undefined;
+  // Accepts both `--name value` and `--name=value` forms.
+  const eqPrefix = `${name}=`;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) return args[i + 1];
+    if (args[i].startsWith(eqPrefix)) return args[i].slice(eqPrefix.length);
+  }
+  return undefined;
 }
 
 function table(rows: string[][]) {

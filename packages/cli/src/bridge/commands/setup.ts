@@ -2,9 +2,9 @@
  * `oma bridge setup` — one-time onboarding.
  *
  *   1. Bind 127.0.0.1:<rand-port> as a single-shot HTTP server.
- *   2. Open the user's browser to https://openma.dev/connect-daemon?cb=…&state=…
+ *   2. Open the user's browser to https://openma.dev/connect-runtime?cb=…&state=…
  *   3. User clicks "Allow this machine" (already auth'd via session cookie).
- *      Browser POSTs /api/v1/runtimes/connect-daemon → gets one-time `code`.
+ *      Browser POSTs /api/v1/runtimes/connect-runtime → gets one-time `code`.
  *      Browser redirects to http://127.0.0.1:<port>/cb?code=…&state=…
  *   4. Local server receives the code, returns a "✓ All set" HTML page,
  *      shuts down.
@@ -165,7 +165,7 @@ function waitForCallback(state: string, browserOrigin: string): Promise<string> 
       const port = (server.address() as AddressInfo).port;
       const cb = `http://127.0.0.1:${port}/cb`;
       const target =
-        `${browserOrigin.replace(/\/$/, "")}/connect-daemon` +
+        `${browserOrigin.replace(/\/$/, "")}/connect-runtime` +
         `?cb=${encodeURIComponent(cb)}&state=${encodeURIComponent(state)}`;
       process.stderr.write(`→ opening ${target}\n`);
       openBrowser(target).catch((e) => {
