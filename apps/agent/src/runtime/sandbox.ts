@@ -34,19 +34,175 @@ export class CloudflareSandbox implements SandboxExecutor {
     return this.sandboxPromise;
   }
 
+  /**
+   * @deprecated /workspace persistence is now via createBackup/restoreBackup
+   * (see restoreWorkspaceBackup + createWorkspaceBackup below). This is kept
+   * as a no-op so callers that call mountWorkspace() during warmup don't
+   * break, but it does NOT mount R2 anymore.
+   *
+   * Why dropped:
+   *   - `localBucket: true` silently fails to push writes back in real CF
+   *     (only works in `wrangler dev`). Workspace was effectively ephemeral.
+   *   - FUSE/s3fs mode would make every `/workspace/...` write a synchronous
+   *     R2 PUT (~100-500ms per write), unacceptable for typical agent flows
+   *     (compile, build, scratch files).
+   *   - Cloudflare's recommended pattern for "fast workspace + persist
+   *     across sessions" is createBackup at session end + restoreBackup at
+   *     session warmup. See changelog 2026-02-23.
+   */
   async mountWorkspace(): Promise<void> {
     if (this.mounted) return;
     this.mounted = true;
-    const sandbox = await this.getSandbox();
+    // Intentionally no-op. /workspace is plain container disk now.
+    // Persistence is wired in session-do.ts via restoreWorkspaceBackup
+    // (warmup) and createWorkspaceBackup (destroy).
+  }
+
+  /**
+   * Snapshot /workspace into R2 via squashfs. Returns a handle the caller
+   * persists in D1 (workspace_backups table). Best-effort: failure is
+   * logged but does not raise — losing a backup is recoverable (worst
+   * case: next session starts from empty workspace).
+   */
+  async createWorkspaceBackup(opts: {
+    name?: string;
+    ttlSec: number;
+  }): Promise<{ id: string; dir: string; localBucket?: boolean } | null> {
     try {
-      if (this.env.WORKSPACE_BUCKET) {
-        await sandbox.mountBucket("managed-agents-workspace", "/workspace", {
-          localBucket: true,
-        });
-      }
-    } catch {
-      // Mount failed — fall back to ephemeral container disk.
+      const sandbox = await this.getSandbox();
+      // Detect dev mode: in wrangler dev there are no R2 S3 keys (no
+      // presigned URLs available), so the SDK requires localBucket: true
+      // which uses BACKUP_BUCKET binding directly. In prod we omit it and
+      // the SDK uses presigned URLs.
+      const isDev = !this.env.R2_ENDPOINT || !this.env.R2_ACCESS_KEY_ID;
+      const backup = await sandbox.createBackup({
+        dir: "/workspace",
+        name: opts.name,
+        ttl: opts.ttlSec,
+        // Skip the obvious bloat. node_modules can be 100s of MB and is
+        // re-installable. Same for build caches.
+        excludes: ["node_modules", ".cache", "__pycache__", ".next", "target"],
+        // If /workspace is a git repo, respect .gitignore — it covers
+        // build artifacts the project itself declared as expendable.
+        gitignore: true,
+        ...(isDev ? { localBucket: true } : {}),
+      });
+      return {
+        id: backup.id,
+        dir: backup.dir,
+        localBucket: backup.localBucket,
+      };
+    } catch (err) {
+      console.warn(
+        `[sandbox] createWorkspaceBackup failed: ${err instanceof Error ? err.message : err}`,
+      );
+      return null;
     }
+  }
+
+  /**
+   * Restore a previously created backup into /workspace. Returns true on
+   * success, false on failure (e.g. backup expired in R2). Best-effort:
+   * failure is logged and the caller continues with an empty /workspace.
+   */
+  async restoreWorkspaceBackup(handle: {
+    id: string;
+    dir: string;
+    localBucket?: boolean;
+  }): Promise<boolean> {
+    try {
+      const sandbox = await this.getSandbox();
+      await sandbox.restoreBackup(handle);
+      return true;
+    } catch (err) {
+      // Common: backup expired (BACKUP_EXPIRED), R2 lifecycle deleted the
+      // squashfs, etc. Either way, fall through to empty workspace — agent
+      // can re-clone / re-install as if it's a fresh session.
+      console.warn(
+        `[sandbox] restoreWorkspaceBackup failed (likely expired): ` +
+        `${err instanceof Error ? err.message : err}`,
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Mount a memory store into the sandbox at /mnt/memory/<store_name>/.
+   * Uses sandbox.mountBucket with prefix scoping so the agent only sees this
+   * store's keys (`<store_id>/...`) under the mount, regardless of what other
+   * tenants have in MEMORY_BUCKET.
+   *
+   * Anthropic Managed Agents Memory contract: the agent reads/writes via
+   * standard file tools — no bespoke memory_* tools (those were removed).
+   *
+   * Mode selection:
+   *   - Production (FUSE / s3fs): used when R2_ENDPOINT + R2_ACCESS_KEY_ID
+   *     + R2_SECRET_ACCESS_KEY are all bound. Writes flow synchronously
+   *     over the S3 API and trigger R2 Event Notifications → CF Queue →
+   *     consumer → D1 audit. This is the contract the rest of the memory
+   *     subsystem assumes.
+   *   - wrangler dev (`localBucket: true`): R2 binding-sync. Reads work,
+   *     writes do NOT persist to R2 in real CF — only used here as a dev
+   *     fallback so `pnpm wrangler dev` keeps working without R2 keys.
+   */
+  async mountMemoryStore(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void> {
+    if (!this.env.MEMORY_BUCKET) {
+      throw new Error(
+        `MEMORY_BUCKET binding missing — cannot mount memory store ${opts.storeName}`,
+      );
+    }
+    const sandbox = await this.getSandbox();
+    const mountPath = `/mnt/memory/${opts.storeName}`;
+    // Trailing slash on the prefix ensures we don't accidentally match
+    // sibling prefixes (e.g. "abc/" vs "abcd/...").
+    const prefix = `/${opts.storeId}/`;
+
+    const fuse = this.fuseR2ConfigOrNull();
+    const bucketName = this.env.MEMORY_BUCKET_NAME;
+
+    if (fuse && bucketName) {
+      await sandbox.mountBucket(bucketName, mountPath, {
+        endpoint: fuse.endpoint,
+        provider: "r2",
+        credentials: fuse.credentials,
+        prefix,
+        readOnly: opts.readOnly,
+      });
+    } else {
+      // Dev fallback. In production this branch means agent writes won't
+      // persist — log loudly so the operator catches the misconfig.
+      console.warn(
+        "[sandbox] mountMemoryStore: R2 FUSE creds missing (R2_ENDPOINT / " +
+        "R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / MEMORY_BUCKET_NAME) — " +
+        "falling back to localBucket mode. Agent writes to /mnt/memory/ will " +
+        "NOT persist to R2 in real CF; this is dev-only behavior.",
+      );
+      await sandbox.mountBucket("MEMORY_BUCKET", mountPath, {
+        localBucket: true,
+        prefix,
+        readOnly: opts.readOnly,
+      });
+    }
+  }
+
+  /**
+   * Returns the R2 S3 credentials block if all three FUSE env vars are
+   * present, else null (dev fallback). Centralized so memory + workspace
+   * share the same gating.
+   */
+  private fuseR2ConfigOrNull(): {
+    endpoint: string;
+    credentials: { accessKeyId: string; secretAccessKey: string };
+  } | null {
+    const endpoint = this.env.R2_ENDPOINT;
+    const accessKeyId = this.env.R2_ACCESS_KEY_ID;
+    const secretAccessKey = this.env.R2_SECRET_ACCESS_KEY;
+    if (!endpoint || !accessKeyId || !secretAccessKey) return null;
+    return { endpoint, credentials: { accessKeyId, secretAccessKey } };
   }
 
   async exec(command: string, timeout?: number): Promise<string> {

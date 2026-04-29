@@ -27,7 +27,7 @@ import { resolveModel } from "../harness/provider";
 import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
-import { buildTools, buildMemoryTools } from "../harness/tools";
+import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
@@ -38,6 +38,13 @@ import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
 import { mountResources } from "./resource-mounter";
 import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
+import {
+  findLatestBackup as findWorkspaceBackup,
+  recordBackup as recordWorkspaceBackup,
+  coordinateBackup,
+  DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+  type BackupCoordinatorState,
+} from "./workspace-backups";
 
 interface SessionInitParams {
   agent_id: string;
@@ -278,6 +285,19 @@ export class SessionDO extends Agent<Env, SessionState> {
   private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
+  /** Last time we wrote a workspace backup (ms). Used to debounce per-turn
+   *  snapshots so a chatty agent doesn't spam BACKUP_BUCKET PUTs. Forced
+   *  backups (session destroy) ignore this. */
+  private lastWorkspaceBackupAt = 0;
+  /** Min interval between turn-end backups. Forced backups bypass this. */
+  private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 60_000;
+  /** Single in-flight workspace backup promise — coalesces concurrent calls
+   *  so a turn-end fire-and-forget backup + a DELETE force backup don't race
+   *  on the same container (CF Sandbox SDK rejects the second concurrent
+   *  createBackup with HTTP 500). Force callers `await` the in-flight one
+   *  instead of starting a new one — the FS state is the same since no
+   *  agent ops can run during a backup. */
+  private workspaceBackupInFlight: Promise<void> | null = null;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -820,6 +840,14 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.currentAbortController.abort();
         this.currentAbortController = null;
       }
+      // Snapshot /workspace BEFORE we destroy the container — once destroy()
+      // runs the container is gone and we can't read its filesystem.
+      // CF's "persist across sessions" pattern (changelog 2026-02-23):
+      // squashfs of /workspace lands in BACKUP_BUCKET; the handle goes into
+      // D1 keyed by (tenant, env). Next session in the same scope's warmup
+      // looks it up and restoreBackup's it. Force=true bypasses the
+      // turn-end debounce so we always get a final snapshot.
+      await this.maybeBackupWorkspace({ force: true });
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -1362,6 +1390,69 @@ export class SessionDO extends Agent<Env, SessionState> {
         await sandbox.mountWorkspace();
       }
 
+      // Restore the most recent workspace backup for (tenant, environment)
+      // BEFORE mountResources runs, so the agent picks up where it left
+      // off. Per CF's recommended pattern (changelog 2026-02-23, "pick up
+      // where you left off, even after days of inactivity").
+      //
+      // Skip when the session attaches a github_repository resource: that
+      // resource git-clones into /workspace, and `git clone` requires the
+      // target dir to be empty. Restore-then-clone would fail; the user
+      // explicitly asked for a clone so they want clone semantics, not
+      // restore semantics. (Future: smarter merge — restore then `git pull`.)
+      if (
+        sandbox instanceof CloudflareSandbox &&
+        this.state.tenant_id &&
+        this.state.environment_id &&
+        this.env.AUTH_DB
+      ) {
+        try {
+          let hasGitRepo = false;
+          if (this.state.session_id) {
+            const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
+            const rows = await services.sessions.listResourcesBySession({ sessionId: this.state.session_id });
+            hasGitRepo = rows.some(
+              (r) => r.type === "github_repository" || r.type === "github_repo",
+            );
+          }
+          if (hasGitRepo) {
+            logWarn(
+              { op: "session_do.warmup.skip_restore_github_repo", session_id: this.state.session_id },
+              "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
+            );
+          } else {
+            const handle = await findWorkspaceBackup(
+              this.env.AUTH_DB,
+              this.state.tenant_id,
+              this.state.environment_id,
+              Date.now(),
+            );
+            if (handle) {
+              const ok = await sandbox.restoreWorkspaceBackup(handle);
+              if (!ok) {
+                logWarn(
+                  {
+                    op: "session_do.warmup.restore_backup",
+                    session_id: this.state.session_id,
+                    tenant_id: this.state.tenant_id,
+                    environment_id: this.state.environment_id,
+                    backup_id: handle.id,
+                  },
+                  "workspace backup restore returned false (likely expired) — continuing with empty workspace",
+                );
+              }
+            }
+          }
+        } catch (err) {
+          // Best-effort. Workspace persistence shouldn't block session
+          // warmup — agent still works with empty /workspace.
+          logWarn(
+            { op: "session_do.warmup.restore_backup", session_id: this.state.session_id, err },
+            "workspace backup restore failed; continuing with empty /workspace",
+          );
+        }
+      }
+
       // image_strategy fast path REMOVED. Was a base_snapshot lazy-prepare
       // path that ran a multi-minute install + tar + R2 upload via a single
       // sandbox.exec — the SDK wraps each exec in blockConcurrencyWhile,
@@ -1436,6 +1527,21 @@ export class SessionDO extends Agent<Env, SessionState> {
             secretStore,
             this.env.FILES_BUCKET,
             this.state.tenant_id,
+            // Memory-store name lookup for mount paths (Anthropic mounts as
+            // /mnt/memory/<name>/, not /mnt/memory/<id>/). The lookup falls
+            // back to the id if the store can't be resolved.
+            async (storeId: string) => {
+              try {
+                const memSvc = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
+                const store = await memSvc.getStore({
+                  tenantId: this.state.tenant_id,
+                  storeId,
+                });
+                return store ? { name: store.name } : null;
+              } catch {
+                return null;
+              }
+            },
           );
         }
       }
@@ -2073,7 +2179,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const memoryAttachments: Array<{
       store_id: string;
       access: "read_write" | "read_only";
-      prompt?: string;
+      instructions?: string;
     }> = [];
     if (sessionId) {
       // listResourcesBySession queries the session_id column directly — no
@@ -2086,7 +2192,11 @@ export class SessionDO extends Agent<Env, SessionState> {
           memoryAttachments.push({
             store_id: row.resource.memory_store_id,
             access: row.resource.access === "read_only" ? "read_only" : "read_write",
-            prompt: typeof row.resource.prompt === "string" ? row.resource.prompt : undefined,
+            // Accept Anthropic-aligned `instructions` going forward.
+            instructions:
+              typeof (row.resource as { instructions?: unknown }).instructions === "string"
+                ? ((row.resource as { instructions: string }).instructions)
+                : undefined,
           });
         }
       }
@@ -2130,19 +2240,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       },
     });
 
-    // Add memory tools if session has memory store resources. The CF factory
-    // wires Noop adapters when AI / VECTORIZE are unbound, so we only require
-    // AUTH_DB to be present.
+    // Memory store mounts: per the Anthropic Managed Agents Memory contract,
+    // each attached store appears as /mnt/memory/<store_name>/ inside the
+    // sandbox. The agent reads/writes via the standard file tools (no
+    // bespoke memory_* tools). The mount itself is set up further down in
+    // the resource-mounter call. We only need MemoryStoreService here to
+    // resolve store metadata for the system-prompt reminder block.
     let memoryStoreService: MemoryStoreService | null = null;
     if (memoryAttachments.length && this.env.AUTH_DB) {
       memoryStoreService = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
-      const memTools = buildMemoryTools(
-        memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
-        this.state.tenant_id,
-        memoryStoreService,
-        this.state.agent_id ?? "agent",
-      );
-      Object.assign(allTools, memTools);
     }
 
     // Resolve model — look up model card credentials, fall back to env vars
@@ -2270,7 +2376,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Memory store prompts → platformReminders (was: appended to systemPrompt
     // every turn, KV-list-order dependent → permanent cache miss). Build the
     // prompt strings on the fly from memory store metadata + per-attachment
-    // prompt overrides.
+    // instructions overrides. Format mirrors Anthropic's auto-injected mount
+    // descriptors: `/mnt/memory/<name>/ (access)` so the agent knows where to
+    // find the store and uses standard file tools to interact.
     const memoryPrompts: string[] = [];
     if (memoryAttachments.length && memoryStoreService) {
       try {
@@ -2283,10 +2391,16 @@ export class SessionDO extends Agent<Env, SessionState> {
             memoryPrompts.push("");
             continue;
           }
-          const lines = [`## Memory store: ${store.name}`];
+          const accessLabel = att.access === "read_only" ? "read-only" : "read-write";
+          const lines = [
+            `## Memory store: ${store.name}`,
+            `Mounted at /mnt/memory/${store.name}/ (${accessLabel})`,
+          ];
           if (store.description) lines.push(store.description);
-          if (att.prompt) lines.push(att.prompt);
-          if (att.access === "read_only") lines.push("(read-only attachment — write tools are not available for this store)");
+          if (att.instructions) lines.push(att.instructions);
+          if (att.access === "read_only") {
+            lines.push("(read-only mount — write attempts to this directory will fail)");
+          }
           memoryPrompts.push(lines.join("\n"));
         }
       } catch (err) {
@@ -2572,7 +2686,86 @@ export class SessionDO extends Agent<Env, SessionState> {
     } finally {
       this.currentAbortController = null;
       this.setState({ ...this.state, status: "idle" });
+      // Snapshot /workspace at turn end (debounced — see maybeBackupWorkspace).
+      // CF Sandbox kills the container + deletes /workspace after 10 minutes
+      // idle, so without a fresh snapshot here the next session resumes from
+      // the previous turn's state at best, empty at worst. Fire-and-forget
+      // via waitUntil so it doesn't add latency to the turn's completion.
+      this.ctx.waitUntil(this.maybeBackupWorkspace());
     }
+  }
+
+  /**
+   * Snapshot /workspace into BACKUP_BUCKET via createBackup + record the
+   * handle in D1. Triggers:
+   *   - End of each agent turn (debounced, fire-and-forget via waitUntil)
+   *   - Session destroy (force=true, awaited so it completes before
+   *     sandbox.destroy())
+   *
+   * Per-turn debouncing matters because CF Sandbox's 10-minute idle timeout
+   * stops the container AND deletes its filesystem. Without a fresh backup
+   * since the last meaningful state change, the next session loses that
+   * work. Debounce keeps cost reasonable (no spam during chatty turns) but
+   * the destroy path always forces a final snapshot.
+   *
+   * Best-effort throughout: failures are logged + swallowed. A missing
+   * backup means the next session starts from the previous backup or
+   * empty — never a hard error for the user.
+   */
+  private async maybeBackupWorkspace(opts?: { force?: boolean }): Promise<void> {
+    if (
+      !(this.sandbox instanceof CloudflareSandbox) ||
+      !this.state.tenant_id ||
+      !this.state.environment_id ||
+      !this.env.AUTH_DB
+    ) {
+      return;
+    }
+    const sandbox = this.sandbox;
+    const tenantId = this.state.tenant_id;
+    const environmentId = this.state.environment_id;
+    const authDb = this.env.AUTH_DB;
+    const sessionId = this.state.session_id;
+    // Coordination (debounce + in-flight coalesce) lives in workspace-backups.ts
+    // as a pure function so it's unit-testable. State adapter routes the get/set
+    // through the SessionDO's own instance fields so the existing storage model
+    // (mutable instance fields) is preserved.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const this_ = this;
+    const state: BackupCoordinatorState = {
+      get lastBackupAt(): number { return this_.lastWorkspaceBackupAt; },
+      set lastBackupAt(v: number) { this_.lastWorkspaceBackupAt = v; },
+      get inFlight(): Promise<void> | null { return this_.workspaceBackupInFlight; },
+      set inFlight(v: Promise<void> | null) { this_.workspaceBackupInFlight = v; },
+    };
+    return coordinateBackup(
+      state,
+      {
+        debounceMs: SessionDO.WORKSPACE_BACKUP_DEBOUNCE_MS,
+        now: () => Date.now(),
+        doBackup: async () => {
+          const handle = await sandbox.createWorkspaceBackup({
+            name: `session-${sessionId ?? "unknown"}`,
+            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+          });
+          if (!handle) return;
+          await recordWorkspaceBackup(authDb, {
+            tenantId,
+            environmentId,
+            handle,
+            nowMs: Date.now(),
+            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+            sessionId,
+          });
+        },
+      },
+      opts,
+    ).catch((err: unknown) => {
+      logWarn(
+        { op: "session_do.workspace_backup", session_id: sessionId, force: !!opts?.force, err },
+        "workspace backup failed (best-effort)",
+      );
+    });
   }
 
   /**

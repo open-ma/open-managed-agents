@@ -26,11 +26,17 @@ import schema0001 from "../apps/main/migrations/0001_schema.sql?raw";
 import schema0002 from "../apps/main/migrations/0002_integrations_tenant_id.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0003 from "../apps/main/migrations/0003_tenant_shard.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0010 from "../apps/main/migrations/0010_memory_anthropic_alignment.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0011 from "../apps/main/migrations/0011_workspace_backups.sql?raw";
 
 const MIGRATIONS_RAW: string[] = [
   schema0001 as string,
   schema0002 as string,
   schema0003 as string,
+  schema0010 as string,
+  schema0011 as string,
 ];
 
 let migrationsApplied = false;

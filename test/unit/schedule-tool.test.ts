@@ -279,9 +279,12 @@ describe("event classification — schedule tool emits agent.tool_use, not agent
     // Negative checks — verify the classifier hasn't gone too broad.
     expect(isBuiltinTool("totally_made_up_tool")).toBe(false);
     expect(isBuiltinTool("send_email")).toBe(false);
-    // MCP / call_agent / memory prefixes still classify as built-in
+    // MCP / call_agent prefixes still classify as built-in.
     expect(isBuiltinTool("mcp_github_get_issue")).toBe(true);
     expect(isBuiltinTool("call_agent_researcher")).toBe(true);
-    expect(isBuiltinTool("memory_search")).toBe(true);
+    // memory_* tools were removed in the Anthropic-aligned memory migration —
+    // agents read/write /mnt/memory/<store>/ via standard file tools instead.
+    // Anything still named memory_* is a custom (non-builtin) tool now.
+    expect(isBuiltinTool("memory_search")).toBe(false);
   });
 });

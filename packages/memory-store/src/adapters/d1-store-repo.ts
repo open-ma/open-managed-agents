@@ -77,14 +77,6 @@ export class D1MemoryStoreRepo implements MemoryStoreRepo {
         .bind(storeId, tenantId),
     ]);
   }
-
-  async listMemoryIds(storeId: string): Promise<string[]> {
-    const result = await this.db
-      .prepare(`SELECT id FROM memories WHERE store_id = ?`)
-      .bind(storeId)
-      .all<{ id: string }>();
-    return (result.results ?? []).map((r) => r.id);
-  }
 }
 
 interface DbStore {

@@ -14,7 +14,13 @@
 export * from "./types";
 export * from "./errors";
 export * from "./ports";
-export { MemoryStoreService } from "./service";
+export {
+  MemoryStoreService,
+  r2Key,
+  parseR2Key,
+  byteLength,
+  sha256Hex,
+} from "./service";
 export type { MemoryStoreServiceDeps } from "./service";
 
 // Re-export the CF factory at the top level so callers don't have to know
@@ -24,8 +30,5 @@ export {
   D1MemoryStoreRepo,
   D1MemoryRepo,
   D1MemoryVersionRepo,
-  WorkersAiEmbeddingProvider,
-  NoopEmbeddingProvider,
-  CfVectorIndex,
-  NoopVectorIndex,
+  CfR2BlobStore,
 } from "./adapters";

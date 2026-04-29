@@ -367,6 +367,31 @@ function flag(args: string[], name: string): string | undefined {
   return undefined;
 }
 
+/**
+ * Read memory content from either --content <string> or --from-file <path>.
+ * Returns undefined if neither was specified, throws if both were.
+ * `--from-file -` reads stdin.
+ */
+function readContentArg(args: string[]): string | undefined {
+  const inline = flag(args, "--content");
+  const fromFile = flag(args, "--from-file");
+  if (inline !== undefined && fromFile !== undefined) {
+    console.error("Pass either --content or --from-file, not both.");
+    process.exit(1);
+  }
+  if (inline !== undefined) return inline;
+  if (fromFile !== undefined) {
+    if (fromFile === "-") {
+      // Sync read from stdin. Acceptable for CLI use where the user is piping.
+      const fs = require("fs") as typeof import("fs");
+      return fs.readFileSync(0, "utf8");
+    }
+    const fs = require("fs") as typeof import("fs");
+    return fs.readFileSync(fromFile, "utf8");
+  }
+  return undefined;
+}
+
 function table(rows: string[][]) {
   if (!rows.length) return;
   const widths = rows[0].map((_, i) => Math.max(...rows.map(r => (r[i] || "").length)));
@@ -1732,58 +1757,281 @@ const commands: Cmd[] = [
     },
   },
 
-  // Memory
+  // Memory stores (Anthropic Managed Agents Memory contract)
   {
-    group: "Memory", match: ["memory", "reconcile"],
-    usage: "oma memory reconcile [--store <id>] [--limit N] [--all]",
-    desc: "Re-embed memories whose Vectorize sync is stale (vector_synced_at IS NULL).",
-    http: "POST   /v1/memory_stores/_reconcile {store_id?, limit?}",
+    group: "Memory", match: ["memory", "stores", "create"], needsArg: true,
+    usage: "oma memory stores create <name> [--description <d>]",
+    desc: "Create a memory store",
+    http: "POST   /v1/memory_stores {name, description?}",
     async run(config, args) {
-      const storeId = flag(args, "--store");
-      const limitStr = flag(args, "--limit");
-      const all = args.includes("--all");
-      const limit = limitStr ? Number(limitStr) : 200;
-      if (!storeId && !all) {
-        console.error("Specify either --store <id> or --all (drains all stores in the tenant).");
+      const name = args.find((a) => !a.startsWith("--"));
+      const description = flag(args, "--description");
+      if (!name) {
+        console.error("Usage: oma memory stores create <name> [--description <d>]");
         process.exit(1);
       }
-      let totalScanned = 0, totalFixed = 0, totalFailing = 0;
-      const errors: Array<{ memory_id: string; error: string }> = [];
-      for (let pass = 1; pass <= 100; pass++) {
-        const body: { store_id?: string; limit?: number } = { limit };
-        if (storeId) body.store_id = storeId;
-        const result = await apiFetch<{
-          scanned: number; fixed: number; still_failing: number;
-          sample_errors: Array<{ memory_id: string; error: string }>;
-        }>(config, "/v1/memory_stores/_reconcile", {
-          method: "POST",
-          body: JSON.stringify(body),
-        });
-        totalScanned += result.scanned;
-        totalFixed += result.fixed;
-        totalFailing = result.still_failing; // last pass's failing count
-        for (const e of result.sample_errors) if (errors.length < 10) errors.push(e);
-        if (config.json) {
-          console.log(JSON.stringify({ pass, ...result }));
-        } else {
-          console.log(`pass ${pass}: scanned=${result.scanned} fixed=${result.fixed} failing=${result.still_failing}`);
-        }
-        // Stop when this batch had nothing to do, or when we made no progress.
-        if (result.scanned === 0) break;
-        if (result.fixed === 0 && result.still_failing > 0) {
-          console.error("No progress this pass — remaining rows keep failing. Stopping.");
-          break;
-        }
+      const store = await apiFetch<{ id: string; name: string; description?: string; created_at: string }>(
+        config,
+        "/v1/memory_stores",
+        { method: "POST", body: JSON.stringify({ name, description }) },
+      );
+      if (config.json) { console.log(JSON.stringify(store, null, 2)); return; }
+      console.log(`Created memory store: ${store.name} (${store.id})`);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "stores", "list"],
+    usage: "oma memory stores list [--include-archived]",
+    desc: "List memory stores",
+    http: "GET    /v1/memory_stores?include_archived=bool",
+    async run(config, args) {
+      const includeArchived = args.includes("--include-archived");
+      const { data } = await apiFetch<{
+        data: Array<{ id: string; name: string; description?: string; archived_at?: string; created_at: string }>;
+      }>(config, `/v1/memory_stores?include_archived=${includeArchived}`);
+      if (!data.length) {
+        console.log("No memory stores. Create one with: oma memory stores create <name>");
+        return;
       }
-      if (config.json) {
-        console.log(JSON.stringify({ totals: { scanned: totalScanned, fixed: totalFixed, failing: totalFailing }, errors }));
-      } else {
-        console.log(`\nDone. scanned=${totalScanned} fixed=${totalFixed} still_failing=${totalFailing}`);
-        if (errors.length) {
-          console.log("\nSample errors:");
-          for (const e of errors) console.log(`  ${e.memory_id}: ${e.error}`);
-        }
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      table([
+        ["NAME", "ID", "ARCHIVED", "CREATED"],
+        ...data.map((s) => [
+          s.name,
+          s.id,
+          s.archived_at ? "yes" : "",
+          new Date(s.created_at).toLocaleDateString(),
+        ]),
+      ]);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "stores", "get"], needsArg: true,
+    usage: "oma memory stores get <store-id>",
+    desc: "Get a memory store",
+    http: "GET    /v1/memory_stores/:id",
+    async run(config, args) {
+      const id = args[0];
+      const store = await apiFetch<unknown>(config, `/v1/memory_stores/${id}`);
+      console.log(JSON.stringify(store, null, 2));
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "stores", "archive"], needsArg: true,
+    usage: "oma memory stores archive <store-id>",
+    desc: "Archive a memory store (one-way; can't be unarchived)",
+    http: "POST   /v1/memory_stores/:id/archive",
+    async run(config, args) {
+      const id = args[0];
+      const store = await apiFetch<{ id: string; name: string; archived_at: string }>(
+        config, `/v1/memory_stores/${id}/archive`, { method: "POST" });
+      if (config.json) { console.log(JSON.stringify(store, null, 2)); return; }
+      console.log(`Archived: ${store.name} (${store.id})`);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "stores", "delete"], needsArg: true,
+    usage: "oma memory stores delete <store-id>",
+    desc: "Delete a memory store + all its memories + versions",
+    http: "DELETE /v1/memory_stores/:id",
+    async run(config, args) {
+      const id = args[0];
+      await apiFetch(config, `/v1/memory_stores/${id}`, { method: "DELETE" });
+      console.log(`Deleted memory store: ${id}`);
+    },
+  },
+
+  // Memories within a store
+  {
+    group: "Memory", match: ["memory", "write"], needsArg: true,
+    usage: "oma memory write <store-id> <path> (--content <c> | --from-file <f>) [--precondition-sha256 <h>]",
+    desc: "Write a memory at a path (creates or updates; max 100KB)",
+    http: "POST   /v1/memory_stores/:id/memories {path, content, precondition?}",
+    async run(config, args) {
+      const storeId = args[0];
+      const path = args[1];
+      const content = readContentArg(args);
+      const sha = flag(args, "--precondition-sha256");
+      if (!storeId || !path || content === undefined) {
+        console.error("Usage: oma memory write <store-id> <path> (--content <c> | --from-file <f>) [--precondition-sha256 <h>]");
+        process.exit(1);
       }
+      const body: { path: string; content: string; precondition?: { type: "content_sha256"; content_sha256: string } } = { path, content };
+      if (sha) body.precondition = { type: "content_sha256", content_sha256: sha };
+      const mem = await apiFetch<{ id: string; path: string; content_sha256: string; etag: string; size_bytes: number }>(
+        config, `/v1/memory_stores/${storeId}/memories`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+      if (config.json) { console.log(JSON.stringify(mem, null, 2)); return; }
+      console.log(`Wrote memory: ${mem.path} (id=${mem.id}, sha256=${mem.content_sha256.slice(0, 16)}…, size=${mem.size_bytes}B)`);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "read"], needsArg: true,
+    usage: "oma memory read <store-id> <memory-id>",
+    desc: "Read a memory's full content by ID",
+    http: "GET    /v1/memory_stores/:id/memories/:mid",
+    async run(config, args) {
+      const storeId = args[0];
+      const memId = args[1];
+      if (!storeId || !memId) {
+        console.error("Usage: oma memory read <store-id> <memory-id>");
+        process.exit(1);
+      }
+      const mem = await apiFetch<{ content: string; path: string; content_sha256: string }>(
+        config, `/v1/memory_stores/${storeId}/memories/${memId}`);
+      if (config.json) { console.log(JSON.stringify(mem, null, 2)); return; }
+      // Prefix with --- so users can pipe through without metadata pollution.
+      console.error(`# ${mem.path} (sha256=${mem.content_sha256.slice(0, 16)}…)`);
+      process.stdout.write(mem.content);
+      if (!mem.content.endsWith("\n")) process.stdout.write("\n");
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "ls"], needsArg: true,
+    usage: "oma memory ls <store-id> [--prefix <p>] [--depth N]",
+    desc: "List memories in a store (metadata; no content)",
+    http: "GET    /v1/memory_stores/:id/memories?path_prefix=X&depth=N",
+    async run(config, args) {
+      const storeId = args[0];
+      const prefix = flag(args, "--prefix");
+      const depth = flag(args, "--depth");
+      const qs = new URLSearchParams();
+      if (prefix) qs.set("path_prefix", prefix);
+      if (depth) qs.set("depth", depth);
+      const url = `/v1/memory_stores/${storeId}/memories${qs.toString() ? `?${qs}` : ""}`;
+      const { data } = await apiFetch<{ data: Array<{ id: string; path: string; size_bytes: number; updated_at: string }> }>(config, url);
+      if (!data.length) { console.log("(empty)"); return; }
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      table([
+        ["PATH", "ID", "SIZE", "UPDATED"],
+        ...data.map((m) => [m.path, m.id, `${m.size_bytes}B`, new Date(m.updated_at).toLocaleString()]),
+      ]);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "update"], needsArg: true,
+    usage: "oma memory update <store-id> <memory-id> [--path <p>] [--content <c> | --from-file <f>] [--precondition-sha256 <h>]",
+    desc: "Update a memory (rename and/or change content)",
+    http: "POST   /v1/memory_stores/:id/memories/:mid {path?, content?, precondition?}",
+    async run(config, args) {
+      const storeId = args[0];
+      const memId = args[1];
+      const path = flag(args, "--path");
+      const content = readContentArg(args);
+      const sha = flag(args, "--precondition-sha256");
+      if (!storeId || !memId) {
+        console.error("Usage: oma memory update <store-id> <memory-id> [--path <p>] [--content <c> | --from-file <f>] [--precondition-sha256 <h>]");
+        process.exit(1);
+      }
+      if (path === undefined && content === undefined) {
+        console.error("Pass at least --path or --content/--from-file.");
+        process.exit(1);
+      }
+      const body: Record<string, unknown> = {};
+      if (path !== undefined) body.path = path;
+      if (content !== undefined) body.content = content;
+      if (sha) body.precondition = { type: "content_sha256", content_sha256: sha };
+      const mem = await apiFetch<{ id: string; path: string; content_sha256: string }>(
+        config, `/v1/memory_stores/${storeId}/memories/${memId}`,
+        { method: "POST", body: JSON.stringify(body) },
+      );
+      if (config.json) { console.log(JSON.stringify(mem, null, 2)); return; }
+      console.log(`Updated memory: ${mem.path} (sha256=${mem.content_sha256.slice(0, 16)}…)`);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "rm"], needsArg: true,
+    usage: "oma memory rm <store-id> <memory-id> [--expected-sha256 <h>]",
+    desc: "Delete a memory by ID",
+    http: "DELETE /v1/memory_stores/:id/memories/:mid?expected_content_sha256=...",
+    async run(config, args) {
+      const storeId = args[0];
+      const memId = args[1];
+      const sha = flag(args, "--expected-sha256");
+      if (!storeId || !memId) {
+        console.error("Usage: oma memory rm <store-id> <memory-id> [--expected-sha256 <h>]");
+        process.exit(1);
+      }
+      const url = sha
+        ? `/v1/memory_stores/${storeId}/memories/${memId}?expected_content_sha256=${encodeURIComponent(sha)}`
+        : `/v1/memory_stores/${storeId}/memories/${memId}`;
+      await apiFetch(config, url, { method: "DELETE" });
+      console.log(`Deleted memory: ${memId}`);
+    },
+  },
+
+  // Versions
+  {
+    group: "Memory", match: ["memory", "versions"], needsArg: true,
+    usage: "oma memory versions <store-id> [--memory-id <m>]",
+    desc: "List version history for a store (or filtered to one memory)",
+    http: "GET    /v1/memory_stores/:id/memory_versions?memory_id=...",
+    async run(config, args) {
+      const storeId = args[0];
+      const memId = flag(args, "--memory-id");
+      const url = memId
+        ? `/v1/memory_stores/${storeId}/memory_versions?memory_id=${encodeURIComponent(memId)}`
+        : `/v1/memory_stores/${storeId}/memory_versions`;
+      const { data } = await apiFetch<{
+        data: Array<{
+          id: string;
+          memory_id: string;
+          operation: string;
+          path?: string;
+          actor: { type: string; id: string };
+          created_at: string;
+          redacted?: boolean;
+        }>;
+      }>(config, url);
+      if (!data.length) { console.log("(no versions)"); return; }
+      if (config.json) { console.log(JSON.stringify(data, null, 2)); return; }
+      table([
+        ["VERSION", "MEMORY", "OP", "ACTOR", "PATH", "WHEN"],
+        ...data.map((v) => [
+          v.id,
+          v.memory_id,
+          v.operation + (v.redacted ? " (redacted)" : ""),
+          `${v.actor.type}:${v.actor.id}`,
+          v.path ?? "",
+          new Date(v.created_at).toLocaleString(),
+        ]),
+      ]);
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "version"], needsArg: true,
+    usage: "oma memory version <store-id> <version-id>",
+    desc: "Get a memory version (includes content snapshot for rollback)",
+    http: "GET    /v1/memory_stores/:id/memory_versions/:ver_id",
+    async run(config, args) {
+      const storeId = args[0];
+      const verId = args[1];
+      if (!storeId || !verId) {
+        console.error("Usage: oma memory version <store-id> <version-id>");
+        process.exit(1);
+      }
+      const v = await apiFetch<unknown>(config, `/v1/memory_stores/${storeId}/memory_versions/${verId}`);
+      console.log(JSON.stringify(v, null, 2));
+    },
+  },
+  {
+    group: "Memory", match: ["memory", "redact"], needsArg: true,
+    usage: "oma memory redact <store-id> <version-id>",
+    desc: "Redact content of a prior version (refuses live head)",
+    http: "POST   /v1/memory_stores/:id/memory_versions/:ver_id/redact",
+    async run(config, args) {
+      const storeId = args[0];
+      const verId = args[1];
+      if (!storeId || !verId) {
+        console.error("Usage: oma memory redact <store-id> <version-id>");
+        process.exit(1);
+      }
+      const v = await apiFetch<{ id: string; redacted: boolean }>(
+        config, `/v1/memory_stores/${storeId}/memory_versions/${verId}/redact`,
+        { method: "POST" });
+      if (config.json) { console.log(JSON.stringify(v, null, 2)); return; }
+      console.log(`Redacted version: ${v.id}`);
     },
   },
 ];
@@ -1826,14 +2074,6 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Files", http: "GET    /v1/files/:id                           Get file metadata" },
   { group: "Files", http: "GET    /v1/files/:id/content                   Download file content" },
   { group: "Files", http: "DELETE /v1/files/:id                           Delete file" },
-  { group: "Memory", http: "POST   /v1/memory_stores                       Create store {name}" },
-  { group: "Memory", http: "GET    /v1/memory_stores                       List stores" },
-  { group: "Memory", http: "DELETE /v1/memory_stores/:id                   Delete store" },
-  { group: "Memory", http: "POST   /v1/memory_stores/:id/memories          Write memory {path, content} (max 100KB)" },
-  { group: "Memory", http: "GET    /v1/memory_stores/:id/memories?prefix=X List memories (metadata)" },
-  { group: "Memory", http: "GET    /v1/memory_stores/:id/memories/:mid     Get memory with content" },
-  { group: "Memory", http: "DELETE /v1/memory_stores/:id/memories/:mid     Delete memory" },
-  { group: "Memory", http: "POST   /v1/memory_stores/_reconcile {store_id?,limit?}  Re-embed stale rows" },
   { group: "Evals", http: "POST   /v1/evals/runs                          Create eval run {agent_id, environment_id, tasks:[...]}" },
   { group: "Evals", http: "GET    /v1/evals/runs                          List eval runs" },
   { group: "Evals", http: "GET    /v1/evals/runs/:id                      Get eval run results" },
