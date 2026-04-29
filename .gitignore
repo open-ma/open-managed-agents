@@ -32,3 +32,7 @@ test/eval/data/
 *.swp
 .DS_Store
 .claude/worktrees/
+.claude/scheduled_tasks.lock
+
+# pnpm content store (created when --store-dir=. is used locally)
+.pnpm-store/
