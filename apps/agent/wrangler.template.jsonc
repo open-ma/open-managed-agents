@@ -55,7 +55,9 @@
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
     { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
-    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" }
+    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" },
+    // Memory store mount target — see apps/agent/wrangler.jsonc comment.
+    { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
   "browser": { "binding": "BROWSER" },

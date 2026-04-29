@@ -49,6 +49,42 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
   }
 
+  /**
+   * Mount a memory store into the sandbox at /mnt/memory/<store_name>/.
+   * Uses sandbox.mountBucket with prefix scoping so the agent only sees this
+   * store's keys (`<store_id>/...`) under the mount, regardless of what other
+   * tenants have in MEMORY_BUCKET.
+   *
+   * The Anthropic Managed Agents Memory contract uses standard file tools
+   * over /mnt/memory/<store>/ — we deliberately do NOT register memory_*
+   * tools (those were removed in this migration).
+   *
+   * Local dev (`wrangler dev`): R2 binding sync via `localBucket: true`.
+   * Production (CF): S3FS-FUSE — should be wired by the sandbox SDK using
+   * the same binding name when running outside the local simulator.
+   */
+  async mountMemoryStore(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void> {
+    if (!this.env.MEMORY_BUCKET) {
+      throw new Error(
+        `MEMORY_BUCKET binding missing — cannot mount memory store ${opts.storeName}`,
+      );
+    }
+    const sandbox = await this.getSandbox();
+    const mountPath = `/mnt/memory/${opts.storeName}`;
+    // Trailing slash on the prefix ensures we don't accidentally match
+    // sibling prefixes (e.g. "abc/" vs "abcd/...").
+    const prefix = `/${opts.storeId}/`;
+    await sandbox.mountBucket("managed-agents-memory", mountPath, {
+      localBucket: true,
+      prefix,
+      readOnly: opts.readOnly,
+    });
+  }
+
   async exec(command: string, timeout?: number): Promise<string> {
     const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;

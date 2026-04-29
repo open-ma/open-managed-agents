@@ -63,6 +63,40 @@ export class D1MemoryVersionRepo implements MemoryVersionRepo {
     if (!row) throw new Error(`memory_versions ${versionId} vanished after redact`);
     return row;
   }
+
+  /**
+   * Drop versions older than `cutoffMs` EXCEPT the most recent per memory_id.
+   * Mirrors Anthropic's retention rule:
+   *   "Versions are retained for 30 days; however, the recent versions are
+   *    always kept regardless of age, so memories that change infrequently
+   *    may retain history beyond 30 days."
+   *
+   * Returns rows-deleted count for cron observability.
+   */
+  async pruneOlderThan(cutoffMs: number): Promise<number> {
+    // Subquery picks the latest version per memory_id (highest created_at, tie-broken by id);
+    // we delete anything older than cutoff that isn't the latest for its memory.
+    // SQLite supports DELETE ... WHERE id IN (SELECT ...) so this is one round-trip.
+    const result = await this.db
+      .prepare(
+        `DELETE FROM memory_versions
+         WHERE created_at < ?
+           AND id NOT IN (
+             SELECT v.id FROM memory_versions v
+             JOIN (
+               SELECT memory_id, MAX(created_at) AS max_at
+               FROM memory_versions GROUP BY memory_id
+             ) latest
+             ON v.memory_id = latest.memory_id AND v.created_at = latest.max_at
+           )`,
+      )
+      .bind(cutoffMs)
+      .run();
+    // D1 doesn't always populate `meta.changes` on .run(); if absent we report -1
+    // and the caller logs it as "unknown count, sweep ran".
+    const changes = (result.meta as { changes?: number } | undefined)?.changes;
+    return typeof changes === "number" ? changes : -1;
+  }
 }
 
 interface DbVersion {

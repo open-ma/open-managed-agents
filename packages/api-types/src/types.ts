@@ -809,7 +809,12 @@ export interface SessionResource {
   credential_id?: string;
   mount_path?: string;
   access?: "read_write" | "read_only";
-  prompt?: string;
+  /**
+   * Per-attachment guidance the agent receives alongside the store's
+   * description. Anthropic-aligned: capped at 4096 characters. Replaces
+   * the legacy `prompt` field name (hard cutover, no shim).
+   */
+  instructions?: string;
   created_at: string;
 }
 

@@ -20,7 +20,7 @@ const isMcpTool = (name: string) => name.startsWith("mcp_");
 // `agent.custom_tool_use`. Down-stream consumers (Console UI, SDK event
 // filters, billing dashboards) split on those event types.
 export const isBuiltinTool = (name: string): boolean =>
-  BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_") || name.startsWith("memory_");
+  BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_");
 
 // LLM call resilience settings (inspired by Claude Code)
 const MAX_RETRIES = 10;

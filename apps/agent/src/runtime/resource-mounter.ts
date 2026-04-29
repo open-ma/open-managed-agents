@@ -8,11 +8,14 @@ import { logWarn } from "@open-managed-agents/shared";
  * Resource types (aligned with Anthropic + our extensions):
  * - file:              Mount file content at a path
  * - github_repository: Clone repo with auth, checkout branch/commit
+ * - memory_store:      Mount /mnt/memory/<store_name>/ from MEMORY_BUCKET (R2)
  *
  * Security model:
  * - authorization_token is write-only (never in API responses)
  * - Git credentials stored via `git credential approve` (per-repo, per-host)
  * - Tokens not visible via `git remote -v`
+ * - Memory store mounts are R2 prefix-scoped to the store_id; read_only
+ *   attachments mount with readOnly:true so writes from the agent fail.
  */
 export async function mountResources(
   sandbox: SandboxExecutor,
@@ -21,6 +24,7 @@ export async function mountResources(
   secretStore?: Map<string, string>,
   filesBucket?: R2Bucket,
   tenantId?: string,
+  memoryStoreLookup?: (storeId: string) => Promise<{ name: string } | null>,
 ): Promise<void> {
   let hasGitRepo = false;
   let lastGitToken: string | null = null;
@@ -40,6 +44,9 @@ export async function mountResources(
           await mountGitRepo(sandbox, res, token);
           break;
         }
+        case "memory_store":
+          await mountMemoryStore(sandbox, res, memoryStoreLookup);
+          break;
       }
     } catch (err) {
       // Best-effort: skip failed resource, don't crash session. Resources are
@@ -93,6 +100,53 @@ async function mountFile(
     // Legacy fallback: best-effort UTF-8 decode. Will corrupt binary.
     await sandbox.writeFile(path, new TextDecoder("utf-8").decode(bytes));
   }
+}
+
+/**
+ * Mount a memory store at /mnt/memory/<store_name>/. Looks up the store name
+ * from the platform's memory service (passed in via `memoryStoreLookup`) so
+ * we don't need to plumb env / D1 directly into the resource mounter — keeps
+ * this module test-friendly.
+ */
+async function mountMemoryStore(
+  sandbox: SandboxExecutor,
+  res: Record<string, unknown>,
+  lookup: ((storeId: string) => Promise<{ name: string } | null>) | undefined,
+): Promise<void> {
+  if (!sandbox.mountMemoryStore) {
+    logWarn(
+      { op: "resource.mount.memory_store_unsupported" },
+      "sandbox does not support memory_store mounts; skipping",
+    );
+    return;
+  }
+  const storeId = (res.memory_store_id as string) || (res.id as string);
+  if (!storeId) return;
+
+  // Discover the store name (used as the mount directory). Fall back to
+  // the storeId itself if the lookup can't find / can't run — name is
+  // human-friendly but not security-critical (path scoping is by storeId).
+  let storeName = storeId;
+  if (lookup) {
+    try {
+      const meta = await lookup(storeId);
+      if (meta?.name) storeName = meta.name;
+    } catch (err) {
+      logWarn(
+        { op: "resource.mount.memory_store_lookup", store_id: storeId, err },
+        "memory store name lookup failed; falling back to id",
+      );
+    }
+  }
+
+  const access = res.access as string | undefined;
+  const readOnly = access === "read_only";
+
+  await sandbox.mountMemoryStore({
+    storeName,
+    storeId,
+    readOnly,
+  });
 }
 
 async function mountGitRepo(

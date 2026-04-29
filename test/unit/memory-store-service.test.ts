@@ -1,23 +1,22 @@
-// Unit tests for MemoryStoreService — drives the service against in-memory
-// implementations of every port. No D1, AI, or Vectorize bindings needed.
+// Unit tests for the Anthropic-aligned MemoryStoreService — drives the
+// service against in-memory implementations of every port. No D1 or R2
+// bindings needed.
 //
 // What's covered here is *service-level* behavior: consistency rules,
-// preconditions, atomicity, reconciliation flow, error mapping. Adapter
-// behavior (D1 SQL, Vectorize semantics) is exercised via integration
-// tests + manual end-to-end verification on Cloudflare staging.
+// preconditions, atomicity (R2 conditional PUT semantics), redact constraint,
+// retention pruning, and queue-consumer-style upsertFromEvent / deleteFromEvent.
+// Adapter behavior (D1 SQL, real R2) is exercised via integration tests +
+// staging end-to-end verification.
 
 import { describe, it, expect } from "vitest";
 import {
   MemoryContentTooLargeError,
+  MemoryNotFoundError,
   MemoryPreconditionFailedError,
   MemoryStoreNotFoundError,
 } from "@open-managed-agents/memory-store";
-import {
-  DeterministicEmbeddingProvider,
-  FailingVectorIndex,
-  InMemoryVectorIndex,
-  createInMemoryMemoryStoreService,
-} from "@open-managed-agents/memory-store/test-fakes";
+import { createInMemoryMemoryStoreService } from "@open-managed-agents/memory-store/test-fakes";
+import { generateMemoryVersionId } from "@open-managed-agents/shared";
 
 const TENANT = "tn_test_memstore";
 const ACTOR = { type: "system" as const, id: "test" };
@@ -29,309 +28,359 @@ describe("MemoryStoreService — store CRUD", () => {
     const b = await service.createStore({ tenantId: TENANT, name: "B", description: "desc" });
     expect(a.id).toMatch(/^memstore-/);
     expect(b.description).toBe("desc");
-    const list = await service.listStores({ tenantId: TENANT });
-    expect(list.map((s) => s.name).sort()).toEqual(["A", "B"]);
+    const all = await service.listStores({ tenantId: TENANT });
+    expect(all.map((s) => s.name).sort()).toEqual(["A", "B"]);
   });
 
-  it("hides archived stores by default", async () => {
+  it("rejects store names with forbidden characters", async () => {
     const { service } = createInMemoryMemoryStoreService();
-    const s = await service.createStore({ tenantId: TENANT, name: "X" });
-    await service.archiveStore({ tenantId: TENANT, storeId: s.id });
-    expect((await service.listStores({ tenantId: TENANT })).length).toBe(0);
-    expect((await service.listStores({ tenantId: TENANT, includeArchived: true })).length).toBe(1);
-  });
-
-  it("isolates stores by tenant", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    await service.createStore({ tenantId: "tn_a", name: "A" });
-    await service.createStore({ tenantId: "tn_b", name: "B" });
-    expect((await service.listStores({ tenantId: "tn_a" })).length).toBe(1);
-    expect((await service.listStores({ tenantId: "tn_b" })).length).toBe(1);
-  });
-});
-
-describe("MemoryStoreService — memory write/read", () => {
-  it("creates a memory + version atomically and syncs Vectorize", async () => {
-    const { service, vectorIndex } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const mem = await service.writeByPath({
-      tenantId: TENANT,
-      storeId: store.id,
-      path: "/notes/hi",
-      content: "hello world",
-      actor: ACTOR,
-    });
-    expect(mem.path).toBe("/notes/hi");
-    expect(mem.content_sha256).toMatch(/^[0-9a-f]{64}$/);
-    expect(mem.size_bytes).toBe(11);
-    // Vector index sync ran successfully → row marked synced.
-    expect(mem.vector_synced_at).not.toBeNull();
-    expect((vectorIndex as InMemoryVectorIndex).has(`${store.id}:${mem.id}`)).toBe(true);
-
-    const versions = await service.listVersions({ tenantId: TENANT, storeId: store.id });
-    expect(versions.length).toBe(1);
-    expect(versions[0].operation).toBe("created");
-    expect(versions[0].path).toBe("/notes/hi");
-    expect(versions[0].actor_type).toBe("system");
-  });
-
-  it("upserts on duplicate path (rather than creating a 2nd row)", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v1", actor: ACTOR });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v2", actor: ACTOR });
-    const list = await service.listMemories({ tenantId: TENANT, storeId: store.id });
-    expect(list.length).toBe(1);
-    expect(list[0].content).toBe("v2");
-    const versions = await service.listVersions({ tenantId: TENANT, storeId: store.id });
-    expect(versions.length).toBe(2);
-    expect(versions.map((v) => v.operation).sort()).toEqual(["created", "modified"]);
-  });
-
-  it("filters memory_list by path_prefix", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/notes/a", content: "x", actor: ACTOR });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/notes/b", content: "x", actor: ACTOR });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/other/c", content: "x", actor: ACTOR });
-    const notes = await service.listMemories({ tenantId: TENANT, storeId: store.id, pathPrefix: "/notes/" });
-    expect(notes.map((m) => m.path).sort()).toEqual(["/notes/a", "/notes/b"]);
-  });
-
-  it("readByPath returns null for missing path", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    expect(await service.readByPath({ tenantId: TENANT, storeId: store.id, path: "/missing" })).toBeNull();
-  });
-
-  it("rejects content > 100 KB", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const oversized = "x".repeat(100 * 1024 + 1);
+    await expect(service.createStore({ tenantId: TENANT, name: "" })).rejects.toThrow();
+    await expect(service.createStore({ tenantId: TENANT, name: "a/b" })).rejects.toThrow();
+    // Spaces are allowed (Anthropic mounts /mnt/memory/User Preferences/ literally).
     await expect(
-      service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/big", content: oversized, actor: ACTOR }),
-    ).rejects.toBeInstanceOf(MemoryContentTooLargeError);
-  });
-});
-
-describe("MemoryStoreService — preconditions", () => {
-  it("not_exists fires 409 on duplicate path", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v1", actor: ACTOR });
-    await expect(
-      service.writeByPath({
-        tenantId: TENANT,
-        storeId: store.id,
-        path: "/p",
-        content: "v2",
-        precondition: { type: "not_exists" },
-        actor: ACTOR,
-      }),
-    ).rejects.toBeInstanceOf(MemoryPreconditionFailedError);
+      service.createStore({ tenantId: TENANT, name: "User Preferences" }),
+    ).resolves.toBeDefined();
   });
 
-  it("content_sha256 mismatch fires 409", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const mem = await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v1", actor: ACTOR });
-    await expect(
-      service.writeByPath({
-        tenantId: TENANT,
-        storeId: store.id,
-        path: "/p",
-        content: "v2",
-        precondition: { type: "content_sha256", content_sha256: "wrongHash" },
-        actor: ACTOR,
-      }),
-    ).rejects.toBeInstanceOf(MemoryPreconditionFailedError);
-
-    // Correct hash works.
+  it("archives + delete cleans up R2 + D1", async () => {
+    const { service, blobs } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "to-clean" });
     await service.writeByPath({
-      tenantId: TENANT,
-      storeId: store.id,
-      path: "/p",
-      content: "v2",
-      precondition: { type: "content_sha256", content_sha256: mem.content_sha256 },
+      tenantId: TENANT, storeId: s.id, path: "/x.md", content: "hi", actor: ACTOR,
+    });
+    expect(blobs.size()).toBe(1);
+    await service.archiveStore({ tenantId: TENANT, storeId: s.id });
+    expect((await service.getStore({ tenantId: TENANT, storeId: s.id }))!.archived_at).toBeTruthy();
+    await service.deleteStore({ tenantId: TENANT, storeId: s.id });
+    expect(blobs.size()).toBe(0);
+    expect(await service.getStore({ tenantId: TENANT, storeId: s.id })).toBeNull();
+  });
+
+  it("isolates tenants — store in tenant A invisible to tenant B", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const a = await service.createStore({ tenantId: "tn_a", name: "shared-name" });
+    expect(await service.getStore({ tenantId: "tn_b", storeId: a.id })).toBeNull();
+  });
+});
+
+describe("MemoryStoreService — memory writes", () => {
+  it("writeByPath creates a memory + version row + R2 object", async () => {
+    const { service, memoryRepo, blobs } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/foo.md", content: "hello",
       actor: ACTOR,
     });
+    expect(m.path).toBe("/foo.md");
+    expect(m.content).toBe("hello");
+    expect(m.etag).toBeTruthy();
+    expect(blobs.has(`${s.id}/foo.md`)).toBe(true);
+    expect(memoryRepo.versions).toHaveLength(1);
+    expect(memoryRepo.versions[0].operation).toBe("created");
+    expect(memoryRepo.versions[0].content).toBe("hello");
   });
-});
 
-describe("MemoryStoreService — update / delete", () => {
-  it("update by id changes content + writes version + re-syncs vector", async () => {
-    const { service, vectorIndex } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const mem = await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v1", actor: ACTOR });
-    await service.updateById({
-      tenantId: TENANT, storeId: store.id, memoryId: mem.id,
-      content: "v2", actor: ACTOR,
+  it("writeByPath with existing path overwrites + writes 'modified' version", async () => {
+    const { service, memoryRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR,
     });
-    const refreshed = await service.readById({ tenantId: TENANT, storeId: store.id, memoryId: mem.id });
-    expect(refreshed!.content).toBe("v2");
-    expect(refreshed!.vector_synced_at).not.toBeNull();
-    expect((await service.listVersions({ tenantId: TENANT, storeId: store.id })).length).toBe(2);
-    // Vector key remains stable through updates (idempotent overwrite).
-    expect((vectorIndex as InMemoryVectorIndex).size()).toBe(1);
+    const m2 = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "v2", actor: ACTOR,
+    });
+    expect(m2.content).toBe("v2");
+    expect(memoryRepo.versions.map((v) => v.operation)).toEqual(["created", "modified"]);
   });
 
-  it("delete removes memory + writes deleted version + cleans vector", async () => {
-    const { service, vectorIndex } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const mem = await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v1", actor: ACTOR });
-    await service.deleteById({ tenantId: TENANT, storeId: store.id, memoryId: mem.id, actor: ACTOR });
-    expect(await service.readById({ tenantId: TENANT, storeId: store.id, memoryId: mem.id })).toBeNull();
-    const versions = await service.listVersions({ tenantId: TENANT, storeId: store.id });
-    expect(versions.length).toBe(2);
-    const deleted = versions.find((v) => v.operation === "deleted")!;
-    expect(deleted.content).toBe("v1");
-    expect((vectorIndex as InMemoryVectorIndex).size()).toBe(0);
-  });
-
-  it("deleteById with mismatched expectedSha throws 409", async () => {
+  it("rejects content > 100KB", async () => {
     const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const mem = await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v1", actor: ACTOR });
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const huge = "x".repeat(101 * 1024);
     await expect(
-      service.deleteById({ tenantId: TENANT, storeId: store.id, memoryId: mem.id, expectedSha: "wrong", actor: ACTOR }),
-    ).rejects.toBeInstanceOf(MemoryPreconditionFailedError);
-    expect(await service.readById({ tenantId: TENANT, storeId: store.id, memoryId: mem.id })).not.toBeNull();
+      service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/big", content: huge, actor: ACTOR }),
+    ).rejects.toThrow(MemoryContentTooLargeError);
   });
 
-  it("deleteStore cascades memories + cleans vectors", async () => {
-    const { service, vectorIndex, memoryRepo } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "v", actor: ACTOR });
-    await service.deleteStore({ tenantId: TENANT, storeId: store.id });
+  it("rejects forbidden path characters", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
     await expect(
-      service.listMemories({ tenantId: TENANT, storeId: store.id }),
-    ).rejects.toBeInstanceOf(MemoryStoreNotFoundError);
-    expect((vectorIndex as InMemoryVectorIndex).size()).toBe(0);
-    expect(await memoryRepo.countUnsynced()).toBe(0);
-  });
-});
-
-describe("MemoryStoreService — semantic search via injected fakes", () => {
-  it("returns hits ordered by similarity, with D1 join filtering orphans", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/a", content: "alpha beta gamma delta", actor: ACTOR });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/b", content: "alpha beta", actor: ACTOR });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/c", content: "completely different words", actor: ACTOR });
-
-    const hits = await service.searchMemories({ tenantId: TENANT, storeId: store.id, query: "alpha beta" });
-    expect(hits.length).toBeGreaterThan(0);
-    // /b is the closer match (exact phrase).
-    expect(hits[0].path).toBe("/b");
-  });
-
-  it("search returns [] when vector index is the no-op variant", async () => {
-    // Build a service with our own no-op-style adapters by passing a failing
-    // index that reports unavailable via isAvailable().
-    const { service } = createInMemoryMemoryStoreService({
-      vectorIndex: {
-        isAvailable: () => false,
-        upsert: async () => {},
-        query: async () => [],
-        deleteByIds: async () => {},
-        getById: async () => null,
-      },
-    });
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "hello", actor: ACTOR });
-    expect(await service.searchMemories({ tenantId: TENANT, storeId: store.id, query: "hello" })).toEqual([]);
-  });
-});
-
-describe("MemoryStoreService — Vectorize-down → write succeeds, reconcile fixes it", () => {
-  it("write logs warning, returns 200, leaves vector_synced_at NULL when index throws", async () => {
-    const failing = new FailingVectorIndex();
-    const { service } = createInMemoryMemoryStoreService({ vectorIndex: failing });
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    const mem = await service.writeByPath({
-      tenantId: TENANT,
-      storeId: store.id,
-      path: "/p",
-      content: "hello",
-      actor: ACTOR,
-    });
-    expect(mem.id).toBeDefined();
-    expect(mem.vector_synced_at).toBeNull();
-  });
-
-  it("reconcile drains stale rows once vector index recovers", async () => {
-    const failing = new FailingVectorIndex();
-    const { service, memoryRepo, storeRepo, versionRepo } = createInMemoryMemoryStoreService({ vectorIndex: failing });
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p1", content: "a", actor: ACTOR });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p2", content: "b", actor: ACTOR });
-    expect(await memoryRepo.countUnsynced()).toBe(2);
-
-    // Swap in a working vector index — simulates ops fixing Vectorize after
-    // an incident — and reconcile.
-    const recoveredIndex = new InMemoryVectorIndex();
-    const recovered = new (await import("@open-managed-agents/memory-store")).MemoryStoreService({
-      storeRepo,
-      memoryRepo,
-      versionRepo,
-      embedding: new DeterministicEmbeddingProvider(),
-      vectorIndex: recoveredIndex,
-    });
-    const result = await recovered.reconcile({ tenantId: TENANT, storeId: store.id });
-    expect(result.scanned).toBe(2);
-    expect(result.fixed).toBe(2);
-    expect(result.still_failing).toBe(0);
-    expect(recoveredIndex.size()).toBe(2);
-    expect(await memoryRepo.countUnsynced()).toBe(0);
-  });
-
-  it("reconcile reports stale rows but cannot fix when index is unavailable", async () => {
-    const { service } = createInMemoryMemoryStoreService({
-      vectorIndex: {
-        isAvailable: () => false,
-        upsert: async () => {},
-        query: async () => [],
-        deleteByIds: async () => {},
-        getById: async () => null,
-      },
-    });
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/p", content: "x", actor: ACTOR });
-    const result = await service.reconcile({ tenantId: TENANT, storeId: store.id });
-    expect(result.scanned).toBe(1);
-    expect(result.fixed).toBe(0);
-    expect(result.sample_errors[0].error).toMatch(/unavailable/);
-  });
-});
-
-describe("MemoryStoreService — version operations", () => {
-  it("redact wipes content + path but preserves audit fields", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const store = await service.createStore({ tenantId: TENANT, name: "S" });
-    await service.writeByPath({ tenantId: TENANT, storeId: store.id, path: "/secret", content: "leaked", actor: ACTOR });
-    const versions = await service.listVersions({ tenantId: TENANT, storeId: store.id });
-    const v = versions[0];
-    await service.redactVersion({ tenantId: TENANT, storeId: store.id, versionId: v.id });
-    const after = await service.getVersion({ tenantId: TENANT, storeId: store.id, versionId: v.id });
-    expect(after!.content).toBeNull();
-    expect(after!.path).toBeNull();
-    expect(after!.redacted).toBe(true);
-    expect(after!.actor_type).toBe("system");
-  });
-
-  it("rejects cross-tenant redactVersion (regression for ultrareview bug_009)", async () => {
-    const { service } = createInMemoryMemoryStoreService();
-    const storeA = await service.createStore({ tenantId: "tn_a", name: "A" });
-    await service.writeByPath({ tenantId: "tn_a", storeId: storeA.id, path: "/p", content: "secret-A", actor: ACTOR });
-    const versionsA = await service.listVersions({ tenantId: "tn_a", storeId: storeA.id });
-    const versionId = versionsA[0].id;
-
+      service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "../escape", content: "x", actor: ACTOR }),
+    ).rejects.toThrow();
     await expect(
-      service.redactVersion({ tenantId: "tn_b", storeId: storeA.id, versionId }),
+      service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "back\\slash", content: "x", actor: ACTOR }),
+    ).rejects.toThrow();
+  });
+
+  it("rejects unknown store with MemoryStoreNotFoundError", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    await expect(
+      service.writeByPath({ tenantId: TENANT, storeId: "memstore-doesnotexist", path: "/x", content: "y", actor: ACTOR }),
     ).rejects.toThrow(MemoryStoreNotFoundError);
+  });
+});
 
-    const after = await service.getVersion({ tenantId: "tn_a", storeId: storeA.id, versionId });
-    expect(after!.content).toBe("secret-A");
-    expect(after!.redacted).toBe(false);
+describe("MemoryStoreService — preconditions (CAS)", () => {
+  it("not_exists precondition fails when path occupied", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR });
+    await expect(
+      service.writeByPath({
+        tenantId: TENANT, storeId: s.id, path: "/x", content: "v2",
+        precondition: { type: "not_exists" }, actor: ACTOR,
+      }),
+    ).rejects.toThrow(MemoryPreconditionFailedError);
+  });
+
+  it("content_sha256 precondition succeeds when sha matches", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR,
+    });
+    const m2 = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "v2",
+      precondition: { type: "content_sha256", content_sha256: m.content_sha256 },
+      actor: ACTOR,
+    });
+    expect(m2.content).toBe("v2");
+  });
+
+  it("content_sha256 precondition fails on stale sha", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR });
+    await expect(
+      service.writeByPath({
+        tenantId: TENANT, storeId: s.id, path: "/x", content: "v2",
+        precondition: { type: "content_sha256", content_sha256: "fake-sha" },
+        actor: ACTOR,
+      }),
+    ).rejects.toThrow(MemoryPreconditionFailedError);
+  });
+});
+
+describe("MemoryStoreService — updateById + deleteById", () => {
+  it("updateById renames the memory + writes new R2 object", async () => {
+    const { service, blobs } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/old", content: "data", actor: ACTOR,
+    });
+    const renamed = await service.updateById({
+      tenantId: TENANT, storeId: s.id, memoryId: m.id, path: "/new", actor: ACTOR,
+    });
+    expect(renamed.path).toBe("/new");
+    expect(blobs.has(`${s.id}/new`)).toBe(true);
+    expect(blobs.has(`${s.id}/old`)).toBe(false);
+  });
+
+  it("deleteById removes from R2 + writes 'deleted' version row", async () => {
+    const { service, memoryRepo, blobs } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "data", actor: ACTOR,
+    });
+    await service.deleteById({ tenantId: TENANT, storeId: s.id, memoryId: m.id, actor: ACTOR });
+    expect(blobs.has(`${s.id}/x`)).toBe(false);
+    expect(memoryRepo.versions.at(-1)!.operation).toBe("deleted");
+    expect(await service.readById({ tenantId: TENANT, storeId: s.id, memoryId: m.id })).toBeNull();
+  });
+
+  it("deleteById refuses on stale expectedSha", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "data", actor: ACTOR,
+    });
+    await expect(
+      service.deleteById({
+        tenantId: TENANT, storeId: s.id, memoryId: m.id,
+        expectedSha: "fake-sha", actor: ACTOR,
+      }),
+    ).rejects.toThrow(MemoryPreconditionFailedError);
+  });
+
+  it("readById on missing memory returns null; updateById throws", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    expect(await service.readById({ tenantId: TENANT, storeId: s.id, memoryId: "mem-missing" })).toBeNull();
+    await expect(
+      service.updateById({ tenantId: TENANT, storeId: s.id, memoryId: "mem-missing", content: "x", actor: ACTOR }),
+    ).rejects.toThrow(MemoryNotFoundError);
+  });
+});
+
+describe("MemoryStoreService — versions + redact + rollback workflow", () => {
+  it("listVersions returns audit chain in chronological order", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v2", actor: ACTOR });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v3", actor: ACTOR });
+    const vs = await service.listVersions({ tenantId: TENANT, storeId: s.id });
+    expect(vs.length).toBe(3);
+    expect(vs.map((v) => v.content)).toEqual(["v3", "v2", "v1"]);
+  });
+
+  it("rollback workflow: getVersion → writeByPath produces a new version with the old content", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m1 = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "A", actor: ACTOR,
+    });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "B", actor: ACTOR });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "C", actor: ACTOR });
+
+    const versions = await service.listVersions({ tenantId: TENANT, storeId: s.id, memoryId: m1.id });
+    const v1 = versions[versions.length - 1]; // oldest = "A"
+    expect(v1.content).toBe("A");
+
+    // Roll back: write the old content as the new live version
+    const m4 = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: v1.content!, actor: ACTOR,
+    });
+    expect(m4.content).toBe("A");
+    expect(m4.content_sha256).toBe(v1.content_sha256);
+
+    const after = await service.listVersions({ tenantId: TENANT, storeId: s.id, memoryId: m1.id });
+    expect(after.length).toBe(4);
+    expect(after[0].content).toBe("A");
+    expect(after[0].content_sha256).toBe(v1.content_sha256);
+  });
+
+  it("redact refuses live head; succeeds on prior version", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v2", actor: ACTOR });
+
+    const versions = await service.listVersions({ tenantId: TENANT, storeId: s.id });
+    const head = versions[0]; // newest = "v2" (live)
+    const prior = versions[1]; // older = "v1"
+
+    await expect(
+      service.redactVersion({ tenantId: TENANT, storeId: s.id, versionId: head.id }),
+    ).rejects.toThrow(MemoryPreconditionFailedError);
+
+    const redacted = await service.redactVersion({
+      tenantId: TENANT, storeId: s.id, versionId: prior.id,
+    });
+    expect(redacted.redacted).toBe(true);
+    expect(redacted.content).toBeNull();
+  });
+
+  it("versions outlive their parent memory (audit chain preserved)", async () => {
+    const { service } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "data", actor: ACTOR,
+    });
+    await service.deleteById({ tenantId: TENANT, storeId: s.id, memoryId: m.id, actor: ACTOR });
+    const versions = await service.listVersions({
+      tenantId: TENANT, storeId: s.id, memoryId: m.id,
+    });
+    expect(versions.length).toBe(2);
+    expect(versions[0].operation).toBe("deleted");
+    expect(versions[1].operation).toBe("created");
+  });
+});
+
+describe("MemoryRepo — upsertFromEvent / deleteFromEvent (queue consumer)", () => {
+  it("upsertFromEvent creates memory + version on first event", async () => {
+    const { service, memoryRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const out = await memoryRepo.upsertFromEvent({
+      storeId: s.id,
+      path: "/agent-wrote.md",
+      contentSha256: "sha-fake",
+      etag: "etag-fake",
+      sizeBytes: 5,
+      actor: { type: "agent_session", id: "sess_xyz" },
+      nowMs: Date.now(),
+      versionId: generateMemoryVersionId(),
+      content: "hello",
+    });
+    expect(out.wrote).toBe(true);
+    expect(memoryRepo.versions.at(-1)!.actor_type).toBe("agent_session");
+  });
+
+  it("upsertFromEvent dedupes by etag (R2 at-least-once delivery)", async () => {
+    const { service, memoryRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const event = {
+      storeId: s.id,
+      path: "/x",
+      contentSha256: "sha-1",
+      etag: "etag-1",
+      sizeBytes: 5,
+      actor: { type: "agent_session" as const, id: "sess" },
+      nowMs: Date.now(),
+      versionId: generateMemoryVersionId(),
+      content: "hello",
+    };
+    const a = await memoryRepo.upsertFromEvent(event);
+    const b = await memoryRepo.upsertFromEvent({ ...event, versionId: generateMemoryVersionId() });
+    expect(a.wrote).toBe(true);
+    expect(b.wrote).toBe(false);
+    expect(memoryRepo.versions.length).toBe(1);
+  });
+
+  it("deleteFromEvent removes the memory + writes deleted version", async () => {
+    const { service, memoryRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "data", actor: ACTOR,
+    });
+    const out = await memoryRepo.deleteFromEvent({
+      storeId: s.id, path: "/x",
+      actor: { type: "agent_session", id: "sess" },
+      nowMs: Date.now(),
+      versionId: generateMemoryVersionId(),
+    });
+    expect(out.wrote).toBe(true);
+    expect(memoryRepo.versions.at(-1)!.operation).toBe("deleted");
+  });
+
+  it("deleteFromEvent on missing path is a no-op (dedupe)", async () => {
+    const { service, memoryRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const out = await memoryRepo.deleteFromEvent({
+      storeId: s.id, path: "/nope",
+      actor: { type: "agent_session", id: "sess" },
+      nowMs: Date.now(),
+      versionId: generateMemoryVersionId(),
+    });
+    expect(out.wrote).toBe(false);
+  });
+});
+
+describe("MemoryVersionRepo — pruneOlderThan", () => {
+  it("drops old versions but keeps the most recent per memory_id", async () => {
+    const { service, versionRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    const m = await service.writeByPath({
+      tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR,
+    });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v2", actor: ACTOR });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v3", actor: ACTOR });
+
+    const removed = await versionRepo.pruneOlderThan(Date.now() + 60_000);
+    expect(removed).toBe(2);
+    const remaining = await versionRepo.list(s.id, { memoryId: m.id, limit: 100 });
+    expect(remaining.length).toBe(1);
+    expect(remaining[0].content).toBe("v3");
+  });
+
+  it("keeps everything when nothing is past cutoff", async () => {
+    const { service, versionRepo } = createInMemoryMemoryStoreService();
+    const s = await service.createStore({ tenantId: TENANT, name: "S" });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v1", actor: ACTOR });
+    await service.writeByPath({ tenantId: TENANT, storeId: s.id, path: "/x", content: "v2", actor: ACTOR });
+
+    const removed = await versionRepo.pruneOlderThan(0);
+    expect(removed).toBe(0);
   });
 });

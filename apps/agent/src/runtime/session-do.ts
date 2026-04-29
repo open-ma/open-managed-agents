@@ -27,7 +27,7 @@ import { resolveModel } from "../harness/provider";
 import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
 import { evaluateOutcome } from "../harness/outcome-evaluator";
-import { buildTools, buildMemoryTools } from "../harness/tools";
+import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
@@ -1436,6 +1436,21 @@ export class SessionDO extends Agent<Env, SessionState> {
             secretStore,
             this.env.FILES_BUCKET,
             this.state.tenant_id,
+            // Memory-store name lookup for mount paths (Anthropic mounts as
+            // /mnt/memory/<name>/, not /mnt/memory/<id>/). The lookup falls
+            // back to the id if the store can't be resolved.
+            async (storeId: string) => {
+              try {
+                const memSvc = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
+                const store = await memSvc.getStore({
+                  tenantId: this.state.tenant_id,
+                  storeId,
+                });
+                return store ? { name: store.name } : null;
+              } catch {
+                return null;
+              }
+            },
           );
         }
       }
@@ -2073,7 +2088,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const memoryAttachments: Array<{
       store_id: string;
       access: "read_write" | "read_only";
-      prompt?: string;
+      instructions?: string;
     }> = [];
     if (sessionId) {
       // listResourcesBySession queries the session_id column directly — no
@@ -2086,7 +2101,11 @@ export class SessionDO extends Agent<Env, SessionState> {
           memoryAttachments.push({
             store_id: row.resource.memory_store_id,
             access: row.resource.access === "read_only" ? "read_only" : "read_write",
-            prompt: typeof row.resource.prompt === "string" ? row.resource.prompt : undefined,
+            // Accept Anthropic-aligned `instructions` going forward.
+            instructions:
+              typeof (row.resource as { instructions?: unknown }).instructions === "string"
+                ? ((row.resource as { instructions: string }).instructions)
+                : undefined,
           });
         }
       }
@@ -2130,19 +2149,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       },
     });
 
-    // Add memory tools if session has memory store resources. The CF factory
-    // wires Noop adapters when AI / VECTORIZE are unbound, so we only require
-    // AUTH_DB to be present.
+    // Memory store mounts: per the Anthropic Managed Agents Memory contract,
+    // each attached store appears as /mnt/memory/<store_name>/ inside the
+    // sandbox. The agent reads/writes via the standard file tools (no
+    // bespoke memory_* tools). The mount itself is set up further down in
+    // the resource-mounter call. We only need MemoryStoreService here to
+    // resolve store metadata for the system-prompt reminder block.
     let memoryStoreService: MemoryStoreService | null = null;
     if (memoryAttachments.length && this.env.AUTH_DB) {
       memoryStoreService = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
-      const memTools = buildMemoryTools(
-        memoryAttachments.map((a) => ({ store_id: a.store_id, access: a.access })),
-        this.state.tenant_id,
-        memoryStoreService,
-        this.state.agent_id ?? "agent",
-      );
-      Object.assign(allTools, memTools);
     }
 
     // Resolve model — look up model card credentials, fall back to env vars
@@ -2270,7 +2285,9 @@ export class SessionDO extends Agent<Env, SessionState> {
     // Memory store prompts → platformReminders (was: appended to systemPrompt
     // every turn, KV-list-order dependent → permanent cache miss). Build the
     // prompt strings on the fly from memory store metadata + per-attachment
-    // prompt overrides.
+    // instructions overrides. Format mirrors Anthropic's auto-injected mount
+    // descriptors: `/mnt/memory/<name>/ (access)` so the agent knows where to
+    // find the store and uses standard file tools to interact.
     const memoryPrompts: string[] = [];
     if (memoryAttachments.length && memoryStoreService) {
       try {
@@ -2283,10 +2300,16 @@ export class SessionDO extends Agent<Env, SessionState> {
             memoryPrompts.push("");
             continue;
           }
-          const lines = [`## Memory store: ${store.name}`];
+          const accessLabel = att.access === "read_only" ? "read-only" : "read-write";
+          const lines = [
+            `## Memory store: ${store.name}`,
+            `Mounted at /mnt/memory/${store.name}/ (${accessLabel})`,
+          ];
           if (store.description) lines.push(store.description);
-          if (att.prompt) lines.push(att.prompt);
-          if (att.access === "read_only") lines.push("(read-only attachment — write tools are not available for this store)");
+          if (att.instructions) lines.push(att.instructions);
+          if (att.access === "read_only") {
+            lines.push("(read-only mount — write attempts to this directory will fail)");
+          }
           memoryPrompts.push(lines.join("\n"));
         }
       } catch (err) {
