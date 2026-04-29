@@ -37,12 +37,21 @@
   // ~1hr TTL) on 401. The agent worker never sees provider secrets directly
   // — it just asks the gateway "please refresh credential X" and the gateway
   // does the App-JWT signing using its locally-held private key.
-  // MAIN binding lets AcpProxyHarness call /v1/internal/runtime-attach-harness
-  // to reach the RuntimeRoom DO (where the user's `oma bridge daemon` is wired).
   "services": [
-    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
-    { "binding": "MAIN", "service": "managed-agents" }
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
   ],
+
+  // Cross-script DO binding for RuntimeRoom. The class lives in the main
+  // worker (apps/main/wrangler.jsonc:54), but DOs are namespace-level and
+  // any worker in the account can bind the same class via `script_name`.
+  // AcpProxyHarness uses this to attach to the daemon's RuntimeRoom
+  // directly, no service-binding hop through main and no shared secret —
+  // see apps/agent/src/harness/acp-proxy-loop.ts.
+  "durable_objects": {
+    "bindings": [
+      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom", "script_name": "managed-agents" }
+    ]
+  },
 
   // Workers AI for generating embeddings
   "ai": { "binding": "AI" },
@@ -115,10 +124,16 @@
           "max_instances": 50
         }
       ],
+      "services": [
+        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
+      ],
+      // Cross-script DO binding to staging RuntimeRoom (lives in
+      // managed-agents-staging). Same shape as prod above.
       "durable_objects": {
         "bindings": [
           { "name": "SESSION_DO", "class_name": "SessionDO" },
-          { "name": "SANDBOX", "class_name": "Sandbox" }
+          { "name": "SANDBOX", "class_name": "Sandbox" },
+          { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom", "script_name": "managed-agents-staging" }
         ]
       },
       "kv_namespaces": [
@@ -126,10 +141,6 @@
       ],
       "d1_databases": [
         { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" }
-      ],
-      "services": [
-        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" },
-        { "binding": "MAIN", "service": "managed-agents-staging" }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
