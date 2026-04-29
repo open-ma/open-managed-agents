@@ -25,21 +25,21 @@ export const c = {
 };
 
 /**
- * "C/" lockup. A chunky 5-line block that reads as a stylized C with a
- * forward slash baked into its right edge — same vibe as the web logo.
+ * OMA bracket-feather lockup, mirroring the web/Console SVG mark
+ * (apps/console/public/logo.svg — `[ ' ]` with a diagonal feather inside
+ * the left bracket). Five lines of box-drawing + half-blocks so it
+ * renders at consistent width across most terminal fonts.
  *
  * Exported so other commands can reuse the exact same banner — single
  * source of truth for "what does oma bridge look like at startup".
  */
 export function logo(): string {
-  // Built with light-shade + full-block characters so it renders the
-  // same width across most terminal fonts. The "/" is the right cap.
   const lines = [
-    "  ▄▄████▄  ▗▌",
-    "  █       ▟▘",
-    "  █      ▟▘",
-    "  █     ▟▘",
-    "  █▄▄▄▟▘",
+    "  ┌──┐    ▟   ┌──┐",
+    "  │  │   ▟▘   │  │",
+    "  │  │  ▟▘    │  │",
+    "  │  │ ▟▘     │  │",
+    "  └──┘        └──┘",
   ];
   return lines.map((l) => c.cyan(c.bold(l))).join("\n");
 }
