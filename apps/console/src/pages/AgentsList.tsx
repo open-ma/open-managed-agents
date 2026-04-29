@@ -458,57 +458,64 @@ export function AgentsList() {
                     <label className="text-sm text-fg-muted block mb-1">Name *</label>
                     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="Coding Assistant" />
                   </div>
-                  <div>
-                    <label className="text-sm text-fg-muted block mb-1">Model</label>
-                    {/* Options derived dynamically from the user's model_cards.
-                        The previous hard-coded list (sonnet-4-6 / opus-4-6 /
-                        haiku-4-5) silently embedded a non-existent model
-                        (opus-4-6 was retired; current Opus is 4-7) and stayed
-                        in sync with no source of truth. Now the dropdown
-                        reflects exactly what cards are configured — anyone
-                        picking a model has somewhere to back the call.
-                        Cloud agents need at least one model_card to create;
-                        local-runtime agents skip this section entirely (the
-                        ACP child brings its own credentials). */}
-                    <select
-                      value={form.model}
-                      onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })}
-                      className={inputCls}
-                      disabled={modelCards.length === 0}
-                    >
-                      {modelCards.length === 0 && <option value="">— add a model card first —</option>}
-                      {Array.from(new Set(modelCards.map(mc => mc.model_id))).map(modelId => (
-                        <option key={modelId} value={modelId}>{modelId}</option>
-                      ))}
-                    </select>
-                  </div>
-                  {modelCards.length > 0 && (
-                    <div>
-                      <label className="text-sm text-fg-muted block mb-1">Model Card</label>
-                      <select
-                        value={form.modelCardId}
-                        onChange={(e) => {
-                          const cardId = e.target.value;
-                          setForm({ ...form, modelCardId: cardId });
-                          if (cardId) {
-                            const card = modelCards.find(mc => mc.id === cardId);
-                            if (card) setForm(f => ({ ...f, modelCardId: cardId, model: card.model_id }));
-                          }
-                        }}
-                        className={inputCls}
-                      >
-                        <option value="">Auto-detect by model ID</option>
-                        {modelCards.map(mc => (
-                          <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
-                        ))}
-                      </select>
-                      <p className="text-xs text-fg-subtle mt-1">Select which API credentials to use for this agent.</p>
-                    </div>
+                  {/* Model + Model Card section. Cloud agents need the
+                      dropdown + a backing model_card to make API calls;
+                      local-runtime agents (form.runtimeId set) skip the
+                      whole thing because the ACP child running on the
+                      user's daemon brings its own LLM credentials —
+                      OMA's model_id and model_card never enter the
+                      picture. We show a one-line hint instead so it's
+                      clear this isn't a bug. */}
+                  {!form.runtimeId && (
+                    <>
+                      <div>
+                        <label className="text-sm text-fg-muted block mb-1">Model</label>
+                        <select
+                          value={form.model}
+                          onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })}
+                          className={inputCls}
+                          disabled={modelCards.length === 0}
+                        >
+                          {modelCards.length === 0 && <option value="">— add a model card first —</option>}
+                          {Array.from(new Set(modelCards.map(mc => mc.model_id))).map(modelId => (
+                            <option key={modelId} value={modelId}>{modelId}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {modelCards.length > 0 && (
+                        <div>
+                          <label className="text-sm text-fg-muted block mb-1">Model Card</label>
+                          <select
+                            value={form.modelCardId}
+                            onChange={(e) => {
+                              const cardId = e.target.value;
+                              setForm({ ...form, modelCardId: cardId });
+                              if (cardId) {
+                                const card = modelCards.find(mc => mc.id === cardId);
+                                if (card) setForm(f => ({ ...f, modelCardId: cardId, model: card.model_id }));
+                              }
+                            }}
+                            className={inputCls}
+                          >
+                            <option value="">Auto-detect by model ID</option>
+                            {modelCards.map(mc => (
+                              <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-fg-subtle mt-1">Select which API credentials to use for this agent.</p>
+                        </div>
+                      )}
+                      {modelCards.length === 0 && (
+                        <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
+                          No model cards configured. Cloud agents need at least one card to provide LLM credentials.{" "}
+                          <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
+                        </p>
+                      )}
+                    </>
                   )}
-                  {modelCards.length === 0 && (
+                  {form.runtimeId && (
                     <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-                      No model cards configured. Cloud agents need at least one card to provide LLM credentials.{" "}
-                      <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
+                      Model is determined by the ACP child on the runtime ({form.acpAgentId || "—"}) — it uses its own LLM credentials.
                     </p>
                   )}
                   <div>

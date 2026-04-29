@@ -110,8 +110,16 @@ app.post("/", async (c) => {
     runtime_binding?: AgentConfig["runtime_binding"];
   }>();
 
-  if (!body.name || !body.model) {
-    return c.json({ error: "name and model are required" }, 400);
+  // `model` is required for cloud agents (it picks which model_card the
+  // SessionDO loop talks to) but meaningless for local-runtime agents
+  // (the ACP child has its own model selection, see the validateModel
+  // skip below). Empty string accepted from the form when the UI hides
+  // the Model section for local-runtime agents.
+  if (!body.name) {
+    return c.json({ error: "name is required" }, 400);
+  }
+  if (!body.runtime_binding && !body.model) {
+    return c.json({ error: "model is required for cloud agents" }, 400);
   }
 
   // Validate model has a configured model card. Skipped for local-runtime
