@@ -24,7 +24,7 @@ const ANTHROPIC_SKILLS = [
 ];
 
 const INITIAL_FORM = {
-  name: "", model: "claude-sonnet-4-6", system: "", description: "",
+  name: "", model: "", system: "", description: "",
   modelCardId: "",
   mcpServers: [] as McpEntry[],
   skills: [] as SkillEntry[],
@@ -223,6 +223,10 @@ export function AgentsList() {
         setForm({
           ...INITIAL_FORM,
           name: String(parsed.name || ""),
+          // Paste-mode fallback: if the pasted config has no model field,
+          // claude-sonnet-4-6 is a real, current Anthropic model id (not
+          // a placeholder), so it's a reasonable default. The form
+          // dropdown does its own dynamic option set from modelCards.
           model: String(parsed.model || "claude-sonnet-4-6"),
           system: String(parsed.system || ""),
           description: String(parsed.description || ""),
@@ -456,14 +460,26 @@ export function AgentsList() {
                   </div>
                   <div>
                     <label className="text-sm text-fg-muted block mb-1">Model</label>
-                    <select value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })} className={inputCls}>
-                      <option>claude-sonnet-4-6</option>
-                      <option>claude-opus-4-6</option>
-                      <option>claude-haiku-4-5</option>
-                      {modelCards
-                        .filter(mc => !["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"].includes(mc.model_id))
-                        .filter((mc, i, arr) => arr.findIndex(m => m.model_id === mc.model_id) === i)
-                        .map(mc => <option key={mc.model_id} value={mc.model_id}>{mc.model_id}</option>)}
+                    {/* Options derived dynamically from the user's model_cards.
+                        The previous hard-coded list (sonnet-4-6 / opus-4-6 /
+                        haiku-4-5) silently embedded a non-existent model
+                        (opus-4-6 was retired; current Opus is 4-7) and stayed
+                        in sync with no source of truth. Now the dropdown
+                        reflects exactly what cards are configured — anyone
+                        picking a model has somewhere to back the call.
+                        Cloud agents need at least one model_card to create;
+                        local-runtime agents skip this section entirely (the
+                        ACP child brings its own credentials). */}
+                    <select
+                      value={form.model}
+                      onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })}
+                      className={inputCls}
+                      disabled={modelCards.length === 0}
+                    >
+                      {modelCards.length === 0 && <option value="">— add a model card first —</option>}
+                      {Array.from(new Set(modelCards.map(mc => mc.model_id))).map(modelId => (
+                        <option key={modelId} value={modelId}>{modelId}</option>
+                      ))}
                     </select>
                   </div>
                   {modelCards.length > 0 && (
@@ -491,7 +507,7 @@ export function AgentsList() {
                   )}
                   {modelCards.length === 0 && (
                     <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-                      No model cards configured. Agents will use the environment API key.{" "}
+                      No model cards configured. Cloud agents need at least one card to provide LLM credentials.{" "}
                       <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
                     </p>
                   )}
