@@ -161,6 +161,38 @@ function bindingErrorResponse(
 }
 
 /**
+ * Direct-to-DO fetcher used by local-runtime sessions that don't pin an
+ * environment. Skips the sandbox-worker indirection — local-runtime sessions
+ * never run a container, so the only thing the "binding" is used for is
+ * routing /sessions/:id/* to the SessionDO. This mirrors the lazy fallback
+ * already inside getSandboxBinding (see lines 91-114) but factored out so
+ * the env_id-less path doesn't have to construct a fake environmentId just
+ * to traverse a function whose first action is to look one up.
+ */
+function sessionDoFallbackFetcher(env: Env): Fetcher | null {
+  if (!env.SESSION_DO) return null;
+  return {
+    fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(req.url);
+      const match = url.pathname.match(/^\/sessions\/([^/]+)\/(.*)/);
+      if (!match) return Promise.resolve(new Response("Not found", { status: 404 }));
+      const [, sessionId, rest] = match;
+      const doId = env.SESSION_DO!.idFromName(sessionId);
+      const stub = env.SESSION_DO!.get(doId);
+      // Workaround for cloudflare/workerd#2240
+      (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
+      return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
+        method: req.method,
+        headers: req.headers,
+        body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+      }));
+    },
+    connect: () => { throw new Error("not implemented"); },
+  } as unknown as Fetcher;
+}
+
+/**
  * Forward a request to the sandbox worker via service binding.
  */
 function forwardToSandbox(
@@ -256,7 +288,7 @@ app.post("/", async (c) => {
   if (daily) return daily;
   const body = await c.req.json<{
     agent: string;
-    environment_id: string;
+    environment_id?: string;
     title?: string;
     vault_ids?: string[];
     resources?: Array<{
@@ -277,8 +309,8 @@ app.post("/", async (c) => {
     }>;
   }>();
 
-  if (!body.agent || !body.environment_id) {
-    return c.json({ error: "agent and environment_id are required" }, 400);
+  if (!body.agent) {
+    return c.json({ error: "agent is required" }, 400);
   }
 
   // The 8-memory-store sub-cap is enforced inside sessions-store on
@@ -309,10 +341,51 @@ app.post("/", async (c) => {
   const agentRow = await c.var.services.agents.get({ tenantId: t, agentId: body.agent });
   if (!agentRow) return c.json({ error: "Agent not found" }, 404);
 
-  // Resolve sandbox worker binding
-  const sbRes = await getSandboxBinding(c.env, body.environment_id, t);
-  const binding = sbRes.binding;
-  if (!binding) return bindingErrorResponse(c, sbRes);
+  // Local-runtime agents (acp-proxy harness) don't use the sandbox container
+  // — their loop is forwarded to the user's daemon via the RuntimeRoom DO.
+  // We still need an environment_id to satisfy the sessions schema (NOT
+  // NULL) and the SessionDO routing, but the user shouldn't have to think
+  // about it: pick the tenant's first environment as a benign default.
+  // Cloud agents continue to require an explicit environment_id because
+  // the picked sandbox lane materially affects the run.
+  //
+  // Long-term: make sessions.environment_id nullable so local-runtime
+  // sessions can store NULL — out of scope for this PR (D1 migration +
+  // sessions-store API + multiple downstream consumers).
+  const agentIsLocalRuntime = !!agentRow.runtime_binding;
+  let resolvedEnvId = body.environment_id;
+  if (!resolvedEnvId) {
+    if (!agentIsLocalRuntime) {
+      return c.json({ error: "environment_id is required for cloud agents" }, 400);
+    }
+    const envs = await c.var.services.environments.list({ tenantId: t });
+    const fallback = envs.find((e) => !e.archived_at) ?? envs[0];
+    if (!fallback) {
+      return c.json(
+        { error: "No environment configured. Create at least one environment before starting a local-runtime session." },
+        400,
+      );
+    }
+    resolvedEnvId = fallback.id;
+  }
+
+  // Resolve sandbox worker binding. Local-runtime sessions still go
+  // through the sandbox lane for SessionDO routing, but the harness skips
+  // the container — so a missing/unhealthy sandbox is technically tolerable
+  // for them. We keep the same lookup path for now to avoid two routing
+  // codepaths; if this becomes a real reliability problem (e.g. the user's
+  // first env is in `error` status), revisit and short-circuit to the
+  // SESSION_DO direct fetcher (sessionDoFallbackFetcher below).
+  const sbRes = await getSandboxBinding(c.env, resolvedEnvId, t);
+  let binding = sbRes.binding;
+  if (!binding) {
+    if (agentIsLocalRuntime) {
+      binding = sessionDoFallbackFetcher(c.env);
+      if (!binding) return bindingErrorResponse(c, sbRes);
+    } else {
+      return bindingErrorResponse(c, sbRes);
+    }
+  }
 
   // Pre-fetch snapshots so SessionDO doesn't have to read CONFIG_KV with a
   // tenant-prefixed key (which fails when sandbox-default's KV binding
@@ -320,7 +393,7 @@ app.post("/", async (c) => {
   const { tenant_id: _atid, ...agentSnapshot } = agentRow;
   const envRow = await c.var.services.environments.get({
     tenantId: t,
-    environmentId: body.environment_id,
+    environmentId: resolvedEnvId,
   });
   const environmentSnapshot = envRow ? toEnvironmentConfig(envRow) : undefined;
   const vaultIds = body.vault_ids || [];
@@ -406,7 +479,7 @@ app.post("/", async (c) => {
     const result = await c.var.services.sessions.create({
       tenantId: t,
       agentId: body.agent,
-      environmentId: body.environment_id,
+      environmentId: resolvedEnvId,
       title: body.title || "",
       vaultIds,
       agentSnapshot,
@@ -448,7 +521,7 @@ app.post("/", async (c) => {
     "PUT",
     JSON.stringify({
       agent_id: body.agent,
-      environment_id: body.environment_id,
+      environment_id: resolvedEnvId,
       title: body.title || "",
       session_id: sessionId,
       tenant_id: t,
