@@ -107,6 +107,7 @@ app.post("/", async (c) => {
     model_card_id?: string;
     aux_model?: string | { id: string; speed?: "standard" | "fast" };
     aux_model_card_id?: string;
+    runtime_binding?: AgentConfig["runtime_binding"];
   }>();
 
   if (!body.name || !body.model) {
@@ -145,6 +146,7 @@ app.post("/", async (c) => {
       model_card_id: body.model_card_id,
       aux_model: body.aux_model,
       aux_model_card_id: body.aux_model_card_id,
+      runtime_binding: body.runtime_binding,
     },
   });
   return c.json(toApiAgent(row), 201);
@@ -195,6 +197,7 @@ const updateAgent = async (c: any) => {
     aux_model_card_id?: string | null;
     metadata?: Record<string, unknown>;
     version?: number;
+    runtime_binding?: AgentConfig["runtime_binding"] | null;
   };
 
   // Validate model if model or model_card_id is being changed
@@ -242,6 +245,7 @@ const updateAgent = async (c: any) => {
         model_card_id: body.model_card_id,
         aux_model: body.aux_model,
         aux_model_card_id: body.aux_model_card_id,
+        runtime_binding: body.runtime_binding,
       },
     });
     return c.json(toApiAgent(row));
