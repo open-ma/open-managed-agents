@@ -106,6 +106,36 @@ jobs:
           echo "All attempts failed"
           exit 1
 
+      # AcpProxyHarness in the agent worker calls main's /v1/internal/*
+      # endpoints (runtime-attach-harness, runtime-session-bundle), gated
+      # on this header secret. Without it, every local-runtime turn fails
+      # with "INTEGRATIONS_INTERNAL_SECRET unset" — observed in prod when
+      # a runtime-bound agent first sent a turn after the agent worker was
+      # rebuilt without anyone having manually set the secret. Lane CI
+      # (deploy-lane.yml:226) sets the same secret on lane agent workers
+      # for the same reason; this is the prod sibling.
+      #
+      # Scope intentionally narrow: only this one secret. The rest of the
+      # prod worker secrets are managed manually (see docs/linear-
+      # integration-sop.md), and a blanket sync would risk overwriting
+      # values that aren't checked into GH Secrets. If/when the rest of
+      # the secrets are confirmed to live in GH (gh secret list), expand
+      # this block to mirror the lane workflow.
+      #
+      # `if` guard skips when the GH secret is unset — same drift the
+      # lane's set_secret() helper handles, written inline here because
+      # we only have one value to consider.
+      - name: Sync agent worker secrets
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          INTEGRATIONS_INTERNAL_SECRET: ${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}
+        if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
+        run: |
+          cd apps/agent
+          echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name sandbox-default
+          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to sandbox-default"
+
       - name: Deploy main worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
