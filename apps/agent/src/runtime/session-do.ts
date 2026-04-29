@@ -2439,11 +2439,11 @@ export class SessionDO extends Agent<Env, SessionState> {
         CONFIG_KV: this.env.CONFIG_KV,
         memoryStoreIds,
         environmentConfig,
-        // Wired through so AcpProxyHarness can attach to the RuntimeRoom DO
-        // via the apps/main worker. Optional on the env type — non-acp
-        // harnesses simply don't read these.
-        MAIN: this.env.MAIN,
-        INTEGRATIONS_INTERNAL_SECRET: this.env.INTEGRATIONS_INTERNAL_SECRET,
+        // Cross-script DO binding so AcpProxyHarness can attach to the
+        // user's RuntimeRoom directly (no HTTP hop through main, no
+        // shared INTEGRATIONS_INTERNAL_SECRET). Optional on the env type
+        // — non-acp harnesses don't read it.
+        RUNTIME_ROOM: this.env.RUNTIME_ROOM,
         delegateToAgent: async (agentId: string, message: string) => {
           return this.runSubAgent(agentId, message, history, sandbox);
         },

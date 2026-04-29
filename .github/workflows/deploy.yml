@@ -167,21 +167,22 @@ jobs:
       # agent worker because `wrangler secret put` had only ever been run
       # against main and integrations — no codified record meant a worker
       # rebuild silently dropped the secret. Pushing the same GH-stored
-      # value to all three workers on every deploy makes drift impossible:
-      # set the GH secret once, every subsequent push reconciles all
-      # three workers to that value.
+      # value to the workers that need it on every deploy makes drift
+      # impossible: set the GH secret once, every subsequent push
+      # reconciles them to that value.
+      #
+      # Scope: only main + integrations. The agent worker no longer needs
+      # this secret after AcpProxyHarness was rewired to talk to the
+      # RuntimeRoom DO directly via cross-script binding (see
+      # apps/agent/wrangler.jsonc and apps/agent/src/harness/acp-proxy-loop.ts).
+      # If you re-introduce a main HTTP call from agent, add the agent
+      # worker back to this loop.
       #
       # Idempotent: when the value already matches the existing secret,
       # `wrangler secret put` re-encrypts to the same plaintext — no error.
       # `if` guard skips the whole step when the GH secret is unset, so a
       # repo where INTEGRATIONS_INTERNAL_SECRET hasn't been added yet
       # deploys cleanly without clobbering existing manually-set values.
-      #
-      # Scope is intentionally just this one secret. The rest of the
-      # prod worker secrets stay manually managed (docs/linear-
-      # integration-sop.md). Expanding to the full lane-style sync
-      # requires inventorying which prod secrets are mirrored in GH
-      # Secrets first — a blank GH value would clear a live-prod one.
       - name: Sync INTEGRATIONS_INTERNAL_SECRET to all workers
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -190,13 +191,13 @@ jobs:
         if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
         run: |
           set -e
-          for entry in "apps/main:managed-agents" "apps/agent:sandbox-default" "apps/integrations:managed-agents-integrations"; do
+          for entry in "apps/main:managed-agents" "apps/integrations:managed-agents-integrations"; do
             dir="${entry%%:*}"
             worker="${entry##*:}"
             (cd "$dir" && echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name "$worker" >/dev/null)
             echo "  ✓ $worker"
           done
-          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to all 3 workers"
+          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to main + integrations"
 
       # --- Post-deploy verification ---
       - name: Verify deployment

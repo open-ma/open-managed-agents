@@ -219,11 +219,12 @@ jobs:
           set_secret ANTHROPIC_BASE_URL           "$AGENT" "${{ secrets.ANTHROPIC_BASE_URL }}"
           set_secret INTERNAL_TOKEN               "$AGENT" "${{ secrets.INTERNAL_TOKEN }}"
           set_secret TAVILY_API_KEY               "$AGENT" "${{ secrets.TAVILY_API_KEY }}"
-          # AcpProxyHarness in the agent worker calls main's /v1/internal/*
-          # endpoints (runtime-attach-harness, runtime-session-bundle), which
-          # gate on this header secret. Without it, local-runtime sessions
-          # error with "INTEGRATIONS_INTERNAL_SECRET unset".
-          set_secret INTEGRATIONS_INTERNAL_SECRET "$AGENT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+          # NOTE: agent worker no longer needs INTEGRATIONS_INTERNAL_SECRET.
+          # AcpProxyHarness now talks to RuntimeRoom via cross-script DO
+          # binding (apps/agent/wrangler.jsonc → script_name) instead of
+          # going through main's /v1/internal/runtime-attach-harness endpoint.
+          # Lane workers should follow the same pattern automatically once
+          # they pick up the wrangler.jsonc cross-script binding.
           # R2 S3 API credentials for sandbox.ts FUSE mount mode. Without
           # these, mountMemoryStore + mountWorkspace fall back to localBucket
           # mode (writes don't persist to R2 — see sandbox.ts comment).
