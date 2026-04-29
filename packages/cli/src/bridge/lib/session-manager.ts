@@ -80,6 +80,15 @@ export interface SessionManagerEnv {
 }
 
 interface BundleFile { path: string; content: string }
+interface BundleMcpServer {
+  name: string;
+  type: "http" | "sse";
+  url: string;
+}
+interface BundleEnvVar {
+  name: string;
+  value: string;
+}
 interface SessionBundle {
   files: BundleFile[];
   /** Per-agent local-skill blocklist — daemon hides any skill with id in
@@ -87,6 +96,14 @@ interface SessionBundle {
    *  Bare directory ids (no plugin prefix); a global skill and a plugin
    *  skill that share the same id are both hidden. */
   local_skill_blocklist?: string[];
+  /** MCP servers the ACP child should connect to. URLs already point at
+   *  OMA's mcp-proxy; SessionManager appends the Authorization header
+   *  (Bearer agentApiKey) at spawn time so the PAT never round-trips
+   *  through the bundle response. */
+  mcp_servers?: BundleMcpServer[];
+  /** Plain env vars (was env_secret pre-rename) merged into the spawned
+   *  ACP child's process.env. Daemon never logs name or value. */
+  env?: BundleEnvVar[];
 }
 
 export class SessionManager {
@@ -147,11 +164,15 @@ export class SessionManager {
     // materialize before starting the ACP child. Bundle errors are non-fatal
     // — we still spawn; the agent just won't see OMA's prompt/skills.
     let blocklist: string[] = [];
+    let bundleMcpServers: BundleMcpServer[] = [];
+    let bundleEnv: BundleEnvVar[] = [];
     try {
       const bundle = await this.#fetchBundle(p.session_id, p.agent_id);
       if (bundle) {
         await writeBundle(sessionCwd, bundle.files);
         blocklist = bundle.local_skill_blocklist ?? [];
+        bundleMcpServers = bundle.mcp_servers ?? [];
+        bundleEnv = bundle.env ?? [];
       }
     } catch (e) {
       process.stderr.write(`  ! bundle fetch failed (non-fatal): ${(e as Error).message}\n`);
@@ -173,10 +194,37 @@ export class SessionManager {
       }
     }
 
+    // Bundle-supplied env vars merged on top of agent.spec.env and
+    // CLAUDE_CONFIG_DIR. Order matters: bundleEnv comes from the user's
+    // session resources (type=env), so it should override the ACP
+    // agent's defaults but stay below CLAUDE_CONFIG_DIR (which is a
+    // session-cwd routing concern, not user data).
+    const envFromBundle: Record<string, string> = {};
+    for (const v of bundleEnv) envFromBundle[v.name] = v.value;
+
+    // ACP McpServer schema requires a name + url + headers array. We add
+    // the Authorization header here, on the daemon side, so the agent
+    // PAT never travels back through the bundle response from main.
+    // stdio servers are intentionally not supported in this path — they'd
+    // need a daemon-side spawner that doesn't exist yet.
+    const mcpServersForAcp = bundleMcpServers.map((s) => ({
+      type: s.type,
+      name: s.name,
+      url: s.url,
+      headers: this.#env.apiKey
+        ? [{ name: "Authorization", value: `Bearer ${this.#env.apiKey}` }]
+        : [],
+    }));
+
     process.stderr.write(
       `  → SessionManager.start ${agent.spec.command} cwd=${sessionCwd}` +
         (extraEnv.CLAUDE_CONFIG_DIR ? ` cfg=${extraEnv.CLAUDE_CONFIG_DIR}` : "") +
         (blocklist.length ? ` blocklist=${blocklist.length}` : "") +
+        (mcpServersForAcp.length ? ` mcp=${mcpServersForAcp.length}` : "") +
+        (bundleEnv.length ? ` env=${bundleEnv.length}` : "") +
+        // Intentionally NOT logging env names or values — these come from
+        // user-supplied session resources and may be sensitive even if not
+        // formally encrypted. Only the count is observable.
         "\n",
     );
 
@@ -185,8 +233,9 @@ export class SessionManager {
         agent: {
           ...agent.spec,
           cwd: sessionCwd,
-          env: scrubAcpSpawnEnv({ ...(agent.spec.env ?? {}), ...extraEnv }),
+          env: scrubAcpSpawnEnv({ ...(agent.spec.env ?? {}), ...envFromBundle, ...extraEnv }),
         },
+        mcpServers: mcpServersForAcp,
         resumeAcpSessionId: p.resume?.acp_session_id,
       });
       this.#sessions.set(p.session_id, {
