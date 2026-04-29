@@ -38,6 +38,11 @@ import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
 import { mountResources } from "./resource-mounter";
 import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
+import {
+  findLatestBackup as findWorkspaceBackup,
+  recordBackup as recordWorkspaceBackup,
+  DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+} from "./workspace-backups";
 
 interface SessionInitParams {
   agent_id: string;
@@ -820,6 +825,43 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.currentAbortController.abort();
         this.currentAbortController = null;
       }
+      // Snapshot /workspace BEFORE we destroy the container — once destroy()
+      // runs the container is gone and we can't read its filesystem.
+      // CF's "persist across sessions" pattern (changelog 2026-02-23):
+      // squashfs of /workspace lands in BACKUP_BUCKET; the handle goes into
+      // D1 keyed by (tenant, env). Next session in the same scope's warmup
+      // looks it up and restoreBackup's it.
+      if (
+        this.sandbox instanceof CloudflareSandbox &&
+        this.state.tenant_id &&
+        this.state.environment_id &&
+        this.env.AUTH_DB
+      ) {
+        try {
+          const handle = await this.sandbox.createWorkspaceBackup({
+            name: `session-${this.state.session_id ?? "unknown"}`,
+            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+          });
+          if (handle) {
+            await recordWorkspaceBackup(this.env.AUTH_DB, {
+              tenantId: this.state.tenant_id,
+              environmentId: this.state.environment_id,
+              handle,
+              nowMs: Date.now(),
+              ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+              sessionId: this.state.session_id,
+            });
+          }
+        } catch (err) {
+          // Snapshot failure shouldn't block destroy — losing one snapshot
+          // is recoverable (next session starts from previous snapshot or
+          // empty if first time).
+          logWarn(
+            { op: "session_do.destroy.workspace_backup", session_id: this.state.session_id, err },
+            "workspace backup snapshot failed; teardown continues",
+          );
+        }
+      }
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -1360,6 +1402,50 @@ export class SessionDO extends Agent<Env, SessionState> {
       // Mount R2-backed /workspace for persistent file storage
       if (sandbox instanceof CloudflareSandbox) {
         await sandbox.mountWorkspace();
+      }
+
+      // Restore the most recent workspace backup for (tenant, environment)
+      // BEFORE mountResources runs so any github_repository clone (which
+      // git-clones into /workspace) lands on top of restored state — or
+      // refuses if the dir is non-empty (current behavior, agent gets clear
+      // error). Per CF's recommended pattern from the 2026-02-23 changelog
+      // ("pick up where you left off, even after days of inactivity").
+      if (
+        sandbox instanceof CloudflareSandbox &&
+        this.state.tenant_id &&
+        this.state.environment_id &&
+        this.env.AUTH_DB
+      ) {
+        try {
+          const handle = await findWorkspaceBackup(
+            this.env.AUTH_DB,
+            this.state.tenant_id,
+            this.state.environment_id,
+            Date.now(),
+          );
+          if (handle) {
+            const ok = await sandbox.restoreWorkspaceBackup(handle);
+            if (!ok) {
+              logWarn(
+                {
+                  op: "session_do.warmup.restore_backup",
+                  session_id: this.state.session_id,
+                  tenant_id: this.state.tenant_id,
+                  environment_id: this.state.environment_id,
+                  backup_id: handle.id,
+                },
+                "workspace backup restore returned false (likely expired) — continuing with empty workspace",
+              );
+            }
+          }
+        } catch (err) {
+          // Best-effort. Workspace persistence shouldn't block session
+          // warmup — agent still works with empty /workspace.
+          logWarn(
+            { op: "session_do.warmup.restore_backup", session_id: this.state.session_id, err },
+            "workspace backup restore failed; continuing with empty /workspace",
+          );
+        }
       }
 
       // image_strategy fast path REMOVED. Was a base_snapshot lazy-prepare
