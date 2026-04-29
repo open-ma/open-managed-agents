@@ -17,12 +17,15 @@ import { readCreds } from "../lib/config.js";
 import { osTag } from "../lib/platform.js";
 import { detectAll } from "@open-managed-agents/acp-runtime/registry";
 import { SessionManager } from "../lib/session-manager.js";
-import { gcOldSessions } from "../lib/session-cwd.js";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 import WebSocket from "ws";
 
-const HEARTBEAT_INTERVAL_MS = 5 * 60 * 1000;
+// CF Workers WS connections to *.workers.dev (lane URLs) idle out fast —
+// observed ~5-30s before TCP RST without keep-alive traffic. Even prod custom
+// domains drop within minutes of silence. Send a small ping every 25s so the
+// connection stays warm without burning much bandwidth or DO CPU.
+const HEARTBEAT_INTERVAL_MS = 25 * 1000;
 const RECONNECT_BACKOFF_MIN_MS = 1000;
 const RECONNECT_BACKOFF_MAX_MS = 60 * 1000;
 
@@ -37,13 +40,6 @@ export async function runDaemon(): Promise<void> {
   }
 
   printBanner(`daemon — runtime ${creds.runtimeId.slice(0, 8)}… → ${creds.serverUrl}`, PKG_VERSION);
-
-  // Best-effort GC of session dirs older than 7 days. Non-blocking — if
-  // it fails the daemon still starts; user can clean ~/.oma/bridge/sessions/
-  // by hand if it ever piles up.
-  void gcOldSessions().then((r) => {
-    if (r.removed > 0) log.step(`GC: removed ${r.removed} stale session dir${r.removed === 1 ? "" : "s"}`);
-  }).catch(() => undefined);
 
   // Convert https:// → wss:// (or http→ws for dev). The exchange flow
   // wrote whatever scheme the user passed via --server-url to setup.
