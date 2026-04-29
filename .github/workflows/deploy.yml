@@ -51,6 +51,43 @@ jobs:
           # "DB may be unavailable during migration" prompt.
           npx wrangler d1 migrations apply AUTH_DB --remote
 
+      # Memory subsystem infra: the queue + DLQ + R2 event subscription
+      # referenced by apps/main/wrangler.jsonc must exist before the main
+      # worker can deploy (wrangler validates queue bindings at deploy
+      # time and refuses with "Queue X does not exist"). All three
+      # commands are idempotent — they tee output and swallow
+      # already-exists / conflict errors. Mirrors the lane workflow.
+      - name: Ensure memory subsystem infra exists (idempotent)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/main
+          npx wrangler r2 bucket create managed-agents-memory 2>&1 \
+            | tee /tmp/r2-create.log || true
+          if grep -qiE "already exists|conflict" /tmp/r2-create.log; then
+            echo "  (bucket exists — fine)"
+          fi
+          npx wrangler queues create managed-agents-memory-events 2>&1 \
+            | tee /tmp/q-create.log || true
+          if grep -qiE "already exists|conflict" /tmp/q-create.log; then
+            echo "  (queue exists — fine)"
+          fi
+          npx wrangler queues create managed-agents-memory-events-dlq 2>&1 \
+            | tee /tmp/dlq-create.log || true
+          if grep -qiE "already exists|conflict" /tmp/dlq-create.log; then
+            echo "  (DLQ exists — fine)"
+          fi
+          # R2 event subscription wires bucket PUT/DELETE → queue so the
+          # consumer in apps/main can reflect agent FUSE writes back into D1.
+          npx wrangler r2 bucket notification create managed-agents-memory \
+            --event-type object-create --event-type object-delete \
+            --queue managed-agents-memory-events 2>&1 \
+            | tee /tmp/notif-create.log || true
+          if grep -qiE "already exists|conflict|duplicate" /tmp/notif-create.log; then
+            echo "  (event subscription exists — fine)"
+          fi
+
       # --- Deploy both workers with retry ---
       - name: Deploy agent worker
         env:
