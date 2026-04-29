@@ -1,6 +1,6 @@
 {
   "name": "@openma/cli",
-  "version": "0.3.0-beta.1",
+  "version": "0.3.0-beta.2",
   "description": "CLI for the openma managed agents platform",
   "type": "module",
   "bin": {
@@ -29,17 +29,15 @@
   "bugs": {
     "url": "https://github.com/open-ma/open-managed-agents/issues"
   },
-  "dependencies": {
+  "devDependencies": {
     "@agentclientprotocol/sdk": "^0.20.0",
     "@open-managed-agents/acp-runtime": "workspace:*",
-    "ws": "^8.18.0"
-  },
-  "devDependencies": {
     "@open-managed-agents/api-types": "workspace:*",
     "@types/node": "^22.0.0",
     "@types/ws": "^8.5.0",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.8.0"
+    "typescript": "^5.8.0",
+    "ws": "^8.18.0"
   }
 }
