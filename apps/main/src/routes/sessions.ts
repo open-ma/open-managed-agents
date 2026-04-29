@@ -260,7 +260,8 @@ app.post("/", async (c) => {
     title?: string;
     vault_ids?: string[];
     resources?: Array<{
-      type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
+      // `env` is the canonical name; `env_secret` accepted as legacy alias.
+      type: "file" | "memory_store" | "github_repository" | "github_repo" | "env" | "env_secret";
       file_id?: string;
       memory_store_id?: string;
       mount_path?: string;
@@ -364,7 +365,7 @@ app.post("/", async (c) => {
   const vaultCredentials = await fetchVaultCredentials(c.var.services, t, vaultIds);
 
   // Build the non-file initial resources (memory_store, github_repository,
-  // env_secret). File resources need the session id BEFORE we can create the
+  // env). File resources need the session id BEFORE we can create the
   // scoped file row, so they're handled after the session row exists.
   const nonFileInputs: NewResourceInput[] = [];
   for (const res of body.resources ?? []) {
@@ -385,9 +386,11 @@ app.post("/", async (c) => {
         mount_path: res.mount_path || "/workspace",
         checkout: res.checkout,
       });
-    } else if (res.type === "env_secret" && res.name && res.value) {
+    } else if ((res.type === "env" || res.type === "env_secret") && res.name && res.value) {
+      // Normalize on write: legacy `env_secret` always lands as `env` in
+      // the store. Read-side code only has to handle the new name.
       nonFileInputs.push({
-        type: "env_secret",
+        type: "env",
         name: res.name,
       });
     }
@@ -457,18 +460,18 @@ app.post("/", async (c) => {
     }),
   );
 
-  // Persist secret KV entries for the env_secret + github_repository inputs
-  // we created above. These continue to live in CONFIG_KV — sessions-store
+  // Persist secret KV entries for the env + github_repository inputs we
+  // created above. These continue to live in CONFIG_KV — sessions-store
   // intentionally records resource METADATA only.
   for (let i = 0; i < (body.resources?.length ?? 0); i++) {
     const res = body.resources![i];
-    if (res.type === "env_secret" && res.name && res.value) {
-      // Find the matching createdResource by metadata equality (env_secret
-      // has no meaningful natural key beyond name; the order is preserved
-      // because we built nonFileInputs in source order and sessions-store
-      // returns the same order).
+    if ((res.type === "env" || res.type === "env_secret") && res.name && res.value) {
+      // Find the matching createdResource by metadata equality (env has no
+      // meaningful natural key beyond name; the order is preserved because
+      // we built nonFileInputs in source order and sessions-store returns
+      // the same order). Read-side already normalized to type=env above.
       const created = createdResources.find(
-        (r) => r.type === "env_secret" && r.resource.type === "env_secret" && r.resource.name === res.name,
+        (r) => r.type === "env" && r.resource.type === "env" && r.resource.name === res.name,
       );
       if (created) {
         await c.var.services.sessionSecrets.put({
@@ -723,7 +726,7 @@ app.delete("/:id", async (c) => {
 
   // Cascade-delete the session row + every session_resources row in one
   // batch. Caller is still responsible for the per-session secret KV
-  // entries (env_secret.value, github_repository.token) and for files
+  // entries (env.value, github_repository.token) and for files
   // uploaded under this session — both are cleaned up below.
   try {
     await c.var.services.sessions.delete({ tenantId: t, sessionId: id });

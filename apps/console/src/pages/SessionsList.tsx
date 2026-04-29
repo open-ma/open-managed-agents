@@ -61,7 +61,19 @@ export function SessionsList() {
     agent: "", environment_id: "", title: "",
     vault_ids: [] as string[],
     github_url: "", github_token: "", github_branch: "",
-    env_secrets: [{ name: "", value: "" }],
+    env_vars: [{ name: "", value: "" }],
+  });
+  // Per-row toggle for masking the env value input. Default: masked. We
+  // intentionally use a text input + a visual mask via the toggle (rather
+  // than type="password") so the UI stops implying that the value is
+  // encrypted at rest — env values are stored alongside other session
+  // resources without app-level encryption today (see the "env" type
+  // rename in api-types/types.ts:801 for the matching back-end change).
+  const [revealedEnvIdx, setRevealedEnvIdx] = useState<Set<number>>(new Set());
+  const toggleEnvReveal = (idx: number) => setRevealedEnvIdx((prev) => {
+    const next = new Set(prev);
+    if (next.has(idx)) next.delete(idx); else next.add(idx);
+    return next;
   });
 
   const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
@@ -96,9 +108,12 @@ export function SessionsList() {
         resources.push(res);
       }
 
-      for (const s of form.env_secrets) {
+      for (const s of form.env_vars) {
         if (s.name && s.value) {
-          resources.push({ type: "env_secret", name: s.name, value: s.value });
+          // type=env (was env_secret pre-rename). Server still accepts the
+          // legacy alias so older console builds keep working — see
+          // sessions.ts:262.
+          resources.push({ type: "env", name: s.name, value: s.value });
         }
       }
 
@@ -126,20 +141,28 @@ export function SessionsList() {
     }));
   };
 
-  const updateEnvSecret = (idx: number, field: "name" | "value", val: string) => {
+  const updateEnvVar = (idx: number, field: "name" | "value", val: string) => {
     setForm(f => {
-      const secrets = [...f.env_secrets];
-      secrets[idx] = { ...secrets[idx], [field]: val };
-      return { ...f, env_secrets: secrets };
+      const vars = [...f.env_vars];
+      vars[idx] = { ...vars[idx], [field]: val };
+      return { ...f, env_vars: vars };
     });
   };
 
-  const addEnvSecret = () => {
-    setForm(f => ({ ...f, env_secrets: [...f.env_secrets, { name: "", value: "" }] }));
+  const addEnvVar = () => {
+    setForm(f => ({ ...f, env_vars: [...f.env_vars, { name: "", value: "" }] }));
   };
 
-  const removeEnvSecret = (idx: number) => {
-    setForm(f => ({ ...f, env_secrets: f.env_secrets.filter((_, i) => i !== idx) }));
+  const removeEnvVar = (idx: number) => {
+    setForm(f => ({ ...f, env_vars: f.env_vars.filter((_, i) => i !== idx) }));
+    setRevealedEnvIdx((prev) => {
+      const next = new Set<number>();
+      for (const i of prev) {
+        if (i < idx) next.add(i);
+        else if (i > idx) next.add(i - 1);
+      }
+      return next;
+    });
   };
 
   const statusCls = (status?: string) => {
@@ -313,22 +336,42 @@ export function SessionsList() {
           </details>
 
           <details className="group">
-            <summary className="text-sm font-medium text-fg cursor-pointer hover:text-brand">Environment Secrets <span className="text-fg-subtle font-normal">(optional)</span></summary>
+            <summary className="text-sm font-medium text-fg cursor-pointer hover:text-brand">Environment Variables <span className="text-fg-subtle font-normal">(optional)</span></summary>
             <div className="mt-2 space-y-2 pl-1">
-              {form.env_secrets.map((s, i) => (
-                <div key={i} className="flex gap-2 items-start">
-                  <div className="flex-1">
-                    <input value={s.name} onChange={(e) => updateEnvSecret(i, "name", e.target.value)} className={inputCls} placeholder="ENV_VAR_NAME" />
+              <p className="text-xs text-fg-subtle">
+                Plain environment variables passed to the agent. For tokens that need encryption, use credential vaults instead.
+              </p>
+              {form.env_vars.map((s, i) => {
+                const revealed = revealedEnvIdx.has(i);
+                return (
+                  <div key={i} className="flex gap-2 items-start">
+                    <div className="flex-1">
+                      <input value={s.name} onChange={(e) => updateEnvVar(i, "name", e.target.value)} className={inputCls} placeholder="ENV_VAR_NAME" />
+                    </div>
+                    <div className="flex-1 relative">
+                      <input
+                        type={revealed ? "text" : "password"}
+                        value={s.value}
+                        onChange={(e) => updateEnvVar(i, "value", e.target.value)}
+                        className={`${inputCls} pr-12`}
+                        placeholder="value"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => toggleEnvReveal(i)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
+                        aria-label={revealed ? "Hide value" : "Show value"}
+                      >
+                        {revealed ? "hide" : "show"}
+                      </button>
+                    </div>
+                    {form.env_vars.length > 1 && (
+                      <button onClick={() => removeEnvVar(i)} className="text-fg-subtle hover:text-danger text-xs mt-2">Remove</button>
+                    )}
                   </div>
-                  <div className="flex-1">
-                    <input type="password" value={s.value} onChange={(e) => updateEnvSecret(i, "value", e.target.value)} className={inputCls} placeholder="secret value" />
-                  </div>
-                  {form.env_secrets.length > 1 && (
-                    <button onClick={() => removeEnvSecret(i)} className="text-fg-subtle hover:text-danger text-xs mt-2">Remove</button>
-                  )}
-                </div>
-              ))}
-              <button onClick={addEnvSecret} className="text-xs text-fg-muted hover:text-fg">+ Add secret</button>
+                );
+              })}
+              <button onClick={addEnvVar} className="text-xs text-fg-muted hover:text-fg">+ Add variable</button>
             </div>
           </details>
         </div>
