@@ -52,7 +52,15 @@ export function SessionsList() {
   const { api } = useApi();
   const nav = useNavigate();
   const [sessions, setSessions] = useState<Session[]>([]);
-  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+  const [agents, setAgents] = useState<Array<{
+    id: string;
+    name: string;
+    // Present iff the agent is bound to a user-registered runtime
+    // (acp-proxy harness). The New Session dialog reads this to decide
+    // whether to show the Environment picker — local-runtime sessions
+    // don't run a sandbox container so there's nothing to pick.
+    runtime_binding?: { runtime_id: string; acp_agent_id: string };
+  }>>([]);
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [loading, setLoading] = useState(true);
@@ -97,6 +105,12 @@ export function SessionsList() {
 
   useEffect(() => { load(); }, []);
 
+  // Computed: which agent is selected, and is it bound to a local runtime?
+  // The Environment picker, the Create-button enable condition, and the
+  // request body all key off this single source of truth.
+  const selectedAgent = agents.find((a) => a.id === form.agent);
+  const isLocalRuntime = !!selectedAgent?.runtime_binding;
+
   const create = async () => {
     try {
       const resources: Array<Record<string, unknown>> = [];
@@ -119,9 +133,12 @@ export function SessionsList() {
 
       const body: Record<string, unknown> = {
         agent: form.agent,
-        environment_id: form.environment_id,
         title: form.title || undefined,
       };
+      // Only send environment_id when the user actually picked one. For
+      // local-runtime agents the picker is hidden and the server picks a
+      // tenant fallback (sessions.ts requires a NOT NULL env_id today).
+      if (form.environment_id) body.environment_id = form.environment_id;
       if (form.vault_ids.length > 0) body.vault_ids = form.vault_ids;
       if (resources.length > 0) body.resources = resources;
 
@@ -269,7 +286,7 @@ export function SessionsList() {
         footer={
           <>
             <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-            <Button onClick={create} disabled={!form.agent || !form.environment_id}>Create</Button>
+            <Button onClick={create} disabled={!form.agent || (!isLocalRuntime && !form.environment_id)}>Create</Button>
           </>
         }
       >
@@ -284,16 +301,28 @@ export function SessionsList() {
               {agents.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
             </select>
           </div>
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm text-fg-muted">Environment</label>
-              <a href="/environments" className="text-xs text-brand hover:underline">Manage environments →</a>
+          {/* Environment picker is for cloud sandbox lanes — local-runtime
+              agents (acp-proxy harness) run on the user's daemon and
+              never touch a cloud sandbox, so the picker is hidden in
+              that mode. Server picks a tenant fallback when env_id is
+              omitted; see sessions.ts:resolvedEnvId. */}
+          {!isLocalRuntime && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-sm text-fg-muted">Environment</label>
+                <a href="/environments" className="text-xs text-brand hover:underline">Manage environments →</a>
+              </div>
+              <select value={form.environment_id} onChange={(e) => setForm({ ...form, environment_id: e.target.value })} className={inputCls}>
+                <option value="">Select environment...</option>
+                {envs.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}
+              </select>
             </div>
-            <select value={form.environment_id} onChange={(e) => setForm({ ...form, environment_id: e.target.value })} className={inputCls}>
-              <option value="">Select environment...</option>
-              {envs.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}
-            </select>
-          </div>
+          )}
+          {isLocalRuntime && (
+            <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
+              Local runtime agents use the runtime machine's filesystem — no cloud environment needed.
+            </p>
+          )}
           <div>
             <label className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></label>
             <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className={inputCls} placeholder="My conversation" />
