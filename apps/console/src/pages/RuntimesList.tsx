@@ -71,7 +71,8 @@ export function RuntimesList() {
             Local Runtimes
           </h1>
           <p className="text-fg-muted text-sm">
-            Machines running <code className="text-xs bg-bg-surface px-1 py-0.5 rounded">oma bridge daemon</code> — bind an agent to one to delegate its loop to a local Claude Code child.
+            Your own laptops or servers, registered with OMA. Bind an agent to a runtime to run its turns
+            on your hardware using a local ACP agent (Claude Code today; more coming) instead of OMA's cloud.
           </p>
         </div>
         <Button
@@ -198,19 +199,18 @@ export function RuntimesList() {
       >
         <div className="space-y-4 text-sm">
           <p className="text-fg-muted">
-            On the machine you want to connect, install one ACP agent and run setup:
+            On the machine you want to connect, run:
           </p>
           <div className="bg-bg-surface border border-border rounded-lg p-3 font-mono text-xs space-y-1">
-            <div className="text-fg-subtle"># Install an ACP-compatible agent (Claude Code is a popular pick):</div>
-            <div className="text-fg select-all">npm install -g @zed-industries/claude-code-acp</div>
-            <div className="text-fg-subtle pt-2"># Register this machine with OMA + install the daemon:</div>
-            <div className="text-fg select-all">npx @openma/cli bridge setup</div>
+            <div className="text-fg select-all">npx @openma/cli@beta bridge setup</div>
           </div>
           <p className="text-fg-muted text-xs">
             Setup opens this browser for OAuth, writes credentials to{" "}
             <code className="bg-bg-surface px-1 rounded">~/.oma/bridge/</code>, and (on macOS) installs a launchd job
-            that keeps the daemon running across reboots. The runtime appears here as{" "}
-            <span className="text-success">online</span> within a few seconds of the daemon attaching.
+            that keeps the daemon running across reboots. If you have{" "}
+            <code className="bg-bg-surface px-1 rounded">claude</code> installed, setup will also install the ACP wrapper
+            (<code className="bg-bg-surface px-1 rounded">@zed-industries/claude-code-acp</code>) for you. The runtime appears
+            here as <span className="text-success">online</span> within a few seconds of the daemon attaching.
           </p>
         </div>
       </Modal>

@@ -97,7 +97,27 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
   // Quick agent scan so the user can see what we'll report on first daemon
   // startup. Manifest gets re-sent on every WS attach so this is just for
   // setup-time feedback.
-  const agents = await detectAll();
+  let agents = await detectAll();
+
+  // If `claude` (Claude Code itself) is on PATH but its ACP wrapper isn't,
+  // install the wrapper for the user. Anyone running `oma bridge setup` is
+  // already opting into running a daemon on their box; needing them to also
+  // remember a separate `npm i -g @zed-industries/claude-code-acp` step is
+  // friction with no upside. We only do this when `claude` is present —
+  // we're not pre-installing wrappers for users who haven't picked
+  // Claude Code as their day-to-day CLI.
+  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-code-acp");
+  if (!hasClaudeAcp && (await isOnPath("claude"))) {
+    log.step("found `claude` on PATH — installing ACP wrapper @zed-industries/claude-code-acp");
+    const ok = await npmInstallGlobal("@zed-industries/claude-code-acp");
+    if (ok) {
+      log.ok("claude-code-acp installed");
+      agents = await detectAll();
+    } else {
+      log.warn("auto-install failed — install manually: npm i -g @zed-industries/claude-code-acp");
+    }
+  }
+
   if (agents.length > 0) {
     log.ok(`agents detected  ${c.dim(agents.map((a: { id: string }) => a.id).join(", "))}`);
   } else {
@@ -216,5 +236,28 @@ function openBrowser(url: string): Promise<void> {
     p.once("error", reject);
     p.unref();
     setTimeout(() => resolve(), 100);
+  });
+}
+
+/** `which <cmd>` — true iff exit 0. Mirrors registry.ts:isOnPath; we don't
+ *  import that one because it's not exported and it's three lines. */
+function isOnPath(cmd: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const probe = process.platform === "win32" ? "where" : "which";
+    const p = spawn(probe, [cmd], { stdio: "ignore" });
+    p.once("error", () => resolve(false));
+    p.once("exit", (code) => resolve(code === 0));
+  });
+}
+
+/** `npm install -g <pkg>`. Streams output to the user's terminal so they
+ *  can see progress / EACCES / etc. Returns true on exit 0. We don't try
+ *  to elevate (no sudo wrapper) — if the user's npm prefix needs root
+ *  they'll see the error and can rerun setup after fixing it. */
+function npmInstallGlobal(pkg: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    const p = spawn("npm", ["install", "-g", pkg], { stdio: "inherit" });
+    p.once("error", () => resolve(false));
+    p.once("exit", (code) => resolve(code === 0));
   });
 }
