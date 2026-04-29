@@ -358,8 +358,13 @@ async function tailSession(config: Config, sessionId: string): Promise<void> {
 // ─── Helpers ───
 
 function flag(args: string[], name: string): string | undefined {
-  const idx = args.indexOf(name);
-  return idx !== -1 ? args[idx + 1] : undefined;
+  // Accepts both `--name value` and `--name=value` forms.
+  const eqPrefix = `${name}=`;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name) return args[i + 1];
+    if (args[i].startsWith(eqPrefix)) return args[i].slice(eqPrefix.length);
+  }
+  return undefined;
 }
 
 function table(rows: string[][]) {
@@ -720,14 +725,27 @@ const commands: Cmd[] = [
   {
     group: "Agents", match: ["agents", "create"],
     usage: "oma agents create <name> [--model <id>]", desc: "Create agent",
-    http: "POST   /v1/agents {name, model, system, tools, skills?, mcp_servers?, callable_agents?}",
+    http: "POST   /v1/agents {name, model, system, tools, skills?, mcp_servers?, callable_agents?, runtime_binding?}",
     async run(config, args) {
       const name = flag(args, "--name") || args.find(a => !a.startsWith("--"));
       const model = flag(args, "--model") || "claude-sonnet-4-6";
       const system = flag(args, "--system") || "";
-      if (!name) { console.error("Usage: oma agents create <name> [--model <id>] [--system <prompt>]"); process.exit(1); }
-      const agent = await apiFetch<{ id: string; name: string }>(config, "/v1/agents", { method: "POST", body: JSON.stringify({ name, model, system, tools: [{ type: "agent_toolset_20260401" }] }) });
-      console.log(`Agent created: ${agent.name} (${agent.id})`);
+      if (!name) { console.error("Usage: oma agents create <name> [--model <id>] [--system <prompt>] [--runtime <id> --acp-agent <agent-id>]"); process.exit(1); }
+      // Local-runtime agent: routes turns to a user-registered `oma bridge daemon`
+      // running an ACP-compatible child (Claude Code etc.). Both flags must be
+      // present to opt in — partial config silently drops the binding.
+      const runtimeId = flag(args, "--runtime");
+      const acpAgentId = flag(args, "--acp-agent");
+      const useAcpProxy = !!(runtimeId && acpAgentId);
+      const body: Record<string, unknown> = {
+        name, model, system, tools: [{ type: "agent_toolset_20260401" }],
+      };
+      if (useAcpProxy) {
+        body.harness = "acp-proxy";
+        body.runtime_binding = { runtime_id: runtimeId, acp_agent_id: acpAgentId };
+      }
+      const agent = await apiFetch<{ id: string; name: string }>(config, "/v1/agents", { method: "POST", body: JSON.stringify(body) });
+      console.log(`Agent created: ${agent.name} (${agent.id})${useAcpProxy ? `  [acp-proxy → ${acpAgentId} on ${runtimeId.slice(0, 8)}…]` : ""}`);
     },
   },
   {
@@ -746,6 +764,47 @@ const commands: Cmd[] = [
     usage: "oma agents delete <id>", desc: "Delete agent",
     http: "DELETE /v1/agents/:id",
     async run(config, args) { await apiFetch(config, `/v1/agents/${args[0]}`, { method: "DELETE" }); console.log(`Agent deleted: ${args[0]}`); },
+  },
+
+  // Runtimes — user-registered local machines running `oma bridge daemon`.
+  // Used as the spawn host for ACP-proxy agents (claude-code etc.).
+  {
+    group: "Runtimes", match: ["runtime", "list"],
+    usage: "oma runtime list", desc: "List registered local runtimes",
+    http: "GET    /v1/runtimes",
+    async run(config) {
+      const { runtimes } = await apiFetch<{ runtimes: Array<{
+        id: string; hostname: string; os: string; status: string;
+        version: string; agents: Array<{ id: string }>; last_heartbeat: number | null;
+      }> }>(config, "/v1/runtimes");
+      if (config.json) { console.log(JSON.stringify(runtimes, null, 2)); return; }
+      if (!runtimes.length) {
+        console.log("No runtimes. Register one with `oma bridge setup` on the target machine.");
+        return;
+      }
+      table([
+        ["ID", "HOSTNAME", "OS", "STATUS", "VER", "AGENTS", "HEARTBEAT"],
+        ...runtimes.map((r) => [
+          r.id.slice(0, 8) + "…",
+          r.hostname,
+          r.os,
+          r.status,
+          r.version,
+          r.agents.map((a) => a.id).join(",") || "—",
+          r.last_heartbeat ? new Date(r.last_heartbeat * 1000).toISOString().slice(11, 19) : "—",
+        ]),
+      ]);
+    },
+  },
+  {
+    group: "Runtimes", match: ["runtime", "rm"], needsArg: true,
+    usage: "oma runtime rm <id>", desc: "Revoke a runtime + all its tokens",
+    http: "DELETE /v1/runtimes/:id",
+    async run(config, args) {
+      await apiFetch(config, `/v1/runtimes/${args[0]}`, { method: "DELETE" });
+      console.log(`Runtime revoked: ${args[0]}`);
+      console.log("The daemon will stop reconnecting after a few backoff cycles.");
+    },
   },
 
   // Sessions
@@ -1908,6 +1967,50 @@ async function main() {
   let args = process.argv.slice(2);
   if (!args.length || ["-h", "--help", "help"].includes(args[0])) { usage(); process.exit(0); }
   if (args[0] === "api") { apiRef(args[1]); return; }
+
+  // Bridge subcommands (oma bridge {setup,daemon,status,uninstall}) are
+  // self-contained — they don't need the api-key config and have their own
+  // argv parsing. Dispatch early to keep the main commands array unaware.
+  if (args[0] === "bridge") {
+    const sub = args[1] ?? "";
+    process.argv.splice(2, 2); // strip "bridge" + subname so commands' parseArgs sees flags only
+    switch (sub) {
+      case "setup": {
+        const { runSetup } = await import("./bridge/commands/setup.js");
+        await runSetup({
+          serverUrl: flag(args, "--server-url") ?? "https://app.openma.dev",
+          browserOrigin: flag(args, "--browser-origin") ?? "https://app.openma.dev",
+          noService: args.includes("--no-service"),
+          force: args.includes("--force"),
+        });
+        return;
+      }
+      case "daemon": {
+        const { runDaemon } = await import("./bridge/commands/daemon.js");
+        await runDaemon();
+        return;
+      }
+      case "status": {
+        const { runStatus } = await import("./bridge/commands/status.js");
+        await runStatus();
+        return;
+      }
+      case "uninstall": {
+        const { runUninstall } = await import("./bridge/commands/uninstall.js");
+        await runUninstall();
+        return;
+      }
+      default:
+        console.error(
+          "oma bridge — pair a local ACP agent with OMA\n\n" +
+          "  oma bridge setup [--server-url=…] [--no-service] [--force]\n" +
+          "  oma bridge daemon\n" +
+          "  oma bridge status\n" +
+          "  oma bridge uninstall\n",
+        );
+        process.exit(sub ? 1 : 0);
+    }
+  }
 
   // Strip --json from args so subcommand matchers don't see it.
   const wantJson = args.includes("--json");

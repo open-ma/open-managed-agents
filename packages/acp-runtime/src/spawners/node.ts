@@ -23,8 +23,22 @@ export class NodeSpawner implements Spawner {
     // stdio: [stdin, stdout, stderr] all piped — we own all three streams.
     // Inheriting stderr would dump child noise into the bridge's own stderr
     // and lose it from any structured log we set up; keep it captured.
+    //
+    // env merge semantics: parent env is inherited, then spec.env overrides.
+    // A spec.env entry with `undefined` value EXPLICITLY UNSETS the inherited
+    // key — used by callers who need the child to look like it's not running
+    // inside another agent (e.g. unsetting CLAUDECODE so claude-code-acp
+    // doesn't refuse to spawn nested-session-style).
+    const merged: Record<string, string | undefined> = {
+      ...process.env,
+      ...(spec.env ?? {}),
+    };
+    const env: NodeJS.ProcessEnv = {};
+    for (const [k, v] of Object.entries(merged)) {
+      if (typeof v === "string") env[k] = v;
+    }
     const child: ChildProcessWithoutNullStreams = nodeSpawn(spec.command, spec.args ?? [], {
-      env: { ...process.env, ...(spec.env ?? {}) },
+      env,
       cwd: spec.cwd,
       stdio: ["pipe", "pipe", "pipe"],
     });

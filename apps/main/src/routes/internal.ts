@@ -576,6 +576,42 @@ async function fetchVaultCredentials(
   }));
 }
 
+// ─── Local ACP runtime ────────────────────────────────────────────────────
+
+/**
+ * GET /v1/internal/runtime-attach-harness?sid=<sid>&runtime_id=<rid>  (WS upgrade)
+ *
+ * Thin proxy used by AcpProxyHarness inside SessionDO. Forwards a WebSocket
+ * upgrade request to the RuntimeRoom DO addressed by `runtime_id`, tagged as
+ * a "harness" attach for `sid`. The DO holds the WS open and pipes session.*
+ * events between the daemon's WS and this one.
+ *
+ * Auth: x-internal-secret (already gated by the use("*") middleware above).
+ * The harness opens this once per turn and reads/writes ACP messages directly
+ * over the returned WS. main worker doesn't parse anything.
+ *
+ * NOTE: the daemon-facing bundle endpoint (used to render AGENTS.md +
+ * skills) lives at /agents/runtime/sessions/:sid/bundle in routes/runtimes.ts
+ * and authenticates via the runtime token, not the internal secret.
+ */
+app.get("/runtime-attach-harness", async (c) => {
+  if (c.req.header("Upgrade") !== "websocket") {
+    return c.text("WebSocket only", 400);
+  }
+  if (!c.env.RUNTIME_ROOM) return c.text("RUNTIME_ROOM binding missing", 503);
+
+  const sid = c.req.query("sid");
+  const runtimeId = c.req.query("runtime_id");
+  if (!sid || !runtimeId) return c.text("sid + runtime_id required", 400);
+
+  // Forward the upgrade to RUNTIME_ROOM with the harness attach role headers.
+  const stub = c.env.RUNTIME_ROOM.get(c.env.RUNTIME_ROOM.idFromName(runtimeId));
+  const fwd = new Request(c.req.raw);
+  fwd.headers.set("x-attach-role", "harness");
+  fwd.headers.set("x-session-id", sid);
+  return stub.fetch(fwd);
+});
+
 export default app;
 
 // Test-only exports.
