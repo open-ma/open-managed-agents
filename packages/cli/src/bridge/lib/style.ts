@@ -22,26 +22,33 @@ export const c = {
   magenta: wrap("35", "39"),
   cyan:    wrap("36", "39"),
   gray:    wrap("90", "39"),
+  // OMA brand orange (#FF6B50) — sourced from apps/console/public/logo.svg.
+  // 24-bit ANSI; terminals without truecolor will silently drop the color
+  // (the wrap() noop already covers no-TTY / NO_COLOR).
+  brand:   wrap("38;2;255;107;80", "39"),
 };
 
 /**
- * OMA bracket-feather lockup, mirroring the web/Console SVG mark
- * (apps/console/public/logo.svg — `[ ' ]` with a diagonal feather inside
- * the left bracket). Five lines of box-drawing + half-blocks so it
- * renders at consistent width across most terminal fonts.
+ * OMA wordmark — bracket + comma-feather lockup, mirroring the Console SVG
+ * (apps/console/public/logo.svg). Rendered with 8-dot Braille so width
+ * stays consistent across monospace fonts and terminals without
+ * graphics protocols. Color is the brand orange (#FF6B50, 24-bit ANSI);
+ * non-truecolor terminals show it monochrome.
  *
  * Exported so other commands can reuse the exact same banner — single
  * source of truth for "what does oma bridge look like at startup".
  */
 export function logo(): string {
   const lines = [
-    "  ┌──┐    ▟   ┌──┐",
-    "  │  │   ▟▘   │  │",
-    "  │  │  ▟▘    │  │",
-    "  │  │ ▟▘     │  │",
-    "  └──┘        └──┘",
+    "           ⠦         ",
+    "   ⣶⡶⠆          ⠰⢶⣶  ",
+    "   ⣿⡇      ⣀     ⢸⣿  ",
+    "   ⣿⡇      ⠉     ⢸⣿  ",
+    "   ⣿⡇            ⢸⣿  ",
+    "   ⣿⣇⡀          ⢀⣸⣿  ",
+    "   ⠉⠉⠁          ⠈⠉⠉  ",
   ];
-  return lines.map((l) => c.cyan(c.bold(l))).join("\n");
+  return lines.map((l) => c.brand(c.bold(l))).join("\n");
 }
 
 /** "oma bridge — <subtitle>" header line, used right after the logo. */
