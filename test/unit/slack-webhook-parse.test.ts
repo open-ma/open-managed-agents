@@ -208,4 +208,184 @@ describe("Slack webhook parse", () => {
       expect(event).toBeNull();
     });
   });
+
+  describe("isTopLevel — per_channel scan-arm gate", () => {
+    it("flags top-level message (no thread_ts) as isTopLevel", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_TOP",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: {
+          type: "message",
+          channel: "C0CHAN",
+          ts: "1700000000.000100",
+          channel_type: "channel",
+          user: "U0USER",
+          text: "hi",
+        },
+      });
+      expect(event?.isTopLevel).toBe(true);
+    });
+
+    it("flags thread reply (thread_ts != ts) as NOT isTopLevel", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_REPLY",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: {
+          type: "message",
+          channel: "C0CHAN",
+          ts: "1700000005.000100",
+          thread_ts: "1700000000.000100",
+          channel_type: "channel",
+          user: "U0USER",
+          text: "follow-up",
+        },
+      });
+      expect(event?.isTopLevel).toBe(false);
+    });
+
+    it("flags message_changed subtype as NOT isTopLevel (don't re-arm on edits)", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_EDIT",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: {
+          type: "message",
+          subtype: "message_changed",
+          channel: "C0CHAN",
+          ts: "1700000010.000100",
+          channel_type: "channel",
+          user: "U0USER",
+          text: "edited",
+        },
+      });
+      expect(event?.isTopLevel).toBe(false);
+    });
+  });
+
+  describe("member_joined_channel / member_left_channel", () => {
+    it("parses member_joined_channel with user + channel", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_JOIN",
+        event_time: 1_700_000_000,
+        team_id: "T07TEAM",
+        api_app_id: "A07APP",
+        event: {
+          type: "member_joined_channel",
+          channel: "C0CHAN",
+          user: "U07BOT",
+          event_ts: "1700000000.000123",
+        },
+      });
+      expect(event?.kind).toBe("member_joined_channel");
+      expect(event?.channelId).toBe("C0CHAN");
+      expect(event?.userId).toBe("U07BOT");
+      expect(event?.scopeKey).toBeNull();
+      expect(event?.isTopLevel).toBe(false);
+    });
+
+    it("parses member_left_channel symmetrically", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_LEFT",
+        event_time: 1_700_000_000,
+        team_id: "T07TEAM",
+        api_app_id: "A07APP",
+        event: {
+          type: "member_left_channel",
+          channel: "C0CHAN",
+          user: "U07BOT",
+        },
+      });
+      expect(event?.kind).toBe("member_left_channel");
+      expect(event?.channelId).toBe("C0CHAN");
+      expect(event?.userId).toBe("U07BOT");
+    });
+  });
+
+  describe("channel lifecycle (archive / unarchive / rename)", () => {
+    it("parses channel_archive", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_ARCH",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: { type: "channel_archive", channel: "C0CHAN", user: "U07ADMIN" },
+      });
+      expect(event?.kind).toBe("channel_archive");
+      expect(event?.channelId).toBe("C0CHAN");
+      expect(event?.userId).toBe("U07ADMIN");
+    });
+
+    it("parses channel_rename with nested channel.{id,name}", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_REN",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: {
+          type: "channel_rename",
+          channel: { id: "C0CHAN", name: "engineering-v2", created: 1 },
+        },
+      });
+      expect(event?.kind).toBe("channel_rename");
+      expect(event?.channelId).toBe("C0CHAN");
+      expect(event?.channelName).toBe("engineering-v2");
+    });
+  });
+
+  describe("reaction_added / reaction_removed", () => {
+    it("parses reaction_added with item_user, reaction name, item.ts/channel", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_RX",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: {
+          type: "reaction_added",
+          user: "U0USER",
+          reaction: "white_check_mark",
+          item: { type: "message", channel: "C0CHAN", ts: "1700000000.000999" },
+          item_user: "U07BOT",
+          event_ts: "1700000005.000111",
+        },
+      });
+      expect(event?.kind).toBe("reaction_added");
+      expect(event?.channelId).toBe("C0CHAN");
+      expect(event?.userId).toBe("U0USER");
+      expect(event?.itemUserId).toBe("U07BOT");
+      expect(event?.itemTs).toBe("1700000000.000999");
+      expect(event?.reactionName).toBe("white_check_mark");
+    });
+
+    it("parses reaction_removed symmetrically", () => {
+      const event = parseWebhook({
+        type: "event_callback",
+        event_id: "Ev_RXRM",
+        event_time: 1_700_000_000,
+        team_id: "T",
+        api_app_id: "A",
+        event: {
+          type: "reaction_removed",
+          user: "U0USER",
+          reaction: "thumbsdown",
+          item: { type: "message", channel: "C0CHAN", ts: "1700000000.000888" },
+          item_user: "U07BOT",
+        },
+      });
+      expect(event?.kind).toBe("reaction_removed");
+      expect(event?.reactionName).toBe("thumbsdown");
+    });
+  });
 });

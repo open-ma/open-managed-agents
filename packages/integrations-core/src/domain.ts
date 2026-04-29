@@ -217,7 +217,7 @@ export type SessionScopeStatus =
    *  but we keep the row so audits can spot repeated failures. */
   | "failed";
 
-export type SessionGranularity = "per_issue" | "per_thread" | "per_event";
+export type SessionGranularity = "per_issue" | "per_thread" | "per_event" | "per_channel";
 
 export interface Installation {
   id: string;
@@ -341,12 +341,31 @@ export interface SessionScope {
   /**
    * Provider-native key identifying the conversational scope this session is
    * bound to. Linear stores the issue id (e.g. `iss_…`); Slack stores
-   * `${channel_id}:${thread_ts ?? event_ts}`. Opaque to core.
+   * `${channel_id}:${thread_ts ?? event_ts}` (per_thread) or `channel:${channel_id}`
+   * (per_channel). Opaque to core.
    */
   scopeKey: string;
   sessionId: SessionId;
   status: SessionScopeStatus;
   createdAt: number;
+  /**
+   * For Slack per_channel: when set to a future ms timestamp, a debounced
+   * channel-scan turn has already been dispatched and the next top-level
+   * messages within this window should be silently throttled. The agent's
+   * scheduleWakeup will fire around this time and re-scan via
+   * conversations.history. Cleared once the scan turn completes.
+   */
+  pendingScanUntil?: number | null;
+  /**
+   * For Slack per_channel: timestamp of the last completed scan turn — agent
+   * uses this as `oldest` in `conversations.history` to bound its re-read.
+   */
+  lastScanAt?: number | null;
+  /**
+   * For Slack per_channel: cached channel display name. Updated on
+   * channel_rename without waking the agent; agent reads it on next wake.
+   */
+  channelName?: string | null;
 }
 
 export interface SetupLink {

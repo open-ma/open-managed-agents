@@ -47,4 +47,4 @@ export {
   type RawEventInner,
 } from "./webhook/parse";
 export { SlackApiClient, SlackApiError, type AuthTestResult } from "./api/client";
-export type { SlackInstallationRepo } from "./ports";
+export type { SlackInstallationRepo, SlackSessionScopeRepo } from "./ports";
