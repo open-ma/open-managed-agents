@@ -37,8 +37,11 @@
   // Outbound proxy on-401 token refresh path delegates to the integrations
   // gateway (App-JWT signing for GitHub installation tokens etc.). Without
   // this binding, refreshes silently no-op.
+  // MAIN binding lets AcpProxyHarness call /v1/internal/runtime-attach-harness
+  // to reach the RuntimeRoom DO (where the user's `oma bridge daemon` is wired).
   "services": [
-    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
+    { "binding": "MAIN", "service": "managed-agents" }
   ],
 
   // Workers AI for embedding generation (memory tools).

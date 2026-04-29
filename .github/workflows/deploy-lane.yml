@@ -16,6 +16,11 @@ on:
         required: true
         type: boolean
         default: false
+      workers:
+        description: 'Subset of workers to redeploy (comma-separated): main,agent,integrations. Default = all (full lane bring-up).'
+        required: false
+        type: string
+        default: 'all'
 
 # Allow concurrent deploys of different lanes; serialize within a single lane.
 concurrency:
@@ -95,7 +100,14 @@ jobs:
       #   3. main (binds integrations + agent, both exist)
       #   4. integrations re-deploy (now with MAIN binding to lane main)
       # jq is preinstalled on ubuntu-latest.
+      #
+      # `workers` input opts into single-worker redeploy when the lane is
+      # already up and you only changed one app's code. Skips the whole
+      # circular-binding dance — wrangler updates the script in place and the
+      # bindings are already live from the prior full deploy. Pass e.g.
+      # `workers=agent` to redeploy only the agent worker (~30s vs ~5min).
       - name: Deploy integrations worker (stub, no service bindings yet)
+        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'integrations')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -106,6 +118,7 @@ jobs:
           npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
 
       - name: Deploy agent worker
+        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'agent')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -114,6 +127,7 @@ jobs:
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       - name: Deploy main worker
+        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'main')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -122,6 +136,7 @@ jobs:
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       - name: Re-deploy integrations worker (full config, MAIN binding live)
+        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'integrations')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -133,6 +148,7 @@ jobs:
       # silently — operators can `wrangler secret put` per worker post-hoc for
       # anything not in repo secrets.
       - name: Set worker secrets
+        if: contains(inputs.workers, 'all')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -172,6 +188,11 @@ jobs:
           set_secret ANTHROPIC_BASE_URL           "$AGENT" "${{ secrets.ANTHROPIC_BASE_URL }}"
           set_secret INTERNAL_TOKEN               "$AGENT" "${{ secrets.INTERNAL_TOKEN }}"
           set_secret TAVILY_API_KEY               "$AGENT" "${{ secrets.TAVILY_API_KEY }}"
+          # AcpProxyHarness in the agent worker calls main's /v1/internal/*
+          # endpoints (runtime-attach-harness, runtime-session-bundle), which
+          # gate on this header secret. Without it, local-runtime sessions
+          # error with "INTEGRATIONS_INTERNAL_SECRET unset".
+          set_secret INTEGRATIONS_INTERNAL_SECRET "$AGENT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
 
           echo "Setting secrets on $INT:"
           set_secret API_KEY                      "$INT" "${{ secrets.API_KEY }}"

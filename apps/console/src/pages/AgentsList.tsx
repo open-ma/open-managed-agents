@@ -29,6 +29,15 @@ const INITIAL_FORM = {
   mcpServers: [] as McpEntry[],
   skills: [] as SkillEntry[],
   callableAgents: [] as CallableEntry[],
+  // When set, agent uses harness:"acp-proxy" — its loop runs on a user-
+  // registered local runtime via `oma bridge daemon` instead of OMA's cloud
+  // SessionDO loop. Both fields must be set together; partial = fall back to
+  // default cloud agent.
+  runtimeId: "",
+  acpAgentId: "claude-code-acp",
+  /** Local skill ids to HIDE from this agent's ACP child. Empty = all
+   *  detected local skills are visible (the daemon's default). */
+  localSkillBlocklist: [] as string[],
 };
 
 export function AgentsList() {
@@ -38,6 +47,16 @@ export function AgentsList() {
   const [allAgents, setAllAgents] = useState<Agent[]>([]);
   const [customSkills, setCustomSkills] = useState<Array<{ id: string; name: string; description: string }>>([]);
   const [modelCards, setModelCards] = useState<ModelCard[]>([]);
+  const [runtimes, setRuntimes] = useState<Array<{
+    id: string;
+    hostname: string;
+    status: string;
+    agents: Array<{ id: string }>;
+    /** Skills daemon detected locally on the user's machine, keyed by
+     *  acp agent id. Source for the blocklist multi-select that appears
+     *  when the user picks an acp agent. */
+    local_skills?: Record<string, Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>>;
+  }>>([]);
   const [loading, setLoading] = useState(true);
   const [createError, setCreateError] = useState("");
   const [showArchived, setShowArchived] = useState(false);
@@ -64,6 +83,10 @@ export function AgentsList() {
         const mc = await api<{ data: ModelCard[] }>("/v1/model_cards");
         setModelCards(mc.data);
       } catch {}
+      try {
+        const rt = await api<{ runtimes: Array<{ id: string; hostname: string; status: string; agents: Array<{ id: string }> }> }>("/v1/runtimes");
+        setRuntimes(rt.runtimes);
+      } catch {}
     } catch {}
     setLoading(false);
   };
@@ -84,6 +107,19 @@ export function AgentsList() {
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
       if (form.callableAgents.length) payload.callable_agents = form.callableAgents;
+      // Local-runtime agent: opt into acp-proxy harness when both runtimeId
+      // and acpAgentId are set. Partial config silently falls back to the
+      // default cloud loop — same semantics as the CLI flag pair.
+      if (form.runtimeId && form.acpAgentId) {
+        payload.harness = "acp-proxy";
+        payload.runtime_binding = {
+          runtime_id: form.runtimeId,
+          acp_agent_id: form.acpAgentId,
+          ...(form.localSkillBlocklist.length > 0
+            ? { local_skill_blocklist: form.localSkillBlocklist }
+            : {}),
+        };
+      }
 
       const agent = await api<Agent>("/v1/agents", {
         method: "POST",
@@ -133,14 +169,13 @@ export function AgentsList() {
       setForm({ ...INITIAL_FORM });
     } else {
       setForm({
+        ...INITIAL_FORM,
         name: tmpl.name,
         model: tmpl.model,
         system: tmpl.system,
         description: tmpl.description,
-        modelCardId: "",
         mcpServers: tmpl.mcpServers.map(m => ({ ...m })),
         skills: tmpl.skills.map(s => ({ ...s } as SkillEntry)),
-        callableAgents: [],
       });
     }
     setCreateStep("form");
@@ -184,15 +219,19 @@ export function AgentsList() {
       // code → form: try to parse back (best-effort, may lose data)
       try {
         const parsed = createMode === "yaml" ? yaml.load(codeValue) as Record<string, unknown> : JSON.parse(codeValue);
+        const rb = parsed.runtime_binding as { runtime_id?: string; acp_agent_id?: string; local_skill_blocklist?: string[] } | undefined;
         setForm({
+          ...INITIAL_FORM,
           name: String(parsed.name || ""),
           model: String(parsed.model || "claude-sonnet-4-6"),
           system: String(parsed.system || ""),
           description: String(parsed.description || ""),
-          modelCardId: "",
-          mcpServers: Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers : [],
-          skills: Array.isArray(parsed.skills) ? parsed.skills : [],
-          callableAgents: Array.isArray(parsed.callable_agents) ? parsed.callable_agents : [],
+          mcpServers: Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers as McpEntry[] : [],
+          skills: Array.isArray(parsed.skills) ? parsed.skills as SkillEntry[] : [],
+          callableAgents: Array.isArray(parsed.callable_agents) ? parsed.callable_agents as CallableEntry[] : [],
+          runtimeId: rb?.runtime_id ?? "",
+          acpAgentId: rb?.acp_agent_id ?? "claude-code-acp",
+          localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist) ? rb.local_skill_blocklist : [],
         });
       } catch { /* keep current form if parse fails */ }
     } else {
@@ -463,6 +502,127 @@ export function AgentsList() {
                   <div>
                     <label className="text-sm text-fg-muted block mb-1">System Prompt</label>
                     <textarea value={form.system} onChange={(e) => setForm({ ...form, system: e.target.value })} rows={5} className={`${inputCls} resize-none font-mono text-xs leading-relaxed`} placeholder="You are a helpful assistant..." />
+                  </div>
+                  {/* Local Runtime — bind agent's loop to a user-registered
+                      machine instead of OMA's cloud SessionDO. The "no
+                      runtime" option is the default cloud agent. */}
+                  <div>
+                    <label className="text-sm text-fg-muted block mb-1">
+                      Local Runtime
+                      <span className="ml-1 text-xs text-fg-subtle">(optional)</span>
+                    </label>
+                    {runtimes.length === 0 ? (
+                      <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
+                        No runtimes registered.{" "}
+                        <a href="/runtimes" className="underline hover:text-fg-muted">Connect a machine</a>{" "}
+                        to delegate this agent's loop to your own Claude Code (or other ACP) child.
+                      </p>
+                    ) : (
+                      <>
+                        <select
+                          value={form.runtimeId}
+                          onChange={(e) => {
+                            const rid = e.target.value;
+                            // Auto-pick the first detected ACP agent on the
+                            // chosen runtime — user doesn't have to know what
+                            // strings the daemon's manifest emits. Falls back
+                            // to whatever was set if the runtime has none
+                            // (rare; daemon detection list would be empty).
+                            const first = runtimes.find((r) => r.id === rid)?.agents?.[0]?.id;
+                            setForm({
+                              ...form,
+                              runtimeId: rid,
+                              acpAgentId: rid && first ? first : form.acpAgentId,
+                            });
+                          }}
+                          className={inputCls}
+                        >
+                          <option value="">— Cloud (run on OMA) —</option>
+                          {runtimes.map((r) => (
+                            <option key={r.id} value={r.id} disabled={r.status !== "online"}>
+                              {r.hostname} ({r.status}{r.status === "online" && r.agents.length ? ` · ${r.agents.length} agents` : ""})
+                            </option>
+                          ))}
+                        </select>
+                        {form.runtimeId && (
+                          <div className="mt-2">
+                            <label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</label>
+                            <select
+                              value={form.acpAgentId}
+                              onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
+                              className={inputCls}
+                            >
+                              {(runtimes.find((r) => r.id === form.runtimeId)?.agents ?? []).map((a) => (
+                                <option key={a.id} value={a.id}>{a.id}</option>
+                              ))}
+                            </select>
+                            <p className="text-xs text-fg-subtle mt-1">
+                              Each turn spawns this ACP child on the runtime. Model + skills come from the daemon-fetched bundle.
+                            </p>
+                            {/* Local-skill blocklist — multi-select fed by what the
+                                daemon reported in hello.local_skills[acpAgentId].
+                                Default = all visible (empty blocklist). User unchecks
+                                to hide a global skill from this agent. */}
+                            {(() => {
+                              const localSkills =
+                                runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[form.acpAgentId] ?? [];
+                              if (!localSkills.length) return null;
+                              const allowed = new Set(localSkills.map((s) => s.id))
+                              for (const id of form.localSkillBlocklist) allowed.delete(id);
+                              return (
+                                <div className="mt-3 border border-border rounded-md p-2.5 bg-bg-surface">
+                                  <div className="flex items-center justify-between mb-1.5">
+                                    <span className="text-xs text-fg-muted">
+                                      Local skills ({allowed.size}/{localSkills.length} visible)
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() => setForm({ ...form, localSkillBlocklist: [] })}
+                                      className="text-[10px] text-fg-subtle hover:text-fg underline"
+                                    >
+                                      reset
+                                    </button>
+                                  </div>
+                                  <div className="space-y-0.5 max-h-40 overflow-y-auto">
+                                    {localSkills.map((s) => {
+                                      const blocked = form.localSkillBlocklist.includes(s.id);
+                                      return (
+                                        <label
+                                          key={s.id}
+                                          className="flex items-start gap-2 text-xs cursor-pointer hover:bg-bg rounded px-1.5 py-0.5"
+                                        >
+                                          <input
+                                            type="checkbox"
+                                            checked={!blocked}
+                                            onChange={(e) => {
+                                              const next = new Set(form.localSkillBlocklist);
+                                              if (e.target.checked) next.delete(s.id);
+                                              else next.add(s.id);
+                                              setForm({ ...form, localSkillBlocklist: [...next] });
+                                            }}
+                                            className="mt-0.5 accent-brand"
+                                          />
+                                          <span className="font-mono text-fg flex-shrink-0">{s.id}</span>
+                                          <span className="text-fg-subtle">
+                                            ({s.source ?? "global"}{s.source_label ? `:${s.source_label}` : ""})
+                                          </span>
+                                          {s.name && s.name !== s.id && (
+                                            <span className="text-fg-muted truncate">— {s.name}</span>
+                                          )}
+                                        </label>
+                                      );
+                                    })}
+                                  </div>
+                                  <p className="text-[10px] text-fg-subtle mt-1.5">
+                                    Unchecked = hidden from the ACP child (daemon won't symlink the dir into the spawn cwd).
+                                  </p>
+                                </div>
+                              );
+                            })()}
+                          </div>
+                        )}
+                      </>
+                    )}
                   </div>
                 </div>
               )}

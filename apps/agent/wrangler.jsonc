@@ -37,8 +37,11 @@
   // ~1hr TTL) on 401. The agent worker never sees provider secrets directly
   // — it just asks the gateway "please refresh credential X" and the gateway
   // does the App-JWT signing using its locally-held private key.
+  // MAIN binding lets AcpProxyHarness call /v1/internal/runtime-attach-harness
+  // to reach the RuntimeRoom DO (where the user's `oma bridge daemon` is wired).
   "services": [
-    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
+    { "binding": "MAIN", "service": "managed-agents" }
   ],
 
   // Workers AI for generating embeddings
@@ -105,7 +108,8 @@
         { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" }
       ],
       "services": [
-        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
+        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" },
+        { "binding": "MAIN", "service": "managed-agents-staging" }
       ],
       "ai": { "binding": "AI" },
       "vectorize": [
