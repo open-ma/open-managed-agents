@@ -32,8 +32,10 @@ import { PKG_VERSION } from "../lib/version.js";
 
 interface SetupOpts {
   serverUrl: string;
-  /** Browser URL — typically same host as serverUrl but on the user-facing
-   *  zone (openma.dev) rather than the API zone (app.openma.dev). */
+  /** Browser-facing origin where the user authorizes this machine. Almost
+   *  always the same as `serverUrl` in production (Console + API both live
+   *  on the same Worker at openma.dev). Kept separate so dev/staging can
+   *  point the browser at one host while the daemon hits another. */
   browserOrigin: string;
   /** When true, skip launchd install (useful for dev / non-macOS). */
   noService?: boolean;
