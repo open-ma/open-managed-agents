@@ -3,12 +3,26 @@ import { useApi } from "../lib/api";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
 
+interface LocalSkill {
+  id: string;
+  name?: string;
+  description?: string;
+  source?: "global" | "plugin" | "project";
+  source_label?: string;
+}
+
 interface Runtime {
   id: string;
   machine_id: string;
   hostname: string;
   os: string;
   agents: Array<{ id: string; binary?: string }>;
+  /** Per-acp-agent-id list of skills daemon detected on the user's machine.
+   *  Populated from ~/.claude/skills/ + ~/.claude/plugins (asterisk)/skills/
+   *  for the Claude Code agent. Use this to show users what's locally
+   *  available + as the source for the per-agent blocklist
+   *  (AgentConfig.runtime_binding.local_skill_blocklist). */
+  local_skills?: Record<string, LocalSkill[]>;
   version: string;
   status: "online" | "offline";
   last_heartbeat: number | null;
@@ -91,14 +105,47 @@ export function RuntimesList() {
               </tr>
             </thead>
             <tbody>
-              {runtimes.map((r) => (
+              {runtimes.map((r) => {
+                const totalSkills = Object.values(r.local_skills ?? {}).reduce(
+                  (n, arr) => n + (arr?.length ?? 0),
+                  0,
+                );
+                return (
                 <tr
                   key={r.id}
-                  className="border-t border-border hover:bg-bg-surface transition-colors"
+                  className="border-t border-border hover:bg-bg-surface transition-colors align-top"
                 >
                   <td className="px-4 py-3">
                     <div className="font-medium text-fg">{r.hostname}</div>
                     <div className="text-xs text-fg-subtle font-mono">{r.id}</div>
+                    {totalSkills > 0 && (
+                      <details className="mt-2 text-xs">
+                        <summary className="cursor-pointer text-fg-muted hover:text-fg select-none">
+                          {totalSkills} local skill{totalSkills === 1 ? "" : "s"} detected
+                        </summary>
+                        <div className="mt-1.5 ml-2 space-y-1.5">
+                          {Object.entries(r.local_skills ?? {}).map(([acpId, skills]) =>
+                            !skills?.length ? null : (
+                              <div key={acpId}>
+                                <div className="text-fg-subtle text-[10px] uppercase tracking-wider mb-0.5">
+                                  for {acpId}
+                                </div>
+                                <ul className="space-y-0.5">
+                                  {skills.map((s) => (
+                                    <li key={`${acpId}/${s.source_label ?? ""}/${s.id}`} className="font-mono">
+                                      <span className="text-fg">{s.id}</span>
+                                      <span className="text-fg-subtle ml-1">
+                                        ({s.source ?? "global"}{s.source_label ? `:${s.source_label}` : ""})
+                                      </span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              </div>
+                            )
+                          )}
+                        </div>
+                      </details>
+                    )}
                   </td>
                   <td className="px-4 py-3 text-fg-muted">{r.os}</td>
                   <td className="px-4 py-3">
@@ -136,7 +183,8 @@ export function RuntimesList() {
                     </button>
                   </td>
                 </tr>
-              ))}
+                );
+              })}
             </tbody>
           </table>
         </div>
