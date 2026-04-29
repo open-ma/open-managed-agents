@@ -26,6 +26,11 @@
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
+  "vars": {
+    "MEMORY_BUCKET_NAME": "managed-agents-memory",
+    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace"
+  },
+
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
     { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },

@@ -109,6 +109,30 @@ export interface Env {
    *  through HTTP keeps the auth surface narrow (one internal-secret-gated
    *  endpoint) and avoids a cross-script DO binding. Bound on apps/agent. */
   MAIN?: Fetcher;
+  /**
+   * R2 S3 API credentials for sandbox containers to mount R2 buckets via
+   * S3FS-FUSE (sandbox SDK's `RemoteMountBucketOptions`). When all three
+   * are present, the sandbox uses FUSE mode (writes flow synchronously
+   * over the S3 API and trigger R2 Event Notifications). When absent,
+   * mountBucket falls back to `localBucket: true` — fine for `wrangler
+   * dev`, but writes silently don't persist to R2 in production.
+   *
+   * R2 binding (e.g. `MEMORY_BUCKET`) is Worker-only; it can't be reached
+   * from inside the sandbox container. These keys give the container
+   * direct S3 access. Mint via CF Dashboard → R2 → Manage R2 API Tokens.
+   */
+  R2_ACCESS_KEY_ID?: string;
+  R2_SECRET_ACCESS_KEY?: string;
+  R2_ENDPOINT?: string;
+  /**
+   * Resolved bucket NAMES per environment — needed when mounting via FUSE
+   * because the S3 API takes the actual bucket name (not the binding name).
+   * Set via `vars` in wrangler.jsonc; overridden in env.staging.
+   *   prod:    "managed-agents-memory"
+   *   staging: "managed-agents-memory-staging"
+   */
+  MEMORY_BUCKET_NAME?: string;
+  WORKSPACE_BUCKET_NAME?: string;
 }
 
 /**

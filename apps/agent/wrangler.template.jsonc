@@ -52,6 +52,11 @@
     { "binding": "VECTORIZE", "index_name": "memory-search" }
   ],
 
+  "vars": {
+    "MEMORY_BUCKET_NAME": "managed-agents-memory",
+    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace"
+  },
+
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
     { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },

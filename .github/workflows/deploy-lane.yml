@@ -224,6 +224,12 @@ jobs:
           # gate on this header secret. Without it, local-runtime sessions
           # error with "INTEGRATIONS_INTERNAL_SECRET unset".
           set_secret INTEGRATIONS_INTERNAL_SECRET "$AGENT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+          # R2 S3 API credentials for sandbox.ts FUSE mount mode. Without
+          # these, mountMemoryStore + mountWorkspace fall back to localBucket
+          # mode (writes don't persist to R2 — see sandbox.ts comment).
+          set_secret R2_ACCESS_KEY_ID             "$AGENT" "${{ secrets.R2_ACCESS_KEY_ID }}"
+          set_secret R2_SECRET_ACCESS_KEY         "$AGENT" "${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          set_secret R2_ENDPOINT                  "$AGENT" "${{ secrets.R2_ENDPOINT }}"
 
           echo "Setting secrets on $INT:"
           set_secret API_KEY                      "$INT" "${{ secrets.API_KEY }}"
