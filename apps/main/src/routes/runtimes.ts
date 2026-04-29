@@ -108,7 +108,7 @@ runtimesRoutes.get("/", async (c) => {
 
   const { results } = await c.env.AUTH_DB
     .prepare(
-      `SELECT id, machine_id, hostname, os, agents_json, version, status, last_heartbeat, created_at
+      `SELECT id, machine_id, hostname, os, agents_json, local_skills_json, version, status, last_heartbeat, created_at
        FROM "runtimes" WHERE owner_user_id = ? ORDER BY created_at DESC`,
     )
     .bind(userId)
@@ -118,6 +118,7 @@ runtimesRoutes.get("/", async (c) => {
       hostname: string;
       os: string;
       agents_json: string;
+      local_skills_json: string;
       version: string;
       status: string;
       last_heartbeat: number | null;
@@ -131,6 +132,7 @@ runtimesRoutes.get("/", async (c) => {
       hostname: r.hostname,
       os: r.os,
       agents: safeJsonParse(r.agents_json) as Array<{ id: string; binary?: string }>,
+      local_skills: safeJsonParse(r.local_skills_json ?? "{}") as Record<string, Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>>,
       version: r.version,
       status: r.status,
       last_heartbeat: r.last_heartbeat,

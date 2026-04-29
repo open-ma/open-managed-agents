@@ -154,9 +154,16 @@ export class RuntimeRoom extends DurableObject<Env> {
       const version = typeof parsed.version === "string" ? parsed.version : "unknown";
       const hostname = typeof parsed.hostname === "string" ? parsed.hostname : null;
       const os = typeof parsed.os === "string" ? parsed.os : null;
+      // local_skills is the daemon's scan of ~/.claude/skills/ +
+      // ~/.claude/plugins/*/skills/, keyed by acp agent id. Default {} when
+      // older daemons don't send it — column has DEFAULT '{}' too so writes
+      // either way produce valid JSON.
+      const localSkills = (parsed.local_skills && typeof parsed.local_skills === "object")
+        ? parsed.local_skills
+        : {};
       try {
-        const cols = ["agents_json = ?", "version = ?", "status = 'online'", "last_heartbeat = unixepoch()"];
-        const args: unknown[] = [JSON.stringify(agents), version];
+        const cols = ["agents_json = ?", "version = ?", "local_skills_json = ?", "status = 'online'", "last_heartbeat = unixepoch()"];
+        const args: unknown[] = [JSON.stringify(agents), version, JSON.stringify(localSkills)];
         if (hostname) { cols.push("hostname = ?"); args.push(hostname); }
         if (os) { cols.push("os = ?"); args.push(os); }
         args.push(this.runtimeId);

@@ -17,6 +17,7 @@ import { readCreds } from "../lib/config.js";
 import { osTag } from "../lib/platform.js";
 import { detectAll } from "@open-managed-agents/acp-runtime/registry";
 import { SessionManager } from "../lib/session-manager.js";
+import { detectLocalSkills } from "../lib/local-skills.js";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 import WebSocket from "ws";
@@ -94,6 +95,16 @@ export async function runDaemon(): Promise<void> {
         id: a.id,
         binary: a.spec.command,
       }));
+      // Scan local skill dirs (~/.claude/skills/, ~/.claude/plugins/*/skills/)
+      // so the platform can show users what's available + let them blocklist
+      // specific skills per-agent. Strips the absolute `path` field — the
+      // platform doesn't need to know the user's home layout.
+      const localSkillsDetailed = await detectLocalSkills();
+      const localSkills: Record<string, Array<{ id: string; name?: string; description?: string; source: string; source_label?: string }>> = {};
+      for (const [agentId, skills] of Object.entries(localSkillsDetailed)) {
+        if (!skills) continue;
+        localSkills[agentId] = skills.map(({ path: _path, ...rest }) => rest);
+      }
       ws.send(JSON.stringify({
         type: "hello",
         machine_id: creds.machineId,
@@ -101,6 +112,7 @@ export async function runDaemon(): Promise<void> {
         os: osTag(),
         version: PKG_VERSION,
         agents,
+        local_skills: localSkills,
       }));
       // Re-announce any sessions we were running before the WS drop.
       // First-attach this is a no-op (no sessions yet).
