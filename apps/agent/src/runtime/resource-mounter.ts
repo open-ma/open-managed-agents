@@ -9,6 +9,7 @@ import { logWarn } from "@open-managed-agents/shared";
  * - file:              Mount file content at a path
  * - github_repository: Clone repo with auth, checkout branch/commit
  * - memory_store:      Mount /mnt/memory/<store_name>/ from MEMORY_BUCKET (R2)
+ * - env:               Set process env vars (was env_secret pre-rename)
  *
  * Security model:
  * - authorization_token is write-only (never in API responses)
@@ -16,6 +17,9 @@ import { logWarn } from "@open-managed-agents/shared";
  * - Tokens not visible via `git remote -v`
  * - Memory store mounts are R2 prefix-scoped to the store_id; read_only
  *   attachments mount with readOnly:true so writes from the agent fail.
+ * - env values are written via sandbox.setEnvVars in a single batched
+ *   call so all the agent's exec calls see the same env. Values come
+ *   from the per-session secret store keyed by resource_id.
  */
 export async function mountResources(
   sandbox: SandboxExecutor,
@@ -28,6 +32,10 @@ export async function mountResources(
 ): Promise<void> {
   let hasGitRepo = false;
   let lastGitToken: string | null = null;
+  // Buffer env vars across the loop so we make a single setEnvVars call
+  // at the end. setEnvVars on most sandbox implementations is a network
+  // round-trip per call; one batched call beats one-per-resource.
+  const envBatch: Record<string, string> = {};
 
   for (const res of resources) {
     try {
@@ -47,6 +55,16 @@ export async function mountResources(
         case "memory_store":
           await mountMemoryStore(sandbox, res, memoryStoreLookup);
           break;
+        case "env":
+        case "env_secret": {
+          // env_secret kept for any session row that predates the rename
+          // (sessions.ts:262). New rows always land as type=env.
+          const resId = res.id as string;
+          const name = res.name as string;
+          const value = resId ? secretStore?.get(resId) : undefined;
+          if (name && value) envBatch[name] = value;
+          break;
+        }
       }
     } catch (err) {
       // Best-effort: skip failed resource, don't crash session. Resources are
@@ -65,6 +83,26 @@ export async function mountResources(
   // Register last token for gh CLI (gh only supports one GH_TOKEN)
   if (lastGitToken && sandbox.registerCommandSecrets) {
     sandbox.registerCommandSecrets("gh", { GITHUB_TOKEN: lastGitToken, GH_TOKEN: lastGitToken });
+  }
+
+  // Apply collected env vars in a single call. setEnvVars is optional on
+  // SandboxExecutor (some test fakes omit it) — silently skip when
+  // unsupported so an env resource on a stripped-down sandbox doesn't
+  // crash the whole mount pass. Logged as a warn so the gap is visible.
+  if (Object.keys(envBatch).length > 0) {
+    if (sandbox.setEnvVars) {
+      // Names only — values are session secrets; never logged.
+      try {
+        await sandbox.setEnvVars(envBatch);
+      } catch (err) {
+        logWarn({ op: "resource.env_apply", count: Object.keys(envBatch).length, err }, "setEnvVars failed");
+      }
+    } else {
+      logWarn(
+        { op: "resource.env_apply", count: Object.keys(envBatch).length },
+        "sandbox does not support setEnvVars; env resources skipped",
+      );
+    }
   }
 
   // Install gh CLI when a GitHub repo is mounted
