@@ -28,7 +28,9 @@
 
   "vars": {
     "MEMORY_BUCKET_NAME": "managed-agents-memory",
-    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace"
+    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
+    "BACKUP_BUCKET_NAME": "managed-agents-backups",
+    "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
   },
 
   "r2_buckets": [

@@ -56,9 +56,14 @@
   // S3 API which takes the actual bucket name (not the binding name).
   // Keep these in sync with r2_buckets[].bucket_name above. Override in
   // env.staging for staging-specific bucket names.
+  // CLOUDFLARE_ACCOUNT_ID + BACKUP_BUCKET_NAME are required by sandbox
+  // SDK createBackup() to mint R2 presigned URLs for the squashfs upload
+  // (production mode). Keep these in sync across env overrides.
   "vars": {
     "MEMORY_BUCKET_NAME": "managed-agents-memory",
-    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace"
+    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
+    "BACKUP_BUCKET_NAME": "managed-agents-backups",
+    "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
   },
 
   "r2_buckets": [
@@ -132,7 +137,9 @@
       ],
       "vars": {
         "MEMORY_BUCKET_NAME": "managed-agents-memory-staging",
-        "WORKSPACE_BUCKET_NAME": "managed-agents-workspace"
+        "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
+        "BACKUP_BUCKET_NAME": "managed-agents-backups",
+        "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
       },
       "r2_buckets": [
         { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
