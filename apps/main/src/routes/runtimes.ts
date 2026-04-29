@@ -295,12 +295,10 @@ function safeJsonParse(s: string | null | undefined): unknown {
 // GET /agents/runtime/sessions/:sid/bundle?agent_id=<acp-agent-id>
 // Returns AGENTS.md + skill files for the daemon to materialize in spawn cwd.
 // Auth: Authorization: Bearer sk_machine_* — same auth the daemon uses to
-// open the WS attach. Validating that the daemon owns the requested session
-// would require resolving (token → user) → (sid → user) parity; we keep it
-// simpler by just verifying the bearer is a valid runtime token. The bundle
-// content doesn't include credentials, so the worst leak is a session's
-// AGENTS.md text. If a future agent has very sensitive system prompts,
-// tighten this to enforce session ownership via runtime_id ↔ session linkage.
+// open the WS attach. We additionally verify the requested session belongs
+// to the same tenant as the runtime token, so a leaked sk_machine_* from
+// tenant A can't enumerate tenant B's session ids and exfiltrate their
+// agent system prompts via the bundle.
 runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
   const auth = c.req.header("authorization") ?? "";
   const ok = await authenticateRuntimeToken(c.env, auth);
@@ -312,7 +310,12 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
 
   const services = c.get("services");
   const session = await services.sessions.getById({ sessionId: sid }).catch(() => null);
-  if (!session) return c.json({ error: "session not found" }, 404);
+  // Return 404 (not 403) for cross-tenant misses too — same response a
+  // legitimately-missing sid would produce, so the endpoint doesn't double
+  // as an existence oracle for sids in other tenants.
+  if (!session || session.tenant_id !== ok.tenant_id) {
+    return c.json({ error: "session not found" }, 404);
+  }
   const agent = (session as { agent_snapshot?: AgentConfig }).agent_snapshot;
   if (!agent) return c.json({ error: "session has no agent snapshot" }, 500);
 
@@ -382,18 +385,18 @@ function renderSessionBundle(
 export async function authenticateRuntimeToken(
   env: Env,
   bearer: string,
-): Promise<{ runtime_id: string; user_id: string } | null> {
+): Promise<{ runtime_id: string; user_id: string; tenant_id: string } | null> {
   const token = bearer.startsWith("Bearer ") ? bearer.slice(7) : bearer;
   if (!token.startsWith("sk_machine_")) return null;
   const hash = await sha256(token);
   const row = await env.AUTH_DB
     .prepare(
-      `SELECT t.runtime_id AS runtime_id, r.owner_user_id AS user_id
+      `SELECT t.runtime_id AS runtime_id, r.owner_user_id AS user_id, r.owner_tenant_id AS tenant_id
        FROM "runtime_tokens" t JOIN "runtimes" r ON r.id = t.runtime_id
        WHERE t.token_hash = ? AND t.revoked_at IS NULL`,
     )
     .bind(hash)
-    .first<{ runtime_id: string; user_id: string }>();
+    .first<{ runtime_id: string; user_id: string; tenant_id: string }>();
   if (!row) return null;
   // Best-effort last_used_at refresh; don't block on it.
   env.AUTH_DB
