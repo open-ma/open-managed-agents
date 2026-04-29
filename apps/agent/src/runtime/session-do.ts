@@ -283,6 +283,12 @@ export class SessionDO extends Agent<Env, SessionState> {
   private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
+  /** Last time we wrote a workspace backup (ms). Used to debounce per-turn
+   *  snapshots so a chatty agent doesn't spam BACKUP_BUCKET PUTs. Forced
+   *  backups (session destroy) ignore this. */
+  private lastWorkspaceBackupAt = 0;
+  /** Min interval between turn-end backups. Forced backups bypass this. */
+  private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 60_000;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -830,38 +836,9 @@ export class SessionDO extends Agent<Env, SessionState> {
       // CF's "persist across sessions" pattern (changelog 2026-02-23):
       // squashfs of /workspace lands in BACKUP_BUCKET; the handle goes into
       // D1 keyed by (tenant, env). Next session in the same scope's warmup
-      // looks it up and restoreBackup's it.
-      if (
-        this.sandbox instanceof CloudflareSandbox &&
-        this.state.tenant_id &&
-        this.state.environment_id &&
-        this.env.AUTH_DB
-      ) {
-        try {
-          const handle = await this.sandbox.createWorkspaceBackup({
-            name: `session-${this.state.session_id ?? "unknown"}`,
-            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-          });
-          if (handle) {
-            await recordWorkspaceBackup(this.env.AUTH_DB, {
-              tenantId: this.state.tenant_id,
-              environmentId: this.state.environment_id,
-              handle,
-              nowMs: Date.now(),
-              ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-              sessionId: this.state.session_id,
-            });
-          }
-        } catch (err) {
-          // Snapshot failure shouldn't block destroy — losing one snapshot
-          // is recoverable (next session starts from previous snapshot or
-          // empty if first time).
-          logWarn(
-            { op: "session_do.destroy.workspace_backup", session_id: this.state.session_id, err },
-            "workspace backup snapshot failed; teardown continues",
-          );
-        }
-      }
+      // looks it up and restoreBackup's it. Force=true bypasses the
+      // turn-end debounce so we always get a final snapshot.
+      await this.maybeBackupWorkspace({ force: true });
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -1405,11 +1382,15 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
 
       // Restore the most recent workspace backup for (tenant, environment)
-      // BEFORE mountResources runs so any github_repository clone (which
-      // git-clones into /workspace) lands on top of restored state — or
-      // refuses if the dir is non-empty (current behavior, agent gets clear
-      // error). Per CF's recommended pattern from the 2026-02-23 changelog
-      // ("pick up where you left off, even after days of inactivity").
+      // BEFORE mountResources runs, so the agent picks up where it left
+      // off. Per CF's recommended pattern (changelog 2026-02-23, "pick up
+      // where you left off, even after days of inactivity").
+      //
+      // Skip when the session attaches a github_repository resource: that
+      // resource git-clones into /workspace, and `git clone` requires the
+      // target dir to be empty. Restore-then-clone would fail; the user
+      // explicitly asked for a clone so they want clone semantics, not
+      // restore semantics. (Future: smarter merge — restore then `git pull`.)
       if (
         sandbox instanceof CloudflareSandbox &&
         this.state.tenant_id &&
@@ -1417,25 +1398,40 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.env.AUTH_DB
       ) {
         try {
-          const handle = await findWorkspaceBackup(
-            this.env.AUTH_DB,
-            this.state.tenant_id,
-            this.state.environment_id,
-            Date.now(),
-          );
-          if (handle) {
-            const ok = await sandbox.restoreWorkspaceBackup(handle);
-            if (!ok) {
-              logWarn(
-                {
-                  op: "session_do.warmup.restore_backup",
-                  session_id: this.state.session_id,
-                  tenant_id: this.state.tenant_id,
-                  environment_id: this.state.environment_id,
-                  backup_id: handle.id,
-                },
-                "workspace backup restore returned false (likely expired) — continuing with empty workspace",
-              );
+          let hasGitRepo = false;
+          if (this.state.session_id) {
+            const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
+            const rows = await services.sessions.listResourcesBySession({ sessionId: this.state.session_id });
+            hasGitRepo = rows.some(
+              (r) => r.type === "github_repository" || r.type === "github_repo",
+            );
+          }
+          if (hasGitRepo) {
+            logWarn(
+              { op: "session_do.warmup.skip_restore_github_repo", session_id: this.state.session_id },
+              "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
+            );
+          } else {
+            const handle = await findWorkspaceBackup(
+              this.env.AUTH_DB,
+              this.state.tenant_id,
+              this.state.environment_id,
+              Date.now(),
+            );
+            if (handle) {
+              const ok = await sandbox.restoreWorkspaceBackup(handle);
+              if (!ok) {
+                logWarn(
+                  {
+                    op: "session_do.warmup.restore_backup",
+                    session_id: this.state.session_id,
+                    tenant_id: this.state.tenant_id,
+                    environment_id: this.state.environment_id,
+                    backup_id: handle.id,
+                  },
+                  "workspace backup restore returned false (likely expired) — continuing with empty workspace",
+                );
+              }
             }
           }
         } catch (err) {
@@ -2681,6 +2677,68 @@ export class SessionDO extends Agent<Env, SessionState> {
     } finally {
       this.currentAbortController = null;
       this.setState({ ...this.state, status: "idle" });
+      // Snapshot /workspace at turn end (debounced — see maybeBackupWorkspace).
+      // CF Sandbox kills the container + deletes /workspace after 10 minutes
+      // idle, so without a fresh snapshot here the next session resumes from
+      // the previous turn's state at best, empty at worst. Fire-and-forget
+      // via waitUntil so it doesn't add latency to the turn's completion.
+      this.ctx.waitUntil(this.maybeBackupWorkspace());
+    }
+  }
+
+  /**
+   * Snapshot /workspace into BACKUP_BUCKET via createBackup + record the
+   * handle in D1. Triggers:
+   *   - End of each agent turn (debounced, fire-and-forget via waitUntil)
+   *   - Session destroy (force=true, awaited so it completes before
+   *     sandbox.destroy())
+   *
+   * Per-turn debouncing matters because CF Sandbox's 10-minute idle timeout
+   * stops the container AND deletes its filesystem. Without a fresh backup
+   * since the last meaningful state change, the next session loses that
+   * work. Debounce keeps cost reasonable (no spam during chatty turns) but
+   * the destroy path always forces a final snapshot.
+   *
+   * Best-effort throughout: failures are logged + swallowed. A missing
+   * backup means the next session starts from the previous backup or
+   * empty — never a hard error for the user.
+   */
+  private async maybeBackupWorkspace(opts?: { force?: boolean }): Promise<void> {
+    const now = Date.now();
+    if (
+      !opts?.force &&
+      now - this.lastWorkspaceBackupAt < SessionDO.WORKSPACE_BACKUP_DEBOUNCE_MS
+    ) {
+      return;
+    }
+    if (
+      !(this.sandbox instanceof CloudflareSandbox) ||
+      !this.state.tenant_id ||
+      !this.state.environment_id ||
+      !this.env.AUTH_DB
+    ) {
+      return;
+    }
+    try {
+      const handle = await this.sandbox.createWorkspaceBackup({
+        name: `session-${this.state.session_id ?? "unknown"}`,
+        ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+      });
+      if (!handle) return;
+      await recordWorkspaceBackup(this.env.AUTH_DB, {
+        tenantId: this.state.tenant_id,
+        environmentId: this.state.environment_id,
+        handle,
+        nowMs: now,
+        ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+        sessionId: this.state.session_id,
+      });
+      this.lastWorkspaceBackupAt = now;
+    } catch (err) {
+      logWarn(
+        { op: "session_do.workspace_backup", session_id: this.state.session_id, force: !!opts?.force, err },
+        "workspace backup failed (best-effort)",
+      );
     }
   }
 
