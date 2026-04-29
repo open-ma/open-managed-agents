@@ -2218,8 +2218,8 @@ async function main() {
       case "setup": {
         const { runSetup } = await import("./bridge/commands/setup.js");
         await runSetup({
-          serverUrl: flag(args, "--server-url") ?? "https://app.openma.dev",
-          browserOrigin: flag(args, "--browser-origin") ?? "https://app.openma.dev",
+          serverUrl: flag(args, "--server-url") ?? "https://openma.dev",
+          browserOrigin: flag(args, "--browser-origin") ?? "https://openma.dev",
           noService: args.includes("--no-service"),
           force: args.includes("--force"),
         });
