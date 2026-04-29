@@ -683,6 +683,27 @@ app.delete("/:id", async (c) => {
     });
   }
 
+  // Local-runtime (acp-proxy) sessions: also tell the daemon to kill its
+  // ACP child + drop the spawn cwd. Best-effort — if the runtime is offline
+  // or the binding missing, the daemon will reconcile next time it sees a
+  // 403 on session lookup. RuntimeRoom DO is addressed by runtime_id from
+  // the session's agent_snapshot.runtime_binding.
+  const agentSnap = (session as { agent_snapshot?: { runtime_binding?: { runtime_id?: string } } }).agent_snapshot;
+  const rid = agentSnap?.runtime_binding?.runtime_id;
+  if (rid && c.env.RUNTIME_ROOM) {
+    try {
+      const stub = c.env.RUNTIME_ROOM.get(c.env.RUNTIME_ROOM.idFromName(rid));
+      await (stub as unknown as {
+        sendToDaemon(msg: Record<string, unknown>): Promise<boolean>;
+      }).sendToDaemon({ type: "session.dispose", session_id: id });
+    } catch (err) {
+      logWarn(
+        { op: "session.delete.daemon_dispose", session_id: id, runtime_id: rid, err },
+        "daemon dispose forward failed; row will still be removed",
+      );
+    }
+  }
+
   // Cascade-delete the session row + every session_resources row in one
   // batch. Caller is still responsible for the per-session secret KV
   // entries (env_secret.value, github_repository.token) and for files

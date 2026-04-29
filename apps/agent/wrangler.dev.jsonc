@@ -31,6 +31,12 @@
     { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
   ],
 
+  // MAIN service binding so AcpProxyHarness can call into the main worker's
+  // /v1/internal/runtime-attach-harness endpoint to reach RuntimeRoom DO.
+  "services": [
+    { "binding": "MAIN", "service": "managed-agents" }
+  ],
+
   "browser": { "binding": "BROWSER" },
 
   "migrations": [

@@ -37,6 +37,11 @@ export class AcpSessionImpl implements AcpSession {
   readonly id: string;
   readonly options: SessionOptions;
 
+  /** Public read-only view of the agent-issued sessionId. Empty until init() resolves. */
+  get acpSessionId(): string {
+    return this.#sessionId ?? "";
+  }
+
   #child: ChildHandle;
   #agent!: Agent;                  // initialized in init()
   #sessionId!: string;              // ACP-side session id (different from this.id)
@@ -85,10 +90,35 @@ export class AcpSessionImpl implements AcpSession {
     );
     this.#agent = conn;
 
-    await this.#agent.initialize({
+    const initResult = await this.#agent.initialize({
       protocolVersion: 1,
       clientCapabilities: {},
     } as never);
+
+    // Try to resume an existing ACP session if asked. Agents that advertise
+    // loadSession in agentCapabilities will respond; older / leaner agents
+    // won't. We fall back to a fresh `session/new` instead of failing —
+    // losing transcript history is preferable to crashing the chat.
+    const wantsResume = this.options.resumeAcpSessionId;
+    const supportsLoad = (initResult as { agentCapabilities?: { loadSession?: boolean } })
+      ?.agentCapabilities?.loadSession === true;
+
+    if (wantsResume && supportsLoad) {
+      try {
+        await (this.#agent as unknown as { loadSession?: (p: unknown) => Promise<unknown> }).loadSession?.({
+          sessionId: wantsResume,
+          cwd: this.options.agent.cwd ?? process.cwd(),
+          mcpServers: [],
+        });
+        this.#sessionId = wantsResume;
+        return;
+      } catch (e) {
+        // Resume failed (e.g. on-disk transcript was deleted) — fall
+        // through to creating a fresh session.
+        // eslint-disable-next-line no-console
+        console.error(`[acp] session/load(${wantsResume}) failed, falling back to new:`, e);
+      }
+    }
 
     const newSession = await this.#agent.newSession({
       cwd: this.options.agent.cwd ?? process.cwd(),

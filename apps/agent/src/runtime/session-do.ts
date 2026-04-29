@@ -2311,6 +2311,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const ctx: HarnessContext = {
       agent,
       userMessage,
+      session_id: this.state.session_id,
       tools: allTools,
       model,
       systemPrompt,
@@ -2324,6 +2325,11 @@ export class SessionDO extends Agent<Env, SessionState> {
         CONFIG_KV: this.env.CONFIG_KV,
         memoryStoreIds,
         environmentConfig,
+        // Wired through so AcpProxyHarness can attach to the RuntimeRoom DO
+        // via the apps/main worker. Optional on the env type — non-acp
+        // harnesses simply don't read these.
+        MAIN: this.env.MAIN,
+        INTEGRATIONS_INTERNAL_SECRET: this.env.INTEGRATIONS_INTERNAL_SECRET,
         delegateToAgent: async (agentId: string, message: string) => {
           return this.runSubAgent(agentId, message, history, sandbox);
         },

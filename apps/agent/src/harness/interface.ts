@@ -132,6 +132,12 @@ export interface HarnessRuntime {
 export interface HarnessContext {
   agent: AgentConfig;
   userMessage: UserMessageEvent;
+  /**
+   * The OMA session id this turn belongs to. Optional during the transition
+   * for legacy harnesses; AcpProxyHarness needs it to address the
+   * RuntimeRoom DO. SessionDO populates this on every harness.run call.
+   */
+  session_id?: string;
 
   /** Platform-prepared tools: built from agent config, ready to pass to generateText. */
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -180,6 +186,12 @@ export interface HarnessContext {
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** Register a background task for completion notification (CC-style task_notification). */
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
+    /** Service binding back to apps/main. Used by AcpProxyHarness to attach
+     *  to the RuntimeRoom DO via /v1/internal/runtime-attach-harness. */
+    MAIN?: Fetcher;
+    /** Shared header secret to call /v1/internal/* on main. Set on the agent
+     *  worker; same value as main's INTEGRATIONS_INTERNAL_SECRET. */
+    INTEGRATIONS_INTERNAL_SECRET?: string;
   };
   runtime: HarnessRuntime;
 }

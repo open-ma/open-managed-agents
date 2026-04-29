@@ -1,6 +1,6 @@
 {
   "name": "@openma/cli",
-  "version": "0.2.0-beta.1",
+  "version": "0.3.0-beta.0",
   "description": "CLI for the openma managed agents platform",
   "type": "module",
   "bin": {
@@ -11,7 +11,7 @@
     "node": ">=20"
   },
   "scripts": {
-    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --banner:js='#!/usr/bin/env node'",
+    "build": "esbuild src/index.ts --bundle --platform=node --format=esm --outfile=dist/index.js --banner:js=\"#!/usr/bin/env node\nimport { createRequire as __cr } from 'node:module'; const require = __cr(import.meta.url);\"",
     "dev": "tsx src/index.ts",
     "prepublishOnly": "npm run build"
   },
@@ -29,9 +29,17 @@
   "bugs": {
     "url": "https://github.com/open-ma/open-managed-agents/issues"
   },
+  "dependencies": {
+    "@agentclientprotocol/sdk": "^0.20.0",
+    "@open-managed-agents/acp-runtime": "workspace:*",
+    "ws": "^8.18.0"
+  },
   "devDependencies": {
     "@open-managed-agents/api-types": "workspace:*",
+    "@types/node": "^22.0.0",
+    "@types/ws": "^8.5.0",
     "esbuild": "^0.25.0",
-    "tsx": "^4.19.0"
+    "tsx": "^4.19.0",
+    "typescript": "^5.8.0"
   }
 }

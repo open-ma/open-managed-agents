@@ -18,6 +18,11 @@ export const authMiddleware = createMiddleware<{
   if (c.req.path.startsWith("/v1/internal/")) {
     return next();
   }
+  // MCP proxy authenticates via Bearer oma_* on every request — its own
+  // resolveProxyTarget validates token + session ownership in one shot.
+  if (c.req.path.startsWith("/v1/mcp-proxy/")) {
+    return next();
+  }
 
   // 1. Try API Key authentication (for CLI / SDK)
   const apiKey = c.req.header("x-api-key");
