@@ -133,6 +133,14 @@ export interface Env {
    */
   MEMORY_BUCKET_NAME?: string;
   WORKSPACE_BUCKET_NAME?: string;
+  /**
+   * BACKUP_BUCKET_NAME (also CLOUDFLARE_ACCOUNT_ID above) are required by
+   * @cloudflare/sandbox createBackup() in production mode — the SDK
+   * mints R2 presigned URLs to upload the squashfs and needs both to
+   * construct the URL. Without them createBackup throws
+   * InvalidBackupConfigError. See sandbox.ts createWorkspaceBackup.
+   */
+  BACKUP_BUCKET_NAME?: string;
 }
 
 /**
