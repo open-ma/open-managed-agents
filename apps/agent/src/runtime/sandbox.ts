@@ -59,9 +59,12 @@ export class CloudflareSandbox implements SandboxExecutor {
    * over /mnt/memory/<store>/ — we deliberately do NOT register memory_*
    * tools (those were removed in this migration).
    *
-   * Local dev (`wrangler dev`): R2 binding sync via `localBucket: true`.
-   * Production (CF): S3FS-FUSE — should be wired by the sandbox SDK using
-   * the same binding name when running outside the local simulator.
+   * `localBucket: true` mode requires the FIRST arg to be the BINDING NAME
+   * (the SDK does `this.env[bucket]` to resolve it; @cloudflare/sandbox 0.9.1
+   * sandbox-PAYx1CcU.js mountBucketLocal). Pass "MEMORY_BUCKET" not the
+   * actual bucket_name so prod ("managed-agents-memory") and staging
+   * ("managed-agents-memory-staging") both work — the binding name is the
+   * same across environments.
    */
   async mountMemoryStore(opts: {
     storeName: string;
@@ -78,7 +81,7 @@ export class CloudflareSandbox implements SandboxExecutor {
     // Trailing slash on the prefix ensures we don't accidentally match
     // sibling prefixes (e.g. "abc/" vs "abcd/...").
     const prefix = `/${opts.storeId}/`;
-    await sandbox.mountBucket("managed-agents-memory", mountPath, {
+    await sandbox.mountBucket("MEMORY_BUCKET", mountPath, {
       localBucket: true,
       prefix,
       readOnly: opts.readOnly,
