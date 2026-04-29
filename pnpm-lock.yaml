@@ -330,17 +330,13 @@ importers:
   packages/cf-billing: {}
 
   packages/cli:
-    dependencies:
+    devDependencies:
       '@agentclientprotocol/sdk':
         specifier: ^0.20.0
         version: 0.20.0(zod@4.3.6)
       '@open-managed-agents/acp-runtime':
         specifier: workspace:*
         version: link:../acp-runtime
-      ws:
-        specifier: ^8.18.0
-        version: 8.18.0
-    devDependencies:
       '@open-managed-agents/api-types':
         specifier: workspace:*
         version: link:../api-types
@@ -359,6 +355,9 @@ importers:
       typescript:
         specifier: ^5.8.0
         version: 5.9.3
+      ws:
+        specifier: ^8.18.0
+        version: 8.18.0
 
   packages/credentials-store:
     dependencies:
