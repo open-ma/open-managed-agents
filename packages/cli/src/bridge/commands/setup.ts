@@ -23,12 +23,26 @@ import type { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { writeCreds, readCreds, getOrCreateMachineId } from "../lib/config.js";
 import { paths, currentPlatform, osTag } from "../lib/platform.js";
-import { install as installLaunchd } from "../lib/launchd.js";
+import { install as installLaunchd, type InstallOptions } from "../lib/launchd.js";
 import { detectAll } from "@open-managed-agents/acp-runtime/registry";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
+
+/** Snapshot of the current process's node + cli entry. Frozen here (not at
+ *  daemon start) because launchd doesn't source the user's shell — the only
+ *  moment we know which node the user actually wants is when they run
+ *  `oma bridge setup`. realpath unwraps the npm/.bin/oma symlink so the
+ *  plist points at the real dist/index.js, not at a shim that re-triggers
+ *  shebang resolution. */
+function launchdInstallOpts(): InstallOptions {
+  return {
+    nodePath: process.execPath,
+    cliEntry: realpathSync(process.argv[1]!),
+  };
+}
 
 interface SetupOpts {
   serverUrl: string;
@@ -59,7 +73,7 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
       log.ok(`existing credentials found  ${c.dim(paths().credsFile)}`);
       log.hint(`runtime ${existing.runtimeId.slice(0, 8)}… (use --force to re-register)`);
       if (!opts.noService && currentPlatform() === "darwin") {
-        await installLaunchd({ binaryPath: process.argv[1] });
+        await installLaunchd(launchdInstallOpts());
         log.ok(`launchd plist refreshed  ${c.dim(paths().serviceFile ?? "")}`);
         log.ok(`daemon restarted  ${c.dim("logs: " + paths().logFile)}`);
       } else {
@@ -134,7 +148,7 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
     return;
   }
 
-  await installLaunchd({ binaryPath: process.argv[1] });
+  await installLaunchd(launchdInstallOpts());
   log.ok(`launchd plist installed  ${c.dim(paths().serviceFile ?? "")}`);
   log.ok(`daemon started  ${c.dim("logs: " + paths().logFile)}`);
   process.stderr.write("\n");
