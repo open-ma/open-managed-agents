@@ -26,7 +26,7 @@
   // Shared with apps/main. Migrations for integrations tables live with
   // packages/integrations-adapters-cf and are applied via the same D1 instance.
   "d1_databases": [
-    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "67edb234-8ac8-4666-9252-7ce0bf35c20a" }
+    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" }
   ],
 
   // Service binding back to the main worker for session creation / resume.
