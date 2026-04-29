@@ -289,6 +289,13 @@ export class SessionDO extends Agent<Env, SessionState> {
   private lastWorkspaceBackupAt = 0;
   /** Min interval between turn-end backups. Forced backups bypass this. */
   private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 60_000;
+  /** Single in-flight workspace backup promise — coalesces concurrent calls
+   *  so a turn-end fire-and-forget backup + a DELETE force backup don't race
+   *  on the same container (CF Sandbox SDK rejects the second concurrent
+   *  createBackup with HTTP 500). Force callers `await` the in-flight one
+   *  instead of starting a new one — the FS state is the same since no
+   *  agent ops can run during a backup. */
+  private workspaceBackupInFlight: Promise<void> | null = null;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -2704,6 +2711,14 @@ export class SessionDO extends Agent<Env, SessionState> {
    * empty — never a hard error for the user.
    */
   private async maybeBackupWorkspace(opts?: { force?: boolean }): Promise<void> {
+    // Coalesce concurrent backups: if one is already in flight, the FS
+    // state it captures is the same one a second backup would see (no
+    // agent ops can run during a backup). Force callers await the
+    // in-flight one rather than starting a racing second that the SDK
+    // would reject with HTTP 500. Non-force callers just skip.
+    if (this.workspaceBackupInFlight) {
+      return opts?.force ? this.workspaceBackupInFlight : undefined;
+    }
     const now = Date.now();
     if (
       !opts?.force &&
@@ -2719,26 +2734,38 @@ export class SessionDO extends Agent<Env, SessionState> {
     ) {
       return;
     }
+    const sandbox = this.sandbox;
+    const tenantId = this.state.tenant_id;
+    const environmentId = this.state.environment_id;
+    const authDb = this.env.AUTH_DB;
+    const sessionId = this.state.session_id;
+    this.workspaceBackupInFlight = (async () => {
+      try {
+        const handle = await sandbox.createWorkspaceBackup({
+          name: `session-${sessionId ?? "unknown"}`,
+          ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+        });
+        if (!handle) return;
+        await recordWorkspaceBackup(authDb, {
+          tenantId,
+          environmentId,
+          handle,
+          nowMs: now,
+          ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+          sessionId,
+        });
+        this.lastWorkspaceBackupAt = now;
+      } catch (err) {
+        logWarn(
+          { op: "session_do.workspace_backup", session_id: sessionId, force: !!opts?.force, err },
+          "workspace backup failed (best-effort)",
+        );
+      }
+    })();
     try {
-      const handle = await this.sandbox.createWorkspaceBackup({
-        name: `session-${this.state.session_id ?? "unknown"}`,
-        ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-      });
-      if (!handle) return;
-      await recordWorkspaceBackup(this.env.AUTH_DB, {
-        tenantId: this.state.tenant_id,
-        environmentId: this.state.environment_id,
-        handle,
-        nowMs: now,
-        ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-        sessionId: this.state.session_id,
-      });
-      this.lastWorkspaceBackupAt = now;
-    } catch (err) {
-      logWarn(
-        { op: "session_do.workspace_backup", session_id: this.state.session_id, force: !!opts?.force, err },
-        "workspace backup failed (best-effort)",
-      );
+      await this.workspaceBackupInFlight;
+    } finally {
+      this.workspaceBackupInFlight = null;
     }
   }
 
