@@ -319,6 +319,18 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
   const agent = (session as { agent_snapshot?: AgentConfig }).agent_snapshot;
   if (!agent) return c.json({ error: "session has no agent snapshot" }, 500);
 
+  // Runtime ownership check: a daemon can only fetch bundles for sessions
+  // whose agent is bound to the same runtime that owns this token. Without
+  // this gate, two daemons in the same tenant could read each other's
+  // session bundles by guessing sids — an info-leak that becomes a
+  // material security hole the moment the bundle starts carrying env
+  // values + mcp_servers config (next commit). Same 404 shape so the
+  // endpoint stays a non-oracle for cross-runtime sids.
+  const sessionRuntimeId = agent.runtime_binding?.runtime_id;
+  if (!sessionRuntimeId || sessionRuntimeId !== ok.runtime_id) {
+    return c.json({ error: "session not found" }, 404);
+  }
+
   const files = renderSessionBundle(agent, acpAgentId);
   // Per-agent blocklist of LOCAL skills the user has on their machine
   // — daemon enforces by NOT symlinking these into the spawn-cwd's
