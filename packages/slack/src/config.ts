@@ -1,6 +1,8 @@
 // SlackProvider configuration. Cleanly separated from runtime ports so the
 // provider remains pure and testable.
 
+import type { SessionGranularity } from "@open-managed-agents/integrations-core";
+
 /**
  * Slack-specific capability keys gating Web API operations. Stored as opaque
  * strings at the core boundary (CapabilityKey = string) so providers don't
@@ -44,11 +46,21 @@ export interface SlackConfig {
    * (which may only further restrict) are stored on the Publication row.
    */
   defaultCapabilities: ReadonlyArray<SlackCapabilityKey>;
+
+  /**
+   * Default session granularity for new publications. `per_channel` makes the
+   * bot a "channel-scoped colleague" — one long-lived session per channel,
+   * top-level messages debounce-arm a scan turn, lifecycle events route to
+   * the same session. `per_thread` (the legacy default) opens a fresh session
+   * per thread. Defaults to `per_channel` if absent.
+   */
+  defaultSessionGranularity?: SessionGranularity;
 }
 
 /**
  * Bot scopes for an OMA agent published into Slack. Covers the common path:
- * receive @-mentions and DMs, post messages, react, fetch user/team metadata.
+ * receive @-mentions and DMs, post messages, react, fetch user/team metadata,
+ * observe channel-membership lifecycle for `per_channel` granularity.
  *
  * - app_mentions:read     — receive `app_mention` events
  * - chat:write            — chat.postMessage as the bot
@@ -57,6 +69,8 @@ export interface SlackConfig {
  * - groups:history        — read private channel messages
  * - im:history            — read direct messages
  * - mpim:history          — read multi-person DMs
+ * - channels:read         — receive `member_joined_channel` / `channel_*` for public channels
+ * - groups:read           — same for private channels
  * - reactions:read/write  — observe + add reactions
  * - users:read            — fetch user profiles (display name, avatar)
  * - users:read.email      — email lookup (handoff/notification flows)
@@ -70,6 +84,8 @@ export const DEFAULT_SLACK_BOT_SCOPES: ReadonlyArray<string> = [
   "groups:history",
   "im:history",
   "mpim:history",
+  "channels:read",
+  "groups:read",
   "reactions:read",
   "reactions:write",
   "users:read",
@@ -101,8 +117,9 @@ export const DEFAULT_SLACK_USER_SCOPES: ReadonlyArray<string> = [
 /**
  * Bot events the App subscribes to via Event Subscriptions. Set in the
  * manifest's settings.event_subscriptions.bot_events. Covers @-mentions,
- * messages in all conversation kinds, the AI assistant pane handshake, and
- * revocation signals.
+ * messages in all conversation kinds, the AI assistant pane handshake,
+ * channel-membership lifecycle, archive/rename, reactions on bot messages,
+ * and revocation signals.
  */
 export const DEFAULT_SLACK_SUBSCRIBED_EVENTS: ReadonlyArray<string> = [
   "app_mention",
@@ -113,6 +130,15 @@ export const DEFAULT_SLACK_SUBSCRIBED_EVENTS: ReadonlyArray<string> = [
   "assistant_thread_started",
   "tokens_revoked",
   "app_uninstalled",
+  // Channel-membership lifecycle for per_channel granularity.
+  "member_joined_channel",
+  "member_left_channel",
+  "channel_archive",
+  "channel_unarchive",
+  "channel_rename",
+  // Reactions — provider drops anything not on a bot-authored message.
+  "reaction_added",
+  "reaction_removed",
 ] as const;
 
 export const ALL_SLACK_CAPABILITIES: ReadonlyArray<SlackCapabilityKey> = [
