@@ -28,10 +28,14 @@ export class MemoryContentTooLargeError extends Error {
   }
 }
 
-export class MemoryEmbeddingFailedError extends Error {
-  readonly code = "memory_embedding_failed";
+/**
+ * The blob store (R2) couldn't write the bytes — typically transient. Distinct
+ * from precondition failure (separate error). Maps to 503.
+ */
+export class MemoryBlobStoreError extends Error {
+  readonly code = "memory_blob_store_error";
   constructor(public cause: unknown) {
-    super(`embedding generation failed: ${describeCause(cause)}`);
+    super(`memory blob store error: ${describeCause(cause)}`);
   }
 }
 

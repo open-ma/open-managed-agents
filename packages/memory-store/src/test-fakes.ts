@@ -4,15 +4,20 @@
 //
 // Notes:
 //   - InMemoryMemoryRepo enforces UNIQUE(store_id, path) the same way the D1
-//     adapter does (via UNIQUE constraint), so duplicate-path semantics match.
-//   - DeterministicEmbeddingProvider hashes text → fixed-length vector so
-//     "search" can deterministically rank exact substrings without depending
-//     on an actual embedding model.
-//   - InMemoryVectorIndex stores vectors keyed by id and queries via cosine
-//     similarity. Supports the metadata filter shape the service uses.
+//     adapter does, so duplicate-path semantics match.
+//   - InMemoryBlobStore mimics R2's conditional PUT semantics: If-None-Match: *
+//     fails if any object exists at the key; If-Match: <etag> fails if the
+//     stored etag doesn't match. Etag is sha256-hex of bytes (vs. R2's MD5)
+//     — only the conditional comparison cares; tests should not rely on the
+//     specific algorithm.
 
+import {
+  generateMemoryId,
+} from "@open-managed-agents/shared";
 import type {
-  EmbeddingProvider,
+  BlobMetadata,
+  BlobReadResult,
+  BlobStore,
   IdGenerator,
   Logger,
   MemoryRepo,
@@ -22,12 +27,9 @@ import type {
   NewMemoryRow,
   NewMemoryStoreInput,
   NewMemoryVersionInput,
-  VectorIndex,
-  VectorMatch,
-  VectorUpsertItem,
 } from "./ports";
 import { MemoryStoreService } from "./service";
-import type { MemoryRow, MemoryStoreRow, MemoryVersionRow } from "./types";
+import type { Actor, MemoryRow, MemoryStoreRow, MemoryVersionRow } from "./types";
 
 export class InMemoryStoreRepo implements MemoryStoreRepo {
   private readonly stores = new Map<string, MemoryStoreRow>();
@@ -88,22 +90,17 @@ export class InMemoryStoreRepo implements MemoryStoreRepo {
       this.memoryRepo?.deleteByStore(storeId);
     }
   }
-
-  async listMemoryIds(storeId: string): Promise<string[]> {
-    return this.memoryRepo?.listIdsByStore(storeId) ?? [];
-  }
 }
 
 interface InMemMemory {
   id: string;
   store_id: string;
   path: string;
-  content: string;
   content_sha256: string;
+  etag: string;
   size_bytes: number;
   created_at: number;
   updated_at: number;
-  vector_synced_at: number | null;
 }
 
 export class InMemoryMemoryRepo implements MemoryRepo {
@@ -113,7 +110,6 @@ export class InMemoryMemoryRepo implements MemoryRepo {
   readonly versions: MemoryVersionRow[] = [];
 
   async createWithVersion(memory: NewMemoryRow, version: NewMemoryVersionInput): Promise<MemoryRow> {
-    // UNIQUE(store_id, path) check — match D1's constraint behavior.
     for (const m of this.byId.values()) {
       if (m.store_id === memory.storeId && m.path === memory.path) {
         throw new Error(`UNIQUE constraint failed: memories.store_id, memories.path`);
@@ -123,12 +119,11 @@ export class InMemoryMemoryRepo implements MemoryRepo {
       id: memory.id,
       store_id: memory.storeId,
       path: memory.path,
-      content: memory.content,
       content_sha256: memory.contentSha256,
+      etag: memory.etag,
       size_bytes: memory.sizeBytes,
       created_at: memory.createdAt,
       updated_at: memory.updatedAt,
-      vector_synced_at: null,
     };
     this.byId.set(memory.id, row);
     this.versions.push(toVersionRow(version));
@@ -143,11 +138,10 @@ export class InMemoryMemoryRepo implements MemoryRepo {
     const row = this.byId.get(memoryId);
     if (!row) throw new Error("memory not found");
     if (update.path !== undefined) row.path = update.path;
-    if (update.content !== undefined) row.content = update.content;
     if (update.contentSha256 !== undefined) row.content_sha256 = update.contentSha256;
+    if (update.etag !== undefined) row.etag = update.etag;
     if (update.sizeBytes !== undefined) row.size_bytes = update.sizeBytes;
     row.updated_at = update.updatedAt;
-    if (update.vectorSyncedAt !== "unchanged") row.vector_synced_at = update.vectorSyncedAt;
     this.versions.push(toVersionRow(version));
     return toRow(row);
   }
@@ -177,48 +171,102 @@ export class InMemoryMemoryRepo implements MemoryRepo {
       .map(toRow);
   }
 
-  async markSynced(memoryId: string, syncedAt: number): Promise<void> {
-    const row = this.byId.get(memoryId);
-    if (row) row.vector_synced_at = syncedAt;
+  async upsertFromEvent(input: {
+    storeId: string;
+    path: string;
+    contentSha256: string;
+    etag: string;
+    sizeBytes: number;
+    actor: Actor;
+    nowMs: number;
+    versionId: string;
+    content: string;
+    memoryId?: string;
+  }): Promise<{ wrote: boolean; row: MemoryRow | null }> {
+    const existing = await this.findByPath(input.storeId, input.path);
+    if (existing && existing.etag === input.etag) return { wrote: false, row: existing };
+    if (existing) {
+      const row = await this.updateWithVersion(
+        existing.id,
+        {
+          contentSha256: input.contentSha256,
+          etag: input.etag,
+          sizeBytes: input.sizeBytes,
+          updatedAt: input.nowMs,
+        },
+        {
+          id: input.versionId,
+          memoryId: existing.id,
+          storeId: input.storeId,
+          operation: "modified",
+          path: input.path,
+          content: input.content,
+          contentSha256: input.contentSha256,
+          sizeBytes: input.sizeBytes,
+          actor: input.actor,
+          createdAt: input.nowMs,
+        },
+      );
+      return { wrote: true, row };
+    }
+    const memoryId = input.memoryId ?? generateMemoryId();
+    const row = await this.createWithVersion(
+      {
+        id: memoryId,
+        storeId: input.storeId,
+        path: input.path,
+        contentSha256: input.contentSha256,
+        etag: input.etag,
+        sizeBytes: input.sizeBytes,
+        createdAt: input.nowMs,
+        updatedAt: input.nowMs,
+      },
+      {
+        id: input.versionId,
+        memoryId,
+        storeId: input.storeId,
+        operation: "created",
+        path: input.path,
+        content: input.content,
+        contentSha256: input.contentSha256,
+        sizeBytes: input.sizeBytes,
+        actor: input.actor,
+        createdAt: input.nowMs,
+      },
+    );
+    return { wrote: true, row };
   }
 
-  async markUnsynced(memoryId: string): Promise<void> {
-    const row = this.byId.get(memoryId);
-    if (row) row.vector_synced_at = null;
-  }
-
-  async listUnsynced(opts: {
-    tenantId?: string;
-    storeId?: string;
-    limit: number;
-  }): Promise<Array<{ id: string; storeId: string; path: string; content: string }>> {
-    // tenantId filter is intentionally not enforced — fakes test the service's
-    // logic, not cross-table joins. If a test really cares, configure storeId.
-    return Array.from(this.byId.values())
-      .filter((m) => m.vector_synced_at === null)
-      .filter((m) => !opts.storeId || m.store_id === opts.storeId)
-      .slice(0, opts.limit)
-      .map((m) => ({ id: m.id, storeId: m.store_id, path: m.path, content: m.content }));
-  }
-
-  async countUnsynced(): Promise<number> {
-    let n = 0;
-    for (const m of this.byId.values()) if (m.vector_synced_at === null) n++;
-    return n;
+  async deleteFromEvent(input: {
+    storeId: string;
+    path: string;
+    actor: Actor;
+    nowMs: number;
+    versionId: string;
+  }): Promise<{ wrote: boolean }> {
+    const existing = await this.findByPath(input.storeId, input.path);
+    if (!existing) return { wrote: false };
+    await this.deleteWithVersion(existing.id, {
+      id: input.versionId,
+      memoryId: existing.id,
+      storeId: input.storeId,
+      operation: "deleted",
+      path: input.path,
+      content: "",
+      contentSha256: existing.content_sha256,
+      sizeBytes: existing.size_bytes,
+      actor: input.actor,
+      createdAt: input.nowMs,
+    });
+    return { wrote: true };
   }
 
   // ── helpers used by InMemoryStoreRepo for cascade delete ──
   deleteByStore(storeId: string): void {
     for (const [id, m] of this.byId.entries()) if (m.store_id === storeId) this.byId.delete(id);
-    // Also drop versions — D1 adapter cascades both in the same batch.
     for (let i = this.versions.length - 1; i >= 0; i--) {
       if (this.versions[i].store_id === storeId) this.versions.splice(i, 1);
     }
-  }
-  listIdsByStore(storeId: string): string[] {
-    const out: string[] = [];
-    for (const m of this.byId.values()) if (m.store_id === storeId) out.push(m.id);
-    return out;
   }
 }
 
@@ -232,7 +280,15 @@ export class InMemoryVersionRepo implements MemoryVersionRepo {
     return this.memoryRepo.versions
       .filter((v) => v.store_id === storeId)
       .filter((v) => !opts.memoryId || v.memory_id === opts.memoryId)
-      .sort((a, b) => b.created_at.localeCompare(a.created_at))
+      // Newest first; id desc as tiebreaker so versions written within the
+      // same millisecond come out in the order they were inserted (sequential
+      // ids = sequential writes). Without this the redact / rollback /
+      // outlive-parent tests are non-deterministic.
+      .sort((a, b) => {
+        const cmp = b.created_at.localeCompare(a.created_at);
+        if (cmp !== 0) return cmp;
+        return b.id.localeCompare(a.id);
+      })
       .slice(0, opts.limit);
   }
 
@@ -257,88 +313,91 @@ export class InMemoryVersionRepo implements MemoryVersionRepo {
     this.memoryRepo.versions[idx] = redacted;
     return redacted;
   }
+
+  async pruneOlderThan(cutoffMs: number): Promise<number> {
+    const cutoffIso = new Date(cutoffMs).toISOString();
+    // Index of the latest version per memory_id. Tie-break on id so two
+    // versions with the same created_at (same millisecond) pick a deterministic
+    // "latest" — matches the same id-desc tiebreaker used by list().
+    const latestPerMemory = new Map<string, { id: string; createdAt: string }>();
+    for (const v of this.memoryRepo.versions) {
+      const cur = latestPerMemory.get(v.memory_id);
+      if (
+        !cur ||
+        v.created_at > cur.createdAt ||
+        (v.created_at === cur.createdAt && v.id > cur.id)
+      ) {
+        latestPerMemory.set(v.memory_id, { id: v.id, createdAt: v.created_at });
+      }
+    }
+    let removed = 0;
+    for (let i = this.memoryRepo.versions.length - 1; i >= 0; i--) {
+      const v = this.memoryRepo.versions[i];
+      if (v.created_at >= cutoffIso) continue;
+      if (latestPerMemory.get(v.memory_id)?.id === v.id) continue;
+      this.memoryRepo.versions.splice(i, 1);
+      removed++;
+    }
+    return removed;
+  }
 }
 
 /**
- * Deterministic embedding: hash the text into a fixed-length numeric vector.
- * Two texts with significant token overlap produce vectors with high cosine
- * similarity, so basic semantic-search assertions work.
+ * In-memory blob store with R2-shaped conditional semantics. Etag is
+ * sha256-hex of the bytes, deterministic so tests can compare.
  */
-export class DeterministicEmbeddingProvider implements EmbeddingProvider {
-  constructor(private readonly dim: number = 32) {}
+export class InMemoryBlobStore implements BlobStore {
+  /** key → { text, etag, size, customMetadata } */
+  private readonly objects = new Map<
+    string,
+    { text: string; etag: string; size: number; customMetadata?: Record<string, string> }
+  >();
 
-  async embed(text: string): Promise<number[] | null> {
-    const v = new Array(this.dim).fill(0);
-    // Token-frequency style projection. Each word increments dim slots based
-    // on its character codes. Simple, deterministic, no external libs.
-    for (const word of text.toLowerCase().split(/\W+/).filter(Boolean)) {
-      const slot = hashStr(word) % this.dim;
-      v[slot] += 1;
+  async head(key: string): Promise<BlobMetadata | null> {
+    const obj = this.objects.get(key);
+    return obj ? { etag: obj.etag, size: obj.size } : null;
+  }
+
+  async getText(key: string): Promise<BlobReadResult | null> {
+    const obj = this.objects.get(key);
+    return obj ? { text: obj.text, etag: obj.etag, size: obj.size } : null;
+  }
+
+  async put(
+    key: string,
+    body: string,
+    opts?: {
+      precondition?: import("./ports").BlobPrecondition;
+      actorMetadata?: { actor_type: string; actor_id: string };
+    },
+  ): Promise<BlobMetadata | null> {
+    const existing = this.objects.get(key);
+    if (opts?.precondition?.type === "ifNoneMatch") {
+      if (existing) return null;
+    } else if (opts?.precondition?.type === "ifMatch") {
+      if (!existing || existing.etag !== opts.precondition.etag) return null;
     }
-    // L2 normalize so cosine sim ranges in [-1, 1].
-    const norm = Math.sqrt(v.reduce((a, b) => a + b * b, 0));
-    return norm === 0 ? v : v.map((x) => x / norm);
-  }
-}
-
-export class InMemoryVectorIndex implements VectorIndex {
-  /** id → { values, metadata } */
-  private readonly vectors = new Map<string, { values: number[]; metadata: Record<string, unknown> }>();
-
-  isAvailable(): boolean {
-    return true;
-  }
-
-  async upsert(items: VectorUpsertItem[]): Promise<void> {
-    for (const it of items) {
-      this.vectors.set(it.id, { values: it.values, metadata: it.metadata });
-    }
+    const etag = await sha256HexShort(body);
+    const size = new TextEncoder().encode(body).length;
+    this.objects.set(key, {
+      text: body,
+      etag,
+      size,
+      customMetadata: opts?.actorMetadata
+        ? { actor_type: opts.actorMetadata.actor_type, actor_id: opts.actorMetadata.actor_id }
+        : undefined,
+    });
+    return { etag, size };
   }
 
-  async query(
-    values: number[],
-    opts: { topK: number; filter?: Record<string, unknown> },
-  ): Promise<VectorMatch[]> {
-    const ranked: VectorMatch[] = [];
-    for (const [id, v] of this.vectors.entries()) {
-      if (opts.filter) {
-        let match = true;
-        for (const [k, expected] of Object.entries(opts.filter)) {
-          if (v.metadata[k] !== expected) {
-            match = false;
-            break;
-          }
-        }
-        if (!match) continue;
-      }
-      ranked.push({ id, score: cosineSim(values, v.values), metadata: v.metadata, values: v.values });
-    }
-    ranked.sort((a, b) => b.score - a.score);
-    return ranked.slice(0, opts.topK);
+  async delete(key: string): Promise<void> {
+    this.objects.delete(key);
   }
 
-  async deleteByIds(ids: string[]): Promise<void> {
-    for (const id of ids) this.vectors.delete(id);
-  }
-
-  async getById(id: string): Promise<{ id: string; values: number[]; metadata?: Record<string, unknown> } | null> {
-    const v = this.vectors.get(id);
-    return v ? { id, values: v.values, metadata: v.metadata } : null;
-  }
-
-  // Test introspection helpers — not part of VectorIndex.
-  size(): number { return this.vectors.size; }
-  has(id: string): boolean { return this.vectors.has(id); }
-}
-
-/** A vector index that fails every operation — for testing the service's
- * "Vectorize down → write still succeeds, vector_synced_at stays NULL" path. */
-export class FailingVectorIndex implements VectorIndex {
-  isAvailable(): boolean { return true; }
-  async upsert(): Promise<void> { throw new Error("vector index unavailable"); }
-  async query(): Promise<VectorMatch[]> { throw new Error("vector index unavailable"); }
-  async deleteByIds(): Promise<void> { throw new Error("vector index unavailable"); }
-  async getById(): Promise<null> { throw new Error("vector index unavailable"); }
+  // Test-only introspection helpers — not part of BlobStore.
+  size(): number { return this.objects.size; }
+  has(key: string): boolean { return this.objects.has(key); }
+  keys(): string[] { return Array.from(this.objects.keys()); }
 }
 
 export class SilentLogger implements Logger {
@@ -356,13 +415,9 @@ export class SequentialIdGenerator implements IdGenerator {
 }
 
 /**
- * Convenience factory: full in-memory wiring with sane defaults. Tests can
- * still pass overrides for any port to inject failure modes (FailingVectorIndex,
- * a stubbed embedding provider, a ManualClock, etc.).
+ * Convenience factory: full in-memory wiring with sane defaults.
  */
 export function createInMemoryMemoryStoreService(opts?: {
-  embedding?: EmbeddingProvider;
-  vectorIndex?: VectorIndex;
   ids?: IdGenerator;
   logger?: Logger;
 }): {
@@ -370,16 +425,14 @@ export function createInMemoryMemoryStoreService(opts?: {
   storeRepo: InMemoryStoreRepo;
   memoryRepo: InMemoryMemoryRepo;
   versionRepo: InMemoryVersionRepo;
-  vectorIndex: VectorIndex;
-  embedding: EmbeddingProvider;
+  blobs: InMemoryBlobStore;
 } {
   const storeRepo = new InMemoryStoreRepo();
   const memoryRepo = new InMemoryMemoryRepo();
   const versionRepo = new InMemoryVersionRepo(memoryRepo);
   storeRepo.attachMemories(memoryRepo);
 
-  const embedding = opts?.embedding ?? new DeterministicEmbeddingProvider();
-  const vectorIndex = opts?.vectorIndex ?? new InMemoryVectorIndex();
+  const blobs = new InMemoryBlobStore();
   const ids = opts?.ids ?? new SequentialIdGenerator();
   const logger = opts?.logger ?? new SilentLogger();
 
@@ -387,45 +440,25 @@ export function createInMemoryMemoryStoreService(opts?: {
     storeRepo,
     memoryRepo,
     versionRepo,
-    embedding,
-    vectorIndex,
+    blobs,
     ids,
     logger,
   });
-  return { service, storeRepo, memoryRepo, versionRepo, vectorIndex, embedding };
+  return { service, storeRepo, memoryRepo, versionRepo, blobs };
 }
 
 // ── helpers ──
-
-function hashStr(s: string): number {
-  let h = 5381;
-  for (let i = 0; i < s.length; i++) h = (h * 33) ^ s.charCodeAt(i);
-  return Math.abs(h | 0);
-}
-
-function cosineSim(a: number[], b: number[]): number {
-  if (a.length !== b.length) return 0;
-  let dot = 0, na = 0, nb = 0;
-  for (let i = 0; i < a.length; i++) {
-    dot += a[i] * b[i];
-    na += a[i] * a[i];
-    nb += b[i] * b[i];
-  }
-  if (na === 0 || nb === 0) return 0;
-  return dot / (Math.sqrt(na) * Math.sqrt(nb));
-}
 
 function toRow(m: InMemMemory): MemoryRow {
   return {
     id: m.id,
     store_id: m.store_id,
     path: m.path,
-    content: m.content,
     content_sha256: m.content_sha256,
+    etag: m.etag,
     size_bytes: m.size_bytes,
     created_at: msToIso(m.created_at),
     updated_at: msToIso(m.updated_at),
-    vector_synced_at: m.vector_synced_at ? msToIso(m.vector_synced_at) : null,
   };
 }
 
@@ -448,4 +481,12 @@ function toVersionRow(v: NewMemoryVersionInput): MemoryVersionRow {
 
 function msToIso(ms: number): string {
   return new Date(ms).toISOString();
+}
+
+async function sha256HexShort(s: string): Promise<string> {
+  const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
+  return Array.from(new Uint8Array(buf))
+    .slice(0, 16)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
 }

@@ -75,6 +75,37 @@ jobs:
           CF_SUBDOMAIN: ${{ vars.CF_SUBDOMAIN }}
         run: node scripts/lane-generate.mjs '${{ inputs.lane_name }}'
 
+      # Memory subsystem (Anthropic Managed Agents Memory contract): the lane
+      # workers reference an R2 bucket + Cloudflare Queue that must exist
+      # before deploy. All three commands are idempotent — second invocation
+      # no-ops with a non-zero exit that we swallow with `|| true`. The R2
+      # event subscription wires bucket PUTs/DELETEs to the queue so the
+      # consumer in apps/main can reflect agent FUSE writes back into D1.
+      - name: Ensure memory subsystem infra exists (idempotent)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/main
+          npx wrangler r2 bucket create managed-agents-memory-staging 2>&1 \
+            | tee /tmp/r2-create.log || true
+          if grep -qiE "already exists|conflict" /tmp/r2-create.log; then
+            echo "  (bucket exists — fine)"
+          fi
+          npx wrangler queues create managed-agents-memory-events-staging 2>&1 \
+            | tee /tmp/q-create.log || true
+          if grep -qiE "already exists|conflict" /tmp/q-create.log; then
+            echo "  (queue exists — fine)"
+          fi
+          # R2 event subscription. Skips silently if already configured.
+          npx wrangler r2 bucket notification create managed-agents-memory-staging \
+            --event-type object-create --event-type object-delete \
+            --queue managed-agents-memory-events-staging 2>&1 \
+            | tee /tmp/notif-create.log || true
+          if grep -qiE "already exists|conflict|duplicate" /tmp/notif-create.log; then
+            echo "  (event subscription exists — fine)"
+          fi
+
       # Apply D1 migrations to the staging DB before any worker boots. Lanes
       # share staging data (KV / D1 / R2), so this targets the staging D1
       # binding via the lane wrangler config (env.staging override). Idempotent:
@@ -193,6 +224,12 @@ jobs:
           # gate on this header secret. Without it, local-runtime sessions
           # error with "INTEGRATIONS_INTERNAL_SECRET unset".
           set_secret INTEGRATIONS_INTERNAL_SECRET "$AGENT" "${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}"
+          # R2 S3 API credentials for sandbox.ts FUSE mount mode. Without
+          # these, mountMemoryStore + mountWorkspace fall back to localBucket
+          # mode (writes don't persist to R2 — see sandbox.ts comment).
+          set_secret R2_ACCESS_KEY_ID             "$AGENT" "${{ secrets.R2_ACCESS_KEY_ID }}"
+          set_secret R2_SECRET_ACCESS_KEY         "$AGENT" "${{ secrets.R2_SECRET_ACCESS_KEY }}"
+          set_secret R2_ENDPOINT                  "$AGENT" "${{ secrets.R2_ENDPOINT }}"
 
           echo "Setting secrets on $INT:"
           set_secret API_KEY                      "$INT" "${{ secrets.API_KEY }}"

@@ -52,10 +52,19 @@
     { "binding": "VECTORIZE", "index_name": "memory-search" }
   ],
 
+  "vars": {
+    "MEMORY_BUCKET_NAME": "managed-agents-memory",
+    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
+    "BACKUP_BUCKET_NAME": "managed-agents-backups",
+    "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
+  },
+
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
     { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
-    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" }
+    { "binding": "BACKUP_BUCKET", "bucket_name": "managed-agents-backups" },
+    // Memory store mount target — see apps/agent/wrangler.jsonc comment.
+    { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
   "browser": { "binding": "BROWSER" },

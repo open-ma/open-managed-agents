@@ -4,21 +4,20 @@ import {
   generateMemoryVersionId,
 } from "@open-managed-agents/shared";
 import {
+  MemoryBlobStoreError,
   MemoryContentTooLargeError,
-  MemoryEmbeddingFailedError,
   MemoryNotFoundError,
   MemoryPreconditionFailedError,
   MemoryStoreNotFoundError,
 } from "./errors";
 import type {
+  BlobStore,
   Clock,
-  EmbeddingProvider,
   IdGenerator,
   Logger,
   MemoryRepo,
   MemoryStoreRepo,
   MemoryVersionRepo,
-  VectorIndex,
 } from "./ports";
 import {
   Actor,
@@ -26,8 +25,6 @@ import {
   MemoryRow,
   MemoryStoreRow,
   MemoryVersionRow,
-  ReconcileResult,
-  SearchHit,
   WritePrecondition,
 } from "./types";
 
@@ -35,43 +32,53 @@ export interface MemoryStoreServiceDeps {
   storeRepo: MemoryStoreRepo;
   memoryRepo: MemoryRepo;
   versionRepo: MemoryVersionRepo;
-  embedding: EmbeddingProvider;
-  vectorIndex: VectorIndex;
+  blobs: BlobStore;
   clock?: Clock;
   ids?: IdGenerator;
   logger?: Logger;
 }
 
 /**
- * MemoryStoreService — pure business logic over abstract ports.
+ * MemoryStoreService — Anthropic Managed Agents Memory contract over Cloudflare.
  *
- * The service contains the consistency rules (D1 is truth, Vectorize is a
- * best-effort side index, write order, atomic memory+version writes,
- * preconditions, content cap, reconciliation strategy) but knows nothing
- * about D1, Workers AI, Vectorize, or any other concrete runtime. All
- * persistence and infrastructure flows through the injected ports.
+ * Architecture (https://platform.claude.com/docs/en/managed-agents/memory):
+ *   - R2 is the bytes-of-truth. Object key = `<store_id>/<memory_path>`.
+ *   - D1 holds: store metadata (`memory_stores`), index (`memories`, no content
+ *     column), and audit (`memory_versions`, content inline up to 100KB).
+ *   - Agent reads/writes /mnt/memory/<store>/ via standard file tools (no memory_*
+ *     tools). Sandbox mounts the bucket per-session with a `prefix` scope.
+ *   - REST API writes (this service) take both paths atomically: R2 PUT first,
+ *     then D1 batch [memory index UPSERT, memory_versions INSERT]. Writes from
+ *     agent FUSE (which bypass the service) are reconciled into D1 via R2 Event
+ *     Notifications → Queue → Consumer (apps/main/src/queue/memory-events.ts).
  *
- * Deployment wiring (tenant ↔ adapter binding) is the caller's job:
- *   - Production: createCfMemoryStoreService(env) — see src/adapters/index.ts
- *   - Tests: createInMemoryMemoryStoreService() — see src/test-fakes.ts
+ * Atomicity:
+ *   - R2 single-key PUT is atomic. Conditional PUT (etag match / etag absent)
+ *     gives us CAS for both create-only and update-with-precondition semantics.
+ *   - The (R2 PUT, D1 batch) pair is NOT a distributed transaction. If we crash
+ *     between them, R2 has the bytes and D1 missed the version row. The R2-event
+ *     queue consumer fills the gap, deduped by (store_id, path, etag). Worst
+ *     case: brief window where REST-API readers see stale list metadata.
  *
- * Consistency model:
- *   - The persistence repo is the single source of truth. All read paths hit
- *     it directly and are strongly consistent.
- *   - The vector index is a search-time side replica. Each successful write
- *     attempts to maintain it inline; failures only degrade `searchMemories`,
- *     they never fail the canonical write. Memories with NULL vector_synced_at
- *     are picked up by `reconcile()` on demand.
- *   - When the embedding provider returns null (intentionally unconfigured),
- *     the vector index is left untouched and `searchMemories` returns []. This
- *     is the supported "no semantic search" mode for tests/dev.
+ * Rollback:
+ *   - Emergent. Caller does `getVersion(v) → updateById/writeByPath(v.content)`.
+ *     Per Anthropic doc: "There is no dedicated restore endpoint."
+ *
+ * Redact:
+ *   - Refuses live head: a version whose `content_sha256` matches the live
+ *     memory's current `content_sha256` cannot be redacted. Caller must write
+ *     a new version first (or delete the memory) before redacting prior history.
+ *
+ * Out of scope (vs. the previous implementation):
+ *   - No semantic search / embeddings / Vectorize. Anthropic's spec does not
+ *     ship one and the prior gold-plated layer is removed in this rewrite.
+ *   - No reconciler. Vector sync is no longer a concept.
  */
 export class MemoryStoreService {
   private readonly storeRepo: MemoryStoreRepo;
   private readonly memoryRepo: MemoryRepo;
   private readonly versionRepo: MemoryVersionRepo;
-  private readonly embedding: EmbeddingProvider;
-  private readonly vectorIndex: VectorIndex;
+  private readonly blobs: BlobStore;
   private readonly clock: Clock;
   private readonly ids: IdGenerator;
   private readonly logger: Logger;
@@ -80,8 +87,7 @@ export class MemoryStoreService {
     this.storeRepo = deps.storeRepo;
     this.memoryRepo = deps.memoryRepo;
     this.versionRepo = deps.versionRepo;
-    this.embedding = deps.embedding;
-    this.vectorIndex = deps.vectorIndex;
+    this.blobs = deps.blobs;
     this.clock = deps.clock ?? defaultClock;
     this.ids = deps.ids ?? defaultIds();
     this.logger = deps.logger ?? consoleLogger;
@@ -96,6 +102,7 @@ export class MemoryStoreService {
     name: string;
     description?: string;
   }): Promise<MemoryStoreRow> {
+    assertValidStoreName(opts.name);
     return this.storeRepo.insert({
       id: this.ids.storeId(),
       tenantId: opts.tenantId,
@@ -122,43 +129,52 @@ export class MemoryStoreService {
   }
 
   /**
-   * Delete the store and all its memories + versions. Best-effort vector
-   * cleanup — list all memory IDs, delete them from the index, then drop the
-   * D1 rows via adapter-level cascade. Failure to clean the index leaves
-   * orphan vectors that search-time D1 join will filter out.
+   * Delete the store and all its memories + versions. Best-effort R2 cleanup —
+   * list R2 objects under the prefix and delete them; failure leaves orphans
+   * (eventual lifecycle GC will catch them). D1 cascade is via adapter batch.
    */
   async deleteStore(opts: { tenantId: string; storeId: string }): Promise<void> {
     await this.requireStore(opts);
-    const memIds = await this.storeRepo.listMemoryIds(opts.storeId);
-    if (memIds.length > 0 && this.vectorIndex.isAvailable()) {
-      try {
-        await this.vectorIndex.deleteByIds(memIds.map((id) => vectorKey(opts.storeId, id)));
-      } catch (err) {
-        this.logger.warn("vector index cleanup failed during store delete", {
-          store_id: opts.storeId,
-          err: errToString(err),
-        });
+    // Best-effort R2 cleanup: scan and delete. 100KB cap × few thousand keys
+    // is bounded; LIST iterates with cursors. We don't fail the store delete
+    // if R2 cleanup hiccups — orphans are recoverable, missing the audit isn't.
+    try {
+      const memos = await this.memoryRepo.list(opts.storeId, {});
+      for (const m of memos) {
+        try {
+          await this.blobs.delete(r2Key(opts.storeId, m.path));
+        } catch (err) {
+          this.logger.warn("R2 delete failed during store delete (orphan left)", {
+            store_id: opts.storeId,
+            path: m.path,
+            err: errToString(err),
+          });
+        }
       }
+    } catch (err) {
+      this.logger.warn("R2 cleanup pre-scan failed during store delete", {
+        store_id: opts.storeId,
+        err: errToString(err),
+      });
     }
     await this.storeRepo.delete(opts.tenantId, opts.storeId);
   }
 
   // ============================================================
-  // Memories — write paths
+  // Memories — write paths (REST API actor; agent FUSE writes go through queue)
   // ============================================================
 
   /**
-   * Upsert by path. Creates a memory at the path or, if `precondition` allows,
-   * overwrites the existing memory at that path.
+   * Upsert by path. Creates or overwrites the memory at `path`.
    *
    * Steps:
-   *   1. Validate (size, store exists, precondition)
-   *   2. Compute embedding (throws MemoryEmbeddingFailedError on failure — write
-   *      is aborted before any state mutation; null = embedding intentionally
-   *      disabled, in which case we skip step 4 and leave vector_synced_at NULL)
-   *   3. memoryRepo.{create,update}WithVersion — atomic memory + version
-   *   4. vectorIndex.upsert (best-effort — failure logs warn, leaves
-   *      vector_synced_at NULL for reconciler)
+   *   1. Validate (size, store exists, precondition).
+   *   2. R2 conditional PUT:
+   *      - precondition: not_exists       → If-None-Match: *
+   *      - precondition: content_sha256   → If-Match: <existing etag from D1>
+   *      - no precondition + new path     → If-None-Match: *  (defensive)
+   *      - no precondition + existing     → unconditional PUT
+   *   3. D1 batch [INSERT/UPDATE memories index, INSERT memory_versions] atomically.
    */
   async writeByPath(opts: {
     tenantId: string;
@@ -169,10 +185,13 @@ export class MemoryStoreService {
     actor: Actor;
   }): Promise<MemoryRow> {
     await this.requireStore(opts);
+    assertValidMemoryPath(opts.path);
     this.assertContentSize(opts.content);
 
     const existing = await this.memoryRepo.findByPath(opts.storeId, opts.path);
 
+    // App-layer precondition checks before R2 to give clean error semantics.
+    // R2's conditional PUT is the actual atomicity barrier.
     if (opts.precondition?.type === "not_exists" && existing) {
       throw new MemoryPreconditionFailedError("memory exists at path");
     }
@@ -184,21 +203,38 @@ export class MemoryStoreService {
       throw new MemoryPreconditionFailedError("content_sha256 mismatch");
     }
 
-    const embedding = await this.embed(opts.content);
-    const now = this.clock.nowMs();
     const sha = await sha256Hex(opts.content);
     const sizeBytes = byteLength(opts.content);
+    const key = r2Key(opts.storeId, opts.path);
 
+    let blob;
+    try {
+      blob = await this.blobs.put(key, opts.content, {
+        precondition: existing
+          ? { type: "ifMatch", etag: existing.etag }
+          : { type: "ifNoneMatch", value: "*" },
+        actorMetadata: { actor_type: opts.actor.type, actor_id: opts.actor.id },
+      });
+    } catch (err) {
+      throw new MemoryBlobStoreError(err);
+    }
+    if (!blob) {
+      // R2 precondition failed — someone wrote between our D1 read and the PUT.
+      throw new MemoryPreconditionFailedError(
+        existing ? "concurrent write detected (etag mismatch)" : "memory exists at path",
+      );
+    }
+
+    const now = this.clock.nowMs();
     let mem: MemoryRow;
     if (existing) {
       mem = await this.memoryRepo.updateWithVersion(
         existing.id,
         {
-          content: opts.content,
           contentSha256: sha,
+          etag: blob.etag,
           sizeBytes,
           updatedAt: now,
-          vectorSyncedAt: null,
         },
         {
           id: this.ids.versionId(),
@@ -220,8 +256,8 @@ export class MemoryStoreService {
           id: memoryId,
           storeId: opts.storeId,
           path: opts.path,
-          content: opts.content,
           contentSha256: sha,
+          etag: blob.etag,
           sizeBytes,
           createdAt: now,
           updatedAt: now,
@@ -241,13 +277,8 @@ export class MemoryStoreService {
       );
     }
 
-    if (embedding) {
-      await this.syncVectorIndex(opts.tenantId, opts.storeId, mem.id, opts.path, embedding);
-    }
-
-    // Re-read to capture vector_synced_at the syncVectorIndex update may have set.
-    const refreshed = await this.memoryRepo.findById(opts.storeId, mem.id);
-    return refreshed ?? mem;
+    // Hand back the row with content filled (caller just provided it).
+    return { ...mem, content: opts.content };
   }
 
   /** Mutate by ID — supports rename (path change) and content edit. */
@@ -264,6 +295,7 @@ export class MemoryStoreService {
     const existing = await this.requireMemory(opts.storeId, opts.memoryId);
 
     if (opts.content !== undefined) this.assertContentSize(opts.content);
+    if (opts.path !== undefined) assertValidMemoryPath(opts.path);
 
     if (opts.precondition?.type === "content_sha256") {
       if (existing.content_sha256 !== opts.precondition.content_sha256) {
@@ -278,25 +310,106 @@ export class MemoryStoreService {
     }
 
     const newPath = opts.path ?? existing.path;
-    const newContent = opts.content ?? existing.content;
-    const contentChanged = opts.content !== undefined && opts.content !== existing.content;
-    const newSha = contentChanged ? await sha256Hex(newContent) : existing.content_sha256;
-    const newSize = contentChanged ? byteLength(newContent) : existing.size_bytes;
+    const pathChanged = opts.path !== undefined && opts.path !== existing.path;
+    const contentChanged = opts.content !== undefined;
+    if (!pathChanged && !contentChanged) return { ...existing };
+
+    let newContent: string;
+    let newSha: string;
+    let newSize: number;
+    let newEtag: string;
+
+    if (contentChanged) {
+      newContent = opts.content!;
+      newSha = await sha256Hex(newContent);
+      newSize = byteLength(newContent);
+
+      // Write content to (possibly new) R2 key with CAS protection on the
+      // existing key's etag. If path is also changing, we PUT the new key
+      // create-only then DELETE the old key.
+      const targetKey = r2Key(opts.storeId, newPath);
+      const oldKey = r2Key(opts.storeId, existing.path);
+
+      let blob;
+      try {
+        if (pathChanged) {
+          blob = await this.blobs.put(targetKey, newContent, {
+            precondition: { type: "ifNoneMatch", value: "*" },
+            actorMetadata: { actor_type: opts.actor.type, actor_id: opts.actor.id },
+          });
+        } else {
+          blob = await this.blobs.put(targetKey, newContent, {
+            precondition: { type: "ifMatch", etag: existing.etag },
+            actorMetadata: { actor_type: opts.actor.type, actor_id: opts.actor.id },
+          });
+        }
+      } catch (err) {
+        throw new MemoryBlobStoreError(err);
+      }
+      if (!blob) {
+        throw new MemoryPreconditionFailedError(
+          pathChanged ? "target path occupied" : "concurrent write detected (etag mismatch)",
+        );
+      }
+      newEtag = blob.etag;
+
+      if (pathChanged) {
+        // Best-effort: drop the old object after the new one is committed.
+        // If this fails the audit row still records the rename; an orphan R2
+        // object remains until the next store-delete or a manual cleanup.
+        try {
+          await this.blobs.delete(oldKey);
+        } catch (err) {
+          this.logger.warn("R2 delete of old key after rename failed", {
+            store_id: opts.storeId,
+            old_path: existing.path,
+            err: errToString(err),
+          });
+        }
+      }
+    } else {
+      // Pure rename: copy content to the new R2 key, delete the old.
+      const blob0 = await this.blobs.getText(r2Key(opts.storeId, existing.path));
+      if (!blob0) {
+        // R2 doesn't have it — nothing to copy. Index is lying or recently
+        // deleted. Treat as not-found.
+        throw new MemoryNotFoundError("memory content missing in blob store");
+      }
+      newContent = blob0.text;
+      newSha = existing.content_sha256;
+      newSize = existing.size_bytes;
+
+      let blob;
+      try {
+        blob = await this.blobs.put(r2Key(opts.storeId, newPath), newContent, {
+          precondition: { type: "ifNoneMatch", value: "*" },
+          actorMetadata: { actor_type: opts.actor.type, actor_id: opts.actor.id },
+        });
+      } catch (err) {
+        throw new MemoryBlobStoreError(err);
+      }
+      if (!blob) throw new MemoryPreconditionFailedError("target path occupied");
+      newEtag = blob.etag;
+      try {
+        await this.blobs.delete(r2Key(opts.storeId, existing.path));
+      } catch (err) {
+        this.logger.warn("R2 delete of old key after rename failed", {
+          store_id: opts.storeId,
+          old_path: existing.path,
+          err: errToString(err),
+        });
+      }
+    }
+
     const now = this.clock.nowMs();
-
-    // Embed only if content changed — saves a network round-trip on pure renames.
-    let embedding: number[] | null = null;
-    if (contentChanged) embedding = await this.embed(newContent);
-
     const mem = await this.memoryRepo.updateWithVersion(
       opts.memoryId,
       {
         path: newPath,
-        content: contentChanged ? newContent : undefined,
-        contentSha256: contentChanged ? newSha : undefined,
-        sizeBytes: contentChanged ? newSize : undefined,
+        contentSha256: newSha,
+        etag: newEtag,
+        sizeBytes: newSize,
         updatedAt: now,
-        vectorSyncedAt: contentChanged ? null : "unchanged",
       },
       {
         id: this.ids.versionId(),
@@ -312,22 +425,10 @@ export class MemoryStoreService {
       },
     );
 
-    if (embedding) {
-      await this.syncVectorIndex(opts.tenantId, opts.storeId, opts.memoryId, newPath, embedding);
-    } else if (opts.path && opts.path !== existing.path && this.vectorIndex.isAvailable()) {
-      // Path changed without content change — refresh metadata in vector index
-      // so search results carry the new path. Cheap: same vector values.
-      await this.refreshVectorMetadata(opts.tenantId, opts.storeId, opts.memoryId, newPath);
-    }
-
-    const refreshed = await this.memoryRepo.findById(opts.storeId, opts.memoryId);
-    return refreshed ?? mem;
+    return { ...mem, content: newContent };
   }
 
-  /**
-   * Delete by ID. Persistence is the truth — once it commits, the memory is
-   * gone for read/list/get; orphan vector cleanup is best-effort.
-   */
+  /** Delete by ID. R2 DELETE first; then D1 batch (index drop + version row). */
   async deleteById(opts: {
     tenantId: string;
     storeId: string;
@@ -340,6 +441,17 @@ export class MemoryStoreService {
     if (opts.expectedSha && existing.content_sha256 !== opts.expectedSha) {
       throw new MemoryPreconditionFailedError("content_sha256 mismatch");
     }
+
+    // Snapshot content for the version row before R2 delete.
+    const snapshot = await this.blobs.getText(r2Key(opts.storeId, existing.path));
+    const snapshotContent = snapshot?.text ?? "";
+
+    try {
+      await this.blobs.delete(r2Key(opts.storeId, existing.path));
+    } catch (err) {
+      throw new MemoryBlobStoreError(err);
+    }
+
     const now = this.clock.nowMs();
     await this.memoryRepo.deleteWithVersion(opts.memoryId, {
       id: this.ids.versionId(),
@@ -347,23 +459,12 @@ export class MemoryStoreService {
       storeId: opts.storeId,
       operation: "deleted",
       path: existing.path,
-      content: existing.content,
+      content: snapshotContent,
       contentSha256: existing.content_sha256,
       sizeBytes: existing.size_bytes,
       actor: opts.actor,
       createdAt: now,
     });
-    if (this.vectorIndex.isAvailable()) {
-      try {
-        await this.vectorIndex.deleteByIds([vectorKey(opts.storeId, opts.memoryId)]);
-      } catch (err) {
-        this.logger.warn("vector index delete failed (orphan vector left)", {
-          store_id: opts.storeId,
-          memory_id: opts.memoryId,
-          err: errToString(err),
-        });
-      }
-    }
   }
 
   // ============================================================
@@ -379,61 +480,30 @@ export class MemoryStoreService {
     return this.memoryRepo.list(opts.storeId, { pathPrefix: opts.pathPrefix });
   }
 
+  /** Single read by path — fills `content` from R2. */
   async readByPath(opts: {
     tenantId: string;
     storeId: string;
     path: string;
   }): Promise<MemoryRow | null> {
     await this.requireStore(opts);
-    return this.memoryRepo.findByPath(opts.storeId, opts.path);
+    const row = await this.memoryRepo.findByPath(opts.storeId, opts.path);
+    if (!row) return null;
+    const blob = await this.blobs.getText(r2Key(opts.storeId, row.path));
+    return { ...row, content: blob?.text ?? "" };
   }
 
+  /** Single read by id — fills `content` from R2. */
   async readById(opts: {
     tenantId: string;
     storeId: string;
     memoryId: string;
   }): Promise<MemoryRow | null> {
     await this.requireStore(opts);
-    return this.memoryRepo.findById(opts.storeId, opts.memoryId);
-  }
-
-  // ============================================================
-  // Search
-  // ============================================================
-
-  async searchMemories(opts: {
-    tenantId: string;
-    storeId: string;
-    query: string;
-    topK?: number;
-  }): Promise<SearchHit[]> {
-    await this.requireStore(opts);
-    if (!this.vectorIndex.isAvailable()) return [];
-
-    let queryEmbedding: number[] | null;
-    try {
-      queryEmbedding = await this.embedding.embed(opts.query);
-    } catch (err) {
-      this.logger.warn("query embedding failed", { err: errToString(err) });
-      return [];
-    }
-    if (!queryEmbedding) return [];
-
-    const matches = await this.vectorIndex.query(queryEmbedding, {
-      topK: opts.topK ?? 10,
-      filter: { store_id: opts.storeId },
-    });
-    if (!matches.length) return [];
-
-    // D1 join filters orphan vectors (vector exists but D1 row gone).
-    const hits: SearchHit[] = [];
-    for (const m of matches) {
-      const memId = extractMemoryId(m.id);
-      const row = await this.memoryRepo.findById(opts.storeId, memId);
-      if (!row) continue;
-      hits.push({ id: row.id, path: row.path, content: row.content, score: m.score });
-    }
-    return hits;
+    const row = await this.memoryRepo.findById(opts.storeId, opts.memoryId);
+    if (!row) return null;
+    const blob = await this.blobs.getText(r2Key(opts.storeId, row.path));
+    return { ...row, content: blob?.text ?? "" };
   }
 
   // ============================================================
@@ -462,81 +532,37 @@ export class MemoryStoreService {
     return this.versionRepo.get(opts.storeId, opts.versionId);
   }
 
+  /**
+   * Redact a prior version's content. Per Anthropic spec:
+   *   "A version that is the current head of a live memory cannot be redacted.
+   *    Write a new version first (or delete the memory), then redact the old one."
+   *
+   * "Live head" = a version whose content_sha256 equals the live memory's current
+   * content_sha256. We check by looking up the memory at the version's
+   * memory_id and comparing sha256s.
+   */
   async redactVersion(opts: {
     tenantId: string;
     storeId: string;
     versionId: string;
   }): Promise<MemoryVersionRow> {
     await this.requireStore(opts);
-    const existing = await this.versionRepo.get(opts.storeId, opts.versionId);
-    if (!existing) throw new MemoryNotFoundError("Memory version not found");
+    const version = await this.versionRepo.get(opts.storeId, opts.versionId);
+    if (!version) throw new MemoryNotFoundError("Memory version not found");
+
+    // If the parent memory still exists and its current sha256 matches this
+    // version, the version IS the live head — refuse.
+    const liveMemory = await this.memoryRepo.findById(opts.storeId, version.memory_id);
+    if (
+      liveMemory &&
+      version.content_sha256 !== null &&
+      liveMemory.content_sha256 === version.content_sha256
+    ) {
+      throw new MemoryPreconditionFailedError(
+        "cannot redact the current head of a live memory; write a new version first",
+      );
+    }
     return this.versionRepo.redact(opts.storeId, opts.versionId);
-  }
-
-  // ============================================================
-  // Reconciliation
-  // ============================================================
-
-  /**
-   * Re-embed and re-upsert any memories with NULL vector_synced_at, then mark
-   * them synced. Bounded by `limit` to keep a single invocation cheap; call
-   * repeatedly until `still_failing === 0` to drain entirely.
-   */
-  async reconcile(opts: {
-    tenantId?: string;
-    storeId?: string;
-    limit?: number;
-  }): Promise<ReconcileResult> {
-    const limit = Math.min(opts.limit ?? 100, 500);
-    const rows = await this.memoryRepo.listUnsynced({
-      tenantId: opts.tenantId,
-      storeId: opts.storeId,
-      limit,
-    });
-
-    if (!this.vectorIndex.isAvailable()) {
-      return {
-        scanned: rows.length,
-        fixed: 0,
-        still_failing: rows.length,
-        sample_errors: rows.length
-          ? [{ memory_id: rows[0].id, error: "vector index unavailable" }]
-          : [],
-      };
-    }
-
-    let fixed = 0;
-    const errors: Array<{ memory_id: string; error: string }> = [];
-
-    for (const row of rows) {
-      try {
-        const embedding = await this.embedding.embed(row.content);
-        if (!embedding) throw new Error("embedding returned null (provider disabled)");
-        await this.vectorIndex.upsert([
-          {
-            id: vectorKey(row.storeId, row.id),
-            values: embedding,
-            metadata: { store_id: row.storeId, memory_id: row.id, path: row.path },
-          },
-        ]);
-        await this.memoryRepo.markSynced(row.id, this.clock.nowMs());
-        fixed++;
-      } catch (err) {
-        if (errors.length < 5) errors.push({ memory_id: row.id, error: errToString(err) });
-      }
-    }
-
-    return {
-      scanned: rows.length,
-      fixed,
-      still_failing: rows.length - fixed,
-      sample_errors: errors,
-    };
-  }
-
-  /** For health endpoints / monitoring — reconcile backlog gauge. */
-  async countUnsynced(opts: { tenantId?: string }): Promise<number> {
-    return this.memoryRepo.countUnsynced({ tenantId: opts.tenantId });
   }
 
   // ============================================================
@@ -558,67 +584,6 @@ export class MemoryStoreService {
   private assertContentSize(content: string): void {
     if (byteLength(content) > MEMORY_CONTENT_MAX_BYTES) {
       throw new MemoryContentTooLargeError(MEMORY_CONTENT_MAX_BYTES);
-    }
-  }
-
-  private async embed(text: string): Promise<number[] | null> {
-    try {
-      return await this.embedding.embed(text);
-    } catch (err) {
-      throw new MemoryEmbeddingFailedError(err);
-    }
-  }
-
-  private async syncVectorIndex(
-    tenantId: string,
-    storeId: string,
-    memoryId: string,
-    path: string,
-    embedding: number[],
-  ): Promise<void> {
-    if (!this.vectorIndex.isAvailable()) return;
-    try {
-      await this.vectorIndex.upsert([
-        {
-          id: vectorKey(storeId, memoryId),
-          values: embedding,
-          metadata: { tenant_id: tenantId, store_id: storeId, memory_id: memoryId, path },
-        },
-      ]);
-      await this.memoryRepo.markSynced(memoryId, this.clock.nowMs());
-    } catch (err) {
-      this.logger.warn("vector index upsert failed; row left for reconcile", {
-        store_id: storeId,
-        memory_id: memoryId,
-        err: errToString(err),
-      });
-    }
-  }
-
-  private async refreshVectorMetadata(
-    tenantId: string,
-    storeId: string,
-    memoryId: string,
-    path: string,
-  ): Promise<void> {
-    try {
-      const existing = await this.vectorIndex.getById(vectorKey(storeId, memoryId));
-      if (!existing || !existing.values) throw new Error("vector missing");
-      await this.vectorIndex.upsert([
-        {
-          id: vectorKey(storeId, memoryId),
-          values: existing.values,
-          metadata: { tenant_id: tenantId, store_id: storeId, memory_id: memoryId, path },
-        },
-      ]);
-      await this.memoryRepo.markSynced(memoryId, this.clock.nowMs());
-    } catch (err) {
-      await this.memoryRepo.markUnsynced(memoryId);
-      this.logger.warn("vector metadata refresh failed; row left for reconcile", {
-        store_id: storeId,
-        memory_id: memoryId,
-        err: errToString(err),
-      });
     }
   }
 }
@@ -644,27 +609,38 @@ const consoleLogger: Logger = {
 };
 
 // ============================================================
-// utilities
+// utilities (exported for adapters/queue consumer reuse)
 // ============================================================
 
-function byteLength(s: string): number {
+/**
+ * Compute the R2 object key for a memory. Anthropic paths typically lead with
+ * "/" (e.g. "/preferences/formatting.md"). We strip a leading "/" before
+ * concatenating to avoid R2 keys with double slashes that confuse `list`.
+ */
+export function r2Key(storeId: string, memoryPath: string): string {
+  const p = memoryPath.startsWith("/") ? memoryPath.slice(1) : memoryPath;
+  return `${storeId}/${p}`;
+}
+
+/** Reverse of `r2Key`. Returns null if the key isn't <store_id>/<path>. */
+export function parseR2Key(key: string): { storeId: string; memoryPath: string } | null {
+  const slash = key.indexOf("/");
+  if (slash <= 0 || slash === key.length - 1) return null;
+  return {
+    storeId: key.slice(0, slash),
+    memoryPath: "/" + key.slice(slash + 1),
+  };
+}
+
+export function byteLength(s: string): number {
   return new TextEncoder().encode(s).length;
 }
 
-async function sha256Hex(s: string): Promise<string> {
+export async function sha256Hex(s: string): Promise<string> {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(s));
   return Array.from(new Uint8Array(buf))
     .map((b) => b.toString(16).padStart(2, "0"))
     .join("");
-}
-
-function vectorKey(storeId: string, memoryId: string): string {
-  return `${storeId}:${memoryId}`;
-}
-
-function extractMemoryId(vectorId: string): string {
-  const idx = vectorId.indexOf(":");
-  return idx === -1 ? vectorId : vectorId.slice(idx + 1);
 }
 
 function errToString(err: unknown): string {
@@ -673,5 +649,46 @@ function errToString(err: unknown): string {
     return JSON.stringify(err);
   } catch {
     return String(err);
+  }
+}
+
+/**
+ * Validate a store name. Anthropic mounts as `/mnt/memory/<name>/` literally
+ * (spaces allowed) so we accept anything except chars that would break a
+ * filesystem path: forward slash, NUL, and control chars.
+ */
+function assertValidStoreName(name: string): void {
+  if (!name || name.length === 0) {
+    throw new Error("memory store name cannot be empty");
+  }
+  if (name.length > 255) {
+    throw new Error("memory store name too long (>255 chars)");
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f/\\]/.test(name)) {
+    throw new Error("memory store name contains forbidden characters");
+  }
+}
+
+/**
+ * Validate a memory path. Anthropic paths are forward-slash separated and
+ * typically start with "/". Reject backslash, NUL, control chars, and
+ * relative-traversal segments.
+ */
+function assertValidMemoryPath(path: string): void {
+  if (!path || path.length === 0) {
+    throw new Error("memory path cannot be empty");
+  }
+  if (path.length > 1024) {
+    throw new Error("memory path too long (>1024 chars)");
+  }
+  // eslint-disable-next-line no-control-regex
+  if (/[\x00-\x1f\\]/.test(path)) {
+    throw new Error("memory path contains forbidden characters");
+  }
+  for (const segment of path.split("/")) {
+    if (segment === ".." || segment === ".") {
+      throw new Error("memory path cannot contain '.' or '..' segments");
+    }
   }
 }

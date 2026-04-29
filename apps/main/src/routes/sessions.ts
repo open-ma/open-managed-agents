@@ -265,7 +265,8 @@ app.post("/", async (c) => {
       memory_store_id?: string;
       mount_path?: string;
       access?: "read_write" | "read_only";
-      prompt?: string;
+      /** Per-attachment guidance for the agent (Anthropic-aligned name). 4096 char cap. */
+      instructions?: string;
       url?: string;
       repo_url?: string;
       authorization_token?: string;
@@ -285,6 +286,22 @@ app.post("/", async (c) => {
   const memoryStoreCount = (body.resources ?? []).filter((r) => r.type === "memory_store").length;
   if (memoryStoreCount > 8) {
     return c.json({ error: "Maximum 8 memory_store resources per session" }, 422);
+  }
+
+  // Reject duplicate memory_store_id within a single session — they would
+  // collide on the same /mnt/memory/<store_name>/ mount path. Anthropic
+  // also disallows duplicates per session.
+  const seenMemoryStoreIds = new Set<string>();
+  for (const r of body.resources ?? []) {
+    if (r.type === "memory_store" && r.memory_store_id) {
+      if (seenMemoryStoreIds.has(r.memory_store_id)) {
+        return c.json(
+          { error: `Duplicate memory_store resource: ${r.memory_store_id}` },
+          422,
+        );
+      }
+      seenMemoryStoreIds.add(r.memory_store_id);
+    }
   }
 
   // Verify agent exists
@@ -357,7 +374,7 @@ app.post("/", async (c) => {
         memory_store_id: res.memory_store_id,
         mount_path: res.mount_path,
         access: res.access === "read_only" ? "read_only" : "read_write",
-        prompt: typeof res.prompt === "string" ? res.prompt.slice(0, 4096) : undefined,
+        instructions: typeof res.instructions === "string" ? res.instructions.slice(0, 4096) : undefined,
       });
     } else if ((res.type === "github_repository" || res.type === "github_repo") && (res.url || res.repo_url)) {
       const repoUrl = res.url || res.repo_url!;
@@ -1254,7 +1271,8 @@ app.post("/:id/resources", async (c) => {
     memory_store_id?: string;
     mount_path?: string;
     access?: "read_write" | "read_only";
-    prompt?: string;
+    /** Per-attachment guidance for the agent (Anthropic-aligned name). 4096 char cap. */
+    instructions?: string;
   }>();
 
   if (!body.type) {
@@ -1290,8 +1308,8 @@ app.post("/:id/resources", async (c) => {
         access: body.type === "memory_store"
           ? (body.access === "read_only" ? "read_only" : "read_write")
           : undefined,
-        prompt: body.type === "memory_store" && typeof body.prompt === "string"
-          ? body.prompt.slice(0, 4096)
+        instructions: body.type === "memory_store" && typeof body.instructions === "string"
+          ? body.instructions.slice(0, 4096)
           : undefined,
       },
     });
