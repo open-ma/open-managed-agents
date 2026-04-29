@@ -28,11 +28,11 @@ export interface KnownAgentEntry {
 
 export const KNOWN_ACP_AGENTS: KnownAgentEntry[] = [
   {
-    id: "claude-code-acp",
+    id: "claude-agent-acp",
     label: "Claude Code",
-    spec: { command: "claude-code-acp" },
-    installHint: "npm install -g @zed-industries/claude-code-acp",
-    homepage: "https://github.com/zed-industries/claude-code-acp",
+    spec: { command: "claude-agent-acp" },
+    installHint: "npm install -g @agentclientprotocol/claude-agent-acp",
+    homepage: "https://github.com/agentclientprotocol/claude-agent-acp",
   },
   {
     id: "codex-cli",

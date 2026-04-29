@@ -17,7 +17,7 @@
  *
  * Tool calls (sessionUpdate "tool_call" / "tool_call_update") become OMA
  * `agent.tool_use` + `agent.tool_result`. The ACP child runs the tool itself
- * (claude-code-acp ships its own bash/edit/read), so OMA never executes —
+ * (claude-agent-acp ships its own bash/edit/read), so OMA never executes —
  * we only mirror the trace for replay/audit.
  *
  * Why tool_call frames are buffered: Claude Code's ACP child sends multiple

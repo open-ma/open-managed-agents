@@ -34,7 +34,7 @@ const INITIAL_FORM = {
   // SessionDO loop. Both fields must be set together; partial = fall back to
   // default cloud agent.
   runtimeId: "",
-  acpAgentId: "claude-code-acp",
+  acpAgentId: "claude-agent-acp",
   /** Local skill ids to HIDE from this agent's ACP child. Empty = all
    *  detected local skills are visible (the daemon's default). */
   localSkillBlocklist: [] as string[],
@@ -234,7 +234,7 @@ export function AgentsList() {
           skills: Array.isArray(parsed.skills) ? parsed.skills as SkillEntry[] : [],
           callableAgents: Array.isArray(parsed.callable_agents) ? parsed.callable_agents as CallableEntry[] : [],
           runtimeId: rb?.runtime_id ?? "",
-          acpAgentId: rb?.acp_agent_id ?? "claude-code-acp",
+          acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
           localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist) ? rb.local_skill_blocklist : [],
         });
       } catch { /* keep current form if parse fails */ }

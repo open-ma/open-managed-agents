@@ -183,7 +183,7 @@ export class SessionManager {
     // child sees. Other ACP agents don't share Claude Code's filesystem
     // layout — leave their env untouched.
     const extraEnv: Record<string, string | undefined> = {};
-    if (p.agent_id === "claude-code-acp") {
+    if (p.agent_id === "claude-agent-acp") {
       try {
         const cfgDir = await setupClaudeConfigDir(sessionCwd, new Set(blocklist));
         extraEnv.CLAUDE_CONFIG_DIR = cfgDir;
@@ -365,7 +365,7 @@ export class SessionManager {
 
 /**
  * Strip env vars that signal "you're already inside another Claude-flavored
- * session". claude-code-acp aborts session/new with "cannot be launched
+ * session". claude-agent-acp aborts session/new with "cannot be launched
  * inside another Claude Code session" when CLAUDECODE is inherited (e.g.
  * user runs `oma bridge daemon` from a Claude Code terminal). The same
  * precaution applies to other ACP agents that may detect parent shells.

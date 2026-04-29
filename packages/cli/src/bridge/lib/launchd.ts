@@ -46,7 +46,7 @@ function buildPlist(opts: InstallOptions): string {
   const nodeDir = dirname(opts.nodePath);
   const setupPath = process.env.PATH ?? "";
   // Prepend node's dir so it always wins; freeze the rest so daemon-spawned
-  // children (claude-code-acp etc.) can find the same tools the user can.
+  // children (claude-agent-acp etc.) can find the same tools the user can.
   // Dedup keeps the plist readable when the user's shell already prepended
   // nvm/asdf to PATH (otherwise we'd write the node dir twice).
   const envPath = opts.envPath ?? dedupPath(setupPath ? `${nodeDir}:${setupPath}` : nodeDir);

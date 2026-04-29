@@ -84,7 +84,7 @@ import { detect } from "@open-managed-agents/acp-runtime/registry";
 const runtime: AcpRuntime = new AcpRuntime(new NodeSpawner());
 
 // User picked "Claude Code" from clash chat dropdown
-const agent = await detect("claude-code-acp");
+const agent = await detect("claude-agent-acp");
 if (!agent) throw new Error("claude-code not installed locally");
 
 const session = await runtime.start({
