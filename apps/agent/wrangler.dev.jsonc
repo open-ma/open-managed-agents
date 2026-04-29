@@ -26,9 +26,20 @@
     { "binding": "CONFIG_KV", "id": "5e49bdaec1884f5989037c86ece7b462" }
   ],
 
+  "vars": {
+    "MEMORY_BUCKET_NAME": "managed-agents-memory",
+    "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
+    "BACKUP_BUCKET_NAME": "managed-agents-backups",
+    "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
+  },
+
   "r2_buckets": [
     { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },
-    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
+    // Memory store mount target. In wrangler dev this resolves to the local
+    // wrangler R2 simulator; sandbox.mountBucket(..., { localBucket: true })
+    // performs bidirectional sync via the binding.
+    { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
   // MAIN service binding so AcpProxyHarness can call into the main worker's

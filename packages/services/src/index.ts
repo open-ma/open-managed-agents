@@ -187,8 +187,14 @@ export function buildServices(env: Env, db: D1Database): Services {
       // pg: () => createPgCredentialService({ pg: getPgPool(env) }),
     }),
     memory: pickBackend(overrides, "memory", {
-      cf: () => createCfMemoryStoreService({ db, ai: env.AI, vectorize: env.VECTORIZE }),
-      // pg: () => createPgMemoryStoreService({ pg: getPgPool(env), ai: env.AI, vectorize: env.VECTORIZE }),
+      cf: () => createCfMemoryStoreService({
+        db,
+        // MEMORY_BUCKET is required at runtime — no noop fallback. The bang
+        // intentionally throws if the binding is missing so the failure is
+        // visible at first request rather than silently degrading.
+        r2: env.MEMORY_BUCKET!,
+      }),
+      // pg: () => createPgMemoryStoreService({ pg: getPgPool(env), r2: env.MEMORY_BUCKET! }),
     }),
     vaults: pickBackend(overrides, "vaults", {
       cf: () => createCfVaultService({ db }),

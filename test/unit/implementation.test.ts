@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { describe, it, expect } from "vitest";
-import { buildTools, buildMemoryTools, getToolPermission } from "../../apps/agent/src/harness/tools";
+import { buildTools, getToolPermission } from "../../apps/agent/src/harness/tools";
 import { TestSandbox } from "../../apps/agent/src/runtime/sandbox";
 import type { AgentConfig } from "@open-managed-agents/shared";
 import type { SandboxExecutor } from "../../apps/agent/src/harness/interface";
@@ -146,82 +146,13 @@ describe("Permission policy enforcement", () => {
 });
 
 // ============================================================
-// Fix 2: Memory tools injection into harness
+// Memory tool injection — REMOVED in the Anthropic Memory Store migration.
+// Agents no longer get bespoke memory_* tools; each attached store is mounted
+// at /mnt/memory/<store_name>/ via sandbox.mountBucket and the agent uses
+// standard file tools (bash/read/write/edit/glob/grep) on that path. See
+// test/unit/memory-store-service.test.ts for service-level coverage and
+// test/unit/memory-events-consumer.test.ts for the R2-events queue consumer.
 // ============================================================
-describe("Memory tools injection into harness", () => {
-  // Use a fake MemoryStoreService so these tests stay focused on tool
-  // injection wiring rather than D1/Vectorize behavior.
-  function makeFakeSvc() {
-    const memories = new Map<string, any>();
-    let nextId = 1;
-    return {
-      async listMemories() { return Array.from(memories.values()); },
-      async readByPath({ path }: any) { return Array.from(memories.values()).find((m: any) => m.path === path) ?? null; },
-      async writeByPath({ path, content }: any) {
-        const id = `mem-fake-${nextId++}`;
-        const row = { id, path, content, content_sha256: "deadbeef", size_bytes: content.length, updated_at: new Date().toISOString() };
-        memories.set(id, row);
-        return row;
-      },
-      async updateById() { return null; },
-      async deleteById({ memoryId }: any) { memories.delete(memoryId); },
-      async searchMemories() { return []; },
-    };
-  }
-
-  it("memory tools merge correctly with built-in tools", async () => {
-    const builtInTools = await buildTools(makeAgentConfig(), new TestSandbox());
-    const memTools = buildMemoryTools(
-      [{ store_id: "store_1", access: "read_write" }],
-      "tn_test",
-      makeFakeSvc() as any,
-      "agent-test",
-    );
-    Object.assign(builtInTools, memTools);
-
-    // Built-in tools still present
-    expect(builtInTools.bash).toBeDefined();
-    expect(builtInTools.read).toBeDefined();
-    // Memory tools injected
-    expect(builtInTools.memory_list).toBeDefined();
-    expect(builtInTools.memory_read).toBeDefined();
-    expect(builtInTools.memory_write).toBeDefined();
-    expect(builtInTools.memory_search).toBeDefined();
-    expect(builtInTools.memory_delete).toBeDefined();
-  });
-
-  it("memory tools are not injected when no attachments", () => {
-    const memTools = buildMemoryTools([], "tn_test", makeFakeSvc() as any, "agent-test");
-    expect(Object.keys(memTools)).toHaveLength(0);
-  });
-
-  it("memory tools are operational after merge", async () => {
-    const builtInTools = await buildTools(makeAgentConfig(), new TestSandbox());
-    const memTools = buildMemoryTools(
-      [{ store_id: "store_1", access: "read_write" }],
-      "tn_test",
-      makeFakeSvc() as any,
-      "agent-test",
-    );
-    Object.assign(builtInTools, memTools);
-
-    // Write a memory via the merged tools
-    const writeResult = await builtInTools.memory_write.execute(
-      { path: "test/notes", content: "merged test" },
-      TOOL_EXEC_OPTS,
-    );
-    expect(writeResult).toContain("Wrote memory at test/notes");
-
-    // Read it back via the merged tools
-    const listResult = await builtInTools.memory_list.execute(
-      {},
-      TOOL_EXEC_OPTS,
-    );
-    const items = JSON.parse(listResult);
-    expect(items.length).toBe(1);
-    expect(items[0].path).toBe("test/notes");
-  });
-});
 
 // ============================================================
 // Fix 3: File mounting into sandbox

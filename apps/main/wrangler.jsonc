@@ -37,7 +37,12 @@
   },
 
   "r2_buckets": [
-    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+    { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
+    // Bytes-of-truth for memory store content. Each memory is keyed
+    // <store_id>/<memory_path>. R2 Event Notifications on this bucket
+    // route to MEMORY_EVENTS_QUEUE; the queue consumer in this worker
+    // reflects writes back to D1 (memories index + memory_versions audit).
+    { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
   "d1_databases": [
@@ -118,6 +123,31 @@
     { "name": "RL_UPLOAD_TENANT",   "namespace_id": "1007", "simple": { "limit": 30, "period": 60 } }
   ],
 
+  // Cloudflare Queue consumer for R2 Event Notifications on MEMORY_BUCKET.
+  // R2 fires { action, bucket, object: { key, size, eTag } } per write/delete;
+  // the consumer in apps/main/src/queue/memory-events.ts derives store_id+path
+  // from the key, dedupes by (store_id, path, etag), and writes:
+  //   - memories index row (UPSERT)
+  //   - memory_versions audit row (INSERT)
+  // R2 → Queue subscription itself is NOT in wrangler — set it up via:
+  //   wrangler r2 bucket notification create managed-agents-memory \
+  //     --event-type object-create object-delete \
+  //     --queue managed-agents-memory-events
+  // Local dev: R2 events do NOT fire (CF control-plane feature). REST writes
+  // still audit (inline write to D1 in the route handler), but agent FUSE
+  // writes are not audited in dev. Documented in README.
+  "queues": {
+    "consumers": [
+      {
+        "queue": "managed-agents-memory-events",
+        "max_batch_size": 25,
+        "max_batch_timeout": 5,
+        "max_retries": 5,
+        "dead_letter_queue": "managed-agents-memory-events-dlq"
+      }
+    ]
+  },
+
   "triggers": {
     "crons": ["* * * * *"]
   },
@@ -138,8 +168,20 @@
         { "binding": "AUTH_DB", "database_name": "openma-auth-staging", "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" }
       ],
       "r2_buckets": [
-        { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" }
+        { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
+        { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory-staging" }
       ],
+      "queues": {
+        "consumers": [
+          {
+            "queue": "managed-agents-memory-events-staging",
+            "max_batch_size": 25,
+            "max_batch_timeout": 5,
+            "max_retries": 5,
+            "dead_letter_queue": "managed-agents-memory-events-staging-dlq"
+          }
+        ]
+      },
       "send_email": [
         { "name": "SEND_EMAIL" }
       ],
