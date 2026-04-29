@@ -246,6 +246,26 @@ export interface SandboxExecutor {
     storeId: string;
     readOnly: boolean;
   }): Promise<void>;
+  /**
+   * Snapshot /workspace into R2 via squashfs. Returns a serializable
+   * handle; null on failure. Used by session-do.ts to checkpoint the
+   * workspace at session destroy. See workspace-backups.ts for the D1
+   * persistence layer that survives the snapshot handle across sessions.
+   */
+  createWorkspaceBackup?(opts: {
+    name?: string;
+    ttlSec: number;
+  }): Promise<{ id: string; dir: string; localBucket?: boolean } | null>;
+  /**
+   * Restore a previously-created backup into /workspace. Returns true on
+   * success, false if the backup is missing/expired/etc. Best-effort: a
+   * false return means the caller should treat /workspace as empty.
+   */
+  restoreWorkspaceBackup?(handle: {
+    id: string;
+    dir: string;
+    localBucket?: boolean;
+  }): Promise<boolean>;
   /** Destroy the sandbox container — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
 }
