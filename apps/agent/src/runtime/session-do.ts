@@ -41,7 +41,9 @@ import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
 import {
   findLatestBackup as findWorkspaceBackup,
   recordBackup as recordWorkspaceBackup,
+  coordinateBackup,
   DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+  type BackupCoordinatorState,
 } from "./workspace-backups";
 
 interface SessionInitParams {
@@ -2711,21 +2713,6 @@ export class SessionDO extends Agent<Env, SessionState> {
    * empty — never a hard error for the user.
    */
   private async maybeBackupWorkspace(opts?: { force?: boolean }): Promise<void> {
-    // Coalesce concurrent backups: if one is already in flight, the FS
-    // state it captures is the same one a second backup would see (no
-    // agent ops can run during a backup). Force callers await the
-    // in-flight one rather than starting a racing second that the SDK
-    // would reject with HTTP 500. Non-force callers just skip.
-    if (this.workspaceBackupInFlight) {
-      return opts?.force ? this.workspaceBackupInFlight : undefined;
-    }
-    const now = Date.now();
-    if (
-      !opts?.force &&
-      now - this.lastWorkspaceBackupAt < SessionDO.WORKSPACE_BACKUP_DEBOUNCE_MS
-    ) {
-      return;
-    }
     if (
       !(this.sandbox instanceof CloudflareSandbox) ||
       !this.state.tenant_id ||
@@ -2739,34 +2726,46 @@ export class SessionDO extends Agent<Env, SessionState> {
     const environmentId = this.state.environment_id;
     const authDb = this.env.AUTH_DB;
     const sessionId = this.state.session_id;
-    this.workspaceBackupInFlight = (async () => {
-      try {
-        const handle = await sandbox.createWorkspaceBackup({
-          name: `session-${sessionId ?? "unknown"}`,
-          ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-        });
-        if (!handle) return;
-        await recordWorkspaceBackup(authDb, {
-          tenantId,
-          environmentId,
-          handle,
-          nowMs: now,
-          ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-          sessionId,
-        });
-        this.lastWorkspaceBackupAt = now;
-      } catch (err) {
-        logWarn(
-          { op: "session_do.workspace_backup", session_id: sessionId, force: !!opts?.force, err },
-          "workspace backup failed (best-effort)",
-        );
-      }
-    })();
-    try {
-      await this.workspaceBackupInFlight;
-    } finally {
-      this.workspaceBackupInFlight = null;
-    }
+    // Coordination (debounce + in-flight coalesce) lives in workspace-backups.ts
+    // as a pure function so it's unit-testable. State adapter routes the get/set
+    // through the SessionDO's own instance fields so the existing storage model
+    // (mutable instance fields) is preserved.
+    // eslint-disable-next-line @typescript-eslint/no-this-alias
+    const this_ = this;
+    const state: BackupCoordinatorState = {
+      get lastBackupAt(): number { return this_.lastWorkspaceBackupAt; },
+      set lastBackupAt(v: number) { this_.lastWorkspaceBackupAt = v; },
+      get inFlight(): Promise<void> | null { return this_.workspaceBackupInFlight; },
+      set inFlight(v: Promise<void> | null) { this_.workspaceBackupInFlight = v; },
+    };
+    return coordinateBackup(
+      state,
+      {
+        debounceMs: SessionDO.WORKSPACE_BACKUP_DEBOUNCE_MS,
+        now: () => Date.now(),
+        doBackup: async () => {
+          const handle = await sandbox.createWorkspaceBackup({
+            name: `session-${sessionId ?? "unknown"}`,
+            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+          });
+          if (!handle) return;
+          await recordWorkspaceBackup(authDb, {
+            tenantId,
+            environmentId,
+            handle,
+            nowMs: Date.now(),
+            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+            sessionId,
+          });
+        },
+      },
+      opts,
+    ).catch((err: unknown) => {
+      logWarn(
+        { op: "session_do.workspace_backup", session_id: sessionId, force: !!opts?.force, err },
+        "workspace backup failed (best-effort)",
+      );
+    });
   }
 
   /**
