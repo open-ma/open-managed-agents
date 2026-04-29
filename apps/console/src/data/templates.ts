@@ -97,7 +97,7 @@ Match the customer's tone. Be warm but don't pad. One emoji max.`,
     id: "incident-commander",
     name: "Incident commander",
     description: "Triages a Sentry alert, opens a Linear incident ticket, and runs the Slack war room.",
-    model: "claude-opus-4-6",
+    model: "claude-opus-4-7",
     system: `You are an on-call incident commander. When handed a Sentry issue ID or an error fingerprint:
 
 1. Pull the full event payload, stack trace, release tag, and affected-user count from Sentry.
