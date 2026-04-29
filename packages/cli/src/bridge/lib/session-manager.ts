@@ -36,7 +36,7 @@ import { AcpRuntimeImpl } from "@open-managed-agents/acp-runtime";
 import { NodeSpawner } from "@open-managed-agents/acp-runtime/node-spawner";
 import { KNOWN_ACP_AGENTS } from "@open-managed-agents/acp-runtime/registry";
 import type { AcpSession } from "@open-managed-agents/acp-runtime";
-import { ensureSessionCwd, writeBundle } from "./session-cwd.js";
+import { ensureSessionCwd, removeSessionCwd, writeBundle } from "./session-cwd.js";
 
 export interface SessionStartParams {
   session_id: string;
@@ -242,17 +242,29 @@ export class SessionManager {
   }
 
   async dispose(session_id: string): Promise<void> {
+    await this.#killChild(session_id);
+    // Drop the spawn cwd — session is dead at the platform; transcripts /
+    // AGENTS.md / .claude/skills/ are no longer load-bearing.
+    await removeSessionCwd(session_id);
+    this.#send({ type: "session.disposed", session_id });
+  }
+
+  /** Best-effort cleanup on daemon shutdown. KEEPS spawn cwds — sessions are
+   *  still live at the platform; the daemon coming back tomorrow needs the
+   *  same dirs to spawn fresh ACP children with the same transcripts. */
+  async disposeAll(): Promise<void> {
+    const ids = [...this.#sessions.keys()];
+    await Promise.all(ids.map((id) => this.#killChild(id)));
+  }
+
+  /** Kill the ACP child + drop in-memory state. Does NOT touch the spawn
+   *  cwd — caller decides whether the cwd should outlive this. */
+  async #killChild(session_id: string): Promise<void> {
     const sess = this.#sessions.get(session_id);
     if (!sess) return;
     for (const ctrl of sess.turns.values()) ctrl.abort();
     await sess.acp.dispose().catch(() => undefined);
     this.#sessions.delete(session_id);
-    this.#send({ type: "session.disposed", session_id });
-  }
-
-  async disposeAll(): Promise<void> {
-    const ids = [...this.#sessions.keys()];
-    await Promise.all(ids.map((id) => this.dispose(id)));
   }
 
   async #fetchBundle(sid: string, acpAgentId: string): Promise<SessionBundle | null> {
