@@ -48,6 +48,31 @@ export const KNOWN_ACP_AGENTS: KnownAgentEntry[] = [
     installHint: "npm install -g @google/gemini-cli",
     homepage: "https://github.com/google-gemini/gemini-cli",
   },
+  {
+    id: "opencode",
+    label: "OpenCode",
+    spec: { command: "opencode", args: ["acp"] },
+    installHint: "https://opencode.ai/docs/ — Go binary, install via the platform package or https://opencode.ai/install.sh",
+    homepage: "https://opencode.ai/",
+  },
+  {
+    id: "hermes",
+    label: "Hermes (Nous Research)",
+    spec: { command: "hermes", args: ["acp"] },
+    installHint: "see https://hermes-agent.nousresearch.com/docs/installation/",
+    homepage: "https://github.com/NousResearch/hermes-agent",
+  },
+  {
+    // Meta-CLI from openclaw that can wrap many non-native-ACP agents
+    // (openclaw, cursor, pi, kiro, qwen). We ship one entry pointing at
+    // openclaw because that's the most-asked-for; users can always pass
+    // their own AgentSpec to wrap a different one.
+    id: "openclaw",
+    label: "OpenClaw (via acpx)",
+    spec: { command: "acpx", args: ["openclaw"] },
+    installHint: "npm install -g acpx",
+    homepage: "https://github.com/openclaw/acpx",
+  },
 ];
 
 /**

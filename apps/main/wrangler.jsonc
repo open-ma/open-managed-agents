@@ -15,7 +15,8 @@
       "/auth-info",
       "/health",
       "/linear/*",
-      "/linear-setup/*"
+      "/linear-setup/*",
+      "/agents/runtime/*"
     ]
   },
 
@@ -42,6 +43,12 @@
   "d1_databases": [
     { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" }
   ],
+
+  "durable_objects": {
+    "bindings": [
+      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" }
+    ]
+  },
 
   // Cloudflare Email Service (public beta) — transactional email
   "send_email": [
@@ -78,6 +85,10 @@
     {
       "tag": "v4",
       "deleted_classes": ["BuilderSandbox"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["RuntimeRoom"]
     }
   ],
 
@@ -140,6 +151,11 @@
         { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default-staging" },
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
       ],
+      "durable_objects": {
+        "bindings": [
+          { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom" }
+        ]
+      },
       "limits": { "cpu_ms": 300000 },
       "observability": { "enabled": true },
       "analytics_engine_datasets": [

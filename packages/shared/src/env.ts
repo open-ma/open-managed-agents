@@ -88,4 +88,14 @@ export interface Env {
   // Workers, point this at a Hyperdrive connection string for production;
   // direct DSN works in local dev / Node deployments.
   DATABASE_URL?: string;
+  /** Local-ACP-runtime control plane DO. Pairs the user's `oma bridge daemon`
+   *  WebSocket with the ACP-proxy harness inside SessionDO so a session can
+   *  delegate its agent loop to a Claude Code (or other ACP) child running
+   *  on the user's machine. Bound only on apps/main. */
+  RUNTIME_ROOM?: DurableObjectNamespace;
+  /** Service binding from per-env sandbox workers back to the main worker.
+   *  AcpProxyHarness uses this to call /v1/internal/runtime-turn — going
+   *  through HTTP keeps the auth surface narrow (one internal-secret-gated
+   *  endpoint) and avoids a cross-script DO binding. Bound on apps/agent. */
+  MAIN?: Fetcher;
 }
