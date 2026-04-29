@@ -317,7 +317,12 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
   if (!agent) return c.json({ error: "session has no agent snapshot" }, 500);
 
   const files = renderSessionBundle(agent, acpAgentId);
-  return c.json({ files });
+  // Per-agent blocklist of LOCAL skills the user has on their machine
+  // — daemon enforces by NOT symlinking these into the spawn-cwd's
+  // CLAUDE_CONFIG_DIR. Always send an array (possibly empty) so the
+  // daemon doesn't have to handle three states (undefined / empty / set).
+  const local_skill_blocklist = agent.runtime_binding?.local_skill_blocklist ?? [];
+  return c.json({ files, local_skill_blocklist });
 });
 
 /**

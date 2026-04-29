@@ -37,6 +37,7 @@ import { NodeSpawner } from "@open-managed-agents/acp-runtime/node-spawner";
 import { KNOWN_ACP_AGENTS } from "@open-managed-agents/acp-runtime/registry";
 import type { AcpSession } from "@open-managed-agents/acp-runtime";
 import { ensureSessionCwd, removeSessionCwd, writeBundle } from "./session-cwd.js";
+import { setupClaudeConfigDir } from "./claude-config-dir.js";
 
 export interface SessionStartParams {
   session_id: string;
@@ -79,7 +80,14 @@ export interface SessionManagerEnv {
 }
 
 interface BundleFile { path: string; content: string }
-interface SessionBundle { files: BundleFile[] }
+interface SessionBundle {
+  files: BundleFile[];
+  /** Per-agent local-skill blocklist — daemon hides any skill with id in
+   *  this list from the spawn by NOT symlinking it into CLAUDE_CONFIG_DIR.
+   *  Bare directory ids (no plugin prefix); a global skill and a plugin
+   *  skill that share the same id are both hidden. */
+  local_skill_blocklist?: string[];
+}
 
 export class SessionManager {
   #send: Sender;
@@ -138,15 +146,38 @@ export class SessionManager {
     // Fetch spawn-cwd bundle (AGENTS.md + .claude/skills/...) from main and
     // materialize before starting the ACP child. Bundle errors are non-fatal
     // — we still spawn; the agent just won't see OMA's prompt/skills.
+    let blocklist: string[] = [];
     try {
       const bundle = await this.#fetchBundle(p.session_id, p.agent_id);
-      if (bundle) await writeBundle(sessionCwd, bundle.files);
+      if (bundle) {
+        await writeBundle(sessionCwd, bundle.files);
+        blocklist = bundle.local_skill_blocklist ?? [];
+      }
     } catch (e) {
       process.stderr.write(`  ! bundle fetch failed (non-fatal): ${(e as Error).message}\n`);
     }
 
+    // For Claude Code we redirect ~/.claude → <cwd>/.claude-config so the
+    // user's per-agent local-skill blocklist actually filters what the
+    // child sees. Other ACP agents don't share Claude Code's filesystem
+    // layout — leave their env untouched.
+    const extraEnv: Record<string, string | undefined> = {};
+    if (p.agent_id === "claude-code-acp") {
+      try {
+        const cfgDir = await setupClaudeConfigDir(sessionCwd, new Set(blocklist));
+        extraEnv.CLAUDE_CONFIG_DIR = cfgDir;
+      } catch (e) {
+        process.stderr.write(
+          `  ! CLAUDE_CONFIG_DIR setup failed (non-fatal, child sees real ~/.claude): ${(e as Error).message}\n`,
+        );
+      }
+    }
+
     process.stderr.write(
-      `  → SessionManager.start ${agent.spec.command} cwd=${sessionCwd}\n`,
+      `  → SessionManager.start ${agent.spec.command} cwd=${sessionCwd}` +
+        (extraEnv.CLAUDE_CONFIG_DIR ? ` cfg=${extraEnv.CLAUDE_CONFIG_DIR}` : "") +
+        (blocklist.length ? ` blocklist=${blocklist.length}` : "") +
+        "\n",
     );
 
     try {
@@ -154,7 +185,7 @@ export class SessionManager {
         agent: {
           ...agent.spec,
           cwd: sessionCwd,
-          env: scrubAcpSpawnEnv({ ...(agent.spec.env ?? {}) }),
+          env: scrubAcpSpawnEnv({ ...(agent.spec.env ?? {}), ...extraEnv }),
         },
         resumeAcpSessionId: p.resume?.acp_session_id,
       });
