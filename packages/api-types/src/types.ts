@@ -87,6 +87,14 @@ export interface AgentConfig {
   runtime_binding?: {
     runtime_id: string;
     acp_agent_id: string;
+    /**
+     * Skill ids the user wants HIDDEN from this agent's ACP child. Default
+     * (omitted / empty) = all locally-detected skills allowed. Each id matches
+     * a skill the daemon reported in the runtime hello manifest's
+     * `local_skills[acp_agent_id]`. Daemon enforces by NOT symlinking the
+     * blocked dir into spawn cwd's CLAUDE_CONFIG_DIR.
+     */
+    local_skill_blocklist?: string[];
   };
   description?: string;
   metadata?: Record<string, unknown>;
