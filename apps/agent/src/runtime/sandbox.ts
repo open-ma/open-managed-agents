@@ -38,9 +38,24 @@ export class CloudflareSandbox implements SandboxExecutor {
     if (this.mounted) return;
     this.mounted = true;
     const sandbox = await this.getSandbox();
+    if (!this.env.WORKSPACE_BUCKET) return;
+
+    const fuse = this.fuseR2ConfigOrNull();
+    const bucketName = this.env.WORKSPACE_BUCKET_NAME;
+
     try {
-      if (this.env.WORKSPACE_BUCKET) {
-        await sandbox.mountBucket("managed-agents-workspace", "/workspace", {
+      if (fuse && bucketName) {
+        // Production path: S3FS-FUSE direct to R2 (writes truly persist).
+        await sandbox.mountBucket(bucketName, "/workspace", {
+          endpoint: fuse.endpoint,
+          provider: "r2",
+          credentials: fuse.credentials,
+        });
+      } else {
+        // wrangler dev path: binding-sync. In real CF, writes don't push
+        // back to R2 — workspace becomes effectively ephemeral. Logged
+        // but not raised, matching prior OMA behavior.
+        await sandbox.mountBucket("WORKSPACE_BUCKET", "/workspace", {
           localBucket: true,
         });
       }
@@ -55,16 +70,18 @@ export class CloudflareSandbox implements SandboxExecutor {
    * store's keys (`<store_id>/...`) under the mount, regardless of what other
    * tenants have in MEMORY_BUCKET.
    *
-   * The Anthropic Managed Agents Memory contract uses standard file tools
-   * over /mnt/memory/<store>/ — we deliberately do NOT register memory_*
-   * tools (those were removed in this migration).
+   * Anthropic Managed Agents Memory contract: the agent reads/writes via
+   * standard file tools — no bespoke memory_* tools (those were removed).
    *
-   * `localBucket: true` mode requires the FIRST arg to be the BINDING NAME
-   * (the SDK does `this.env[bucket]` to resolve it; @cloudflare/sandbox 0.9.1
-   * sandbox-PAYx1CcU.js mountBucketLocal). Pass "MEMORY_BUCKET" not the
-   * actual bucket_name so prod ("managed-agents-memory") and staging
-   * ("managed-agents-memory-staging") both work — the binding name is the
-   * same across environments.
+   * Mode selection:
+   *   - Production (FUSE / s3fs): used when R2_ENDPOINT + R2_ACCESS_KEY_ID
+   *     + R2_SECRET_ACCESS_KEY are all bound. Writes flow synchronously
+   *     over the S3 API and trigger R2 Event Notifications → CF Queue →
+   *     consumer → D1 audit. This is the contract the rest of the memory
+   *     subsystem assumes.
+   *   - wrangler dev (`localBucket: true`): R2 binding-sync. Reads work,
+   *     writes do NOT persist to R2 in real CF — only used here as a dev
+   *     fallback so `pnpm wrangler dev` keeps working without R2 keys.
    */
   async mountMemoryStore(opts: {
     storeName: string;
@@ -81,11 +98,49 @@ export class CloudflareSandbox implements SandboxExecutor {
     // Trailing slash on the prefix ensures we don't accidentally match
     // sibling prefixes (e.g. "abc/" vs "abcd/...").
     const prefix = `/${opts.storeId}/`;
-    await sandbox.mountBucket("MEMORY_BUCKET", mountPath, {
-      localBucket: true,
-      prefix,
-      readOnly: opts.readOnly,
-    });
+
+    const fuse = this.fuseR2ConfigOrNull();
+    const bucketName = this.env.MEMORY_BUCKET_NAME;
+
+    if (fuse && bucketName) {
+      await sandbox.mountBucket(bucketName, mountPath, {
+        endpoint: fuse.endpoint,
+        provider: "r2",
+        credentials: fuse.credentials,
+        prefix,
+        readOnly: opts.readOnly,
+      });
+    } else {
+      // Dev fallback. In production this branch means agent writes won't
+      // persist — log loudly so the operator catches the misconfig.
+      console.warn(
+        "[sandbox] mountMemoryStore: R2 FUSE creds missing (R2_ENDPOINT / " +
+        "R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY / MEMORY_BUCKET_NAME) — " +
+        "falling back to localBucket mode. Agent writes to /mnt/memory/ will " +
+        "NOT persist to R2 in real CF; this is dev-only behavior.",
+      );
+      await sandbox.mountBucket("MEMORY_BUCKET", mountPath, {
+        localBucket: true,
+        prefix,
+        readOnly: opts.readOnly,
+      });
+    }
+  }
+
+  /**
+   * Returns the R2 S3 credentials block if all three FUSE env vars are
+   * present, else null (dev fallback). Centralized so memory + workspace
+   * share the same gating.
+   */
+  private fuseR2ConfigOrNull(): {
+    endpoint: string;
+    credentials: { accessKeyId: string; secretAccessKey: string };
+  } | null {
+    const endpoint = this.env.R2_ENDPOINT;
+    const accessKeyId = this.env.R2_ACCESS_KEY_ID;
+    const secretAccessKey = this.env.R2_SECRET_ACCESS_KEY;
+    if (!endpoint || !accessKeyId || !secretAccessKey) return null;
+    return { endpoint, credentials: { accessKeyId, secretAccessKey } };
   }
 
   async exec(command: string, timeout?: number): Promise<string> {
