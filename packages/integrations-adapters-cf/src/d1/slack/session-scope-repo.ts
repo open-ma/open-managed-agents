@@ -150,6 +150,17 @@ export class D1SlackSessionScopeRepo implements SlackSessionScopeRepo {
       .run();
   }
 
+  async closeAllForPublication(publicationId: string): Promise<void> {
+    await this.db
+      .prepare(
+        `UPDATE slack_thread_sessions
+         SET status = 'completed', pending_scan_until = NULL
+         WHERE publication_id = ? AND status = 'active'`,
+      )
+      .bind(publicationId)
+      .run();
+  }
+
   private toDomain(row: Row): SessionScope {
     return {
       tenantId: row.tenant_id,
