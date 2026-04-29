@@ -22,7 +22,7 @@ export interface SessionSecretServiceDeps {
  *     `t:{tenantId}:secret:{sessionId}:` strings.
  *   - Resource lifecycle. The session-resources rows live in sessions-store;
  *     this service only stores the opaque payload that some resource types
- *     (env_secret, github_repository) carry alongside their metadata.
+ *     (env, github_repository) carry alongside their metadata.
  *
  * Why this stays a separate package even though it's mostly a passthrough:
  * the future Redis / per-tenant-KV / Postgres-pgcrypto adapter will swap

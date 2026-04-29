@@ -797,7 +797,14 @@ export interface FileRecord {
 export interface SessionResource {
   id: string;
   session_id: string;
-  type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
+  // `env` is the canonical name for environment-variable resources. The
+  // legacy alias `env_secret` is still accepted on writes (so older API
+  // clients keep working) but is normalized to `env` before persistence.
+  // The rename was intentional: there is no application-level encryption
+  // on these values today (only Cloudflare's at-rest layer), and the
+  // "secret" suffix was overpromising — see the type=text + mask toggle
+  // in the New Session UI for the matching change.
+  type: "file" | "memory_store" | "github_repository" | "github_repo" | "env" | "env_secret";
   file_id?: string;
   memory_store_id?: string;
   url?: string;

@@ -57,7 +57,7 @@ export type NewResourceInput = Omit<SessionResource, "id" | "session_id" | "crea
  *   - metadata merge semantics (per-key delete on null) — was sessions.ts:489-498
  *
  * Does NOT own:
- *   - secret materials (env_secret.value, github_repository.authorization_token).
+ *   - secret materials (env.value, github_repository.authorization_token).
  *     Those continue to live in CONFIG_KV under `t:{tenant}:secret:...` keys
  *     because they're write-only blobs the route layer reads alongside the
  *     resource. Sessions store records resource METADATA only.
