@@ -108,33 +108,12 @@ jobs:
 
       # AcpProxyHarness in the agent worker calls main's /v1/internal/*
       # endpoints (runtime-attach-harness, runtime-session-bundle), gated
-      # on this header secret. Without it, every local-runtime turn fails
-      # with "INTEGRATIONS_INTERNAL_SECRET unset" — observed in prod when
-      # a runtime-bound agent first sent a turn after the agent worker was
-      # rebuilt without anyone having manually set the secret. Lane CI
-      # (deploy-lane.yml:226) sets the same secret on lane agent workers
-      # for the same reason; this is the prod sibling.
-      #
-      # Scope intentionally narrow: only this one secret. The rest of the
-      # prod worker secrets are managed manually (see docs/linear-
-      # integration-sop.md), and a blanket sync would risk overwriting
-      # values that aren't checked into GH Secrets. If/when the rest of
-      # the secrets are confirmed to live in GH (gh secret list), expand
-      # this block to mirror the lane workflow.
-      #
-      # `if` guard skips when the GH secret is unset — same drift the
-      # lane's set_secret() helper handles, written inline here because
-      # we only have one value to consider.
-      - name: Sync agent worker secrets
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          INTEGRATIONS_INTERNAL_SECRET: ${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}
-        if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
-        run: |
-          cd apps/agent
-          echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name sandbox-default
-          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to sandbox-default"
+      # on this header secret. The "Sync ..." step at the end of this job
+      # makes sure agent + main + integrations all carry the same value
+      # from the GH repo secret — first observed missing on agent in
+      # prod, manifesting as "INTEGRATIONS_INTERNAL_SECRET unset" the
+      # moment a runtime-bound agent sent its first turn after a
+      # standalone agent-worker rebuild.
 
       - name: Deploy main worker
         env:
@@ -177,6 +156,47 @@ jobs:
           done
           echo "All attempts failed"
           exit 1
+
+      # Consolidated secret sync — run AFTER all three deploys so the new
+      # bindings (if any) are live before we set values against them. For
+      # rotation of an existing secret the order doesn't matter (CF
+      # replaces atomically; both old and new code read the same name).
+      #
+      # Why GH secret as source of truth (vs manual `wrangler secret put`):
+      # the original prod was missing INTEGRATIONS_INTERNAL_SECRET on the
+      # agent worker because `wrangler secret put` had only ever been run
+      # against main and integrations — no codified record meant a worker
+      # rebuild silently dropped the secret. Pushing the same GH-stored
+      # value to all three workers on every deploy makes drift impossible:
+      # set the GH secret once, every subsequent push reconciles all
+      # three workers to that value.
+      #
+      # Idempotent: when the value already matches the existing secret,
+      # `wrangler secret put` re-encrypts to the same plaintext — no error.
+      # `if` guard skips the whole step when the GH secret is unset, so a
+      # repo where INTEGRATIONS_INTERNAL_SECRET hasn't been added yet
+      # deploys cleanly without clobbering existing manually-set values.
+      #
+      # Scope is intentionally just this one secret. The rest of the
+      # prod worker secrets stay manually managed (docs/linear-
+      # integration-sop.md). Expanding to the full lane-style sync
+      # requires inventorying which prod secrets are mirrored in GH
+      # Secrets first — a blank GH value would clear a live-prod one.
+      - name: Sync INTEGRATIONS_INTERNAL_SECRET to all workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          INTEGRATIONS_INTERNAL_SECRET: ${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}
+        if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
+        run: |
+          set -e
+          for entry in "apps/main:managed-agents" "apps/agent:sandbox-default" "apps/integrations:managed-agents-integrations"; do
+            dir="${entry%%:*}"
+            worker="${entry##*:}"
+            (cd "$dir" && echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name "$worker" >/dev/null)
+            echo "  ✓ $worker"
+          done
+          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to all 3 workers"
 
       # --- Post-deploy verification ---
       - name: Verify deployment
