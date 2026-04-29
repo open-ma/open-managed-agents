@@ -69,4 +69,13 @@ export interface SlackSessionScopeRepo extends SessionScopeRepo {
     scopeKey: string,
     channelName: string,
   ): Promise<void>;
+
+  /**
+   * Mark every active scope row for a publication as completed and clear any
+   * pending scan watermark. Called from the `tokens_revoked` / `app_uninstalled`
+   * lifecycle path when the whole installation is gone — without this, stale
+   * `active` rows linger and any agent scheduleWakeups would burn turns
+   * 401-ing against a revoked token.
+   */
+  closeAllForPublication(publicationId: string): Promise<void>;
 }

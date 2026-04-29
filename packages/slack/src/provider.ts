@@ -545,9 +545,14 @@ export class SlackProvider implements IntegrationProvider {
       return { handled: false, reason: "unparseable" };
     }
 
-    // Revocation events — flip the installation, no dispatch.
+    // Revocation events — flip the installation, close all channel-scope
+    // sessions for the publication so dangling scheduleWakeups don't burn
+    // turns 401-ing against a now-revoked token. No agent dispatch needed
+    // (the wakeups themselves will cascade through and discover their
+    // sessions are completed).
     if (event.kind === "tokens_revoked" || event.kind === "app_uninstalled") {
       await this.container.installations.markRevoked(installation.id, this.container.clock.nowMs());
+      await this.container.sessionScopes.closeAllForPublication(pub.id);
       await this.container.webhookEvents.attachPublication(env.event_id, pub.id);
       return { handled: true, reason: event.kind, publicationId: pub.id, tenantId: installation.tenantId };
     }

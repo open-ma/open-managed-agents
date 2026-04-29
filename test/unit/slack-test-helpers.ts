@@ -135,6 +135,14 @@ export class FakeSlackSessionScopeRepo implements SlackSessionScopeRepo {
     const row = this.rows.get(k);
     if (row) this.rows.set(k, { ...row, channelName });
   }
+
+  async closeAllForPublication(publicationId: string): Promise<void> {
+    for (const [k, row] of this.rows.entries()) {
+      if (row.publicationId === publicationId && row.status === "active") {
+        this.rows.set(k, { ...row, status: "completed", pendingScanUntil: null });
+      }
+    }
+  }
 }
 
 export interface FakeSlackBundle extends Omit<FakeContainer, "installations" | "sessionScopes"> {
