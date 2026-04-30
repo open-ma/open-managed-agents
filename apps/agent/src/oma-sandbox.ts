@@ -44,35 +44,62 @@ const injectVaultCredsHandler = async (
   env: unknown,
   ctx: SdkContext<OutboundContextParams>,
 ): Promise<Response> => {
+  const url = new URL(request.url);
+  const params = ctx.params ?? {};
+  const e = env as Env;
+
+  // Wiring missing — refuse the call (fail-closed). If we returned
+  // `fetch(request)` here we'd silently send the request without the
+  // credential injection the caller relied on; for an MCP-style
+  // upstream that returns 200-with-empty for unauthenticated
+  // requests, the model would see "the tool worked, no data" and
+  // never know auth was missing. Returning 503 makes the failure
+  // visible to the model immediately.
+  if (!params.tenantId || !params.sessionId || !e.MAIN_MCP) {
+    console.error(
+      `[oma-sandbox] inject_vault_creds fail-closed host=${url.hostname} reason=no-context`,
+    );
+    return new Response(
+      JSON.stringify({
+        error: "outbound_credential_injection_unavailable",
+        reason: "session context not bound — sandbox warmup likely incomplete",
+      }),
+      { status: 503, headers: { "content-type": "application/json" } },
+    );
+  }
+
+  // Body capture: the SDK gives us a Request; we have to read the body
+  // before forwarding via RPC because the RPC method signature takes a
+  // string, not a stream. For typical sandbox HTTPS calls (JSON API
+  // requests to Linear / GitHub / Slack) this is fine. For large binary
+  // uploads we'd need to widen the RPC body type — leave that for when
+  // a real use case lands.
+  const method = request.method;
+  const headers: Record<string, string> = {};
+  request.headers.forEach((v, k) => {
+    headers[k] = v;
+  });
+
+  let body: string | null;
   try {
-    const url = new URL(request.url);
-    const params = ctx.params ?? {};
-    const e = env as Env;
-
-    // Wiring missing — pass through. Happens during early warmup before
-    // SessionDO has bound the outbound context, or in test harnesses.
-    if (!params.tenantId || !params.sessionId || !e.MAIN_MCP) {
-      console.log(
-        `[oma-sandbox] inject_vault_creds passthrough host=${url.hostname} reason=no-context`,
-      );
-      return fetch(request);
-    }
-
-    // Body capture: the SDK gives us a Request; we have to read the body
-    // before forwarding via RPC because the RPC method signature takes a
-    // string, not a stream. For typical sandbox HTTPS calls (JSON API
-    // requests to Linear / GitHub / Slack) this is fine. For large binary
-    // uploads we'd need to widen the RPC body type — leave that for when
-    // a real use case lands.
-    const method = request.method;
-    const headers: Record<string, string> = {};
-    request.headers.forEach((v, k) => {
-      headers[k] = v;
-    });
-    const body =
+    body =
       method === "GET" || method === "HEAD" ? null : await request.text();
+  } catch (err) {
+    console.error(
+      `[oma-sandbox] inject_vault_creds body-read fail host=${url.hostname}: ${(err as Error)?.message ?? err}`,
+    );
+    return new Response(
+      JSON.stringify({
+        error: "outbound_body_read_failed",
+        reason: (err as Error)?.message ?? "unknown",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
+  }
 
-    const result = await e.MAIN_MCP.outboundForward({
+  let result: { status: number; headers: Record<string, string>; body: string };
+  try {
+    result = await e.MAIN_MCP.outboundForward({
       tenantId: params.tenantId,
       sessionId: params.sessionId,
       url: request.url,
@@ -80,21 +107,31 @@ const injectVaultCredsHandler = async (
       headers,
       body,
     });
-
-    console.log(
-      `[oma-sandbox] inject_vault_creds host=${url.hostname} status=${result.status}`,
-    );
-
-    return new Response(result.body, {
-      status: result.status,
-      headers: result.headers,
-    });
   } catch (err) {
+    // Service-binding RPC threw — main worker unreachable, deploy in
+    // progress, etc. Fail-closed: don't fall back to direct fetch
+    // (which would skip credential injection silently). The model sees
+    // 502 and surfaces the failure to the user.
     console.error(
-      `[oma-sandbox] inject_vault_creds error: ${(err as Error)?.message ?? err}`,
+      `[oma-sandbox] inject_vault_creds fail-closed host=${url.hostname} reason=rpc-error: ${(err as Error)?.message ?? err}`,
     );
-    return fetch(request);
+    return new Response(
+      JSON.stringify({
+        error: "outbound_credential_injection_failed",
+        reason: (err as Error)?.message ?? "main worker RPC unreachable",
+      }),
+      { status: 502, headers: { "content-type": "application/json" } },
+    );
   }
+
+  console.log(
+    `[oma-sandbox] inject_vault_creds host=${url.hostname} status=${result.status}`,
+  );
+
+  return new Response(result.body, {
+    status: result.status,
+    headers: result.headers,
+  });
 };
 
 export class OmaSandbox extends Sandbox {

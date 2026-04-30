@@ -47,6 +47,7 @@
 
 import { Hono } from "hono";
 import type { Env, AgentConfig, CredentialConfig } from "@open-managed-agents/shared";
+import { log, logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 
 const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
@@ -320,9 +321,44 @@ export async function forwardWithRefresh(
   method: string,
   inboundHeaders: Headers,
   body: string | null,
+  /** Audit context — surfaces in structured log lines so production
+   *  incidents have a "who called what when" trail without us having to
+   *  thread it through every call. tenantId comes from the function arg
+   *  above; this just adds the session/server discriminators that vary
+   *  per call. */
+  audit?: {
+    sessionId?: string;
+    serverName?: string;
+    callerKind: "http" | "rpc-mcp" | "rpc-outbound";
+  },
 ): Promise<Response> {
+  const started = Date.now();
+  let upstreamHost: string | undefined;
+  try {
+    upstreamHost = new URL(target.upstreamUrl).hostname;
+  } catch {
+    /* never */
+  }
+
   const first = await forwardToUpstream(target, method, inboundHeaders, body);
-  if (first.status !== 401 || !target.refresh) return first;
+  if (first.status !== 401 || !target.refresh) {
+    log(
+      {
+        op: "mcp_proxy.forward",
+        caller: audit?.callerKind ?? "unknown",
+        tenant_id: tenantId,
+        session_id: audit?.sessionId,
+        server: audit?.serverName,
+        host: upstreamHost,
+        method,
+        status: first.status,
+        refreshed: false,
+        ms: Date.now() - started,
+      },
+      "mcp_proxy forward",
+    );
+    return first;
+  }
 
   // Drain so we can return a fresh Response without two outstanding
   // streams. We don't read the body — its content is irrelevant once
@@ -333,26 +369,84 @@ export async function forwardWithRefresh(
     /* already consumed / closed */
   }
 
-  const fresh = await tryRefreshOauth(services, tenantId, target.refresh);
+  const fresh = await tryRefreshOauth(services, tenantId, target.refresh, target.upstreamToken);
   if (!fresh) {
     // Refresh failed: re-issue the original request unchanged so the
     // caller gets the upstream's actual 401 (matches old behavior).
-    return forwardToUpstream(target, method, inboundHeaders, body);
+    const retry = await forwardToUpstream(target, method, inboundHeaders, body);
+    logWarn(
+      {
+        op: "mcp_proxy.refresh_failed",
+        caller: audit?.callerKind ?? "unknown",
+        tenant_id: tenantId,
+        session_id: audit?.sessionId,
+        server: audit?.serverName,
+        host: upstreamHost,
+        status: retry.status,
+        ms: Date.now() - started,
+      },
+      "mcp_proxy refresh failed; surfacing upstream 401",
+    );
+    return retry;
   }
 
-  return forwardToUpstream(
+  const retried = await forwardToUpstream(
     { ...target, upstreamToken: fresh },
     method,
     inboundHeaders,
     body,
   );
+  log(
+    {
+      op: "mcp_proxy.forward",
+      caller: audit?.callerKind ?? "unknown",
+      tenant_id: tenantId,
+      session_id: audit?.sessionId,
+      server: audit?.serverName,
+      host: upstreamHost,
+      method,
+      status: retried.status,
+      refreshed: true,
+      ms: Date.now() - started,
+    },
+    "mcp_proxy forward (after refresh)",
+  );
+  return retried;
 }
 
 async function tryRefreshOauth(
   services: Services,
   tenantId: string,
   refresh: NonNullable<ProxyTarget["refresh"]>,
+  staleAccessToken: string,
 ): Promise<string | null> {
+  // Double-checked locking against concurrent refresh: if N parallel
+  // calls all 401 at the same instant (typical when access_token TTL
+  // hits boundary mid-multi-tool-call), they'll all enter this path.
+  // Re-fetch the canonical credential from D1 first; if its access_token
+  // has already moved past the stale one we just got 401'd with, another
+  // call already refreshed — return the live token, skip the
+  // token_endpoint call entirely. This isn't a perfect mutex (two calls
+  // can both re-fetch BEFORE either persists), but it cuts the race
+  // window from "every 401" to "two 401s landing in the same low
+  // single-digit ms". Good enough for current scale; perfect mutex
+  // would need a per-credential Durable Object and isn't worth it
+  // until we see real concurrent-refresh damage in production logs.
+  try {
+    const fresh = await services.credentials
+      .get({ tenantId, vaultId: refresh.vaultId, credentialId: refresh.credentialId })
+      .catch(() => null);
+    const liveAccessToken = (fresh as { auth?: { access_token?: string } } | null)?.auth?.access_token;
+    if (liveAccessToken && liveAccessToken !== staleAccessToken) {
+      // Someone (another in-flight call, or a manual refresh via
+      // /v1/oauth/refresh) already rotated. Use the fresh token; don't
+      // burn another token_endpoint roundtrip.
+      return liveAccessToken;
+    }
+  } catch {
+    // D1 unreachable — fall through to token_endpoint refresh.
+  }
+
   const tokenBody = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: refresh.refreshToken,
@@ -432,7 +526,15 @@ app.all("/:sid/:server", async (c) => {
   const method = c.req.method;
   const body = ["GET", "HEAD"].includes(method) ? null : await c.req.text();
 
-  return forwardWithRefresh(services, tenantId, target, method, c.req.raw.headers, body);
+  return forwardWithRefresh(
+    services,
+    tenantId,
+    target,
+    method,
+    c.req.raw.headers,
+    body,
+    { sessionId: sid, serverName: serverName, callerKind: "http" },
+  );
 });
 
 export default app;

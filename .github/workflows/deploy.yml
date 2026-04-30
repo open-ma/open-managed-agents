@@ -88,7 +88,39 @@ jobs:
             echo "  (event subscription exists — fine)"
           fi
 
-      # --- Deploy both workers with retry ---
+      # --- Deploy order: main FIRST, then agent. ---
+      #
+      # The agent worker has a service binding to main's `McpProxyRpc`
+      # WorkerEntrypoint class (apps/agent/wrangler.jsonc → MAIN_MCP).
+      # CF service bindings resolve at request time, not deploy time —
+      # if agent goes live before main's new entrypoint exists, every
+      # cloud-MCP call fails until main catches up. Forward order:
+      #   main (entrypoint exists) → agent (binds to it).
+      # ROLLBACK is the inverse: agent first (stop calling the new
+      # entrypoint), then main (can safely revert the class). Manual
+      # rollbacks must respect this; CF doesn't enforce it.
+      - name: Deploy main worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
+        run: |
+          cd apps/main
+          DOMAIN_FLAG=""
+          if [ -n "$CUSTOM_DOMAIN" ]; then
+            DOMAIN_FLAG="--domain $CUSTOM_DOMAIN"
+            echo "Deploying with custom domain: $CUSTOM_DOMAIN"
+          fi
+          for i in 1 2 3; do
+            if npx wrangler deploy --config wrangler.jsonc $DOMAIN_FLAG; then
+              echo "Main worker deployed successfully"
+              break
+            fi
+            echo "Attempt $i/3 failed, waiting 60s before retry..."
+            sleep 60
+            if [ "$i" = "3" ]; then echo "All attempts failed"; exit 1; fi
+          done
+
       - name: Deploy agent worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -114,28 +146,6 @@ jobs:
       # prod, manifesting as "INTEGRATIONS_INTERNAL_SECRET unset" the
       # moment a runtime-bound agent sent its first turn after a
       # standalone agent-worker rebuild.
-
-      - name: Deploy main worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CUSTOM_DOMAIN: ${{ vars.CUSTOM_DOMAIN }}
-        run: |
-          cd apps/main
-          DOMAIN_FLAG=""
-          if [ -n "$CUSTOM_DOMAIN" ]; then
-            DOMAIN_FLAG="--domain $CUSTOM_DOMAIN"
-            echo "Deploying with custom domain: $CUSTOM_DOMAIN"
-          fi
-          for i in 1 2 3; do
-            if npx wrangler deploy --config wrangler.jsonc $DOMAIN_FLAG; then
-              echo "Main worker deployed successfully"
-              break
-            fi
-            echo "Attempt $i/3 failed, waiting 60s before retry..."
-            sleep 60
-            if [ "$i" = "3" ]; then echo "All attempts failed"; exit 1; fi
-          done
 
       # Integrations worker is the inbound webhook surface for Slack /
       # Linear / GitHub. Its custom domain (integrations.openma.dev) is
