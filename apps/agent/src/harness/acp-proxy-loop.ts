@@ -4,9 +4,12 @@
  * registered local runtime.
  *
  * Per-turn flow:
- *   1. Open a WebSocket through the MAIN service binding to the RuntimeRoom
- *      DO (`/v1/internal/runtime-attach-harness?sid=...&runtime_id=...`).
- *      DO holds it open and shuttles session.* messages to/from the daemon.
+ *   1. Open a WebSocket directly to the RuntimeRoom DO via the cross-script
+ *      binding (env.RUNTIME_ROOM). The DO class lives in the main worker but
+ *      DOs are namespace-level, so the agent worker binds the same class with
+ *      `script_name: "managed-agents"` in wrangler.jsonc — no service-binding
+ *      hop through main, no shared INTEGRATIONS_INTERNAL_SECRET. The DO holds
+ *      the WS open and shuttles session.* messages to/from the daemon.
  *   2. Send `session.start` (idempotent on the daemon — first time spawns the
  *      ACP child, subsequent times short-circuits to session.ready).
  *   3. Send `session.prompt { text, turn_id }` with the latest user message.
@@ -64,13 +67,9 @@ export class AcpProxyHarness implements HarnessInterface {
       return;
     }
 
-    const env = ctx.env as unknown as { MAIN?: Fetcher; INTEGRATIONS_INTERNAL_SECRET?: string };
-    if (!env.MAIN) {
-      this.#emitError(runtime, "MAIN service binding missing on agent worker");
-      return;
-    }
-    if (!env.INTEGRATIONS_INTERNAL_SECRET) {
-      this.#emitError(runtime, "INTEGRATIONS_INTERNAL_SECRET unset — cannot call main internal endpoints");
+    const env = ctx.env as unknown as { RUNTIME_ROOM?: DurableObjectNamespace };
+    if (!env.RUNTIME_ROOM) {
+      this.#emitError(runtime, "RUNTIME_ROOM binding missing on agent worker — check wrangler.jsonc cross-script DO binding");
       return;
     }
 
@@ -86,7 +85,7 @@ export class AcpProxyHarness implements HarnessInterface {
       return;
     }
 
-    const ws = await this.#openHarnessWs(env.MAIN, env.INTEGRATIONS_INTERNAL_SECRET, sid, binding.runtime_id);
+    const ws = await this.#openHarnessWs(env.RUNTIME_ROOM, sid, binding.runtime_id);
     if (!ws) {
       this.#emitError(runtime, "Failed to attach to RuntimeRoom — runtime_id may be invalid or daemon offline");
       return;
@@ -167,20 +166,24 @@ export class AcpProxyHarness implements HarnessInterface {
   }
 
   async #openHarnessWs(
-    main: Fetcher,
-    internalSecret: string,
+    runtimeRoom: DurableObjectNamespace,
     sid: string,
     runtimeId: string,
   ): Promise<AttachedWs | null> {
-    const url = new URL("https://main.internal/v1/internal/runtime-attach-harness");
-    url.searchParams.set("sid", sid);
-    url.searchParams.set("runtime_id", runtimeId);
+    // Direct DO access. The DO class lives in the main worker but DOs are
+    // namespace-scoped; the cross-script binding in wrangler.jsonc lets the
+    // agent worker hold a stub without going through main as a service.
+    // Headers (`x-attach-role`, `x-session-id`) match what the now-removed
+    // /v1/internal/runtime-attach-harness endpoint used to inject — DO's
+    // fetch handler already keys off them.
     try {
-      const res = await main.fetch(
-        new Request(url.toString(), {
+      const stub = runtimeRoom.get(runtimeRoom.idFromName(runtimeId));
+      const res = await stub.fetch(
+        new Request("http://runtime-room/_attach_harness", {
           headers: {
             Upgrade: "websocket",
-            "x-internal-secret": internalSecret,
+            "x-attach-role": "harness",
+            "x-session-id": sid,
           },
         }),
       );

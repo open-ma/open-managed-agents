@@ -135,6 +135,16 @@ export interface SessionOptions {
    * to surface the loss of history.
    */
   resumeAcpSessionId?: string;
+  /**
+   * MCP servers to advertise to the ACP child via `session/new`'s
+   * `mcpServers` array. Pass-through opaque (we don't validate the shape
+   * here so the package stays decoupled from @agentclientprotocol/sdk
+   * schema details — the caller, typically SessionManager in
+   * @openma/cli's bridge, builds the array per ACP spec). When omitted
+   * or empty the child sees an empty list and falls back to its own
+   * configured MCP servers (e.g. claude-code's user-level config).
+   */
+  mcpServers?: unknown[];
 }
 
 /**

@@ -209,7 +209,7 @@ export function RuntimesList() {
             <code className="bg-bg-surface px-1 rounded">~/.oma/bridge/</code>, and (on macOS) installs a launchd job
             that keeps the daemon running across reboots. If you have{" "}
             <code className="bg-bg-surface px-1 rounded">claude</code> installed, setup will also install the ACP wrapper
-            (<code className="bg-bg-surface px-1 rounded">@zed-industries/claude-code-acp</code>) for you. The runtime appears
+            (<code className="bg-bg-surface px-1 rounded">@agentclientprotocol/claude-agent-acp</code>) for you. The runtime appears
             here as <span className="text-success">online</span> within a few seconds of the daemon attaching.
           </p>
         </div>

@@ -1,0 +1,19 @@
+{
+  "$schema": "../../../node_modules/wrangler/config-schema.json",
+  "name": "oma-fake-oauth-mcp",
+  "main": "src/index.ts",
+  "compatibility_date": "2025-04-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  // KV namespace to persist (current_access, current_refresh, issued_count).
+  // ID is filled in at deploy time by the user — see README. Using a
+  // dedicated namespace so this fake never reads/writes anything in the
+  // shared OMA staging KV by accident.
+  "kv_namespaces": [
+    { "binding": "FAKE_STATE", "id": "e4a38c0574204dda8ea2f2c021a16e55" }
+  ],
+
+  // No prod env — this fixture is intentionally single-environment.
+  // Deploy with `npx wrangler deploy` from this dir.
+  "vars": {}
+}

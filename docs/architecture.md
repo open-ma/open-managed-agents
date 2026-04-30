@@ -139,7 +139,7 @@ Containers are interchangeable. A failed container can be replaced with `provisi
 Key design decisions:
 - **Lazy provisioning**: Containers are created on first tool call, not at session start. Sessions that don't need code execution skip the container cost entirely.
 - **Parallel start**: Inference begins immediately from the event log. Container provisioning happens in background. By the time Claude makes its first tool call, the container is usually ready.
-- **No credentials in sandbox**: Git tokens wire into local remotes during init. OAuth tokens live in vault, accessed via MCP proxy. The harness never sees credentials.
+- **No credentials in the harness or sandbox**: Vault credentials live exclusively in the main worker. Both the harness (cloud DO / local daemon) and the sandbox container only ever know `(tenantId, sessionId, serverName | hostname)` — they ask main to make the actual MCP / outbound HTTPS call on their behalf, and main looks up the credential live (no per-session snapshot) and injects the bearer just before forwarding upstream. This mirrors [Anthropic Managed Agents' "credential proxy outside the harness"](./mcp-credential-architecture.md) pattern; a prompt-injected agent has no credential to leak because there is none in its address space. Full details + threat model in [mcp-credential-architecture.md](./mcp-credential-architecture.md).
 
 ## Implications for Custom Harnesses
 

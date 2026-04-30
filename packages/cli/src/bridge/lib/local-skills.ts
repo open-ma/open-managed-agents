@@ -46,7 +46,7 @@ const HOME = homedir();
  */
 export async function detectLocalSkills(): Promise<LocalSkillManifest> {
   return {
-    "claude-code-acp": await detectClaudeCodeSkills(),
+    "claude-agent-acp": await detectClaudeCodeSkills(),
   };
 }
 

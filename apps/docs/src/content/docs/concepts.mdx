@@ -31,9 +31,13 @@ Manage on the Console **Environments** page or via `/v1/environments`.
 
 ## Vault
 
-A credential store. Vaults hold **bearer tokens, OAuth tokens, and env vars** that tools and integrations need — but the credentials *never enter the sandbox*. Instead, tools make outbound HTTPS requests through a proxy, and the proxy injects the auth header per-host. The model sees only the response; it never sees the secret.
+A credential store. Vaults hold **bearer tokens, OAuth tokens, and env vars** that tools and integrations need.
 
-Vaults are managed in the Console (**Vaults** page) and via `/v1/vaults`. Bound to specific hosts so a leaked or hostile tool can't pivot.
+The platform's credential-isolation property: **secrets never leave the main worker**. Both the agent (cloud DO or local daemon) and the sandbox container only know `(tenantId, sessionId, server-name | hostname)` — they ask main to make the actual upstream call. Main looks up the credential live (no per-session snapshot), injects the bearer, and forwards. A prompt-injected agent has no credential to leak because there isn't one in its address space.
+
+For OAuth credentials (`mcp_oauth` type), the platform also handles 401-triggered refresh automatically and persists the rotated tokens back to the vault — sessions survive token rollovers without intervention. Concurrent refresh dedup via D1 re-fetch keeps rotating-refresh-token providers (Linear, Notion) from invalidating themselves under concurrent load.
+
+Vaults are managed in the Console (**Vaults** page) and via `/v1/vaults`. Bound to specific hosts so a leaked or hostile tool can't pivot. Full architecture: [Vault & MCP Credentials](/build/vault-and-mcp/).
 
 <Aside type="caution">
   Anything sensitive belongs in a Vault. Never put secrets in an Agent's `system` prompt or in tool inputs.

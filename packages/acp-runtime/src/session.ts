@@ -108,7 +108,7 @@ export class AcpSessionImpl implements AcpSession {
         await (this.#agent as unknown as { loadSession?: (p: unknown) => Promise<unknown> }).loadSession?.({
           sessionId: wantsResume,
           cwd: this.options.agent.cwd ?? process.cwd(),
-          mcpServers: [],
+          mcpServers: this.options.mcpServers ?? [],
         });
         this.#sessionId = wantsResume;
         return;
@@ -122,7 +122,7 @@ export class AcpSessionImpl implements AcpSession {
 
     const newSession = await this.#agent.newSession({
       cwd: this.options.agent.cwd ?? process.cwd(),
-      mcpServers: [],
+      mcpServers: this.options.mcpServers ?? [],
     } as never);
     this.#sessionId = (newSession as { sessionId: string }).sessionId;
   }
