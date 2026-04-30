@@ -1,4 +1,5 @@
 import { tool, generateText } from "ai";
+import { experimental_createMCPClient } from "@ai-sdk/mcp";
 import { z } from "zod";
 import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
@@ -322,6 +323,13 @@ export async function buildTools(
     AI?: Ai;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
+    /** Session vault credentials, threaded through so MCP tool registration
+     *  can pick a bearer token by `auth.mcp_server_url` match. Same shape
+     *  the SessionDO holds and the outbound interceptor uses. Empty/omitted
+     *  is fine — MCP servers without a credential just go unauthenticated
+     *  (works for public MCP servers; matches the old curl-path behavior
+     *  when no agent.authorization_token was set). */
+    vault_credentials?: Array<{ vault_id: string; credentials: unknown[] }>;
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
     browser?: BrowserSession;
     /** Pre-resolved auxiliary model — when present, web_fetch summarizes
@@ -1070,10 +1078,35 @@ export async function buildTools(
     }
   }
 
-  // MCP tools — MCP requests go through the sandbox network so that:
-  // 1. Container networking rules (allow_mcp_servers) are enforced
-  // 2. Outbound Worker can inject vault credentials transparently
-  // We call MCP endpoints via sandbox.exec(curl) instead of Worker-side fetch.
+  // MCP tools — first-class via AI SDK MCP client. We open one HTTP MCP
+  // connection per declared mcp_server (warmup-time + per-buildTools call;
+  // the connection is held by the returned `tool({execute})` closures and
+  // is released when the tools object is GC'd at end of turn) and surface
+  // each remote tool as a fully-typed `mcp__<server>__<tool>` entry. The
+  // model sees real tool schemas instead of a stringly-typed `arguments`
+  // JSON blob, prompt-cache hits because tool defs live in the system
+  // surface, and a single tool call covers what the old curl-double-hop
+  // (`mcp_<name>_list_tools` then `mcp_<name>_call`) needed two turns +
+  // ~5K tokens of dumped schemas to do.
+  //
+  // Auth: agent.mcp_servers[].authorization_token wins (literal pinned
+  // token); otherwise we look up a vault credential whose
+  // `auth.mcp_server_url` matches the server URL and use its bearer token.
+  // Same precedence the old sandbox-curl path expected — except the old
+  // path relied on the sandbox outbound interceptor (oma-sandbox.ts +
+  // outbound.ts) to inject the bearer at the network layer, while we now
+  // inject in DO code at MCP-client construction time. The outbound
+  // interceptor still serves any non-MCP HTTPS the agent makes from
+  // sandbox.exec — its host-match logic is unchanged.
+  //
+  // Network policy ("model can only call declared mcp_servers"): the old
+  // path leaned on the sandbox container's allow_mcp_servers iptables-style
+  // gate. The new path enforces the same constraint at the tool-registration
+  // layer instead — only declared mcp_servers get registered as tools, and
+  // the model has no other tool that takes an arbitrary URL. Equivalent
+  // end-result, but the gate moves from network layer to API layer, which
+  // is where the rest of OMA's MCP authorization already lives (see
+  // apps/main/src/routes/mcp-proxy.ts for the parallel local-runtime path).
   if (agentConfig.mcp_servers?.length) {
     for (const server of agentConfig.mcp_servers) {
       if (!server.url) {
@@ -1082,60 +1115,60 @@ export async function buildTools(
         // when the next buildTools fires after warmup.
         continue;
       }
-      const escapedUrl = server.url.replace(/'/g, "'\\''");
-      const authHeader = server.authorization_token
-        ? `-H 'Authorization: Bearer ${server.authorization_token.replace(/'/g, "'\\''")}'`
-        : "";
 
-      // Create a tool that lists available MCP tools from this server
-      tools[`mcp_${server.name}_list_tools`] = tool({
-        description: `List available tools from MCP server "${server.name}".`,
-        inputSchema: z.object({}),
-        execute: safe(async () => {
-          const rpcBody = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/list",
-            params: {},
-          });
-          return truncateResult(await sandbox.exec(
-            `curl -sS -X POST '${escapedUrl}' ` +
-            `-H 'Content-Type: application/json' ` +
-            `-H 'Accept: application/json, text/event-stream' ` +
-            `${authHeader} ` +
-            `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
-            15000
-          ));
-        }),
-      });
+      // Resolve auth bearer: agent-pinned token wins, else vault lookup
+      // by mcp_server_url match.
+      let bearer = server.authorization_token ?? "";
+      if (!bearer && env?.vault_credentials?.length) {
+        const target = server.url;
+        outer: for (const v of env.vault_credentials) {
+          for (const c of v.credentials as Array<{
+            auth?: {
+              mcp_server_url?: string;
+              token?: string;
+              bearer_token?: string;
+              access_token?: string;
+            };
+          }>) {
+            if (c.auth?.mcp_server_url !== target) continue;
+            const t = c.auth?.bearer_token ?? c.auth?.token ?? c.auth?.access_token;
+            if (t) {
+              bearer = t;
+              break outer;
+            }
+          }
+        }
+      }
 
-      // Create a tool that calls any tool on this MCP server
-      tools[`mcp_${server.name}_call`] = tool({
-        description: `Call a tool on MCP server "${server.name}". First use mcp_${server.name}_list_tools to see available tools and their input schemas.`,
-        inputSchema: z.object({
-          tool_name: z.string().describe("Name of the MCP tool to call"),
-          arguments: z.string().optional().describe("Tool arguments as JSON string"),
-        }),
-        execute: safe(async ({ tool_name, arguments: argsStr }) => {
-          const args = argsStr ? JSON.parse(argsStr) : {};
-          const rpcBody = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/call",
-            params: { name: tool_name, arguments: args || {} },
-          });
-          return truncateResult(await sandbox.exec(
-            `curl -sS -X POST '${escapedUrl}' ` +
-            `-H 'Content-Type: application/json' ` +
-            `-H 'Accept: application/json, text/event-stream' ` +
-            `${authHeader} ` +
-            `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
-            30000
-          ));
-        }),
-      });
+      try {
+        const mcpClient = await experimental_createMCPClient({
+          transport: {
+            type: "http",
+            url: server.url,
+            headers: bearer ? { Authorization: `Bearer ${bearer}` } : {},
+          },
+          name: "oma-cloud-agent",
+        });
+        const remoteTools = await mcpClient.tools();
+        for (const [toolName, t] of Object.entries(remoteTools)) {
+          // Prefix matches what the local-runtime ACP path produces
+          // (`mcp__<server>__<tool>`), so transcripts from cloud and
+          // local sessions are visually identical.
+          tools[`mcp__${server.name}__${toolName}`] = t;
+        }
+      } catch (err) {
+        // Connection / handshake / tools/list failure for one server.
+        // Log + skip so a misconfigured single server doesn't take the
+        // whole turn down — the model just doesn't see this server's
+        // tools and reports "MCP server X unavailable" if asked.
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(
+          `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
+        );
+      }
     }
   }
+
 
   // Multi-agent tools — create a call tool for each callable agent
   if (agentConfig.callable_agents?.length && env?.ANTHROPIC_API_KEY) {
