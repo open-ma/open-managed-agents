@@ -23,7 +23,11 @@ import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
-import mcpProxyRoutes, { resolveProxyTargetByTenant, forwardToUpstream } from "./routes/mcp-proxy";
+import mcpProxyRoutes, {
+  resolveProxyTargetByTenant,
+  resolveOutboundCredentialByHost,
+  forwardToUpstream,
+} from "./routes/mcp-proxy";
 import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
 import { memoryRetentionTick } from "./cron/memory-retention";
@@ -248,6 +252,82 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     }
     const inboundHeaders = new Headers(opts.headers);
     const res = await forwardToUpstream(target, opts.method, inboundHeaders, opts.body);
+    const respHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => {
+      respHeaders[k] = v;
+    });
+    return {
+      status: res.status,
+      headers: respHeaders,
+      body: await res.text(),
+    };
+  }
+
+  /**
+   * Outbound counterpart to `mcpForward` for sandbox-side HTTPS calls
+   * (anything the cloud agent's container does via fetch / curl). The
+   * agent worker's outbound interceptor (apps/agent/src/oma-sandbox.ts)
+   * passes only `(tenantId, sessionId, hostname, request bytes)`; we
+   * resolve the matching vault credential live, inject Authorization,
+   * and fetch upstream. The agent's container never sees the credential
+   * and the agent worker never even loads it into memory.
+   *
+   * Body is passed as a string for now (sandbox HTTPS calls in OMA are
+   * typically JSON-shaped; binary uploads to upstream APIs are rare and
+   * can be added by widening to ArrayBuffer when a real use case lands).
+   * Pass-through when no credential matches: same behavior as the legacy
+   * snapshot-based path — public APIs and pre-authenticated URLs work.
+   */
+  async outboundForward(opts: {
+    tenantId: string;
+    sessionId: string;
+    /** Full upstream URL the sandbox is trying to reach. */
+    url: string;
+    method: string;
+    headers: Record<string, string>;
+    body: string | null;
+  }): Promise<{
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+  }> {
+    let parsedUrl: URL;
+    try {
+      parsedUrl = new URL(opts.url);
+    } catch {
+      return {
+        status: 400,
+        headers: { "content-type": "application/json" },
+        body: '{"error":"invalid url"}',
+      };
+    }
+
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const cred = await resolveOutboundCredentialByHost(
+      this.env,
+      services,
+      opts.tenantId,
+      opts.sessionId,
+      parsedUrl.hostname,
+    );
+
+    const upstreamHeaders = new Headers(opts.headers);
+    if (cred) {
+      upstreamHeaders.set("Authorization", `Bearer ${cred.token}`);
+    }
+    upstreamHeaders.delete("host");
+    upstreamHeaders.delete("cf-connecting-ip");
+    upstreamHeaders.delete("cf-ray");
+    upstreamHeaders.delete("x-forwarded-for");
+    upstreamHeaders.delete("x-forwarded-proto");
+    upstreamHeaders.delete("x-real-ip");
+
+    const upstreamReq = new Request(opts.url, {
+      method: opts.method,
+      headers: upstreamHeaders,
+      body: ["GET", "HEAD"].includes(opts.method) ? undefined : opts.body,
+    });
+    const res = await fetch(upstreamReq);
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {
       respHeaders[k] = v;

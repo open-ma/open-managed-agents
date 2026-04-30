@@ -788,27 +788,17 @@ export class SessionDO extends Agent<Env, SessionState> {
         status: "idle",
       });
 
-      // Outbound proxy view: untenanted snapshot keyed only by sessionId.
-      // The outbound worker only knows sessionId from the container context;
-      // it can't construct the tenant-prefixed `t:{tenantId}:cred:...` keys
-      // that prod uses, so without this side-write its lookups always miss
-      // and credentials never get injected. See apps/agent/src/outbound.ts.
-      //
-      // 24h TTL (defaulted by the service) bounds the leftover when the
-      // explicit /destroy cleanup below doesn't run (DO eviction, sandbox
-      // crash, force-terminate). The blob contains plaintext OAuth material
-      // so we don't want it lingering beyond a realistic max session lifetime.
-      if (params.session_id && (params.vault_credentials?.length ?? 0) > 0) {
-        // outboundSnapshots is KV-backed; AUTH_DB is fine.
-        await buildCfServices(this.env, this.env.AUTH_DB).outboundSnapshots.publish({
-          sessionId: params.session_id,
-          snapshot: {
-            tenant_id: params.tenant_id ?? "default",
-            vault_ids: params.vault_ids ?? [],
-            vault_credentials: params.vault_credentials!,
-          },
-        });
-      }
+      // Outbound credential snapshot — DELETED. The legacy path published
+      // a per-session KV blob containing plaintext vault credentials so the
+      // outbound interceptor (apps/agent/src/outbound.ts) could look them
+      // up by sessionId without going back to D1. That blob lived in the
+      // agent worker's KV namespace and contained OAuth tokens / API keys
+      // — i.e. plaintext secrets visible to anyone with KV-read access in
+      // the agent worker scope. Post-refactor the interceptor RPCs into
+      // main on each call (apps/agent/src/oma-sandbox.ts → env.MAIN_MCP
+      // .outboundForward), main does the live vault lookup, and the agent
+      // worker never holds plaintext credentials. See file-level comment
+      // on apps/agent/src/oma-sandbox.ts for the full rationale.
 
       // Pre-flight events from main worker (e.g. credential refresh warnings).
       // Append in order so the console renders them as the first items in the
@@ -864,23 +854,11 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
         this.browserSession = null;
       }
-      // Drop the outbound credential snapshot — its TTL would clean it up
-      // eventually, but explicit deletion here keeps the keyspace tidy on
-      // the normal teardown path and shrinks the leak window for plaintext
-      // OAuth material.
-      if (this.state.session_id) {
-        try {
-          // KV-backed; AUTH_DB is fine.
-          await buildCfServices(this.env, this.env.AUTH_DB).outboundSnapshots.delete({
-            sessionId: this.state.session_id,
-          });
-        } catch (err) {
-          logWarn(
-            { op: "session_do.destroy.snapshot_delete", session_id: this.state.session_id, err },
-            "outbound snapshot delete failed; plaintext OAuth lingers until TTL",
-          );
-        }
-      }
+      // Outbound snapshot delete — DROPPED. The publish at session init
+      // is gone too (see comment above), so there's nothing here to clean
+      // up. The outbound interceptor RPCs into main on each call and main
+      // re-checks session.archived_at, so an archived session's outbound
+      // calls naturally fail without any KV cleanup needed.
       this.setState({ ...this.state, status: "terminated" });
 
       const terminatedEvent: SessionEvent = {
@@ -1559,15 +1537,17 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
       }
 
-      // Bind the outbound handler with vault credentials so MCP/static_bearer
-      // tokens get injected into outbound HTTPS as Authorization headers.
-      // See apps/agent/src/oma-sandbox.ts for the handler implementation.
-      // Gate purely on vault_credentials presence — vaultIds can be empty
-      // when callers (e.g. apps/main /sessions for Linear-triggered sessions)
-      // synthesize a vault_id-less credential entry that still needs outbound
-      // header injection.
-      if (sandbox.setVaultCredentialsForOutbound && this.state.vault_credentials?.length) {
-        await sandbox.setVaultCredentialsForOutbound(this.state.vault_credentials);
+      // Bind the outbound handler with this session's identifying context.
+      // Per-call vault lookup happens in main via env.MAIN_MCP.outboundForward
+      // — the agent worker (and the sandbox itself) never see plaintext
+      // vault credentials. See apps/agent/src/oma-sandbox.ts file header.
+      // Always bind when we have a session_id; the handler itself decides
+      // per-call whether a credential exists for the request's hostname.
+      if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id) {
+        await sandbox.setOutboundContext({
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+        });
       }
     } catch (err) {
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
