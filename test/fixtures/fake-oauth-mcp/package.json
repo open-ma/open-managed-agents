@@ -1,0 +1,13 @@
+{
+  "name": "oma-fake-oauth-mcp",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "deploy": "npx wrangler deploy",
+    "tail": "npx wrangler tail"
+  },
+  "dependencies": {
+    "hono": "^4.6.16"
+  }
+}

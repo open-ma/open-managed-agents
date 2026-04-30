@@ -186,12 +186,11 @@ export interface HarnessContext {
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** Register a background task for completion notification (CC-style task_notification). */
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
-    /** Service binding back to apps/main. Used by AcpProxyHarness to attach
-     *  to the RuntimeRoom DO via /v1/internal/runtime-attach-harness. */
-    MAIN?: Fetcher;
-    /** Shared header secret to call /v1/internal/* on main. Set on the agent
-     *  worker; same value as main's INTEGRATIONS_INTERNAL_SECRET. */
-    INTEGRATIONS_INTERNAL_SECRET?: string;
+    /** Cross-script DO binding to RuntimeRoom (declared on main worker but
+     *  bound here via wrangler.jsonc `script_name`). AcpProxyHarness uses
+     *  this to attach to the daemon's room without going through main as
+     *  an HTTP service. */
+    RUNTIME_ROOM?: DurableObjectNamespace;
   };
   runtime: HarnessRuntime;
 }
@@ -221,12 +220,16 @@ export interface SandboxExecutor {
   /** Register secrets injected only for commands matching a prefix (e.g. "git", "gh"). */
   registerCommandSecrets?(commandPrefix: string, secrets: Record<string, string>): void;
   /**
-   * Bind the outbound handler with this session's vault credentials so they
-   * get injected as Bearer headers on matching MCP/HTTP requests.
+   * Bind the outbound handler with this session's identifying context. The
+   * sandbox's outbound interceptor uses (tenantId, sessionId) to RPC into
+   * main on each outbound HTTPS call; main resolves the matching vault
+   * credential live and injects the Authorization header. The agent worker
+   * never holds plaintext credentials.
    */
-  setVaultCredentialsForOutbound?(
-    vault_credentials: Array<{ vault_id: string; credentials: unknown[] }>,
-  ): Promise<void>;
+  setOutboundContext?(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
   /**

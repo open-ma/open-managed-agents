@@ -6,10 +6,20 @@
  * StandardOutPath / StandardErrorPath → logs go to ~/Library/Logs/oma/
  * so users can `tail -f` without dealing with `log show` filters.
  *
- * The plist invokes the same `oma bridge` binary that's on PATH (the one
- * the user installed with `npm i -g @openma/cli`). If the user
- * uninstalls the npm package, the plist will still try to start it on next
- * load and fail — `oma bridge uninstall` removes the plist explicitly.
+ * Why we call node directly instead of the `oma` shim: the shim's shebang
+ * is `#!/usr/bin/env node`, and launchd does NOT source the user's shell
+ * init — so on nvm/asdf/volta machines `env node` fails with 127 and the
+ * daemon never starts (KeepAlive then loops forever, see issue logs).
+ * We freeze process.execPath at setup time as the absolute node path and
+ * point ProgramArguments at the cli's dist/index.js directly. dirname(node)
+ * is also prepended to EnvironmentVariables.PATH so spawned ACP children
+ * (which still carry `#!/usr/bin/env node` shebangs) can resolve node too.
+ * This is the same pattern PM2 uses for `pm2 startup` — the working node
+ * path at setup is the one we commit to. Users who later nvm-uninstall
+ * that node version need to re-run `oma bridge setup` (or the daemon
+ * loops 127 again). That re-setup is a one-liner so we accept the cost
+ * over the alternatives (ship our own node, write shell wrappers per
+ * version manager, etc).
  */
 
 import { mkdir, writeFile, unlink } from "node:fs/promises";
@@ -18,12 +28,29 @@ import { spawn } from "node:child_process";
 import { paths, currentPlatform } from "./platform.js";
 
 export interface InstallOptions {
-  /** Absolute path to the daemon binary (the bin entry of @openma/cli). */
-  binaryPath: string;
+  /** Absolute path to the node binary that should run the daemon. Almost
+   *  always `process.execPath` of the process running `oma bridge setup`. */
+  nodePath: string;
+  /** Absolute path to the cli's bundled entrypoint (dist/index.js). The
+   *  caller should pass `realpathSync(process.argv[1])` so npm/npx symlinks
+   *  in `node_modules/.bin/` are resolved to the real file. */
+  cliEntry: string;
+  /** PATH to expose to the daemon process. Used for spawn'd ACP children
+   *  that still carry `#!/usr/bin/env node` shebangs. Defaults to a
+   *  freeze of the setup-time PATH with dirname(nodePath) prepended. */
+  envPath?: string;
 }
 
 function buildPlist(opts: InstallOptions): string {
   const p = paths();
+  const nodeDir = dirname(opts.nodePath);
+  const setupPath = process.env.PATH ?? "";
+  // Prepend node's dir so it always wins; freeze the rest so daemon-spawned
+  // children (claude-agent-acp etc.) can find the same tools the user can.
+  // Dedup keeps the plist readable when the user's shell already prepended
+  // nvm/asdf to PATH (otherwise we'd write the node dir twice).
+  const envPath = opts.envPath ?? dedupPath(setupPath ? `${nodeDir}:${setupPath}` : nodeDir);
+
   // launchd's xml is unforgiving; use a single template literal with no
   // accidental whitespace inside <string> elements.
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -34,7 +61,9 @@ function buildPlist(opts: InstallOptions): string {
   <string>${p.serviceLabel}</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${opts.binaryPath}</string>
+    <string>${opts.nodePath}</string>
+    <string>${opts.cliEntry}</string>
+    <string>bridge</string>
     <string>daemon</string>
   </array>
   <key>RunAtLoad</key>
@@ -50,11 +79,30 @@ function buildPlist(opts: InstallOptions): string {
   <key>EnvironmentVariables</key>
   <dict>
     <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    <string>${escapeXml(envPath)}</string>
   </dict>
 </dict>
 </plist>
 `;
+}
+
+function escapeXml(s: string): string {
+  return s
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function dedupPath(p: string): string {
+  const seen = new Set<string>();
+  return p
+    .split(":")
+    .filter((part) => {
+      if (!part || seen.has(part)) return false;
+      seen.add(part);
+      return true;
+    })
+    .join(":");
 }
 
 export async function install(opts: InstallOptions): Promise<void> {

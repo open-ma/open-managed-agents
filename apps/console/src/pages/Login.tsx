@@ -57,9 +57,27 @@ export function Login() {
     return "/";
   })();
 
+  // Auto-redirect when an already-authenticated user lands on /login (e.g.
+  // a stale tab, or someone hitting /login?next=... with an existing
+  // session). Each mode handler below ALSO calls nav(nextUrl) on success;
+  // this effect only fires when `isAuthenticated` was already true at
+  // mount or flips true via session refresh independent of a handler.
+  //
+  // Subtlety: we don't call onLoginSuccess() here because that resets
+  // active tenant — fine when the user just signed in (membership may
+  // have changed) but unwanted when they're just being bounced through
+  // /login with an existing session. We also wait for !isLoading so we
+  // don't fire while Better Auth's useSession is still pending its first
+  // result and isAuthenticated reads spuriously false. The bug this
+  // guards against: signup OTP verify completed → session updates →
+  // isAuthenticated flips true → effect previously called onLoginSuccess
+  // which reset tenant THEN nav'd, racing the handler's own nav and
+  // sometimes landing on / instead of /connect-runtime.
   useEffect(() => {
-    if (isAuthenticated) onLoginSuccess(() => nav(nextUrl, { replace: true }));
-  }, [isAuthenticated]);
+    if (!isLoading && isAuthenticated && nextUrl !== "/") {
+      nav(nextUrl, { replace: true });
+    }
+  }, [isAuthenticated, isLoading]);
 
   useEffect(() => {
     fetch("/auth-info")

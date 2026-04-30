@@ -23,7 +23,7 @@
  * `plugins/cache/<marketplace>/<plugin>/<ver>/skills/<id>/` — would need a
  * recursive walk to filter individually). Add when a real user hits this.
  *
- * For non–claude-code-acp agents this isn't called; their skill ecosystems
+ * For non–claude-agent-acp agents this isn't called; their skill ecosystems
  * don't share Claude Code's filesystem layout. Add per-agent helpers when
  * codex / opencode / gemini grow analogous mechanisms.
  *

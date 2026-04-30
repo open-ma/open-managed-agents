@@ -1,0 +1,98 @@
+---
+title: Vault & MCP Credentials
+description: How OMA isolates upstream credentials from the agent and the sandbox using a main-side credential proxy.
+---
+
+OMA's vault is the single source of truth for upstream credentials (MCP-server tokens, OAuth tokens, API keys). The agent itself — whether the cloud DO running `generateText`, the local daemon spawning `claude-agent-acp`, or the sandbox container running `curl` — **never holds plaintext credentials in memory**. All three callers know only `(tenantId, sessionId, server-name | hostname)` and ask the **main worker** to make the actual upstream call on their behalf. Main looks up the credential **live on every call**, injects the bearer, and forwards.
+
+Mirrors the [Anthropic Managed Agents](https://www.anthropic.com/engineering/managed-agents) "credential proxy outside the harness" pattern: a prompt-injected agent has no credential to leak because there is none in its address space.
+
+## Three callers, one resolver
+
+```
+                    ┌──────────────────┐
+                    │  Vault (D1+KV)   │  single source of truth
+                    └────────┬─────────┘
+                             │ live read on EVERY call
+              ┌──────────────▼──────────────┐
+              │  apps/main worker            │
+              │  resolveProxyTargetByTenant  │  URL match
+              │  resolveOutboundCredentialByHost  │  hostname match
+              │  forwardWithRefresh          │  inject + 401-refresh
+              └──┬─────────┬───────────┬────┘
+                 │         │           │
+        ┌────────┘         │           └────────┐
+        │ HTTP             │ RPC                │ RPC
+        ▼                  ▼                    ▼
+  ACP child          Cloud agent DO         Sandbox container
+  (laptop daemon)    (in-Worker)            (HTTPS interceptor)
+        │                  │                    │
+        └─ NONE of these three holds plaintext credentials ─┘
+```
+
+| Caller | Knows | Asks |
+|---|---|---|
+| Local-runtime ACP child | `(sid, server, agent api key)` | HTTP `/v1/mcp-proxy/<sid>/<server>` with `Authorization: Bearer <apiKey>` |
+| Cloud agent DO | `(tenantId, sid, server)` | `env.MAIN_MCP.mcpForward(...)` via service-binding RPC (binding scope = auth) |
+| Sandbox container | full upstream URL | `env.MAIN_MCP.outboundForward(...)` via the agent worker's outbound interceptor |
+
+## OAuth refresh
+
+For credentials of type `mcp_oauth`, the proxy automatically handles 401:
+
+1. Upstream returns 401
+2. Re-fetch the credential row from D1 — if `access_token` already moved past the stale one (a concurrent call refreshed first), use the live token. Otherwise:
+3. POST `token_endpoint` with the `refresh_token`
+4. Persist rotated `{access_token, refresh_token, expires_at}` back to D1 via `services.credentials.refreshAuth`
+5. Retry once with the new bearer
+
+If refresh itself fails (revoked refresh_token, scope change), the second upstream call returns the original 401 to the caller. No false-success masking.
+
+## What the model sees
+
+Tools registered as `mcp__<server>__<tool_name>` with full schemas — first-class AI SDK tools, not stringly-typed wrappers. The model picks tools by name + structured arguments; the platform handles auth and forwarding.
+
+```
+agent.mcp_tool_use:
+  name: mcp__linear__list_issues
+  input: { team: "OpenMA", limit: 1, orderBy: "updatedAt" }
+
+agent.mcp_tool_result:
+  content: { issues: [{ id: "OPE-48", title: "...", status: "Done", ... }] }
+```
+
+The model never sees the bearer token — only the response.
+
+## Audit trail
+
+Every call through `forwardWithRefresh` emits a structured log line:
+
+```json
+{
+  "op": "mcp_proxy.forward",
+  "caller": "http" | "rpc-mcp" | "rpc-outbound",
+  "tenant_id": "...",
+  "session_id": "...",
+  "server": "linear",
+  "host": "mcp.linear.app",
+  "method": "POST",
+  "status": 200,
+  "refreshed": true | false,
+  "ms": 1234
+}
+```
+
+Production incident response can answer "who called what when" without per-call-site instrumentation.
+
+## Limits
+
+- **`command_secret` credentials** (e.g. `GIT_TOKEN` injected as env var on `git` commands) flow into the sandbox container's per-command process env. AST-gated to single-simple-command form (composite `&&`/`;`/`|` blocks injection) — casual `env | grep` from the model returns nothing. **Targeted prompt injection** that crafts single-command-form leak vectors specific to the binary can still exfiltrate. Don't attach high-blast-radius credentials (org-wide GitHub PAT, prod database creds) to agents handling untrusted input until command_secret moves to the same out-of-sandbox proxy pattern as MCP/outbound.
+
+- **Streaming uploads** through `outboundForward` — current RPC body type is `string | null`. Multi-MB binary uploads from `curl -F file=@big.pdf` would need the body type widened first.
+
+- **Rate limiting** — no per-credential / per-session quota in mcp-proxy yet. A misbehaving agent can spam an upstream until it rate-limits the entire tenant.
+
+## See also
+
+- Internal architecture deep-dive: [`docs/mcp-credential-architecture.md`](https://github.com/open-ma/open-managed-agents/blob/main/docs/mcp-credential-architecture.md)
+- E2E test fixture: [`test/fixtures/fake-oauth-mcp/`](https://github.com/open-ma/open-managed-agents/tree/main/test/fixtures/fake-oauth-mcp) — a deployable CF Worker that plays both OAuth provider and MCP server, used to drill the refresh path without burning real-provider credentials.
