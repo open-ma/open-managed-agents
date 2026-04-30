@@ -27,7 +27,7 @@ export class NodeSpawner implements Spawner {
     // env merge semantics: parent env is inherited, then spec.env overrides.
     // A spec.env entry with `undefined` value EXPLICITLY UNSETS the inherited
     // key — used by callers who need the child to look like it's not running
-    // inside another agent (e.g. unsetting CLAUDECODE so claude-code-acp
+    // inside another agent (e.g. unsetting CLAUDECODE so claude-agent-acp
     // doesn't refuse to spawn nested-session-style).
     const merged: Record<string, string | undefined> = {
       ...process.env,

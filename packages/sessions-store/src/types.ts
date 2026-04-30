@@ -11,10 +11,11 @@
 //     `config` for symmetry across resource types; a denormalized `type` column
 //     supports the per-type quota count without touching JSON.
 //   - The actual secret values for `github_repository.authorization_token` and
-//     `env_secret.value` are NOT stored here — they continue to live in
-//     CONFIG_KV under `t:{tenant}:secret:{session}:{resource}` keys, owned by
-//     the route layer (sessions.ts:361/374, internal.ts:315). This store is
-//     intentionally write-once for resource metadata only.
+//     `env.value` (legacy: `env_secret.value`) are NOT stored here — they
+//     continue to live in CONFIG_KV under
+//     `t:{tenant}:secret:{session}:{resource}` keys, owned by the route layer
+//     (sessions.ts:361/374, internal.ts:315). This store is intentionally
+//     write-once for resource metadata only.
 
 import type {
   AgentConfig,

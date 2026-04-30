@@ -1,8 +1,10 @@
 import { tool, generateText } from "ai";
+import { experimental_createMCPClient } from "@ai-sdk/mcp";
 import { z } from "zod";
 import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
 import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from "@open-managed-agents/shared";
+import { BindingMCPTransport } from "../runtime/binding-mcp-transport";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
 import { buildBrowserTools, type BrowserSession } from "./browser-tools";
@@ -322,6 +324,23 @@ export async function buildTools(
     AI?: Ai;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
+    /** MCP routing context — wired from SessionDO. The transport opened
+     *  per declared mcp_server forwards via the binding instead of fetching
+     *  upstream directly. Vault credentials never enter this Worker; main
+     *  resolves and injects them inside `mcpForward`. Omitting any of the
+     *  three (binding, tenantId, sessionId) silently disables MCP tool
+     *  registration — the loop below logs nothing because in legacy
+     *  callsites this is the expected "no MCP" path. */
+    mcpBinding?: { mcpForward: (opts: {
+      tenantId: string;
+      sessionId: string;
+      serverName: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string | null;
+    }) => Promise<{ status: number; headers: Record<string, string>; body: string }> };
+    tenantId?: string;
+    sessionId?: string;
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
     browser?: BrowserSession;
     /** Pre-resolved auxiliary model — when present, web_fetch summarizes
@@ -1070,72 +1089,82 @@ export async function buildTools(
     }
   }
 
-  // MCP tools — MCP requests go through the sandbox network so that:
-  // 1. Container networking rules (allow_mcp_servers) are enforced
-  // 2. Outbound Worker can inject vault credentials transparently
-  // We call MCP endpoints via sandbox.exec(curl) instead of Worker-side fetch.
+  // MCP tools — first-class via AI SDK MCP client routed through the main
+  // worker's mcp-proxy via a CF service-binding RPC. Each declared mcp_server
+  // gets one MCPClient (warmup-time + per-buildTools call); the client is
+  // held by the returned `tool({execute})` closures and released when the
+  // tools object is GC'd at end of turn. Each remote tool surfaces as a
+  // fully-typed `mcp__<server>__<tool>` entry — model sees real schemas
+  // instead of stringly-typed arguments, single tool call covers what the
+  // old curl-double-hop (mcp_<name>_list_tools then mcp_<name>_call) needed
+  // two turns + ~5K tokens of dumped schemas to do.
+  //
+  // Auth + vault injection happen **inside main, not here**. The transport
+  // (BindingMCPTransport) just forwards `(tenantId, sessionId, serverName)`
+  // + the JSON-RPC body to `env.MAIN_MCP.mcpForward`; main looks up the
+  // vault credential live (no DO-side snapshot, so no staleness on cred
+  // rotation), injects the upstream bearer, and forwards. The agent's DO
+  // never holds plaintext credentials — mirrors Anthropic Managed Agents'
+  // "credential proxy outside the harness" design and matches what the
+  // local-runtime ACP path already does (claude-agent-acp connects to the
+  // same /v1/mcp-proxy endpoint via Bearer apiKey).
+  //
+  // Network policy ("model can only call declared mcp_servers"): enforced
+  // at the tool-registration layer below — only declared servers get
+  // registered, and the model has no other tool that takes an arbitrary
+  // URL. The old sandbox `allow_mcp_servers` iptables-style gate was
+  // belt-and-suspenders; this is the suspenders.
   if (agentConfig.mcp_servers?.length) {
-    for (const server of agentConfig.mcp_servers) {
-      if (!server.url) {
-        // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
-        // (warmup hasn't run, or spawn failed). Skip silently — re-attempt
-        // when the next buildTools fires after warmup.
-        continue;
+    if (!env?.mcpBinding || !env?.tenantId || !env?.sessionId) {
+      // Wiring missing — buildTools called from a context that didn't
+      // thread the binding through (legacy path or test harness). Skip MCP
+      // setup silently rather than crash; the model just won't see the
+      // tools and will report "I don't have that available". Caller logs
+      // are responsible for surfacing this misconfiguration in real
+      // deployments — see SessionDO callsites which always thread it.
+    } else {
+      for (const server of agentConfig.mcp_servers) {
+        if (!server.url) {
+          // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
+          // (warmup hasn't run, or spawn failed). Skip silently — re-attempt
+          // when the next buildTools fires after warmup.
+          continue;
+        }
+        try {
+          const transport = new BindingMCPTransport({
+            binding: env.mcpBinding,
+            tenantId: env.tenantId,
+            sessionId: env.sessionId,
+            serverName: server.name,
+          });
+          const mcpClient = await experimental_createMCPClient({
+            transport: transport as never,
+            name: "oma-cloud-agent",
+          });
+          const remoteTools = await mcpClient.tools();
+          for (const [toolName, t] of Object.entries(remoteTools)) {
+            // Prefix matches what the local-runtime ACP path produces
+            // (`mcp__<server>__<tool>`), so transcripts from cloud and
+            // local sessions are visually identical.
+            tools[`mcp__${server.name}__${toolName}`] = t;
+          }
+        } catch (err) {
+          // Connection / handshake / tools/list failure for one server
+          // (e.g. main worker unreachable, vault credential missing,
+          // upstream MCP server down). Log + skip so a single
+          // misconfiguration doesn't take the whole turn down — the model
+          // just doesn't see this server's tools and reports "MCP server
+          // X unavailable" if asked.
+          const msg = err instanceof Error ? err.message : String(err);
+          console.error(
+            `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
+          );
+        }
       }
-      const escapedUrl = server.url.replace(/'/g, "'\\''");
-      const authHeader = server.authorization_token
-        ? `-H 'Authorization: Bearer ${server.authorization_token.replace(/'/g, "'\\''")}'`
-        : "";
-
-      // Create a tool that lists available MCP tools from this server
-      tools[`mcp_${server.name}_list_tools`] = tool({
-        description: `List available tools from MCP server "${server.name}".`,
-        inputSchema: z.object({}),
-        execute: safe(async () => {
-          const rpcBody = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/list",
-            params: {},
-          });
-          return truncateResult(await sandbox.exec(
-            `curl -sS -X POST '${escapedUrl}' ` +
-            `-H 'Content-Type: application/json' ` +
-            `-H 'Accept: application/json, text/event-stream' ` +
-            `${authHeader} ` +
-            `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
-            15000
-          ));
-        }),
-      });
-
-      // Create a tool that calls any tool on this MCP server
-      tools[`mcp_${server.name}_call`] = tool({
-        description: `Call a tool on MCP server "${server.name}". First use mcp_${server.name}_list_tools to see available tools and their input schemas.`,
-        inputSchema: z.object({
-          tool_name: z.string().describe("Name of the MCP tool to call"),
-          arguments: z.string().optional().describe("Tool arguments as JSON string"),
-        }),
-        execute: safe(async ({ tool_name, arguments: argsStr }) => {
-          const args = argsStr ? JSON.parse(argsStr) : {};
-          const rpcBody = JSON.stringify({
-            jsonrpc: "2.0",
-            id: 1,
-            method: "tools/call",
-            params: { name: tool_name, arguments: args || {} },
-          });
-          return truncateResult(await sandbox.exec(
-            `curl -sS -X POST '${escapedUrl}' ` +
-            `-H 'Content-Type: application/json' ` +
-            `-H 'Accept: application/json, text/event-stream' ` +
-            `${authHeader} ` +
-            `-d '${rpcBody.replace(/'/g, "'\\''")}'`,
-            30000
-          ));
-        }),
-      });
     }
   }
+
+
 
   // Multi-agent tools — create a call tool for each callable agent
   if (agentConfig.callable_agents?.length && env?.ANTHROPIC_API_KEY) {

@@ -23,12 +23,26 @@ import type { AddressInfo } from "node:net";
 import { spawn } from "node:child_process";
 import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { writeCreds, readCreds, getOrCreateMachineId } from "../lib/config.js";
 import { paths, currentPlatform, osTag } from "../lib/platform.js";
-import { install as installLaunchd } from "../lib/launchd.js";
+import { install as installLaunchd, type InstallOptions } from "../lib/launchd.js";
 import { detectAll } from "@open-managed-agents/acp-runtime/registry";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
+
+/** Snapshot of the current process's node + cli entry. Frozen here (not at
+ *  daemon start) because launchd doesn't source the user's shell — the only
+ *  moment we know which node the user actually wants is when they run
+ *  `oma bridge setup`. realpath unwraps the npm/.bin/oma symlink so the
+ *  plist points at the real dist/index.js, not at a shim that re-triggers
+ *  shebang resolution. */
+function launchdInstallOpts(): InstallOptions {
+  return {
+    nodePath: process.execPath,
+    cliEntry: realpathSync(process.argv[1]!),
+  };
+}
 
 interface SetupOpts {
   serverUrl: string;
@@ -59,7 +73,7 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
       log.ok(`existing credentials found  ${c.dim(paths().credsFile)}`);
       log.hint(`runtime ${existing.runtimeId.slice(0, 8)}… (use --force to re-register)`);
       if (!opts.noService && currentPlatform() === "darwin") {
-        await installLaunchd({ binaryPath: process.argv[1] });
+        await installLaunchd(launchdInstallOpts());
         log.ok(`launchd plist refreshed  ${c.dim(paths().serviceFile ?? "")}`);
         log.ok(`daemon restarted  ${c.dim("logs: " + paths().logFile)}`);
       } else {
@@ -104,19 +118,28 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
   // If `claude` (Claude Code itself) is on PATH but its ACP wrapper isn't,
   // install the wrapper for the user. Anyone running `oma bridge setup` is
   // already opting into running a daemon on their box; needing them to also
-  // remember a separate `npm i -g @zed-industries/claude-code-acp` step is
+  // remember a separate `npm i -g @agentclientprotocol/claude-agent-acp` step is
   // friction with no upside. We only do this when `claude` is present —
   // we're not pre-installing wrappers for users who haven't picked
   // Claude Code as their day-to-day CLI.
-  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-code-acp");
+  //
+  // Package history: this used to be `@zed-industries/claude-code-acp` (binary
+  // name `claude-code-acp`). The project moved to `agentclientprotocol` org
+  // and renamed both the npm package and the binary in v0.31.x; the old name
+  // is npm-deprecated and stuck on agent-sdk 0.2.44, which has an internal
+  // capability/handler inconsistency that makes Linear-style MCP servers
+  // (anything that triggers the elicitation handler-registration path) fail
+  // with `Client does not support elicitation capability`. The new name is
+  // on agent-sdk 0.2.121+ where that path is fixed.
+  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-agent-acp");
   if (!hasClaudeAcp && (await isOnPath("claude"))) {
-    log.step("found `claude` on PATH — installing ACP wrapper @zed-industries/claude-code-acp");
-    const ok = await npmInstallGlobal("@zed-industries/claude-code-acp");
+    log.step("found `claude` on PATH — installing ACP wrapper @agentclientprotocol/claude-agent-acp");
+    const ok = await npmInstallGlobal("@agentclientprotocol/claude-agent-acp");
     if (ok) {
-      log.ok("claude-code-acp installed");
+      log.ok("claude-agent-acp installed");
       agents = await detectAll();
     } else {
-      log.warn("auto-install failed — install manually: npm i -g @zed-industries/claude-code-acp");
+      log.warn("auto-install failed — install manually: npm i -g @agentclientprotocol/claude-agent-acp");
     }
   }
 
@@ -124,7 +147,7 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
     log.ok(`agents detected  ${c.dim(agents.map((a: { id: string }) => a.id).join(", "))}`);
   } else {
     log.warn("no ACP agents on PATH yet");
-    log.hint("install one, e.g. `npm i -g @zed-industries/claude-code-acp`");
+    log.hint("install one, e.g. `npm i -g @agentclientprotocol/claude-agent-acp`");
   }
 
   if (opts.noService || currentPlatform() !== "darwin") {
@@ -134,7 +157,7 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
     return;
   }
 
-  await installLaunchd({ binaryPath: process.argv[1] });
+  await installLaunchd(launchdInstallOpts());
   log.ok(`launchd plist installed  ${c.dim(paths().serviceFile ?? "")}`);
   log.ok(`daemon started  ${c.dim("logs: " + paths().logFile)}`);
   process.stderr.write("\n");
