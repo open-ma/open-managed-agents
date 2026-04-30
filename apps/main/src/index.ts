@@ -1,6 +1,7 @@
 import { Hono } from "hono";
+import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "@open-managed-agents/shared";
-import { servicesMiddleware, tenantDbMiddleware } from "@open-managed-agents/services";
+import { servicesMiddleware, tenantDbMiddleware, getCfServicesForTenant } from "@open-managed-agents/services";
 import { authMiddleware } from "./auth";
 import { rateLimitMiddleware, authRateLimitMiddleware } from "./rate-limit";
 import agentsRoutes from "./routes/agents";
@@ -22,7 +23,7 @@ import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
-import mcpProxyRoutes from "./routes/mcp-proxy";
+import mcpProxyRoutes, { resolveProxyTargetByTenant, forwardToUpstream } from "./routes/mcp-proxy";
 import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
 import { memoryRetentionTick } from "./cron/memory-retention";
@@ -185,3 +186,76 @@ export default {
 // DO classes must be re-exported from the worker entry so wrangler can find
 // them by class_name in durable_objects.bindings + migrations.
 export { RuntimeRoom } from "./runtime-room";
+
+/**
+ * RPC entrypoint for the agent worker (cloud agent path) to forward MCP
+ * requests through main's credential-injection layer without exposing the
+ * vault to the agent's DO.
+ *
+ * Mirrors Anthropic Managed Agents' "credential proxy outside the harness"
+ * design: the agent worker (the harness) only knows session_id +
+ * server_name; the actual vault lookup, token injection, and upstream call
+ * happen here in main, where the secrets already live. This means a
+ * cloud-side prompt-injection attack against the agent's DO cannot read
+ * any vault credential because the DO doesn't hold one.
+ *
+ * Auth model: this class is reachable only via wrangler service-binding
+ * declarations — Workers without an explicit `services[].entrypoint` block
+ * pointing at "McpProxyRpc" cannot invoke `mcpForward`. The binding itself
+ * is the authentication primitive; no shared secret needed. The agent
+ * worker passes `tenantId` because it has it from the SessionDO context;
+ * we trust it the same way we'd trust any in-process function call from
+ * sibling code, since the binding scope establishes that the caller is
+ * our own deployment.
+ *
+ * Local-runtime path (claude-agent-acp daemon) keeps using the public
+ * /v1/mcp-proxy/<sid>/<server> HTTP endpoint with apiKey auth — the
+ * daemon doesn't have a service binding, so it has to authenticate the
+ * old way. Both paths converge on the same `resolveProxyTargetByTenant` +
+ * `forwardToUpstream` helpers in routes/mcp-proxy.ts.
+ */
+export class McpProxyRpc extends WorkerEntrypoint<Env> {
+  async mcpForward(opts: {
+    tenantId: string;
+    sessionId: string;
+    serverName: string;
+    method: string;
+    /** Inbound headers from the MCP client. The Authorization header here is
+     *  the agent worker's own token (or empty); we always overwrite it with
+     *  the upstream credential before forwarding. */
+    headers: Record<string, string>;
+    /** Stringified JSON-RPC body for POST. Empty / null for GET. */
+    body: string | null;
+  }): Promise<{
+    status: number;
+    headers: Record<string, string>;
+    body: string;
+  }> {
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const target = await resolveProxyTargetByTenant(
+      this.env,
+      services,
+      opts.tenantId,
+      opts.sessionId,
+      opts.serverName,
+    );
+    if (!target) {
+      return {
+        status: 403,
+        headers: { "content-type": "application/json" },
+        body: '{"error":"forbidden"}',
+      };
+    }
+    const inboundHeaders = new Headers(opts.headers);
+    const res = await forwardToUpstream(target, opts.method, inboundHeaders, opts.body);
+    const respHeaders: Record<string, string> = {};
+    res.headers.forEach((v, k) => {
+      respHeaders[k] = v;
+    });
+    return {
+      status: res.status,
+      headers: respHeaders,
+      body: await res.text(),
+    };
+  }
+}

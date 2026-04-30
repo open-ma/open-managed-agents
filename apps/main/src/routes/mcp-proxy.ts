@@ -1,19 +1,30 @@
 /**
- * MCP proxy — gateway between an ACP child running on a user's machine and
- * the upstream MCP servers configured on an OMA agent. Lets the agent's
- * model use Linear / GitHub / etc. tools without ever sending the upstream
- * credentials to the user's machine.
+ * MCP proxy — gateway between an OMA agent (cloud or local-runtime) and the
+ * upstream MCP servers configured on that agent. The credential lives in
+ * a vault on the cloud side; this proxy is the only layer that ever holds
+ * the plaintext token, mirroring Anthropic's Managed Agents design (the
+ * sandbox / harness never sees credentials, only references to them).
  *
- *   ACP child (user's laptop)
- *     │  HTTP w/ Bearer oma_*
- *     ▼
- *   /v1/mcp-proxy/<sid>/<server_name>   ← here
- *     │  Same MCP-over-HTTP protocol the upstream speaks; we
- *     │  only swap the auth header before forwarding
- *     ▼
- *   upstream MCP server (integrations.openma.dev or third-party)
+ *   ┌────────────────────────────────┐
+ *   │  ACP child  /  Cloud agent DO  │   "调 server X，sid=Y"
+ *   │  (the harness — no creds)      │
+ *   └─────────────┬──────────────────┘
+ *                 │
+ *                 ├── HTTP via Bearer oma_*  (local-runtime path)
+ *                 │   /v1/mcp-proxy/<sid>/<server_name>
+ *                 │
+ *                 └── WorkerEntrypoint RPC via service binding
+ *                     (cloud agent path — see apps/main/src/index.ts:McpProxyRpc)
+ *                 │
+ *   ┌─────────────▼──────────────────┐
+ *   │  resolveProxyTarget(...)        │   ← only function that touches creds
+ *   │  + forwardToUpstream(...)       │
+ *   └─────────────┬──────────────────┘
+ *                 │  Authorization: Bearer <real-token>
+ *                 ▼
+ *           upstream MCP server
  *
- * Auth surface:
+ * Auth surface (HTTP path):
  *   - Bearer omak_*: hashed in CONFIG_KV `apikey:<sha256>` (same row API
  *     keys created via /v1/api_keys use). Resolves to (tenant_id, user_id).
  *   - sid in URL: must reference a row in `sessions` belonging to the same
@@ -22,11 +33,16 @@
  *   - server_name in URL: must match one of agent.mcp_servers[].name on the
  *     session's agent_snapshot.
  *
+ * Auth surface (RPC path): tenant_id is established by the binding itself —
+ * only configured Workers can RPC into us, and the caller (agent worker)
+ * already authenticated the session out-of-band. The same session/server
+ * checks below run, just without the apiKey lookup step.
+ *
  * Auth flow is intentionally cache-friendly: a single function
- * `resolveProxyTarget(env, token, sid, serverName) → ProxyTarget | error`
- * isolates the lookup so a future KV cache layer can drop in around it
- * without changing call sites. We don't add the cache yet — current scale
- * runs sub-ms per call, KV rounds-trip would be slower.
+ * `resolveProxyTargetByTenant(env, services, tenantId, sid, serverName) →
+ * ProxyTarget | null` isolates the lookup so a future KV cache layer can
+ * drop in around it without changing call sites. We don't add the cache
+ * yet — current scale runs sub-ms per call, KV round-trip would be slower.
  */
 
 import { Hono } from "hono";
@@ -35,7 +51,7 @@ import type { Services } from "@open-managed-agents/services";
 
 const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
 
-interface ProxyTarget {
+export interface ProxyTarget {
   /** Real upstream MCP server URL (e.g. https://integrations.openma.dev/.../mcp). */
   upstreamUrl: string;
   /** Bearer token to inject on the upstream request. */
@@ -48,28 +64,36 @@ async function sha256(input: string): Promise<string> {
 }
 
 /**
- * Validate the (api key, session id, mcp server name) triple and resolve
- * the upstream URL + injection token. Returns null if anything fails — the
- * caller turns that into a 401/403/404 with a generic message.
- *
- * Single function on purpose: when we add a KV cache for the (token+sid+server)
- * tuple, the wrapper goes here, signature stays.
+ * Resolve apiKey → tenant_id via the existing CONFIG_KV `apikey:<sha256>`
+ * index. Exported so the HTTP endpoint can do its auth step before handing
+ * off to `resolveProxyTargetByTenant`. Returns null on miss / malformed row.
  */
-async function resolveProxyTarget(
-  env: Env,
-  services: Services,
-  apiKey: string,
-  sid: string,
-  serverName: string,
-): Promise<ProxyTarget | null> {
-  // 1. Token → tenant_id, user_id (KV: apikey:<sha256>)
+export async function apiKeyToTenantId(env: Env, apiKey: string): Promise<string | null> {
   const hash = await sha256(apiKey);
   const keyData = await env.CONFIG_KV.get(`apikey:${hash}`);
   if (!keyData) return null;
   const { tenant_id: tenantId } = JSON.parse(keyData) as { tenant_id: string; user_id?: string };
-  if (!tenantId) return null;
+  return tenantId || null;
+}
 
-  // 2. Session must exist, belong to the same tenant, not archived.
+/**
+ * Validate the (tenantId, sid, serverName) triple and resolve the upstream
+ * URL + injection token. Returns null if anything fails — the caller turns
+ * that into a 403 with a generic message.
+ *
+ * Used by both the HTTP endpoint (auth via apiKey → tenantId) and the RPC
+ * entrypoint (auth via service binding; tenantId comes from the agent
+ * worker's session context). Keeping the cred-resolution step apiKey-free
+ * is what lets cloud agents skip the apiKey-bootstrap problem.
+ */
+export async function resolveProxyTargetByTenant(
+  env: Env,
+  services: Services,
+  tenantId: string,
+  sid: string,
+  serverName: string,
+): Promise<ProxyTarget | null> {
+  // 1. Session must exist, belong to the same tenant, not archived.
   const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
   if (!session) return null;
   const sessionAny = session as {
@@ -79,13 +103,13 @@ async function resolveProxyTarget(
   };
   if (sessionAny.archived_at) return null;
 
-  // 3. agent_snapshot must declare the requested mcp server.
+  // 2. agent_snapshot must declare the requested mcp server.
   const agent = sessionAny.agent_snapshot;
   if (!agent) return null;
   const server = (agent.mcp_servers ?? []).find((s) => s.name === serverName);
   if (!server || !server.url) return null;
 
-  // 4. Resolve credential. agent.mcp_servers[].authorization_token, if set,
+  // 3. Resolve credential. agent.mcp_servers[].authorization_token, if set,
   //    is the literal token we should inject. Otherwise look up an active
   //    credential matching the server URL across the session's vault_ids.
   if (server.authorization_token) {
@@ -110,23 +134,23 @@ async function resolveProxyTarget(
   return null;
 }
 
-// Forward both POST and GET for the MCP HTTP transport (depending on which
-// upstream protocol — JSON-RPC / SSE / etc. — the server speaks).
-app.all("/:sid/:server", async (c) => {
-  const sid = c.req.param("sid");
-  const serverName = c.req.param("server");
-  const auth = c.req.header("authorization") ?? "";
-  const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
-  if (!apiKey) return c.json({ error: "missing bearer" }, 401);
-
-  const target = await resolveProxyTarget(c.env, c.get("services"), apiKey, sid, serverName);
-  if (!target) return c.json({ error: "forbidden" }, 403);
-
-  // Build the upstream request: clone method + body, replace URL, swap
-  // authorization header. Strip any session-/proxy-specific headers so the
-  // upstream server only sees what it would have if the agent had called
-  // it directly with the real credential.
-  const upstreamHeaders = new Headers(c.req.raw.headers);
+/**
+ * Forward an MCP request to the upstream server, swapping the authorization
+ * header for the resolved upstream token. Strips any session-/proxy-specific
+ * CF headers so the upstream sees only what it would have if the agent had
+ * called it directly with the real credential.
+ *
+ * Streams the response back as-is — MCP-over-HTTP clients expect to read
+ * the body progressively (SSE / chunked NDJSON). Both the HTTP endpoint
+ * and the RPC entrypoint share this code path.
+ */
+export async function forwardToUpstream(
+  target: ProxyTarget,
+  method: string,
+  inboundHeaders: Headers,
+  body: BodyInit | null,
+): Promise<Response> {
+  const upstreamHeaders = new Headers(inboundHeaders);
   upstreamHeaders.set("authorization", `Bearer ${target.upstreamToken}`);
   upstreamHeaders.delete("host");
   upstreamHeaders.delete("cf-connecting-ip");
@@ -136,14 +160,37 @@ app.all("/:sid/:server", async (c) => {
   upstreamHeaders.delete("x-real-ip");
 
   const upstreamReq = new Request(target.upstreamUrl, {
-    method: c.req.method,
+    method,
     headers: upstreamHeaders,
-    body: ["GET", "HEAD"].includes(c.req.method) ? undefined : c.req.raw.body,
+    body: ["GET", "HEAD"].includes(method) ? undefined : body,
   });
 
-  // Stream the upstream response back as-is — MCP-over-HTTP clients
-  // expect to read the body progressively (SSE / chunked NDJSON).
   return fetch(upstreamReq);
+}
+
+// HTTP endpoint — used by the local-runtime ACP child via apiKey auth.
+// Cloud agent path uses the WorkerEntrypoint RPC instead (see McpProxyRpc
+// in apps/main/src/index.ts).
+app.all("/:sid/:server", async (c) => {
+  const sid = c.req.param("sid");
+  const serverName = c.req.param("server");
+  const auth = c.req.header("authorization") ?? "";
+  const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
+  if (!apiKey) return c.json({ error: "missing bearer" }, 401);
+
+  const tenantId = await apiKeyToTenantId(c.env, apiKey);
+  if (!tenantId) return c.json({ error: "forbidden" }, 403);
+
+  const target = await resolveProxyTargetByTenant(
+    c.env,
+    c.get("services"),
+    tenantId,
+    sid,
+    serverName,
+  );
+  if (!target) return c.json({ error: "forbidden" }, 403);
+
+  return forwardToUpstream(target, c.req.method, c.req.raw.headers, c.req.raw.body);
 });
 
 export default app;
