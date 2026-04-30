@@ -83,11 +83,24 @@ export interface Env {
   // vault credential lookup + token injection happen in main where the
   // secrets already live, never in the agent's DO. Optional because main
   // worker doesn't have this binding (it's the target, not a caller).
+  //
+  // `outboundForward` is the sandbox-side equivalent: any HTTPS request
+  // the cloud agent's container makes is intercepted by oma-sandbox.ts
+  // and routed through here for vault-credential injection by hostname
+  // match. Same "credentials only ever live in main" property.
   MAIN_MCP?: {
     mcpForward(opts: {
       tenantId: string;
       sessionId: string;
       serverName: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string | null;
+    }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
+    outboundForward(opts: {
+      tenantId: string;
+      sessionId: string;
+      url: string;
       method: string;
       headers: Record<string, string>;
       body: string | null;

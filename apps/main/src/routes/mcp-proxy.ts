@@ -135,6 +135,69 @@ export async function resolveProxyTargetByTenant(
 }
 
 /**
+ * Outbound counterpart to `resolveProxyTargetByTenant`: pick a vault bearer
+ * token whose `auth.mcp_server_url` shares a hostname with the request the
+ * sandbox is about to make. Returns null when the session has no matching
+ * credential — caller forwards the request without injection (works for
+ * unauthenticated upstreams and matches the pre-refactor "pass through if
+ * no match" behavior).
+ *
+ * Hostname-based match (rather than full URL like the MCP path) because
+ * the sandbox container hits arbitrary upstream paths — e.g. the agent
+ * configures an MCP server at `https://api.linear.app/mcp` and then
+ * fetches `https://api.linear.app/v1/issues/...` from a script. Both
+ * should get the same Bearer.
+ *
+ * Live read on every call: no DO-side snapshot, no KV blob in agent
+ * worker. If a vault credential is rotated mid-session, the next outbound
+ * call sees the new token without any session-side invalidation.
+ */
+export async function resolveOutboundCredentialByHost(
+  env: Env,
+  services: Services,
+  tenantId: string,
+  sid: string,
+  hostname: string,
+): Promise<{ token: string; type: string } | null> {
+  const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
+  if (!session) return null;
+  const sessionAny = session as {
+    archived_at?: string | null;
+    vault_ids?: string[] | null;
+  };
+  if (sessionAny.archived_at) return null;
+
+  const vaultIds = sessionAny.vault_ids ?? [];
+  if (vaultIds.length === 0) return null;
+  const grouped = await services.credentials
+    .listByVaults({ tenantId, vaultIds })
+    .catch(() => []);
+  for (const g of grouped) {
+    for (const c of g.credentials) {
+      const auth = (c as unknown as CredentialConfig).auth as
+        | {
+            type?: string;
+            mcp_server_url?: string;
+            bearer_token?: string;
+            token?: string;
+            access_token?: string;
+          }
+        | undefined;
+      if (!auth?.mcp_server_url) continue;
+      try {
+        const credUrl = new URL(auth.mcp_server_url);
+        if (credUrl.hostname !== hostname) continue;
+      } catch {
+        continue;
+      }
+      const token = auth.bearer_token ?? auth.token ?? auth.access_token;
+      if (token) return { token, type: auth.type ?? "static_bearer" };
+    }
+  }
+  return null;
+}
+
+/**
  * Forward an MCP request to the upstream server, swapping the authorization
  * header for the resolved upstream token. Strips any session-/proxy-specific
  * CF headers so the upstream sees only what it would have if the agent had

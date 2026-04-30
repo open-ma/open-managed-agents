@@ -305,24 +305,35 @@ export class CloudflareSandbox implements SandboxExecutor {
 
   /**
    * Bind the OmaSandbox `inject_vault_creds` outbound handler with the
-   * session's vault credentials. After this call, any HTTPS request the
-   * container makes whose hostname matches a credential's `mcp_server_url`
-   * gets a Bearer header injected before being forwarded upstream.
-   * The credentials never leave the Workers runtime.
+   * session's identifying context (tenantId, sessionId). The handler runs
+   * in the agent worker scope; on every outbound HTTPS request the
+   * sandbox makes, it RPCs to main with these identifiers, main does the
+   * vault lookup live, injects the bearer, and forwards. The agent
+   * worker's address space never holds plaintext vault credentials —
+   * mirrors Anthropic Managed Agents' "credential proxy outside the
+   * harness" pattern (see apps/agent/src/oma-sandbox.ts file header).
    */
-  async setVaultCredentialsForOutbound(
-    vault_credentials: Array<{ vault_id: string; credentials: unknown[] }>,
-  ): Promise<void> {
-    if (!vault_credentials.length) return;
+  async setOutboundContext(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (!opts.tenantId || !opts.sessionId) return;
     try {
       const sandbox = await this.getSandbox();
       const hasFn = typeof sandbox.setOutboundHandler === "function";
-      console.log(`[sandbox] setVaultCredentialsForOutbound vaults=${vault_credentials.length} hasFn=${hasFn}`);
+      console.log(
+        `[sandbox] setOutboundContext tenant=${opts.tenantId.slice(0, 8)} sid=${opts.sessionId.slice(0, 12)} hasFn=${hasFn}`,
+      );
       if (!hasFn) return;
-      await sandbox.setOutboundHandler("inject_vault_creds", { vault_credentials });
-      console.log(`[sandbox] setOutboundHandler bound`);
+      await sandbox.setOutboundHandler("inject_vault_creds", {
+        tenantId: opts.tenantId,
+        sessionId: opts.sessionId,
+      });
+      console.log(`[sandbox] setOutboundHandler bound (RPC mode)`);
     } catch (err) {
-      console.error(`[sandbox] setVaultCredentialsForOutbound failed: ${(err as Error).message ?? err}`);
+      console.error(
+        `[sandbox] setOutboundContext failed: ${(err as Error).message ?? err}`,
+      );
     }
   }
 
