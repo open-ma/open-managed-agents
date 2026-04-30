@@ -77,6 +77,22 @@ export interface Env {
   // Service binding to apps/integrations for proxying install initiation
   // calls from the Console (single-origin, no CORS).
   INTEGRATIONS?: Fetcher;
+  // WorkerEntrypoint RPC binding from the agent worker to the main worker's
+  // McpProxyRpc class — see apps/main/src/index.ts. Cloud agents call
+  // `env.MAIN_MCP.mcpForward({tenantId, sessionId, serverName, ...})` so
+  // vault credential lookup + token injection happen in main where the
+  // secrets already live, never in the agent's DO. Optional because main
+  // worker doesn't have this binding (it's the target, not a caller).
+  MAIN_MCP?: {
+    mcpForward(opts: {
+      tenantId: string;
+      sessionId: string;
+      serverName: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string | null;
+    }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
+  };
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;

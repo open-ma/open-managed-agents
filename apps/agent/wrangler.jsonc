@@ -32,13 +32,26 @@
     { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" }
   ],
 
-  // Service binding to the integrations gateway. Used by the outbound proxy
-  // to refresh short-lived upstream tokens (e.g. GitHub installation tokens,
-  // ~1hr TTL) on 401. The agent worker never sees provider secrets directly
-  // — it just asks the gateway "please refresh credential X" and the gateway
-  // does the App-JWT signing using its locally-held private key.
+  // Service bindings:
+  //
+  // - INTEGRATIONS: integrations gateway. Used by the outbound proxy to
+  //   refresh short-lived upstream tokens (e.g. GitHub installation tokens,
+  //   ~1hr TTL) on 401. The agent worker never sees provider secrets directly
+  //   — it just asks the gateway "please refresh credential X" and the gateway
+  //   does the App-JWT signing using its locally-held private key.
+  //
+  // - MAIN_MCP: WorkerEntrypoint RPC into the main worker for MCP forwarding
+  //   (cloud agent path). Per-request the DO calls
+  //   `env.MAIN_MCP.mcpForward({tenantId, sessionId, serverName, ...})` and
+  //   the main worker (where vault credentials already live) does the cred
+  //   lookup + token injection + upstream call. The agent's DO never holds
+  //   plaintext credentials — mirrors Anthropic Managed Agents' "credential
+  //   proxy outside the harness" design. See apps/main/src/index.ts:McpProxyRpc
+  //   for the entrypoint, packages/binding-mcp-transport for the AI-SDK
+  //   transport adapter.
   "services": [
-    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
+    { "binding": "MAIN_MCP", "service": "managed-agents", "entrypoint": "McpProxyRpc" }
   ],
 
   // Cross-script DO binding for RuntimeRoom. The class lives in the main
@@ -125,7 +138,8 @@
         }
       ],
       "services": [
-        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
+        { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" },
+        { "binding": "MAIN_MCP", "service": "managed-agents-staging", "entrypoint": "McpProxyRpc" }
       ],
       // Cross-script DO binding to staging RuntimeRoom (lives in
       // managed-agents-staging). Same shape as prod above.
