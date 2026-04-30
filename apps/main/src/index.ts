@@ -26,7 +26,7 @@ import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from ".
 import mcpProxyRoutes, {
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
-  forwardToUpstream,
+  forwardWithRefresh,
 } from "./routes/mcp-proxy";
 import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
@@ -251,7 +251,14 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       };
     }
     const inboundHeaders = new Headers(opts.headers);
-    const res = await forwardToUpstream(target, opts.method, inboundHeaders, opts.body);
+    const res = await forwardWithRefresh(
+      services,
+      opts.tenantId,
+      target,
+      opts.method,
+      inboundHeaders,
+      opts.body,
+    );
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {
       respHeaders[k] = v;
@@ -311,23 +318,50 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       parsedUrl.hostname,
     );
 
-    const upstreamHeaders = new Headers(opts.headers);
-    if (cred) {
-      upstreamHeaders.set("Authorization", `Bearer ${cred.token}`);
-    }
-    upstreamHeaders.delete("host");
-    upstreamHeaders.delete("cf-connecting-ip");
-    upstreamHeaders.delete("cf-ray");
-    upstreamHeaders.delete("x-forwarded-for");
-    upstreamHeaders.delete("x-forwarded-proto");
-    upstreamHeaders.delete("x-real-ip");
+    const inboundHeaders = new Headers(opts.headers);
 
-    const upstreamReq = new Request(opts.url, {
-      method: opts.method,
-      headers: upstreamHeaders,
-      body: ["GET", "HEAD"].includes(opts.method) ? undefined : opts.body,
-    });
-    const res = await fetch(upstreamReq);
+    if (!cred) {
+      // No matching credential — pass through without injection. Public
+      // APIs and pre-authenticated URLs work this way; matches old
+      // behavior of the snapshot interceptor (host miss → no header).
+      // We still strip the CF-edge headers for cleanliness.
+      inboundHeaders.delete("host");
+      inboundHeaders.delete("cf-connecting-ip");
+      inboundHeaders.delete("cf-ray");
+      inboundHeaders.delete("x-forwarded-for");
+      inboundHeaders.delete("x-forwarded-proto");
+      inboundHeaders.delete("x-real-ip");
+      const upstreamReq = new Request(opts.url, {
+        method: opts.method,
+        headers: inboundHeaders,
+        body: ["GET", "HEAD"].includes(opts.method) ? undefined : opts.body,
+      });
+      const res = await fetch(upstreamReq);
+      const respHeaders: Record<string, string> = {};
+      res.headers.forEach((v, k) => {
+        respHeaders[k] = v;
+      });
+      return {
+        status: res.status,
+        headers: respHeaders,
+        body: await res.text(),
+      };
+    }
+
+    // Override target.upstreamUrl with the actual URL the sandbox wants
+    // to hit (resolveOutboundCredentialByHost only knows the credential's
+    // mcp_server_url, but for outbound the caller might be hitting any
+    // path on that host). forwardWithRefresh injects token + auto-refreshes
+    // on 401 if the credential is mcp_oauth.
+    const target = { ...cred, upstreamUrl: opts.url };
+    const res = await forwardWithRefresh(
+      services,
+      opts.tenantId,
+      target,
+      opts.method,
+      inboundHeaders,
+      opts.body,
+    );
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {
       respHeaders[k] = v;
