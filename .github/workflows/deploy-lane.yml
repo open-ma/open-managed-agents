@@ -148,15 +148,12 @@ jobs:
             > "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
           npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
 
-      - name: Deploy agent worker
-        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'agent')
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          cd apps/agent
-          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
-
+      # Deploy main BEFORE agent — agent worker has a service binding to
+      # main's `McpProxyRpc` WorkerEntrypoint class. CF resolves bindings
+      # at request time; if agent goes live before main's entrypoint
+      # exists, every cloud-MCP call fails until main catches up.
+      # Rollback: agent first, then main. See deploy.yml for the same
+      # rationale and full ordering invariant.
       - name: Deploy main worker
         if: contains(inputs.workers, 'all') || contains(inputs.workers, 'main')
         env:
@@ -164,6 +161,15 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
         run: |
           cd apps/main
+          npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
+
+      - name: Deploy agent worker
+        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'agent')
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/agent
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       - name: Re-deploy integrations worker (full config, MAIN binding live)

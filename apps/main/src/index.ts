@@ -258,6 +258,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       opts.method,
       inboundHeaders,
       opts.body,
+      { sessionId: opts.sessionId, serverName: opts.serverName, callerKind: "rpc-mcp" },
     );
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {
@@ -361,6 +362,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       opts.method,
       inboundHeaders,
       opts.body,
+      { sessionId: opts.sessionId, callerKind: "rpc-outbound" },
     );
     const respHeaders: Record<string, string> = {};
     res.headers.forEach((v, k) => {

