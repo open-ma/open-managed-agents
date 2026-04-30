@@ -56,6 +56,19 @@ export interface ProxyTarget {
   upstreamUrl: string;
   /** Bearer token to inject on the upstream request. */
   upstreamToken: string;
+  /** Set when the matched credential is `mcp_oauth` and has the bits
+   *  needed to refresh on 401 (refresh_token + token_endpoint). Used by
+   *  `forwardWithRefresh` to retry once with a fresh token if the upstream
+   *  rejects the bearer. Stays internal to main — never leaves through
+   *  any RPC return value or HTTP response body. */
+  refresh?: {
+    refreshToken: string;
+    tokenEndpoint: string;
+    clientId?: string;
+    clientSecret?: string;
+    credentialId: string;
+    vaultId: string;
+  };
 }
 
 async function sha256(input: string): Promise<string> {
@@ -124,11 +137,35 @@ export async function resolveProxyTargetByTenant(
   for (const g of grouped) {
     for (const c of g.credentials) {
       const auth = (c as unknown as CredentialConfig).auth as
-        | { mcp_server_url?: string; bearer_token?: string; token?: string }
+        | {
+            type?: string;
+            mcp_server_url?: string;
+            bearer_token?: string;
+            token?: string;
+            access_token?: string;
+            refresh_token?: string;
+            token_endpoint?: string;
+            client_id?: string;
+            client_secret?: string;
+          }
         | undefined;
       if (auth?.mcp_server_url !== server.url) continue;
-      const token = auth?.bearer_token ?? auth?.token;
-      if (token) return { upstreamUrl: server.url, upstreamToken: token };
+      const token = auth?.bearer_token ?? auth?.token ?? auth?.access_token;
+      if (!token) continue;
+      const target: ProxyTarget = { upstreamUrl: server.url, upstreamToken: token };
+      // Surface refresh metadata for mcp_oauth so 401 can trigger an
+      // automatic token refresh + retry. static_bearer creds skip this.
+      if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
+        target.refresh = {
+          refreshToken: auth.refresh_token,
+          tokenEndpoint: auth.token_endpoint,
+          clientId: auth.client_id,
+          clientSecret: auth.client_secret,
+          credentialId: (c as { id: string }).id,
+          vaultId: g.vault_id,
+        };
+      }
+      return target;
     }
   }
   return null;
@@ -158,7 +195,7 @@ export async function resolveOutboundCredentialByHost(
   tenantId: string,
   sid: string,
   hostname: string,
-): Promise<{ token: string; type: string } | null> {
+): Promise<ProxyTarget | null> {
   const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
   if (!session) return null;
   const sessionAny = session as {
@@ -181,17 +218,39 @@ export async function resolveOutboundCredentialByHost(
             bearer_token?: string;
             token?: string;
             access_token?: string;
+            refresh_token?: string;
+            token_endpoint?: string;
+            client_id?: string;
+            client_secret?: string;
           }
         | undefined;
       if (!auth?.mcp_server_url) continue;
+      let credUrl: URL;
       try {
-        const credUrl = new URL(auth.mcp_server_url);
-        if (credUrl.hostname !== hostname) continue;
+        credUrl = new URL(auth.mcp_server_url);
       } catch {
         continue;
       }
+      if (credUrl.hostname !== hostname) continue;
       const token = auth.bearer_token ?? auth.token ?? auth.access_token;
-      if (token) return { token, type: auth.type ?? "static_bearer" };
+      if (!token) continue;
+      // upstreamUrl on this target is just for forward bookkeeping; the
+      // outbound RPC caller passes the actual destination URL it wants
+      // hit. We thread the cred's mcp_server_url through so log messages
+      // / refresh persistence can correlate, but it's not used by
+      // forwardWithRefresh's fetch (which uses caller's URL).
+      const target: ProxyTarget = { upstreamUrl: auth.mcp_server_url, upstreamToken: token };
+      if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
+        target.refresh = {
+          refreshToken: auth.refresh_token,
+          tokenEndpoint: auth.token_endpoint,
+          clientId: auth.client_id,
+          clientSecret: auth.client_secret,
+          credentialId: (c as { id: string }).id,
+          vaultId: g.vault_id,
+        };
+      }
+      return target;
     }
   }
   return null;
@@ -231,6 +290,119 @@ export async function forwardToUpstream(
   return fetch(upstreamReq);
 }
 
+/**
+ * Forward + auto-refresh on 401 for `mcp_oauth` credentials. Wraps
+ * `forwardToUpstream` with: if the first response is 401 AND the
+ * resolved credential carries refresh metadata, hit `token_endpoint`
+ * with the `refresh_token`, persist the rotated token back to D1 (via
+ * services.credentials.refreshAuth so the next session sees the new
+ * token immediately), and retry the upstream call once with the fresh
+ * bearer. Returns whatever the retry produced — including another 401
+ * if refresh itself was rejected (revoked refresh_token, scopes
+ * removed) — so the caller's UI can surface the genuine auth failure.
+ *
+ * Body must be pre-buffered (string | null) because the request stream
+ * gets consumed by the first fetch and we need to replay it on retry.
+ * For Worker-to-Worker traffic both `mcpForward` and `outboundForward`
+ * already pass body as a string; the public HTTP /v1/mcp-proxy endpoint
+ * pre-buffers via `c.req.text()` for the same reason.
+ *
+ * Replaces the old apps/agent/src/outbound.ts:tryRefreshToken path,
+ * which lived in the agent worker and updated a per-session KV
+ * snapshot. The KV snapshot is gone (see previous commit); refresh
+ * persistence is now D1-direct so the canonical credential row is the
+ * single source of truth and stays consistent across sessions.
+ */
+export async function forwardWithRefresh(
+  services: Services,
+  tenantId: string,
+  target: ProxyTarget,
+  method: string,
+  inboundHeaders: Headers,
+  body: string | null,
+): Promise<Response> {
+  const first = await forwardToUpstream(target, method, inboundHeaders, body);
+  if (first.status !== 401 || !target.refresh) return first;
+
+  // Drain so we can return a fresh Response without two outstanding
+  // streams. We don't read the body — its content is irrelevant once
+  // we've decided to refresh.
+  try {
+    await first.body?.cancel();
+  } catch {
+    /* already consumed / closed */
+  }
+
+  const fresh = await tryRefreshOauth(services, tenantId, target.refresh);
+  if (!fresh) {
+    // Refresh failed: re-issue the original request unchanged so the
+    // caller gets the upstream's actual 401 (matches old behavior).
+    return forwardToUpstream(target, method, inboundHeaders, body);
+  }
+
+  return forwardToUpstream(
+    { ...target, upstreamToken: fresh },
+    method,
+    inboundHeaders,
+    body,
+  );
+}
+
+async function tryRefreshOauth(
+  services: Services,
+  tenantId: string,
+  refresh: NonNullable<ProxyTarget["refresh"]>,
+): Promise<string | null> {
+  const tokenBody = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: refresh.refreshToken,
+    client_id: refresh.clientId || "open-managed-agents",
+  });
+  if (refresh.clientSecret) tokenBody.set("client_secret", refresh.clientSecret);
+
+  let res: Response;
+  try {
+    res = await fetch(refresh.tokenEndpoint, {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: tokenBody.toString(),
+    });
+  } catch {
+    return null;
+  }
+  if (!res.ok) return null;
+
+  let tokens: { access_token?: string; refresh_token?: string; expires_in?: number };
+  try {
+    tokens = (await res.json()) as typeof tokens;
+  } catch {
+    return null;
+  }
+  if (!tokens.access_token) return null;
+
+  // Best-effort persist back to D1. If the write fails we still return
+  // the new access_token — the current request gets through, future
+  // sessions just may take one extra refresh hop.
+  try {
+    await services.credentials.refreshAuth({
+      tenantId,
+      vaultId: refresh.vaultId,
+      credentialId: refresh.credentialId,
+      auth: {
+        access_token: tokens.access_token,
+        refresh_token: tokens.refresh_token ?? refresh.refreshToken,
+        expires_at: tokens.expires_in
+          ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
+          : undefined,
+      },
+    });
+  } catch {
+    /* best-effort */
+  }
+
+  return tokens.access_token;
+}
+
 // HTTP endpoint — used by the local-runtime ACP child via apiKey auth.
 // Cloud agent path uses the WorkerEntrypoint RPC instead (see McpProxyRpc
 // in apps/main/src/index.ts).
@@ -244,16 +416,23 @@ app.all("/:sid/:server", async (c) => {
   const tenantId = await apiKeyToTenantId(c.env, apiKey);
   if (!tenantId) return c.json({ error: "forbidden" }, 403);
 
+  const services = c.get("services");
   const target = await resolveProxyTargetByTenant(
     c.env,
-    c.get("services"),
+    services,
     tenantId,
     sid,
     serverName,
   );
   if (!target) return c.json({ error: "forbidden" }, 403);
 
-  return forwardToUpstream(target, c.req.method, c.req.raw.headers, c.req.raw.body);
+  // Buffer the body so forwardWithRefresh can replay it on a 401 retry.
+  // For typical MCP clients body is a small JSON-RPC payload — fine to
+  // hold in memory. Streamed uploads aren't a thing on this endpoint.
+  const method = c.req.method;
+  const body = ["GET", "HEAD"].includes(method) ? null : await c.req.text();
+
+  return forwardWithRefresh(services, tenantId, target, method, c.req.raw.headers, body);
 });
 
 export default app;
