@@ -107,6 +107,14 @@ package needs the workflow registered on npmjs.com:
 If the trusted publisher isn't configured, publish step 401s with
 "audience mismatch" — recover by adding it.
 
+**One workflow per package limit.** npm's trusted publisher only allows
+one workflow per package, so we can't keep the old `publish-cli.yml` /
+`publish-sdk.yml` as standalone escape hatches — they'd 401. The
+`workflow_dispatch` trigger on `release.yml` itself is the escape hatch:
+manually triggering it re-runs the same logic as a push, useful when you
+want to re-attempt a publish after fixing a config issue without making
+a no-op commit.
+
 ## Troubleshooting
 
 **My changeset PR didn't open a Version Packages PR.**
@@ -120,11 +128,20 @@ via a follow-up PR), then the bot re-rolls the Version Packages PR.
 
 **I want to publish out-of-band right now without going through
 changesets.**
-Use `publish-cli.yml` (workflow_dispatch). It's still wired up as an
-escape hatch for hotfixes when changesets is in a weird state. Bump the
-package.json version manually first.
+You still need a changeset — the publish step only fires when changesets
+sees a real version bump in `package.json`. Open a tiny PR that adds a
+changeset for the hotfix, merge it, then merge the auto-generated
+Version Packages PR. Total flow is 3 PR merges; with practice it's a
+few minutes.
 
 **I accidentally bumped to a version I shouldn't have.**
 npm doesn't let you republish or downgrade. Bump again to a higher
 version with the right content. Use `npm deprecate` if a published
 version was actively harmful.
+
+**I need to re-point a dist-tag (e.g. roll back `latest` to an older
+version).**
+This isn't supported via OIDC — you'll need to `npm login` locally and
+run `npm dist-tag add @openma/cli@<version> latest`. Use sparingly; the
+right answer for "this version is bad" is usually publish a new version
+that fixes it, not move the tag.
