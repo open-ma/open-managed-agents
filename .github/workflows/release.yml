@@ -14,9 +14,9 @@ name: Release
 #      versions (containing `-`) go to `--tag <preid>` (e.g. beta), normal
 #      versions go to `--tag latest` — done by `changeset publish` itself.
 #
-# Auth: npm publish goes through OIDC trusted publisher (same as before),
-# no NPM_TOKEN. The trusted publisher config on npmjs.com must list this
-# workflow filename — set up the same way publish-cli.yml is.
+# Auth: npm publish goes through OIDC trusted publisher (no NPM_TOKEN).
+# The trusted publisher config on npmjs.com must list this workflow
+# filename for each public package — see docs/release-process.md.
 #
 # Prerelease workflow: to enter beta mode for the next release cycle:
 #   pnpm changeset pre enter beta
@@ -29,6 +29,12 @@ name: Release
 on:
   push:
     branches: [main]
+  # Manual escape hatch when changesets is in a weird state and you need to
+  # re-trigger the release machinery without a real push (e.g. you fixed a
+  # trusted-publisher misconfig and want to re-run publish for an already-
+  # bumped version sitting on main). No inputs — same logic as the push
+  # trigger: pending changesets → open Version Packages PR; none → publish.
+  workflow_dispatch:
 
 concurrency:
   group: release
@@ -37,8 +43,8 @@ concurrency:
 jobs:
   release:
     runs-on: ubuntu-latest
-    # Same trusted-publisher environment as publish-cli — npm verifies the
-    # OIDC token against this env config.
+    # Same trusted-publisher environment used by every workflow that
+    # publishes to npm — npm verifies the OIDC token against this env.
     environment: production
     permissions:
       contents: write       # to push the Version Packages PR's bump commits
