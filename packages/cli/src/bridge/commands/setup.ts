@@ -26,10 +26,11 @@ import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { writeCreds, readCreds, getOrCreateMachineId } from "../lib/config.js";
 import { paths, currentPlatform, osTag } from "../lib/platform.js";
-import { install as installLaunchd, type InstallOptions } from "../lib/launchd.js";
+import { install as installLaunchd, readInstalledCliEntry, type InstallOptions } from "../lib/launchd.js";
 import { detectAll } from "@open-managed-agents/acp-runtime/registry";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
+import { probeRuntimeToken } from "../lib/probe.js";
 
 /** Snapshot of the current process's node + cli entry. Frozen here (not at
  *  daemon start) because launchd doesn't source the user's shell — the only
@@ -62,25 +63,57 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
   printBanner(`setup — register this machine with ${opts.serverUrl}`, PKG_VERSION);
 
   // Fast path: if creds already exist (and the user didn't pass --force),
-  // skip the OAuth dance and just refresh the launchd plist (binary path
-  // changes when the user upgrades the npm package — the plist must be
-  // re-generated to point at the new dist/cli.js). This makes
-  // `npx @openma/cli@beta setup` a clean upgrade flow: same one
-  // command for first install and every subsequent version bump.
+  // probe the server first. This catches the "I deleted the runtime in the
+  // console and re-ran setup" recovery flow — without the probe we'd happily
+  // refresh the launchd plist and restart the daemon with a token the server
+  // no longer recognizes, leaving the runtime offline with no hint why.
+  //
+  // Three outcomes from probeRuntimeToken:
+  //   - ok          → original fast path (refresh plist, kick daemon, exit)
+  //   - invalid     → server forgot us; fall through to OAuth dance, same
+  //                   as if --force was passed. The stale creds will be
+  //                   overwritten by writeCreds() below.
+  //   - unreachable → can't tell; refresh plist anyway (offline tolerance)
+  //                   and warn the user that we couldn't verify.
   if (!opts.force) {
     const existing = await readCreds();
     if (existing) {
       log.ok(`existing credentials found  ${c.dim(paths().credsFile)}`);
-      log.hint(`runtime ${existing.runtimeId.slice(0, 8)}… (use --force to re-register)`);
-      if (!opts.noService && currentPlatform() === "darwin") {
-        await installLaunchd(launchdInstallOpts());
-        log.ok(`launchd plist refreshed  ${c.dim(paths().serviceFile ?? "")}`);
-        log.ok(`daemon restarted  ${c.dim("logs: " + paths().logFile)}`);
+      const probe = await probeRuntimeToken(existing.serverUrl, existing.token);
+      if (!probe.ok && probe.reason === "invalid") {
+        log.warn(
+          `server no longer recognises this runtime (${probe.detail}) — re-registering`,
+        );
+        log.hint(`(was runtime ${existing.runtimeId.slice(0, 8)}…)`);
+        // Fall through to the OAuth path; writeCreds() will overwrite the
+        // stale file with the new runtime_id + token from /exchange.
       } else {
-        log.hint("run `oma bridge daemon` to start the bridge");
+        if (!probe.ok) {
+          log.warn(`could not verify with server (${probe.detail}) — proceeding anyway`);
+        } else {
+          log.hint(`runtime ${existing.runtimeId.slice(0, 8)}… (use --force to re-register)`);
+        }
+        if (!opts.noService && currentPlatform() === "darwin") {
+          // Warn about plist binary drift before refreshing. The plist gets
+          // rewritten to whatever cliEntry the *current* process resolves to,
+          // so we want to surface "your daemon was running an older binary
+          // until just now" rather than silently swap it under the user.
+          const installedEntry = await readInstalledCliEntry();
+          const currentEntry = launchdInstallOpts().cliEntry;
+          if (installedEntry && installedEntry !== currentEntry) {
+            log.warn(`plist was pointing at a different binary; updating`);
+            log.hint(`old: ${c.dim(installedEntry)}`);
+            log.hint(`new: ${c.dim(currentEntry)}`);
+          }
+          await installLaunchd(launchdInstallOpts());
+          log.ok(`launchd plist refreshed  ${c.dim(paths().serviceFile ?? "")}`);
+          log.ok(`daemon restarted  ${c.dim("logs: " + paths().logFile)}`);
+        } else {
+          log.hint("run `oma bridge daemon` to start the bridge");
+        }
+        process.stderr.write(`\n${c.bold("Up to date.")}\n\n`);
+        return;
       }
-      process.stderr.write(`\n${c.bold("Up to date.")}\n\n`);
-      return;
     }
   }
 

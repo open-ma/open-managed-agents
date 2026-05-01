@@ -13,6 +13,7 @@ import { readCreds } from "../lib/config.js";
 import { paths } from "../lib/platform.js";
 import { printBanner, log, c, sym } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
+import { probeRuntimeToken } from "../lib/probe.js";
 
 export async function runStatus(): Promise<void> {
   printBanner("status", PKG_VERSION);
@@ -37,26 +38,17 @@ export async function runStatus(): Promise<void> {
 
   process.stderr.write("\n");
   log.step("probing server");
-  try {
-    const wsUrl = `${creds.serverUrl.replace(/^http(s?):\/\//, "ws$1://").replace(/\/$/, "")}/agents/runtime/_attach`;
-    const WebSocket = (await import("ws")).default;
-    await new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(wsUrl, {
-        headers: { Authorization: `Bearer ${creds.token}` },
-      });
-      ws.once("open", () => {
-        log.ok("token accepted (server reachable)");
-        ws.close(1000, "status probe");
-        resolve();
-      });
-      ws.once("unexpected-response", (_req, res) => {
-        reject(new Error(`HTTP ${res.statusCode}`));
-      });
-      ws.once("error", reject);
-      setTimeout(() => reject(new Error("timeout")), 8000);
-    });
-  } catch (e) {
-    process.stderr.write(`  ${sym.err()} ${c.red(`probe failed: ${e instanceof Error ? e.message : String(e)}`)}\n`);
+  const probe = await probeRuntimeToken(creds.serverUrl, creds.token);
+  if (probe.ok) {
+    log.ok("token accepted (server reachable)");
+  } else if (probe.reason === "invalid") {
+    process.stderr.write(
+      `  ${sym.err()} ${c.red(`server no longer recognises this runtime (${probe.detail})`)}\n`,
+    );
+    log.hint("run `oma bridge setup --force` to re-register");
+    process.exit(1);
+  } else {
+    process.stderr.write(`  ${sym.err()} ${c.red(`probe failed: ${probe.detail}`)}\n`);
     process.exit(1);
   }
   process.stderr.write("\n");

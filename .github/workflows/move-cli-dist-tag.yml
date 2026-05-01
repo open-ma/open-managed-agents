@@ -1,0 +1,92 @@
+name: Move CLI dist-tag
+
+# Re-points an npm dist-tag (beta, next, latest, …) to an already-published
+# version of @openma/cli. Useful when:
+#   - beta drifted older than latest and we want to align it
+#   - latest needs to be reverted to a prior version after a bad release
+#
+# Does NOT publish anything; only moves the tag pointer. Idempotent.
+#
+# Run from Actions UI:
+#   Actions → "Move CLI dist-tag" → Run workflow → fill version + tag.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Already-published version to point the tag at (e.g. 0.3.0)'
+        type: string
+        required: true
+      tag:
+        description: 'dist-tag to move (e.g. beta, next, latest)'
+        type: string
+        required: true
+
+concurrency:
+  group: move-dist-tag-${{ inputs.tag }}
+  cancel-in-progress: false
+
+jobs:
+  move:
+    runs-on: ubuntu-latest
+    # Same trusted-publisher environment as publish-cli — npm verifies the
+    # OIDC token against the same env config.
+    environment: production
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # OIDC dist-tag support landed in the same npm 11.5.1 that added
+          # OIDC publish; keep this in sync with publish-cli.yml.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Verify npm version
+        run: |
+          NPM_VER=$(npm --version)
+          echo "npm version: $NPM_VER"
+          node -e "
+            const [maj,min,pat] = process.argv[1].split('.').map(Number);
+            const ok = maj > 11 || (maj === 11 && (min > 5 || (min === 5 && pat >= 1)));
+            if (!ok) { console.error('Need npm >= 11.5.1 for OIDC dist-tag'); process.exit(1); }
+          " "$NPM_VER"
+
+      - name: Verify version exists on npm
+        run: |
+          if ! npm view "@openma/cli@${VERSION}" version >/dev/null 2>&1; then
+            echo "::error::@openma/cli@${VERSION} is not published on npm — publish it first"
+            exit 1
+          fi
+          echo "✓ @openma/cli@${VERSION} exists on npm"
+        env:
+          VERSION: ${{ inputs.version }}
+
+      - name: Move dist-tag
+        # `dist-tag add` is the operation for both create-tag and move-tag.
+        # NODE_AUTH_TOKEN cleared so npm uses the OIDC flow instead of the
+        # placeholder set by setup-node.
+        run: |
+          npm dist-tag add "@openma/cli@${VERSION}" "${TAG}"
+          echo "✓ Moved @openma/cli ${TAG} → ${VERSION}"
+          echo "Current tags:"
+          npm view @openma/cli dist-tags
+        env:
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
+          NODE_AUTH_TOKEN: ''
+
+      - name: Summary
+        run: |
+          {
+            echo "## Moved @openma/cli dist-tag"
+            echo ""
+            echo "- **Tag**: \`${TAG}\`"
+            echo "- **Now points at**: \`${VERSION}\`"
+            echo "- **Install**: \`npm i -g @openma/cli@${TAG}\`"
+          } >> "$GITHUB_STEP_SUMMARY"
+        env:
+          VERSION: ${{ inputs.version }}
+          TAG: ${{ inputs.tag }}
