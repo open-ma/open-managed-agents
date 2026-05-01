@@ -30,6 +30,15 @@ jobs:
       - name: Build console
         run: pnpm --filter managed-agents-console build
 
+      # Wrangler config sanity gate — catches duplicate top-level keys
+      # in any wrangler.jsonc (the JSONC last-write-wins footgun PR #28
+      # hit, where a duplicate `durable_objects` block silently dropped
+      # SESSION_DO + SANDBOX bindings on prod). Fail-fast: don't deploy
+      # if any config has dup keys or dup binding names — every prior
+      # case of these has been a real outage.
+      - name: Lint wrangler.jsonc files (no duplicate keys / bindings)
+        run: node scripts/lint-wrangler-jsonc.mjs
+
       # Apply D1 migrations BEFORE deploying any worker. New code that
       # references columns / tables added in this PR will start serving
       # traffic the moment the deploy step finishes, so the schema must

@@ -70,6 +70,13 @@ jobs:
         # the lane main worker won't deploy without these built artifacts.
         run: pnpm --filter managed-agents-console build
 
+      # Wrangler config sanity gate — same one as deploy.yml. Catches
+      # duplicate top-level keys in any wrangler.jsonc (the JSONC
+      # last-write-wins footgun, e.g. two top-level "durable_objects"
+      # blocks where the second silently drops the first's bindings).
+      - name: Lint wrangler.jsonc files (no duplicate keys / bindings)
+        run: node scripts/lint-wrangler-jsonc.mjs
+
       - name: Generate lane wrangler configs
         env:
           CF_SUBDOMAIN: ${{ vars.CF_SUBDOMAIN }}
