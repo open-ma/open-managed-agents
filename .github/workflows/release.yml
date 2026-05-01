@@ -92,7 +92,7 @@ jobs:
     runs-on: ubuntu-latest
     environment: production  # ← the one approval gate, only for the publish
     permissions:
-      contents: read
+      contents: write   # to push the git tag (@openma/cli@x.y.z) after publish
       id-token: write   # required for npm OIDC publish
     steps:
       - name: Checkout
