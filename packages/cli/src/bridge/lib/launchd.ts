@@ -22,7 +22,7 @@
  * version manager, etc).
  */
 
-import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, unlink, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { paths, currentPlatform } from "./platform.js";
@@ -153,4 +153,27 @@ function runLaunchctl(args: string[]): Promise<void> {
       else reject(new Error(`launchctl ${args.join(" ")} exited ${code}: ${stderr.trim()}`));
     });
   });
+}
+
+/**
+ * Read the cliEntry path the currently-installed plist points at, or null
+ * if no plist is installed / can't be parsed. Used by `oma bridge setup` to
+ * detect when an npm upgrade landed a new dist/index.js but the plist still
+ * points at an older build (often a dev path under the project tree).
+ */
+export async function readInstalledCliEntry(): Promise<string | null> {
+  const p = paths();
+  if (!p.serviceFile) return null;
+  let xml: string;
+  try {
+    xml = await readFile(p.serviceFile, "utf-8");
+  } catch {
+    return null;
+  }
+  // ProgramArguments is an array; second <string> is the cli entry (first is
+  // the node binary). Match the array contents and pick element [1].
+  const arr = xml.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  if (!arr) return null;
+  const strings = [...arr[1].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  return strings[1] ?? null;
 }
