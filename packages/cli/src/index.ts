@@ -2187,6 +2187,12 @@ function usage() {
     console.log(`    ${c.usage.padEnd(42)} ${c.desc}`);
   }
   console.log(`
+  Bridge (local runtime):
+    oma bridge setup [--force] [--no-service]    Pair this machine with OMA (one-time OAuth)
+    oma bridge daemon                            Run the bridge in foreground
+    oma bridge status                            Show creds + probe server reachability
+    oma bridge uninstall                         Remove launchd service + creds
+
   API Reference:
     oma api                                    Show all HTTP endpoints
     oma api <resource>                         Show endpoints for a resource
