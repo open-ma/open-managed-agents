@@ -1,22 +1,26 @@
 name: Release
 
-# Changesets-driven release flow.
+# Changesets-driven release flow, split into two jobs so only the publish
+# half requires the production environment approval:
 #
-# Two modes, decided automatically by changesets/action:
+#   1. version-pr (no environment, runs every push):
+#      - Pending .changeset/*.md files → open / update "Version Packages" PR.
+#      - No pending changesets → noop here, hand off to publish job.
 #
-#   1. There are pending .changeset/*.md files on main → open or update a
-#      "Version Packages" PR that bumps versions + writes CHANGELOG. Merging
-#      that PR removes the changeset files. No publish happens here.
+#   2. publish (environment: production, only runs when version-pr says
+#      "no pending changesets" — which is the moment right after a Version
+#      Packages PR was merged):
+#      - Builds + runs `pnpm release` which publishes the bumped packages.
+#      - Tag is auto-derived from the version: `0.x.y` → latest,
+#        `0.x.y-beta.N` → beta. No NPM_TOKEN; uses OIDC trusted publisher.
 #
-#   2. main has no pending changesets (i.e. the Version Packages PR was just
-#      merged) → run `pnpm release` which bundles + publishes the bumped
-#      packages to npm. Tag is auto-derived from the version: prerelease
-#      versions (containing `-`) go to `--tag <preid>` (e.g. beta), normal
-#      versions go to `--tag latest` — done by `changeset publish` itself.
+# Net effect: opening a Version Packages PR is friction-free (no approval),
+# only actually pushing bits to npm needs you to acknowledge the
+# production deploy. This is the right friction split — the PR is a
+# review opportunity, the npm publish is the irreversible action.
 #
-# Auth: npm publish goes through OIDC trusted publisher (no NPM_TOKEN).
-# The trusted publisher config on npmjs.com must list this workflow
-# filename for each public package — see docs/release-process.md.
+# Trusted publisher config on npmjs.com must list this workflow filename
+# (`release.yml`) for each public package — see docs/release-process.md.
 #
 # Prerelease workflow: to enter beta mode for the next release cycle:
 #   pnpm changeset pre enter beta
@@ -32,8 +36,7 @@ on:
   # Manual escape hatch when changesets is in a weird state and you need to
   # re-trigger the release machinery without a real push (e.g. you fixed a
   # trusted-publisher misconfig and want to re-run publish for an already-
-  # bumped version sitting on main). No inputs — same logic as the push
-  # trigger: pending changesets → open Version Packages PR; none → publish.
+  # bumped version sitting on main).
   workflow_dispatch:
 
 concurrency:
@@ -41,20 +44,60 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
+  version-pr:
     runs-on: ubuntu-latest
-    # Same trusted-publisher environment used by every workflow that
-    # publishes to npm — npm verifies the OIDC token against this env.
-    environment: production
     permissions:
-      contents: write       # to push the Version Packages PR's bump commits
-      pull-requests: write  # to open / update the Version Packages PR
-      id-token: write       # required for npm OIDC publish
+      contents: write       # push bump commits to changeset-release/main branch
+      pull-requests: write  # open / update the Version Packages PR
+    outputs:
+      hasChangesets: ${{ steps.changesets.outputs.hasChangesets }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # Full history so changesets can compute changelog diffs.
+          fetch-depth: 0  # full history so changelog diffs work
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create / update Version Packages PR
+        # No `publish` input → action only opens the Version PR. Publishing
+        # is in the next job, gated on environment approval.
+        id: changesets
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset version
+          commit: "chore: version packages"
+          title: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    needs: version-pr
+    # Only fire when version-pr reports there are no pending changesets,
+    # i.e. the Version Packages PR was just merged and main has the bumped
+    # versions ready to publish. On a regular push that introduced a new
+    # changeset, hasChangesets='true' and we skip publishing.
+    if: needs.version-pr.outputs.hasChangesets == 'false'
+    runs-on: ubuntu-latest
+    environment: production  # ← the one approval gate, only for the publish
+    permissions:
+      contents: read
+      id-token: write   # required for npm OIDC publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
           fetch-depth: 0
 
       - name: Setup pnpm
@@ -72,19 +115,15 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Create Release PR or Publish
-        # Two side effects depending on changeset state:
-        #  - Pending changesets exist  → opens/updates the Version Packages PR
-        #  - No pending changesets     → runs `pnpm release` (publish to npm)
-        # The `version` script also runs `pnpm install --no-frozen-lockfile`
-        # so the lockfile in the PR reflects the new versions.
+      - name: Publish to npm
+        # `changesets/action` again, but this time only the publish path
+        # — no version step. It detects nothing to bump and runs the
+        # publish script directly. createGithubReleases mirrors the
+        # CHANGELOG entries to GitHub Releases.
         uses: changesets/action@v1
         with:
-          version: pnpm changeset version
           publish: pnpm release
           createGithubReleases: true
-          commit: "chore: version packages"
-          title: "chore: version packages"
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Clear setup-node's placeholder so npm publish falls back to OIDC.
