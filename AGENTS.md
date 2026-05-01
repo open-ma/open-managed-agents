@@ -726,3 +726,44 @@ When investigating platform or agent issues, follow this loop. **Do not skip ste
 - Never assume the cause — observe first.
 - `wrangler tail <worker-name>` shows real-time Durable Object logs. Use it.
 - Read dependency source code (`node_modules/agents/`, `@cloudflare/sandbox`) instead of guessing behavior.
+
+---
+
+## Releasing `@openma/cli` and `@openma/sdk`
+
+We use [changesets](https://github.com/changesets/changesets) for the two
+public npm packages. Internal `@open-managed-agents/*` packages never publish.
+
+**Per PR (only if you touched `packages/cli` or `packages/sdk`):**
+
+```bash
+pnpm changeset
+# pick package(s) → patch / minor / major → write a one-line changelog
+git add .changeset/ && git commit && git push
+```
+
+The interactive prompt produces a `.changeset/<random>.md` file. Commit it
+along with your code change. PRs that only touch console / workers / docs /
+internal packages don't need a changeset.
+
+**After your PR merges:**
+
+1. `release.yml` automatically opens a "Version Packages" PR that bumps
+   versions and updates `CHANGELOG.md` based on the accumulated changesets
+2. Review the bump + changelog, merge that PR
+3. `release.yml` runs again — version-pr job is auto, **publish job needs
+   one production-environment approval** (the only manual gate)
+4. Packages publish to npm via OIDC trusted publisher (no NPM_TOKEN); tag
+   is auto-derived from the version (`-beta.N` → beta tag, plain → latest)
+
+**Prerelease (beta) flow:**
+
+```bash
+pnpm changeset pre enter beta   # next bumps become 0.x.y-beta.N → tag=beta
+# … work, ship, gather feedback …
+pnpm changeset pre exit         # next Version Packages PR rolls to stable
+```
+
+Detailed flow + troubleshooting in [`docs/release-process.md`](docs/release-process.md).
+The trusted publisher config on npmjs.com must list `release.yml` for both
+public packages; without it the publish step 401s.
