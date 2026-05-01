@@ -1,0 +1,85 @@
+name: Release
+
+# Changesets-driven release flow.
+#
+# Two modes, decided automatically by changesets/action:
+#
+#   1. There are pending .changeset/*.md files on main → open or update a
+#      "Version Packages" PR that bumps versions + writes CHANGELOG. Merging
+#      that PR removes the changeset files. No publish happens here.
+#
+#   2. main has no pending changesets (i.e. the Version Packages PR was just
+#      merged) → run `pnpm release` which bundles + publishes the bumped
+#      packages to npm. Tag is auto-derived from the version: prerelease
+#      versions (containing `-`) go to `--tag <preid>` (e.g. beta), normal
+#      versions go to `--tag latest` — done by `changeset publish` itself.
+#
+# Auth: npm publish goes through OIDC trusted publisher (same as before),
+# no NPM_TOKEN. The trusted publisher config on npmjs.com must list this
+# workflow filename — set up the same way publish-cli.yml is.
+#
+# Prerelease workflow: to enter beta mode for the next release cycle:
+#   pnpm changeset pre enter beta
+#   git add .changeset/pre.json && git commit -m "enter beta prerelease mode"
+#   git push
+# Subsequent `pnpm changeset` will produce 0.x.y-beta.N bumps. Exit with:
+#   pnpm changeset pre exit
+# and the next Version Packages PR will roll up to the stable version.
+
+on:
+  push:
+    branches: [main]
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    # Same trusted-publisher environment as publish-cli — npm verifies the
+    # OIDC token against this env config.
+    environment: production
+    permissions:
+      contents: write       # to push the Version Packages PR's bump commits
+      pull-requests: write  # to open / update the Version Packages PR
+      id-token: write       # required for npm OIDC publish
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # Full history so changesets can compute changelog diffs.
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          # npm OIDC publish needs npm 11.5.1+, which ships with node 24.
+          node-version: '24'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Create Release PR or Publish
+        # Two side effects depending on changeset state:
+        #  - Pending changesets exist  → opens/updates the Version Packages PR
+        #  - No pending changesets     → runs `pnpm release` (publish to npm)
+        # The `version` script also runs `pnpm install --no-frozen-lockfile`
+        # so the lockfile in the PR reflects the new versions.
+        uses: changesets/action@v1
+        with:
+          version: pnpm changeset version
+          publish: pnpm release
+          createGithubReleases: true
+          commit: "chore: version packages"
+          title: "chore: version packages"
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # Clear setup-node's placeholder so npm publish falls back to OIDC.
+          NODE_AUTH_TOKEN: ''
