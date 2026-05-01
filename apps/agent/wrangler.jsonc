@@ -17,7 +17,14 @@
   "durable_objects": {
     "bindings": [
       { "name": "SESSION_DO", "class_name": "SessionDO" },
-      { "name": "SANDBOX", "class_name": "Sandbox" }
+      { "name": "SANDBOX", "class_name": "Sandbox" },
+      // Cross-script DO binding for RuntimeRoom. The class lives in the main
+      // worker (apps/main/wrangler.jsonc), but DOs are namespace-level and
+      // any worker in the account can bind the same class via `script_name`.
+      // AcpProxyHarness uses this to attach to the daemon's RuntimeRoom
+      // directly, no service-binding hop through main and no shared secret —
+      // see apps/agent/src/harness/acp-proxy-loop.ts.
+      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom", "script_name": "managed-agents" }
     ]
   },
 
@@ -53,18 +60,6 @@
     { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
     { "binding": "MAIN_MCP", "service": "managed-agents", "entrypoint": "McpProxyRpc" }
   ],
-
-  // Cross-script DO binding for RuntimeRoom. The class lives in the main
-  // worker (apps/main/wrangler.jsonc:54), but DOs are namespace-level and
-  // any worker in the account can bind the same class via `script_name`.
-  // AcpProxyHarness uses this to attach to the daemon's RuntimeRoom
-  // directly, no service-binding hop through main and no shared secret —
-  // see apps/agent/src/harness/acp-proxy-loop.ts.
-  "durable_objects": {
-    "bindings": [
-      { "name": "RUNTIME_ROOM", "class_name": "RuntimeRoom", "script_name": "managed-agents" }
-    ]
-  },
 
   // Workers AI for generating embeddings
   "ai": { "binding": "AI" },
