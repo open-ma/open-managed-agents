@@ -3,6 +3,7 @@ import type {
   TenantShardDirectoryRepo,
   TenantShardRow,
 } from "../ports";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 
 interface Row {
   tenant_id: string;
@@ -10,8 +11,8 @@ interface Row {
   created_at: number;
 }
 
-export class D1TenantShardDirectoryRepo implements TenantShardDirectoryRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlTenantShardDirectoryRepo implements TenantShardDirectoryRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async get(tenantId: string): Promise<TenantShardRow | null> {
     const row = await this.db

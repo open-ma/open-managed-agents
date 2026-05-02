@@ -20,9 +20,10 @@ import type {
   SessionUpdateFields,
 } from "../ports";
 import type { SessionResourceRow, SessionRow } from "../types";
+import type { SqlClient, SqlStatement } from "@open-managed-agents/sql-client";
 
 /**
- * Cloudflare D1 implementation of {@link SessionRepo}. Owns the SQL against
+ * SqlClient-backed implementation of {@link SessionRepo}. Owns the SQL against
  * the `sessions` and `session_resources` tables defined in
  * apps/main/migrations/0010_sessions_tables.sql.
  *
@@ -34,14 +35,14 @@ import type { SessionResourceRow, SessionRow } from "../types";
  *   - deleteByAgent uses two statements — list all session ids for the agent,
  *     then DELETE both tables — wrapped in batch.
  */
-export class D1SessionRepo implements SessionRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlSessionRepo implements SessionRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insertWithResources(
     session: NewSessionInput,
     resources: NewSessionResourceInput[],
   ): Promise<{ session: SessionRow; resources: SessionResourceRow[] }> {
-    const stmts: D1PreparedStatement[] = [
+    const stmts: SqlStatement[] = [
       this.db
         .prepare(
           `INSERT INTO sessions
@@ -366,9 +367,9 @@ export class D1SessionRepo implements SessionRepo {
 }
 
 function resourceInsertStmt(
-  db: D1Database,
+  db: SqlClient,
   r: NewSessionResourceInput,
-): D1PreparedStatement {
+): SqlStatement {
   return db
     .prepare(
       `INSERT INTO session_resources (id, session_id, type, config, created_at)

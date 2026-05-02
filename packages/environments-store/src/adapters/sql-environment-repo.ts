@@ -6,6 +6,7 @@ import {
   fetchN,
   trimPage,
 } from "@open-managed-agents/shared";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import { EnvironmentNotFoundError } from "../errors";
 import type {
   EnvironmentRepo,
@@ -15,15 +16,15 @@ import type {
 import type { EnvironmentRow, EnvironmentStatus } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link EnvironmentRepo}. Owns the SQL against
+ * SqlClient-backed implementation of {@link EnvironmentRepo}. Owns the SQL against
  * the `environments` table defined in apps/main/migrations/0003_environments_table.sql.
  *
  * Hot fields (status, sandbox_worker_name) live in their own columns so the
  * sandbox-binding resolver in routes/sessions.ts (and friends) can read them
  * without parsing the `config` JSON.
  */
-export class D1EnvironmentRepo implements EnvironmentRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlEnvironmentRepo implements EnvironmentRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewEnvironmentInput): Promise<EnvironmentRow> {
     await this.db

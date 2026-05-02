@@ -7,5 +7,7 @@
     ".": "./src/index.ts",
     "./test-fakes": "./src/test-fakes.ts"
   },
-  "dependencies": {}
+  "dependencies": {
+    "@open-managed-agents/sql-client": "workspace:*"
+  }
 }

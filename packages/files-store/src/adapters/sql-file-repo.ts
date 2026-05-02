@@ -4,9 +4,10 @@ import type {
   NewFileInput,
 } from "../ports";
 import type { FileRow, FileScope } from "../types";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 
 /**
- * Cloudflare D1 implementation of {@link FileRepo}. Owns the SQL against
+ * SqlClient-backed implementation of {@link FileRepo}. Owns the SQL against
  * the `files` table defined in apps/main/migrations/0011_files_table.sql.
  *
  * The schema has no FK by project convention — cascade-by-session lives in
@@ -17,8 +18,8 @@ import type { FileRow, FileScope } from "../types";
  * Booleans (`downloadable`) are stored as INTEGER 0/1 — SQLite has no native
  * BOOL. The toRow helper does the 0/1 ↔ false/true conversion.
  */
-export class D1FileRepo implements FileRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlFileRepo implements FileRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewFileInput): Promise<FileRow> {
     await this.db
