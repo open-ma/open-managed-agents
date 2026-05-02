@@ -1,0 +1,69 @@
+{
+  "run_id": "evrun-blniia0ccj68iklj",
+  "run_status": "completed",
+  "agent_id": "agent-7vtoexplollhzbd1",
+  "environment_id": "env-lvqed06glbi3ent0",
+  "started_at": "2026-05-02T04:41:13.798Z",
+  "ended_at": "2026-05-02T04:44:59.085Z",
+  "task_count": 5,
+  "completed_count": 5,
+  "failed_count": 0,
+  "pass_count": 3,
+  "results": [
+    {
+      "task_id": "tb-aimo-airline-departures",
+      "trial_status": "completed",
+      "session_id": "sess-y28qqxri79ht10pi",
+      "trajectory_id": "tr-7gkmvjni0o39os39",
+      "agent_turns": 6,
+      "verifier_exit_code": 0,
+      "verifier_output_tail": "....                                                                     [100%]\n4 passed in 38.09s",
+      "reward": 1,
+      "duration_s": 60
+    },
+    {
+      "task_id": "tb-countdown-game",
+      "trial_status": "completed",
+      "session_id": "sess-t2q8q7buung2o99s",
+      "trajectory_id": "tr-zwxuspi8uac1763t",
+      "agent_turns": 8,
+      "verifier_exit_code": 0,
+      "verifier_output_tail": "..                                                                       [100%]\n2 passed in 0.09s",
+      "reward": 1,
+      "duration_s": 172
+    },
+    {
+      "task_id": "tb-grid-pattern-transform",
+      "trial_status": "completed",
+      "session_id": "sess-ymtj890f7e6npuj8",
+      "trajectory_id": "tr-yxoupxygbhix1bwi",
+      "agent_turns": 8,
+      "verifier_exit_code": 0,
+      "verifier_output_tail": "...                                                                      [100%]\n3 passed in 0.20s",
+      "reward": 1,
+      "duration_s": 162
+    },
+    {
+      "task_id": "tb-hello-world",
+      "trial_status": "completed",
+      "session_id": "sess-k5doyrejoald1l3q",
+      "trajectory_id": "tr-fp1kt0eo030t8mje",
+      "agent_turns": 1,
+      "verifier_exit_code": 1,
+      "verifier_output_tail": "e/hello.txt').exists\n\ntests/test_outputs.py:10: AssertionError\n___________________________ test_hello_file_content ____________________________\n\n    def test_hello_file_content():\n        \"\"\"Test that hello.txt contains exactly 'Hello, world!' followed by a newline.\"\"\"\n        hello_path = Path(\"/workspace/hello.txt\")\n    \n>       assert hello_path.read_text().strip() == \"Hello, world!\", (\n               ^^^^^^^^^^^^^^^^^^^^^^\n            f\"Expected 'Hello, world!' but got '{hello_path.read_text().strip()}'\"\n        )\n\ntests/test_outputs.py:17: \n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/pathlib.py:1027: in read_text\n    with self.open(mode='r', encoding=encoding, errors=errors) as f:\n         ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\n_ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ _ \n\nself = PosixPath('/workspace/hello.txt'), mode = 'r', buffering = -1\nencoding = 'locale', errors = None, newline = None\n\n    def open(self, mode='r', buffering=-1, encoding=None,\n             errors=None, newline=None):\n        \"\"\"\n        Open the file pointed to by this path and return a file object, as\n        the built-in open() function does.\n        \"\"\"\n        if \"b\" not in mode:\n            encoding = io.text_encoding(encoding)\n>       return io.open(self, mode, buffering, encoding, errors, newline)\n               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\nE       FileNotFoundError: [Errno 2] No such file or directory: '/workspace/hello.txt'\n\n/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/pathlib.py:1013: FileNotFoundError\n=========================== short test summary info ============================\nFAILED tests/test_outputs.py::test_hello_file_exists - AssertionError: File /...\nFAILED tests/test_outputs.py::test_hello_file_content - FileNotFoundError: [E...\n2 failed in 0.11s",
+      "reward": 0,
+      "duration_s": 41
+    },
+    {
+      "task_id": "tb-sha-puzzle",
+      "trial_status": "completed",
+      "session_id": "sess-mq8kderw3eu45u2k",
+      "trajectory_id": "tr-lagwaw0xkswj0ncm",
+      "agent_turns": 4,
+      "verifier_exit_code": 2,
+      "verifier_output_tail": "\n==================================== ERRORS ====================================\n____________________ ERROR collecting tests/test_outputs.py ____________________\nImportError while importing test module '/workspace/tests/test_outputs.py'.\nHint: make sure your test modules/packages have valid Python names.\nTraceback:\n/root/.local/share/uv/python/cpython-3.12.13-linux-x86_64-gnu/lib/python3.12/importlib/__init__.py:90: in import_module\n    return _bootstrap._gcd_import(name[level:], package, level)\n           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^\ntests/test_outputs.py:6: in <module>\n    from word2number import w2n\nE   ModuleNotFoundError: No module named 'word2number'\n=========================== short test summary info ============================\nERROR tests/test_outputs.py\n!!!!!!!!!!!!!!!!!!!! Interrupted: 1 error during collection !!!!!!!!!!!!!!!!!!!!\n1 error in 0.40s",
+      "reward": 0,
+      "duration_s": 75
+    }
+  ]
+}
