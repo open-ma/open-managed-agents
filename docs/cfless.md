@@ -104,8 +104,9 @@ curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 | `web_fetch` tool (HTML → markdown via turndown) | ✓ |
 | `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
 | `browser` tool | ✗  CF-only (uses @cloudflare/playwright) |
-| Memory stores | ⏸  port exists, Node adapter pending |
+| Memory stores (mount + agent fs writes → SQL index) | ✓ symlink + chokidar watcher |
 | Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar |
+| Postgres backend (DATABASE_URL=postgres://...) | ✓ same code path as SQLite |
 | Multi-tenant authentication (better-auth) | ⏸  TENANT="default" hardcoded |
 | Console UI | ⏸  not yet wired to main-node |
 

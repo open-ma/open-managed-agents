@@ -6,16 +6,21 @@
   "exports": {
     ".": "./src/index.ts",
     "./adapters/cf-d1": "./src/adapters/cf-d1.ts",
-    "./adapters/better-sqlite3": "./src/adapters/better-sqlite3.ts"
+    "./adapters/better-sqlite3": "./src/adapters/better-sqlite3.ts",
+    "./adapters/postgres": "./src/adapters/postgres.ts"
   },
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*"
   },
   "peerDependencies": {
-    "better-sqlite3": "^11.5.0"
+    "better-sqlite3": "^11.5.0",
+    "postgres": "^3.4.0"
   },
   "peerDependenciesMeta": {
     "better-sqlite3": {
+      "optional": true
+    },
+    "postgres": {
       "optional": true
     }
   }

@@ -38,6 +38,7 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import {
   createBetterSqlite3SqlClient,
+  createPostgresSqlClient,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
 import {
@@ -84,10 +85,27 @@ const toMarkdownProvider = nodeToMarkdown();
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
-const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
-mkdirSync(dirname(dbPath), { recursive: true });
+// Backend selection. DATABASE_URL takes precedence (postgres:// or
+// postgresql:// scheme); otherwise we fall back to better-sqlite3 with the
+// DATABASE_PATH env var (or ./data/oma.db). Both backends speak the same
+// SqlClient port — every store package + the event log work identically on
+// both.
+const dbUrl = process.env.DATABASE_URL ?? "";
+const usePostgres = dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://");
 
-const sql: SqlClient = await createBetterSqlite3SqlClient(dbPath);
+let sql: SqlClient;
+let backendDescription: string;
+if (usePostgres) {
+  sql = await createPostgresSqlClient(dbUrl);
+  // Don't print the dsn — it usually carries the password.
+  const u = new URL(dbUrl);
+  backendDescription = `postgres ${u.hostname}:${u.port || 5432}${u.pathname}`;
+} else {
+  const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
+  mkdirSync(dirname(dbPath), { recursive: true });
+  sql = await createBetterSqlite3SqlClient(dbPath);
+  backendDescription = `sqlite ${dbPath}`;
+}
 
 // Apply schemas. Idempotent. CFless deploys eventually replace this with a
 // proper migrations runner.
@@ -96,10 +114,10 @@ await sql.exec(`
     "id"           TEXT PRIMARY KEY NOT NULL,
     "tenant_id"    TEXT NOT NULL,
     "config"       TEXT NOT NULL,
-    "version"      INTEGER NOT NULL,
-    "created_at"   INTEGER NOT NULL,
-    "updated_at"   INTEGER,
-    "archived_at"  INTEGER
+    "version"   BIGINT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
   );
   CREATE INDEX IF NOT EXISTS "idx_agents_tenant"
     ON "agents" ("tenant_id", "archived_at");
@@ -107,9 +125,9 @@ await sql.exec(`
   CREATE TABLE IF NOT EXISTS "agent_versions" (
     "agent_id"    TEXT NOT NULL,
     "tenant_id"   TEXT NOT NULL,
-    "version"     INTEGER NOT NULL,
+    "version"   BIGINT NOT NULL,
     "snapshot"    TEXT NOT NULL,
-    "created_at"  INTEGER NOT NULL,
+    "created_at"   BIGINT NOT NULL,
     PRIMARY KEY ("agent_id", "version")
   );
 
@@ -119,8 +137,8 @@ await sql.exec(`
     "agent_id"     TEXT,
     "status"       TEXT NOT NULL,
     "title"        TEXT,
-    "created_at"   INTEGER NOT NULL,
-    "updated_at"   INTEGER NOT NULL
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS "idx_sessions_status"
     ON "sessions" ("status", "tenant_id");
@@ -130,9 +148,9 @@ await sql.exec(`
     "tenant_id"    TEXT NOT NULL,
     "name"         TEXT NOT NULL,
     "description"  TEXT,
-    "created_at"   INTEGER NOT NULL,
-    "updated_at"   INTEGER,
-    "archived_at"  INTEGER
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
   );
   CREATE INDEX IF NOT EXISTS "idx_memory_stores_tenant"
     ON "memory_stores" ("tenant_id", "archived_at");
@@ -143,9 +161,9 @@ await sql.exec(`
     "path"             TEXT NOT NULL,
     "content_sha256"   TEXT NOT NULL,
     "etag"             TEXT NOT NULL,
-    "size_bytes"       INTEGER NOT NULL,
-    "created_at"       INTEGER NOT NULL,
-    "updated_at"       INTEGER NOT NULL
+    "size_bytes"   BIGINT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT NOT NULL
   );
   CREATE UNIQUE INDEX IF NOT EXISTS "idx_memories_store_path"
     ON "memories" ("store_id", "path");
@@ -158,10 +176,10 @@ await sql.exec(`
     "path"             TEXT NOT NULL,
     "content"          TEXT NOT NULL,
     "content_sha256"   TEXT NOT NULL,
-    "size_bytes"       INTEGER NOT NULL,
+    "size_bytes"   BIGINT NOT NULL,
     "actor_type"       TEXT NOT NULL,
     "actor_id"         TEXT NOT NULL,
-    "created_at"       INTEGER NOT NULL,
+    "created_at"   BIGINT NOT NULL,
     "redacted"         INTEGER NOT NULL DEFAULT 0
   );
   CREATE INDEX IF NOT EXISTS "idx_memory_versions_store"
@@ -173,9 +191,9 @@ await sql.exec(`
     "id"          TEXT PRIMARY KEY NOT NULL,
     "tenant_id"   TEXT NOT NULL,
     "name"        TEXT NOT NULL,
-    "created_at"  INTEGER NOT NULL,
-    "updated_at"  INTEGER,
-    "archived_at" INTEGER
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
   );
   CREATE INDEX IF NOT EXISTS "idx_vaults_tenant"
     ON "vaults" ("tenant_id", "archived_at");
@@ -189,9 +207,9 @@ await sql.exec(`
     "mcp_server_url" TEXT,
     "provider"       TEXT,
     "auth"           TEXT NOT NULL,
-    "created_at"     INTEGER NOT NULL,
-    "updated_at"     INTEGER,
-    "archived_at"    INTEGER
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
   );
   CREATE INDEX IF NOT EXISTS "idx_credentials_vault"
     ON "credentials" ("tenant_id", "vault_id", "archived_at");
@@ -206,7 +224,7 @@ await sql.exec(`
     "session_id" TEXT NOT NULL,
     "store_id"   TEXT NOT NULL,
     "access"     TEXT NOT NULL DEFAULT 'read_write',
-    "created_at" INTEGER NOT NULL,
+    "created_at"   BIGINT NOT NULL,
     PRIMARY KEY ("session_id", "store_id")
   );
 `);
@@ -305,7 +323,12 @@ app.get("/health", (c) =>
     runtime: "node",
     pid: process.pid,
     uptime_s: Math.round(process.uptime()),
-    backends: { agents: "sqlite", events: "sqlite", hub: "in-process", db_path: dbPath },
+    backends: {
+      agents: usePostgres ? "postgres" : "sqlite",
+      events: usePostgres ? "postgres" : "sqlite",
+      hub: "in-process",
+      db: backendDescription,
+    },
   }),
 );
 
@@ -901,7 +924,7 @@ const host = process.env.HOST ?? "0.0.0.0";
 
 serve({ fetch: app.fetch, port, hostname: host }, (info) => {
   console.log(`[main-node] listening on http://${info.address}:${info.port}`);
-  console.log(`[main-node] sqlite db: ${dbPath}`);
+  console.log(`[main-node] db: ${backendDescription}`);
 });
 
 const shutdown = async (signal: string) => {

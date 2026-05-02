@@ -12,8 +12,9 @@ export type {
 // imports stay as before:
 //   import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 
-// better-sqlite3 adapter is exported here because it has no CF type
-// dependencies; the driver itself is a peer dep so this remains import-safe
-// when better-sqlite3 isn't installed (the createBetterSqlite3SqlClient
-// call is the only thing that touches it).
+// better-sqlite3 / postgres adapters are exported here because neither has
+// CF type dependencies; the drivers themselves are peer deps so this remains
+// import-safe when neither is installed (the createXxxClient calls are the
+// only things that touch them).
 export { createBetterSqlite3SqlClient } from "./adapters/better-sqlite3";
+export { createPostgresSqlClient } from "./adapters/postgres";
