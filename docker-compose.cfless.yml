@@ -38,6 +38,14 @@ services:
       # to route HTTPS traffic through oma-vault for header injection.
       OMA_VAULT_PROXY_URL: http://oma-vault:14322
       OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
+      # Auth: better-auth sqlite-backed. AUTH_DISABLED=1 bypasses entirely
+      # (all requests become tenant_id="default") for local single-user
+      # demos. BETTER_AUTH_SECRET signs cookies; generate with
+      # `openssl rand -hex 32` and put in .env.
+      AUTH_DATABASE_PATH: /app/data/auth.db
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      AUTH_DISABLED: ${AUTH_DISABLED:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
     volumes:
       - ./data:/app/data
     depends_on:
