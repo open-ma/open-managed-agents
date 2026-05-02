@@ -467,6 +467,12 @@ async function runHarnessTurn(
       sessionId,
     );
     const sandbox = new LocalSubprocessSandbox({ workdir: sandboxWorkdir });
+    // Wire outbound credential injection. Reads OMA_VAULT_PROXY_URL +
+    // OMA_VAULT_CA_CERT from process.env; no-op when unset (sandbox bash
+    // talks to upstreams directly with no header injection). The TenantId
+    // / sessionId carry context for future per-session vault scoping —
+    // today's matcher uses hostname only, so they're informational.
+    await sandbox.setOutboundContext({ tenantId: TENANT, sessionId });
     const runtime = new NodeHarnessRuntime({ sessionId, log, hub, sandbox });
     await runtime.refreshHistory();
 

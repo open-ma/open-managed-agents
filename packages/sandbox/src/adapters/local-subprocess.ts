@@ -123,7 +123,7 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(): Promise<void> {
+  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
     // Wire outbound credential injection through the oma-vault sidecar
     // (apps/oma-vault). The sidecar runs a mockttp HTTPS MITM proxy with a
     // self-signed CA; we point the subprocess at it via standard
