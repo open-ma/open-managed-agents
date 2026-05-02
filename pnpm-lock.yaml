@@ -105,6 +105,9 @@ importers:
       '@open-managed-agents/outbound-snapshots-store':
         specifier: workspace:*
         version: link:../../packages/outbound-snapshots-store
+      '@open-managed-agents/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@open-managed-agents/services':
         specifier: workspace:*
         version: link:../../packages/services
@@ -347,6 +350,9 @@ importers:
       '@open-managed-agents/markdown':
         specifier: workspace:*
         version: link:../../packages/markdown
+      '@open-managed-agents/sandbox':
+        specifier: workspace:*
+        version: link:../../packages/sandbox
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
@@ -537,6 +543,12 @@ importers:
         version: link:../shared
 
   packages/outbound-snapshots-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
+  packages/sandbox:
     dependencies:
       '@open-managed-agents/shared':
         specifier: workspace:*

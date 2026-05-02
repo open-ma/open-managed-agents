@@ -54,8 +54,9 @@ import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
 import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
+import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/local-subprocess";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
@@ -351,7 +352,12 @@ async function runHarnessTurn(
 
   try {
     const log = newEventLog(sessionId);
-    const runtime = new NodeHarnessRuntime({ sessionId, log, hub });
+    const sandboxWorkdir = join(
+      process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
+      sessionId,
+    );
+    const sandbox = new LocalSubprocessSandbox({ workdir: sandboxWorkdir });
+    const runtime = new NodeHarnessRuntime({ sessionId, log, hub, sandbox });
     await runtime.refreshHistory();
 
     const model = resolveModel(

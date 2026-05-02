@@ -19,28 +19,6 @@ import { eventsToMessages } from "@open-managed-agents/agent/runtime/history";
 import type { InProcessEventStreamHub } from "./event-stream-hub";
 
 /**
- * Sandbox stub. Every method that touches a real sandbox throws — agents
- * with toolsets that include bash/read/write/etc will fail at first tool
- * call. Suitable for text-only PoC; Phase C wires a real
- * SandboxExecutor (E2B or local subprocess) and removes this.
- */
-class NoSandboxStub implements SandboxExecutor {
-  async exec(): Promise<string> {
-    throw new Error(
-      "SandboxExecutor not configured for this Node deployment — " +
-        "configure the agent without bash/read/write/edit/glob/grep tools, " +
-        "or wire a real sandbox (Phase C).",
-    );
-  }
-  async readFile(): Promise<string> {
-    throw new Error("readFile: no sandbox configured");
-  }
-  async writeFile(): Promise<string> {
-    throw new Error("writeFile: no sandbox configured");
-  }
-}
-
-/**
  * HistoryStore backed by a SqlEventLog. The interface is sync (matches the
  * CF DO contract); we call refresh() before each turn so the cache is
  * current. Adapt() returns the cached events; mutations via broadcast
@@ -77,6 +55,10 @@ export interface NodeHarnessRuntimeOptions {
   sessionId: string;
   log: SqlEventLog;
   hub: InProcessEventStreamHub;
+  /** Sandbox to use for tool execution. Caller picks the implementation:
+   *  LocalSubprocessSandbox for local dev, E2BSandbox / CloudflareSandbox
+   *  in production. */
+  sandbox: SandboxExecutor;
 }
 
 export class NodeHarnessRuntime implements HarnessRuntime {
@@ -86,7 +68,7 @@ export class NodeHarnessRuntime implements HarnessRuntime {
 
   constructor(private opts: NodeHarnessRuntimeOptions) {
     this.history = new SqlHistoryStore(opts.log);
-    this.sandbox = new NoSandboxStub();
+    this.sandbox = opts.sandbox;
   }
 
   /** Call before each harness.run() so getEvents reflects DB state. */
