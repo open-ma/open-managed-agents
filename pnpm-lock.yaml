@@ -335,6 +335,9 @@ importers:
       '@open-managed-agents/blob-store':
         specifier: workspace:*
         version: link:../../packages/blob-store
+      '@open-managed-agents/event-log':
+        specifier: workspace:*
+        version: link:../../packages/event-log
       '@open-managed-agents/kv-store':
         specifier: workspace:*
         version: link:../../packages/kv-store
@@ -353,6 +356,9 @@ importers:
       hono:
         specifier: ^4.7.0
         version: 4.12.12
+      nanoid:
+        specifier: ^5.1.0
+        version: 5.1.9
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13
@@ -458,6 +464,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/files-store:
     dependencies:
