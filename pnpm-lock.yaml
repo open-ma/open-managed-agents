@@ -504,6 +504,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/eval-core:
     dependencies:
@@ -519,6 +522,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/event-log:
     dependencies:
@@ -534,6 +540,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/github:
     dependencies:
@@ -597,6 +606,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/outbound-snapshots-store:
     dependencies:
@@ -684,6 +696,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/shared:
     dependencies:
@@ -717,7 +732,11 @@ importers:
 
   packages/tenant-db: {}
 
-  packages/tenant-dbs-store: {}
+  packages/tenant-dbs-store:
+    dependencies:
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/vaults-store:
     dependencies:

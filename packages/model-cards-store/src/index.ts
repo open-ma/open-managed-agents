@@ -17,4 +17,4 @@ export * from "./ports";
 export { ModelCardService } from "./service";
 export type { ModelCardServiceDeps } from "./service";
 
-export { createCfModelCardService, D1ModelCardRepo } from "./adapters";
+export { createCfModelCardService, createSqliteModelCardService, SqlModelCardRepo } from "./adapters";

@@ -1,10 +1,11 @@
-// Cloudflare adapter wiring. Exports the D1 implementation of EvalRunRepo
-// plus a `createCfEvalRunService` factory that callers in apps/main use to
-// instantiate the service.
+// Adapter wiring. Both Cloudflare (D1) and CFless / Node (any SqlClient)
+// deployment factories live here behind a single SqlEvalRunRepo class.
 
-export { D1EvalRunRepo } from "./d1-eval-run-repo";
+export { SqlEvalRunRepo } from "./sql-eval-run-repo";
 
-import { D1EvalRunRepo } from "./d1-eval-run-repo";
+import { SqlEvalRunRepo } from "./sql-eval-run-repo";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { Logger } from "../ports";
 import { EvalRunService } from "../service";
 
@@ -13,7 +14,17 @@ export function createCfEvalRunService(
   opts?: { logger?: Logger },
 ): EvalRunService {
   return new EvalRunService({
-    repo: new D1EvalRunRepo(deps.db),
+    repo: new SqlEvalRunRepo(new CfD1SqlClient(deps.db)),
+    logger: opts?.logger,
+  });
+}
+
+export function createSqliteEvalRunService(
+  deps: { client: SqlClient },
+  opts?: { logger?: Logger },
+): EvalRunService {
+  return new EvalRunService({
+    repo: new SqlEvalRunRepo(deps.client),
     logger: opts?.logger,
   });
 }

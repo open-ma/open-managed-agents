@@ -1,10 +1,11 @@
-// Cloudflare adapter wiring. Exports the D1 implementation of SessionRepo
-// plus a `createCfSessionService` factory that callers in apps/main and
-// apps/agent use to instantiate the service.
+// Adapter wiring. Both Cloudflare (D1) and CFless / Node (any SqlClient)
+// deployment factories live here behind a single SqlSessionRepo class.
 
-export { D1SessionRepo } from "./d1-session-repo";
+export { SqlSessionRepo } from "./sql-session-repo";
 
-import { D1SessionRepo } from "./d1-session-repo";
+import { SqlSessionRepo } from "./sql-session-repo";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { Logger } from "../ports";
 import { SessionService } from "../service";
 
@@ -13,7 +14,17 @@ export function createCfSessionService(
   opts?: { logger?: Logger },
 ): SessionService {
   return new SessionService({
-    repo: new D1SessionRepo(deps.db),
+    repo: new SqlSessionRepo(new CfD1SqlClient(deps.db)),
+    logger: opts?.logger,
+  });
+}
+
+export function createSqliteSessionService(
+  deps: { client: SqlClient },
+  opts?: { logger?: Logger },
+): SessionService {
+  return new SessionService({
+    repo: new SqlSessionRepo(deps.client),
     logger: opts?.logger,
   });
 }

@@ -4,6 +4,7 @@ import type {
   ShardPoolRow,
   ShardStatus,
 } from "../ports";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 
 interface Row {
   binding_name: string;
@@ -14,8 +15,8 @@ interface Row {
   notes: string | null;
 }
 
-export class D1ShardPoolRepo implements ShardPoolRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlShardPoolRepo implements ShardPoolRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async get(bindingName: string): Promise<ShardPoolRow | null> {
     const row = await this.db

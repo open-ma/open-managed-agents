@@ -6,9 +6,10 @@ import type {
   NewEvalRunInput,
 } from "../ports";
 import type { EvalRunRow, EvalRunStatus } from "../types";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 
 /**
- * Cloudflare D1 implementation of {@link EvalRunRepo}. Owns the SQL against
+ * SqlClient-backed implementation of {@link EvalRunRepo}. Owns the SQL against
  * the `eval_runs` table defined in apps/main/migrations/0012_eval_runs_table.sql.
  *
  * Atomicity:
@@ -17,8 +18,8 @@ import type { EvalRunRow, EvalRunStatus } from "../types";
  *   - delete and deleteByAgent are single DELETE statements; no resources to
  *     cascade (trajectory blobs live in CONFIG_KV under their own keys).
  */
-export class D1EvalRunRepo implements EvalRunRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlEvalRunRepo implements EvalRunRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewEvalRunInput): Promise<EvalRunRow> {
     await this.db

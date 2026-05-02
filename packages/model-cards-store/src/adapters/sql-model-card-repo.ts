@@ -16,9 +16,10 @@ import type {
   NewModelCardInput,
 } from "../ports";
 import type { ModelCardRow } from "../types";
+import type { SqlClient, SqlStatement } from "@open-managed-agents/sql-client";
 
 /**
- * Cloudflare D1 implementation of {@link ModelCardRepo}. Owns the SQL against
+ * SqlClient-backed implementation of {@link ModelCardRepo}. Owns the SQL against
  * the `model_cards` table defined in apps/main/migrations/0013_model_cards_table.sql.
  *
  * Atomicity:
@@ -31,8 +32,8 @@ import type { ModelCardRow } from "../types";
  * The api_key_cipher is treated as an opaque blob — the service handles
  * encryption via the Crypto port before passing it in.
  */
-export class D1ModelCardRepo implements ModelCardRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlModelCardRepo implements ModelCardRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewModelCardInput): Promise<ModelCardRow> {
     const insertStmt = this.db
@@ -276,7 +277,7 @@ export class D1ModelCardRepo implements ModelCardRepo {
   private clearDefaultsStmt(
     tenantId: string,
     updatedAt: number,
-  ): D1PreparedStatement {
+  ): SqlStatement {
     return this.db
       .prepare(
         `UPDATE model_cards SET is_default = 0, updated_at = ?
@@ -290,7 +291,7 @@ export class D1ModelCardRepo implements ModelCardRepo {
     tenantId: string,
     exceptCardId: string,
     updatedAt: number,
-  ): D1PreparedStatement {
+  ): SqlStatement {
     return this.db
       .prepare(
         `UPDATE model_cards SET is_default = 0, updated_at = ?
