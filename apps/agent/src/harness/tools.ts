@@ -8,7 +8,9 @@ import type { ToMarkdownProvider } from "@open-managed-agents/markdown";
 import { BindingMCPTransport } from "../runtime/binding-mcp-transport";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
-import { buildBrowserTools, type BrowserSession } from "./browser-tools";
+// Browser tools are lazy-imported below — they pull in @cloudflare/playwright
+// which is workerd-only. Type-only import is fine (erased at runtime).
+import type { BrowserSession } from "./browser-tools";
 
 // Source of truth for which tool names are part of the agent_toolset_20260401
 // built-in suite. Used by buildTools() below to decide which tool entries to
@@ -385,7 +387,11 @@ export async function buildTools(
 
   // Browser tools (Cloudflare Browser Rendering binding). Requires both an
   // active session passed in AND the agent to opt in to "browser" in its toolset.
+  // Lazy-imported because @cloudflare/playwright is workerd-only and pulling
+  // it at module-load time would block CFless / Node consumers from importing
+  // this file at all.
   if (env?.browser && enabled.has("browser")) {
+    const { buildBrowserTools } = await import("./browser-tools");
     Object.assign(tools, buildBrowserTools(env.browser));
   }
 

@@ -47,12 +47,18 @@ import {
   type AgentService,
 } from "@open-managed-agents/agents-store";
 import { SqlEventLog, ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
-import type { AgentConfig, SessionEvent } from "@open-managed-agents/shared";
+import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
+import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
+import { buildTools } from "@open-managed-agents/agent/harness/tools";
+import { resolveModel } from "@open-managed-agents/agent/harness/provider";
+import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
+import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import { mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
+import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
@@ -88,6 +94,7 @@ await sql.exec(`
   CREATE TABLE IF NOT EXISTS "sessions" (
     "id"           TEXT PRIMARY KEY NOT NULL,
     "tenant_id"    TEXT NOT NULL,
+    "agent_id"     TEXT,
     "status"       TEXT NOT NULL,
     "title"        TEXT,
     "created_at"   INTEGER NOT NULL,
@@ -238,29 +245,36 @@ v1.put("/agents/:id", async (c) => {
 
 v1.post("/sessions", async (c) => {
   const body = await c.req
-    .json<{ title?: string }>()
-    .catch(() => ({}) as { title?: string });
+    .json<{ agent_id?: string; title?: string }>()
+    .catch(() => ({}) as { agent_id?: string; title?: string });
+  // Validate agent if provided. Sessions without an agent only support
+  // _test_emit injection — they can't run a harness loop.
+  if (body.agent_id) {
+    const agent = await agentsService.get({ tenantId: TENANT, agentId: body.agent_id });
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+  }
   const id = `sess_${nanoid(20)}`;
   const now = Date.now();
   await sql
     .prepare(
-      `INSERT INTO sessions (id, tenant_id, status, title, created_at, updated_at)
-       VALUES (?, ?, 'idle', ?, ?, ?)`,
+      `INSERT INTO sessions (id, tenant_id, agent_id, status, title, created_at, updated_at)
+       VALUES (?, ?, ?, 'idle', ?, ?, ?)`,
     )
-    .bind(id, TENANT, body.title ?? null, now, now)
+    .bind(id, TENANT, body.agent_id ?? null, body.title ?? null, now, now)
     .run();
-  return c.json({ id, status: "idle", title: body.title ?? null }, 201);
+  return c.json({ id, agent_id: body.agent_id ?? null, status: "idle", title: body.title ?? null }, 201);
 });
 
 v1.get("/sessions/:id", async (c) => {
   const row = await sql
     .prepare(
-      `SELECT id, status, title, created_at, updated_at FROM sessions
+      `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
        WHERE tenant_id = ? AND id = ?`,
     )
     .bind(TENANT, c.req.param("id"))
     .first<{
       id: string;
+      agent_id: string | null;
       status: string;
       title: string | null;
       created_at: number;
@@ -270,28 +284,114 @@ v1.get("/sessions/:id", async (c) => {
   return c.json(row);
 });
 
-// POST /v1/sessions/:id/events — append events (analogous to apps/main).
-// Each event lands in the event log (durable) and broadcasts to live SSE
-// subscribers via the hub.
+// POST /v1/sessions/:id/events — append events to the log and (if a
+// user.message is among them and the session is bound to an agent) drive
+// one harness turn. Mirrors apps/main's /v1/sessions/:id/events route +
+// SessionDO's onUserMessage path, condensed onto the Node side.
 v1.post("/sessions/:id/events", async (c) => {
   const sid = c.req.param("id");
   const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .prepare(`SELECT id, agent_id FROM sessions WHERE tenant_id = ? AND id = ?`)
     .bind(TENANT, sid)
-    .first();
+    .first<{ id: string; agent_id: string | null }>();
   if (!session) return c.json({ error: "Session not found" }, 404);
   const body = await c.req.json<{ events: SessionEvent[] }>();
   if (!Array.isArray(body.events)) return c.json({ error: "events array required" }, 400);
+
   const log = newEventLog(sid);
-  for (const ev of body.events) {
-    await log.appendAsync(ev);
-  }
-  // Re-read to grab the auto-generated seq for SSE delivery.
+  for (const ev of body.events) await log.appendAsync(ev);
+  // Re-read so we can deliver hub publishes with their assigned seq.
   const stored = await log.getEventsAsync();
   const newOnes = stored.slice(-body.events.length);
   for (const ev of newOnes) hub.publish(sid, ev);
-  return c.json({ accepted: body.events.length }, 202);
+
+  // If any of the new events is a user.message and the session has an
+  // agent bound, kick a harness turn. Fire-and-forget — the SSE client
+  // gets streamed agent.message_chunk events as the LLM runs.
+  const hasUserMessage = body.events.some((e) => e.type === "user.message");
+  if (hasUserMessage && session.agent_id) {
+    void runHarnessTurn(sid, session.agent_id, body.events.find(
+      (e) => e.type === "user.message",
+    ) as UserMessageEvent).catch((err) => {
+      console.error("[main-node] harness turn failed", err);
+      // Surface as session.error so SSE clients learn the turn died.
+      void log.appendAsync({
+        type: "session.error",
+        error: "harness_turn_failed",
+        message: err instanceof Error ? err.message : String(err),
+      } as unknown as SessionEvent);
+    });
+  }
+
+  return c.json({ accepted: body.events.length, harness_triggered: hasUserMessage && !!session.agent_id }, 202);
 });
+
+/**
+ * Run one DefaultHarness turn for `sessionId` against `agentId` with the
+ * given user message. Builds a HarnessContext on the fly: agent config from
+ * agentsService, model from resolveModel + ANTHROPIC_API_KEY, tools from
+ * buildTools (with the no-sandbox stub). Marks the session 'running' for the
+ * duration so crash-recovery on restart finds it.
+ */
+async function runHarnessTurn(
+  sessionId: string,
+  agentId: string,
+  userMessage: UserMessageEvent,
+): Promise<void> {
+  const agent = await agentsService.get({ tenantId: TENANT, agentId });
+  if (!agent) throw new Error(`agent ${agentId} not found`);
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+
+  await sql
+    .prepare(`UPDATE sessions SET status = 'running', updated_at = ? WHERE id = ?`)
+    .bind(Date.now(), sessionId)
+    .run();
+
+  try {
+    const log = newEventLog(sessionId);
+    const runtime = new NodeHarnessRuntime({ sessionId, log, hub });
+    await runtime.refreshHistory();
+
+    const model = resolveModel(
+      agent.model,
+      apiKey,
+      process.env.ANTHROPIC_BASE_URL,
+      undefined, // compat: default to Anthropic
+      parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS),
+    );
+    const tools = await buildTools(agent, runtime.sandbox, {
+      ANTHROPIC_API_KEY: apiKey,
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+      // Sandbox-dependent tools (bash/read/write/edit/glob/grep/web_fetch
+      // when toMarkdown is missing) will throw on use. The agent config in
+      // this PoC opts out of all of them — see smoke test in commit msg.
+    });
+
+    const ctx: HarnessContext = {
+      agent,
+      userMessage,
+      session_id: sessionId,
+      tools,
+      model,
+      systemPrompt: agent.system ?? "",
+      env: {
+        ANTHROPIC_API_KEY: apiKey,
+        ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+      },
+      runtime,
+    };
+
+    const harness = new DefaultHarness();
+    await harness.run(ctx);
+  } finally {
+    await sql
+      .prepare(`UPDATE sessions SET status = 'idle', updated_at = ? WHERE id = ?`)
+      .bind(Date.now(), sessionId)
+      .run();
+  }
+}
 
 // POST /v1/sessions/:id/_test_emit — manual event injector. Stand-in for
 // what a real harness loop does when an LLM produces an agent.message.
@@ -411,6 +511,21 @@ function parseLastEventId(raw: string | undefined): number | undefined {
   if (!raw) return undefined;
   const n = Number.parseInt(raw, 10);
   return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/** Parse `Header-Name: value, Header-2: value2` into a Record. Best-effort —
+ *  malformed entries silently dropped. Used to thread custom headers
+ *  (X-Sub-Module etc.) into the model API call when ANTHROPIC_BASE_URL
+ *  points at a proxy that requires them. */
+function parseCustomHeaders(raw: string | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const part of raw.split(",")) {
+    const [name, ...rest] = part.split(":");
+    if (!name || rest.length === 0) continue;
+    out[name.trim()] = rest.join(":").trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
