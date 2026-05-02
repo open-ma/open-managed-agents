@@ -33,6 +33,7 @@ import { handleMemoryEvents } from "./queue/memory-events";
 import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
 import { memoryRetentionTick } from "./cron/memory-retention";
 import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
+import { globalErrorHandler, requestMetricsMiddleware } from "./lib/observability";
 import type { R2EventMessage } from "@open-managed-agents/shared";
 
 // Main worker: CRUD + routing layer.
@@ -41,6 +42,15 @@ import type { R2EventMessage } from "@open-managed-agents/shared";
 
 // --- HTTP app ---
 const app = new Hono<{ Bindings: Env }>();
+
+// Request-level observability — must be the FIRST middleware so it
+// captures every request including auth failures, rate-limit rejects,
+// and unhandled exceptions. Pairs with globalErrorHandler below.
+app.use("*", requestMetricsMiddleware);
+
+// Catch-all for anything that escapes per-route try/catch. Logs +
+// records to AE before returning a clean 500 (no internal leak in body).
+app.onError(globalErrorHandler);
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
