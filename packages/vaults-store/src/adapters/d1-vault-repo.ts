@@ -1,3 +1,10 @@
+import {
+  cursorBinds,
+  cursorWhereSql,
+  fetchN,
+  trimPage,
+  type PageCursor,
+} from "@open-managed-agents/shared";
 import { VaultNotFoundError } from "../errors";
 import type { NewVaultInput, VaultRepo, VaultUpdateFields } from "../ports";
 import type { VaultRow } from "../types";
@@ -52,6 +59,26 @@ export class D1VaultRepo implements VaultRepo {
          FROM vaults WHERE tenant_id = ? AND archived_at IS NULL ORDER BY created_at ASC`;
     const result = await this.db.prepare(sql).bind(tenantId).all<DbVault>();
     return (result.results ?? []).map(toRow);
+  }
+
+  async listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: VaultRow[]; hasMore: boolean }> {
+    const archived = opts.includeArchived ? "" : "AND archived_at IS NULL";
+    const sql =
+      `SELECT id, tenant_id, name, created_at, updated_at, archived_at ` +
+      `FROM vaults WHERE tenant_id = ? ${archived} ${cursorWhereSql(opts.after)} ` +
+      `ORDER BY created_at DESC, id DESC LIMIT ?`;
+    const result = await this.db
+      .prepare(sql)
+      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
+      .all<DbVault>();
+    return trimPage((result.results ?? []).map(toRow), opts.limit);
   }
 
   async update(

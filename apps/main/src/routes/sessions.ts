@@ -20,6 +20,7 @@ import {
   SessionResourceNotFoundError,
   type NewResourceInput,
 } from "@open-managed-agents/sessions-store";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
 
 const app = new Hono<{
   Bindings: Env;
@@ -647,24 +648,15 @@ app.post("/", async (c) => {
   return c.json(response, 201);
 });
 
-// GET /v1/sessions — list sessions
+// GET /v1/sessions — list sessions (cursor-paginated, optional agent_id filter)
 app.get("/", async (c) => {
-  const agentIdFilter = c.req.query("agent_id");
-  const limitParam = c.req.query("limit");
-  const order = c.req.query("order") === "asc" ? "asc" : "desc";
-  const includeArchived = c.req.query("include_archived") === "true";
-  let limit = limitParam ? parseInt(limitParam, 10) : 100;
-  if (isNaN(limit) || limit < 1) limit = 100;
-  if (limit > 1000) limit = 1000;
-
-  const sessions = await c.var.services.sessions.list({
+  const agentIdFilter = c.req.query("agent_id") || undefined;
+  const page = await c.var.services.sessions.listPage({
     tenantId: c.get("tenant_id"),
-    agentId: agentIdFilter ?? undefined,
-    includeArchived,
-    order,
-    limit,
+    agentId: agentIdFilter,
+    ...parsePageQuery(c),
   });
-  return c.json({ data: sessions.map(toApiSession) });
+  return jsonPage(c, page, toApiSession);
 });
 
 // GET /v1/sessions/:id — get session (status from sandbox worker)
@@ -1245,7 +1237,12 @@ app.get("/:id/trajectory", async (c) => {
         c.req.raw,
         "GET",
       );
-      if (!res.ok) break;
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        throw new Error(
+          `events fetch failed: ${res.status} ${errBody.slice(0, 200)} (after_seq=${afterSeq})`,
+        );
+      }
       const body = (await res.json()) as { data?: StoredEvent[]; has_more?: boolean };
       const batch = body.data || [];
       all.push(...batch);
@@ -1307,6 +1304,31 @@ app.get("/:id/threads", async (c) => {
 
   const res = await forwardToSandbox(binding, `/sessions/${id}/threads`, c.req.raw, "GET");
   return c.json(await res.json());
+});
+
+// POST /v1/sessions/:id/sandbox/exec — run a raw shell command in this
+// session's sandbox WITHOUT going through the agent. Designed for
+// eval / verifier workflows where the harness needs to run pytest (or
+// similar) on the post-agent state without trusting the model to invoke a
+// tool. Body: { command: string, timeout_ms?: number (default 60000) }
+// Returns: { exit_code: number, output: string, truncated: boolean }
+app.post("/:id/sandbox/exec", async (c) => {
+  const id = c.req.param("id");
+  const t = c.get("tenant_id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
+
+  const res = await forwardToSandbox(binding, `/sessions/${id}/sandbox/exec`, c.req.raw, "POST");
+  // Pass status through (exec can legitimately return 500 on sandbox error)
+  const body = await res.text();
+  return new Response(body, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 });
 
 // GET /v1/sessions/:id/threads/:thread_id/events — thread events

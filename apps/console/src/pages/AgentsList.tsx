@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
@@ -43,7 +44,6 @@ const INITIAL_FORM = {
 export function AgentsList() {
   const { api } = useApi();
   const nav = useNavigate();
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [allAgents, setAllAgents] = useState<Agent[]>([]);
   const [customSkills, setCustomSkills] = useState<Array<{ id: string; name: string; description: string }>>([]);
   const [modelCards, setModelCards] = useState<ModelCard[]>([]);
@@ -57,7 +57,7 @@ export function AgentsList() {
      *  when the user picks an acp agent. */
     local_skills?: Record<string, Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>>;
   }>>([]);
-  const [loading, setLoading] = useState(true);
+  const [auxLoading, setAuxLoading] = useState(true);
   const [createError, setCreateError] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -68,11 +68,28 @@ export function AgentsList() {
   const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
   const [codeValue, setCodeValue] = useState("");
 
-  const load = async () => {
-    setLoading(true);
+  // Main agents table — cursor-paginated. Filter changes (showArchived)
+  // reset to page 1 automatically.
+  const agentsParams = useMemo(
+    () => ({ include_archived: showArchived ? "true" : undefined }),
+    [showArchived],
+  );
+  const {
+    items: agents,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: refreshAgents,
+    setItems: setAgents,
+  } = useCursorList<Agent>("/v1/agents", { limit: 50, params: agentsParams });
+
+  // Aux fetches that aren't paginated UI surfaces — refreshed on mount and
+  // after agent CRUD. Pull all agents (for the callable-agents dropdown)
+  // separately so it isn't constrained by the main list's page size.
+  const loadAux = async () => {
+    setAuxLoading(true);
     try {
-      const data = await api<{ data: Agent[] }>(`/v1/agents?limit=200${showArchived ? "&include_archived=true" : ""}`);
-      setAgents(data.data);
       const all = await api<{ data: Agent[] }>("/v1/agents?limit=200");
       setAllAgents(all.data);
       try {
@@ -80,7 +97,7 @@ export function AgentsList() {
         setCustomSkills(sk.data);
       } catch {}
       try {
-        const mc = await api<{ data: ModelCard[] }>("/v1/model_cards");
+        const mc = await api<{ data: ModelCard[] }>("/v1/model_cards?limit=200");
         setModelCards(mc.data);
       } catch {}
       try {
@@ -88,10 +105,18 @@ export function AgentsList() {
         setRuntimes(rt.runtimes);
       } catch {}
     } catch {}
-    setLoading(false);
+    setAuxLoading(false);
   };
 
-  useEffect(() => { load(); }, [showArchived]);
+  useEffect(() => { loadAux(); }, []);
+
+  // Keep load() name as a thin wrapper for the rest of the file (create /
+  // archive / delete callbacks call it). Refreshes both the paginated list
+  // and the aux data.
+  const load = async () => {
+    await refreshAgents();
+    await loadAux();
+  };
 
   const create = async () => {
     setCreateError("");
@@ -354,6 +379,17 @@ export function AgentsList() {
               ))}
             </tbody>
           </table>
+          {hasMore && (
+            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
+              <button
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isLoadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

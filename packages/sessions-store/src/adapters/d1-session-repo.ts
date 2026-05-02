@@ -1,8 +1,15 @@
 import type {
   AgentConfig,
   EnvironmentConfig,
+  PageCursor,
   SessionResource,
   SessionStatus,
+} from "@open-managed-agents/shared";
+import {
+  cursorBinds,
+  cursorWhereSql,
+  fetchN,
+  trimPage,
 } from "@open-managed-agents/shared";
 import { SessionNotFoundError } from "../errors";
 import type {
@@ -119,6 +126,41 @@ export class D1SessionRepo implements SessionRepo {
                  LIMIT ?`;
     const result = await this.db.prepare(sql).bind(...binds).all<DbSession>();
     return (result.results ?? []).map(toSessionRow);
+  }
+
+  async listPage(
+    tenantId: string,
+    opts: {
+      agentId?: string;
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: SessionRow[]; hasMore: boolean }> {
+    const where: string[] = ["tenant_id = ?"];
+    const binds: unknown[] = [tenantId];
+    if (opts.agentId) {
+      where.push("agent_id = ?");
+      binds.push(opts.agentId);
+    }
+    if (!opts.includeArchived) where.push("archived_at IS NULL");
+    const cursorClause = cursorWhereSql(opts.after);
+    if (cursorClause) {
+      // cursorWhereSql returns "AND (...)" — strip the leading AND since
+      // we're joining via " AND " in the WHERE composer.
+      where.push(cursorClause.replace(/^AND\s+/, ""));
+      binds.push(...cursorBinds(opts.after));
+    }
+    binds.push(fetchN(opts.limit));
+    const sql = `SELECT id, tenant_id, agent_id, environment_id, title, status,
+                        vault_ids, agent_snapshot, environment_snapshot, metadata,
+                        created_at, updated_at, archived_at
+                 FROM sessions
+                 WHERE ${where.join(" AND ")}
+                 ORDER BY created_at DESC, id DESC
+                 LIMIT ?`;
+    const result = await this.db.prepare(sql).bind(...binds).all<DbSession>();
+    return trimPage((result.results ?? []).map(toSessionRow), opts.limit);
   }
 
   async hasActiveByAgent(tenantId: string, agentId: string): Promise<boolean> {

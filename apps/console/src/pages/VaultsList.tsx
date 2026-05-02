@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
@@ -13,8 +14,6 @@ interface Credential {
 
 export function VaultsList() {
   const { api } = useApi();
-  const [vaults, setVaults] = useState<Vault[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showCreateVault, setShowCreateVault] = useState(false);
   const [vaultName, setVaultName] = useState("");
 
@@ -32,13 +31,14 @@ export function VaultsList() {
     display_name: "", token: "", command_prefixes: "", env_var: "",
   });
 
-  const load = async () => {
-    setLoading(true);
-    try { setVaults((await api<{ data: Vault[] }>("/v1/vaults?limit=100")).data); } catch {}
-    setLoading(false);
-  };
-
-  useEffect(() => { load(); }, []);
+  const {
+    items: vaults,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: load,
+  } = useCursorList<Vault>("/v1/vaults", { limit: 50 });
 
   // Listen for OAuth popup completion
   const handleOAuthMessage = useCallback((event: MessageEvent) => {
@@ -157,6 +157,17 @@ export function VaultsList() {
               </tr>
             ))}</tbody>
           </table>
+          {hasMore && (
+            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
+              <button
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isLoadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

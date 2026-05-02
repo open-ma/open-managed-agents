@@ -2,6 +2,7 @@ import {
   generateEnvId,
   type EnvironmentConfig,
 } from "@open-managed-agents/shared";
+import { paginateVia } from "@open-managed-agents/shared";
 import { EnvironmentNotFoundError } from "./errors";
 import type {
   Clock,
@@ -164,6 +165,33 @@ export class EnvironmentService {
   }): Promise<EnvironmentRow[]> {
     return this.repo.list(opts.tenantId, {
       includeArchived: opts.includeArchived ?? true,
+    });
+  }
+
+  /**
+   * Cursor-paginated list. Pass the previous response's `nextCursor` back
+   * as `cursor` to fetch the next page; omit for the first page. Order:
+   * created_at DESC (newest first), id DESC tie-break.
+   */
+  async listPage(opts: {
+    tenantId: string;
+    includeArchived?: boolean;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: EnvironmentRow[]; nextCursor?: string }> {
+    return paginateVia({
+      cursor: opts.cursor,
+      limit: opts.limit,
+      fetch: (after, limit) =>
+        this.repo.listPage(opts.tenantId, {
+          includeArchived: opts.includeArchived ?? true,
+          limit,
+          after,
+        }),
+      extractCursor: (r) => ({
+        createdAt: new Date(r.created_at).getTime(),
+        id: r.id,
+      }),
     });
   }
 
