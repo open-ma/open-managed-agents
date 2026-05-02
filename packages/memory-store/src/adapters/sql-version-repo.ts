@@ -1,14 +1,15 @@
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { MemoryVersionRepo } from "../ports";
 import type { Actor, MemoryVersionRow } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link MemoryVersionRepo}. Read + redact
+ * SQL implementation of {@link MemoryVersionRepo}. Read + redact
  * paths over the memory_versions table; the write path lives in
- * {@link D1MemoryRepo} because every version write is paired with a memory
- * mutation in the same D1 batch.
+ * {@link SqlMemoryRepo} because every version write is paired with a memory
+ * mutation in the same client.batch.
  */
-export class D1MemoryVersionRepo implements MemoryVersionRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlMemoryVersionRepo implements MemoryVersionRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async list(
     storeId: string,

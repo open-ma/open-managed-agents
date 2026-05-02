@@ -1,12 +1,18 @@
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { MemoryStoreRepo, NewMemoryStoreInput } from "../ports";
 import type { MemoryStoreRow } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link MemoryStoreRepo}. Owns the SQL
- * against the memory_stores table defined in apps/main/migrations/0007.
+ * SQL implementation of {@link MemoryStoreRepo}. Owns the SQL against the
+ * memory_stores table defined in apps/main/migrations/0001_schema.sql.
+ *
+ * Backend-agnostic: takes a {@link SqlClient}, which works with Cloudflare D1
+ * and better-sqlite3 / Postgres (CFless). The schema is plain SQLite-flavoured
+ * DDL — D1 IS SQLite, and better-sqlite3 reads the same statements without
+ * modification.
  */
-export class D1MemoryStoreRepo implements MemoryStoreRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlMemoryStoreRepo implements MemoryStoreRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewMemoryStoreInput): Promise<MemoryStoreRow> {
     await this.db

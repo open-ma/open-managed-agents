@@ -1,6 +1,7 @@
 import {
   generateMemoryId,
 } from "@open-managed-agents/shared";
+import type { SqlClient, SqlStatement } from "@open-managed-agents/sql-client";
 import type {
   MemoryRepo,
   MemoryUpdateFields,
@@ -10,17 +11,20 @@ import type {
 import type { Actor, MemoryRow } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link MemoryRepo}. Owns the SQL against
+ * SQL implementation of {@link MemoryRepo}. Owns the SQL against
  * the `memories` (index only — no content column, see migration 0010) and
  * `memory_versions` tables.
  *
- * The `*WithVersion` methods use D1.batch so the index update + audit row
- * are atomic in a single SQLite transaction. The `upsertFromEvent` /
+ * Backend-agnostic: takes a {@link SqlClient}, which works with Cloudflare D1
+ * and better-sqlite3 / Postgres (CFless). Schema is plain SQLite-flavoured.
+ *
+ * The `*WithVersion` methods use client.batch so the index update + audit row
+ * are atomic in a single transaction. The `upsertFromEvent` /
  * `deleteFromEvent` methods are the queue consumer's entry points and must
  * be idempotent (R2 events deliver at-least-once).
  */
-export class D1MemoryRepo implements MemoryRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlMemoryRepo implements MemoryRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async createWithVersion(memory: NewMemoryRow, version: NewMemoryVersionInput): Promise<MemoryRow> {
     await this.db.batch([
@@ -226,7 +230,7 @@ export class D1MemoryRepo implements MemoryRepo {
   }
 }
 
-function versionInsertStmt(db: D1Database, v: NewMemoryVersionInput): D1PreparedStatement {
+function versionInsertStmt(db: SqlClient, v: NewMemoryVersionInput): SqlStatement {
   return db
     .prepare(
       `INSERT INTO memory_versions

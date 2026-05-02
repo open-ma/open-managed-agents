@@ -20,6 +20,7 @@
     "@open-managed-agents/event-log": "workspace:*",
     "@open-managed-agents/kv-store": "workspace:*",
     "@open-managed-agents/markdown": "workspace:*",
+    "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
