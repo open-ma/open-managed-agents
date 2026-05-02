@@ -83,23 +83,36 @@ export const requestMetricsMiddleware: MiddlewareHandler<{
 export function globalErrorHandler(err: Error, c: Context<{ Bindings: Env }>) {
   const route = routeOp(c);
   const tenantId = (c.get as (k: string) => string | undefined)("tenant_id");
+  const fields = errFields(err);
   logError(
     {
       op: "http.unhandled",
       route,
       tenant_id: tenantId,
-      ...errFields(err),
+      ...fields,
     },
     "unhandled exception in route handler — returning 500",
   );
   recordEvent(c.env.ANALYTICS, {
     op: "http.unhandled",
     tenant_id: tenantId,
-    ...errFields(err),
+    ...fields,
   });
-  // Don't leak err.message to clients — could surface internal details
-  // (DB column names, stack hints). Generic body, structured info in logs.
-  return c.json({ error: "Internal server error" }, 500);
+  // Surface the underlying error to the (authenticated) caller. The auth
+  // middleware already filtered out unauth traffic; the operational value
+  // of seeing the real error in the response (debugging stuck eval trials,
+  // sandbox/RPC failures, etc.) outweighs the leak risk for our internal-
+  // only API surface. Keep the message bounded to avoid stack-overflow-y
+  // payloads from runaway exceptions.
+  return c.json(
+    {
+      error: "Internal server error",
+      route,
+      error_name: fields.error_name,
+      error_message: (fields.error_message ?? "").slice(0, 1000),
+    },
+    500,
+  );
 }
 
 /** Build the AE op label from the matched route pattern, falling back to

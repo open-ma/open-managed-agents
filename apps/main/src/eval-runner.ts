@@ -7,9 +7,10 @@
 //             run completed when all tasks done
 //
 // Each task = a fresh session against the run's agent_id + environment_id.
-// Setup files are written via a setup-message turn (same pattern as
-// test/eval/runner.ts setupFiles helper). Then each user message in the spec
-// is sent in sequence, waiting for idle between messages.
+// On bootstrap we (1) create the session, (2) write any declared setup_files
+// directly to /workspace via raw /exec (NOT through the agent — see
+// writeSetupFiles below), then (3) send the spec's first user message and
+// wait for idle, repeating for each subsequent message.
 
 import type { Env, AgentConfig, EnvironmentConfig, StoredEvent } from "@open-managed-agents/shared";
 import { buildTrajectory } from "@open-managed-agents/shared";
@@ -192,6 +193,75 @@ async function postUserMessage(env: Env, run: EvalRunRecord, sessionId: string, 
   }));
 }
 
+/**
+ * Write declared `setup_files` directly to the sandbox via /exec, BEFORE the
+ * first user message. Bypasses the agent — eval-runner-side files are
+ * deterministic infra, not something we want the model to try to recreate
+ * (would slow down + waste tokens + occasionally drop or rewrite content).
+ *
+ * Path safety: each `path` is validated to start with `/` (absolute) and
+ * contain no `'` (the heredoc body is single-quoted; collisions would break
+ * the parse). Content is heredoc-passed via a sentinel that includes a
+ * random hex tail, so collisions with file content are vanishingly
+ * improbable and would surface as a non-zero exit (loud failure, not silent
+ * truncation).
+ *
+ * Failure mode: if any file write fails the whole trial is marked failed.
+ * We do NOT silently continue — the test would run on incomplete state and
+ * mislead the eval. setup_files is a contract, not a hint.
+ */
+async function writeSetupFiles(
+  env: Env,
+  run: EvalRunRecord,
+  sessionId: string,
+  files: ReadonlyArray<{ path: string; content: string }>,
+): Promise<void> {
+  if (files.length === 0) return;
+  const binding = await getSandboxBinding(env, run.environment_id, run.tenant_id);
+  if (!binding) throw new Error("environment binding lost");
+
+  for (const f of files) {
+    if (!f.path.startsWith("/")) {
+      throw new Error(`setup_files path must be absolute, got "${f.path}"`);
+    }
+    // Random heredoc sentinel — short hex tail keeps the chance of collision
+    // with file content effectively zero. If a setup file legitimately
+    // contains the sentinel we throw rather than silently truncating.
+    const sentinel = `OMA_SETUP_EOF_${Math.random().toString(16).slice(2, 14).toUpperCase()}`;
+    if (f.content.includes(sentinel)) {
+      throw new Error(`setup_files heredoc sentinel collision for ${f.path} (impossible — re-run)`);
+    }
+    // mkdir -p <dirname> ; cat > <path> <<'<sentinel>'\n<content>\n<sentinel>
+    // Single-quoted sentinel disables expansion inside the body, so $vars,
+    // backticks, etc. in user content are preserved verbatim.
+    const lastSlash = f.path.lastIndexOf("/");
+    const dir = lastSlash > 0 ? f.path.slice(0, lastSlash) : "/";
+    const command = [
+      `mkdir -p ${shellQuote(dir)}`,
+      `cat > ${shellQuote(f.path)} <<'${sentinel}'`,
+      f.content,
+      sentinel,
+    ].join("\n");
+    const res = await fwd(binding, `/sessions/${sessionId}/exec`, "POST", JSON.stringify({
+      command,
+      timeout_ms: 30_000,
+    }));
+    if (!res.ok) {
+      const body = await res.text();
+      throw new Error(`setup_files write failed for ${f.path}: HTTP ${res.status} ${body.slice(0, 200)}`);
+    }
+    const data = (await res.json()) as { exit_code?: number; output?: string };
+    if (data.exit_code !== 0) {
+      throw new Error(`setup_files write exit=${data.exit_code} for ${f.path}: ${(data.output ?? "").slice(0, 200)}`);
+    }
+  }
+}
+
+function shellQuote(s: string): string {
+  // POSIX-safe single-quote: replace any embedded ' with '\''
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
 async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string): Promise<string | null> {
   const binding = await getSandboxBinding(env, run.environment_id, run.tenant_id);
   if (!binding) return null;
@@ -269,7 +339,7 @@ async function advanceTrial(
   // Returns true if any progress was made (caller should save).
   if (trial.status === "completed" || trial.status === "failed") return false;
 
-  // Bootstrap: create session + send first message
+  // Bootstrap: create session + write setup_files (if any) + send first message
   if (trial.status === "pending") {
     try {
       const sessionId = await createTaskSession(env, run, task);
@@ -277,6 +347,12 @@ async function advanceTrial(
       trial.status = "running";
       trial.started_at = new Date().toISOString();
       trial.current_message_index = 0;
+      // Setup files are written via raw /exec — bypasses the agent so the
+      // model doesn't have to recreate deterministic infrastructure (slower,
+      // wastes tokens, occasionally drops or rewrites content).
+      if (task.spec.setup_files && task.spec.setup_files.length > 0) {
+        await writeSetupFiles(env, run, sessionId, task.spec.setup_files);
+      }
       // Send first message immediately
       await postUserMessage(env, run, sessionId, task.spec.messages[0]);
       return true;
@@ -293,6 +369,22 @@ async function advanceTrial(
     trial.status = "failed";
     trial.error = "running trial missing session_id";
     return true;
+  }
+
+  // Enforce per-trial timeout_ms (default 1 hour). Without this a stuck
+  // session — model hung, sandbox crash, status fetch broken — would leave
+  // the trial "running" forever, blocking the run from terminating and
+  // hiding the underlying failure. Implements the type-declared but
+  // previously unread `EvalTaskSpec.timeout_ms` field.
+  const timeoutMs = task.spec.timeout_ms ?? 3_600_000;
+  if (trial.started_at) {
+    const elapsed = Date.now() - Date.parse(trial.started_at);
+    if (elapsed > timeoutMs) {
+      trial.status = "failed";
+      trial.error = `trial timeout: ${Math.round(elapsed / 1000)}s exceeded budget ${Math.round(timeoutMs / 1000)}s (m_idx=${trial.current_message_index ?? 0})`;
+      trial.ended_at = new Date().toISOString();
+      return true;
+    }
   }
 
   const status = await getSessionStatus(env, run, trial.session_id);
@@ -321,9 +413,23 @@ async function advanceTrial(
     trial.ended_at = new Date().toISOString();
     return true;
   } catch (err: unknown) {
-    trial.status = "failed";
-    trial.error = err instanceof Error ? err.message : String(err);
-    trial.ended_at = new Date().toISOString();
+    // Bounded retry: events fetch can transiently 500 under storage
+    // contention (observed on `sess-lyh1t4ilelc87ypk` 2026-05-02 — events
+    // endpoint returned 500 for 25 min during a recovery storm, then
+    // self-recovered). Without this counter the trial would either:
+    //  - get marked failed on the first 500 (silent loss of recoverable work), or
+    //  - sit `running` until the 1 h timeout_ms (slow user feedback).
+    // 3 attempts × ~60 s cron interval = ~3 min before giving up — bounded
+    // and well inside the per-trial budget.
+    const msg = err instanceof Error ? err.message : String(err);
+    trial.finalize_retry_count = (trial.finalize_retry_count ?? 0) + 1;
+    if (trial.finalize_retry_count >= 3) {
+      trial.status = "failed";
+      trial.error = `events_unavailable_during_finalize (${trial.finalize_retry_count} attempts): ${msg.slice(0, 200)}`;
+      trial.ended_at = new Date().toISOString();
+    }
+    // Else: leave status="running" so next cron tick re-attempts the
+    // finalize. session_id is preserved for diagnostics either way.
     return true;
   }
 }

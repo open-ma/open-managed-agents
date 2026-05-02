@@ -15,19 +15,90 @@ import type { EventLogRepo, StreamRepo, StreamRow } from "../ports";
  *
  * `stampEvent` is injected so this adapter doesn't import the agent's
  * id-generation utilities — keeps the dependency direction clean.
+ *
+ * R2 spill: when an event JSON exceeds `SPILL_THRESHOLD_BYTES`, the full
+ * event is written to R2 and SQL only stores a small reference. Read path
+ * resolves the reference back lazily. This avoids both the DO SQLite
+ * cell-size limit (~2 MB) AND avoids data loss / silent corruption.
+ *
+ * If `r2` is null (test mode, non-CF deploy), the spill path falls back
+ * to writing the full event to SQL directly — caller bears the risk of
+ * cell-size errors on huge events.
  */
+const SPILL_THRESHOLD_BYTES = 500_000;
+
 export class CfDoEventLog implements EventLogRepo {
   constructor(
     private sql: SqlStorage,
     private stamp: (e: SessionEvent) => void,
+    private r2: R2Bucket | null = null,
+    private r2KeyPrefix: string = "",
   ) {}
 
   append(event: SessionEvent): void {
     this.stamp(event);
+    const fullData = JSON.stringify(event);
+
+    if (fullData.length <= SPILL_THRESHOLD_BYTES || !this.r2) {
+      // Small enough OR no R2 binding (in-memory tests, non-CF deploys).
+      this.sql.exec("INSERT INTO events (type, data) VALUES (?, ?)", event.type, fullData);
+      return;
+    }
+
+    // Spill: write small reference to SQL immediately so callers (sync)
+    // see the event in the right slot. R2 PUT is fire-and-forget — the
+    // DO is kept alive by other concurrent work (broadcastEvent + the
+    // active fiber) so the put will land. Worst case (DO dies before R2
+    // ack) the reader sees `_spilled` but R2.get returns null; the read
+    // path treats that as a "spilled but lost" event with the metadata
+    // intact (no silent corruption).
+    const r2Key = `${this.r2KeyPrefix}/events/${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
     this.sql.exec(
       "INSERT INTO events (type, data) VALUES (?, ?)",
       event.type,
-      JSON.stringify(event),
+      JSON.stringify({
+        type: event.type,
+        _spilled: { r2_key: r2Key, original_bytes: fullData.length },
+      }),
+    );
+    void this.r2.put(r2Key, fullData).catch((err) => {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error(`[event-log] R2 spill PUT failed (${r2Key}): ${msg}`);
+    });
+  }
+
+  /**
+   * Async helper that resolves `_spilled` references back to full events
+   * by reading from R2. Sync `getEvents()` returns rows verbatim — call
+   * this after if you need full payloads. Missing R2 objects (race or
+   * lost) come back with `_spill_lost: true` instead of throwing.
+   */
+  async resolveSpilledEvents(events: SessionEvent[]): Promise<SessionEvent[]> {
+    if (!this.r2) return events;
+    return Promise.all(
+      events.map(async (e) => {
+        const meta = (e as unknown as { _spilled?: { r2_key: string; original_bytes: number } })._spilled;
+        if (!meta || !this.r2) return e;
+        try {
+          const obj = await this.r2.get(meta.r2_key);
+          if (!obj) {
+            return {
+              ...e,
+              _spill_lost: true,
+              _spill_meta: meta,
+            } as unknown as SessionEvent;
+          }
+          const text = await obj.text();
+          return JSON.parse(text) as SessionEvent;
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          return {
+            ...e,
+            _spill_resolve_error: msg.slice(0, 200),
+            _spill_meta: meta,
+          } as unknown as SessionEvent;
+        }
+      }),
     );
   }
 

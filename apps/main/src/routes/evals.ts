@@ -33,6 +33,13 @@ export interface EvalTrialResult {
   error?: string;
   started_at?: string;
   ended_at?: string;
+  /**
+   * How many times we've attempted to finalize the trajectory (build+store)
+   * after the session went idle. Bounded retry — eval-runner.ts gives up
+   * after 3 attempts and marks the trial failed with structured error.
+   * Field is absent until the first failure (treat as 0).
+   */
+  finalize_retry_count?: number;
 }
 
 export interface EvalTaskResult {
