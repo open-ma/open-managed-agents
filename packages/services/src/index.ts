@@ -89,6 +89,7 @@ import {
   createCfTenantShardDirectoryService,
   createCfShardPoolService,
 } from "@open-managed-agents/tenant-dbs-store";
+import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
 import { parseStoreBackends, pickBackend } from "./store-backends";
 
 export { parseStoreBackends, pickBackend } from "./store-backends";
@@ -119,6 +120,14 @@ export interface Services {
   /** Control-plane: per-shard status / capacity / tenant count. Used for
    *  shard selection at sign-up + capacity monitoring. */
   shardPool: ShardPoolService;
+  /**
+   * File-bytes blob store (R2 FILES_BUCKET in CF, local-FS / S3 in Node).
+   * Null when the underlying storage isn't configured — routes that need it
+   * return 500 with a "not configured" message, matching pre-port behavior.
+   * The CFless adapter (forthcoming) returns a non-null blob store wired to
+   * S3 / local FS — routes never see runtime-specific types.
+   */
+  filesBlob: BlobStore | null;
 }
 
 /**
@@ -229,6 +238,8 @@ export function buildServices(env: Env, db: D1Database): Services {
     // Control-plane services: always query env.AUTH_DB, never the per-tenant db.
     tenantShardDirectory: createCfTenantShardDirectoryService({ controlPlaneDb: env.AUTH_DB }),
     shardPool: createCfShardPoolService({ controlPlaneDb: env.AUTH_DB }),
+    // File blob storage. CF: R2 binding; CFless: S3 / local-FS adapter.
+    filesBlob: blobStoreFromR2(env.FILES_BUCKET),
   };
 }
 

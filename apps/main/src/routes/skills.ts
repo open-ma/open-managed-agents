@@ -2,10 +2,12 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
+import type { BlobStore } from "@open-managed-agents/blob-store";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -124,7 +126,7 @@ function inputToBytes(file: SkillFileInput): Uint8Array {
  * unbound.
  */
 async function writeFilesToR2(
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   version: string,
@@ -144,7 +146,7 @@ async function writeFilesToR2(
 }
 
 async function readFilesFromR2(
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   version: string,
@@ -154,8 +156,7 @@ async function readFilesFromR2(
   for (const entry of manifest) {
     const obj = await bucket.get(skillFileR2Key(tenantId, skillId, version, entry.filename));
     if (!obj) continue;
-    const buf = await obj.arrayBuffer();
-    const bytes = new Uint8Array(buf);
+    const bytes = await obj.bytes();
     const content = entry.encoding === "base64"
       ? bytesToBase64(bytes)
       : new TextDecoder("utf-8").decode(bytes);
@@ -165,7 +166,7 @@ async function readFilesFromR2(
 }
 
 async function deleteFilesFromR2(
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   version: string,
@@ -178,8 +179,8 @@ async function deleteFilesFromR2(
   );
 }
 
-function ensureBucket(c: { env: Env }): R2Bucket | null {
-  return c.env.FILES_BUCKET || null;
+function ensureBucket(c: { var: { services: Services } }): BlobStore | null {
+  return c.var.services.filesBlob;
 }
 
 /**
