@@ -51,22 +51,30 @@ export async function findLatestBackup(
   db: D1Database,
   tenantId: string,
   environmentId: string,
+  sessionId: string,
   nowMs: number,
 ): Promise<WorkspaceBackupHandle | null> {
   try {
     const row = await db
       .prepare(
+        // Session-scoped: cross-session restore is never the right behavior
+        // (sessions are isolation boundaries; one session's files leaking into
+        // another's /workspace breaks reproducibility for batched eval runs).
+        // The schema's source_session_id column was added in 0011 with this
+        // exact use in mind — earlier reads ignored it and that's what caused
+        // the cross-session pollution observed in the TB pilot.
         `SELECT backup_handle FROM workspace_backups
-         WHERE tenant_id = ? AND environment_id = ? AND expires_at > ?
+         WHERE tenant_id = ? AND environment_id = ?
+           AND source_session_id = ? AND expires_at > ?
          ORDER BY created_at DESC LIMIT 1`,
       )
-      .bind(tenantId, environmentId, nowMs)
+      .bind(tenantId, environmentId, sessionId, nowMs)
       .first<{ backup_handle: string }>();
     if (!row) return null;
     return JSON.parse(row.backup_handle) as WorkspaceBackupHandle;
   } catch (err) {
     logWarn(
-      { op: "workspace_backups.find", tenant_id: tenantId, environment_id: environmentId, err },
+      { op: "workspace_backups.find", tenant_id: tenantId, environment_id: environmentId, session_id: sessionId, err },
       "workspace backup lookup failed",
     );
     return null;

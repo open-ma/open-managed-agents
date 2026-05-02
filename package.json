@@ -38,7 +38,6 @@
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.69",
     "@ai-sdk/openai": "^3.0.53",
-    "agents": "^0.11.2",
     "ai": "6.0.158",
     "better-auth": "^1.6.3",
     "drizzle-orm": "^0.45.2",
