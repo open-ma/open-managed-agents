@@ -46,6 +46,11 @@ import {
   createSqliteAgentService,
   type AgentService,
 } from "@open-managed-agents/agents-store";
+import {
+  createSqliteMemoryStoreService,
+  type MemoryStoreService,
+} from "@open-managed-agents/memory-store";
+import { LocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
 import { SqlEventLog, ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
@@ -108,10 +113,66 @@ await sql.exec(`
   );
   CREATE INDEX IF NOT EXISTS "idx_sessions_status"
     ON "sessions" ("status", "tenant_id");
+
+  CREATE TABLE IF NOT EXISTS "memory_stores" (
+    "id"           TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"    TEXT NOT NULL,
+    "name"         TEXT NOT NULL,
+    "description"  TEXT,
+    "created_at"   INTEGER NOT NULL,
+    "updated_at"   INTEGER,
+    "archived_at"  INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS "idx_memory_stores_tenant"
+    ON "memory_stores" ("tenant_id", "archived_at");
+
+  CREATE TABLE IF NOT EXISTS "memories" (
+    "id"               TEXT PRIMARY KEY NOT NULL,
+    "store_id"         TEXT NOT NULL,
+    "path"             TEXT NOT NULL,
+    "content_sha256"   TEXT NOT NULL,
+    "etag"             TEXT NOT NULL,
+    "size_bytes"       INTEGER NOT NULL,
+    "created_at"       INTEGER NOT NULL,
+    "updated_at"       INTEGER NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS "idx_memories_store_path"
+    ON "memories" ("store_id", "path");
+
+  CREATE TABLE IF NOT EXISTS "memory_versions" (
+    "id"               TEXT PRIMARY KEY NOT NULL,
+    "memory_id"        TEXT NOT NULL,
+    "store_id"         TEXT NOT NULL,
+    "operation"        TEXT NOT NULL,
+    "path"             TEXT NOT NULL,
+    "content"          TEXT NOT NULL,
+    "content_sha256"   TEXT NOT NULL,
+    "size_bytes"       INTEGER NOT NULL,
+    "actor_type"       TEXT NOT NULL,
+    "actor_id"         TEXT NOT NULL,
+    "created_at"       INTEGER NOT NULL,
+    "redacted"         INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS "idx_memory_versions_store"
+    ON "memory_versions" ("store_id", "created_at" DESC);
+  CREATE INDEX IF NOT EXISTS "idx_memory_versions_memory"
+    ON "memory_versions" ("memory_id", "created_at" DESC);
 `);
 await ensureEventLogSchema(sql);
 
 const agentsService: AgentService = createSqliteAgentService({ client: sql });
+
+// Memory store: SQLite for index/audit + local filesystem for content blobs.
+// Production CFless can swap LocalFsBlobStore for an S3-compatible adapter
+// (Tigris / MinIO / etc.) — same BlobStore port.
+const memoryBlobs = new LocalFsBlobStore({
+  baseDir: process.env.MEMORY_BLOB_DIR ?? "./data/memory-blobs",
+});
+const memoryService: MemoryStoreService = createSqliteMemoryStoreService({
+  client: sql,
+  blobs: memoryBlobs,
+});
+
 const hub = new InProcessEventStreamHub();
 
 // ─── Crash-recovery scan ─────────────────────────────────────────────────
@@ -507,6 +568,86 @@ v1.get("/sessions/:id/events/stream", async (c) => {
       "x-accel-buffering": "no",
     },
   });
+});
+
+// ── Memory stores (Phase B-memory) ───────────────────────────────────────
+//
+// REST API for the Anthropic-aligned managed memory contract. Inside the
+// sandbox, agents access memory stores as filesystem mounts at
+// `/mnt/memory/<store_name>/` using the standard file tools — no bespoke
+// memory_* tools. The Node-side LocalSubprocessSandbox doesn't support
+// real FUSE mounts so the agent path is currently REST-only; mount support
+// lands when the sandbox grows it (E2B already supports it via s3fs).
+
+v1.post("/memory_stores", async (c) => {
+  const body = await c.req.json<{ name: string; description?: string }>();
+  if (!body.name) return c.json({ error: "name is required" }, 400);
+  const row = await memoryService.createStore({
+    tenantId: TENANT,
+    name: body.name,
+    description: body.description,
+  });
+  return c.json(row, 201);
+});
+
+v1.get("/memory_stores", async (c) => {
+  const rows = await memoryService.listStores({
+    tenantId: TENANT,
+    includeArchived: c.req.query("include_archived") === "true",
+  });
+  return c.json({ data: rows });
+});
+
+v1.get("/memory_stores/:id", async (c) => {
+  const row = await memoryService.getStore({
+    tenantId: TENANT,
+    storeId: c.req.param("id"),
+  });
+  if (!row) return c.json({ error: "Memory store not found" }, 404);
+  return c.json(row);
+});
+
+v1.post("/memory_stores/:id/memories", async (c) => {
+  const body = await c.req.json<{
+    path: string;
+    content: string;
+    precondition?: { type: "content_sha256"; content_sha256: string } | { type: "not_exists" };
+  }>();
+  if (!body.path || body.content === undefined) {
+    return c.json({ error: "path and content are required" }, 400);
+  }
+  try {
+    const row = await memoryService.writeByPath({
+      tenantId: TENANT,
+      storeId: c.req.param("id"),
+      path: body.path,
+      content: body.content,
+      precondition: body.precondition,
+      actor: { type: "user", id: TENANT },
+    });
+    return c.json(row, 201);
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 400);
+  }
+});
+
+v1.get("/memory_stores/:id/memories", async (c) => {
+  const rows = await memoryService.listMemories({
+    tenantId: TENANT,
+    storeId: c.req.param("id"),
+    pathPrefix: c.req.query("path_prefix") ?? undefined,
+  });
+  return c.json({ data: rows });
+});
+
+v1.get("/memory_stores/:id/memories/:mid", async (c) => {
+  const row = await memoryService.readById({
+    tenantId: TENANT,
+    storeId: c.req.param("id"),
+    memoryId: c.req.param("mid"),
+  });
+  if (!row) return c.json({ error: "Memory not found" }, 404);
+  return c.json(row);
 });
 
 app.route("/v1", v1);

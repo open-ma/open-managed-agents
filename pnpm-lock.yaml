@@ -314,6 +314,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../../packages/sql-client
       '@open-managed-agents/tenant-db':
         specifier: workspace:*
         version: link:../../packages/tenant-db
@@ -350,6 +353,9 @@ importers:
       '@open-managed-agents/markdown':
         specifier: workspace:*
         version: link:../../packages/markdown
+      '@open-managed-agents/memory-store':
+        specifier: workspace:*
+        version: link:../../packages/memory-store
       '@open-managed-agents/sandbox':
         specifier: workspace:*
         version: link:../../packages/sandbox
@@ -545,6 +551,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
 
   packages/model-cards-store:
     dependencies:
