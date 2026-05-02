@@ -107,7 +107,7 @@ curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 | Memory stores (mount + agent fs writes → SQL index) | ✓ symlink + chokidar watcher |
 | Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar |
 | Postgres backend (DATABASE_URL=postgres://...) | ✓ same code path as SQLite |
-| Multi-tenant authentication (better-auth) | ⏸  TENANT="default" hardcoded |
+| Multi-tenant authentication (better-auth) | ✓ email+password, AUTH_DISABLED=1 escape |
 | Console UI | ⏸  not yet wired to main-node |
 
 ## Sandbox isolation modes

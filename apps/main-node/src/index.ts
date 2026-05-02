@@ -78,6 +78,9 @@ import { dirname, join } from "node:path";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
+import { createAuth } from "./auth/config.js";
+import { createAuthMiddleware } from "./auth/middleware.js";
+import { ensureTenantSchema } from "./auth/tenants.js";
 
 // Single ToMarkdownProvider instance — turndown is heavy enough that
 // instantiating per turn would be wasteful. Lazy-loads on first use.
@@ -229,6 +232,91 @@ await sql.exec(`
   );
 `);
 await ensureEventLogSchema(sql);
+await ensureTenantSchema(sql);
+
+// ─── Auth ───────────────────────────────────────────────────────────────
+//
+// better-auth on a separate sqlite file. PG-backed auth is a future-work
+// item (the kysely-adapter detection wants `pg.Pool` not `postgres.js`'s
+// Sql); for now main store can be PG while auth stays sqlite — the auth
+// file is small (<1k rows in practice) and the cost is one extra backup
+// target. AUTH_DISABLED=1 escapes back to tenant_id="default" for demos
+// that don't want to set up a user first.
+
+const authDisabled = process.env.AUTH_DISABLED === "1";
+const authDbPath = process.env.AUTH_DATABASE_PATH ?? "./data/auth.db";
+let auth: ReturnType<typeof createAuth> | null = null;
+if (!authDisabled) {
+  // better-auth's kysely-adapter detects better-sqlite3 via `aggregate in db`.
+  // Lazy-import the driver so AUTH_DISABLED=1 paths don't pull it in.
+  mkdirSync(dirname(authDbPath), { recursive: true });
+  const BetterSqlite3 = (await import("better-sqlite3")).default;
+  const authDb = new BetterSqlite3(authDbPath);
+
+  // Bootstrap better-auth's schema. Mirrors what `npx @better-auth/cli
+  // generate` produces for sqlite + emailAndPassword + additionalFields
+  // (tenantId, role). Idempotent — IF NOT EXISTS on every table.
+  authDb.exec(`
+    CREATE TABLE IF NOT EXISTS "user" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "email" TEXT NOT NULL UNIQUE,
+      "emailVerified" INTEGER NOT NULL DEFAULT 0,
+      "name" TEXT NOT NULL,
+      "image" TEXT,
+      "tenantId" TEXT,
+      "role" TEXT,
+      "createdAt" INTEGER NOT NULL,
+      "updatedAt" INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS "session" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+      "token" TEXT NOT NULL UNIQUE,
+      "expiresAt" INTEGER NOT NULL,
+      "ipAddress" TEXT,
+      "userAgent" TEXT,
+      "createdAt" INTEGER NOT NULL,
+      "updatedAt" INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS "account" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+      "accountId" TEXT NOT NULL,
+      "providerId" TEXT NOT NULL,
+      "accessToken" TEXT,
+      "refreshToken" TEXT,
+      "idToken" TEXT,
+      "accessTokenExpiresAt" INTEGER,
+      "refreshTokenExpiresAt" INTEGER,
+      "scope" TEXT,
+      "password" TEXT,
+      "createdAt" INTEGER NOT NULL,
+      "updatedAt" INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS "verification" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "identifier" TEXT NOT NULL,
+      "value" TEXT NOT NULL,
+      "expiresAt" INTEGER NOT NULL,
+      "createdAt" INTEGER,
+      "updatedAt" INTEGER
+    );
+  `);
+
+  auth = createAuth({
+    authDb,
+    mainSql: sql,
+    secret: process.env.BETTER_AUTH_SECRET,
+    baseURL: process.env.PUBLIC_BASE_URL,
+    google:
+      process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+        ? {
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+          }
+        : undefined,
+  });
+}
 
 const agentsService: AgentService = createSqliteAgentService({ client: sql });
 
@@ -315,7 +403,9 @@ function newEventLog(sessionId: string): SqlEventLog {
 
 // ─── HTTP ────────────────────────────────────────────────────────────────
 
-const app = new Hono();
+const app = new Hono<{
+  Variables: { tenant_id: string; user_id?: string };
+}>();
 
 app.get("/health", (c) =>
   c.json({
@@ -323,6 +413,7 @@ app.get("/health", (c) =>
     runtime: "node",
     pid: process.pid,
     uptime_s: Math.round(process.uptime()),
+    auth: authDisabled ? "disabled" : "better-auth",
     backends: {
       agents: usePostgres ? "postgres" : "sqlite",
       events: usePostgres ? "postgres" : "sqlite",
@@ -332,8 +423,25 @@ app.get("/health", (c) =>
   }),
 );
 
-const TENANT = "default";
-const v1 = new Hono();
+// Mount better-auth's request handler. Catches /api/auth/sign-up/email,
+// /api/auth/sign-in/email, /api/auth/sign-out, /api/auth/get-session, etc.
+// Auth-disabled mode exposes nothing here — any request to /api/auth/* will
+// 404, which is the correct signal: there's no auth to interact with.
+if (auth) {
+  app.on(["GET", "POST"], "/api/auth/*", (c) => auth!.handler(c.req.raw));
+}
+
+// Auth gate for the data-plane routes.
+const authMw = createAuthMiddleware({
+  auth: auth ?? ({} as ReturnType<typeof createAuth>),
+  mainSql: sql,
+  disabled: authDisabled,
+});
+
+const v1 = new Hono<{
+  Variables: { tenant_id: string; user_id?: string };
+}>();
+v1.use("*", authMw);
 
 // ── Agents (Phase B2 — unchanged) ────────────────────────────────────────
 
@@ -348,7 +456,7 @@ v1.post("/agents", async (c) => {
   if (!body.name) return c.json({ error: "name is required" }, 400);
   if (!body.model) return c.json({ error: "model is required" }, 400);
   const row = await agentsService.create({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     input: {
       name: body.name,
       model: body.model,
@@ -361,12 +469,12 @@ v1.post("/agents", async (c) => {
 });
 
 v1.get("/agents", async (c) => {
-  const rows = await agentsService.list({ tenantId: TENANT });
+  const rows = await agentsService.list({ tenantId: c.var.tenant_id });
   return c.json({ data: rows.map(toApiAgent) });
 });
 
 v1.get("/agents/:id", async (c) => {
-  const row = await agentsService.get({ tenantId: TENANT, agentId: c.req.param("id") });
+  const row = await agentsService.get({ tenantId: c.var.tenant_id, agentId: c.req.param("id") });
   if (!row) return c.json({ error: "Agent not found" }, 404);
   return c.json(toApiAgent(row));
 });
@@ -380,7 +488,7 @@ v1.put("/agents/:id", async (c) => {
   }>();
   try {
     const row = await agentsService.update({
-      tenantId: TENANT,
+      tenantId: c.var.tenant_id,
       agentId: c.req.param("id"),
       expectedVersion: body.version,
       input: { name: body.name, system: body.system, description: body.description },
@@ -406,7 +514,7 @@ v1.post("/sessions", async (c) => {
   // Validate agent if provided. Sessions without an agent only support
   // _test_emit injection — they can't run a harness loop.
   if (body.agent_id) {
-    const agent = await agentsService.get({ tenantId: TENANT, agentId: body.agent_id });
+    const agent = await agentsService.get({ tenantId: c.var.tenant_id, agentId: body.agent_id });
     if (!agent) return c.json({ error: "Agent not found" }, 404);
   }
   const id = `sess_${nanoid(20)}`;
@@ -416,7 +524,7 @@ v1.post("/sessions", async (c) => {
       `INSERT INTO sessions (id, tenant_id, agent_id, status, title, created_at, updated_at)
        VALUES (?, ?, ?, 'idle', ?, ?, ?)`,
     )
-    .bind(id, TENANT, body.agent_id ?? null, body.title ?? null, now, now)
+    .bind(id, c.var.tenant_id, body.agent_id ?? null, body.title ?? null, now, now)
     .run();
   return c.json({ id, agent_id: body.agent_id ?? null, status: "idle", title: body.title ?? null }, 201);
 });
@@ -427,7 +535,7 @@ v1.get("/sessions/:id", async (c) => {
       `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
        WHERE tenant_id = ? AND id = ?`,
     )
-    .bind(TENANT, c.req.param("id"))
+    .bind(c.var.tenant_id, c.req.param("id"))
     .first<{
       id: string;
       agent_id: string | null;
@@ -448,7 +556,7 @@ v1.post("/sessions/:id/events", async (c) => {
   const sid = c.req.param("id");
   const session = await sql
     .prepare(`SELECT id, agent_id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(TENANT, sid)
+    .bind(c.var.tenant_id, sid)
     .first<{ id: string; agent_id: string | null }>();
   if (!session) return c.json({ error: "Session not found" }, 404);
   const body = await c.req.json<{ events: SessionEvent[] }>();
@@ -466,7 +574,7 @@ v1.post("/sessions/:id/events", async (c) => {
   // gets streamed agent.message_chunk events as the LLM runs.
   const hasUserMessage = body.events.some((e) => e.type === "user.message");
   if (hasUserMessage && session.agent_id) {
-    void runHarnessTurn(sid, session.agent_id, body.events.find(
+    void runHarnessTurn(c.var.tenant_id, sid, session.agent_id, body.events.find(
       (e) => e.type === "user.message",
     ) as UserMessageEvent).catch((err) => {
       console.error("[main-node] harness turn failed", err);
@@ -490,11 +598,12 @@ v1.post("/sessions/:id/events", async (c) => {
  * duration so crash-recovery on restart finds it.
  */
 async function runHarnessTurn(
+  tenantId: string,
   sessionId: string,
   agentId: string,
   userMessage: UserMessageEvent,
 ): Promise<void> {
-  const agent = await agentsService.get({ tenantId: TENANT, agentId });
+  const agent = await agentsService.get({ tenantId, agentId });
   if (!agent) throw new Error(`agent ${agentId} not found`);
 
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -523,7 +632,7 @@ async function runHarnessTurn(
     // talks to upstreams directly with no header injection). The TenantId
     // / sessionId carry context for future per-session vault scoping —
     // today's matcher uses hostname only, so they're informational.
-    await sandbox.setOutboundContext({ tenantId: TENANT, sessionId });
+    await sandbox.setOutboundContext({ tenantId, sessionId });
 
     // Mount memory stores bound to this session. Each row →
     // sandbox.mountMemoryStore({storeName, storeId, readOnly}).
@@ -532,7 +641,7 @@ async function runHarnessTurn(
       .bind(sessionId)
       .all<{ store_id: string; access: string }>();
     for (const binding of memoryBindings.results ?? []) {
-      const store = await memoryService.getStore({ tenantId: TENANT, storeId: binding.store_id });
+      const store = await memoryService.getStore({ tenantId, storeId: binding.store_id });
       if (!store) continue;
       await sandbox.mountMemoryStore({
         storeName: store.name,
@@ -590,7 +699,7 @@ v1.post("/sessions/:id/_test_emit", async (c) => {
   const sid = c.req.param("id");
   const session = await sql
     .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(TENANT, sid)
+    .bind(c.var.tenant_id, sid)
     .first();
   if (!session) return c.json({ error: "Session not found" }, 404);
   const body = await c.req
@@ -615,7 +724,7 @@ v1.get("/sessions/:id/events/stream", async (c) => {
   const sid = c.req.param("id");
   const session = await sql
     .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(TENANT, sid)
+    .bind(c.var.tenant_id, sid)
     .first();
   if (!session) return c.json({ error: "Session not found" }, 404);
 
@@ -700,7 +809,7 @@ v1.post("/memory_stores", async (c) => {
   const body = await c.req.json<{ name: string; description?: string }>();
   if (!body.name) return c.json({ error: "name is required" }, 400);
   const row = await memoryService.createStore({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     name: body.name,
     description: body.description,
   });
@@ -709,7 +818,7 @@ v1.post("/memory_stores", async (c) => {
 
 v1.get("/memory_stores", async (c) => {
   const rows = await memoryService.listStores({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     includeArchived: c.req.query("include_archived") === "true",
   });
   return c.json({ data: rows });
@@ -717,7 +826,7 @@ v1.get("/memory_stores", async (c) => {
 
 v1.get("/memory_stores/:id", async (c) => {
   const row = await memoryService.getStore({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     storeId: c.req.param("id"),
   });
   if (!row) return c.json({ error: "Memory store not found" }, 404);
@@ -735,12 +844,12 @@ v1.post("/memory_stores/:id/memories", async (c) => {
   }
   try {
     const row = await memoryService.writeByPath({
-      tenantId: TENANT,
+      tenantId: c.var.tenant_id,
       storeId: c.req.param("id"),
       path: body.path,
       content: body.content,
       precondition: body.precondition,
-      actor: { type: "user", id: TENANT },
+      actor: { type: "user", id: c.var.user_id ?? c.var.tenant_id },
     });
     return c.json(row, 201);
   } catch (err) {
@@ -750,7 +859,7 @@ v1.post("/memory_stores/:id/memories", async (c) => {
 
 v1.get("/memory_stores/:id/memories", async (c) => {
   const rows = await memoryService.listMemories({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     storeId: c.req.param("id"),
     pathPrefix: c.req.query("path_prefix") ?? undefined,
   });
@@ -759,7 +868,7 @@ v1.get("/memory_stores/:id/memories", async (c) => {
 
 v1.get("/memory_stores/:id/memories/:mid", async (c) => {
   const row = await memoryService.readById({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     storeId: c.req.param("id"),
     memoryId: c.req.param("mid"),
   });
@@ -780,12 +889,12 @@ v1.post("/sessions/:id/memory_stores", async (c) => {
   const sid = c.req.param("id");
   const session = await sql
     .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(TENANT, sid)
+    .bind(c.var.tenant_id, sid)
     .first();
   if (!session) return c.json({ error: "Session not found" }, 404);
   const body = await c.req.json<{ store_id: string; access?: string }>();
   if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
-  const store = await memoryService.getStore({ tenantId: TENANT, storeId: body.store_id });
+  const store = await memoryService.getStore({ tenantId: c.var.tenant_id, storeId: body.store_id });
   if (!store) return c.json({ error: "Memory store not found" }, 404);
   const access = body.access === "read_only" ? "read_only" : "read_write";
   await sql
@@ -821,7 +930,7 @@ v1.post("/vaults", async (c) => {
   const body = await c.req.json<{ name: string }>();
   if (!body.name) return c.json({ error: "name is required" }, 400);
   const row = await vaultService.create({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     name: body.name,
   });
   return c.json(row, 201);
@@ -829,7 +938,7 @@ v1.post("/vaults", async (c) => {
 
 v1.get("/vaults", async (c) => {
   const rows = await vaultService.list({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     includeArchived: c.req.query("include_archived") === "true",
   });
   return c.json({ data: rows });
@@ -837,7 +946,7 @@ v1.get("/vaults", async (c) => {
 
 v1.get("/vaults/:id", async (c) => {
   const row = await vaultService.get({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     vaultId: c.req.param("id"),
   });
   if (!row) return c.json({ error: "Vault not found" }, 404);
@@ -853,7 +962,7 @@ v1.post("/vaults/:id/credentials", async (c) => {
     return c.json({ error: "display_name and auth are required" }, 400);
   }
   const row = await credentialService.create({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     vaultId: c.req.param("id"),
     displayName: body.display_name,
     auth: body.auth,
@@ -864,7 +973,7 @@ v1.post("/vaults/:id/credentials", async (c) => {
 
 v1.get("/vaults/:id/credentials", async (c) => {
   const rows = await credentialService.list({
-    tenantId: TENANT,
+    tenantId: c.var.tenant_id,
     vaultId: c.req.param("id"),
     includeArchived: c.req.query("include_archived") === "true",
   });
