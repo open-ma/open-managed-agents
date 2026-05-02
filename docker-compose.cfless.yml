@@ -1,0 +1,47 @@
+# CFless OMA — single-instance docker-compose for local trials and small
+# self-host deploys. Uses SQLite + local FS for storage; if you outgrow
+# this (multi-instance, real DB, S3 blob) swap in services for postgres /
+# minio and point the env vars accordingly (see docs/cfless.md).
+#
+# Quick start:
+#   1. Copy .env.cfless.example → .env (fill ANTHROPIC_API_KEY)
+#   2. docker compose -f docker-compose.cfless.yml up --build
+#   3. curl localhost:8787/health
+#
+# Persistence: ./data on the host is bind-mounted at /app/data in the
+# container, so kill -9 / docker stop don't lose sessions or workdirs.
+
+services:
+  oma-server:
+    build:
+      context: .
+      dockerfile: apps/main-node/Dockerfile
+    image: openma/main-node:dev
+    container_name: oma-server
+    ports:
+      - "${OMA_PORT:-8787}:8787"
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      # Required for harness turns. Put it in .env or pass via shell env.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional: when pointing at an Anthropic-compat proxy that needs
+      # /v1 in the base URL or custom headers.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_CUSTOM_HEADERS: ${ANTHROPIC_CUSTOM_HEADERS:-}
+      # Storage paths inside the container — mapped to ./data on host.
+      DATABASE_PATH: /app/data/oma.db
+      SANDBOX_WORKDIR: /app/data/sandboxes
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped
+    # Healthcheck queries /health every 30s. unhealthy after 3 misses
+    # (90s grace), at which point Docker / your orchestrator can decide
+    # to restart.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
