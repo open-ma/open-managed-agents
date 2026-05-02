@@ -105,7 +105,7 @@ curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 | `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
 | `browser` tool | ✗  CF-only (uses @cloudflare/playwright) |
 | Memory stores | ⏸  port exists, Node adapter pending |
-| Vault credential injection for outbound MCP / API calls | ⏸  pending |
+| Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar |
 | Multi-tenant authentication (better-auth) | ⏸  TENANT="default" hardcoded |
 | Console UI | ⏸  not yet wired to main-node |
 
@@ -116,6 +116,61 @@ curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 | `LocalSubprocessSandbox` (default) | Local dev, trusted agent code | Nothing — host subprocess in `./data/sandboxes/<sessionId>/` |
 | `E2BSandbox` | Production / untrusted code, want Firecracker microVM | Set `SANDBOX_PROVIDER=e2b`, `E2B_API_KEY=...` (PoC: not yet wired into main-node entry — adapter exists, factory selection lands next) |
 | `CloudflareSandbox` | If you happen to deploy on CF Workers + Containers | Use the regular `apps/agent` worker, not main-node |
+
+## Vault credential injection (oma-vault sidecar)
+
+When the sandbox's bash runs `curl https://api.github.com/...`, OMA injects
+the matching vault credential as an `Authorization: Bearer ...` header
+without ever exposing the token to the agent process. This mirrors the CF
+build's `outboundByHost` + `MAIN_MCP.outboundForward` zero-trust pattern.
+
+How it works:
+
+```
+sandbox bash
+  ├── HTTPS_PROXY=http://oma-vault:14322
+  ├── NODE_EXTRA_CA_CERTS=/app/data/oma-vault-ca/ca.crt
+  ├── SSL_CERT_FILE=/app/data/oma-vault-ca/ca.crt
+  └── curl https://api.github.com/user
+              │
+              ▼
+       oma-vault (mockttp HTTPS MITM proxy)
+       ├── Strip incoming Authorization (zero-trust)
+       ├── Look up credential matching api.github.com host
+       ├── Inject Authorization: Bearer <vault token>
+       └── Forward to upstream
+                  │
+                  ▼
+           api.github.com  ← sees real Authorization header
+```
+
+Set up:
+
+```bash
+# 1. Create a vault.
+VID=$(curl -s -X POST localhost:8787/v1/vaults \
+  -H 'content-type: application/json' \
+  -d '{"name":"github-prod"}' | jq -r .id)
+
+# 2. Add a static_bearer credential bound to api.github.com.
+curl -s -X POST localhost:8787/v1/vaults/$VID/credentials \
+  -H 'content-type: application/json' \
+  -d '{
+    "display_name":"github-pat",
+    "auth":{
+      "type":"static_bearer",
+      "token":"ghp_xxx",
+      "mcp_server_url":"https://api.github.com"
+    }
+  }'
+
+# 3. Run an agent. Its bash `curl https://api.github.com/user` will see
+#    the credential injected; the model never sees the raw token.
+```
+
+The CA at `./data/oma-vault-ca/ca.crt` is regenerated on first vault
+start and persisted across restarts. Sandboxes mounted with the shared
+`./data` volume pick it up automatically through `OMA_VAULT_CA_CERT`.
 
 ## Architecture
 
@@ -164,10 +219,6 @@ If you take this past trusted-dev territory, you'll want:
 
   - **Real auth.** Today every request is `tenant_id="default"`. Wire
     better-auth + the `auth.ts` middleware that apps/main uses.
-  - **Vault credential injection.** The agent's bash currently runs with
-    full host network access and no credential gating. Add an outbound
-    proxy that intercepts HTTPS and injects vault tokens (mirrors the CF
-    side's `MAIN_MCP.outboundForward` RPC).
   - **E2B (or equivalent) sandbox.** `LocalSubprocessSandbox` is a
     `chmod 777` on your host — fine for trusted dev, deadly for an agent
     a stranger can prompt-inject.

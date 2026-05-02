@@ -1,3 +1,4 @@
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import {
   cursorBinds,
   cursorWhereSql,
@@ -10,11 +11,11 @@ import type { NewVaultInput, VaultRepo, VaultUpdateFields } from "../ports";
 import type { VaultRow } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link VaultRepo}. Owns the SQL against
+ * SQL implementation of {@link VaultRepo}. Owns the SQL against
  * the `vaults` table defined in apps/main/migrations/0014_vaults_table.sql.
  */
-export class D1VaultRepo implements VaultRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlVaultRepo implements VaultRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewVaultInput): Promise<VaultRow> {
     await this.db
