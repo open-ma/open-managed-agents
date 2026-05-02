@@ -15,6 +15,7 @@
     "@open-managed-agents/environments-store": "workspace:*",
     "@open-managed-agents/event-log": "workspace:*",
     "@open-managed-agents/files-store": "workspace:*",
+    "@open-managed-agents/markdown": "workspace:*",
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/model-cards-store": "workspace:*",
     "@open-managed-agents/outbound-snapshots-store": "workspace:*",
