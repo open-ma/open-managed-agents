@@ -28,6 +28,7 @@
     "@open-managed-agents/vaults-store": "workspace:*",
     "ai": "^6.0.158",
     "better-sqlite3": "^11.5.0",
+    "chokidar": "^4.0.0",
     "hono": "^4.7.0",
     "nanoid": "^5.1.0",
     "turndown": "^7.2.0"
