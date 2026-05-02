@@ -14,13 +14,17 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
+    "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/blob-store": "workspace:*",
     "@open-managed-agents/kv-store": "workspace:*",
     "@open-managed-agents/markdown": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "better-sqlite3": "^11.5.0",
     "hono": "^4.7.0"
   },
   "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
     "tsx": "^4.19.0"
   }
 }

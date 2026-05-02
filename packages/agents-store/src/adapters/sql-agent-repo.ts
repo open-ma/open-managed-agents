@@ -6,6 +6,7 @@ import {
   fetchN,
   trimPage,
 } from "@open-managed-agents/shared";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import { AgentNotFoundError } from "../errors";
 import type {
   AgentRepo,
@@ -16,19 +17,24 @@ import type {
 import type { AgentRow, AgentVersionRow } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link AgentRepo}. Owns the SQL against
- * the `agents` and `agent_versions` tables defined in
- * apps/main/migrations/0002_agents_tables.sql.
+ * SQL implementation of {@link AgentRepo}. Owns the SQL against the `agents`
+ * and `agent_versions` tables defined in apps/main/migrations/0002_agents_tables.sql.
+ *
+ * Backend-agnostic: takes a {@link SqlClient}, which works with Cloudflare D1
+ * (CF deployments) and better-sqlite3 / Postgres (CFless). The schema is plain
+ * SQLite-flavoured DDL — D1 IS SQLite, and better-sqlite3 reads the same
+ * statements without modification. A future Postgres adapter would need a
+ * separate migration with PG-flavour types but the repo logic stays.
  *
  * Atomicity:
- *   - updateWithVersionSnapshot uses D1.batch so the snapshot INSERT and the
- *     current-row UPDATE succeed-or-fail together (replaces the legacy
+ *   - updateWithVersionSnapshot uses client.batch so the snapshot INSERT and
+ *     the current-row UPDATE succeed-or-fail together (replaces the legacy
  *     non-atomic KV.put then KV.put pattern).
- *   - deleteWithVersions uses D1.batch to drop the agent + cascade its
+ *   - deleteWithVersions uses client.batch to drop the agent + cascade its
  *     history rows (the schema has no FK by project convention).
  */
-export class D1AgentRepo implements AgentRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlAgentRepo implements AgentRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewAgentInput): Promise<AgentRow> {
     await this.db

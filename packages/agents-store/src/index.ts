@@ -17,4 +17,8 @@ export * from "./ports";
 export { AgentService } from "./service";
 export type { AgentServiceDeps, NewAgentInput, UpdateAgentInput } from "./service";
 
-export { createCfAgentService, D1AgentRepo } from "./adapters";
+export {
+  createCfAgentService,
+  createSqliteAgentService,
+  SqlAgentRepo,
+} from "./adapters";
