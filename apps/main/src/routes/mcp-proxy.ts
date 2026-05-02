@@ -49,6 +49,7 @@ import { Hono } from "hono";
 import type { Env, AgentConfig, CredentialConfig } from "@open-managed-agents/shared";
 import { log, logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
+import type { KvStore } from "@open-managed-agents/kv-store";
 
 const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
 
@@ -78,13 +79,13 @@ async function sha256(input: string): Promise<string> {
 }
 
 /**
- * Resolve apiKey → tenant_id via the existing CONFIG_KV `apikey:<sha256>`
+ * Resolve apiKey → tenant_id via the existing KV `apikey:<sha256>`
  * index. Exported so the HTTP endpoint can do its auth step before handing
  * off to `resolveProxyTargetByTenant`. Returns null on miss / malformed row.
  */
-export async function apiKeyToTenantId(env: Env, apiKey: string): Promise<string | null> {
+export async function apiKeyToTenantId(kv: KvStore, apiKey: string): Promise<string | null> {
   const hash = await sha256(apiKey);
-  const keyData = await env.CONFIG_KV.get(`apikey:${hash}`);
+  const keyData = await kv.get(`apikey:${hash}`);
   if (!keyData) return null;
   const { tenant_id: tenantId } = JSON.parse(keyData) as { tenant_id: string; user_id?: string };
   return tenantId || null;
@@ -507,7 +508,7 @@ app.all("/:sid/:server", async (c) => {
   const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
   if (!apiKey) return c.json({ error: "missing bearer" }, 401);
 
-  const tenantId = await apiKeyToTenantId(c.env, apiKey);
+  const tenantId = await apiKeyToTenantId(c.var.services.kv, apiKey);
   if (!tenantId) return c.json({ error: "forbidden" }, 403);
 
   const services = c.get("services");

@@ -90,6 +90,7 @@ import {
   createCfShardPoolService,
 } from "@open-managed-agents/tenant-dbs-store";
 import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
+import { type KvStore, CfKvStore } from "@open-managed-agents/kv-store";
 import { parseStoreBackends, pickBackend } from "./store-backends";
 
 export { parseStoreBackends, pickBackend } from "./store-backends";
@@ -128,6 +129,17 @@ export interface Services {
    * S3 / local FS — routes never see runtime-specific types.
    */
   filesBlob: BlobStore | null;
+  /**
+   * Generic key-value store (CONFIG_KV in CF, SQL-table-backed in Node).
+   * Used by routes that don't yet have a dedicated store package — quotas
+   * counters, skill metadata, api-key records, OAuth state, eval trajectory
+   * blobs, etc. Required at the type level: CONFIG_KV is non-optional in
+   * the Env shape; tests inject an InMemoryKvStore instead. Store packages
+   * with their own KV adapters (KvSessionSecretRepo / KvOutboundSnapshotRepo)
+   * keep their direct KVNamespace dependency — they'll get full SQL-table
+   * replacements in Phase C, not KvStore wrappers.
+   */
+  kv: KvStore;
 }
 
 /**
@@ -240,6 +252,8 @@ export function buildServices(env: Env, db: D1Database): Services {
     shardPool: createCfShardPoolService({ controlPlaneDb: env.AUTH_DB }),
     // File blob storage. CF: R2 binding; CFless: S3 / local-FS adapter.
     filesBlob: blobStoreFromR2(env.FILES_BUCKET),
+    // Generic KV. CF: CONFIG_KV binding; CFless: SQL-table-backed adapter.
+    kv: new CfKvStore(env.CONFIG_KV),
   };
 }
 

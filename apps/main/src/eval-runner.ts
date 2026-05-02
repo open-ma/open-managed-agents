@@ -254,7 +254,7 @@ async function buildAndStoreTrajectory(env: Env, run: EvalRunRecord, sessionId: 
   });
 
   // Store trajectory under a stable key; for now use trajectory_id as the only key
-  await env.CONFIG_KV.put(kvKey(t, "trajectory", trajectory.trajectory_id), JSON.stringify(trajectory));
+  await services.kv.put(kvKey(t, "trajectory", trajectory.trajectory_id), JSON.stringify(trajectory));
   return trajectory.trajectory_id;
 }
 
