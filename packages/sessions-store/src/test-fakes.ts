@@ -105,6 +105,34 @@ export class InMemorySessionRepo implements SessionRepo {
     return rows.slice(0, opts.limit).map(toSessionRow);
   }
 
+  async listPage(
+    tenantId: string,
+    opts: {
+      agentId?: string;
+      includeArchived: boolean;
+      limit: number;
+      after?: import("@open-managed-agents/shared").PageCursor;
+    },
+  ): Promise<{ items: SessionRow[]; hasMore: boolean }> {
+    let rows = Array.from(this.sessions.values()).filter(
+      (s) => s.tenant_id === tenantId,
+    );
+    if (opts.agentId) rows = rows.filter((s) => s.agent_id === opts.agentId);
+    if (!opts.includeArchived) rows = rows.filter((s) => s.archived_at === null);
+    rows.sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    if (opts.after) {
+      const { createdAt: t, id } = opts.after;
+      rows = rows.filter(
+        (r) => r.created_at < t || (r.created_at === t && r.id < id),
+      );
+    }
+    const hasMore = rows.length > opts.limit;
+    return {
+      items: (hasMore ? rows.slice(0, opts.limit) : rows).map(toSessionRow),
+      hasMore,
+    };
+  }
+
   async hasActiveByAgent(tenantId: string, agentId: string): Promise<boolean> {
     for (const s of this.sessions.values()) {
       if (

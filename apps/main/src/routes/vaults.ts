@@ -9,6 +9,7 @@ import {
 } from "@open-managed-agents/credentials-store";
 import { VaultNotFoundError } from "@open-managed-agents/vaults-store";
 import type { Services } from "@open-managed-agents/services";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
 
 // Both vaults and credentials live in D1 (vaults-store + credentials-store).
 // Service surface comes from c.var.services (see packages/services). Wiring
@@ -101,12 +102,13 @@ app.post("/", async (c) => {
   return c.json(toApiVault(vault), 201);
 });
 
-// GET /v1/vaults — list vaults
+// GET /v1/vaults — list vaults (cursor-paginated)
 app.get("/", async (c) => {
-  const t = c.get("tenant_id");
-  const includeArchived = c.req.query("include_archived") === "true";
-  const data = await c.var.services.vaults.list({ tenantId: t, includeArchived });
-  return c.json({ data: data.map(toApiVault) });
+  const page = await c.var.services.vaults.listPage({
+    tenantId: c.get("tenant_id"),
+    ...parsePageQuery(c),
+  });
+  return jsonPage(c, page, toApiVault);
 });
 
 // GET /v1/vaults/:id — get vault

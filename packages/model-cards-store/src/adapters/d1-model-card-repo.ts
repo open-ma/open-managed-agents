@@ -1,4 +1,11 @@
 import {
+  cursorBinds,
+  cursorWhereSql,
+  fetchN,
+  trimPage,
+  type PageCursor,
+} from "@open-managed-agents/shared";
+import {
   ModelCardDefaultConflictError,
   ModelCardDuplicateModelIdError,
   ModelCardNotFoundError,
@@ -93,6 +100,26 @@ export class D1ModelCardRepo implements ModelCardRepo {
       .bind(tenantId)
       .all<DbModelCard>();
     return (result.results ?? []).map(toRow);
+  }
+
+  async listPage(
+    tenantId: string,
+    opts: {
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: ModelCardRow[]; hasMore: boolean }> {
+    const sql =
+      `SELECT id, tenant_id, model_id, provider, display_name, base_url, ` +
+      `custom_headers, api_key_preview, is_default, ` +
+      `created_at, updated_at, archived_at FROM model_cards ` +
+      `WHERE tenant_id = ? ${cursorWhereSql(opts.after)} ` +
+      `ORDER BY created_at DESC, id DESC LIMIT ?`;
+    const result = await this.db
+      .prepare(sql)
+      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
+      .all<DbModelCard>();
+    return trimPage((result.results ?? []).map(toRow), opts.limit);
   }
 
   async findByModelId(

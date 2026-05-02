@@ -1,4 +1,5 @@
 import { generateModelCardId } from "@open-managed-agents/shared";
+import { paginateVia } from "@open-managed-agents/shared";
 import { ModelCardNotFoundError } from "./errors";
 import type {
   Clock,
@@ -157,6 +158,24 @@ export class ModelCardService {
 
   async list(opts: { tenantId: string }): Promise<ModelCardRow[]> {
     return this.repo.list(opts.tenantId);
+  }
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC tie-break. */
+  async listPage(opts: {
+    tenantId: string;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: ModelCardRow[]; nextCursor?: string }> {
+    return paginateVia({
+      cursor: opts.cursor,
+      limit: opts.limit,
+      fetch: (after, limit) =>
+        this.repo.listPage(opts.tenantId, { limit, after }),
+      extractCursor: (r) => ({
+        createdAt: new Date(r.created_at).getTime(),
+        id: r.id,
+      }),
+    });
   }
 
   /**

@@ -1,4 +1,5 @@
 import { generateAgentId } from "@open-managed-agents/shared";
+import { paginateVia } from "@open-managed-agents/shared";
 import type { AgentConfig, ToolConfig } from "@open-managed-agents/shared";
 import {
   AgentNotFoundError,
@@ -264,6 +265,36 @@ export class AgentService {
     });
   }
 
+  /**
+   * Paginated list — returns one page plus an opaque `nextCursor` when more
+   * pages exist. Order: newest first (created_at DESC, id DESC tie-break).
+   * Pass the previous response's `nextCursor` back as `cursor` to fetch the
+   * next page; omit `cursor` for the first page.
+   *
+   * Cursor format is opaque on the wire (base64url(JSON({t,i}))) — callers
+   * never need to interpret it. The route handler propagates it as-is.
+   */
+  async listPage(opts: {
+    tenantId: string;
+    includeArchived?: boolean;
+    /** Hard-clamped to [1, 200]. */
+    limit?: number;
+    /** Opaque cursor returned by a prior call. Undefined = first page. */
+    cursor?: string;
+  }): Promise<{ items: AgentRow[]; nextCursor?: string }> {
+    return paginateVia({
+      cursor: opts.cursor,
+      limit: opts.limit,
+      fetch: (after, limit) =>
+        this.repo.listPage(opts.tenantId, {
+          includeArchived: opts.includeArchived ?? true,
+          limit,
+          after,
+        }),
+      extractCursor: (r) => ({ createdAt: isoToMs(r.created_at), id: r.id }),
+    });
+  }
+
   // ============================================================
   // Version ops
   // ============================================================
@@ -378,6 +409,10 @@ function stripTenantId(row: AgentRow): AgentConfig {
 
 function msToIso(ms: number): string {
   return new Date(ms).toISOString();
+}
+
+function isoToMs(iso: string): number {
+  return new Date(iso).getTime();
 }
 
 // ============================================================

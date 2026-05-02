@@ -15,6 +15,7 @@
 //     can decrypt on demand without polluting the standard read shape.
 
 import type { ModelCardRow } from "./types";
+import type { PageCursor } from "@open-managed-agents/shared";
 
 export interface NewModelCardInput {
   id: string;
@@ -66,6 +67,15 @@ export interface ModelCardRepo {
 
   /** List all cards for a tenant. Default order: created_at ASC (legacy KV order). */
   list(tenantId: string): Promise<ModelCardRow[]>;
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC. */
+  listPage(
+    tenantId: string,
+    opts: {
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: ModelCardRow[]; hasMore: boolean }>;
 
   /**
    * Find an active card by (tenant_id, model_id). Used by the agent worker's

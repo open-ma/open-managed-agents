@@ -9,6 +9,7 @@
 // adapter can pick a database per call without any port changes.
 
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
+import type { PageCursor } from "@open-managed-agents/shared";
 import type { EnvironmentRow, EnvironmentStatus } from "./types";
 
 export interface NewEnvironmentInput {
@@ -60,6 +61,16 @@ export interface EnvironmentRepo {
     tenantId: string,
     opts: { includeArchived: boolean },
   ): Promise<EnvironmentRow[]>;
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC. */
+  listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: EnvironmentRow[]; hasMore: boolean }>;
 
   update(
     tenantId: string,

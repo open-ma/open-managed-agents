@@ -85,6 +85,29 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
       .map(toRow);
   }
 
+  async listPage(
+    tenantId: string,
+    opts: {
+      limit: number;
+      after?: import("@open-managed-agents/shared").PageCursor;
+    },
+  ): Promise<{ items: ModelCardRow[]; hasMore: boolean }> {
+    let rows = Array.from(this.byId.values())
+      .filter((c) => c.tenant_id === tenantId)
+      .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    if (opts.after) {
+      const { createdAt: t, id } = opts.after;
+      rows = rows.filter(
+        (r) => r.created_at < t || (r.created_at === t && r.id < id),
+      );
+    }
+    const hasMore = rows.length > opts.limit;
+    return {
+      items: (hasMore ? rows.slice(0, opts.limit) : rows).map(toRow),
+      hasMore,
+    };
+  }
+
   async findByModelId(
     tenantId: string,
     modelId: string,

@@ -11,6 +11,7 @@
 import type {
   AgentConfig,
   EnvironmentConfig,
+  PageCursor,
   SessionResource,
   SessionStatus,
 } from "@open-managed-agents/shared";
@@ -84,6 +85,22 @@ export interface SessionRepo {
   getById(sessionId: string): Promise<SessionRow | null>;
 
   list(tenantId: string, opts: SessionListOptions): Promise<SessionRow[]>;
+
+  /**
+   * Cursor-paginated list. Order: created_at DESC, id DESC tie-break (the
+   * typical newest-first UI). Optional `agentId` filter narrows by indexed
+   * column. The legacy `list` ASC option isn't carried forward — DESC is
+   * the only paginated order; clients that want ASC can fetch + reverse.
+   */
+  listPage(
+    tenantId: string,
+    opts: {
+      agentId?: string;
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: SessionRow[]; hasMore: boolean }>;
 
   /** Returns true if any non-archived session in the tenant references this agent. */
   hasActiveByAgent(tenantId: string, agentId: string): Promise<boolean>;
