@@ -8,6 +8,7 @@ import {
   EnvironmentNotFoundError,
 } from "@open-managed-agents/environments-store";
 import { kvKey } from "../kv-helpers";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
 
 const app = new Hono<{
   Bindings: Env;
@@ -213,11 +214,13 @@ app.post("/:id/build-complete", async (c) => {
   return c.json(toEnvironmentConfig(row));
 });
 
-// GET /v1/environments — list environments
+// GET /v1/environments — list environments (cursor-paginated)
 app.get("/", async (c) => {
-  const t = c.get("tenant_id");
-  const rows = await c.var.services.environments.list({ tenantId: t });
-  return c.json({ data: rows.map(toEnvironmentConfig) });
+  const page = await c.var.services.environments.listPage({
+    tenantId: c.get("tenant_id"),
+    ...parsePageQuery(c),
+  });
+  return jsonPage(c, page, toEnvironmentConfig);
 });
 
 // GET /v1/environments/:id — get environment

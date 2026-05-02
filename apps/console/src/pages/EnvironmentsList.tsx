@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 
@@ -7,19 +8,18 @@ interface Env { id: string; name: string; config: Record<string, unknown>; creat
 
 export function EnvironmentsList() {
   const { api } = useApi();
-  const [envs, setEnvs] = useState<Env[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [tab, setTab] = useState<"all" | "active">("all");
   const [form, setForm] = useState({ name: "", description: "" });
 
-  const load = async () => {
-    setLoading(true);
-    try { setEnvs((await api<{ data: Env[] }>("/v1/environments?limit=100")).data); } catch {}
-    setLoading(false);
-  };
-
-  useEffect(() => { load(); }, []);
+  const {
+    items: envs,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: load,
+  } = useCursorList<Env>("/v1/environments", { limit: 50 });
 
   const create = async () => {
     await api("/v1/environments", {
@@ -76,6 +76,17 @@ export function EnvironmentsList() {
               </tr>
             ))}</tbody>
           </table>
+          {hasMore && (
+            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
+              <button
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isLoadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

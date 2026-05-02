@@ -6,6 +6,7 @@ import {
   type ModelCardRow,
 } from "@open-managed-agents/model-cards-store";
 import type { Services } from "@open-managed-agents/services";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
 
 const app = new Hono<{
   Bindings: Env;
@@ -70,15 +71,16 @@ app.post("/", async (c) => {
   }
 });
 
-// GET /v1/model_cards — list
+// GET /v1/model_cards — list (cursor-paginated)
 app.get("/", async (c) => {
-  const t = c.get("tenant_id");
-  const cards = await c.var.services.modelCards.list({ tenantId: t });
+  const page = await c.var.services.modelCards.listPage({
+    tenantId: c.get("tenant_id"),
+    ...parsePageQuery(c),
+  });
   // Hide archived cards (forward-compat with soft-delete; today archived_at
   // is always null but the legacy KV path also filtered, so preserve parity).
-  return c.json({
-    data: cards.filter((card) => card.archived_at === null).map(toApiShape),
-  });
+  const filteredItems = page.items.filter((card) => card.archived_at === null);
+  return jsonPage(c, { items: filteredItems, nextCursor: page.nextCursor }, toApiShape);
 });
 
 // GET /v1/model_cards/:id — get single

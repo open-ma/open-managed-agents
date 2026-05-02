@@ -14,6 +14,7 @@
 // packages/credentials-store/src/ports.ts for the rationale.
 
 import type { AgentConfig } from "@open-managed-agents/shared";
+import type { PageCursor } from "@open-managed-agents/shared";
 import type { AgentRow, AgentVersionRow } from "./types";
 
 export interface NewAgentInput {
@@ -50,6 +51,23 @@ export interface AgentRepo {
     tenantId: string,
     opts: { includeArchived: boolean },
   ): Promise<AgentRow[]>;
+
+  /**
+   * Cursor-paginated list. Order: created_at DESC, id DESC (newest first,
+   * id breaks ties on identical timestamps). Returns up to `limit` items
+   * plus `hasMore` so the service layer can decide whether to emit a
+   * `nextCursor`. Caller doesn't need to interpret the cursor — `after`
+   * is the typed pair `{createdAt, id}` decoded by the service.
+   */
+  listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      /** Decoded cursor: skip rows up to and including (created_at, id). */
+      after?: PageCursor;
+    },
+  ): Promise<{ items: AgentRow[]; hasMore: boolean }>;
 
   /**
    * Atomic update: write the prior snapshot to agent_versions AND replace the

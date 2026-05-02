@@ -1,4 +1,5 @@
 import { generateVaultId } from "@open-managed-agents/shared";
+import { paginateVia } from "@open-managed-agents/shared";
 import { VaultNotFoundError } from "./errors";
 import type {
   Clock,
@@ -64,6 +65,29 @@ export class VaultService {
   }): Promise<VaultRow[]> {
     return this.repo.list(opts.tenantId, {
       includeArchived: opts.includeArchived ?? false,
+    });
+  }
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC tie-break. */
+  async listPage(opts: {
+    tenantId: string;
+    includeArchived?: boolean;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: VaultRow[]; nextCursor?: string }> {
+    return paginateVia({
+      cursor: opts.cursor,
+      limit: opts.limit,
+      fetch: (after, limit) =>
+        this.repo.listPage(opts.tenantId, {
+          includeArchived: opts.includeArchived ?? false,
+          limit,
+          after,
+        }),
+      extractCursor: (r) => ({
+        createdAt: new Date(r.created_at).getTime(),
+        id: r.id,
+      }),
     });
   }
 

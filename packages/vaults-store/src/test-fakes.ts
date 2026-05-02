@@ -59,6 +59,31 @@ export class InMemoryVaultRepo implements VaultRepo {
       .map(toRow);
   }
 
+  async listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      after?: import("@open-managed-agents/shared").PageCursor;
+    },
+  ): Promise<{ items: VaultRow[]; hasMore: boolean }> {
+    let rows = Array.from(this.byId.values())
+      .filter((r) => r.tenant_id === tenantId)
+      .filter((r) => opts.includeArchived || r.archived_at === null)
+      .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
+    if (opts.after) {
+      const { createdAt: t, id } = opts.after;
+      rows = rows.filter(
+        (r) => r.created_at < t || (r.created_at === t && r.id < id),
+      );
+    }
+    const hasMore = rows.length > opts.limit;
+    return {
+      items: (hasMore ? rows.slice(0, opts.limit) : rows).map(toRow),
+      hasMore,
+    };
+  }
+
   async update(
     tenantId: string,
     vaultId: string,

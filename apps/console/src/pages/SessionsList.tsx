@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 
@@ -51,7 +52,6 @@ function SlackBadge({ metadata }: { metadata?: Record<string, unknown> }) {
 export function SessionsList() {
   const { api } = useApi();
   const nav = useNavigate();
-  const [sessions, setSessions] = useState<Session[]>([]);
   const [agents, setAgents] = useState<Array<{
     id: string;
     name: string;
@@ -63,7 +63,7 @@ export function SessionsList() {
   }>>([]);
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [auxLoading, setAuxLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({
     agent: "", environment_id: "", title: "",
@@ -86,24 +86,48 @@ export function SessionsList() {
 
   const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
 
-  const load = async () => {
-    setLoading(true);
+  const [search, setSearch] = useState("");
+  const [filterAgent, setFilterAgent] = useState("");
+
+  // Sessions table — cursor-paginated, server-side filtered by agent_id
+  // when the filter dropdown is set. Filter change resets to page 1
+  // (useCursorList re-fetches when params change).
+  const sessionsParams = useMemo(
+    () => ({ agent_id: filterAgent || undefined }),
+    [filterAgent],
+  );
+  const {
+    items: sessions,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: refreshSessions,
+  } = useCursorList<Session>("/v1/sessions", { limit: 50, params: sessionsParams });
+
+  const loadAux = async () => {
+    setAuxLoading(true);
     try {
-      const [s, a, e, v] = await Promise.all([
-        api<{ data: Session[] }>("/v1/sessions?limit=100"),
-        api<{ data: Array<{ id: string; name: string }> }>("/v1/agents?limit=100"),
-        api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=100"),
-        api<{ data: Vault[] }>("/v1/vaults?limit=100").catch(() => ({ data: [] })),
+      const [a, e, v] = await Promise.all([
+        api<{ data: Array<{ id: string; name: string }> }>("/v1/agents?limit=200"),
+        api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=200"),
+        api<{ data: Vault[] }>("/v1/vaults?limit=200").catch(() => ({ data: [] })),
       ]);
-      setSessions(s.data);
       setAgents(a.data);
       setEnvs(e.data);
       setVaults(v.data);
     } catch {}
-    setLoading(false);
+    setAuxLoading(false);
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { loadAux(); }, []);
+
+  // Compatibility shim: the rest of this file calls `load()` after creating
+  // / archiving a session. Refresh both the paginated table and aux dropdowns.
+  const load = async () => {
+    await refreshSessions();
+    await loadAux();
+  };
 
   // Computed: which agent is selected, and is it bound to a local runtime?
   // The Environment picker, the Create-button enable condition, and the
@@ -190,12 +214,8 @@ export function SessionsList() {
     }
   };
 
-  const [search, setSearch] = useState("");
-  const [filterAgent, setFilterAgent] = useState("");
-
   const displayed = sessions.filter((s) => {
     if (search && !s.id.toLowerCase().includes(search.toLowerCase()) && !(s.title || "").toLowerCase().includes(search.toLowerCase())) return false;
-    if (filterAgent && s.agent_id !== filterAgent) return false;
     return true;
   });
 
@@ -275,6 +295,17 @@ export function SessionsList() {
               ))}
             </tbody>
           </table>
+          {hasMore && (
+            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
+              <button
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isLoadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 

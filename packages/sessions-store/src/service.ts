@@ -2,6 +2,7 @@ import {
   generateResourceId,
   generateSessionId,
 } from "@open-managed-agents/shared";
+import { paginateVia } from "@open-managed-agents/shared";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -250,6 +251,32 @@ export class SessionService {
       limit: opts.limit ?? 100,
     };
     return this.repo.list(opts.tenantId, listOpts);
+  }
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC tie-break.
+   *  Optional `agentId` narrows to one agent's sessions. */
+  async listPage(opts: {
+    tenantId: string;
+    agentId?: string;
+    includeArchived?: boolean;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: SessionRow[]; nextCursor?: string }> {
+    return paginateVia({
+      cursor: opts.cursor,
+      limit: opts.limit,
+      fetch: (after, limit) =>
+        this.repo.listPage(opts.tenantId, {
+          agentId: opts.agentId,
+          includeArchived: opts.includeArchived ?? false,
+          limit,
+          after,
+        }),
+      extractCursor: (r) => ({
+        createdAt: new Date(r.created_at).getTime(),
+        id: r.id,
+      }),
+    });
   }
 
   /** Agent-delete safety check: refuse if any active session in the tenant

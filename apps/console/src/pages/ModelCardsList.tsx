@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import type { ModelCard } from "@open-managed-agents/api-types";
@@ -21,8 +22,6 @@ const INITIAL_FORM = {
 
 export function ModelCardsList() {
   const { api } = useApi();
-  const [cards, setCards] = useState<ModelCard[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState({ ...INITIAL_FORM });
@@ -30,6 +29,15 @@ export function ModelCardsList() {
   const [availableModels, setAvailableModels] = useState<Array<{ id: string; name: string }>>([]);
   const [modelsLoading, setModelsLoading] = useState(false);
   const [showModelSuggestions, setShowModelSuggestions] = useState(false);
+
+  const {
+    items: cards,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: load,
+  } = useCursorList<ModelCard>("/v1/model_cards", { limit: 50 });
 
   // Fetch models from official API using the user's key
   const fetchModels = useCallback(async (provider: string, apiKey: string) => {
@@ -50,14 +58,6 @@ export function ModelCardsList() {
       setModelsLoading(false);
     }
   }, [api]);
-
-  const load = async () => {
-    setLoading(true);
-    try { setCards((await api<{ data: ModelCard[] }>("/v1/model_cards")).data); } catch {}
-    setLoading(false);
-  };
-
-  useEffect(() => { load(); }, []);
 
   const save = async () => {
     setError("");
@@ -172,6 +172,17 @@ export function ModelCardsList() {
               ))}
             </tbody>
           </table>
+          {hasMore && (
+            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
+              <button
+                onClick={loadMore}
+                disabled={isLoadingMore}
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {isLoadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
