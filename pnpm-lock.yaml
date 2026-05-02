@@ -260,6 +260,9 @@ importers:
       '@open-managed-agents/agents-store':
         specifier: workspace:*
         version: link:../../packages/agents-store
+      '@open-managed-agents/blob-store':
+        specifier: workspace:*
+        version: link:../../packages/blob-store
       '@open-managed-agents/cf-billing':
         specifier: workspace:*
         version: link:../../packages/cf-billing
@@ -338,6 +341,12 @@ importers:
         version: link:../shared
 
   packages/api-types: {}
+
+  packages/blob-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
 
   packages/cf-billing: {}
 
@@ -475,6 +484,9 @@ importers:
       '@open-managed-agents/agents-store':
         specifier: workspace:*
         version: link:../agents-store
+      '@open-managed-agents/blob-store':
+        specifier: workspace:*
+        version: link:../blob-store
       '@open-managed-agents/credentials-store':
         specifier: workspace:*
         version: link:../credentials-store

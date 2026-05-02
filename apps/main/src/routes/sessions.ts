@@ -241,7 +241,7 @@ async function resolveFileIds(
   tenantId: string,
   content: ContentBlock[],
 ): Promise<{ content: ContentBlock[]; mountFileIds: string[] }> {
-  const bucket = env.FILES_BUCKET;
+  const bucket = services.filesBlob;
   if (!bucket) return { content, mountFileIds: [] };
   const out: ContentBlock[] = [];
   const mountFileIds: string[] = [];
@@ -591,10 +591,11 @@ app.post("/", async (c) => {
       const scopedR2Key = fileR2Key(t, scopedFileId);
 
       // R2 copy first — best-effort (legacy files may have no R2 bytes).
-      if (c.env.FILES_BUCKET) {
-        const obj = await c.env.FILES_BUCKET.get(sourceFile.r2_key);
+      const filesBucket = c.var.services.filesBlob;
+      if (filesBucket) {
+        const obj = await filesBucket.get(sourceFile.r2_key);
         if (obj) {
-          await c.env.FILES_BUCKET.put(
+          await filesBucket.put(
             scopedR2Key,
             obj.body,
             { httpMetadata: { contentType: sourceFile.media_type } },
@@ -806,10 +807,11 @@ app.delete("/:id", async (c) => {
     const orphanedFiles = await c.var.services.files.deleteBySession({
       sessionId: id,
     });
-    if (c.env.FILES_BUCKET && orphanedFiles.length) {
+    if (c.var.services.filesBlob && orphanedFiles.length) {
+      const cleanupBucket = c.var.services.filesBlob;
       await Promise.all(
         orphanedFiles.map((f) =>
-          c.env.FILES_BUCKET!.delete(f.r2_key).catch((err) => {
+          cleanupBucket.delete(f.r2_key).catch((err) => {
             logWarn(
               { op: "session.delete.r2_cleanup", session_id: id, tenant_id: t, r2_key: f.r2_key, err },
               "orphan R2 file delete failed",
@@ -914,7 +916,7 @@ app.post("/:id/files", async (c) => {
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const bucket = c.env.FILES_BUCKET;
+  const bucket = c.var.services.filesBlob;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
