@@ -90,8 +90,8 @@ app.post("/install", async (c) => {
   const version = { version: versionId, files: manifest, created_at: now };
 
   await Promise.all([
-    c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
-    c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
+    c.var.services.kv.put(kvKey(t, "skill", id), JSON.stringify(skill)),
+    c.var.services.kv.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
   return c.json({ ...skill, files }, 201);

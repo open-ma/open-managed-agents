@@ -285,7 +285,7 @@ app.post("/", async (c) => {
   // Per-tenant DAILY cap (KV-backed). Optional via SESSION_DAILY_CAP_PER_TENANT
   // env — feature off when unset / 0. Catches sustained misuse the per-minute
   // gate above can't (5/min × 60 × 24 = 7200/day worth of containers).
-  const daily = await checkDailySessionCap(c.env, t);
+  const daily = await checkDailySessionCap(c.env, c.var.services.kv, t);
   if (daily) return daily;
   const body = await c.req.json<{
     agent: string;

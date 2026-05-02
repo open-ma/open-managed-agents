@@ -284,6 +284,9 @@ importers:
       '@open-managed-agents/integrations-core':
         specifier: workspace:*
         version: link:../../packages/integrations-core
+      '@open-managed-agents/kv-store':
+        specifier: workspace:*
+        version: link:../../packages/kv-store
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
@@ -446,6 +449,12 @@ importers:
         specifier: workspace:*
         version: link:../shared
 
+  packages/kv-store:
+    dependencies:
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../shared
+
   packages/linear:
     dependencies:
       '@open-managed-agents/integrations-core':
@@ -499,6 +508,9 @@ importers:
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../files-store
+      '@open-managed-agents/kv-store':
+        specifier: workspace:*
+        version: link:../kv-store
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../memory-store
