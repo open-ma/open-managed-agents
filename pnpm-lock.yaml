@@ -329,6 +329,9 @@ importers:
       '@hono/node-server':
         specifier: ^1.13.0
         version: 1.19.13(hono@4.12.12)
+      '@open-managed-agents/agent':
+        specifier: workspace:*
+        version: link:../agent
       '@open-managed-agents/agents-store':
         specifier: workspace:*
         version: link:../../packages/agents-store
@@ -350,6 +353,9 @@ importers:
       '@open-managed-agents/sql-client':
         specifier: workspace:*
         version: link:../../packages/sql-client
+      ai:
+        specifier: ^6.0.158
+        version: 6.0.158(zod@4.3.6)
       better-sqlite3:
         specifier: ^11.5.0
         version: 11.10.0

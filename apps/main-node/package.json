@@ -14,6 +14,7 @@
   },
   "dependencies": {
     "@hono/node-server": "^1.13.0",
+    "@open-managed-agents/agent": "workspace:*",
     "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/blob-store": "workspace:*",
     "@open-managed-agents/event-log": "workspace:*",
@@ -21,6 +22,7 @@
     "@open-managed-agents/markdown": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
+    "ai": "^6.0.158",
     "better-sqlite3": "^11.5.0",
     "hono": "^4.7.0",
     "nanoid": "^5.1.0"
