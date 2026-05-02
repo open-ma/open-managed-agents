@@ -68,61 +68,65 @@ export class CloudflareSandbox implements SandboxExecutor {
     name?: string;
     ttlSec: number;
   }): Promise<{ id: string; dir: string; localBucket?: boolean } | null> {
-    try {
-      const sandbox = await this.getSandbox();
-      // Detect dev mode: in wrangler dev there are no R2 S3 keys (no
-      // presigned URLs available), so the SDK requires localBucket: true
-      // which uses BACKUP_BUCKET binding directly. In prod we omit it and
-      // the SDK uses presigned URLs.
-      const isDev = !this.env.R2_ENDPOINT || !this.env.R2_ACCESS_KEY_ID;
-      const backup = await sandbox.createBackup({
-        dir: "/workspace",
-        name: opts.name,
-        ttl: opts.ttlSec,
-        // Skip the obvious bloat. node_modules can be 100s of MB and is
-        // re-installable. Same for build caches.
-        excludes: ["node_modules", ".cache", "__pycache__", ".next", "target"],
-        // If /workspace is a git repo, respect .gitignore — it covers
-        // build artifacts the project itself declared as expendable.
-        gitignore: true,
-        ...(isDev ? { localBucket: true } : {}),
-      });
-      return {
-        id: backup.id,
-        dir: backup.dir,
-        localBucket: backup.localBucket,
-      };
-    } catch (err) {
-      console.warn(
-        `[sandbox] createWorkspaceBackup failed: ${err instanceof Error ? err.message : err}`,
-      );
-      return null;
-    }
+    const sandbox = await this.getSandbox();
+    // Detect dev mode: in wrangler dev there are no R2 S3 keys (no
+    // presigned URLs available), so the SDK requires localBucket: true
+    // which uses BACKUP_BUCKET binding directly. In prod we omit it and
+    // the SDK uses presigned URLs.
+    const isDev = !this.env.R2_ENDPOINT || !this.env.R2_ACCESS_KEY_ID;
+    // Don't catch — let caller surface the SDK error in trajectory.
+    // Earlier swallowed errors made silent backup failures look identical
+    // to "no backup needed" from the perspective of the next session.
+    const backup = await sandbox.createBackup({
+      dir: "/workspace",
+      name: opts.name,
+      ttl: opts.ttlSec,
+      // Skip the obvious bloat. node_modules can be 100s of MB and is
+      // re-installable. Same for build caches.
+      excludes: ["node_modules", ".cache", "__pycache__", ".next", "target"],
+      // If /workspace is a git repo, respect .gitignore — it covers
+      // build artifacts the project itself declared as expendable.
+      gitignore: true,
+      ...(isDev ? { localBucket: true } : {}),
+    });
+    return {
+      id: backup.id,
+      dir: backup.dir,
+      localBucket: backup.localBucket,
+    };
   }
 
   /**
-   * Restore a previously created backup into /workspace. Returns true on
-   * success, false on failure (e.g. backup expired in R2). Best-effort:
-   * failure is logged and the caller continues with an empty /workspace.
+   * Restore a previously created backup into /workspace. Returns
+   * `{ ok: true }` on success, `{ ok: false, error: <message> }` on
+   * failure. Best-effort: failure is logged AND surfaced to the caller
+   * so observability can capture the underlying reason (expired squashfs,
+   * R2 fetch error, container restoreArchive non-success, etc.).
+   *
+   * Earlier shape (`Promise<boolean>`) only returned a bare boolean which
+   * meant a silently-failing restore looked identical to "no backup
+   * existed" — diagnosed during 2026-05-02 TB pilot when hello-world
+   * file vanished post-recycle but no error surfaced.
    */
   async restoreWorkspaceBackup(handle: {
     id: string;
     dir: string;
     localBucket?: boolean;
-  }): Promise<boolean> {
+  }): Promise<{ ok: boolean; error?: string }> {
     try {
       const sandbox = await this.getSandbox();
       await sandbox.restoreBackup(handle);
-      return true;
+      return { ok: true };
     } catch (err) {
       // Common: backup expired (BACKUP_EXPIRED), R2 lifecycle deleted the
-      // squashfs, etc. Either way, fall through to empty workspace — agent
-      // can re-clone / re-install as if it's a fresh session.
+      // squashfs, container's restoreArchive failed, etc. Either way, fall
+      // through to empty workspace — agent can re-clone / re-install as
+      // if it's a fresh session. Surface the message so callers can log.
+      const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[sandbox] restoreWorkspaceBackup failed (likely expired): ` +
-        `${err instanceof Error ? err.message : err}`,
+        `[sandbox] restoreWorkspaceBackup failed: ${msg}`,
       );
-      return false;
+      return { ok: false, error: msg.slice(0, 500) };
     }
   }
 
@@ -342,6 +346,22 @@ export class CloudflareSandbox implements SandboxExecutor {
     try {
       const sandbox = await this.getSandbox();
       if (typeof sandbox.destroy === "function") await sandbox.destroy();
+    } catch {}
+  }
+
+  /**
+   * Reset the CF Container's sleepAfter inactivity timer. Called by SessionDO
+   * while there are background_tasks rows so the container doesn't get
+   * SIGTERM'd out from under a long-running `python script.py &` that the
+   * agent is waiting on. The underlying SDK method is on the Container base
+   * class — fail-soft if missing in case of SDK version drift.
+   */
+  async renewActivityTimeout(): Promise<void> {
+    try {
+      const sandbox = await this.getSandbox();
+      if (typeof sandbox.renewActivityTimeout === "function") {
+        await sandbox.renewActivityTimeout();
+      }
     } catch {}
   }
 

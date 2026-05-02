@@ -20,6 +20,8 @@ const TENANT_A = "tn_test_wb_a";
 const TENANT_B = "tn_test_wb_b";
 const ENV_X = "env_x";
 const ENV_Y = "env_y";
+const SESS_A = "sess-a";
+const SESS_B = "sess-b";
 
 beforeAll(async () => {
   // Trigger the test-worker's ensureMigrations() once so the workspace_backups
@@ -40,7 +42,7 @@ function fakeHandle(id: string): WorkspaceBackupHandle {
 
 describe("workspace-backups: findLatestBackup", () => {
   it("returns null when no backups exist", async () => {
-    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, Date.now());
+    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, Date.now());
     expect(got).toBeNull();
   });
 
@@ -49,56 +51,75 @@ describe("workspace-backups: findLatestBackup", () => {
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-1"),
-      nowMs: now, ttlSec: 3600, sessionId: "sess-a",
+      nowMs: now, ttlSec: 3600, sessionId: SESS_A,
     });
-    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, now);
+    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, now);
     expect(got?.id).toBe("bk-1");
     expect(got?.dir).toBe("/workspace");
   });
 
   it("returns the NEWEST backup when multiple exist for same scope", async () => {
     const t0 = Date.now();
+    // Multiple backups within ONE session — e.g. the agent did several
+    // forced backups during a long-running task. Newest wins.
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-old"),
-      nowMs: t0, ttlSec: 3600, sessionId: "sess-old",
+      nowMs: t0, ttlSec: 3600, sessionId: SESS_A,
     });
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-mid"),
-      nowMs: t0 + 1000, ttlSec: 3600, sessionId: "sess-mid",
+      nowMs: t0 + 1000, ttlSec: 3600, sessionId: SESS_A,
     });
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-new"),
-      nowMs: t0 + 2000, ttlSec: 3600, sessionId: "sess-new",
+      nowMs: t0 + 2000, ttlSec: 3600, sessionId: SESS_A,
     });
-    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, t0 + 2000);
+    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, t0 + 2000);
     expect(got?.id).toBe("bk-new");
   });
 
-  it("isolates scope by (tenant_id, environment_id)", async () => {
+  it("isolates scope by (tenant_id, environment_id, session_id)", async () => {
     const now = Date.now();
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
-      handle: fakeHandle("bk-A-X"),
-      nowMs: now, ttlSec: 3600,
+      handle: fakeHandle("bk-A-X-a"),
+      nowMs: now, ttlSec: 3600, sessionId: SESS_A,
     });
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_Y,
-      handle: fakeHandle("bk-A-Y"),
-      nowMs: now, ttlSec: 3600,
+      handle: fakeHandle("bk-A-Y-a"),
+      nowMs: now, ttlSec: 3600, sessionId: SESS_A,
     });
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_B, environmentId: ENV_X,
-      handle: fakeHandle("bk-B-X"),
-      nowMs: now, ttlSec: 3600,
+      handle: fakeHandle("bk-B-X-a"),
+      nowMs: now, ttlSec: 3600, sessionId: SESS_A,
     });
 
-    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, now))?.id).toBe("bk-A-X");
-    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_Y, now))?.id).toBe("bk-A-Y");
-    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_B, ENV_X, now))?.id).toBe("bk-B-X");
-    expect(await findLatestBackup((env as any).AUTH_DB, TENANT_B, ENV_Y, now)).toBeNull();
+    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, now))?.id).toBe("bk-A-X-a");
+    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_Y, SESS_A, now))?.id).toBe("bk-A-Y-a");
+    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_B, ENV_X, SESS_A, now))?.id).toBe("bk-B-X-a");
+    expect(await findLatestBackup((env as any).AUTH_DB, TENANT_B, ENV_Y, SESS_A, now)).toBeNull();
+  });
+
+  it("does NOT return another session's backup at same (tenant, env)", async () => {
+    // Regression test for the cross-session pollution bug observed in the
+    // 2026-05-02 TB pilot: batched eval runs share a (tenant, env) and
+    // earlier reads ignored source_session_id, so session B could pick up
+    // session A's /workspace state.
+    const now = Date.now();
+    await recordBackup((env as any).AUTH_DB, {
+      tenantId: TENANT_A, environmentId: ENV_X,
+      handle: fakeHandle("bk-from-A"),
+      nowMs: now, ttlSec: 3600, sessionId: SESS_A,
+    });
+    // Session B in the same (tenant, env) — should see nothing.
+    expect(await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_B, now)).toBeNull();
+    // Session A still finds its own backup.
+    expect((await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, now))?.id).toBe("bk-from-A");
   });
 
   it("returns null when the only backup has expired", async () => {
@@ -106,9 +127,9 @@ describe("workspace-backups: findLatestBackup", () => {
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-stale"),
-      nowMs: t0 - 10_000_000, ttlSec: 1, // expired far in the past
+      nowMs: t0 - 10_000_000, ttlSec: 1, sessionId: SESS_A, // expired far in the past
     });
-    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, t0);
+    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, t0);
     expect(got).toBeNull();
   });
 
@@ -118,17 +139,17 @@ describe("workspace-backups: findLatestBackup", () => {
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-stale-newer"),
-      nowMs: t0 - 1000, ttlSec: 0, // expired immediately
+      nowMs: t0 - 1000, ttlSec: 0, sessionId: SESS_A, // expired immediately
     });
     // live but older
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: fakeHandle("bk-fresh-older"),
-      nowMs: t0 - 5000, ttlSec: 3600,
+      nowMs: t0 - 5000, ttlSec: 3600, sessionId: SESS_A,
     });
     // The expired one is "newer" by created_at but should be filtered out;
     // the live older one should win.
-    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, t0);
+    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, t0);
     expect(got?.id).toBe("bk-fresh-older");
   });
 
@@ -137,9 +158,9 @@ describe("workspace-backups: findLatestBackup", () => {
     await recordBackup((env as any).AUTH_DB, {
       tenantId: TENANT_A, environmentId: ENV_X,
       handle: { id: "bk-local", dir: "/workspace", localBucket: true },
-      nowMs: now, ttlSec: 3600,
+      nowMs: now, ttlSec: 3600, sessionId: SESS_A,
     });
-    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, now);
+    const got = await findLatestBackup((env as any).AUTH_DB, TENANT_A, ENV_X, SESS_A, now);
     expect(got?.localBucket).toBe(true);
   });
 });

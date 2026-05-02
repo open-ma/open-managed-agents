@@ -127,6 +127,19 @@ export interface HarnessRuntime {
   reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
   pendingConfirmations?: string[];
   abortSignal?: AbortSignal;
+  /**
+   * Wrap a long async operation (e.g. model fetch + stream consumption) so
+   * the underlying Durable Object stays alive — refcounted keepAlive that
+   * actually prevents CF eviction during the await. Without this the
+   * 30s alarm-driven keepAlive heartbeat is the only thing reminding CF
+   * the DO is busy, which is too coarse: CF can evict between heartbeats
+   * if no request handler is on the stack and no fetch is pending in a
+   * way the runtime credits.
+   *
+   * Implementation: SessionDO injects `(fn) => this.keepAliveWhile(fn)`
+   * (cf-agents Agent.keepAliveWhile). Always returns whatever fn returns.
+   */
+  keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export interface HarnessContext {
@@ -268,7 +281,14 @@ export interface SandboxExecutor {
     id: string;
     dir: string;
     localBucket?: boolean;
-  }): Promise<boolean>;
+  }): Promise<{ ok: boolean; error?: string }>;
   /** Destroy the sandbox container — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
+  /**
+   * Tell the sandbox container "I'm still active". Resets the CF Container's
+   * sleepAfter inactivity timer so it doesn't auto-stop while we have
+   * long-running bg tasks waiting for results. Cheap (~RPC roundtrip).
+   * No-op if the implementation doesn't support it.
+   */
+  renewActivityTimeout?(): Promise<void>;
 }

@@ -39,6 +39,32 @@ interface OutboundContextParams {
   sessionId?: string;
 }
 
+/**
+ * Headers we strip before forwarding upstream. CF Workers auto-adds some
+ * of these when you invoke `fetch()` from a worker; if they're in the
+ * upstream's SigV4-signed-headers list (boto3, aws-sdk, s3fs, awscli),
+ * the signature mismatch produces a 403. The container's libcurl/sdk
+ * never set these — they're CF artifacts of going through our handler.
+ *
+ * `host` is also problematic: container's libcurl set it to upstream's
+ * host; if we forward via `new Request(url, { headers })` the runtime
+ * may rewrite based on URL. We trust the runtime's auto-set Host
+ * (matches URL) so we strip the explicit one to avoid header collision.
+ */
+const HOP_BY_HOP_OR_CF_HEADERS = new Set([
+  "cf-connecting-ip",
+  "cf-ipcountry",
+  "cf-ray",
+  "cf-visitor",
+  "cf-worker",
+  "cf-ew-via",
+  "x-forwarded-for",
+  "x-forwarded-proto",
+  "x-real-ip",
+  "x-amzn-trace-id",
+  "host",
+]);
+
 const injectVaultCredsHandler = async (
   request: Request,
   env: unknown,
@@ -48,90 +74,73 @@ const injectVaultCredsHandler = async (
   const params = ctx.params ?? {};
   const e = env as Env;
 
-  // Wiring missing — refuse the call (fail-closed). If we returned
-  // `fetch(request)` here we'd silently send the request without the
-  // credential injection the caller relied on; for an MCP-style
-  // upstream that returns 200-with-empty for unauthenticated
-  // requests, the model would see "the tool worked, no data" and
-  // never know auth was missing. Returning 503 makes the failure
-  // visible to the model immediately.
-  if (!params.tenantId || !params.sessionId || !e.MAIN_MCP) {
-    console.error(
-      `[oma-sandbox] inject_vault_creds fail-closed host=${url.hostname} reason=no-context`,
-    );
-    return new Response(
-      JSON.stringify({
-        error: "outbound_credential_injection_unavailable",
-        reason: "session context not bound — sandbox warmup likely incomplete",
-      }),
-      { status: 503, headers: { "content-type": "application/json" } },
-    );
+  // Look up credential metadata for this host. Lightweight RPC — only
+  // the resolved bearer token crosses the wire. Body + response stay
+  // local to the agent worker so transparent forwarding preserves all
+  // HTTP semantics (HEAD Content-Length, SigV4 signed headers,
+  // Transfer-Encoding: chunked, streaming, Trailer, etc).
+  let cred: { type: "bearer"; token: string } | null = null;
+  if (params.tenantId && params.sessionId && e.MAIN_MCP) {
+    try {
+      cred = await e.MAIN_MCP.lookupOutboundCredential({
+        tenantId: params.tenantId,
+        sessionId: params.sessionId,
+        hostname: url.hostname,
+      });
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] lookupOutboundCredential threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
+      );
+      // Fall through to passthrough — RPC failure shouldn't block
+      // legitimate outbound. The host either needs a credential (agent
+      // sees auth failure) or doesn't (passthrough is correct).
+    }
   }
 
-  // Body capture: the SDK gives us a Request; we have to read the body
-  // before forwarding via RPC because the RPC method signature takes a
-  // string, not a stream. For typical sandbox HTTPS calls (JSON API
-  // requests to Linear / GitHub / Slack) this is fine. For large binary
-  // uploads we'd need to widen the RPC body type — leave that for when
-  // a real use case lands.
-  const method = request.method;
-  const headers: Record<string, string> = {};
-  request.headers.forEach((v, k) => {
-    headers[k] = v;
-  });
-
-  let body: string | null;
-  try {
-    body =
-      method === "GET" || method === "HEAD" ? null : await request.text();
-  } catch (err) {
-    console.error(
-      `[oma-sandbox] inject_vault_creds body-read fail host=${url.hostname}: ${(err as Error)?.message ?? err}`,
-    );
-    return new Response(
-      JSON.stringify({
-        error: "outbound_body_read_failed",
-        reason: (err as Error)?.message ?? "unknown",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
+  // Build outgoing request: clone with CF-internal headers stripped +
+  // bearer token injected. Body handling:
+  //   - GET / HEAD: no body
+  //   - others: materialize body as ArrayBuffer so Workers fetch can
+  //     compute and send Content-Length. Workers strips Content-Length
+  //     from stream bodies and switches to chunked encoding, which R2
+  //     presigned-URL PUTs reject with 411 "Length Required". Buffering
+  //     is acceptable for our use case (workspace squashfs uploads
+  //     are typically <100 MB; very large would need a streaming-with-
+  //     known-length API, doesn't currently exist in Workers).
+  const outHeaders = new Headers(request.headers);
+  for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
+  if (cred) {
+    outHeaders.set("authorization", `Bearer ${cred.token}`);
   }
 
-  let result: { status: number; headers: Record<string, string>; body: string };
-  try {
-    result = await e.MAIN_MCP.outboundForward({
-      tenantId: params.tenantId,
-      sessionId: params.sessionId,
-      url: request.url,
-      method,
-      headers,
-      body,
+  let upstreamReq: Request;
+  if (request.method === "GET" || request.method === "HEAD") {
+    upstreamReq = new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      redirect: "manual",
     });
-  } catch (err) {
-    // Service-binding RPC threw — main worker unreachable, deploy in
-    // progress, etc. Fail-closed: don't fall back to direct fetch
-    // (which would skip credential injection silently). The model sees
-    // 502 and surfaces the failure to the user.
-    console.error(
-      `[oma-sandbox] inject_vault_creds fail-closed host=${url.hostname} reason=rpc-error: ${(err as Error)?.message ?? err}`,
-    );
-    return new Response(
-      JSON.stringify({
-        error: "outbound_credential_injection_failed",
-        reason: (err as Error)?.message ?? "main worker RPC unreachable",
-      }),
-      { status: 502, headers: { "content-type": "application/json" } },
-    );
+  } else {
+    // Materialize body — Workers needs a known-length body to set
+    // Content-Length on the outbound request.
+    const bodyBytes = await request.arrayBuffer();
+    upstreamReq = new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      body: bodyBytes,
+      redirect: "manual",
+    });
   }
 
   console.log(
-    `[oma-sandbox] inject_vault_creds host=${url.hostname} status=${result.status}`,
+    `[oma-sandbox] outbound host=${url.hostname} method=${request.method} cred=${cred ? "yes" : "no"}`,
   );
 
-  return new Response(result.body, {
-    status: result.status,
-    headers: result.headers,
-  });
+  // Return upstream Response unchanged — preserves status, headers,
+  // body stream, all HTTP semantics. NO new Response() constructor
+  // reconstruction (which is what was overwriting Content-Length on
+  // HEAD responses for s3fs reading R2-mounted backup files).
+  return fetch(upstreamReq);
 };
 
 export class OmaSandbox extends Sandbox {
@@ -141,6 +150,14 @@ export class OmaSandbox extends Sandbox {
   // happen. The SDK creates a per-instance ephemeral CA and trusts it inside
   // the container automatically.
   override interceptHttps = true;
+
+  // Container lifecycle: short check interval (CF default is 30 minutes).
+  // Whether the container ACTUALLY stops at sleepAfter is determined by
+  // SessionDO's bg-task-keepalive mechanism — it explicitly calls
+  // `renewActivityTimeout()` while there are background_tasks rows. With
+  // no bg tasks the container hits onActivityExpired → default this.stop()
+  // → 5-minute idle billing window.
+  override sleepAfter = "5m";
 }
 
 // Assign via the inherited static setter (Sandbox/Container expose
