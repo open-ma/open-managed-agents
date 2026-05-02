@@ -48,6 +48,7 @@ import {
 } from "@open-managed-agents/agents-store";
 import {
   createSqliteMemoryStoreService,
+  SqlMemoryRepo,
   type MemoryStoreService,
 } from "@open-managed-agents/memory-store";
 import { LocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
@@ -69,6 +70,7 @@ import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
 import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/local-subprocess";
+import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -221,6 +223,15 @@ const memoryBlobs = new LocalFsBlobStore({
 const memoryService: MemoryStoreService = createSqliteMemoryStoreService({
   client: sql,
   blobs: memoryBlobs,
+});
+
+// Bridge agent fs writes (LocalSubprocessSandbox writes through symlinked
+// /mnt/memory/<storeName>/) → SQL memories index. Plays the same role as
+// the CF R2 event → Queue → memory-events consumer pipeline. Uses the
+// same memoryRepo.upsertFromEvent / deleteFromEvent entry points.
+const memoryWatcher = startMemoryBlobWatcher({
+  memoryRoot: memoryBlobs.baseDir,
+  memoryRepo: new SqlMemoryRepo(sql),
 });
 
 // Vaults: per-tenant credential containers. Created via REST, consumed by
@@ -893,9 +904,14 @@ serve({ fetch: app.fetch, port, hostname: host }, (info) => {
   console.log(`[main-node] sqlite db: ${dbPath}`);
 });
 
-const shutdown = (signal: string) => {
+const shutdown = async (signal: string) => {
   console.log(`[main-node] received ${signal}, shutting down`);
+  try {
+    await memoryWatcher.stop();
+  } catch (err) {
+    console.warn("[main-node] memory watcher stop failed:", err);
+  }
   process.exit(0);
 };
-process.on("SIGTERM", () => shutdown("SIGTERM"));
-process.on("SIGINT", () => shutdown("SIGINT"));
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
