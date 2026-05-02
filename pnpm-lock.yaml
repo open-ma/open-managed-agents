@@ -324,6 +324,31 @@ importers:
         specifier: ^4.7.0
         version: 4.12.12
 
+  apps/main-node:
+    dependencies:
+      '@hono/node-server':
+        specifier: ^1.13.0
+        version: 1.19.13(hono@4.12.12)
+      '@open-managed-agents/blob-store':
+        specifier: workspace:*
+        version: link:../../packages/blob-store
+      '@open-managed-agents/kv-store':
+        specifier: workspace:*
+        version: link:../../packages/kv-store
+      '@open-managed-agents/markdown':
+        specifier: workspace:*
+        version: link:../../packages/markdown
+      '@open-managed-agents/shared':
+        specifier: workspace:*
+        version: link:../../packages/shared
+      hono:
+        specifier: ^4.7.0
+        version: 4.12.12
+    devDependencies:
+      tsx:
+        specifier: ^4.19.0
+        version: 4.21.0
+
   packages/acp-runtime:
     dependencies:
       '@agentclientprotocol/sdk':

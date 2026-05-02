@@ -17,7 +17,7 @@
     "build:docs": "pnpm --filter open-managed-agents-docs build",
     "deploy:docs": "pnpm --filter open-managed-agents-docs deploy",
     "deploy": "./scripts/deploy.sh",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit && pnpm --filter @open-managed-agents/main-node typecheck",
     "test": "vitest run",
     "changeset": "changeset",
     "version-packages": "changeset version",
