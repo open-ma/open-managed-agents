@@ -291,6 +291,44 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
   }
 
   /**
+   * Lightweight credential lookup for the transparent outbound proxy.
+   * Returns just the auth token + type for the host, or null if no
+   * credential matches. The agent worker injects the Authorization header
+   * itself and forwards the request transparently — body and response
+   * never cross the RPC boundary, preserving HEAD Content-Length, SigV4
+   * signed headers, chunked encoding, streaming, etc.
+   *
+   * Replaces the body-buffered `outboundForward` for the common-case
+   * Bearer-injection path. `outboundForward` remains for callers that
+   * need 401-refresh-and-retry (mcp_oauth with refresh_token), since
+   * that requires keeping the refresh token in main worker.
+   *
+   * Security model change: agent worker briefly holds the bearer token
+   * in memory during a single request handler invocation. Container
+   * still never sees plaintext (auth header is added on agent worker
+   * side, the SDK's TLS-MITM re-encrypts back to container). Trade-off
+   * vs the body-buffered path: agent worker compromise can leak tokens
+   * observed during the brief window; in exchange, we get a working
+   * transparent proxy.
+   */
+  async lookupOutboundCredential(opts: {
+    tenantId: string;
+    sessionId: string;
+    hostname: string;
+  }): Promise<{ type: "bearer"; token: string } | null> {
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const cred = await resolveOutboundCredentialByHost(
+      this.env,
+      services,
+      opts.tenantId,
+      opts.sessionId,
+      opts.hostname,
+    );
+    if (!cred) return null;
+    return { type: "bearer", token: cred.upstreamToken };
+  }
+
+  /**
    * Outbound counterpart to `mcpForward` for sandbox-side HTTPS calls
    * (anything the cloud agent's container does via fetch / curl). The
    * agent worker's outbound interceptor (apps/agent/src/oma-sandbox.ts)
