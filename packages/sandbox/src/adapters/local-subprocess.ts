@@ -15,7 +15,7 @@ import {
   type ChildProcess,
 } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { mkdirSync, rmSync } from "node:fs";
+import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ProcessHandle, SandboxExecutor } from "../ports";
 
@@ -29,6 +29,25 @@ export interface LocalSubprocessSandboxOptions {
   defaultTimeoutMs?: number;
   /** Logger for debug/warn output. Defaults to console. */
   logger?: { warn: (msg: string, ctx?: unknown) => void; log: (msg: string) => void };
+  /**
+   * Absolute path to the directory backing memory blob content. Required
+   * to support mountMemoryStore — when set, mountMemoryStore symlinks
+   * <workdir>/.mnt/memory/<storeName> → <memoryRoot>/<storeId>/, so reads
+   * and writes flow directly to the BlobStore's on-disk layout. When omitted,
+   * mountMemoryStore is a hard error (matches CF behaviour without
+   * MEMORY_BUCKET).
+   */
+  memoryRoot?: string;
+}
+
+interface MemoryMount {
+  storeName: string;
+  storeId: string;
+  readOnly: boolean;
+  /** Real path the symlink targets — `<memoryRoot>/<storeId>/`. */
+  targetDir: string;
+  /** Workdir-relative mount path — `.mnt/memory/<storeName>`. */
+  mountRel: string;
 }
 
 export class LocalSubprocessSandbox implements SandboxExecutor {
@@ -37,11 +56,14 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
   private envVars: Record<string, string> = {};
   private commandSecrets: Array<{ prefix: string; secrets: Record<string, string> }> = [];
   private processes = new Map<string, BackgroundProcess>();
+  private mounts = new Map<string, MemoryMount>();
+  private memoryRoot: string | null;
   private logger: NonNullable<LocalSubprocessSandboxOptions["logger"]>;
 
   constructor(opts: LocalSubprocessSandboxOptions) {
     this.workdir = resolve(opts.workdir);
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 120_000;
+    this.memoryRoot = opts.memoryRoot ? resolve(opts.memoryRoot) : null;
     this.logger = opts.logger ?? {
       warn: (msg, ctx) => console.warn(`[local-sandbox] ${msg}`, ctx ?? ""),
       log: (msg) => console.log(`[local-sandbox] ${msg}`),
@@ -153,11 +175,81 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     await this.setEnvVars(env);
   }
 
+  /**
+   * Bind a memory store into the sandbox at /mnt/memory/<storeName>.
+   *
+   * Implementation: symlinks <workdir>/.mnt/memory/<storeName> →
+   * <memoryRoot>/<storeId>/. The path resolver rewrites
+   * /mnt/memory/<storeName>/<rest> → <workdir>/.mnt/memory/<storeName>/<rest>
+   * so the harness's read/write/edit/glob/grep tools land directly on the
+   * BlobStore's on-disk layout — no copy, no sync-back.
+   *
+   * For bash subprocess access, we set OMA_MEMORY_DIR=<workdir abs>/.mnt/memory
+   * so the agent can do `cat $OMA_MEMORY_DIR/<storeName>/foo.md`. The
+   * canonical /mnt/memory/ path is NOT created on the host filesystem
+   * (would require root + a writable /mnt) — bash that hard-codes
+   * /mnt/memory/ paths won't see the mount; tools and $OMA_MEMORY_DIR-aware
+   * bash will. This matches the spirit of CF's mount but with weaker
+   * compat — documented in docs/cfless.md.
+   *
+   * read_only mode is best-effort: we record the flag so the read/write
+   * tools can refuse writes via path resolver, but the on-disk dir remains
+   * writable (chmod-ing the symlink target would block legitimate
+   * /v1/memories writes from main-node, which writes to the same dir).
+   */
+  async mountMemoryStore(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void> {
+    if (!this.memoryRoot) {
+      throw new Error(
+        `LocalSubprocessSandbox.mountMemoryStore: memoryRoot not configured — ` +
+        `pass it to the constructor or skip memory mounts`,
+      );
+    }
+    const targetDir = join(this.memoryRoot, opts.storeId);
+    mkdirSync(targetDir, { recursive: true });
+
+    const mountParent = join(this.workdir, ".mnt", "memory");
+    mkdirSync(mountParent, { recursive: true });
+
+    const symlinkPath = join(mountParent, opts.storeName);
+    // Replace any stale symlink/dir from a prior session in this workdir.
+    try {
+      rmSync(symlinkPath, { recursive: true, force: true });
+    } catch { /* best-effort */ }
+    try {
+      symlinkSync(targetDir, symlinkPath, "dir");
+    } catch (err) {
+      throw new Error(
+        `mountMemoryStore: symlink ${symlinkPath} → ${targetDir} failed: ` +
+        (err as Error).message,
+      );
+    }
+
+    this.mounts.set(opts.storeName, {
+      storeName: opts.storeName,
+      storeId: opts.storeId,
+      readOnly: opts.readOnly,
+      targetDir,
+      mountRel: join(".mnt", "memory", opts.storeName),
+    });
+
+    // Expose to bash via env. Setting per-store too in case the agent
+    // wants the absolute path without parsing.
+    await this.setEnvVars({
+      OMA_MEMORY_DIR: mountParent,
+      [`OMA_MEMORY_${opts.storeName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]: symlinkPath,
+    });
+  }
+
   async readFile(path: string): Promise<string> {
     return fs.readFile(this.resolvePath(path), "utf8");
   }
 
   async writeFile(path: string, content: string): Promise<string> {
+    this.assertWritable(path);
     const full = this.resolvePath(path);
     await fs.mkdir(dirname(full), { recursive: true });
     await fs.writeFile(full, content, "utf8");
@@ -165,6 +257,7 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
   }
 
   async writeFileBytes(path: string, bytes: Uint8Array): Promise<string> {
+    this.assertWritable(path);
     const full = this.resolvePath(path);
     await fs.mkdir(dirname(full), { recursive: true });
     await fs.writeFile(full, bytes);
@@ -193,11 +286,34 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
    */
   private resolvePath(p: string): string {
     let normalised = p;
-    if (normalised.startsWith("/workspace/")) normalised = normalised.slice("/workspace/".length);
+    // Memory mount: /mnt/memory/<storeName>/<rest> → <workdir>/.mnt/memory/...
+    if (normalised.startsWith("/mnt/memory/")) {
+      normalised = ".mnt/memory/" + normalised.slice("/mnt/memory/".length);
+    } else if (normalised === "/mnt/memory") {
+      normalised = ".mnt/memory";
+    } else if (normalised.startsWith("/workspace/")) normalised = normalised.slice("/workspace/".length);
     else if (normalised === "/workspace") normalised = "";
     else if (normalised.startsWith("/")) normalised = normalised.slice(1);
     if (isAbsolute(normalised)) return normalised; // explicit absolute escape — caller's responsibility
     return join(this.workdir, normalised);
+  }
+
+  /**
+   * Throw if `p` resolves into a read-only memory mount and `mode` is "write".
+   * Read/write tools call this so the agent gets a clear error rather than a
+   * silent successful write that gets blown away on the next mount.
+   */
+  private assertWritable(p: string): void {
+    if (!p.startsWith("/mnt/memory/")) return;
+    const rest = p.slice("/mnt/memory/".length);
+    const slash = rest.indexOf("/");
+    const storeName = slash === -1 ? rest : rest.slice(0, slash);
+    const mount = this.mounts.get(storeName);
+    if (mount?.readOnly) {
+      throw new Error(
+        `EACCES: memory store ${storeName} mounted read-only at /mnt/memory/${storeName}/`,
+      );
+    }
   }
 
   private buildEnv(command: string): NodeJS.ProcessEnv {

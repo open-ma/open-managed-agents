@@ -32,7 +32,10 @@ interface SidecarMeta {
 }
 
 export class LocalFsBlobStore implements BlobStore {
-  private baseDir: string;
+  /** Absolute path to the directory holding blob content. Public so callers
+   *  that need filesystem access alongside the BlobStore API (e.g. the local
+   *  sandbox bind-mounting memory stores) can read it without re-resolving. */
+  readonly baseDir: string;
 
   constructor(opts: LocalFsBlobStoreOptions) {
     this.baseDir = resolve(opts.baseDir);
