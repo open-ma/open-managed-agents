@@ -144,6 +144,17 @@
         "max_batch_timeout": 5,
         "max_retries": 5,
         "dead_letter_queue": "managed-agents-memory-events-dlq"
+      },
+      {
+        // DLQ subscriber for the main queue above. Captures messages that
+        // exhausted retries (D1 outage, malformed key, code regression),
+        // logs + records to AE so they don't disappear silently. Handler
+        // ALWAYS acks — there's no DLQ-of-DLQ in CF Queues, and a thrown
+        // handler here would loop until expiry.
+        "queue": "managed-agents-memory-events-dlq",
+        "max_batch_size": 10,
+        "max_batch_timeout": 30,
+        "max_retries": 1
       }
     ]
   },
@@ -179,6 +190,12 @@
             "max_batch_timeout": 5,
             "max_retries": 5,
             "dead_letter_queue": "managed-agents-memory-events-staging-dlq"
+          },
+          {
+            "queue": "managed-agents-memory-events-staging-dlq",
+            "max_batch_size": 10,
+            "max_batch_timeout": 30,
+            "max_retries": 1
           }
         ]
       },

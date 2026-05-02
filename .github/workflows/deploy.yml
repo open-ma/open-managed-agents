@@ -96,6 +96,17 @@ jobs:
           if grep -qiE "already exists|conflict|duplicate" /tmp/notif-create.log; then
             echo "  (event subscription exists — fine)"
           fi
+          # DLQ → main worker subscription. Wrangler's deploy step won't
+          # create this idempotently — it bails the moment ANY consumer in
+          # the wrangler.jsonc consumers[] already exists, so the new DLQ
+          # subscription never lands. Add it explicitly here. "already
+          # has a consumer" means we're done.
+          npx wrangler queues consumer add managed-agents-memory-events-dlq \
+            managed-agents --batch-size 10 --batch-timeout 30 --message-retries 1 2>&1 \
+            | tee /tmp/dlq-consumer.log || true
+          if grep -qiE "already has a consumer|already exists" /tmp/dlq-consumer.log; then
+            echo "  (DLQ consumer subscription exists — fine)"
+          fi
 
       # --- Deploy order: main FIRST, then agent. ---
       #
