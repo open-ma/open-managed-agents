@@ -26,10 +26,12 @@
     "ai": "^6.0.158",
     "better-sqlite3": "^11.5.0",
     "hono": "^4.7.0",
-    "nanoid": "^5.1.0"
+    "nanoid": "^5.1.0",
+    "turndown": "^7.2.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
+    "@types/turndown": "^5.0.5",
     "tsx": "^4.19.0"
   }
 }

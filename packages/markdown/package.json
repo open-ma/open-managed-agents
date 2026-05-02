@@ -5,6 +5,15 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./adapters/cf-workers-ai": "./src/adapters/cf-workers-ai.ts"
+    "./adapters/cf-workers-ai": "./src/adapters/cf-workers-ai.ts",
+    "./adapters/node": "./src/adapters/node.ts"
+  },
+  "peerDependencies": {
+    "turndown": "^7.2.0"
+  },
+  "peerDependenciesMeta": {
+    "turndown": {
+      "optional": true
+    }
   }
 }

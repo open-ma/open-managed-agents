@@ -823,7 +823,11 @@ export async function buildTools(
               console.warn(`[web_fetch] origin returned HTTP ${r.status} for ${url}`);
             }
           } catch (err) {
-            console.warn(`[web_fetch] toMarkdown threw for ${url}: ${(err as Error).message}`);
+            const e = err as Error & { cause?: unknown };
+            console.warn(
+              `[web_fetch] toMarkdown threw for ${url}: ${e.message}` +
+                (e.cause ? ` (cause: ${JSON.stringify(e.cause)})` : ""),
+            );
           }
         }
         if (markdown === null) {

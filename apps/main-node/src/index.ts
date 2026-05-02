@@ -55,11 +55,16 @@ import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
 import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/local-subprocess";
+import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
+
+// Single ToMarkdownProvider instance — turndown is heavy enough that
+// instantiating per turn would be wasteful. Lazy-loads on first use.
+const toMarkdownProvider = nodeToMarkdown();
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
@@ -370,9 +375,10 @@ async function runHarnessTurn(
     const tools = await buildTools(agent, runtime.sandbox, {
       ANTHROPIC_API_KEY: apiKey,
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
-      // Sandbox-dependent tools (bash/read/write/edit/glob/grep/web_fetch
-      // when toMarkdown is missing) will throw on use. The agent config in
-      // this PoC opts out of all of them — see smoke test in commit msg.
+      // toMarkdown wired via @open-managed-agents/markdown's Node adapter
+      // (turndown for HTML; other formats fall through to raw curl with
+      // a warning). On CF this slot gets cfWorkersAiToMarkdown(env.AI).
+      toMarkdown: toMarkdownProvider,
     });
 
     const ctx: HarnessContext = {

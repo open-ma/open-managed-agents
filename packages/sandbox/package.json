@@ -5,12 +5,21 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
-    "./adapters/local-subprocess": "./src/adapters/local-subprocess.ts"
+    "./adapters/local-subprocess": "./src/adapters/local-subprocess.ts",
+    "./adapters/e2b": "./src/adapters/e2b.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*"
+  },
+  "peerDependencies": {
+    "e2b": "^1.0.0"
+  },
+  "peerDependenciesMeta": {
+    "e2b": {
+      "optional": true
+    }
   }
 }
