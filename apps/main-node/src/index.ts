@@ -196,6 +196,17 @@ await sql.exec(`
   CREATE UNIQUE INDEX IF NOT EXISTS "idx_credentials_mcp_url_active"
     ON "credentials" ("tenant_id", "vault_id", "mcp_server_url")
     WHERE "mcp_server_url" IS NOT NULL AND "archived_at" IS NULL;
+
+  -- session ↔ memory_store binding. The CF version stores these in
+  -- session_resources with type="memory_store"; here we keep a thinner
+  -- table since session_resources isn't wired in this build yet.
+  CREATE TABLE IF NOT EXISTS "session_memory_stores" (
+    "session_id" TEXT NOT NULL,
+    "store_id"   TEXT NOT NULL,
+    "access"     TEXT NOT NULL DEFAULT 'read_write',
+    "created_at" INTEGER NOT NULL,
+    PRIMARY KEY ("session_id", "store_id")
+  );
 `);
 await ensureEventLogSchema(sql);
 
@@ -466,13 +477,35 @@ async function runHarnessTurn(
       process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
       sessionId,
     );
-    const sandbox = new LocalSubprocessSandbox({ workdir: sandboxWorkdir });
+    const sandbox = new LocalSubprocessSandbox({
+      workdir: sandboxWorkdir,
+      // Memory blob root — when set, mountMemoryStore symlinks
+      // .mnt/memory/<storeName> straight to <root>/<storeId>/. memoryBlobs is
+      // always present in this build (it's a hard dep of memoryService).
+      memoryRoot: memoryBlobs.baseDir,
+    });
     // Wire outbound credential injection. Reads OMA_VAULT_PROXY_URL +
     // OMA_VAULT_CA_CERT from process.env; no-op when unset (sandbox bash
     // talks to upstreams directly with no header injection). The TenantId
     // / sessionId carry context for future per-session vault scoping —
     // today's matcher uses hostname only, so they're informational.
     await sandbox.setOutboundContext({ tenantId: TENANT, sessionId });
+
+    // Mount memory stores bound to this session. Each row →
+    // sandbox.mountMemoryStore({storeName, storeId, readOnly}).
+    const memoryBindings = await sql
+      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
+      .bind(sessionId)
+      .all<{ store_id: string; access: string }>();
+    for (const binding of memoryBindings.results ?? []) {
+      const store = await memoryService.getStore({ tenantId: TENANT, storeId: binding.store_id });
+      if (!store) continue;
+      await sandbox.mountMemoryStore({
+        storeName: store.name,
+        storeId: binding.store_id,
+        readOnly: binding.access === "read_only",
+      });
+    }
     const runtime = new NodeHarnessRuntime({ sessionId, log, hub, sandbox });
     await runtime.refreshHistory();
 
@@ -698,6 +731,47 @@ v1.get("/memory_stores/:id/memories/:mid", async (c) => {
   });
   if (!row) return c.json({ error: "Memory not found" }, 404);
   return c.json(row);
+});
+
+// ── Session ↔ memory_store bindings ───────────────────────────────────────
+//
+// On CF the binding lives in session_resources(type="memory_store"); here we
+// keep a thin session_memory_stores table — same row shape (session_id,
+// store_id, access). When the harness runs we look these up and call
+// sandbox.mountMemoryStore for each, which symlinks /mnt/memory/<storeName>
+// into the BlobStore's on-disk dir. The agent reads/writes through normal
+// file tools.
+
+v1.post("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(TENANT, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const body = await c.req.json<{ store_id: string; access?: string }>();
+  if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
+  const store = await memoryService.getStore({ tenantId: TENANT, storeId: body.store_id });
+  if (!store) return c.json({ error: "Memory store not found" }, 404);
+  const access = body.access === "read_only" ? "read_only" : "read_write";
+  await sql
+    .prepare(
+      `INSERT INTO session_memory_stores (session_id, store_id, access, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id, store_id) DO UPDATE SET access = excluded.access`,
+    )
+    .bind(sid, body.store_id, access, Date.now())
+    .run();
+  return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
+});
+
+v1.get("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  const rows = await sql
+    .prepare(`SELECT store_id, access, created_at FROM session_memory_stores WHERE session_id = ?`)
+    .bind(sid)
+    .all<{ store_id: string; access: string; created_at: number }>();
+  return c.json({ data: rows.results ?? [] });
 });
 
 // ── Vaults + credentials (Phase B-vault) ──────────────────────────────────
