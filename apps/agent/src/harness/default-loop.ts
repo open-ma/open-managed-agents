@@ -22,75 +22,12 @@ const isMcpTool = (name: string) => name.startsWith("mcp_");
 export const isBuiltinTool = (name: string): boolean =>
   BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_");
 
-// LLM call resilience settings (inspired by Claude Code)
-const MAX_RETRIES = 10;
-const BASE_RETRY_DELAY = 2000;   // 2s, doubles each retry (capped at 30s)
-const API_TIMEOUT_MS = 300000;   // 5 minutes per generateText call
-
-/**
- * Retry an async function with exponential backoff + jitter.
- */
-async function withRetry<T>(
-  fn: (signal: AbortSignal) => Promise<T>,
-  maxRetries: number,
-  parentSignal?: AbortSignal,
-): Promise<T> {
-  let lastError: unknown;
-  for (let attempt = 0; attempt <= maxRetries; attempt++) {
-    if (parentSignal?.aborted) throw new Error("Aborted");
-
-    // Create a timeout signal for this attempt
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), API_TIMEOUT_MS);
-
-    try {
-      const result = await fn(controller.signal);
-      clearTimeout(timer);
-      return result;
-    } catch (err) {
-      clearTimeout(timer);
-      lastError = err;
-
-      // Don't retry on user abort
-      if (parentSignal?.aborted) throw err;
-
-      // Don't retry on non-transient errors
-      const msg = describeError(err);
-      const isTransient = /timeout|abort|429|529|5\d\d|ECONNRESET|overloaded|rate.limit|fetch failed|silent_stop/i.test(msg);
-
-      console.log(`[retry] attempt ${attempt + 1}/${maxRetries + 1} failed: ${msg.slice(0, 150)} transient=${isTransient}`);
-
-      if (!isTransient) throw err;
-
-      // Don't retry on last attempt
-      if (attempt >= maxRetries) break;
-
-      // Exponential backoff with jitter, capped at 30s
-      const delay = Math.min(30000, BASE_RETRY_DELAY * Math.pow(2, attempt)) * (0.75 + Math.random() * 0.5);
-      console.log(`[retry] waiting ${Math.round(delay)}ms before attempt ${attempt + 2}`);
-      await new Promise(r => setTimeout(r, delay));
-    }
-  }
-  throw lastError;
-}
-
-/**
- * Extract a meaningful error description. Handles cases where err.message
- * is empty (e.g. network failures, non-standard API errors).
- */
-function describeError(err: unknown): string {
-  if (err instanceof Error) {
-    if (err.message) return err.message;
-    // Empty message — include name, cause, or status code if available
-    const parts: string[] = [err.name || "Error"];
-    if ("cause" in err && err.cause) parts.push(`cause: ${String(err.cause)}`);
-    if ("status" in err) parts.push(`status: ${(err as any).status}`);
-    if ("statusCode" in err) parts.push(`statusCode: ${(err as any).statusCode}`);
-    if ("url" in err) parts.push(`url: ${(err as any).url}`);
-    return parts.join(", ");
-  }
-  return String(err) || "Unknown error";
-}
+// LLM call resilience settings
+// Stream-staleness detection: abort the model fetch if no chunk arrives
+// for this long. Heartbeat tick + abort live next to streamText() in
+// run() below — kept simple after a brief detour through DO-alarm-based
+// detection (see history note in run()).
+const STALE_CHUNK_THRESHOLD_MS = 60000;  // 60s with no new chunk → abort
 
 /**
  * Extract the MCP server name from a tool name like "mcp_github_call" or "mcp_github_list_tools".
@@ -375,7 +312,34 @@ export class DefaultHarness implements HarnessInterface {
     // broadcast stream_end with the same id and finalize the stream
     // row. The same id lands on the `agent.message` event so clients
     // can swap chunk display for canonical content.
-    const result = await withRetry(async (signal) => {
+      // Single-attempt model call. Retry/keepAlive/permanent-stall logic
+      // moved out to runtime/turn-runtime.ts (Primitive 1). Caller decides
+      // whether to retry on TurnAborted; default-loop just runs the model
+      // once and propagates errors. Stale-chunk detection stays here
+      // because it needs direct access to streamText's onChunk timing —
+      // turn-runtime would need a chunk-arrival callback to do it from
+      // outside, which is more plumbing for marginal gain.
+      const result = await (async () => {
+      // Stall detection — the simple version. ai-sdk's streamText awaits
+      // the provider stream forever if it stops emitting; the only way
+      // out is an abort signal trip. Arm a setInterval that fires every
+      // 10s, broadcasts a heartbeat, and aborts when the silence exceeds
+      // STALE_CHUNK_THRESHOLD_MS. onChunk resets lastChunkAt.
+      //
+      // History note: a previous attempt routed this through a cf-agents
+      // scheduled alarm + DO-instance state, on the theory that JS timers
+      // were being starved by fiber-await. That diagnosis was wrong — the
+      // heartbeat events were going through broadcastEvent (WS-only) and
+      // weren't visible in /events HTTP, looking like the timer never
+      // fired. The in-closure timer works fine; abort propagates via
+      // streamText's abortSignal as designed. Using runtime.broadcast
+      // here so events land in the SQL events table for verification.
+      const stallController = new AbortController();
+      let lastChunkAt = Date.now();
+      const anySig = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any;
+      const effectiveSignal = runtime.abortSignal && anySig
+        ? anySig([runtime.abortSignal, stallController.signal])
+        : stallController.signal;
       let currentMessageId: string | null = null;
       // Per-step thinking and tool-input streams keyed by the AI SDK
       // chunk's id (reasoning) or toolCallId (tool input). Multiple
@@ -402,15 +366,39 @@ export class DefaultHarness implements HarnessInterface {
       let stepStartId: string | null = null;
       let stepSawFirstChunk = false;
 
+      const streamStartedAt = Date.now();
+      console.log(`[stream] streamText START model=${modelId} messages=${finalMessages.length} tools=${Object.keys(cached.tools ?? {}).length}`);
+
+      // Heartbeat + stall trigger. Fires every 10s while streamText runs.
+      // Broadcasts heartbeat for trajectory visibility; aborts the
+      // controller if no chunk has arrived for STALE_CHUNK_THRESHOLD_MS.
+      const heartbeatTimer = setInterval(() => {
+        const now = Date.now();
+        const sinceLast = now - lastChunkAt;
+        runtime.broadcast({
+          type: "span.model_chunk_heartbeat",
+          elapsed_ms: now - streamStartedAt,
+          since_last_chunk_ms: sinceLast,
+        } as unknown as SessionEvent);
+        if (sinceLast > STALE_CHUNK_THRESHOLD_MS && !stallController.signal.aborted) {
+          console.warn(`[stall] aborting stream after ${sinceLast}ms with no chunk (threshold=${STALE_CHUNK_THRESHOLD_MS}ms)`);
+          stallController.abort();
+        }
+      }, 10_000);
+
+      try {
       const r = streamText({
       model,
       system: cached.system,
       messages: finalMessages,
       tools: cached.tools,
       stopWhen: stepCountIs(100),
-      abortSignal: signal,
+      abortSignal: effectiveSignal,
 
       onChunk: ({ chunk }) => {
+        // Reset the stall watchdog on every chunk type (text, reasoning,
+        // tool-input). Same semantic the heartbeat timer reads.
+        lastChunkAt = Date.now();
         // First chunk of this step → emit span.model_first_token. Pair via
         // model_request_start_id so consumers can split TTFT (start →
         // first_token) from generation (first_token → end). Any chunk
@@ -638,13 +626,19 @@ export class DefaultHarness implements HarnessInterface {
       const toolResults = await r.toolResults;
       const usage = await r.usage;
 
-      // Silent-stop detection: model returned finish_reason="stop" with empty
-      // text and no tool calls mid-conversation. Empirically a transient model
-      // hiccup (seen on MiniMax). Throw with a "silent_stop" message so withRetry's
-      // isTransient regex catches it and retries the call. Same level as a
-      // network error; uses the same MAX_RETRIES + backoff budget.
+      // Silent-stop detection: model returned with empty text + no tool
+      // calls mid-conversation. Two flavors observed on MiniMax-M2:
+      //   - finish_reason="stop"   — transient model hiccup
+      //   - finish_reason="length" — runaway reasoning consumed the entire
+      //     token budget without producing answer text or tool call
+      //     (`sess-6o5qhaa3v1l5r82h` 2026-05-02: 20 KB of agent.thinking,
+      //     0 chars final text). Without surfacing this as an error the
+      //     turn looks "successful" but ships nothing to the user.
+      // Throw so the failure is visible in events; the caller decides whether
+      // to retry (current default-loop has no internal retry — the throw
+      // propagates as a `unexpected` TurnError up to drainEventQueue).
       if (
-        finishReason === "stop"
+        (finishReason === "stop" || finishReason === "length")
         && (!finalText || finalText.trim().length === 0)
         && (!toolCalls || toolCalls.length === 0)
       ) {
@@ -652,10 +646,17 @@ export class DefaultHarness implements HarnessInterface {
         if (currentMessageId) {
           await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
         }
-        throw new Error("silent_stop: model returned finish_reason=stop with empty text and no tool calls");
+        throw new Error(
+          `silent_stop: model returned finish_reason=${finishReason} with empty text and no tool calls`,
+        );
       }
       return { finishReason, text: finalText, toolCalls, toolResults, usage };
-    }, MAX_RETRIES, runtime.abortSignal);
+      } finally {
+        clearInterval(heartbeatTimer);
+        const totalElapsed = Date.now() - streamStartedAt;
+        console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);
+      }
+    })();
 
 
     // 8. Detect pending tool confirmations and custom tool results
