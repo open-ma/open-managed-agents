@@ -7,6 +7,7 @@ import {
 } from "@open-managed-agents/event-log/cf-do";
 import type { StreamRepo } from "@open-managed-agents/event-log";
 import { recoverInterruptedState as runRecovery } from "./recovery";
+import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -1776,7 +1777,7 @@ export class SessionDO extends Agent<Env, SessionState> {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-          AI: this.env.AI,
+          toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
           environmentConfig,
           mcpBinding: this.env.MAIN_MCP,
           tenantId: this.state.tenant_id,
@@ -2064,7 +2065,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      AI: this.env.AI,
+      toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
       sessionId: this.state.session_id,
@@ -2243,7 +2244,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      AI: this.env.AI,
+      toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       environmentConfig,
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,

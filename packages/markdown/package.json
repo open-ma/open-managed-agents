@@ -1,0 +1,10 @@
+{
+  "name": "@open-managed-agents/markdown",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters/cf-workers-ai": "./src/adapters/cf-workers-ai.ts"
+  }
+}

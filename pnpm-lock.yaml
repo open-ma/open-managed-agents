@@ -93,6 +93,9 @@ importers:
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../../packages/files-store
+      '@open-managed-agents/markdown':
+        specifier: workspace:*
+        version: link:../../packages/markdown
       '@open-managed-agents/memory-store':
         specifier: workspace:*
         version: link:../../packages/memory-store
@@ -463,6 +466,8 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+
+  packages/markdown: {}
 
   packages/memory-store:
     dependencies:

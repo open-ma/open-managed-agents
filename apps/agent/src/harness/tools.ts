@@ -4,6 +4,7 @@ import { z } from "zod";
 import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
 import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from "@open-managed-agents/shared";
+import type { ToMarkdownProvider } from "@open-managed-agents/markdown";
 import { BindingMCPTransport } from "../runtime/binding-mcp-transport";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
@@ -320,8 +321,11 @@ export async function buildTools(
     ANTHROPIC_API_KEY?: string;
     ANTHROPIC_BASE_URL?: string;
     TAVILY_API_KEY?: string;
-    /** Workers AI binding — used by web_fetch for env.AI.toMarkdown(). */
-    AI?: Ai;
+    /** Markdown converter for web_fetch (HTML/PDF/DOCX → markdown). On
+     *  Cloudflare it wraps env.AI.toMarkdown(); on Node it's
+     *  turndown/pdf-parse/mammoth. Optional — when absent the tool falls
+     *  back to raw curl + a warning to the model. */
+    toMarkdown?: ToMarkdownProvider;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** MCP routing context — wired from SessionDO. The transport opened
@@ -774,12 +778,14 @@ export async function buildTools(
         const cap = max_length || 50000;
         const truncate = (s: string) => (s.length > cap ? s.slice(0, cap) + `\n\n…[truncated to ${cap} chars]` : s);
 
-        // ── Step 1: Fetch URL → blob → env.AI.toMarkdown() ──
-        // Workers AI converts HTML/PDF/DOCX/etc. to markdown without needing
-        // an external service or API token. Free within the Workers AI quota.
+        // ── Step 1: Fetch URL → blob → markdown converter ──
+        // CF: Workers AI's toMarkdown converts HTML/PDF/DOCX/etc. without
+        // an external service. Node (CFless): turndown / pdf-parse /
+        // mammoth. Either way, the tool calls a portable
+        // ToMarkdownProvider port — runtime detail lives in the adapter.
         let markdown: string | null = null;
         let isRaw = false;
-        if (env?.AI) {
+        if (env?.toMarkdown) {
           try {
             const r = await fetch(url, {
               headers: {
@@ -799,13 +805,13 @@ export async function buildTools(
                   return last.includes(".") ? last : `${last}.html`;
                 } catch { return "page.html"; }
               })();
-              const conv = await (env.AI as Ai).toMarkdown([{ name, blob: new Blob([buf], { type: ct }) }]);
+              const conv = await env.toMarkdown([{ name, blob: new Blob([buf], { type: ct }) }]);
               const result = Array.isArray(conv) ? conv[0] : conv;
-              if (result && (result as { format?: string }).format === "markdown" && typeof (result as { data?: string }).data === "string") {
-                markdown = (result as { data: string }).data;
+              if (result && result.format === "markdown" && typeof result.data === "string") {
+                markdown = result.data;
               } else {
-                const errMsg = (result as { error?: string })?.error || "toMarkdown returned non-markdown result";
-                console.warn(`[web_fetch] env.AI.toMarkdown failed for ${url}: ${errMsg}`);
+                const errMsg = result?.error || "toMarkdown returned non-markdown result";
+                console.warn(`[web_fetch] toMarkdown failed for ${url}: ${errMsg}`);
               }
             } else {
               console.warn(`[web_fetch] origin returned HTTP ${r.status} for ${url}`);
