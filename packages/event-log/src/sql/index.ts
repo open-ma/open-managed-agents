@@ -252,10 +252,10 @@ export async function ensureSchema(sql: SqlClient): Promise<void> {
   await sql.exec(`
     CREATE TABLE IF NOT EXISTS session_events (
       session_id TEXT NOT NULL,
-      seq INTEGER NOT NULL,
+      seq BIGINT NOT NULL,
       type TEXT NOT NULL,
       data TEXT NOT NULL,
-      ts INTEGER NOT NULL,
+      ts BIGINT NOT NULL,
       PRIMARY KEY (session_id, seq)
     );
   `);
@@ -269,8 +269,8 @@ export async function ensureSchema(sql: SqlClient): Promise<void> {
       message_id TEXT NOT NULL,
       status TEXT NOT NULL,
       chunks_json TEXT NOT NULL DEFAULT '[]',
-      started_at INTEGER NOT NULL,
-      completed_at INTEGER,
+      started_at BIGINT NOT NULL,
+      completed_at BIGINT,
       error_text TEXT,
       PRIMARY KEY (session_id, message_id)
     );
