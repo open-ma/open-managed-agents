@@ -1,0 +1,25 @@
+{
+  "run_id": "evrun-sjt0m8k6956p3c0c",
+  "run_status": "completed",
+  "agent_id": "agent-7vtoexplollhzbd1",
+  "environment_id": "env-lvqed06glbi3ent0",
+  "started_at": "2026-05-02T02:17:04.342Z",
+  "ended_at": "2026-05-02T02:34:03.895Z",
+  "task_count": 1,
+  "completed_count": 1,
+  "failed_count": 0,
+  "pass_count": 0,
+  "results": [
+    {
+      "task_id": "tb-sha-puzzle",
+      "trial_status": "completed",
+      "session_id": "sess-n05sxtt7dutr49cx",
+      "trajectory_id": "tr-oika289ks4gpwn55",
+      "agent_turns": 4,
+      "verifier_exit_code": -1,
+      "verifier_output_tail": "verifier exec error: fetch failed",
+      "reward": 0,
+      "duration_s": 963
+    }
+  ]
+}
