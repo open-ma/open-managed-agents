@@ -30,6 +30,7 @@ import mcpProxyRoutes, {
 } from "./routes/mcp-proxy";
 import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
+import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
 import { memoryRetentionTick } from "./cron/memory-retention";
 import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import type { R2EventMessage } from "@open-managed-agents/shared";
@@ -182,7 +183,15 @@ export default {
   // back into D1 (memories index + memory_versions audit) since FUSE writes
   // bypass the REST service. REST writes also produce events but the consumer
   // dedupes by (store_id, path, etag) so they're no-ops.
+  //
+  // The same worker is also subscribed to the DLQ so messages that
+  // exhausted retries don't disappear silently — see queue/memory-events-dlq.
+  // batch.queue discriminates which consumer fired.
   async queue(batch: MessageBatch<R2EventMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
+    if (batch.queue.endsWith("-dlq")) {
+      await handleMemoryEventsDlq(batch, env);
+      return;
+    }
     await handleMemoryEvents(batch, env);
   },
 };
@@ -293,11 +302,19 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     url: string;
     method: string;
     headers: Record<string, string>;
-    body: string | null;
+    /**
+     * Request body as raw bytes. ArrayBuffer over the RPC wire — preserves
+     * binary content (wheels, tarballs, image layers) that string body
+     * silently mangled via UTF-8 decode. CF Worker RPC supports
+     * ArrayBuffer via structured-clone-like serialization. Per-call size
+     * is capped (~32 MB) — multi-GB streaming uploads still need a
+     * dedicated path.
+     */
+    body: ArrayBuffer | null;
   }): Promise<{
     status: number;
     headers: Record<string, string>;
-    body: string;
+    body: ArrayBuffer;
   }> {
     let parsedUrl: URL;
     try {
@@ -306,7 +323,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       return {
         status: 400,
         headers: { "content-type": "application/json" },
-        body: '{"error":"invalid url"}',
+        body: new TextEncoder().encode('{"error":"invalid url"}').buffer as ArrayBuffer,
       };
     }
 
@@ -345,7 +362,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       return {
         status: res.status,
         headers: respHeaders,
-        body: await res.text(),
+        body: await res.arrayBuffer(),
       };
     }
 
@@ -371,7 +388,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     return {
       status: res.status,
       headers: respHeaders,
-      body: await res.text(),
+      body: await res.arrayBuffer(),
     };
   }
 }
