@@ -51,6 +51,15 @@ import {
   type MemoryStoreService,
 } from "@open-managed-agents/memory-store";
 import { LocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
+import {
+  createSqliteVaultService,
+  type VaultService,
+} from "@open-managed-agents/vaults-store";
+import {
+  createSqliteCredentialService,
+  stripSecrets,
+  type CredentialService,
+} from "@open-managed-agents/credentials-store";
 import { SqlEventLog, ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 import { generateEventId } from "@open-managed-agents/shared";
@@ -157,6 +166,36 @@ await sql.exec(`
     ON "memory_versions" ("store_id", "created_at" DESC);
   CREATE INDEX IF NOT EXISTS "idx_memory_versions_memory"
     ON "memory_versions" ("memory_id", "created_at" DESC);
+
+  CREATE TABLE IF NOT EXISTS "vaults" (
+    "id"          TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"   TEXT NOT NULL,
+    "name"        TEXT NOT NULL,
+    "created_at"  INTEGER NOT NULL,
+    "updated_at"  INTEGER,
+    "archived_at" INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS "idx_vaults_tenant"
+    ON "vaults" ("tenant_id", "archived_at");
+
+  CREATE TABLE IF NOT EXISTS "credentials" (
+    "id"             TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"      TEXT NOT NULL,
+    "vault_id"       TEXT NOT NULL,
+    "display_name"   TEXT NOT NULL,
+    "auth_type"      TEXT NOT NULL,
+    "mcp_server_url" TEXT,
+    "provider"       TEXT,
+    "auth"           TEXT NOT NULL,
+    "created_at"     INTEGER NOT NULL,
+    "updated_at"     INTEGER,
+    "archived_at"    INTEGER
+  );
+  CREATE INDEX IF NOT EXISTS "idx_credentials_vault"
+    ON "credentials" ("tenant_id", "vault_id", "archived_at");
+  CREATE UNIQUE INDEX IF NOT EXISTS "idx_credentials_mcp_url_active"
+    ON "credentials" ("tenant_id", "vault_id", "mcp_server_url")
+    WHERE "mcp_server_url" IS NOT NULL AND "archived_at" IS NULL;
 `);
 await ensureEventLogSchema(sql);
 
@@ -172,6 +211,11 @@ const memoryService: MemoryStoreService = createSqliteMemoryStoreService({
   client: sql,
   blobs: memoryBlobs,
 });
+
+// Vaults: per-tenant credential containers. Created via REST, consumed by
+// the oma-vault sidecar (apps/oma-vault) which reads the same sqlite file.
+const vaultService: VaultService = createSqliteVaultService({ client: sql });
+const credentialService: CredentialService = createSqliteCredentialService({ client: sql });
 
 const hub = new InProcessEventStreamHub();
 
@@ -648,6 +692,69 @@ v1.get("/memory_stores/:id/memories/:mid", async (c) => {
   });
   if (!row) return c.json({ error: "Memory not found" }, 404);
   return c.json(row);
+});
+
+// ── Vaults + credentials (Phase B-vault) ──────────────────────────────────
+//
+// REST CRUD for vaults and credentials. The actual credential injection
+// happens in apps/oma-vault (separate process) which reads the same sqlite
+// db. apps/oma-vault sits in front of the agent's outbound HTTPS traffic
+// as a MITM proxy, matches the destination URL against active credentials,
+// and rewrites the Authorization header. Sandboxes run with HTTPS_PROXY +
+// NODE_EXTRA_CA_CERTS pointing at it — the agent never sees secrets.
+
+v1.post("/vaults", async (c) => {
+  const body = await c.req.json<{ name: string }>();
+  if (!body.name) return c.json({ error: "name is required" }, 400);
+  const row = await vaultService.create({
+    tenantId: TENANT,
+    name: body.name,
+  });
+  return c.json(row, 201);
+});
+
+v1.get("/vaults", async (c) => {
+  const rows = await vaultService.list({
+    tenantId: TENANT,
+    includeArchived: c.req.query("include_archived") === "true",
+  });
+  return c.json({ data: rows });
+});
+
+v1.get("/vaults/:id", async (c) => {
+  const row = await vaultService.get({
+    tenantId: TENANT,
+    vaultId: c.req.param("id"),
+  });
+  if (!row) return c.json({ error: "Vault not found" }, 404);
+  return c.json(row);
+});
+
+v1.post("/vaults/:id/credentials", async (c) => {
+  const body = await c.req.json<{
+    display_name: string;
+    auth: import("@open-managed-agents/shared").CredentialAuth;
+  }>();
+  if (!body.display_name || !body.auth) {
+    return c.json({ error: "display_name and auth are required" }, 400);
+  }
+  const row = await credentialService.create({
+    tenantId: TENANT,
+    vaultId: c.req.param("id"),
+    displayName: body.display_name,
+    auth: body.auth,
+  });
+  // Always strip secret fields before returning over the wire.
+  return c.json(stripSecrets(row), 201);
+});
+
+v1.get("/vaults/:id/credentials", async (c) => {
+  const rows = await credentialService.list({
+    tenantId: TENANT,
+    vaultId: c.req.param("id"),
+    includeArchived: c.req.query("include_archived") === "true",
+  });
+  return c.json({ data: rows.map(stripSecrets) });
 });
 
 app.route("/v1", v1);

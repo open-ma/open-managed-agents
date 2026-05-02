@@ -33,8 +33,16 @@ services:
       # Storage paths inside the container — mapped to ./data on host.
       DATABASE_PATH: /app/data/oma.db
       SANDBOX_WORKDIR: /app/data/sandboxes
+      # Outbound credential injection via the oma-vault sidecar. When set,
+      # LocalSubprocessSandbox.setOutboundContext wires the subprocess env
+      # to route HTTPS traffic through oma-vault for header injection.
+      OMA_VAULT_PROXY_URL: http://oma-vault:14322
+      OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
     volumes:
       - ./data:/app/data
+    depends_on:
+      oma-vault:
+        condition: service_started
     restart: unless-stopped
     # Healthcheck queries /health every 30s. unhealthy after 3 misses
     # (90s grace), at which point Docker / your orchestrator can decide
@@ -45,3 +53,24 @@ services:
       timeout: 5s
       retries: 3
       start_period: 10s
+
+  # Outbound credential injector — mockttp HTTPS MITM proxy. Reads vault
+  # credentials from the same sqlite db as oma-server (./data/oma.db) and
+  # injects matching Authorization headers when the sandbox makes outbound
+  # HTTPS requests. The agent never sees the credential value. CA cert is
+  # written to ./data/oma-vault-ca/ca.crt and trusted by the sandbox via
+  # OMA_VAULT_CA_CERT (NODE_EXTRA_CA_CERTS / SSL_CERT_FILE).
+  oma-vault:
+    build:
+      context: .
+      dockerfile: apps/oma-vault/Dockerfile
+    image: openma/oma-vault:dev
+    container_name: oma-vault
+    environment:
+      DATABASE_PATH: /app/data/oma.db
+      OMA_VAULT_CA_DIR: /app/data/oma-vault-ca
+      OMA_VAULT_PORT: "14322"
+      OMA_TENANT: ${OMA_TENANT:-default}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

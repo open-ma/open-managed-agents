@@ -1,3 +1,4 @@
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { CredentialAuth } from "@open-managed-agents/shared";
 import { CredentialDuplicateMcpUrlError, CredentialNotFoundError } from "../errors";
 import type {
@@ -8,15 +9,15 @@ import type {
 import type { CredentialRow } from "../types";
 
 /**
- * Cloudflare D1 implementation of {@link CredentialRepo}. Owns the SQL against
+ * SQL implementation of {@link CredentialRepo}. Owns the SQL against
  * the `credentials` table defined in apps/main/migrations/0009_credentials_table.sql.
  *
  * Hot fields (auth_type, mcp_server_url, provider) are denormalized into their
  * own columns for indexing; the full CredentialAuth lives in the `auth` JSON
  * column. Writers must keep them in sync — see `bindAuthColumns`.
  */
-export class D1CredentialRepo implements CredentialRepo {
-  constructor(private readonly db: D1Database) {}
+export class SqlCredentialRepo implements CredentialRepo {
+  constructor(private readonly db: SqlClient) {}
 
   async insert(input: NewCredentialInput): Promise<CredentialRow> {
     try {

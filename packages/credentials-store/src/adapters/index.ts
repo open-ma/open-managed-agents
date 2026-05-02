@@ -1,19 +1,31 @@
-// Cloudflare adapter wiring. Exports the D1 implementation of CredentialRepo
-// plus a `createCfCredentialService` factory that callers in apps/main and
-// apps/agent use to instantiate the service.
+// Adapter wiring. CF + SQLite factories share a single SqlCredentialRepo class.
 
-export { D1CredentialRepo } from "./d1-credential-repo";
+export { SqlCredentialRepo } from "./sql-credential-repo";
 
-import { D1CredentialRepo } from "./d1-credential-repo";
+import { SqlCredentialRepo } from "./sql-credential-repo";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { Logger } from "../ports";
 import { CredentialService } from "../service";
 
+/** CF deployment factory. */
 export function createCfCredentialService(
   deps: { db: D1Database },
   opts?: { logger?: Logger },
 ): CredentialService {
   return new CredentialService({
-    repo: new D1CredentialRepo(deps.db),
+    repo: new SqlCredentialRepo(new CfD1SqlClient(deps.db)),
+    logger: opts?.logger,
+  });
+}
+
+/** CFless / Node deployment factory — accepts any SqlClient. */
+export function createSqliteCredentialService(
+  deps: { client: SqlClient },
+  opts?: { logger?: Logger },
+): CredentialService {
+  return new CredentialService({
+    repo: new SqlCredentialRepo(deps.client),
     logger: opts?.logger,
   });
 }

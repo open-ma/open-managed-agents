@@ -124,9 +124,33 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
   }
 
   async setOutboundContext(): Promise<void> {
-    // No outbound interception in the local subprocess adapter — the sandbox
-    // is the host's network. Vault credentials would need to be injected by
-    // a HTTP_PROXY pointing at main-node's /v1/proxy/outbound (Phase D-net).
+    // Wire outbound credential injection through the oma-vault sidecar
+    // (apps/oma-vault). The sidecar runs a mockttp HTTPS MITM proxy with a
+    // self-signed CA; we point the subprocess at it via standard
+    // HTTP(S)_PROXY env vars + tell node/curl/python to trust the local CA.
+    //
+    // Both env vars are read from the host process — they're set in
+    // docker-compose.cfless.yml (or the operator's env) and shared between
+    // main-node and the sandbox subprocess. If either is missing the agent
+    // just talks to upstreams directly with no credential injection — same
+    // as the CF path with no oma-vault binding.
+    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const caCertPath = process.env.OMA_VAULT_CA_CERT;
+    if (!proxyUrl || !caCertPath) return;
+
+    const env: Record<string, string> = {
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      // Node TLS: trust the vault CA in addition to system roots.
+      NODE_EXTRA_CA_CERTS: caCertPath,
+      // curl & python's `requests` (when REQUESTS_CA_BUNDLE not set).
+      SSL_CERT_FILE: caCertPath,
+      // Some tools look for this name specifically.
+      CURL_CA_BUNDLE: caCertPath,
+    };
+    await this.setEnvVars(env);
   }
 
   async readFile(path: string): Promise<string> {
