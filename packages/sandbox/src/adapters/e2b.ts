@@ -43,6 +43,7 @@ interface E2BSandboxLike {
   files: {
     read(path: string): Promise<string>;
     write(path: string, data: string | Uint8Array): Promise<void>;
+    makeDir?(path: string): Promise<void>;
   };
   kill(): Promise<void>;
 }
@@ -55,12 +56,29 @@ export interface E2BSandboxOptions {
    * the SDK's default — has python/node/git/curl etc preinstalled. Override
    * with a custom template per `environment.sandbox_template` config when
    * an agent needs additional packages.
+   *
+   * For mountMemoryStore to work, the template MUST have `s3fs` installed:
+   *   Template().fromImage("ubuntu:latest").aptInstall(["s3fs"])
    */
   templateId?: string;
   /** Default per-command timeout in ms. */
   defaultTimeoutMs?: number;
   /** Logger for debug output. */
   logger?: { warn: (msg: string, ctx?: unknown) => void };
+  /**
+   * S3-compatible bucket holding memory store content. Required only if
+   * mountMemoryStore() will be called. Mirrors what apps/agent's
+   * CloudflareSandbox reads from MEMORY_BUCKET_NAME / R2_ENDPOINT etc.
+   * Works against R2 / Tigris / MinIO / AWS S3 — any S3 API.
+   */
+  memoryBucket?: {
+    endpoint: string;       // e.g. https://<account>.r2.cloudflarestorage.com
+    accessKey: string;
+    secretKey: string;
+    bucketName: string;
+    /** Required for non-AWS S3 (R2 / MinIO / etc.). Defaults to true. */
+    usePathRequestStyle?: boolean;
+  };
 }
 
 /**
@@ -94,6 +112,11 @@ export class E2BSandboxExecutor implements SandboxExecutor {
   private commandSecrets: Array<{ prefix: string; secrets: Record<string, string> }> = [];
   private defaultTimeoutMs: number;
   private logger: NonNullable<E2BSandboxOptions["logger"]>;
+  /** Tracks whether s3fs has already mounted the memory bucket root.
+   *  We mount once per sandbox lifetime; subsequent mountMemoryStore calls
+   *  just symlink prefixes. */
+  private memoryBucketMounted = false;
+  private memoryBucketConfig?: NonNullable<E2BSandboxOptions["memoryBucket"]>;
 
   constructor(
     private sandbox: E2BSandboxLike,
@@ -103,6 +126,7 @@ export class E2BSandboxExecutor implements SandboxExecutor {
     this.logger = opts.logger ?? {
       warn: (msg, ctx) => console.warn(`[e2b-sandbox] ${msg}`, ctx ?? ""),
     };
+    this.memoryBucketConfig = opts.memoryBucket;
   }
 
   async exec(command: string, timeout?: number): Promise<string> {
@@ -154,6 +178,83 @@ export class E2BSandboxExecutor implements SandboxExecutor {
   async writeFileBytes(path: string, bytes: Uint8Array): Promise<string> {
     await this.sandbox.files.write(path, bytes);
     return path;
+  }
+
+  /**
+   * Mount a memory store into the sandbox at /mnt/memory/<storeName>/.
+   *
+   * Strategy: s3fs mounts the WHOLE bucket once at /mnt/_oma_storage on the
+   * first call; per-store mounts are then symlinks from that mount under
+   * the store-id prefix. This avoids one s3fs process per store (hundreds
+   * of stores per session would exhaust file descriptors otherwise).
+   *
+   * Requires:
+   *   1. The E2B template has `s3fs` installed (apt-get install s3fs)
+   *   2. memoryBucket: { endpoint, accessKey, secretKey, bucketName } was
+   *      passed at sandbox construction
+   *
+   * Read-only enforcement: PoC limitation — symlinks don't enforce ro.
+   * Future work: bind-mount with `-o ro` for read-only stores. Today
+   * read-only is honoured at the application layer (memory tools refuse
+   * write ops on stores the agent has read-only access to).
+   */
+  async mountMemoryStore(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void> {
+    const cfg = this.memoryBucketConfig;
+    if (!cfg) {
+      throw new Error(
+        "mountMemoryStore: E2BSandbox constructed without memoryBucket config — " +
+          "pass { memoryBucket: { endpoint, accessKey, secretKey, bucketName } } to createE2BSandbox",
+      );
+    }
+
+    if (!this.memoryBucketMounted) {
+      // First call: write s3fs credentials and mount the bucket root.
+      await this.sandbox.files.write(
+        "/root/.passwd-s3fs",
+        `${cfg.accessKey}:${cfg.secretKey}\n`,
+      );
+      await this.runOrThrow("sudo chmod 600 /root/.passwd-s3fs");
+      await this.runOrThrow("sudo mkdir -p /mnt/_oma_storage");
+      const flags = [
+        `-o url=${shellEscape(cfg.endpoint)}`,
+        cfg.usePathRequestStyle === false ? "" : "-o use_path_request_style",
+        // allow_other so the unprivileged sandbox user can read; nonempty
+        // so we can re-mount over an existing dir without errors.
+        "-o allow_other",
+        "-o nonempty",
+        "-o uid=1000",
+        "-o gid=1000",
+      ]
+        .filter(Boolean)
+        .join(" ");
+      await this.runOrThrow(
+        `sudo s3fs ${shellEscape(cfg.bucketName)} /mnt/_oma_storage ${flags}`,
+      );
+      this.memoryBucketMounted = true;
+      this.logger.warn(
+        `mountMemoryStore: bucket ${cfg.bucketName} mounted at /mnt/_oma_storage`,
+      );
+    }
+
+    // Per-store: ensure the mount-point dir + symlink the prefix.
+    const mountPoint = `/mnt/memory/${opts.storeName}`;
+    const sourcePath = `/mnt/_oma_storage/${opts.storeId}`;
+    await this.runOrThrow(`sudo mkdir -p /mnt/memory && sudo rm -rf ${shellEscape(mountPoint)}`);
+    await this.runOrThrow(`sudo ln -sfn ${shellEscape(sourcePath)} ${shellEscape(mountPoint)}`);
+  }
+
+  /** Run a command, throw with combined output on non-zero exit. Used for
+   *  setup commands where silent failure (e.g. s3fs mount issues) would
+   *  leave the agent staring at an empty mount-point with no clue why. */
+  private async runOrThrow(command: string): Promise<void> {
+    const out = await this.exec(command, 30_000);
+    if (out.includes("[exit ")) {
+      throw new Error(`E2BSandbox setup command failed: ${command}\n  → ${out}`);
+    }
   }
 
   async destroy(): Promise<void> {
