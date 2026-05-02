@@ -26,7 +26,12 @@ function isTransientApiError(err: any, status?: number): boolean {
 async function api(path: string, init?: RequestInit): Promise<Response> {
   const url = `${API_URL}${path}`;
   const method = init?.method || "GET";
-  const timeoutMs = method === "POST" ? 120_000 : 30_000;
+  // POST mutates → wait long enough for slow start; GET is read-only +
+  // idempotent (events / status / trajectory), so a long timeout has no
+  // downside, and prod cold-cache GETs commonly take 30-60 s. Bumped from
+  // 30 s after pilot wall time was inflated by repeat 30s timeouts +
+  // exponential backoff on otherwise-healthy /events polls.
+  const timeoutMs = method === "POST" ? 120_000 : 90_000;
   let lastErr: any;
 
   for (let attempt = 0; attempt <= API_MAX_RETRIES; attempt++) {
