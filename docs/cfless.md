@@ -114,9 +114,11 @@ curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 
 | Mode | Use when | Configuration |
 |---|---|---|
-| `LocalSubprocessSandbox` (default) | Local dev, trusted agent code | Nothing — host subprocess in `./data/sandboxes/<sessionId>/` |
-| `E2BSandbox` | Production / untrusted code, want Firecracker microVM | Set `SANDBOX_PROVIDER=e2b`, `E2B_API_KEY=...` (PoC: not yet wired into main-node entry — adapter exists, factory selection lands next) |
-| `CloudflareSandbox` | If you happen to deploy on CF Workers + Containers | Use the regular `apps/agent` worker, not main-node |
+| `LocalSubprocessSandbox` (default) | Local dev, trusted agent code | Nothing — host subprocess in `./data/sandboxes/<sessionId>/`. `SANDBOX_PROVIDER=subprocess` (the default). |
+| `DaytonaSandbox` | Production / untrusted code with managed VMs | `SANDBOX_PROVIDER=daytona`, `DAYTONA_API_KEY=...`, optional `DAYTONA_API_URL` (self-hosted) and `SANDBOX_IMAGE=node:22-slim`. Daytona spins one Linux VM per session; vault injection + memory mounts not yet supported on this backend (TODOs in adapter). |
+| `LiteBoxSandbox` | Local hardware isolation without docker | `SANDBOX_PROVIDER=litebox`, optional `LITEBOX_MEMORY_MIB`, `LITEBOX_CPUS`, `SANDBOX_IMAGE`. BoxLite ships its own Firecracker runtime (no daemon). Memory mounts work via host bind-mount; vault CA copied into VM on first exec. |
+| `E2BSandbox` | Production / untrusted code, want Firecracker microVM SaaS | Adapter exists at `@open-managed-agents/sandbox/adapters/e2b`; not yet wired through `SANDBOX_PROVIDER` factory — wire when you switch. |
+| `CloudflareSandbox` | If you happen to deploy on CF Workers + Containers | Use the regular `apps/agent` worker, not main-node. |
 
 ## Vault credential injection (oma-vault sidecar)
 
