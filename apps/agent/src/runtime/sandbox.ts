@@ -269,7 +269,10 @@ export class CloudflareSandbox implements SandboxExecutor {
   async writeFile(path: string, content: string): Promise<string> {
     const sandbox = await this.getSandbox();
     try {
-      await sandbox.writeFile(path, content);
+      const result = await sandbox.writeFile(path, content);
+      if (result && (result as { success?: boolean }).success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
       return "ok";
     } catch (err: any) {
       throw new Error(`writeFile(${path}) failed: ${err?.message || err}`);
