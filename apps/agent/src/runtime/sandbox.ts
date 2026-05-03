@@ -349,22 +349,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     } catch {}
   }
 
-  /**
-   * Reset the CF Container's sleepAfter inactivity timer. Called by SessionDO
-   * while there are background_tasks rows so the container doesn't get
-   * SIGTERM'd out from under a long-running `python script.py &` that the
-   * agent is waiting on. The underlying SDK method is on the Container base
-   * class — fail-soft if missing in case of SDK version drift.
-   */
-  async renewActivityTimeout(): Promise<void> {
-    try {
-      const sandbox = await this.getSandbox();
-      if (typeof sandbox.renewActivityTimeout === "function") {
-        await sandbox.renewActivityTimeout();
-      }
-    } catch {}
-  }
-
   private getSecretsForCommand(command: string): Record<string, string> | undefined {
     const commandName = this.getSimpleCommandName(command);
     if (!commandName) return undefined;
