@@ -19,5 +19,5 @@
     "apps/*/src/**/*.ts",
     "apps/main/worker-env.d.ts"
   ],
-  "exclude": ["node_modules", "test", "apps/console", "apps/docs", "apps/main-node", "apps/oma-vault", "packages/cli", "packages/integrations-ui", "packages/acp-runtime", "packages/sandbox/src/adapters/local-subprocess.ts", "packages/memory-store/src/adapters/local-fs-blob.ts"]
+  "exclude": ["node_modules", "test", "apps/console", "apps/docs", "apps/main-node", "apps/oma-vault", "packages/cli", "packages/integrations-ui", "packages/acp-runtime", "packages/sandbox/src/adapters/local-subprocess.ts", "packages/sandbox/src/adapters/daytona.ts", "packages/sandbox/src/adapters/litebox.ts", "packages/memory-store/src/adapters/local-fs-blob.ts"]
 }

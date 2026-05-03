@@ -610,11 +610,25 @@ async function buildSandbox(
     const { DaytonaSandbox } = await import(
       "@open-managed-agents/sandbox/adapters/daytona"
     );
+    // Same s3 memory bucket env vars as the E2B branch — both remote
+    // backends share the same s3fs mount approach for /mnt/memory.
+    const mb = (process.env.MEMORY_S3_ENDPOINT &&
+      process.env.MEMORY_S3_ACCESS_KEY &&
+      process.env.MEMORY_S3_SECRET_KEY &&
+      process.env.MEMORY_S3_BUCKET)
+      ? {
+          endpoint: process.env.MEMORY_S3_ENDPOINT,
+          accessKey: process.env.MEMORY_S3_ACCESS_KEY,
+          secretKey: process.env.MEMORY_S3_SECRET_KEY,
+          bucketName: process.env.MEMORY_S3_BUCKET,
+        }
+      : undefined;
     return new DaytonaSandbox({
       sessionId,
       apiKey: process.env.DAYTONA_API_KEY,
       apiUrl: process.env.DAYTONA_API_URL,
       image: process.env.SANDBOX_IMAGE,
+      memoryBucket: mb,
     });
   }
   if (provider === "litebox" || provider === "boxlite") {
@@ -628,6 +642,31 @@ async function buildSandbox(
         : undefined,
       cpus: process.env.LITEBOX_CPUS ? Number(process.env.LITEBOX_CPUS) : undefined,
       name: `oma-${sessionId}`,
+    });
+  }
+  if (provider === "e2b") {
+    const { createE2BSandbox } = await import(
+      "@open-managed-agents/sandbox/adapters/e2b"
+    );
+    // Memory bucket config for the s3fs mount (shared with the daytona
+    // branch — both remote sandboxes use the same MEMORY_S3_* env vars).
+    // Without these set, mountMemoryStore throws — agents in remote
+    // sandboxes either get s3-backed memory or none.
+    const mb = (process.env.MEMORY_S3_ENDPOINT &&
+      process.env.MEMORY_S3_ACCESS_KEY &&
+      process.env.MEMORY_S3_SECRET_KEY &&
+      process.env.MEMORY_S3_BUCKET)
+      ? {
+          endpoint: process.env.MEMORY_S3_ENDPOINT,
+          accessKey: process.env.MEMORY_S3_ACCESS_KEY,
+          secretKey: process.env.MEMORY_S3_SECRET_KEY,
+          bucketName: process.env.MEMORY_S3_BUCKET,
+        }
+      : undefined;
+    return await createE2BSandbox({
+      apiKey: process.env.E2B_API_KEY,
+      templateId: process.env.SANDBOX_IMAGE,
+      memoryBucket: mb,
     });
   }
   // Default: subprocess.
