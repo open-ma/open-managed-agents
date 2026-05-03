@@ -213,26 +213,26 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;
     const injectedSecrets = this.getSecretsForCommand(command);
-
-    const execPromise = sandbox.exec(command, {
-      timeout: timeoutMs,
-      env: injectedSecrets,
-    }).then((result: any) => {
-      const out = result.stdout || "";
-      const err = result.stderr || "";
-      const combined = `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
-      return this.appendSecretRetryHint(command, combined, injectedSecrets);
-    }).catch((err: any) => {
-      throw new Error(`exec("${command.slice(0, 80)}") failed: ${err?.message || err}`);
-    });
-
-    const timeoutPromise = new Promise<string>((_, reject) =>
-      setTimeout(() => reject(new Error(
-        `Command timed out after ${Math.round(timeoutMs / 1000)}s: ${command.slice(0, 100)}`
-      )), timeoutMs + 10000)
-    );
-
-    return Promise.race([execPromise, timeoutPromise]);
+    try {
+      const execPromise = sandbox.exec(command, {
+        timeout: timeoutMs,
+        env: injectedSecrets,
+      }).then((result: { stdout?: string; stderr?: string; exitCode?: number }) => {
+        const out = result.stdout || "";
+        const err = result.stderr || "";
+        const combined = `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
+        return this.appendSecretRetryHint(command, combined, injectedSecrets);
+      });
+      const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error(
+          `Command timed out after ${Math.round(timeoutMs / 1000)}s: ${command.slice(0, 100)}`,
+        )), timeoutMs + 10000),
+      );
+      return await Promise.race([execPromise, timeoutPromise]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`exec("${command.slice(0, 80)}") failed: ${msg}`);
+    }
   }
 
   async startProcess(command: string): Promise<ProcessHandle | null> {
