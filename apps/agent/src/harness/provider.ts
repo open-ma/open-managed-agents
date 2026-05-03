@@ -50,9 +50,15 @@ async function observingFetch(url: RequestInfo | URL, init?: RequestInit): Promi
   const startedAt = Date.now();
   const method = init?.method ?? "GET";
   const urlStr = typeof url === "string" ? url : url instanceof URL ? url.toString() : url.url;
+  // 5min hard timeout on the whole HTTP exchange (including streaming body).
+  // Without it a silent provider stream hangs the SessionDO indefinitely.
+  const TIMEOUT_MS = 5 * 60_000;
+  const signal = init?.signal
+    ? AbortSignal.any([init.signal, AbortSignal.timeout(TIMEOUT_MS)])
+    : AbortSignal.timeout(TIMEOUT_MS);
   let res: Response;
   try {
-    res = await globalThis.fetch(url, init);
+    res = await globalThis.fetch(url, { ...init, signal });
   } catch (err) {
     const elapsed = Date.now() - startedAt;
     console.warn(`[provider.fetch] ${method} ${urlStr} → THROW after ${elapsed}ms: ${err instanceof Error ? err.message : String(err)}`);
