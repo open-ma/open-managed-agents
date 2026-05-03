@@ -52,9 +52,7 @@ import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
 import {
   findLatestBackup as findWorkspaceBackup,
   recordBackup as recordWorkspaceBackup,
-  coordinateBackup,
   DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-  type BackupCoordinatorState,
 } from "./workspace-backups";
 
 interface SessionInitParams {
@@ -210,34 +208,6 @@ export class SessionDO extends DurableObject<Env> {
     // Recovery: if SessionDO restarted with bg_tasks rows still pending,
     // grab keepAlive immediately so we keep the container warm for them.
     void this._recoverBgKeepAlive();
-    // SessionDO restart counter — every fresh constructor = a new
-    // instance, almost always due to CF DO eviction (deploy, runtime
-    // upgrade, host migration, idle timeout). Persisted so we can tell
-    // "this session got restarted N times" externally. Used by the
-    // /__session_restarts__ endpoint to verify our keepAlive vs
-    // platform-driven evict balance.
-    void this._logRestart();
-  }
-
-  private async _logRestart(): Promise<void> {
-    try {
-      this.ctx.storage.sql.exec(`
-        CREATE TABLE IF NOT EXISTS oma_session_restarts (
-          ts INTEGER PRIMARY KEY,
-          instance_id TEXT NOT NULL
-        )
-      `);
-      const instanceId = crypto.randomUUID();
-      this.ctx.storage.sql.exec(
-        `INSERT OR REPLACE INTO oma_session_restarts (ts, instance_id) VALUES (?, ?)`,
-        Date.now(), instanceId,
-      );
-      // Bound to last 50 entries.
-      this.ctx.storage.sql.exec(
-        `DELETE FROM oma_session_restarts WHERE ts NOT IN (SELECT ts FROM oma_session_restarts ORDER BY ts DESC LIMIT 50)`,
-      );
-      console.log(`[session-do] restart instance_id=${instanceId} session_id=${this.state?.session_id ?? "init"}`);
-    } catch {}
   }
 
   /** Build a tenant-scoped KV key */
@@ -334,19 +304,6 @@ export class SessionDO extends DurableObject<Env> {
   private wrappedSandbox: SandboxExecutor | null = null;
   private sandboxWarmupPromise: Promise<void> | null = null;
   /**
-   * Random per-warmup generation marker, mirrored into the container's
-   * /tmp/.oma-warm file. Lets the wrap proxy detect a recycled container
-   * (CF Sandbox has a ~10-min idle TTL independent of DO lifecycle): if
-   * the marker file is missing or contains a different value, the cached
-   * sandboxWarmupPromise no longer reflects reality and we re-warmup so
-   * restoreWorkspaceBackup runs again. Without this the verifier `/exec`
-   * after an idle agent could see an empty /workspace.
-   */
-  private currentWarmupGen: string | null = null;
-  /** Throttle the marker probe so steady-state cost is at most one extra
-   * `cat` per 30 s window. */
-  private lastWarmupProbeAt: number = 0;
-  /**
    * Per-turn dedup of `agent.message` broadcasts. Recovery's
    * `loadRecoveryContext` reads prior agent messages out of SQL so the
    * next streamText resumes with the right context, but each recovery
@@ -390,19 +347,6 @@ export class SessionDO extends DurableObject<Env> {
   private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
-  /** Last time we wrote a workspace backup (ms). Used to debounce per-turn
-   *  snapshots so a chatty agent doesn't spam BACKUP_BUCKET PUTs. Forced
-   *  backups (session destroy) ignore this. */
-  private lastWorkspaceBackupAt = 0;
-  /** Min interval between turn-end backups. Forced backups bypass this. */
-  private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 120_000;
-  /** Single in-flight workspace backup promise — coalesces concurrent calls
-   *  so a turn-end fire-and-forget backup + a DELETE force backup don't race
-   *  on the same container (CF Sandbox SDK rejects the second concurrent
-   *  createBackup with HTTP 500). Force callers `await` the in-flight one
-   *  instead of starting a new one — the FS state is the same since no
-   *  agent ops can run during a backup. */
-  private workspaceBackupInFlight: Promise<void> | null = null;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -931,9 +875,9 @@ export class SessionDO extends DurableObject<Env> {
             }
           },
           {
-            // Per-turn backup: NOT force — let WORKSPACE_BACKUP_DEBOUNCE_MS
-            // gate the actual squashfs+R2 PUT cost. /destroy below still
-            // calls with force:true so the final snapshot always lands.
+            // Per-turn backup: snapshots /workspace to R2 each turn so a
+            // mid-session DO eviction doesn't lose work. /destroy below
+            // also calls this so the final snapshot lands.
             persistWorkspace: () => this.maybeBackupWorkspace(),
           },
         );
@@ -1110,7 +1054,7 @@ export class SessionDO extends DurableObject<Env> {
       if (!this.sandbox) {
         try { this.getOrCreateSandbox(); } catch {}
       }
-      await this.maybeBackupWorkspace({ force: true });
+      await this.maybeBackupWorkspace();
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -1120,12 +1064,6 @@ export class SessionDO extends DurableObject<Env> {
       this.sandbox = null;
       this.wrappedSandbox = null;
       this.sandboxWarmupPromise = null;
-      this.currentWarmupGen = null;
-      this.lastWarmupProbeAt = 0;
-      // Hygiene: clear the persisted gen so a re-spawned same-id session
-      // (rare but possible) doesn't probe against a marker from a long-dead
-      // container.
-      try { await this.ctx.storage.delete("oma_warmup_gen"); } catch {}
       // Close the browser session if one was created
       if (this.browserSession) {
         try { await this.browserSession.close(); } catch (err) {
@@ -1274,57 +1212,6 @@ export class SessionDO extends DurableObject<Env> {
     // Auth: requires the X-Debug-Token header to match env.DEBUG_TOKEN
     // (set as a wrangler secret in environments where this should work).
     // 401s if either side is unset, so prod-without-secret is safe.
-    if (request.method === "GET" && url.pathname === "/__session_restarts__") {
-      // Diagnostic: how many times has the SessionDO been re-instantiated?
-      // Each row = a constructor run = a CF eviction (deploy, runtime
-      // upgrade, host migration, idle). Lets us tell whether
-      // workspace_restored events are caused by SessionDO restarts vs
-      // actual container deaths.
-      try {
-        this.ctx.storage.sql.exec(`
-          CREATE TABLE IF NOT EXISTS oma_session_restarts (
-            ts INTEGER PRIMARY KEY,
-            instance_id TEXT NOT NULL
-          )
-        `);
-        const rows = this.ctx.storage.sql
-          .exec<{ ts: number; instance_id: string }>(
-            `SELECT ts, instance_id FROM oma_session_restarts ORDER BY ts DESC LIMIT 50`,
-          )
-          .toArray();
-        return new Response(JSON.stringify({ restarts: rows }), {
-          headers: { "content-type": "application/json" },
-        });
-      } catch (err) {
-        return new Response(
-          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
-          { status: 500, headers: { "content-type": "application/json" } },
-        );
-      }
-    }
-
-    if (request.method === "GET" && url.pathname === "/__sandbox_stops__") {
-      // Diagnostic: return the recent container onStop events captured by
-      // OmaSandbox.onStop. Lets us see exit codes (137=SIGKILL/likely-OOM,
-      // 143=SIGTERM/graceful, etc) and reason ("runtime_signal" vs "exit")
-      // for every container recycle on this session — without needing
-      // wrangler tail (often network-blocked).
-      try {
-        const sandbox = this.getOrCreateSandbox() as unknown as {
-          getRecentStops?: () => Promise<unknown>;
-        };
-        const stops = sandbox.getRecentStops ? await sandbox.getRecentStops() : [];
-        return new Response(JSON.stringify({ stops }), {
-          headers: { "content-type": "application/json" },
-        });
-      } catch (err) {
-        return new Response(
-          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
-          { status: 500, headers: { "content-type": "application/json" } },
-        );
-      }
-    }
-
     if (request.method === "POST" && url.pathname === "/__debug_recovery__") {
       const expected = (this.env as { DEBUG_TOKEN?: string }).DEBUG_TOKEN;
       const provided = request.headers.get("x-debug-token");
@@ -1687,15 +1574,6 @@ export class SessionDO extends DurableObject<Env> {
    * answer turns) skip the 3s container cold-start entirely; turns that do
    * use tools overlap the warmup with model fetch/TTFT.
    *
-   * Container-recycle detection: the CF Sandbox container has a ~10-min
-   * idle TTL independent of this DO. If the container restarted while the
-   * DO stayed warm, sandboxWarmupPromise still resolves but the underlying
-   * /workspace is empty (no restore). To catch this, we throttle-probe
-   * the per-warmup marker file (/tmp/.oma-warm) every ~30 s; if it's
-   * missing or doesn't match the cached generation, invalidate and
-   * re-warmup before delegating. The probe is a single `cat` (~2-5 ms)
-   * and it's also bypassed when the warmup promise itself is null.
-   *
    * The non-method properties and helpers like setEnvVars are passed
    * through synchronously — they don't talk to the container itself.
    */
@@ -1710,101 +1588,13 @@ export class SessionDO extends DurableObject<Env> {
       "mountWorkspace",
       "gitCheckout",
     ]);
-    const PROBE_THROTTLE_MS = 30_000;
-    const ensureWarm = async (): Promise<void> => {
-      // Cold path: warmup never ran (or was reset on failure / recycle).
-      // After SessionDO restart (CF deploy / hibernation / eviction),
-      // sandboxWarmupPromise is null even if the underlying container is
-      // still alive from a previous SessionDO instance. Quick marker probe
-      // first — if it matches our persisted gen, skip the full warmup
-      // (which would otherwise re-run restoreWorkspaceBackup unnecessarily
-      // and overwrite agent's recent work).
-      if (!this.sandboxWarmupPromise) {
-        try {
-          const persistedGen = await this.ctx.storage.get<string>("oma_warmup_gen");
-          if (persistedGen) {
-            const raw_out = await raw.exec("cat /tmp/.oma-warm 2>/dev/null");
-            const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(raw_out);
-            if (m && m[1] === "0" && m[2].trim() === persistedGen) {
-              // Container alive + marker matches → no need to re-warmup.
-              // Restore in-memory tracking so future probes fast-path.
-              this.currentWarmupGen = persistedGen;
-              this.lastWarmupProbeAt = Date.now();
-              this.sandboxWarmupPromise = Promise.resolve();
-              logWarn(
-                { op: "session_do.warmup.skip_cold_path", session_id: this.state.session_id, gen: persistedGen },
-                "container still warm after SessionDO restart — skipping re-warmup",
-              );
-              return;
-            }
-          }
-        } catch {
-          // Marker probe failed (container down or RPC error) — fall through
-          // to full warmup. Worst case is one extra restore.
-        }
-        await this.warmUpSandbox();
-        return;
-      }
-      // Warm path: wait for the cached promise first so we never probe
-      // mid-warmup (the marker file isn't written yet).
-      await this.sandboxWarmupPromise;
-      const sinceLastProbe = Date.now() - this.lastWarmupProbeAt;
-      if (sinceLastProbe < PROBE_THROTTLE_MS) return;
-      // Probe the marker. Use the RAW sandbox so we don't recurse through
-      // the proxy (which would call ensureWarm → infinite loop). Note:
-      // SandboxExecutor.exec returns "exit=N\n<stdout>[\nstderr: <stderr>]",
-      // not a bare string — so we have to strip the prefix to compare
-      // against the marker we wrote during warmup.
-      let probed: string | null = null;
-      try {
-        const raw_out = await raw.exec("cat /tmp/.oma-warm 2>/dev/null");
-        const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(raw_out);
-        if (m && m[1] === "0") {
-          probed = m[2].trim();
-        } else {
-          probed = ""; // exit != 0 → file missing
-        }
-      } catch {
-        probed = null;
-      }
-      this.lastWarmupProbeAt = Date.now();
-      // Recover from SessionDO restart: if in-memory gen is null but DO
-      // storage has one (persisted at last warmup), the container is
-      // probably still alive and we just lost the in-memory tracker. Load
-      // from storage and compare against probe — match means false alarm,
-      // skip the unnecessary restore.
-      if (this.currentWarmupGen === null) {
-        try {
-          const persisted = await this.ctx.storage.get<string>("oma_warmup_gen");
-          if (persisted) this.currentWarmupGen = persisted;
-        } catch {}
-      }
-      if (probed && probed === this.currentWarmupGen) return; // still alive
-      // Container was recycled (or marker write failed during last warmup).
-      // Reset cached state and re-warmup so restoreWorkspaceBackup runs
-      // again. workspaceWarmupPromise's catch handler also nulls itself
-      // on doWarmUpSandbox throws, so a failed re-warmup will keep
-      // re-trying instead of caching the failure.
-      logWarn(
-        {
-          op: "session_do.warmup.recycle_detected",
-          session_id: this.state.session_id,
-          expected: this.currentWarmupGen,
-          got: probed,
-        },
-        "container generation marker mismatch — re-warming sandbox",
-      );
-      this.sandboxWarmupPromise = null;
-      this.currentWarmupGen = null;
-      await this.warmUpSandbox();
-    };
     return new Proxy(raw, {
       get: (target, prop, receiver) => {
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") return value;
         if (!needsWarm.has(prop as string)) return value.bind(target);
         return async (...args: unknown[]) => {
-          await ensureWarm();
+          await this.warmUpSandbox();
           return (value as (...a: unknown[]) => unknown).apply(target, args);
         };
       },
@@ -1875,12 +1665,8 @@ export class SessionDO extends DurableObject<Env> {
   private warmUpSandbox(): Promise<void> {
     if (!this.sandboxWarmupPromise) {
       this.sandboxWarmupPromise = this.doWarmUpSandbox().catch((err) => {
-        // Clear cached promise on failure so next call retries. Also clear
-        // the marker generation — a partial warmup may have written it
-        // (or not), so the safe move is to start fresh on retry.
+        // Clear cached promise on failure so next call retries.
         this.sandboxWarmupPromise = null;
-        this.currentWarmupGen = null;
-        this.lastWarmupProbeAt = 0;
         throw err;
       });
     }
@@ -2169,38 +1955,6 @@ export class SessionDO extends DurableObject<Env> {
           tenantId: this.state.tenant_id,
           sessionId: this.state.session_id,
         });
-      }
-
-      // Drop a per-warmup generation marker into /tmp. The wrap proxy reads
-      // this on later calls to detect a recycled container (e.g. /workspace
-      // got blown away by the 10-min idle TTL while the DO stayed alive).
-      // /tmp clears on container restart so the absence of the file IS the
-      // signal — there's no separate state to keep in sync. Random hex tail
-      // makes the file name and content unique per warmup so a stale
-      // marker from a prior incarnation can't false-positive.
-      const genId = (this.env as unknown as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.()
-        ?? crypto.randomUUID();
-      const shortGen = genId.slice(0, 12);
-      try {
-        await sandbox.exec(`echo ${shortGen} > /tmp/.oma-warm`);
-        this.currentWarmupGen = shortGen;
-        this.lastWarmupProbeAt = Date.now();
-        // Persist gen to DO storage so SessionDO restarts (CF deploy /
-        // platform recycle) don't lose track of the marker. Without this,
-        // every SessionDO restart triggered a false workspace_restored
-        // (in-memory `currentWarmupGen=null` !== container marker → probe
-        // sees mismatch → re-warmup). Now we recover it on next probe via
-        // `_loadWarmupGen`.
-        try { await this.ctx.storage.put("oma_warmup_gen", shortGen); } catch {}
-      } catch (err) {
-        // Marker write failure shouldn't fail warmup — but log it. Without
-        // the marker the probe will always re-warmup (worst case: extra
-        // restore on every external /exec).
-        logWarn(
-          { op: "session_do.warmup.write_marker", session_id: this.state.session_id, err },
-          "warmup marker write failed; proxy will pessimistically re-warmup",
-        );
-        this.currentWarmupGen = null;
       }
     } catch (err) {
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
@@ -3378,7 +3132,7 @@ export class SessionDO extends DurableObject<Env> {
    * backup means the next session starts from the previous backup or
    * empty — never a hard error for the user.
    */
-  private async maybeBackupWorkspace(opts?: { force?: boolean }): Promise<void> {
+  private async maybeBackupWorkspace(): Promise<void> {
     if (
       !(this.sandbox instanceof CloudflareSandbox) ||
       !this.state.tenant_id ||
@@ -3392,68 +3146,42 @@ export class SessionDO extends DurableObject<Env> {
     const environmentId = this.state.environment_id;
     const authDb = this.env.AUTH_DB;
     const sessionId = this.state.session_id;
-    // Coordination (debounce + in-flight coalesce) lives in workspace-backups.ts
-    // as a pure function so it's unit-testable. State adapter routes the get/set
-    // through the SessionDO's own instance fields so the existing storage model
-    // (mutable instance fields) is preserved.
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const this_ = this;
-    const state: BackupCoordinatorState = {
-      get lastBackupAt(): number { return this_.lastWorkspaceBackupAt; },
-      set lastBackupAt(v: number) { this_.lastWorkspaceBackupAt = v; },
-      get inFlight(): Promise<void> | null { return this_.workspaceBackupInFlight; },
-      set inFlight(v: Promise<void> | null) { this_.workspaceBackupInFlight = v; },
-    };
-    return coordinateBackup(
-      state,
-      {
-        debounceMs: SessionDO.WORKSPACE_BACKUP_DEBOUNCE_MS,
-        now: () => Date.now(),
-        doBackup: async () => {
-          const startMs = Date.now();
-          let handle: { id: string; dir: string; localBucket?: boolean } | null = null;
-          let backupError: string | undefined;
-          try {
-            handle = await sandbox.createWorkspaceBackup({
-              name: `session-${sessionId ?? "unknown"}`,
-              ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-            });
-          } catch (err) {
-            backupError = err instanceof Error ? err.message : String(err);
-          }
-          const elapsedMs = Date.now() - startMs;
-          // Emit observability for backup outcome so silent failures show
-          // up in the trajectory. createWorkspaceBackup returns null on
-          // recoverable error (logged via console.warn but invisible to
-          // /events). Without this we can't tell from the trajectory
-          // whether a missing D1 row means "backup never attempted" or
-          // "backup attempted but failed".
-          try {
-            this_.persistAndBroadcastEvent({
-              type: "session.warning",
-              message: handle
-                ? `workspace_backup_recorded backup_id=${handle.id} elapsed_ms=${elapsedMs}`
-                : `workspace_backup_failed elapsed_ms=${elapsedMs}${backupError ? ` error=${backupError.slice(0, 200)}` : " reason=createBackup-returned-null"}`,
-            } as unknown as SessionEvent);
-          } catch {}
-          if (!handle) return;
-          await recordWorkspaceBackup(authDb, {
-            tenantId,
-            environmentId,
-            handle,
-            nowMs: Date.now(),
-            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-            sessionId,
-          });
-        },
-      },
-      opts,
-    ).catch((err: unknown) => {
+    try {
+      const startMs = Date.now();
+      let handle: { id: string; dir: string; localBucket?: boolean } | null = null;
+      let backupError: string | undefined;
+      try {
+        handle = await sandbox.createWorkspaceBackup({
+          name: `session-${sessionId ?? "unknown"}`,
+          ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+        });
+      } catch (err) {
+        backupError = err instanceof Error ? err.message : String(err);
+      }
+      const elapsedMs = Date.now() - startMs;
+      try {
+        this.persistAndBroadcastEvent({
+          type: "session.warning",
+          message: handle
+            ? `workspace_backup_recorded backup_id=${handle.id} elapsed_ms=${elapsedMs}`
+            : `workspace_backup_failed elapsed_ms=${elapsedMs}${backupError ? ` error=${backupError.slice(0, 200)}` : " reason=createBackup-returned-null"}`,
+        } as unknown as SessionEvent);
+      } catch {}
+      if (!handle) return;
+      await recordWorkspaceBackup(authDb, {
+        tenantId,
+        environmentId,
+        handle,
+        nowMs: Date.now(),
+        ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
+        sessionId,
+      });
+    } catch (err) {
       logWarn(
-        { op: "session_do.workspace_backup", session_id: sessionId, force: !!opts?.force, err },
+        { op: "session_do.workspace_backup", session_id: sessionId, err },
         "workspace backup failed (best-effort)",
       );
-    });
+    }
   }
 
   /**
