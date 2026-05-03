@@ -21,11 +21,13 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 RUN ARCH=$(dpkg --print-architecture) && \
     RG_VERSION="14.1.1" && \
     if [ "$ARCH" = "amd64" ]; then RG_ARCH="x86_64"; else RG_ARCH="aarch64"; fi && \
-    curl -fsSL "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl.tar.gz" \
+    curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      "https://github.com/BurntSushi/ripgrep/releases/download/${RG_VERSION}/ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl.tar.gz" \
     | tar xz --strip-components=1 -C /usr/local/bin "ripgrep-${RG_VERSION}-${RG_ARCH}-unknown-linux-musl/rg"
 
 # uv + Python 3.12
-RUN curl -LsSf https://astral.sh/uv/install.sh | sh
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      https://astral.sh/uv/install.sh | sh
 ENV PATH="/root/.local/bin:${PATH}"
 RUN uv python install 3.12 && \
     uv venv /opt/venv --python 3.12 --seed
@@ -39,9 +41,12 @@ RUN uv pip install --no-cache \
     pytest black ruff mypy
 
 # Go 1.22
-RUN curl -fsSL https://go.dev/dl/go1.22.5.linux-$(dpkg --print-architecture).tar.gz | tar -xz -C /usr/local
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      "https://go.dev/dl/go1.22.5.linux-$(dpkg --print-architecture).tar.gz" \
+    | tar -xz -C /usr/local
 ENV PATH="/usr/local/go/bin:/root/go/bin:${PATH}"
 
 # Rust (minimal)
-RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
+RUN curl --proto '=https' --tlsv1.2 -sSf --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal
 ENV PATH="/root/.cargo/bin:${PATH}"
