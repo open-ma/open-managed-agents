@@ -13,6 +13,7 @@
 // can set EMAIL_FROM + RESEND_API_KEY and we'll wire it in a follow-up).
 
 import { betterAuth } from "better-auth";
+import { emailOTP } from "better-auth/plugins";
 import { ensureTenantSqlite } from "./tenants.js";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 
@@ -56,7 +57,7 @@ export function createAuth(opts: CreateAuthOpts): Auth {
   const secret = opts.secret ?? randomFallbackSecret();
 
   return betterAuth({
-    basePath: "/api/auth",
+    basePath: "/auth",
     secret,
     baseURL: opts.baseURL,
     // The kysely-adapter detection in @better-auth/kysely-adapter looks for
@@ -69,6 +70,32 @@ export function createAuth(opts: CreateAuthOpts): Auth {
       // when the deployer wants it.
       requireEmailVerification: false,
     },
+    plugins: [
+      // emailOTP — the console's Login flow always sends a verify-signup OTP
+      // after sign-up.email even when requireEmailVerification is false. We
+      // wire the plugin so console doesn't 404 on
+      // /auth/email-otp/send-verification-otp; the actual OTP delivery is
+      // console.log on the CFless path (operator pipes stdout to a real
+      // sender when they wire EMAIL_FROM + Resend/SES/etc).
+      emailOTP({
+        otpLength: 6,
+        expiresIn: 300,
+        sendVerificationOnSignUp: true,
+        async sendVerificationOTP({ email, otp, type }) {
+          const labels: Record<string, string> = {
+            "sign-in": "sign-in code",
+            "email-verification": "email-verification code",
+            "forget-password": "password reset code",
+          };
+          const label = labels[type] ?? "verification code";
+          // Print to stdout — local-dev users paste from the server log.
+          // Prod deploys plug a real email sender here (operator passes a
+          // sendEmail fn; out of scope for this PoC commit).
+          // eslint-disable-next-line no-console
+          console.log(`[auth-otp] ${label} for ${email}: ${otp}`);
+        },
+      }),
+    ],
     socialProviders,
     trustedOrigins: opts.baseURL ? [opts.baseURL] : ["*"],
     user: {

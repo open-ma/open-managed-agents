@@ -109,8 +109,8 @@ curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 | Memory stores (mount + agent fs writes → SQL index) | ✓ symlink + chokidar watcher |
 | Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar |
 | Postgres backend (DATABASE_URL=postgres://...) | ✓ same code path as SQLite |
-| Multi-tenant authentication (better-auth) | ✓ email+password, AUTH_DISABLED=1 escape |
-| Console UI | ⏸  not yet wired to main-node |
+| Multi-tenant authentication (better-auth) | ✓ email+password + OTP, AUTH_DISABLED=1 escape |
+| Console UI (vite dev or built `dist`) | ✓ talks to main-node via `/auth/*` + `/v1/*` |
 
 ## Sandbox isolation modes
 
@@ -217,6 +217,50 @@ Eight runtime-agnostic ports separate "what" from "how":
 Each port has a Cloudflare adapter and a Node adapter. The Node entry
 wires the Node adapters; the CF entry wires the CF adapters. Business
 code (routes, harness, store services) is the same on both.
+
+## Console UI
+
+The same `apps/console` build that ships with CF prod talks to main-node.
+Auth path is `/auth/*` (matches CF), data routes are `/v1/*`. Cookie auth
+via better-auth.
+
+```bash
+# Terminal 1: main-node
+ANTHROPIC_API_KEY=sk-... BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
+  PUBLIC_BASE_URL=http://localhost:5173 \
+  pnpm --filter @open-managed-agents/main-node start
+
+# Terminal 2: console (Vite dev server, proxies /v1 + /auth → :8787)
+VITE_API_TARGET=http://localhost:8787 pnpm dev:console
+# → http://localhost:5173
+
+# Terminal 3 (optional): oma-vault — outbound credential injection
+DATABASE_PATH=$(pwd)/data/oma.db OMA_VAULT_CA_DIR=$(pwd)/data/oma-vault-ca \
+  pnpm --filter @open-managed-agents/oma-vault start
+```
+
+Open `http://localhost:5173`, sign up via email + password. The
+verification OTP is printed to main-node's stdout — paste into the
+console verify-signup screen. Operators wiring real email replace the
+`sendVerificationOTP` callback in `apps/main-node/src/auth/config.ts`
+with a Resend / SES / SMTP call.
+
+Endpoints main-node implements for the console:
+- `/auth-info` (provider list)
+- `/auth/*` (better-auth: sign-up, sign-in, sign-out, get-session, OTP)
+- `/v1/me`, `/v1/me/tenants`
+- `/v1/agents` CRUD, `/v1/sessions` CRUD + events + SSE stream
+- `/v1/memory_stores` + `/memories` + per-session bindings
+- `/v1/vaults` + `/credentials`
+- `/v1/models/list`
+
+Endpoints stubbed (return empty `data: []` so the UI degrades gracefully):
+- `/v1/environments`, `/v1/api_keys`, `/v1/me/cli-tokens`,
+  `/v1/runtimes`, `/v1/skills`, `/v1/model_cards`
+- `/v1/integrations/{github,linear,slack}/*`
+
+These pages render an "empty" state in the console; their CF counterparts
+will land in main-node as follow-up work.
 
 ## Production hardening (what's NOT in the PoC)
 

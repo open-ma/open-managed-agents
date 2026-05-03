@@ -68,7 +68,7 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 | Memory mount | sandbox symlinks `/mnt/memory/<storeName>` → `<MEMORY_BLOB_DIR>/<storeId>/`. chokidar watcher reflects fs writes back into the SQL `memories` index |
 | Cron | not wired yet (TODO: `node-cron` adapter for the per-tenant memory retention pass) |
 | Queue | not used — chokidar watcher replaces the R2-event Queue consumer |
-| Console UI | TODO — not yet wired to main-node |
+| Console UI | served by `vite dev` (proxy `/v1` + `/auth` → main-node) or `vite build` static output behind any web server |
 | Observability | `console.log` / `pino` (operator pipes stdout to Loki / Grafana) |
 
 ### Start
@@ -300,7 +300,7 @@ pnpm deploy
 | Browser tool | not supported | wrangler dev BROWSER sim (limited) | @cloudflare/playwright |
 | Vector search | not supported | not supported | Vectorize |
 | Email | TODO (Resend / SES) | wrangler dev SEND_EMAIL sim | CF Email Workers |
-| Console | TODO (not yet wired) | served by main ASSETS | served by main ASSETS |
+| Console | served by `vite dev` (proxy `/v1` + `/auth` → main-node) or `vite build` static output behind any web server | served by main worker ASSETS | served by main worker ASSETS |
 | Rate limit | TODO (rate-limiter-flexible) | wrangler dev ratelimits sim | CF Rate Limiting binding |
 | Observability | stdout (pino) | wrangler tail stdout | Analytics Engine + wrangler tail |
 | Start cmd | `docker compose up` | `pnpm dev` | n/a (run-as-deployed) |
