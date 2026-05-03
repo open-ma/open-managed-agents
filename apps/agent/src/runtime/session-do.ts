@@ -205,9 +205,6 @@ export class SessionDO extends DurableObject<Env> {
     this._ensureCfAgentsSchema();
     this._loadStateFromSql();
     this._initialized = true;
-    // Recovery: if SessionDO restarted with bg_tasks rows still pending,
-    // grab keepAlive immediately so we keep the container warm for them.
-    void this._recoverBgKeepAlive();
   }
 
   /** Build a tenant-scoped KV key */
@@ -315,23 +312,6 @@ export class SessionDO extends DurableObject<Env> {
    * legitimately re-emitted message_id in a new turn isn't suppressed.
    */
   private broadcastedMessageIds: Set<string> = new Set();
-  /**
-   * KeepAlive ref tied to the `background_tasks` table — non-null while at
-   * least one bg task row exists, null when the table drains. Acquired on
-   * INSERT (in watchBackgroundTask) and on SessionDO boot (defensive,
-   * recovers from a SessionDO restart that left rows orphaned). Released
-   * inside pollBackgroundTasks once the table is empty.
-   *
-   * Why this matters: bg tasks (e.g. `python script.py &`) survive only as
-   * long as the sandbox container survives. The container survives only
-   * while it's getting incoming requests (CF sleepAfter). Holding a
-   * SessionDO keepAlive ref keeps SessionDO's alarm firing every 30s, and
-   * pollBackgroundTasks runs every 5s while bg tasks exist — each poll
-   * issues a sandbox.exec() + sandbox.renewActivityTimeout() that resets
-   * the container's idle timer. End result: container never reaches
-   * sleepAfter while there's bg work to wait for.
-   */
-  private _bgKeepAliveDispose: (() => void) | null = null;
   /**
    * Browser session backed by Cloudflare Browser Rendering binding. Lazy-created
    * on first browser_* tool call (in-memory only — recreated if DO hibernates).
@@ -2276,13 +2256,6 @@ export class SessionDO extends DurableObject<Env> {
       taskId, pid, outputFile
     );
 
-    // Hold a SessionDO keepAlive ref while ANY bg task exists. This keeps
-    // SessionDO's alarm firing every 30s so pollBackgroundTasks reliably
-    // runs, AND each poll resets the sandbox container's idle timer (via
-    // sandbox.exec + renewActivityTimeout). Net effect: container does NOT
-    // hit sleepAfter while we're waiting on bg work.
-    await this._acquireBgKeepAlive();
-
     // Schedule first poll in 3 seconds (survives hibernation)
     try {
       const sched = await this.schedule(3, "pollBackgroundTasks");
@@ -2370,23 +2343,15 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // Schedule next poll if there are still pending tasks; otherwise drop
-    // the SessionDO keepAlive ref so the DO + container can both sleep.
+    // Schedule next poll if there are still pending tasks. Container
+    // sleepAfter (20m) is comfortably longer than typical bg-task wait,
+    // and each sandbox.exec() in the next poll auto-renews the timer.
     if (anyPending) {
-      // Belt-and-suspenders: explicitly renew the container's idle timer.
-      // pollBackgroundTasks's own sandbox.exec calls already count as
-      // activity, but renewActivityTimeout makes the intent explicit and
-      // is cheap (just resets a counter).
-      try { await sandbox.renewActivityTimeout?.(); } catch {}
       try {
         await this.schedule(5, "pollBackgroundTasks");
       } catch (err) {
         console.error("[pollBackgroundTasks] reschedule failed:", err);
       }
-    } else {
-      // All bg tasks drained → release the keepAlive ref. SessionDO can now
-      // be evicted normally; container will hit sleepAfter and stop.
-      this._releaseBgKeepAlive();
     }
   }
 
@@ -3577,39 +3542,6 @@ export class SessionDO extends DurableObject<Env> {
     // Housekeeping: orphan-fiber recovery
     await this._checkRunFibers();
 
-    // Container keepalive: while ANY signal says "we have ongoing work",
-    // explicitly poke the sandbox container so its sleepAfter timer
-    // doesn't expire during long model calls. Two signals checked:
-    //   - _keepAliveRefs > 0: in-memory, set by runFiber + bg-task acquire
-    //   - background_tasks SQL row exists: persistent, survives restart
-    //
-    // Reading the SQL table avoids the race where SessionDO restarts and
-    // _recoverBgKeepAlive (async) hasn't completed yet — bg row is the
-    // authoritative signal.
-    let needContainerPing = this._keepAliveRefs > 0;
-    if (!needContainerPing) {
-      try {
-        const rows = this.ctx.storage.sql
-          .exec("SELECT 1 FROM background_tasks LIMIT 1")
-          .toArray();
-        needContainerPing = rows.length > 0;
-      } catch {
-        // background_tasks table doesn't exist → no bg work
-      }
-    }
-    if (needContainerPing) {
-      try {
-        // Use getOrCreateSandbox (not just this.sandbox) so a fresh
-        // SessionDO instance after eviction can still ping — without this,
-        // this.sandbox is null until first explicit getOrCreateSandbox call
-        // and we'd skip the ping.
-        const sb = this.getOrCreateSandbox();
-        if (sb.renewActivityTimeout) {
-          await sb.renewActivityTimeout();
-        }
-      } catch {}
-    }
-
     await this._scheduleNextAlarm();
   }
 
@@ -3696,45 +3628,6 @@ export class SessionDO extends DurableObject<Env> {
     const dispose = await this.keepAlive();
     try { return await fn(); }
     finally { dispose(); }
-  }
-
-  // ── Background-task keepAlive (Gap 5c fix) ─────────────────────────────
-
-  /**
-   * Idempotent: ensure SessionDO holds a keepAlive ref while bg tasks exist.
-   * Called from watchBackgroundTask after INSERT, and from constructor on
-   * recovery (in case SessionDO restarted with rows still in the table).
-   */
-  private async _acquireBgKeepAlive(): Promise<void> {
-    if (this._bgKeepAliveDispose) return;
-    this._bgKeepAliveDispose = await this.keepAlive();
-  }
-
-  /** Drop the bg keepAlive ref. Called when background_tasks drains to 0. */
-  private _releaseBgKeepAlive(): void {
-    if (!this._bgKeepAliveDispose) return;
-    try { this._bgKeepAliveDispose(); } catch {}
-    this._bgKeepAliveDispose = null;
-  }
-
-  /**
-   * Recovery: on SessionDO boot, if background_tasks has any rows,
-   * re-acquire keepAlive so the container they depend on stays alive.
-   * Called once from constructor after schema is ensured.
-   */
-  private async _recoverBgKeepAlive(): Promise<void> {
-    try {
-      const rows = this.ctx.storage.sql
-        .exec<{ c: number }>("SELECT COUNT(*) AS c FROM background_tasks")
-        .toArray();
-      const count = rows[0]?.c ?? 0;
-      if (count > 0) {
-        await this._acquireBgKeepAlive();
-        console.log(`[bg-keepalive] recovered: ${count} pending bg tasks, holding keepAlive`);
-      }
-    } catch {
-      // background_tasks table doesn't exist yet — no bg tasks possible
-    }
   }
 }
 

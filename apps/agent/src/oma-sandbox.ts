@@ -151,13 +151,27 @@ export class OmaSandbox extends Sandbox {
   // the container automatically.
   override interceptHttps = true;
 
-  // Container lifecycle: short check interval (CF default is 30 minutes).
-  // Whether the container ACTUALLY stops at sleepAfter is determined by
-  // SessionDO's bg-task-keepalive mechanism — it explicitly calls
-  // `renewActivityTimeout()` while there are background_tasks rows. With
-  // no bg tasks the container hits onActivityExpired → default this.stop()
-  // → 5-minute idle billing window.
-  override sleepAfter = "5m";
+  // Container lifecycle: 20-minute idle TTL. Long enough that any
+  // reasonable single agent turn (model fetch + tool calls) survives
+  // without us doing explicit ping-pong; CF Sandbox SDK auto-renews
+  // on every container call. When session goes truly idle for 20+ min,
+  // container stops (5-min CF billing window after that).
+  override sleepAfter = "20m";
+
+  // Lightweight visibility: log every container exit so we can see why
+  // containers recycle without the SQL table from the prior diagnostic
+  // scaffolding. CF Workers Logs captures these.
+  // The Sandbox base class narrows onStop to `() => Promise<void>` (drops
+  // the params), but the underlying Container.callOnStop DOES pass
+  // `{ exitCode, reason }` at runtime (container.js:1520). Use rest args to
+  // satisfy TS while still capturing the runtime payload.
+  override async onStop(...args: unknown[]): Promise<void> {
+    const params = (args[0] ?? {}) as { exitCode?: number; reason?: string };
+    const ec = typeof params.exitCode === "number" ? params.exitCode : -1;
+    const reason = typeof params.reason === "string" ? params.reason : "unknown";
+    // 137 = SIGKILL (likely OOM or destroy()); 143 = SIGTERM (graceful)
+    console.log(`[oma-sandbox] onStop exit=${ec} reason=${reason}`);
+  }
 }
 
 // Assign via the inherited static setter (Sandbox/Container expose
