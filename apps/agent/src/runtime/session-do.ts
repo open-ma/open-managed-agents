@@ -300,6 +300,14 @@ export class SessionDO extends DurableObject<Env> {
   private sandbox: SandboxExecutor | null = null;
   private wrappedSandbox: SandboxExecutor | null = null;
   private sandboxWarmupPromise: Promise<void> | null = null;
+  /** Per-warmup random tag mirrored to /tmp/.oma-warm in the container.
+   *  Lets the wrapSandboxWithLazyWarmup proxy detect a recycled container
+   *  (CF Sandbox can die independently of SessionDO via OOM, sleepAfter,
+   *  host migration). On mismatch we re-warm so restoreWorkspaceBackup
+   *  runs and /workspace gets repopulated from the latest backup. */
+  private currentWarmupGen: string | null = null;
+  /** Throttle the marker probe to once per 30s of activity. */
+  private lastWarmupProbeAt = 0;
   /**
    * Per-turn dedup of `agent.message` broadcasts. Recovery's
    * `loadRecoveryContext` reads prior agent messages out of SQL so the
@@ -1554,6 +1562,14 @@ export class SessionDO extends DurableObject<Env> {
    * answer turns) skip the 3s container cold-start entirely; turns that do
    * use tools overlap the warmup with model fetch/TTFT.
    *
+   * Container-recycle detection: CF Sandbox container has its own idle
+   * lifecycle independent of SessionDO. If it dies (sleepAfter, OOM, host
+   * migration), our cached sandboxWarmupPromise still resolves but the
+   * underlying /workspace is empty. We probe a per-warmup marker file
+   * (/tmp/.oma-warm) — if missing or value-mismatched, invalidate cache
+   * and re-warmup so restoreWorkspaceBackup runs again. Probe is one
+   * `cat`, throttled to once per 30s to bound steady-state cost.
+   *
    * The non-method properties and helpers like setEnvVars are passed
    * through synchronously — they don't talk to the container itself.
    */
@@ -1568,13 +1584,41 @@ export class SessionDO extends DurableObject<Env> {
       "mountWorkspace",
       "gitCheckout",
     ]);
+    const PROBE_THROTTLE_MS = 30_000;
+    const ensureWarm = async (): Promise<void> => {
+      // Cold path — warmup never ran or was reset by a recycle below.
+      if (!this.sandboxWarmupPromise) {
+        await this.warmUpSandbox();
+        return;
+      }
+      // Warm path — wait for the cached promise (handles concurrent calls).
+      await this.sandboxWarmupPromise;
+      const sinceLastProbe = Date.now() - this.lastWarmupProbeAt;
+      if (sinceLastProbe < PROBE_THROTTLE_MS) return;
+      this.lastWarmupProbeAt = Date.now();
+      let probed: string | null = null;
+      try {
+        const raw_out = await raw.exec("cat /tmp/.oma-warm 2>/dev/null");
+        const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(raw_out);
+        probed = (m && m[1] === "0") ? m[2].trim() : "";
+      } catch { probed = null; }
+      if (probed === this.currentWarmupGen) return; // alive, marker matches
+      // Container recycled — reset cache so next call re-warms (which
+      // includes restoreWorkspaceBackup).
+      logWarn(
+        { op: "session_do.warmup.recycle_detected", session_id: this.state.session_id, expected: this.currentWarmupGen, got: probed },
+        "container marker mismatch — re-warming on next call",
+      );
+      this.sandboxWarmupPromise = null;
+      this.currentWarmupGen = null;
+    };
     return new Proxy(raw, {
       get: (target, prop, receiver) => {
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") return value;
         if (!needsWarm.has(prop as string)) return value.bind(target);
         return async (...args: unknown[]) => {
-          await this.warmUpSandbox();
+          await ensureWarm();
           return (value as (...a: unknown[]) => unknown).apply(target, args);
         };
       },
@@ -1936,7 +1980,24 @@ export class SessionDO extends DurableObject<Env> {
           sessionId: this.state.session_id,
         });
       }
+
+      // Drop a per-warmup marker so the proxy can detect a recycled
+      // container later (just check `cat /tmp/.oma-warm` matches the
+      // gen we set). /tmp clears on restart so the absence IS the signal.
+      const gen = crypto.randomUUID().slice(0, 12);
+      try {
+        await sandbox.exec(`echo ${gen} > /tmp/.oma-warm`);
+        this.currentWarmupGen = gen;
+        this.lastWarmupProbeAt = Date.now();
+      } catch (err) {
+        logWarn(
+          { op: "session_do.warmup.write_marker", session_id: this.state.session_id, err },
+          "warmup marker write failed; proxy will pessimistically re-warm",
+        );
+        this.currentWarmupGen = null;
+      }
     } catch (err) {
+      this.currentWarmupGen = null;
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
       this.broadcastEvent({
         type: "agent.message",
