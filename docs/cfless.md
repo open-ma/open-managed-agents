@@ -6,11 +6,13 @@ Containers. Storage is SQLite + local filesystem. Sandboxes are local
 subprocesses by default; switch to E2B for Firecracker isolation when
 you're past trusted-developer territory.
 
-> **Status:** Working PoC, not production. The CFless route is a parallel
-> implementation of the same `Services` abstractions used on Cloudflare.
-> Many production-relevant pieces (auth, vaults, multi-tenant) still
-> default to single-tenant + no-auth in this build. See "What works /
-> doesn't" below.
+> **One of three deployment topologies.** See [deployment.md](./deployment.md)
+> for the full Local CFless / CF Local / CF Prod comparison + decision
+> matrix. This doc covers Local CFless specifically.
+
+> **Status:** Working PoC. The CFless route is a parallel implementation of
+> the same `Services` abstractions used on Cloudflare, including better-auth
+> multi-tenant. See "What works / doesn't" below.
 
 ## Quick start (Docker)
 
