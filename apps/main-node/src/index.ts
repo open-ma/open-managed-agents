@@ -423,12 +423,32 @@ app.get("/health", (c) =>
   }),
 );
 
-// Mount better-auth's request handler. Catches /api/auth/sign-up/email,
-// /api/auth/sign-in/email, /api/auth/sign-out, /api/auth/get-session, etc.
-// Auth-disabled mode exposes nothing here — any request to /api/auth/* will
+// /auth-info — public endpoint the console hits on every page load to
+// decide which auth providers to render. Mirrors apps/main/src/index.ts.
+app.get("/auth-info", (c) =>
+  c.json({
+    providers: authDisabled
+      ? []
+      : [
+          "email",
+          "email-otp",
+          ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+            ? ["google"]
+            : []),
+        ],
+    // Turnstile not wired on the CFless side. Console renders without
+    // captcha when this is null.
+    turnstile_site_key: null,
+  }),
+);
+
+// Mount better-auth's request handler. Catches /auth/sign-up/email,
+// /auth/sign-in/email, /auth/sign-out, /auth/get-session, etc.
+// Auth-disabled mode exposes nothing here — any request to /auth/* will
 // 404, which is the correct signal: there's no auth to interact with.
+// Path matches apps/main (CF) so the same console build can hit either.
 if (auth) {
-  app.on(["GET", "POST"], "/api/auth/*", (c) => auth!.handler(c.req.raw));
+  app.on(["GET", "POST"], "/auth/*", (c) => auth!.handler(c.req.raw));
 }
 
 // Auth gate for the data-plane routes.
@@ -527,6 +547,33 @@ v1.post("/sessions", async (c) => {
     .bind(id, c.var.tenant_id, body.agent_id ?? null, body.title ?? null, now, now)
     .run();
   return c.json({ id, agent_id: body.agent_id ?? null, status: "idle", title: body.title ?? null }, 201);
+});
+
+// List sessions for the current tenant. Console renders this on the
+// Sessions page; agent-specific filtering via ?agent_id=... matches the
+// CF route's query params.
+v1.get("/sessions", async (c) => {
+  const agentFilter = c.req.query("agent_id");
+  const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
+  const where = agentFilter
+    ? `WHERE tenant_id = ? AND agent_id = ?`
+    : `WHERE tenant_id = ?`;
+  const binds = agentFilter ? [c.var.tenant_id, agentFilter] : [c.var.tenant_id];
+  const rows = await sql
+    .prepare(
+      `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
+       ${where} ORDER BY created_at DESC LIMIT ?`,
+    )
+    .bind(...binds, limit)
+    .all<{
+      id: string;
+      agent_id: string | null;
+      status: string;
+      title: string | null;
+      created_at: number;
+      updated_at: number;
+    }>();
+  return c.json({ data: rows.results ?? [] });
 });
 
 v1.get("/sessions/:id", async (c) => {
@@ -1066,6 +1113,99 @@ v1.get("/vaults/:id/credentials", async (c) => {
   });
   return c.json({ data: rows.map(stripSecrets) });
 });
+
+// ── /v1/me — current user + tenant + memberships ─────────────────────────
+//
+// Console hits this on bootstrap to (a) decide whether to render the
+// sidebar, (b) populate the workspace switcher when the user has > 1
+// membership. Mirrors apps/main/src/routes/me.ts at the data shape level.
+
+v1.get("/me", async (c) => {
+  if (authDisabled) {
+    return c.json({
+      user: { id: "default", email: "default@local", name: "Default User", role: "owner" },
+      tenant: { id: "default", name: "Default" },
+      tenants: [{ id: "default", name: "Default", role: "owner" }],
+    });
+  }
+  const userId = c.var.user_id;
+  const tenantId = c.var.tenant_id;
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
+  // user row lives in the auth db (separate sqlite); no need to fetch
+  // again — we have what we need from the session.
+  const tenantRow = await sql
+    .prepare(`SELECT id, name FROM "tenant" WHERE id = ?`)
+    .bind(tenantId)
+    .first<{ id: string; name: string }>();
+  const memberRows = await sql
+    .prepare(
+      `SELECT t.id AS id, t.name AS name, m.role AS role
+         FROM "membership" m
+         JOIN "tenant" t ON t.id = m.tenant_id
+        WHERE m.user_id = ?
+        ORDER BY m.created_at ASC, t.id ASC`,
+    )
+    .bind(userId)
+    .all<{ id: string; name: string; role: string }>();
+  return c.json({
+    user: { id: userId, email: "", name: "", role: "owner" },
+    tenant: tenantRow ?? { id: tenantId, name: "" },
+    tenants: memberRows.results ?? [],
+  });
+});
+
+v1.get("/me/tenants", async (c) => {
+  if (authDisabled) {
+    return c.json({ data: [{ id: "default", name: "Default", role: "owner" }] });
+  }
+  const userId = c.var.user_id;
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await sql
+    .prepare(
+      `SELECT t.id AS id, t.name AS name, m.role AS role, m.created_at
+         FROM "membership" m
+         JOIN "tenant" t ON t.id = m.tenant_id
+        WHERE m.user_id = ?
+        ORDER BY m.created_at ASC, t.id ASC`,
+    )
+    .bind(userId)
+    .all<{ id: string; name: string; role: string; created_at: number }>();
+  return c.json({ data: rows.results ?? [] });
+});
+
+// ── Stubs for routes the console hits but main-node doesn't implement ────
+//
+// Console bootstrap pings several endpoints (integrations, skills, model
+// cards, runtimes, environments, api keys). Without these the dashboard
+// throws on first render. We return empty arrays / 404s so the UI degrades
+// gracefully — the user sees an empty integrations list rather than a
+// crash. Real implementations land in follow-up work.
+
+v1.get("/environments", (c) => c.json({ data: [] }));
+v1.get("/api_keys", (c) => c.json({ data: [] }));
+v1.get("/me/cli-tokens", (c) => c.json({ data: [] }));
+v1.get("/runtimes", (c) => c.json({ data: [] }));
+v1.get("/skills", (c) => c.json({ data: [] }));
+v1.get("/model_cards", (c) => c.json({ data: [] }));
+v1.get("/models/list", (c) =>
+  c.json({
+    data: [
+      { id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5", speeds: ["standard", "fast"] },
+      { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", speeds: ["standard"] },
+      { id: "claude-opus-4-7", display_name: "Claude Opus 4.7", speeds: ["standard"] },
+    ],
+  }),
+);
+
+// Integrations not implemented in main-node — return shape compatible
+// "not connected" responses so the integrations page renders an empty
+// state instead of an error.
+v1.get("/integrations/github/installations", (c) => c.json({ data: [] }));
+v1.get("/integrations/github/credentials", (c) => c.json({ data: [] }));
+v1.get("/integrations/linear/installations", (c) => c.json({ data: [] }));
+v1.get("/integrations/linear/credentials", (c) => c.json({ data: [] }));
+v1.get("/integrations/slack/installations", (c) => c.json({ data: [] }));
+v1.get("/integrations/slack/credentials", (c) => c.json({ data: [] }));
 
 app.route("/v1", v1);
 

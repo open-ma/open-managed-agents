@@ -15,7 +15,8 @@
 //
 // Routes that bypass auth entirely:
 //   - GET /health
-//   - /api/auth/* (the better-auth handler — must not require auth itself)
+//   - /auth/* (the better-auth handler — must not require auth itself).
+//     Path matches CF: apps/main exposes better-auth at /auth/* too.
 
 import { createMiddleware } from "hono/factory";
 import type { Auth } from "./config.js";
@@ -35,7 +36,7 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
   }>(async (c, next) => {
     // Bypass paths.
     const path = c.req.path;
-    if (path === "/health" || path.startsWith("/api/auth/")) {
+    if (path === "/health" || path.startsWith("/auth/")) {
       return next();
     }
 
