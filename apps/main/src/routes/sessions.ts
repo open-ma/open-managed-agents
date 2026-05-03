@@ -1066,44 +1066,6 @@ app.get("/:id/events", async (c) => {
   return handleJSONEvents(c, c.req.param("id"));
 });
 
-// GET /v1/sessions/:id/__session_restarts__ — diagnostic: returns the
-// SessionDO constructor invocation log (1 row per CF restart). Lets us
-// distinguish workspace_restored caused by SessionDO eviction from
-// actual container death.
-app.get("/:id/__session_restarts__", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
-  const binding = sbRes.binding;
-  if (!binding) return bindingErrorResponse(c, sbRes);
-  const fwd = new Request(`https://sandbox/sessions/${id}/__session_restarts__`, {
-    method: "GET",
-  });
-  const res = await binding.fetch(fwd);
-  return new Response(res.body, { status: res.status, headers: res.headers });
-});
-
-// GET /v1/sessions/:id/__sandbox_stops__ — diagnostic: returns recent
-// container onStop events captured by OmaSandbox.onStop. Read-only
-// (just exit codes + reasons), so the standard x-api-key + tenant scope
-// is sufficient — no extra debug-token gate.
-app.get("/:id/__sandbox_stops__", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
-  const binding = sbRes.binding;
-  if (!binding) return bindingErrorResponse(c, sbRes);
-  const fwd = new Request(`https://sandbox/sessions/${id}/__sandbox_stops__`, {
-    method: "GET",
-  });
-  const res = await binding.fetch(fwd);
-  return new Response(res.body, { status: res.status, headers: res.headers });
-});
-
 // POST /v1/sessions/:id/__debug_recovery__ — ops-only forwarder for the
 // SessionDO recovery probe. Body forwards as-is. Both layers re-check
 // X-Debug-Token against env.DEBUG_TOKEN — the main-worker check fails
