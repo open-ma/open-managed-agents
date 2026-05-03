@@ -11,21 +11,26 @@
 //
 // Auth: pass apiKey in opts OR set DAYTONA_API_KEY in process.env.
 //
-// What's NOT implemented (and why):
-//   - mountMemoryStore — Daytona Cloud doesn't expose host-mount of an
-//     arbitrary local dir into a sandbox. The CFless analog (s3fs against
-//     a per-session prefix) is doable but needs a per-image setup script
-//     to install s3fs-fuse + mount on boot. Out of scope for this PoC; if
-//     you need memory in a Daytona sandbox today, do read-thru via
-//     `/v1/memory_stores/:id/memories` HTTP from inside the sandbox.
-//   - createWorkspaceBackup / restoreWorkspaceBackup — Daytona's snapshots
-//     could back this but the API differs from the
-//     SandboxExecutor port enough that wiring it well is a separate pass.
+// Outbound credential injection (oma-vault): on first sandbox creation we
+// upload OMA_VAULT_CA_CERT into the box at /etc/ssl/oma-vault-ca.crt, then
+// every exec gets HTTP(S)_PROXY / NODE_EXTRA_CA_CERTS / SSL_CERT_FILE /
+// CURL_CA_BUNDLE pointing at the proxy + uploaded cert. The proxy URL must
+// be reachable from inside the Daytona sandbox network — set OMA_VAULT_
+// PROXY_URL to a public host (or a tunneled URL like ngrok) when running
+// remote.
+//
+// Memory store mount via s3fs: when MEMORY_S3_* env vars are set, we
+// install s3fs-fuse on first sandbox creation and mount the bucket at
+// /mnt/_oma_storage. mountMemoryStore({storeName, storeId}) then symlinks
+// /mnt/memory/<storeName> → /mnt/_oma_storage/<storeId>/. Without those
+// env vars, mountMemoryStore throws (remote sandboxes can't bind a host
+// dir; s3 is the only path).
 //
 // SECURITY: Daytona runs each sandbox in an isolated VM so this is the
 // safer choice for production / untrusted agents vs LocalSubprocessSandbox.
 
 import type { ProcessHandle, SandboxExecutor } from "../ports";
+import { promises as fs } from "node:fs";
 
 export interface DaytonaSandboxOptions {
   /** Per-session identifier — used as the Sandbox label so existing
@@ -37,12 +42,23 @@ export interface DaytonaSandboxOptions {
   apiUrl?: string;
   /** Container image to run. Default: `node:22-slim`. The image must
    *  ship `sh`, `curl`, and the standard coreutils — the harness's bash
-   *  tool relies on them. */
+   *  tool relies on them. For s3fs memory mounts the image needs `apt`
+   *  (we install s3fs-fuse on boot). */
   image?: string;
   /** Default per-call timeout (ms). Per-call timeout overrides this. */
   defaultTimeoutMs?: number;
   /** Logger for debug/warn output. */
   logger?: { warn: (msg: string, ctx?: unknown) => void; log: (msg: string) => void };
+  /** Optional s3 bucket config for memory store mounts. When set,
+   *  ensureSandbox installs s3fs and mounts the bucket at
+   *  /mnt/_oma_storage; mountMemoryStore symlinks per-store prefixes
+   *  underneath. Mirrors the E2B adapter's memoryBucket pattern. */
+  memoryBucket?: {
+    endpoint: string;       // e.g. https://s3.amazonaws.com or your minio
+    accessKey: string;
+    secretKey: string;
+    bucketName: string;
+  };
 }
 
 // Minimal structural types so this file compiles without `@daytonaio/sdk`
@@ -141,16 +157,29 @@ export class DaytonaSandbox implements SandboxExecutor {
     const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
     const caCertPath = process.env.OMA_VAULT_CA_CERT;
     if (!proxyUrl || !caCertPath) return;
-    // Daytona sandboxes run on Daytona's infra, not the operator's host —
-    // OMA_VAULT_CA_CERT (a host path) doesn't exist inside the sandbox.
-    // Emit a warning and skip; injection would need cert upload via
-    // fs.uploadFile + a bootstrap script. Track for follow-up.
-    this.logger.warn(
-      "[daytona] setOutboundContext: vault proxy + CA injection in remote " +
-      "sandboxes is not yet supported — outbound traffic will NOT be intercepted. " +
-      "If you need vault injection in Daytona, switch to LocalSubprocessSandbox " +
-      "or wait for the cert-upload follow-up.",
-    );
+    // Defer the actual cert upload until the sandbox is created — we need
+    // the box to exist before we can fs.uploadFile into it. The proxy URL
+    // must be reachable from inside the Daytona sandbox network; if it's
+    // a localhost URL the operator probably wants ngrok / a public URL
+    // for remote deploys.
+    if (proxyUrl.startsWith("http://localhost") || proxyUrl.startsWith("http://127.")) {
+      this.logger.warn(
+        `[daytona] OMA_VAULT_PROXY_URL points at localhost (${proxyUrl}) — ` +
+        `this is unreachable from inside Daytona's network. Set a public URL ` +
+        `or tunnel the vault (e.g. ngrok http 14322).`,
+      );
+    }
+    this.pendingCaUpload = { hostPath: caCertPath };
+    const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
+    await this.setEnvVars({
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      NODE_EXTRA_CA_CERTS: inBoxCaPath,
+      SSL_CERT_FILE: inBoxCaPath,
+      CURL_CA_BUNDLE: inBoxCaPath,
+    });
   }
 
   async readFile(path: string): Promise<string> {
@@ -187,7 +216,45 @@ export class DaytonaSandbox implements SandboxExecutor {
     }
   }
 
+  async mountMemoryStore(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void> {
+    const cfg = this.opts.memoryBucket;
+    if (!cfg) {
+      throw new Error(
+        "DaytonaSandbox.mountMemoryStore: no memoryBucket config — pass " +
+        "memoryBucket: { endpoint, accessKey, secretKey, bucketName } to " +
+        "the constructor (or set E2B_MEMORY_S3_* env vars in main-node) " +
+        "so we can mount via s3fs. Without it, /mnt/memory has nowhere to " +
+        "land in a remote sandbox.",
+      );
+    }
+    const sb = await this.ensureSandbox();
+    if (!this.memoryBucketMounted) {
+      await this.mountMemoryBucketRoot(sb, cfg);
+      this.memoryBucketMounted = true;
+    }
+    // Symlink /mnt/memory/<storeName> → /mnt/_oma_storage/<storeId>/. The
+    // store-id directory may not exist on the bucket yet; that's fine,
+    // s3fs surfaces it as an empty directory listing and writes create
+    // the prefix lazily.
+    const link = `/mnt/memory/${opts.storeName}`;
+    const target = `/mnt/_oma_storage/${opts.storeId}`;
+    await sb.process.executeCommand(
+      `mkdir -p /mnt/memory && rm -rf ${shellEscape(link)} && ln -s ${shellEscape(target)} ${shellEscape(link)}`,
+      undefined,
+      undefined,
+      30,
+    );
+    this.logger.log(`mounted memory store ${opts.storeName} → ${target}`);
+  }
+
   // ── helpers ──────────────────────────────────────────────────────────────
+
+  private pendingCaUpload: { hostPath: string } | null = null;
+  private memoryBucketMounted = false;
 
   private async ensureSandbox(): Promise<DaytonaSandboxInstance> {
     if (this.sandboxPromise) return this.sandboxPromise;
@@ -219,9 +286,59 @@ export class DaytonaSandbox implements SandboxExecutor {
         labels: { "oma-session-id": this.opts.sessionId },
       });
       this.logger.log(`sandbox ${sb.id} ready`);
+
+      // Apply pending CA upload now that the box exists. Fire-and-forget
+      // so a CA-less image doesn't block the harness on first exec; if
+      // upload fails the per-exec env vars still point at the missing path
+      // and outbound TLS will fail with cert errors — surfaced naturally.
+      if (this.pendingCaUpload) {
+        try {
+          const buf = await fs.readFile(this.pendingCaUpload.hostPath);
+          await sb.fs.createFolder("/etc/ssl", "0755").catch(() => { /* exists */ });
+          await sb.fs.uploadFile(buf, "/etc/ssl/oma-vault-ca.crt");
+          this.logger.log(`uploaded vault CA cert (${buf.byteLength} bytes)`);
+        } catch (err) {
+          this.logger.warn(
+            `vault CA upload failed: ${(err as Error).message} — outbound ` +
+            `TLS through oma-vault will fail with cert errors`,
+          );
+        }
+      }
       return sb;
     })();
     return this.sandboxPromise;
+  }
+
+  /**
+   * One-time setup for the s3fs-mounted memory bucket. Installs s3fs-fuse
+   * via apt (image must have apt + sudo or run as root), writes a creds
+   * file, and mounts the bucket at /mnt/_oma_storage. Idempotent on the
+   * adapter (memoryBucketMounted flag).
+   */
+  private async mountMemoryBucketRoot(
+    sb: DaytonaSandboxInstance,
+    cfg: NonNullable<DaytonaSandboxOptions["memoryBucket"]>,
+  ): Promise<void> {
+    // Heredoc the creds file so the secret never appears in `ps`.
+    const setup = [
+      "set -e",
+      "if ! command -v s3fs >/dev/null 2>&1; then",
+      "  apt-get update -qq && apt-get install -y -qq s3fs >/dev/null",
+      "fi",
+      "mkdir -p /mnt/_oma_storage",
+      `cat > /etc/passwd-s3fs <<'EOF'\n${cfg.accessKey}:${cfg.secretKey}\nEOF`,
+      "chmod 600 /etc/passwd-s3fs",
+      "mountpoint -q /mnt/_oma_storage || " +
+        `s3fs ${shellEscape(cfg.bucketName)} /mnt/_oma_storage ` +
+        `-o url=${shellEscape(cfg.endpoint)} -o use_path_request_style -o allow_other`,
+    ].join(" && ");
+    const r = await sb.process.executeCommand(setup, undefined, undefined, 120);
+    if (r.exitCode !== 0) {
+      throw new Error(
+        `Daytona s3fs mount failed (exit=${r.exitCode}): ${r.artifacts?.stderr ?? r.result ?? ""}`,
+      );
+    }
+    this.logger.log(`s3fs mounted bucket ${cfg.bucketName} at /mnt/_oma_storage`);
   }
 
   /**
@@ -253,4 +370,9 @@ export class DaytonaSandbox implements SandboxExecutor {
     }
     return out;
   }
+}
+
+/** Shell-escape an arbitrary string for safe inclusion in a `sh -c` command. */
+function shellEscape(s: string): string {
+  return `'${s.replace(/'/g, "'\\''")}'`;
 }
