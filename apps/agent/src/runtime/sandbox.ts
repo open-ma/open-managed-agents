@@ -259,9 +259,15 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     try {
       const result = await sandbox.readFile(path, { encoding: "utf-8" });
-      // Handle both string and {content: string} return formats
-      return typeof result === "string" ? result : result.content;
+      // Handle both string and {success, content} shapes
+      if (typeof result === "string") return result;
+      console.log(`[sandbox.readFile] path=${path} success=${(result as { success?: boolean }).success} bytes=${(result as { content?: string }).content?.length ?? 0}`);
+      if ((result as { success?: boolean }).success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
+      return (result as { content: string }).content;
     } catch (err: any) {
+      console.warn(`[sandbox.readFile] FAILED path=${path} err=${err?.message || err}`);
       throw new Error(`readFile(${path}) failed: ${err?.message || err}`);
     }
   }
@@ -296,9 +302,14 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
     const b64 = btoa(bin);
     try {
-      await sandbox.writeFile(path, b64, { encoding: "base64" });
+      const result = await sandbox.writeFile(path, b64, { encoding: "base64" });
+      console.log(`[sandbox.writeFileBytes] path=${path} bytes=${bytes.length} result=${JSON.stringify(result)}`);
+      if (result && (result as { success?: boolean }).success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
       return "ok";
     } catch (err: any) {
+      console.warn(`[sandbox.writeFileBytes] FAILED path=${path} err=${err?.message || err}`);
       throw new Error(`writeFileBytes(${path}) failed: ${err?.message || err}`);
     }
   }
