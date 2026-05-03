@@ -210,6 +210,34 @@ export class SessionDO extends DurableObject<Env> {
     // Recovery: if SessionDO restarted with bg_tasks rows still pending,
     // grab keepAlive immediately so we keep the container warm for them.
     void this._recoverBgKeepAlive();
+    // SessionDO restart counter — every fresh constructor = a new
+    // instance, almost always due to CF DO eviction (deploy, runtime
+    // upgrade, host migration, idle timeout). Persisted so we can tell
+    // "this session got restarted N times" externally. Used by the
+    // /__session_restarts__ endpoint to verify our keepAlive vs
+    // platform-driven evict balance.
+    void this._logRestart();
+  }
+
+  private async _logRestart(): Promise<void> {
+    try {
+      this.ctx.storage.sql.exec(`
+        CREATE TABLE IF NOT EXISTS oma_session_restarts (
+          ts INTEGER PRIMARY KEY,
+          instance_id TEXT NOT NULL
+        )
+      `);
+      const instanceId = crypto.randomUUID();
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO oma_session_restarts (ts, instance_id) VALUES (?, ?)`,
+        Date.now(), instanceId,
+      );
+      // Bound to last 50 entries.
+      this.ctx.storage.sql.exec(
+        `DELETE FROM oma_session_restarts WHERE ts NOT IN (SELECT ts FROM oma_session_restarts ORDER BY ts DESC LIMIT 50)`,
+      );
+      console.log(`[session-do] restart instance_id=${instanceId} session_id=${this.state?.session_id ?? "init"}`);
+    } catch {}
   }
 
   /** Build a tenant-scoped KV key */
@@ -367,7 +395,7 @@ export class SessionDO extends DurableObject<Env> {
    *  backups (session destroy) ignore this. */
   private lastWorkspaceBackupAt = 0;
   /** Min interval between turn-end backups. Forced backups bypass this. */
-  private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 60_000;
+  private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 120_000;
   /** Single in-flight workspace backup promise — coalesces concurrent calls
    *  so a turn-end fire-and-forget backup + a DELETE force backup don't race
    *  on the same container (CF Sandbox SDK rejects the second concurrent
@@ -903,7 +931,10 @@ export class SessionDO extends DurableObject<Env> {
             }
           },
           {
-            persistWorkspace: () => this.maybeBackupWorkspace({ force: true }),
+            // Per-turn backup: NOT force — let WORKSPACE_BACKUP_DEBOUNCE_MS
+            // gate the actual squashfs+R2 PUT cost. /destroy below still
+            // calls with force:true so the final snapshot always lands.
+            persistWorkspace: () => this.maybeBackupWorkspace(),
           },
         );
         // Turn finished cleanly — clear any prior recovery counter so the
@@ -1070,6 +1101,15 @@ export class SessionDO extends DurableObject<Env> {
       // D1 keyed by (tenant, env). Next session in the same scope's warmup
       // looks it up and restoreBackup's it. Force=true bypasses the
       // turn-end debounce so we always get a final snapshot.
+      //
+      // Force-create the sandbox wrapper if this.sandbox is null (SessionDO
+      // was hibernated, in-memory ref lost). Without this, a hibernated
+      // SessionDO that gets a /destroy request would skip both the backup
+      // AND the actual container destroy, leaving the container running
+      // until sleepAfter SIGTERM (with no final snapshot).
+      if (!this.sandbox) {
+        try { this.getOrCreateSandbox(); } catch {}
+      }
       await this.maybeBackupWorkspace({ force: true });
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
@@ -1082,6 +1122,10 @@ export class SessionDO extends DurableObject<Env> {
       this.sandboxWarmupPromise = null;
       this.currentWarmupGen = null;
       this.lastWarmupProbeAt = 0;
+      // Hygiene: clear the persisted gen so a re-spawned same-id session
+      // (rare but possible) doesn't probe against a marker from a long-dead
+      // container.
+      try { await this.ctx.storage.delete("oma_warmup_gen"); } catch {}
       // Close the browser session if one was created
       if (this.browserSession) {
         try { await this.browserSession.close(); } catch (err) {
@@ -1230,6 +1274,57 @@ export class SessionDO extends DurableObject<Env> {
     // Auth: requires the X-Debug-Token header to match env.DEBUG_TOKEN
     // (set as a wrangler secret in environments where this should work).
     // 401s if either side is unset, so prod-without-secret is safe.
+    if (request.method === "GET" && url.pathname === "/__session_restarts__") {
+      // Diagnostic: how many times has the SessionDO been re-instantiated?
+      // Each row = a constructor run = a CF eviction (deploy, runtime
+      // upgrade, host migration, idle). Lets us tell whether
+      // workspace_restored events are caused by SessionDO restarts vs
+      // actual container deaths.
+      try {
+        this.ctx.storage.sql.exec(`
+          CREATE TABLE IF NOT EXISTS oma_session_restarts (
+            ts INTEGER PRIMARY KEY,
+            instance_id TEXT NOT NULL
+          )
+        `);
+        const rows = this.ctx.storage.sql
+          .exec<{ ts: number; instance_id: string }>(
+            `SELECT ts, instance_id FROM oma_session_restarts ORDER BY ts DESC LIMIT 50`,
+          )
+          .toArray();
+        return new Response(JSON.stringify({ restarts: rows }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
+
+    if (request.method === "GET" && url.pathname === "/__sandbox_stops__") {
+      // Diagnostic: return the recent container onStop events captured by
+      // OmaSandbox.onStop. Lets us see exit codes (137=SIGKILL/likely-OOM,
+      // 143=SIGTERM/graceful, etc) and reason ("runtime_signal" vs "exit")
+      // for every container recycle on this session — without needing
+      // wrangler tail (often network-blocked).
+      try {
+        const sandbox = this.getOrCreateSandbox() as unknown as {
+          getRecentStops?: () => Promise<unknown>;
+        };
+        const stops = sandbox.getRecentStops ? await sandbox.getRecentStops() : [];
+        return new Response(JSON.stringify({ stops }), {
+          headers: { "content-type": "application/json" },
+        });
+      } catch (err) {
+        return new Response(
+          JSON.stringify({ error: err instanceof Error ? err.message : String(err) }),
+          { status: 500, headers: { "content-type": "application/json" } },
+        );
+      }
+    }
+
     if (request.method === "POST" && url.pathname === "/__debug_recovery__") {
       const expected = (this.env as { DEBUG_TOKEN?: string }).DEBUG_TOKEN;
       const provided = request.headers.get("x-debug-token");
@@ -1618,8 +1713,35 @@ export class SessionDO extends DurableObject<Env> {
     const PROBE_THROTTLE_MS = 30_000;
     const ensureWarm = async (): Promise<void> => {
       // Cold path: warmup never ran (or was reset on failure / recycle).
-      // No probe needed — going through warmUpSandbox always re-marks.
+      // After SessionDO restart (CF deploy / hibernation / eviction),
+      // sandboxWarmupPromise is null even if the underlying container is
+      // still alive from a previous SessionDO instance. Quick marker probe
+      // first — if it matches our persisted gen, skip the full warmup
+      // (which would otherwise re-run restoreWorkspaceBackup unnecessarily
+      // and overwrite agent's recent work).
       if (!this.sandboxWarmupPromise) {
+        try {
+          const persistedGen = await this.ctx.storage.get<string>("oma_warmup_gen");
+          if (persistedGen) {
+            const raw_out = await raw.exec("cat /tmp/.oma-warm 2>/dev/null");
+            const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(raw_out);
+            if (m && m[1] === "0" && m[2].trim() === persistedGen) {
+              // Container alive + marker matches → no need to re-warmup.
+              // Restore in-memory tracking so future probes fast-path.
+              this.currentWarmupGen = persistedGen;
+              this.lastWarmupProbeAt = Date.now();
+              this.sandboxWarmupPromise = Promise.resolve();
+              logWarn(
+                { op: "session_do.warmup.skip_cold_path", session_id: this.state.session_id, gen: persistedGen },
+                "container still warm after SessionDO restart — skipping re-warmup",
+              );
+              return;
+            }
+          }
+        } catch {
+          // Marker probe failed (container down or RPC error) — fall through
+          // to full warmup. Worst case is one extra restore.
+        }
         await this.warmUpSandbox();
         return;
       }
@@ -1646,6 +1768,17 @@ export class SessionDO extends DurableObject<Env> {
         probed = null;
       }
       this.lastWarmupProbeAt = Date.now();
+      // Recover from SessionDO restart: if in-memory gen is null but DO
+      // storage has one (persisted at last warmup), the container is
+      // probably still alive and we just lost the in-memory tracker. Load
+      // from storage and compare against probe — match means false alarm,
+      // skip the unnecessary restore.
+      if (this.currentWarmupGen === null) {
+        try {
+          const persisted = await this.ctx.storage.get<string>("oma_warmup_gen");
+          if (persisted) this.currentWarmupGen = persisted;
+        } catch {}
+      }
       if (probed && probed === this.currentWarmupGen) return; // still alive
       // Container was recycled (or marker write failed during last warmup).
       // Reset cached state and re-warmup so restoreWorkspaceBackup runs
@@ -2052,6 +2185,13 @@ export class SessionDO extends DurableObject<Env> {
         await sandbox.exec(`echo ${shortGen} > /tmp/.oma-warm`);
         this.currentWarmupGen = shortGen;
         this.lastWarmupProbeAt = Date.now();
+        // Persist gen to DO storage so SessionDO restarts (CF deploy /
+        // platform recycle) don't lose track of the marker. Without this,
+        // every SessionDO restart triggered a false workspace_restored
+        // (in-memory `currentWarmupGen=null` !== container marker → probe
+        // sees mismatch → re-warmup). Now we recover it on next probe via
+        // `_loadWarmupGen`.
+        try { await this.ctx.storage.put("oma_warmup_gen", shortGen); } catch {}
       } catch (err) {
         // Marker write failure shouldn't fail warmup — but log it. Without
         // the marker the probe will always re-warmup (worst case: extra
@@ -3425,6 +3565,12 @@ export class SessionDO extends DurableObject<Env> {
         created_at INTEGER NOT NULL
       )
     `);
+    // Stale-row cleanup: the alarm-based stall detector was removed in the
+    // Gap 10 simplification, but live prod DOs still have its interval
+    // schedule rows. Each alarm tick now logs "callback not found" and
+    // force-resets the row, then re-fires — pure noise that masks real
+    // errors in observability. One-shot delete clears it.
+    sql.exec(`DELETE FROM cf_agents_schedules WHERE callback = '_oma_stallCheckHeartbeat'`);
   }
 
   // ── Schedule API (mirrors cf-agents) ──────────────────────────────────

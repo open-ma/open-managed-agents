@@ -113,6 +113,31 @@ export async function recordBackup(
         opts.sessionId ?? null,
       )
       .run();
+    // Overwrite semantics for per-session backups: keep only the LATEST
+    // backup for this (tenant, env, session) scope. Old D1 rows are
+    // deleted; the corresponding R2 objects become unreachable and are
+    // GC'd by the bucket's lifecycle TTL (7 days). This keeps storage
+    // cost bounded — without this, a long session that backs up every
+    // 2 minutes would accumulate thousands of squashfs blobs in R2.
+    if (opts.sessionId) {
+      try {
+        await db
+          .prepare(
+            `DELETE FROM workspace_backups
+             WHERE tenant_id = ?
+               AND environment_id = ?
+               AND source_session_id = ?
+               AND created_at < ?`,
+          )
+          .bind(opts.tenantId, opts.environmentId, opts.sessionId, opts.nowMs)
+          .run();
+      } catch (err) {
+        logWarn(
+          { op: "workspace_backups.prune_old_session", session_id: opts.sessionId, err },
+          "failed to prune older same-session backups; storage will GC via TTL",
+        );
+      }
+    }
   } catch (err) {
     logWarn(
       { op: "workspace_backups.record", tenant_id: opts.tenantId, environment_id: opts.environmentId, err },
