@@ -270,11 +270,13 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     try {
       const result = await sandbox.writeFile(path, content);
+      console.log(`[sandbox.writeFile] path=${path} bytes=${content.length} result=${JSON.stringify(result)}`);
       if (result && (result as { success?: boolean }).success === false) {
         throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
       }
       return "ok";
     } catch (err: any) {
+      console.warn(`[sandbox.writeFile] FAILED path=${path} err=${err?.message || err}`);
       throw new Error(`writeFile(${path}) failed: ${err?.message || err}`);
     }
   }
