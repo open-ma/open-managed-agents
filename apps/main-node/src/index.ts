@@ -591,6 +591,56 @@ v1.post("/sessions/:id/events", async (c) => {
 });
 
 /**
+ * Pick a sandbox backend per env. Defaults to LocalSubprocessSandbox for
+ * trusted-dev usage; remote/isolated backends opt in via SANDBOX_PROVIDER.
+ *
+ *   SANDBOX_PROVIDER=subprocess (default)
+ *   SANDBOX_PROVIDER=daytona    — Daytona Cloud (DAYTONA_API_KEY required)
+ *   SANDBOX_PROVIDER=litebox    — BoxLite micro-VM (local, hardware iso)
+ *
+ * Each adapter is dynamically imported so the deps that aren't peer-installed
+ * (e.g. @daytonaio/sdk in a litebox-only deploy) don't crash startup.
+ */
+async function buildSandbox(
+  sessionId: string,
+  workdir: string,
+): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
+  const provider = (process.env.SANDBOX_PROVIDER ?? "subprocess").toLowerCase();
+  if (provider === "daytona") {
+    const { DaytonaSandbox } = await import(
+      "@open-managed-agents/sandbox/adapters/daytona"
+    );
+    return new DaytonaSandbox({
+      sessionId,
+      apiKey: process.env.DAYTONA_API_KEY,
+      apiUrl: process.env.DAYTONA_API_URL,
+      image: process.env.SANDBOX_IMAGE,
+    });
+  }
+  if (provider === "litebox" || provider === "boxlite") {
+    const { LiteBoxSandbox } = await import(
+      "@open-managed-agents/sandbox/adapters/litebox"
+    );
+    return new LiteBoxSandbox({
+      image: process.env.SANDBOX_IMAGE,
+      memoryMib: process.env.LITEBOX_MEMORY_MIB
+        ? Number(process.env.LITEBOX_MEMORY_MIB)
+        : undefined,
+      cpus: process.env.LITEBOX_CPUS ? Number(process.env.LITEBOX_CPUS) : undefined,
+      name: `oma-${sessionId}`,
+    });
+  }
+  // Default: subprocess.
+  return new LocalSubprocessSandbox({
+    workdir,
+    // Memory blob root — when set, mountMemoryStore symlinks
+    // .mnt/memory/<storeName> straight to <root>/<storeId>/. memoryBlobs is
+    // always present in this build (it's a hard dep of memoryService).
+    memoryRoot: memoryBlobs.baseDir,
+  });
+}
+
+/**
  * Run one DefaultHarness turn for `sessionId` against `agentId` with the
  * given user message. Builds a HarnessContext on the fly: agent config from
  * agentsService, model from resolveModel + ANTHROPIC_API_KEY, tools from
@@ -620,19 +670,16 @@ async function runHarnessTurn(
       process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
       sessionId,
     );
-    const sandbox = new LocalSubprocessSandbox({
-      workdir: sandboxWorkdir,
-      // Memory blob root — when set, mountMemoryStore symlinks
-      // .mnt/memory/<storeName> straight to <root>/<storeId>/. memoryBlobs is
-      // always present in this build (it's a hard dep of memoryService).
-      memoryRoot: memoryBlobs.baseDir,
-    });
+    const sandbox = await buildSandbox(sessionId, sandboxWorkdir);
     // Wire outbound credential injection. Reads OMA_VAULT_PROXY_URL +
     // OMA_VAULT_CA_CERT from process.env; no-op when unset (sandbox bash
     // talks to upstreams directly with no header injection). The TenantId
     // / sessionId carry context for future per-session vault scoping —
     // today's matcher uses hostname only, so they're informational.
-    await sandbox.setOutboundContext({ tenantId, sessionId });
+    // setOutboundContext / mountMemoryStore are optional on the
+    // SandboxExecutor port — adapters that can't intercept outbound TLS
+    // (Daytona) or mount host dirs simply don't define them.
+    await sandbox.setOutboundContext?.({ tenantId, sessionId });
 
     // Mount memory stores bound to this session. Each row →
     // sandbox.mountMemoryStore({storeName, storeId, readOnly}).
@@ -643,6 +690,7 @@ async function runHarnessTurn(
     for (const binding of memoryBindings.results ?? []) {
       const store = await memoryService.getStore({ tenantId, storeId: binding.store_id });
       if (!store) continue;
+      if (!sandbox.mountMemoryStore) continue;
       await sandbox.mountMemoryStore({
         storeName: store.name,
         storeId: binding.store_id,

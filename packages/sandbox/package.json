@@ -6,7 +6,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./adapters/local-subprocess": "./src/adapters/local-subprocess.ts",
-    "./adapters/e2b": "./src/adapters/e2b.ts"
+    "./adapters/e2b": "./src/adapters/e2b.ts",
+    "./adapters/daytona": "./src/adapters/daytona.ts",
+    "./adapters/litebox": "./src/adapters/litebox.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -15,10 +17,18 @@
     "@open-managed-agents/shared": "workspace:*"
   },
   "peerDependencies": {
-    "e2b": "^1.0.0"
+    "e2b": "^1.0.0",
+    "@daytonaio/sdk": "^0.171.0",
+    "@boxlite-ai/boxlite": "^0.8.0"
   },
   "peerDependenciesMeta": {
     "e2b": {
+      "optional": true
+    },
+    "@daytonaio/sdk": {
+      "optional": true
+    },
+    "@boxlite-ai/boxlite": {
       "optional": true
     }
   }
