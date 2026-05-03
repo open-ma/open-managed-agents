@@ -22,12 +22,6 @@ const isMcpTool = (name: string) => name.startsWith("mcp_");
 export const isBuiltinTool = (name: string): boolean =>
   BUILTIN_TOOLS.has(name) || isMcpTool(name) || name.startsWith("call_agent_");
 
-// LLM call resilience settings
-// Stream-staleness detection: abort the model fetch if no chunk arrives
-// for this long. Heartbeat tick + abort live next to streamText() in
-// run() below — kept simple after a brief detour through DO-alarm-based
-// detection (see history note in run()).
-const STALE_CHUNK_THRESHOLD_MS = 60000;  // 60s with no new chunk → abort
 
 /**
  * Extract the MCP server name from a tool name like "mcp_github_call" or "mcp_github_list_tools".
@@ -320,26 +314,6 @@ export class DefaultHarness implements HarnessInterface {
       // turn-runtime would need a chunk-arrival callback to do it from
       // outside, which is more plumbing for marginal gain.
       const result = await (async () => {
-      // Stall detection — the simple version. ai-sdk's streamText awaits
-      // the provider stream forever if it stops emitting; the only way
-      // out is an abort signal trip. Arm a setInterval that fires every
-      // 10s, broadcasts a heartbeat, and aborts when the silence exceeds
-      // STALE_CHUNK_THRESHOLD_MS. onChunk resets lastChunkAt.
-      //
-      // History note: a previous attempt routed this through a cf-agents
-      // scheduled alarm + DO-instance state, on the theory that JS timers
-      // were being starved by fiber-await. That diagnosis was wrong — the
-      // heartbeat events were going through broadcastEvent (WS-only) and
-      // weren't visible in /events HTTP, looking like the timer never
-      // fired. The in-closure timer works fine; abort propagates via
-      // streamText's abortSignal as designed. Using runtime.broadcast
-      // here so events land in the SQL events table for verification.
-      const stallController = new AbortController();
-      let lastChunkAt = Date.now();
-      const anySig = (AbortSignal as unknown as { any?: (sigs: AbortSignal[]) => AbortSignal }).any;
-      const effectiveSignal = runtime.abortSignal && anySig
-        ? anySig([runtime.abortSignal, stallController.signal])
-        : stallController.signal;
       let currentMessageId: string | null = null;
       // Per-step thinking and tool-input streams keyed by the AI SDK
       // chunk's id (reasoning) or toolCallId (tool input). Multiple
@@ -369,23 +343,6 @@ export class DefaultHarness implements HarnessInterface {
       const streamStartedAt = Date.now();
       console.log(`[stream] streamText START model=${modelId} messages=${finalMessages.length} tools=${Object.keys(cached.tools ?? {}).length}`);
 
-      // Heartbeat + stall trigger. Fires every 10s while streamText runs.
-      // Broadcasts heartbeat for trajectory visibility; aborts the
-      // controller if no chunk has arrived for STALE_CHUNK_THRESHOLD_MS.
-      const heartbeatTimer = setInterval(() => {
-        const now = Date.now();
-        const sinceLast = now - lastChunkAt;
-        runtime.broadcast({
-          type: "span.model_chunk_heartbeat",
-          elapsed_ms: now - streamStartedAt,
-          since_last_chunk_ms: sinceLast,
-        } as unknown as SessionEvent);
-        if (sinceLast > STALE_CHUNK_THRESHOLD_MS && !stallController.signal.aborted) {
-          console.warn(`[stall] aborting stream after ${sinceLast}ms with no chunk (threshold=${STALE_CHUNK_THRESHOLD_MS}ms)`);
-          stallController.abort();
-        }
-      }, 10_000);
-
       try {
       const r = streamText({
       model,
@@ -393,12 +350,9 @@ export class DefaultHarness implements HarnessInterface {
       messages: finalMessages,
       tools: cached.tools,
       stopWhen: stepCountIs(100),
-      abortSignal: effectiveSignal,
+      abortSignal: runtime.abortSignal,
 
       onChunk: ({ chunk }) => {
-        // Reset the stall watchdog on every chunk type (text, reasoning,
-        // tool-input). Same semantic the heartbeat timer reads.
-        lastChunkAt = Date.now();
         // First chunk of this step → emit span.model_first_token. Pair via
         // model_request_start_id so consumers can split TTFT (start →
         // first_token) from generation (first_token → end). Any chunk
@@ -652,7 +606,6 @@ export class DefaultHarness implements HarnessInterface {
       }
       return { finishReason, text: finalText, toolCalls, toolResults, usage };
       } finally {
-        clearInterval(heartbeatTimer);
         const totalElapsed = Date.now() - streamStartedAt;
         console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);
       }
