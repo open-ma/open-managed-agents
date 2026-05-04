@@ -144,16 +144,16 @@ const injectVaultCredsHandler = async (
 };
 
 export class OmaSandbox extends Sandbox {
-  // Test: interceptHttps=true + NO per-turn backup. Hypothesis from
-  // observability: backup churn was creating frequent container restart
-  // opportunities, raising the chance of losing the cert-provisioning
-  // race ("Certificate not found, refusing to start"). With backup OFF
-  // (see runAgentTurn opts; persistWorkspace not wired), container
-  // should restart only on sleepAfter expiry — far less frequently —
-  // so cert race rarely fires.
-  override interceptHttps = true;
+  // SDK 0.9.1 cert provisioning bug: with interceptHttps=true, container
+  // PID 1 sometimes loses a startup race and exits with "Certificate not
+  // found, refusing to start without HTTPS interception enabled". Tested
+  // with per-turn backup OFF (commit ae87ebf) — still fired on every
+  // container restart, so backup is NOT the trigger. Real fix is in CF's
+  // hands. Workaround: keep interceptHttps off; HTTPS-only outbound
+  // targets requiring vault Bearer must route through main worker RPC.
+  override interceptHttps = false;
 
-  // Container lifecycle: 5-minute idle TTL.
+  // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
   override sleepAfter = "5m";
 
   // Lightweight visibility: log every container exit so we can see why
