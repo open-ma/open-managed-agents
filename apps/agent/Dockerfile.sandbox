@@ -1,1 +1,7 @@
 FROM docker.io/openma/sandbox-base:0.9.1
+
+# Wrap the original sandbox-server entrypoint so its stdout+stderr is
+# captured to /tmp/.oma-sandbox-server.log alongside the normal stream.
+# We grep this file from a fresh container to see what killed PID 1
+# of the previous incarnation.
+ENTRYPOINT ["sh","-c","exec /container-server/sandbox 2>&1 | tee -a /tmp/.oma-sandbox-server.log"]
