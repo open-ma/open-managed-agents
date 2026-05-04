@@ -151,12 +151,8 @@ export class OmaSandbox extends Sandbox {
   // the container automatically.
   override interceptHttps = true;
 
-  // Container lifecycle: 20-minute idle TTL. Long enough that any
-  // reasonable single agent turn (model fetch + tool calls) survives
-  // without us doing explicit ping-pong; CF Sandbox SDK auto-renews
-  // on every container call. When session goes truly idle for 20+ min,
-  // container stops (5-min CF billing window after that).
-  override sleepAfter = "20m";
+  // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
+  override sleepAfter = "5m";
 
   // Lightweight visibility: log every container exit so we can see why
   // containers recycle without the SQL table from the prior diagnostic
