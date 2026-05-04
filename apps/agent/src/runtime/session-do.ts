@@ -797,11 +797,9 @@ export class SessionDO extends DurableObject<Env> {
   private async drainEventQueue(): Promise<void> {
     // Concurrency guard — only one drain loop at a time
     if (this.state.status === "running" || this.state.status === "terminated") {
-      console.log(`[drain] skipped: status=${this.state.status}`);
       return;
     }
 
-    console.log("[drain] starting");
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
     while (true) {
@@ -816,11 +814,9 @@ export class SessionDO extends DurableObject<Env> {
       ]);
 
       if (!pendingUserEvent) {
-        console.log("[drain] queue empty, done");
         break;
       }
 
-      console.log(`[drain] processing event seq=${pendingUserEvent.seq}`);
       this.setState({ ...this.state, status: "running" });
       // Fresh per-turn dedup window for agent.message broadcasts. See
       // broadcastedMessageIds field doc for the recovery-replay context.
@@ -1136,7 +1132,6 @@ export class SessionDO extends DurableObject<Env> {
         // re-trigger if this background promise dies before drain runs.
         console.log("[post /event] user.message appended, firing drainEventQueue");
         this.drainEventQueue();
-        console.log("[post /event] returning 202");
         return new Response(null, { status: 202 });
       }
 

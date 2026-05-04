@@ -261,7 +261,6 @@ export class CloudflareSandbox implements SandboxExecutor {
       const result = await sandbox.readFile(path, { encoding: "utf-8" });
       // Handle both string and {success, content} shapes
       if (typeof result === "string") return result;
-      console.log(`[sandbox.readFile] path=${path} success=${(result as { success?: boolean }).success} bytes=${(result as { content?: string }).content?.length ?? 0}`);
       if ((result as { success?: boolean }).success === false) {
         throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
       }
@@ -276,7 +275,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     try {
       const result = await sandbox.writeFile(path, content);
-      console.log(`[sandbox.writeFile] path=${path} bytes=${content.length} result=${JSON.stringify(result)}`);
       if (result && (result as { success?: boolean }).success === false) {
         throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
       }
@@ -303,7 +301,6 @@ export class CloudflareSandbox implements SandboxExecutor {
     const b64 = btoa(bin);
     try {
       const result = await sandbox.writeFile(path, b64, { encoding: "base64" });
-      console.log(`[sandbox.writeFileBytes] path=${path} bytes=${bytes.length} result=${JSON.stringify(result)}`);
       if (result && (result as { success?: boolean }).success === false) {
         throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
       }
