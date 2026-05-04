@@ -144,13 +144,15 @@ const injectVaultCredsHandler = async (
 };
 
 export class OmaSandbox extends Sandbox {
-  // Re-enabled after demo bisection (cf-sandbox-cert-demo): minimal demos
-  // 1/3/4/5 on the same SDK 0.9.1 + base image all pass with interceptHttps
-  // true on cloud, including DO-from-DO + 6-op concurrent warmup storm.
-  // If cert error returns in prod, the trigger is something demos didn't
-  // cover (long-lived eviction recovery, multi-session container reuse,
-  // platform-side cert push race) — capture fresh containers-dataset logs
-  // before flipping back to false.
+  // Required by sandbox-container PID 1: with interceptHttps=true, the
+  // container's trustRuntimeCert() polls cloudflare-containers-ca.crt for
+  // 5s on startup. The cert is only pushed by the platform once
+  // setOutboundHandler has been called from the worker side — so
+  // session-do.ts must call setOutboundContext for every session, vault
+  // or not, before the 5s deadline. See cert-race bisection 2026-05-04
+  // (cf-sandbox-cert-demo): containers without the handler call exit(1)
+  // with "Certificate not found, refusing to start without HTTPS
+  // interception enabled" 100% of the time.
   override interceptHttps = true;
 
   // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
