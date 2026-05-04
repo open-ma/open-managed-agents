@@ -1966,11 +1966,10 @@ export class SessionDO extends DurableObject<Env> {
       // 2026-05-04. The handler itself is a no-op transparent proxy when
       // no vault credentials match the request host (oma-sandbox.ts:82-97).
       //
-      // Trade-off: this routes all container HTTPS through Workers fetch,
-      // which strips Content-Length from HEAD responses. SDK's s3fs-based
-      // restoreBackup expects HEAD Content-Length intact; no-vault TB
-      // pilot / persistence flows accept this for now in exchange for
-      // container surviving past the cert deadline.
+      // R2 traffic (createBackup / restoreBackup squashfs PUT/GET/HEAD)
+      // is routed away from this catch-all by the static `outboundByHost`
+      // entry in oma-sandbox.ts — without that bypass the materialize-and-
+      // re-PUT flow corrupts the squashfs blob (sandbox-sdk#619).
       if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id) {
         await sandbox.setOutboundContext({
           tenantId: this.state.tenant_id,
