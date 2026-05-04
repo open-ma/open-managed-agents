@@ -262,3 +262,18 @@ export class OmaSandbox extends Sandbox {
 }).outboundHandlers = {
   inject_vault_creds: injectVaultCredsHandler,
 };
+
+// Per-host bypass for R2 — createBackup / restoreBackup do raw S3-style
+// PUT/GET/HEAD against `*.r2.cloudflarestorage.com` from inside the
+// container. Routing those through inject_vault_creds (which materializes
+// bodies + uses Workers fetch) corrupts the squashfs blob — see
+// cloudflare/sandbox-sdk#619 ("Failed to mount squashfs: This doesn't
+// look like a squashfs image" when interceptHttps + custom handler).
+// outboundByHost runs at line 217 of @cloudflare/containers/lib/container.js
+// BEFORE the catch-all handler, so a passthrough fetch here keeps the
+// raw bytes + headers intact and restoreBackup actually works.
+(OmaSandbox as unknown as {
+  outboundByHost: Record<string, (req: Request) => Promise<Response>>;
+}).outboundByHost = {
+  "*.r2.cloudflarestorage.com": (req: Request) => fetch(req),
+};
