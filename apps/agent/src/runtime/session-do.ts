@@ -1745,6 +1745,11 @@ export class SessionDO extends DurableObject<Env> {
         this.env.AUTH_DB
       ) {
         try {
+          // Cert-race investigation: clean container, no backup/restore noise.
+          // Backup creation already off (maybeBackupWorkspace has no callers);
+          // also skip restore so /workspace is guaranteed empty on every warm.
+          // Re-enable once cert behaviour is understood.
+          const skipRestoreForCertProbe = true;
           let hasGitRepo = false;
           if (this.state.session_id) {
             const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
@@ -1753,7 +1758,12 @@ export class SessionDO extends DurableObject<Env> {
               (r) => r.type === "github_repository" || r.type === "github_repo",
             );
           }
-          if (hasGitRepo) {
+          if (skipRestoreForCertProbe) {
+            logWarn(
+              { op: "session_do.warmup.skip_restore_cert_probe", session_id: this.state.session_id },
+              "skipping workspace restore — cert-race investigation, clean container only",
+            );
+          } else if (hasGitRepo) {
             logWarn(
               { op: "session_do.warmup.skip_restore_github_repo", session_id: this.state.session_id },
               "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",

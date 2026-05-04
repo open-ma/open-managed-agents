@@ -144,14 +144,14 @@ const injectVaultCredsHandler = async (
 };
 
 export class OmaSandbox extends Sandbox {
-  // SDK 0.9.1 cert provisioning bug: with interceptHttps=true, container
-  // PID 1 sometimes loses a startup race and exits with "Certificate not
-  // found, refusing to start without HTTPS interception enabled". Tested
-  // with per-turn backup OFF (commit ae87ebf) — still fired on every
-  // container restart, so backup is NOT the trigger. Real fix is in CF's
-  // hands. Workaround: keep interceptHttps off; HTTPS-only outbound
-  // targets requiring vault Bearer must route through main worker RPC.
-  override interceptHttps = false;
+  // Re-enabled after demo bisection (cf-sandbox-cert-demo): minimal demos
+  // 1/3/4/5 on the same SDK 0.9.1 + base image all pass with interceptHttps
+  // true on cloud, including DO-from-DO + 6-op concurrent warmup storm.
+  // If cert error returns in prod, the trigger is something demos didn't
+  // cover (long-lived eviction recovery, multi-session container reuse,
+  // platform-side cert push race) — capture fresh containers-dataset logs
+  // before flipping back to false.
+  override interceptHttps = true;
 
   // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
   override sleepAfter = "5m";
