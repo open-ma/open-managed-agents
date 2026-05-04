@@ -357,6 +357,55 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
   }
 
+  /**
+   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
+   * its `onActivityExpired` hook (fires right before sleepAfter teardown)
+   * can write the final /workspace snapshot into AUTH_DB scoped to this
+   * session. Best-effort — failure here just means the next session in
+   * this scope falls back to the previous backup or empty workspace.
+   */
+  async setBackupContext(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (!opts.tenantId || !opts.environmentId || !opts.sessionId) return;
+    try {
+      const sandbox = (await this.getSandbox()) as unknown as {
+        setBackupContext?: (ctx: { tenantId: string; environmentId: string; sessionId: string }) => Promise<void>;
+      };
+      if (typeof sandbox.setBackupContext !== "function") return;
+      await sandbox.setBackupContext({
+        tenantId: opts.tenantId,
+        environmentId: opts.environmentId,
+        sessionId: opts.sessionId,
+      });
+    } catch (err) {
+      console.error(
+        `[sandbox] setBackupContext failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * Trigger an immediate /workspace snapshot via the OmaSandbox helper.
+   * Used by /destroy to get a final snapshot before sandbox.destroy() —
+   * sleepAfter teardown handles itself via onActivityExpired. Best-effort.
+   */
+  async snapshotWorkspaceNow(): Promise<void> {
+    try {
+      const sandbox = (await this.getSandbox()) as unknown as {
+        snapshotWorkspaceNow?: () => Promise<void>;
+      };
+      if (typeof sandbox.snapshotWorkspaceNow !== "function") return;
+      await sandbox.snapshotWorkspaceNow();
+    } catch (err) {
+      console.error(
+        `[sandbox] snapshotWorkspaceNow failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
 
   async destroy(): Promise<void> {
     try {

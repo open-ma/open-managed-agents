@@ -243,6 +243,24 @@ export interface SandboxExecutor {
     tenantId: string;
     sessionId: string;
   }): Promise<void>;
+  /**
+   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
+   * its onActivityExpired hook (sleepAfter teardown) records the final
+   * /workspace snapshot scoped to this session. See oma-sandbox.ts for
+   * the actual backup logic.
+   */
+  setBackupContext?(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
+   * Trigger an immediate /workspace snapshot via OmaSandbox. Used by the
+   * explicit-destroy path to capture state before sandbox.destroy() wipes
+   * the container; the sleepAfter teardown handles itself via
+   * onActivityExpired without needing this call.
+   */
+  snapshotWorkspaceNow?(): Promise<void>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
   /**
