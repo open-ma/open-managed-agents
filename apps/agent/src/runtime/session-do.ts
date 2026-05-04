@@ -2376,17 +2376,49 @@ export class SessionDO extends DurableObject<Env> {
     );
 
     const tasks = this.ctx.storage.sql.exec(
-      `SELECT task_id, pid, output_file FROM background_tasks`
+      `SELECT task_id, pid, output_file, created_at FROM background_tasks`
     ).toArray();
 
     if (!tasks.length) return;
 
     const sandbox = this.getOrCreateSandbox();
     let anyPending = false;
+    const BG_TASK_MAX_LIFETIME_MS = 30 * 60 * 1000;
 
     for (const task of tasks) {
-      const { task_id, pid, output_file } = task as { task_id: string; pid: string; output_file: string };
+      const { task_id, pid, output_file, created_at } = task as { task_id: string; pid: string; output_file: string; created_at: string };
       try {
+        // Hard lifetime cap — bg tasks can keep the container (and the
+        // worker billing meter) alive forever otherwise. SIGKILL the pid,
+        // inject a synthetic user.message so the agent sees the kill and
+        // doesn't block on a notification that's never coming.
+        const ageMs = Date.now() - Date.parse(created_at + "Z");
+        const overCap = Number.isFinite(ageMs) && ageMs > BG_TASK_MAX_LIFETIME_MS;
+        if (overCap) {
+          let killNote = "";
+          if (pid && /^\d+$/.test(pid)) {
+            try { await sandbox.exec(`kill -9 ${pid} 2>/dev/null; true`, 5000); } catch (e) {
+              killNote = ` (kill failed: ${(e as Error).message ?? e})`;
+            }
+          }
+          let output = "";
+          try { output = await sandbox.readFile(output_file); } catch {}
+          const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
+          const ageMin = Math.round(ageMs / 60000);
+          const notifEvent: SessionEvent = {
+            type: "user.message",
+            content: [{
+              type: "text",
+              text: `<task_notification>\nBackground task ${task_id} exceeded the 30-minute lifetime cap and was killed${killNote}.\nRan for: ${ageMin} min\nOutput file (partial): ${output_file}\n\n${output.slice(0, 3000)}\n</task_notification>`,
+            }],
+          };
+          history.append(notifEvent);
+          this.broadcastEvent(notifEvent);
+          this.ctx.storage.sql.exec(`DELETE FROM background_tasks WHERE task_id = ?`, task_id);
+          await this.drainEventQueue();
+          continue;
+        }
+
         // Check if process is still running
         let taskDone = false;
         if (!pid || pid === "undefined" || !/^\d+$/.test(pid)) {
