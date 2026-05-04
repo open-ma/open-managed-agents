@@ -144,16 +144,16 @@ const injectVaultCredsHandler = async (
 };
 
 export class OmaSandbox extends Sandbox {
-  // HTTPS interception is broken in @cloudflare/sandbox 0.9.1: container
-  // PID 1 exits with "Certificate not found, refusing to start without
-  // HTTPS interception enabled" right after start, killing the container
-  // every few seconds. Until SDK ships a fix (or we work around the
-  // ephemeral-disk cert lifecycle), interception OFF — vault Bearer
-  // injection only fires for HTTP outbound. HTTPS-only targets (Linear
-  // MCP) need a different path.
-  override interceptHttps = false;
+  // Test: interceptHttps=true + NO per-turn backup. Hypothesis from
+  // observability: backup churn was creating frequent container restart
+  // opportunities, raising the chance of losing the cert-provisioning
+  // race ("Certificate not found, refusing to start"). With backup OFF
+  // (see runAgentTurn opts; persistWorkspace not wired), container
+  // should restart only on sleepAfter expiry — far less frequently —
+  // so cert race rarely fires.
+  override interceptHttps = true;
 
-  // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
+  // Container lifecycle: 5-minute idle TTL.
   override sleepAfter = "5m";
 
   // Lightweight visibility: log every container exit so we can see why
