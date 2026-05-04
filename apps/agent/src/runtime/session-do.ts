@@ -1745,11 +1745,6 @@ export class SessionDO extends DurableObject<Env> {
         this.env.AUTH_DB
       ) {
         try {
-          // Cert-race investigation: clean container, no backup/restore noise.
-          // Backup creation already off (maybeBackupWorkspace has no callers);
-          // also skip restore so /workspace is guaranteed empty on every warm.
-          // Re-enable once cert behaviour is understood.
-          const skipRestoreForCertProbe = true;
           let hasGitRepo = false;
           if (this.state.session_id) {
             const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
@@ -1758,12 +1753,7 @@ export class SessionDO extends DurableObject<Env> {
               (r) => r.type === "github_repository" || r.type === "github_repo",
             );
           }
-          if (skipRestoreForCertProbe) {
-            logWarn(
-              { op: "session_do.warmup.skip_restore_cert_probe", session_id: this.state.session_id },
-              "skipping workspace restore — cert-race investigation, clean container only",
-            );
-          } else if (hasGitRepo) {
+          if (hasGitRepo) {
             logWarn(
               { op: "session_do.warmup.skip_restore_github_repo", session_id: this.state.session_id },
               "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
@@ -1971,20 +1961,23 @@ export class SessionDO extends DurableObject<Env> {
       // container). The handler is a transparent HTTP proxy: body
       // streams through, response is returned unchanged.
       //
-      // **Only bind when this session has a vault attached.** Binding the
-      // catch-all handler intercepts ALL container HTTPS through our
-      // outbound, which routes via Workers fetch — and Workers strips
-      // Content-Length from HEAD responses (CF runtime behavior, see
-      // 2026-05-02 Gap 5 root cause). For sessions without any vault
-      // there's nothing to inject, so no MITM is needed; container HTTPS
-      // goes direct, HEAD Content-Length round-trips intact, and SDK's
-      // s3fs-based restoreBackup works for TB pilot / persistence flows.
+      // **MUST call this for every session, vault or not.** Cloudflare's
+      // sandbox-container PID 1 runs trustRuntimeCert() at startup which
+      // polls /etc/cloudflare/certs/cloudflare-containers-ca.crt for 5s.
+      // The cert is only pushed by the platform once `setOutboundHandler`
+      // has been called from the worker side. Skipping this call for
+      // no-vault sessions made every such container exit(1) at the 5s
+      // mark with "Certificate not found, refusing to start without
+      // HTTPS interception enabled" — see cf-sandbox-cert-demo bisection
+      // 2026-05-04. The handler itself is a no-op transparent proxy when
+      // no vault credentials match the request host (oma-sandbox.ts:82-97).
       //
-      // Sessions WITH vault accept the MITM HEAD limitation; their
-      // workloads are typically JSON-API tool calls (POST/GET with body)
-      // that round-trip cleanly through the transparent handler.
-      const hasVault = (this.state.vault_ids?.length ?? 0) > 0;
-      if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id && hasVault) {
+      // Trade-off: this routes all container HTTPS through Workers fetch,
+      // which strips Content-Length from HEAD responses. SDK's s3fs-based
+      // restoreBackup expects HEAD Content-Length intact; no-vault TB
+      // pilot / persistence flows accept this for now in exchange for
+      // container surviving past the cert deadline.
+      if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id) {
         await sandbox.setOutboundContext({
           tenantId: this.state.tenant_id,
           sessionId: this.state.session_id,
