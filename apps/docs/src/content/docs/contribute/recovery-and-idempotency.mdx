@@ -1,0 +1,114 @@
+---
+title: Recovery & Idempotency
+description: How a SessionDO recovers after Cloudflare evicts it, what state survives, and the design rule cost-incurring operations must follow to stay safe under recovery.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+A SessionDO can be evicted at any moment by the Cloudflare runtime. In-memory
+fields disappear; the next request (or scheduled alarm) wakes a fresh DO
+instance that must reconstruct state and continue the agent's turn without
+the user noticing. This page explains how that works, what it costs, and the
+design rule new code has to follow to stay safe.
+
+## What survives eviction
+
+| Surface | Where | Survives? |
+|---|---|---|
+| `this.state` (status, agent_id, vault_ids, …) | `cf_agents_state` SQL row | ✅ |
+| Conversation history (events) | `events` SQL table + R2 spillover | ✅ |
+| Partial LLM stream chunks | `streams` SQL table | ✅ |
+| Background tasks (`bash run_in_background`) | `background_tasks` SQL table | ✅ |
+| Schedules (alarms) | `cf_agents_schedules` SQL row + DO alarm | ✅ |
+| Active fibers (in-flight `runFiber`) | `cf_agents_runs` SQL row | ✅ |
+| In-memory caches (`sandboxWarmupPromise`, `currentWarmupGen`, in-memory dedup sets) | RAM only | ❌ — re-derived |
+| Sandbox container `/workspace` | R2-backed via `createBackup` / `restoreBackup` | ✅ if backed up |
+| Sandbox container `/tmp`, processes | Container memory | ❌ — sleepAfter or restart wipes them |
+
+## The recovery path
+
+1. Cloudflare evicts the DO. Memory is gone; SQL is intact.
+2. A request or alarm wakes a fresh DO. The constructor calls
+   `_loadStateFromSql` and registers schemas (`ensureSchema`).
+3. On the alarm path, `_checkRunFibers` scans `cf_agents_runs`. Any row that
+   isn't claimed by a live in-memory fiber is treated as orphaned.
+4. For each orphan, `onFiberRecovered({ id, name, snapshot })` runs:
+   - Force `state.status` from `running` → `idle` so `drainEventQueue`
+     doesn't skip the turn as "still active."
+   - Build a recovery context by reading SQL: the last `user.message`,
+     all events emitted since, plus partial stream chunks (status
+     `streaming` or `interrupted`).
+   - Call `recoverAgentTurn(...)`, which re-invokes `streamText` with the
+     prior context spliced into the prompt and a dedup set
+     (`broadcastedMessageIds`) so `agent.message` events that already
+     reached the client aren't re-emitted.
+   - Emit `session.status_rescheduled` so the trajectory shows the cut.
+5. After the recovery decision returns `continue: true`,
+   `drainEventQueue()` resumes normal turn processing.
+
+The recovery loop is capped at five attempts per turn. The sixth attempt
+fires `forceIdle` and emits `session.error` so a wedged session can't burn
+budget forever.
+
+## What recovery cannot do
+
+`recoverAgentTurn` can rebuild the conversation, but the runtime has no
+visibility into whether a side-effecting call already executed when the
+eviction hit. The model emits a tool call, the worker dispatches it to the
+sandbox, the DO is evicted before the result event lands — on resume, the
+next prompt looks like the tool call hasn't happened yet, so the model is
+free to issue it again.
+
+That means **tool calls executed across an eviction boundary may run more
+than once**. For most reads (`bash("ls /workspace")`) this is harmless;
+for mutations (`rm -rf`, `gh pr merge`, paid API calls) it isn't.
+
+The same applies one level up: if `streamText` fired the LLM request and
+the eviction hit before chunks finished arriving, recovery re-issues a
+fresh model request rather than resuming the old one — two billings, two
+potentially divergent answers.
+
+<Aside type="caution">
+We currently accept this trade-off. Until the design rule below is wired
+into more code paths, treat any cost or side-effecting operation as
+"may execute zero, once, or twice" across eviction.
+</Aside>
+
+## Design rule: cost ops carry an implicit idempotency key
+
+Any operation that costs money or has externally-visible side effects —
+LLM requests, sandbox tool exec, vault-bearing HTTPS, third-party API
+mutations — should be designed so that the recovery path can detect it
+ran before and either replay-suppress or re-attach to the prior result.
+
+The pattern, to apply when adding new such ops:
+
+1. **Derive a stable op id** from the canonical operation arguments and
+   the current turn position — `op_id = hash(op_kind || canonical_args || turn_seq)`.
+2. **Write `op_started`** to SQL (with the `op_id`) before initiating
+   the external call.
+3. **Write `op_completed`** with the result reference after the call
+   succeeds.
+4. **At recovery start, scan for `op_started` without `op_completed`**:
+   - If the upstream supports idempotency keys (Stripe, OpenAI's
+     `idempotency-key` header, GitHub Actions reruns), pass the `op_id`
+     and let the upstream collapse the duplicate.
+   - For sandbox exec: write the result to a deterministic file path
+     keyed by `op_id`; recovery reads it back instead of re-running.
+   - For LLM streams: cache the partial chunks under `op_id`; recovery
+     resumes from the last known chunk rather than re-issuing.
+5. **For ops with no upstream idempotency support and unsafe replay**
+   (e.g., webhook fan-out, irreversible state changes), surface the
+   ambiguity to the agent: "operation `op_id` may have executed; verify
+   before retrying." Do not silently re-run.
+
+Authoring checklist before merging a new cost op:
+
+- [ ] What's the op id — what makes two attempts "the same op"?
+- [ ] If the DO is evicted at the moment between issuing the call and
+      receiving the response, what does recovery do?
+- [ ] If the upstream gets the same op id twice, does it dedupe?
+- [ ] What does the agent see if the answer is "we don't know"?
+
+If you can't answer those, the op isn't ready to ship to a path that can
+be evicted.
