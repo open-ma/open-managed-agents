@@ -2,6 +2,7 @@ import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import { unzipSync } from "fflate";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
 
@@ -225,59 +226,215 @@ function validateFiles(files: SkillFileInput[]): string | null {
 }
 
 // ---------------------------------------------------------------------------
-// POST /v1/skills — create a custom skill
+// Zip handling — accept a packaged skill folder and convert to the same
+// SkillFileInput[] shape the JSON endpoint already consumes. Strips the
+// common top-level directory (Anthropic-style `my-skill/SKILL.md`),
+// filters platform junk, and classifies each file as utf8 vs base64 by
+// strict TextDecoder.
 // ---------------------------------------------------------------------------
 
-app.post("/", async (c) => {
-  const t = c.get("tenant_id");
-  // Cheap upfront rejects — same gates as POST /v1/files. Both soft-pass
-  // when unconfigured.
-  const sizeCheck = checkUploadSize(c.env, c.req.raw);
-  if (sizeCheck) return sizeCheck;
-  const freqCheck = await checkUploadFreq(c.env, t);
-  if (freqCheck) return freqCheck;
+const IGNORED_BASENAMES = new Set([".DS_Store", "Thumbs.db"]);
+const IGNORED_PREFIXES = ["__MACOSX/", ".git/", ".idea/", ".vscode/"];
 
-  const bucket = ensureBucket(c);
-  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+function zipEntryIgnored(path: string): boolean {
+  if (IGNORED_PREFIXES.some((p) => path.startsWith(p) || path.includes(`/${p}`))) return true;
+  const base = path.split("/").pop() || "";
+  if (IGNORED_BASENAMES.has(base)) return true;
+  if (base.startsWith("._")) return true;
+  return false;
+}
 
-  const body = await c.req.json<{
-    display_title?: string;
-    name?: string;
-    description?: string;
-    files: SkillFileInput[];
-  }>();
+function commonRootPrefix(paths: string[]): string {
+  if (paths.length === 0) return "";
+  const firstSlash = paths[0].indexOf("/");
+  if (firstSlash < 0) return "";
+  const candidate = paths[0].slice(0, firstSlash + 1);
+  return paths.every((p) => p.startsWith(candidate)) ? candidate : "";
+}
 
-  if (!body.files || !Array.isArray(body.files) || body.files.length === 0) {
-    return c.json({ error: "files array is required and must not be empty" }, 400);
+function formatBytesHuman(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function bytesToBase64Str(bytes: Uint8Array): string {
+  let bin = "";
+  const CHUNK = 8192;
+  for (let i = 0; i < bytes.length; i += CHUNK) {
+    bin += String.fromCharCode.apply(
+      null,
+      bytes.subarray(i, i + CHUNK) as unknown as number[],
+    );
+  }
+  return btoa(bin);
+}
+
+function tryDecodeUtf8(bytes: Uint8Array): string | null {
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
+interface ParsedSkillZip {
+  files: SkillFileInput[];
+  name?: string;
+  description?: string;
+}
+
+/** Caps applied during unzip to defend against zip-bombs. The dialed limits
+ *  are deliberately generous — the largest legitimate Anthropic-style skill
+ *  observed in the field is ~5 MB / ~100 files, so 100 MB / 25 MB per file /
+ *  500 files leaves ~20× headroom. A maliciously crafted zip can declare
+ *  multi-GB uncompressed sizes from a kilobyte payload; we reject as soon
+ *  as the central-directory metadata exceeds these limits, before
+ *  decompression actually runs. */
+const ZIP_MAX_TOTAL_UNCOMPRESSED = 100 * 1024 * 1024;
+const ZIP_MAX_FILE_UNCOMPRESSED = 25 * 1024 * 1024;
+const ZIP_MAX_FILE_COUNT = 500;
+
+class ZipLimitError extends Error {}
+
+function parseSkillZipBytes(bytes: Uint8Array): ParsedSkillZip {
+  let entries: Record<string, Uint8Array>;
+  try {
+    let totalUncompressed = 0;
+    let count = 0;
+    entries = unzipSync(bytes, {
+      filter: (file) => {
+        // Skip directory entries and platform junk before they count
+        // against the budget — fflate would otherwise call us for every
+        // __MACOSX/* entry.
+        if (file.name.endsWith("/") || zipEntryIgnored(file.name)) return false;
+        count++;
+        if (count > ZIP_MAX_FILE_COUNT) {
+          throw new ZipLimitError(
+            `Zip has too many files (>${ZIP_MAX_FILE_COUNT}); refusing to process`,
+          );
+        }
+        if (file.originalSize > ZIP_MAX_FILE_UNCOMPRESSED) {
+          throw new ZipLimitError(
+            `File "${file.name}" is ${formatBytesHuman(file.originalSize)} uncompressed; per-file limit is ${formatBytesHuman(ZIP_MAX_FILE_UNCOMPRESSED)}`,
+          );
+        }
+        totalUncompressed += file.originalSize;
+        if (totalUncompressed > ZIP_MAX_TOTAL_UNCOMPRESSED) {
+          throw new ZipLimitError(
+            `Zip uncompressed size exceeds ${formatBytesHuman(ZIP_MAX_TOTAL_UNCOMPRESSED)} (zip-bomb defense)`,
+          );
+        }
+        return true;
+      },
+    });
+  } catch (err) {
+    if (err instanceof ZipLimitError) throw err;
+    throw new Error(
+      `Could not read zip: ${err instanceof Error ? err.message : "unknown error"}`,
+    );
   }
 
-  const validateErr = validateFiles(body.files);
-  if (validateErr) return c.json({ error: validateErr }, 400);
+  // fflate's filter already dropped directory + ignored entries; what
+  // remains is the actual skill payload.
+  const usable = Object.entries(entries);
+  if (usable.length === 0) {
+    throw new Error("Zip is empty (after filtering metadata files)");
+  }
 
-  const extracted = extractFromFiles(body.files);
-  const name = body.name || extracted.name;
-  const description = body.description || extracted.description || "";
-  const displayTitle = body.display_title || name || "";
+  const prefix = commonRootPrefix(usable.map(([p]) => p));
+  const stripped = usable.map(([path, data]) => ({
+    path: prefix ? path.slice(prefix.length) : path,
+    bytes: data,
+  }));
+
+  const skillMd = stripped.find((e) => e.path.toLowerCase() === "skill.md");
+  if (!skillMd) {
+    throw new Error(
+      "Zip must contain SKILL.md at the root (or a single top-level folder containing it)",
+    );
+  }
+  const skillMdText = tryDecodeUtf8(skillMd.bytes);
+  if (skillMdText === null) {
+    throw new Error("SKILL.md must be UTF-8 text");
+  }
+
+  const files: SkillFileInput[] = [];
+  for (const entry of stripped) {
+    if (!entry.path) continue;
+    const decoded =
+      entry.path === skillMd.path
+        ? skillMdText
+        : tryDecodeUtf8(entry.bytes);
+    if (decoded !== null) {
+      files.push({ filename: entry.path, content: decoded, encoding: "utf8" });
+    } else {
+      files.push({
+        filename: entry.path,
+        content: bytesToBase64Str(entry.bytes),
+        encoding: "base64",
+      });
+    }
+  }
+
+  const { name, description } = parseFrontmatter(skillMdText);
+  return { files, name, description };
+}
+
+
+
+// ---------------------------------------------------------------------------
+// Shared persistence — both the JSON POST and the multipart upload endpoint
+// converge here once they have a validated SkillFileInput[] in hand.
+// ---------------------------------------------------------------------------
+
+interface PersistArgs {
+  files: SkillFileInput[];
+  display_title?: string;
+  name?: string;
+  description?: string;
+}
+
+async function persistNewSkill(
+  env: Env,
+  bucket: R2Bucket,
+  tenantId: string,
+  args: PersistArgs,
+): Promise<
+  | { ok: true; skill: SkillMeta; files: Array<{ filename: string; content: string; encoding: "utf8" | "base64" }>; status: 201 }
+  | { ok: false; status: number; error: string }
+> {
+  if (!args.files || args.files.length === 0) {
+    return { ok: false, status: 400, error: "files array is required and must not be empty" };
+  }
+  const validateErr = validateFiles(args.files);
+  if (validateErr) return { ok: false, status: 400, error: validateErr };
+
+  const extracted = extractFromFiles(args.files);
+  const name = args.name || extracted.name;
+  const description = args.description || extracted.description || "";
+  const displayTitle = args.display_title || name || "";
 
   if (!name) {
-    return c.json(
-      { error: "name is required (provide it explicitly or via SKILL.md frontmatter)" },
-      400,
-    );
+    return {
+      ok: false,
+      status: 400,
+      error: "name is required (provide it explicitly or via SKILL.md frontmatter)",
+    };
   }
   if (!NAME_RE.test(name)) {
-    return c.json(
-      { error: "name must be lowercase letters, numbers, and hyphens only (max 64 chars)" },
-      400,
-    );
+    return {
+      ok: false,
+      status: 400,
+      error: "name must be lowercase letters, numbers, and hyphens only (max 64 chars)",
+    };
   }
 
   const now = new Date().toISOString();
   const id = `skill_${generateId()}`;
   const versionId = Date.now().toString();
 
-  const manifest = await writeFilesToR2(bucket, t, id, versionId, body.files);
-
+  const manifest = await writeFilesToR2(bucket, tenantId, id, versionId, args.files);
   const skill: SkillMeta = {
     id,
     display_title: displayTitle,
@@ -290,14 +447,139 @@ app.post("/", async (c) => {
   const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
 
   await Promise.all([
-    c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
-    c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
+    env.CONFIG_KV.put(kvKey(tenantId, "skill", id), JSON.stringify(skill)),
+    env.CONFIG_KV.put(kvKey(tenantId, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
-  // Return the same shape the previous API returned: skill metadata + files
-  // with content (so existing CLI tooling keeps working).
-  const filesOut = await readFilesFromR2(bucket, t, id, versionId, manifest);
-  return c.json({ ...skill, files: filesOut }, 201);
+  const filesOut = await readFilesFromR2(bucket, tenantId, id, versionId, manifest);
+  return { ok: true, status: 201, skill, files: filesOut };
+}
+
+async function persistNewVersion(
+  env: Env,
+  bucket: R2Bucket,
+  tenantId: string,
+  skillId: string,
+  args: PersistArgs,
+): Promise<
+  | { ok: true; version: SkillVersion; status: 201 }
+  | { ok: false; status: number; error: string }
+> {
+  const raw = await env.CONFIG_KV.get(kvKey(tenantId, "skill", skillId));
+  if (!raw) return { ok: false, status: 404, error: "Skill not found" };
+  const skill: SkillMeta = JSON.parse(raw);
+  if (skill.source !== "custom") {
+    return { ok: false, status: 403, error: "Cannot create versions for built-in skills" };
+  }
+
+  if (!args.files || args.files.length === 0) {
+    return { ok: false, status: 400, error: "files array is required and must not be empty" };
+  }
+  const validateErr = validateFiles(args.files);
+  if (validateErr) return { ok: false, status: 400, error: validateErr };
+
+  const now = new Date().toISOString();
+  const versionId = Date.now().toString();
+
+  const manifest = await writeFilesToR2(bucket, tenantId, skillId, versionId, args.files);
+  const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
+
+  skill.latest_version = versionId;
+  if (args.display_title !== undefined) skill.display_title = args.display_title;
+  if (args.description !== undefined) skill.description = args.description;
+
+  // Refresh display_title / description from frontmatter if caller didn't
+  // override — matches the JSON endpoint's existing behavior.
+  const extracted = extractFromFiles(args.files);
+  if (!args.display_title && extracted.name) skill.display_title = extracted.name;
+  if (!args.description && extracted.description) skill.description = extracted.description;
+
+  await Promise.all([
+    env.CONFIG_KV.put(kvKey(tenantId, "skill", skillId), JSON.stringify(skill)),
+    env.CONFIG_KV.put(kvKey(tenantId, "skillver", skillId, versionId), JSON.stringify(version)),
+  ]);
+
+  return { ok: true, status: 201, version };
+}
+
+// ---------------------------------------------------------------------------
+// POST /v1/skills — create a custom skill (JSON; SDK / programmatic path)
+// ---------------------------------------------------------------------------
+
+app.post("/", async (c) => {
+  const t = c.get("tenant_id");
+  const sizeCheck = checkUploadSize(c.env, c.req.raw);
+  if (sizeCheck) return sizeCheck;
+  const freqCheck = await checkUploadFreq(c.env, t);
+  if (freqCheck) return freqCheck;
+
+  const bucket = ensureBucket(c);
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  const body = await c.req.json<PersistArgs>();
+  const result = await persistNewSkill(c.env, bucket, t, body);
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
+  return c.json({ ...result.skill, files: result.files }, 201);
+});
+
+// ---------------------------------------------------------------------------
+// POST /v1/skills/upload — create a custom skill from a packaged .zip
+// (multipart/form-data: file=<zip>, optional display_title)
+// ---------------------------------------------------------------------------
+
+app.post("/upload", async (c) => {
+  const t = c.get("tenant_id");
+  const sizeCheck = checkUploadSize(c.env, c.req.raw);
+  if (sizeCheck) return sizeCheck;
+  const freqCheck = await checkUploadFreq(c.env, t);
+  if (freqCheck) return freqCheck;
+
+  const bucket = ensureBucket(c);
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  const contentType = c.req.header("content-type") || "";
+  if (!contentType.includes("multipart/form-data")) {
+    return c.json({ error: "expected multipart/form-data" }, 400);
+  }
+
+  let formData: FormData;
+  try {
+    formData = await c.req.formData();
+  } catch (err) {
+    return c.json(
+      { error: `Invalid multipart body: ${err instanceof Error ? err.message : "unknown"}` },
+      400,
+    );
+  }
+  const file = formData.get("file") as File | null;
+  if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+    return c.json({ error: "file field is required (the skill .zip)" }, 400);
+  }
+
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let parsed: ParsedSkillZip;
+  try {
+    parsed = parseSkillZipBytes(bytes);
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Failed to read zip" },
+      400,
+    );
+  }
+
+  const displayTitle =
+    typeof formData.get("display_title") === "string"
+      ? (formData.get("display_title") as string)
+      : undefined;
+
+  const result = await persistNewSkill(c.env, bucket, t, {
+    files: parsed.files,
+    name: parsed.name,
+    description: parsed.description,
+    display_title: displayTitle,
+  });
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
+  return c.json({ ...result.skill, files: result.files }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -386,7 +668,7 @@ app.delete("/:id", async (c) => {
 });
 
 // ---------------------------------------------------------------------------
-// POST /v1/skills/:id/versions — create a new version
+// POST /v1/skills/:id/versions — create a new version (JSON)
 // ---------------------------------------------------------------------------
 
 app.post("/:id/versions", async (c) => {
@@ -400,46 +682,69 @@ app.post("/:id/versions", async (c) => {
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   const id = c.req.param("id");
-  const raw = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
-  if (!raw) return c.json({ error: "Skill not found" }, 404);
+  const body = await c.req.json<PersistArgs>();
+  const result = await persistNewVersion(c.env, bucket, t, id, body);
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
+  return c.json(result.version, 201);
+});
 
-  const skill: SkillMeta = JSON.parse(raw);
-  if (skill.source !== "custom") {
-    return c.json({ error: "Cannot create versions for built-in skills" }, 403);
+// ---------------------------------------------------------------------------
+// POST /v1/skills/:id/versions/upload — new version from a packaged .zip
+// ---------------------------------------------------------------------------
+
+app.post("/:id/versions/upload", async (c) => {
+  const t = c.get("tenant_id");
+  const sizeCheck = checkUploadSize(c.env, c.req.raw);
+  if (sizeCheck) return sizeCheck;
+  const freqCheck = await checkUploadFreq(c.env, t);
+  if (freqCheck) return freqCheck;
+
+  const bucket = ensureBucket(c);
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  const contentType = c.req.header("content-type") || "";
+  if (!contentType.includes("multipart/form-data")) {
+    return c.json({ error: "expected multipart/form-data" }, 400);
   }
 
-  const body = await c.req.json<{
-    files: SkillFileInput[];
-    display_title?: string;
-    description?: string;
-  }>();
-
-  if (!body.files || !Array.isArray(body.files) || body.files.length === 0) {
-    return c.json({ error: "files array is required and must not be empty" }, 400);
+  let formData: FormData;
+  try {
+    formData = await c.req.formData();
+  } catch (err) {
+    return c.json(
+      { error: `Invalid multipart body: ${err instanceof Error ? err.message : "unknown"}` },
+      400,
+    );
   }
-  const validateErr = validateFiles(body.files);
-  if (validateErr) return c.json({ error: validateErr }, 400);
+  const file = formData.get("file") as File | null;
+  if (!file || typeof (file as { arrayBuffer?: unknown }).arrayBuffer !== "function") {
+    return c.json({ error: "file field is required (the skill .zip)" }, 400);
+  }
 
-  const now = new Date().toISOString();
-  const versionId = Date.now().toString();
+  const bytes = new Uint8Array(await file.arrayBuffer());
+  let parsed: ParsedSkillZip;
+  try {
+    parsed = parseSkillZipBytes(bytes);
+  } catch (err) {
+    return c.json(
+      { error: err instanceof Error ? err.message : "Failed to read zip" },
+      400,
+    );
+  }
 
-  const manifest = await writeFilesToR2(bucket, t, id, versionId, body.files);
-  const version: SkillVersion = { version: versionId, files: manifest, created_at: now };
+  const displayTitle =
+    typeof formData.get("display_title") === "string"
+      ? (formData.get("display_title") as string)
+      : undefined;
 
-  skill.latest_version = versionId;
-  if (body.display_title !== undefined) skill.display_title = body.display_title;
-  if (body.description !== undefined) skill.description = body.description;
-
-  const extracted = extractFromFiles(body.files);
-  if (!body.display_title && extracted.name) skill.display_title = extracted.name;
-  if (!body.description && extracted.description) skill.description = extracted.description;
-
-  await Promise.all([
-    c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
-    c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
-  ]);
-
-  return c.json(version, 201);
+  const id = c.req.param("id");
+  const result = await persistNewVersion(c.env, bucket, t, id, {
+    files: parsed.files,
+    display_title: displayTitle,
+    description: parsed.description,
+  });
+  if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 403 | 404 | 500);
+  return c.json(result.version, 201);
 });
 
 // ---------------------------------------------------------------------------
