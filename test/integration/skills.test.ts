@@ -1,6 +1,7 @@
 // @ts-nocheck
 import { exports } from "cloudflare:workers";
 import { describe, it, expect } from "vitest";
+import { zipSync, strToU8 } from "fflate";
 
 const H = { "x-api-key": "test-key", "Content-Type": "application/json" };
 function api(path: string, init?: RequestInit) {
@@ -14,6 +15,20 @@ function get(path: string) {
 }
 function del(path: string) {
   return api(path, { method: "DELETE", headers: H });
+}
+
+/** Build a multipart upload Request without setting content-type ourselves —
+ *  FormData lets fetch synthesize the correct boundary. We construct a Request
+ *  the same way the dispatcher does so c.req.formData() works. */
+function postZip(path: string, zipBytes: Uint8Array, opts?: { displayTitle?: string; filename?: string }) {
+  const fd = new FormData();
+  fd.append("file", new File([zipBytes], opts?.filename ?? "skill.zip", { type: "application/zip" }));
+  if (opts?.displayTitle) fd.append("display_title", opts.displayTitle);
+  return api(path, {
+    method: "POST",
+    headers: { "x-api-key": "test-key" },
+    body: fd,
+  });
 }
 
 const SKILL_MD = `---
@@ -472,5 +487,186 @@ Summarize emails efficiently.
     expect(skill.description).toBe(
       "Summarizes long email threads into concise bullet points"
     );
+  });
+});
+
+// ============================================================
+// 4. Zip upload — POST /v1/skills/upload + /:id/versions/upload
+// ============================================================
+describe("Skills zip upload", () => {
+  // Tiny binary blob to verify base64 encoding round-trips through R2.
+  const PNG_BYTES = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a,
+    0x00, 0x00, 0x00, 0x0d, 0x49, 0x48, 0x44, 0x52,
+  ]);
+
+  function buildSkillZip(opts?: {
+    /** When true, wrap files inside a top-level folder (Anthropic-style) so
+     *  we can verify the server strips the common prefix. */
+    nested?: boolean;
+    name?: string;
+    description?: string;
+  }) {
+    const name = opts?.name ?? "zipped-skill";
+    const desc = opts?.description ?? "Created from a zip";
+    const md = `---\nname: ${name}\ndescription: ${desc}\n---\n\n# ${name}\n`;
+    const root = opts?.nested ? `${name}/` : "";
+    return zipSync({
+      [`${root}SKILL.md`]: strToU8(md),
+      [`${root}helper.py`]: strToU8("def hello():\n    return 'hi'\n"),
+      [`${root}assets/pixel.png`]: PNG_BYTES,
+      [`${root}.DS_Store`]: strToU8("junk"),
+    });
+  }
+
+  it("creates a skill from a zip with a nested top-level folder", async () => {
+    const bytes = buildSkillZip({ nested: true, name: "from-zip-nested" });
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(201);
+    const skill = (await res.json()) as any;
+    expect(skill.name).toBe("from-zip-nested");
+    expect(skill.description).toBe("Created from a zip");
+    // Files in the response should NOT carry the top-level folder prefix.
+    const filenames = (skill.files as any[]).map((f) => f.filename);
+    expect(filenames).toContain("SKILL.md");
+    expect(filenames).toContain("helper.py");
+    expect(filenames).toContain("assets/pixel.png");
+    // .DS_Store should have been filtered out.
+    expect(filenames.find((n: string) => n.includes(".DS_Store"))).toBeUndefined();
+  });
+
+  it("creates a skill from a flat zip (no top-level folder)", async () => {
+    const bytes = buildSkillZip({ nested: false, name: "from-zip-flat" });
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(201);
+    const skill = (await res.json()) as any;
+    expect(skill.name).toBe("from-zip-flat");
+  });
+
+  it("encodes binary files as base64 in the response", async () => {
+    const bytes = buildSkillZip({ nested: true, name: "binary-skill" });
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(201);
+    const skill = (await res.json()) as any;
+    const png = (skill.files as any[]).find((f) => f.filename === "assets/pixel.png");
+    expect(png).toBeTruthy();
+    expect(png.encoding).toBe("base64");
+    // base64-decode and compare bytes.
+    const bin = atob(png.content);
+    const out = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) out[i] = bin.charCodeAt(i);
+    expect(Array.from(out)).toEqual(Array.from(PNG_BYTES));
+  });
+
+  it("uses display_title form field when provided", async () => {
+    const bytes = buildSkillZip({ name: "title-override" });
+    const res = await postZip("/v1/skills/upload", bytes, {
+      displayTitle: "My Override Title",
+    });
+    expect(res.status).toBe(201);
+    const skill = (await res.json()) as any;
+    expect(skill.display_title).toBe("My Override Title");
+    expect(skill.name).toBe("title-override");
+  });
+
+  it("rejects zip without SKILL.md", async () => {
+    const bytes = zipSync({
+      "README.md": strToU8("not a skill"),
+    });
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/SKILL\.md/);
+  });
+
+  it("rejects upload without file field", async () => {
+    const fd = new FormData();
+    fd.append("display_title", "no file");
+    const res = await api("/v1/skills/upload", {
+      method: "POST",
+      headers: { "x-api-key": "test-key" },
+      body: fd,
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("rejects non-multipart body", async () => {
+    const res = await api("/v1/skills/upload", {
+      method: "POST",
+      headers: H,
+      body: JSON.stringify({ foo: "bar" }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it("creates a new version from a zip via /versions/upload", async () => {
+    // Seed a skill via the JSON path.
+    const createRes = await post("/v1/skills", makeSkillBody({ display_title: "Versioned" }));
+    const skill = (await createRes.json()) as any;
+    const before = skill.latest_version;
+
+    const bytes = buildSkillZip({ nested: true, name: "my-skill", description: "v2 from zip" });
+    const verRes = await postZip(`/v1/skills/${skill.id}/versions/upload`, bytes);
+    expect(verRes.status).toBe(201);
+    const ver = (await verRes.json()) as any;
+    expect(ver.version).toBeTruthy();
+    expect(ver.version).not.toBe(before);
+
+    // Description should refresh from the zip's frontmatter (matches the JSON
+    // version endpoint's existing behavior).
+    const refreshed = (await (await get(`/v1/skills/${skill.id}`)).json()) as any;
+    expect(refreshed.latest_version).toBe(ver.version);
+    expect(refreshed.description).toBe("v2 from zip");
+  });
+
+  it("rejects /versions/upload for unknown skill", async () => {
+    const bytes = buildSkillZip({ name: "unused" });
+    const res = await postZip("/v1/skills/skill_nonexistent/versions/upload", bytes);
+    expect(res.status).toBe(404);
+  });
+
+  // ----- zip-bomb defense -----
+
+  it("rejects zip when a single file's uncompressed size exceeds the per-file cap", async () => {
+    // 30MB of zeroes → ~30KB on the wire after DEFLATE → uncompressed size
+    // well past the 25MB per-file limit.
+    const huge = new Uint8Array(30 * 1024 * 1024);
+    const bytes = zipSync({
+      "SKILL.md": strToU8("---\nname: bombed\ndescription: x\n---\n"),
+      "huge.bin": huge,
+    });
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/per-file limit/);
+  });
+
+  it("rejects zip when total uncompressed size exceeds the aggregate cap", async () => {
+    // Six 20MB compressible blobs = 120MB uncompressed total, which trips
+    // the 100MB aggregate cap. Each individual file stays under the
+    // per-file limit so the failure mode is unambiguous.
+    const blob = new Uint8Array(20 * 1024 * 1024);
+    const files: Record<string, Uint8Array> = {
+      "SKILL.md": strToU8("---\nname: bombed\ndescription: x\n---\n"),
+    };
+    for (let i = 0; i < 6; i++) files[`blob-${i}.bin`] = blob;
+    const bytes = zipSync(files);
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/zip-bomb defense|aggregate|exceeds/i);
+  });
+
+  it("rejects zip with too many files", async () => {
+    // 501 tiny files trips the file-count cap of 500.
+    const files: Record<string, Uint8Array> = {
+      "SKILL.md": strToU8("---\nname: many\ndescription: x\n---\n"),
+    };
+    for (let i = 0; i < 501; i++) files[`f-${i}.txt`] = strToU8("x");
+    const bytes = zipSync(files);
+    const res = await postZip("/v1/skills/upload", bytes);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as any;
+    expect(body.error).toMatch(/too many files/i);
   });
 });
