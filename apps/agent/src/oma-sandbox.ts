@@ -24,6 +24,16 @@
 
 import { Sandbox } from "@cloudflare/sandbox";
 import type { Env } from "@open-managed-agents/shared";
+import { recordBackup } from "./runtime/workspace-backups";
+
+const BACKUP_TTL_SEC = 7 * 24 * 3600;
+const BACKUP_CTX_KEY = "oma_backup_ctx";
+
+interface BackupContext {
+  tenantId: string;
+  environmentId: string;
+  sessionId: string;
+}
 
 // Match the SDK's OutboundHandlerContext shape (see @cloudflare/containers).
 // We accept `unknown` env + cast at the boundary, so we don't need a direct
@@ -157,6 +167,75 @@ export class OmaSandbox extends Sandbox {
 
   // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
   override sleepAfter = "5m";
+
+  /**
+   * SessionDO calls this once per warmup with the (tenant, env, session)
+   * tuple. Stashed in this DO's storage so snapshotWorkspaceNow() (called
+   * from onActivityExpired or directly from /destroy) can record the
+   * backup against the right (tenant, env) scope. Container DO is keyed
+   * by sessionId via getSandbox(env, sessionId), so the stored context
+   * belongs to exactly one logical session.
+   */
+  async setBackupContext(ctx: BackupContext): Promise<void> {
+    await this.ctx.storage.put(BACKUP_CTX_KEY, ctx);
+  }
+
+  /**
+   * Snapshot /workspace into BACKUP_BUCKET + record the handle in AUTH_DB
+   * scoped to the stored backup context. Best-effort: any failure logs
+   * and returns; never throws because all callers (sleepAfter teardown,
+   * explicit /destroy) need to proceed even if backup fails.
+   *
+   * Single source of truth for the actual backup operation. Both the
+   * sleepAfter pre-stop hook and SessionDO's explicit-destroy path call
+   * this — there used to be a parallel impl on SessionDO that drifted.
+   */
+  async snapshotWorkspaceNow(): Promise<void> {
+    try {
+      const env = this.env as Env;
+      const ctx = (await this.ctx.storage.get(BACKUP_CTX_KEY)) as
+        | BackupContext
+        | undefined;
+      if (!ctx || !env.AUTH_DB) return;
+      const startMs = Date.now();
+      const isDev = !env.R2_ENDPOINT || !env.R2_ACCESS_KEY_ID;
+      const backup = await this.createBackup({
+        dir: "/workspace",
+        name: `session-${ctx.sessionId}`,
+        ttl: BACKUP_TTL_SEC,
+        excludes: ["node_modules", ".cache", "__pycache__", ".next", "target"],
+        gitignore: true,
+        ...(isDev ? { localBucket: true } : {}),
+      });
+      const elapsedMs = Date.now() - startMs;
+      if (!backup) return;
+      await recordBackup(env.AUTH_DB, {
+        tenantId: ctx.tenantId,
+        environmentId: ctx.environmentId,
+        handle: { id: backup.id, dir: backup.dir, localBucket: backup.localBucket },
+        nowMs: Date.now(),
+        ttlSec: BACKUP_TTL_SEC,
+        sessionId: ctx.sessionId,
+      });
+      console.log(
+        `[oma-sandbox] backup recorded id=${backup.id} session=${ctx.sessionId.slice(0, 12)} elapsed_ms=${elapsedMs}`,
+      );
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] snapshotWorkspaceNow failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * Pre-stop hook: SDK calls this when sleepAfter elapses, default impl
+   * just calls this.stop(). We override to snapshot first, then defer
+   * to default so the container actually shuts down.
+   */
+  override async onActivityExpired(): Promise<void> {
+    await this.snapshotWorkspaceNow();
+    await super.onActivityExpired();
+  }
 
   // Lightweight visibility: log every container exit so we can see why
   // containers recycle without the SQL table from the prior diagnostic

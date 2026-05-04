@@ -51,8 +51,6 @@ import { mountResources } from "./resource-mounter";
 import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
 import {
   findLatestBackup as findWorkspaceBackup,
-  recordBackup as recordWorkspaceBackup,
-  DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
 } from "./workspace-backups";
 
 interface SessionInitParams {
@@ -306,8 +304,6 @@ export class SessionDO extends DurableObject<Env> {
    *  host migration). On mismatch we re-warm so restoreWorkspaceBackup
    *  runs and /workspace gets repopulated from the latest backup. */
   private currentWarmupGen: string | null = null;
-  /** Throttle the marker probe to once per 30s of activity. */
-  private lastWarmupProbeAt = 0;
   /**
    * Per-turn dedup of `agent.message` broadcasts. Recovery's
    * `loadRecoveryContext` reads prior agent messages out of SQL so the
@@ -862,11 +858,7 @@ export class SessionDO extends DurableObject<Env> {
               await this.processUserMessage(resumeMsg, 0, true);
             }
           },
-          {
-            // Backup disabled while we diagnose container exit=1 churn.
-            // If proven safe later, restore via:
-            //   persistWorkspace: () => this.maybeBackupWorkspace(),
-          },
+          {},
         );
         // Turn finished cleanly — clear any prior recovery counter so the
         // next turn doesn't inherit stale state.
@@ -1041,7 +1033,14 @@ export class SessionDO extends DurableObject<Env> {
       if (!this.sandbox) {
         try { this.getOrCreateSandbox(); } catch {}
       }
-      // Backup-on-destroy disabled while we isolate container exit=1 cause.
+      // Final snapshot — awaited so the squashfs lands in BACKUP_BUCKET
+      // before sandbox.destroy() wipes the container. Implementation lives
+      // on OmaSandbox.snapshotWorkspaceNow (single source of truth, also
+      // used by the sleepAfter onActivityExpired hook). Best-effort: any
+      // failure logs and we proceed with destroy.
+      if (this.sandbox?.snapshotWorkspaceNow) {
+        try { await this.sandbox.snapshotWorkspaceNow(); } catch {}
+      }
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -1723,11 +1722,6 @@ export class SessionDO extends DurableObject<Env> {
         throw new Error(`Sandbox container failed to start after 10 attempts. Last error: ${lastError}`);
       }
 
-      // Mount R2-backed /workspace for persistent file storage
-      if (sandbox instanceof CloudflareSandbox) {
-        await sandbox.mountWorkspace();
-      }
-
       // Restore the most recent workspace backup for (tenant, environment)
       // BEFORE mountResources runs, so the agent picks up where it left
       // off. Per CF's recommended pattern (changelog 2026-02-23, "pick up
@@ -1984,6 +1978,19 @@ export class SessionDO extends DurableObject<Env> {
         });
       }
 
+      // Hand backup context to OmaSandbox so its onActivityExpired hook
+      // (sleepAfter teardown) writes the final /workspace snapshot scoped
+      // to this (tenant, env, session). Container DO is keyed by sessionId,
+      // so this only needs to land once per warmup. Restoration on the
+      // next session uses (tenant, env) — see findWorkspaceBackup above.
+      if (sandbox.setBackupContext && this.state.session_id && this.state.tenant_id && this.state.environment_id) {
+        await sandbox.setBackupContext({
+          tenantId: this.state.tenant_id,
+          environmentId: this.state.environment_id,
+          sessionId: this.state.session_id,
+        });
+      }
+
       // Drop a per-warmup marker so the proxy can detect a recycled
       // container later (just check `cat /tmp/.oma-warm` matches the
       // gen we set). /tmp clears on restart so the absence IS the signal.
@@ -1991,7 +1998,6 @@ export class SessionDO extends DurableObject<Env> {
       try {
         await sandbox.exec(`echo ${gen} > /tmp/.oma-warm`);
         this.currentWarmupGen = gen;
-        this.lastWarmupProbeAt = Date.now();
       } catch (err) {
         logWarn(
           { op: "session_do.warmup.write_marker", session_id: this.state.session_id, err },
@@ -3134,82 +3140,10 @@ export class SessionDO extends DurableObject<Env> {
     } finally {
       this.currentAbortController = null;
       this.setState({ ...this.state, status: "idle" });
-      // Workspace backup is now driven by runAgentTurn's persistWorkspace
-      // hook (synchronous await — see drainEventQueue). The previous
-      // ctx.waitUntil(this.maybeBackupWorkspace()) here was a no-op (DOs
-      // ignore waitUntil) which left a window where the agent finished
-      // and status went idle but /workspace hadn't actually been
-      // snapshotted to R2. Container TTL hit + restore = empty workspace.
-      // Removing the dead path; runAgentTurn guarantees persistence.
-    }
-  }
-
-  /**
-   * Snapshot /workspace into BACKUP_BUCKET via createBackup + record the
-   * handle in D1. Triggers:
-   *   - End of each agent turn (debounced, fire-and-forget via waitUntil)
-   *   - Session destroy (force=true, awaited so it completes before
-   *     sandbox.destroy())
-   *
-   * Per-turn debouncing matters because CF Sandbox's 10-minute idle timeout
-   * stops the container AND deletes its filesystem. Without a fresh backup
-   * since the last meaningful state change, the next session loses that
-   * work. Debounce keeps cost reasonable (no spam during chatty turns) but
-   * the destroy path always forces a final snapshot.
-   *
-   * Best-effort throughout: failures are logged + swallowed. A missing
-   * backup means the next session starts from the previous backup or
-   * empty — never a hard error for the user.
-   */
-  private async maybeBackupWorkspace(): Promise<void> {
-    if (
-      !(this.sandbox instanceof CloudflareSandbox) ||
-      !this.state.tenant_id ||
-      !this.state.environment_id ||
-      !this.env.AUTH_DB
-    ) {
-      return;
-    }
-    const sandbox = this.sandbox;
-    const tenantId = this.state.tenant_id;
-    const environmentId = this.state.environment_id;
-    const authDb = this.env.AUTH_DB;
-    const sessionId = this.state.session_id;
-    try {
-      const startMs = Date.now();
-      let handle: { id: string; dir: string; localBucket?: boolean } | null = null;
-      let backupError: string | undefined;
-      try {
-        handle = await sandbox.createWorkspaceBackup({
-          name: `session-${sessionId ?? "unknown"}`,
-          ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-        });
-      } catch (err) {
-        backupError = err instanceof Error ? err.message : String(err);
-      }
-      const elapsedMs = Date.now() - startMs;
-      try {
-        this.persistAndBroadcastEvent({
-          type: "session.warning",
-          message: handle
-            ? `workspace_backup_recorded backup_id=${handle.id} elapsed_ms=${elapsedMs}`
-            : `workspace_backup_failed elapsed_ms=${elapsedMs}${backupError ? ` error=${backupError.slice(0, 200)}` : " reason=createBackup-returned-null"}`,
-        } as unknown as SessionEvent);
-      } catch {}
-      if (!handle) return;
-      await recordWorkspaceBackup(authDb, {
-        tenantId,
-        environmentId,
-        handle,
-        nowMs: Date.now(),
-        ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-        sessionId,
-      });
-    } catch (err) {
-      logWarn(
-        { op: "session_do.workspace_backup", session_id: sessionId, err },
-        "workspace backup failed (best-effort)",
-      );
+      // Workspace backup is fired by OmaSandbox.onActivityExpired when the
+      // container's sleepAfter elapses (see oma-sandbox.ts) — exactly one
+      // snapshot per quiet period. Explicit /destroy snapshots eagerly via
+      // sandbox.snapshotWorkspaceNow(). Per-turn backup is intentionally off.
     }
   }
 
