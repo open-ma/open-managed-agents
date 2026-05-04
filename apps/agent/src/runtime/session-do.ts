@@ -3603,6 +3603,24 @@ export class SessionDO extends DurableObject<Env> {
     // Housekeeping: orphan-fiber recovery
     await this._checkRunFibers();
 
+    // Container keepalive: while there's at least one background_tasks row,
+    // ping the sandbox container to reset its sleepAfter timer. Means
+    // long-running `python script.py &` jobs that the agent is waiting on
+    // don't get killed by the 5-minute idle TTL. Cheap (~5 ms RPC).
+    try {
+      const rows = this.ctx.storage.sql
+        .exec("SELECT 1 FROM background_tasks LIMIT 1")
+        .toArray();
+      if (rows.length > 0) {
+        const sb = this.getOrCreateSandbox();
+        if (typeof (sb as { renewActivityTimeout?: () => Promise<void> }).renewActivityTimeout === "function") {
+          await (sb as { renewActivityTimeout: () => Promise<void> }).renewActivityTimeout();
+        }
+      }
+    } catch {
+      // background_tasks table missing or container down — alarm continues
+    }
+
     await this._scheduleNextAlarm();
   }
 
