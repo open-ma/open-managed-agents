@@ -126,6 +126,62 @@ Your `LINEAR_WEBHOOK_SECRET` / `GITHUB_WEBHOOK_SECRET` / `SLACK_SIGNING_SECRET` 
 npx wrangler secret list -c apps/integrations/wrangler.jsonc
 ```
 
+## Known long-tail items
+
+These aren't bugs in the "user-visible breakage" sense, but they're worth
+having on the radar so a long-running deploy doesn't drift into one.
+
+### SQL growth inside SessionDO
+
+The DO writes one row to the `events` table per trajectory event. Events
+larger than 500 KB spill to the R2 `FILES_BUCKET` with an `_spilled`
+reference, but small events accumulate in SQL forever — there's no
+pruning. CF's Durable Object SQLite quota is 10 GB per DO, which leaves
+room for roughly 10M events at ~1 KB each. A single session would have
+to run ~100 000 turns to come close. Same shape applies to the `streams`
+table: `finalize` flips the row's status, doesn't delete it. Quantity
+is small (one row per LLM call) but it's also unbounded.
+
+If you run multi-day persistent sessions in production, plan a periodic
+prune of `events` rows older than the retention window you actually
+need, and configure an R2 lifecycle rule on `managed-agents-files` so
+spilled blobs from extinct sessions don't sit in storage forever.
+
+### Container OOM
+
+Sandbox containers default to `instance_type: standard-1` (1 vCPU, 4 GB
+RAM, 4 GB disk). Heavy `pip install` of ML libraries, large data files
+loaded into pandas, or anything that mmap's a multi-GB blob will OOM.
+The container exits, which triggers `onActivityExpired` →
+`snapshotWorkspaceNow` → `super.onActivityExpired` → graceful stop;
+the next session warmup picks up the most recent backup.
+
+If your workload routinely OOMs, bump `instance_type` to `standard-2`
+(2 vCPU, 8 GB RAM) or `standard-4` (4 vCPU, 16 GB RAM) in
+`apps/agent/wrangler.template.jsonc`. Watch the `containers` dataset
+in observability for `Container exited (code: 137)` (SIGKILL, usually
+OOM) vs `Container exited (code: 0)` (graceful sleepAfter).
+
+### R2 bucket lifecycles
+
+The `managed-agents-backups` bucket's per-object TTL is set by the SDK
+at upload time (7 days by default — `BACKUP_TTL_SEC` in
+`apps/agent/src/oma-sandbox.ts`), so old backups age out cleanly.
+`managed-agents-files` (event spillover, vault audit blobs) and
+`managed-agents-memory` (memory-store content) have no automatic TTL.
+For long-running deploys, attach an R2 lifecycle rule with whatever
+retention you actually need — Cloudflare's R2 dashboard lets you
+configure these per-bucket without code changes.
+
+### LLM stream chunks > 500 KB
+
+A single chunk that crosses the spillover threshold ends up in R2
+rather than SQL, which is fine, but the `chunks_json` array still has
+to fit in one row. If a chunk ever exceeds the SQLite row size limit
+(~1 GB on Workers) the stream finalize will fail. We've never seen
+this in practice — typical model output is line-by-line — but if you
+build a tool that streams huge blobs through the LLM, slice them.
+
 ## Where to go next
 
 <LinkCard
