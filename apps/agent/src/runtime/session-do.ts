@@ -863,10 +863,9 @@ export class SessionDO extends DurableObject<Env> {
             }
           },
           {
-            // Per-turn backup: snapshots /workspace to R2 each turn so a
-            // mid-session DO eviction doesn't lose work. /destroy below
-            // also calls this so the final snapshot lands.
-            persistWorkspace: () => this.maybeBackupWorkspace(),
+            // Backup disabled while we diagnose container exit=1 churn.
+            // If proven safe later, restore via:
+            //   persistWorkspace: () => this.maybeBackupWorkspace(),
           },
         );
         // Turn finished cleanly — clear any prior recovery counter so the
@@ -1042,7 +1041,7 @@ export class SessionDO extends DurableObject<Env> {
       if (!this.sandbox) {
         try { this.getOrCreateSandbox(); } catch {}
       }
-      await this.maybeBackupWorkspace();
+      // Backup-on-destroy disabled while we isolate container exit=1 cause.
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -1584,7 +1583,6 @@ export class SessionDO extends DurableObject<Env> {
       "mountWorkspace",
       "gitCheckout",
     ]);
-    const PROBE_THROTTLE_MS = 30_000;
     const ensureWarm = async (): Promise<void> => {
       // Cold path — warmup never ran or was reset by a recycle below.
       if (!this.sandboxWarmupPromise) {
@@ -1593,9 +1591,9 @@ export class SessionDO extends DurableObject<Env> {
       }
       // Warm path — wait for the cached promise (handles concurrent calls).
       await this.sandboxWarmupPromise;
-      const sinceLastProbe = Date.now() - this.lastWarmupProbeAt;
-      if (sinceLastProbe < PROBE_THROTTLE_MS) return;
-      this.lastWarmupProbeAt = Date.now();
+      // Probe marker every call. Container can recycle (OOM, sleepAfter,
+      // host migration) between any two calls; throttling the probe
+      // misses fast-cluster-then-die patterns. ~5ms cost per tool call.
       let probed: string | null = null;
       try {
         const raw_out = await raw.exec("cat /tmp/.oma-warm 2>/dev/null");
@@ -1603,14 +1601,16 @@ export class SessionDO extends DurableObject<Env> {
         probed = (m && m[1] === "0") ? m[2].trim() : "";
       } catch { probed = null; }
       if (probed === this.currentWarmupGen) return; // alive, marker matches
-      // Container recycled — reset cache so next call re-warms (which
-      // includes restoreWorkspaceBackup).
+      // Container recycled — reset cache and re-warm now (which includes
+      // restoreWorkspaceBackup) so the upcoming user call sees /workspace
+      // restored, not an empty fresh container.
       logWarn(
         { op: "session_do.warmup.recycle_detected", session_id: this.state.session_id, expected: this.currentWarmupGen, got: probed },
-        "container marker mismatch — re-warming on next call",
+        "container marker mismatch — re-warming",
       );
       this.sandboxWarmupPromise = null;
       this.currentWarmupGen = null;
+      await this.warmUpSandbox();
     };
     return new Proxy(raw, {
       get: (target, prop, receiver) => {
