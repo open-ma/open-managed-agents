@@ -1739,6 +1739,27 @@ export class SessionDO extends DurableObject<Env> {
         this.env.AUTH_DB
       ) {
         try {
+          // If /tmp/.oma-warm is present, the container survived since a
+          // previous warmup — /workspace is already populated by whoever
+          // wrote the marker. Skip restore: re-running it would download
+          // the latest backup over a live /workspace, throwing away any
+          // writes since that backup. This is the path that lets a verify
+          // exec arriving N minutes after the agent turn just see the
+          // files the agent wrote, no D1 round-trip needed.
+          let containerWarmAlready = false;
+          try {
+            const probed = await sandbox.exec("cat /tmp/.oma-warm 2>/dev/null");
+            const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(probed);
+            if (m && m[1] === "0" && m[2].trim().length > 0) {
+              containerWarmAlready = true;
+              this.currentWarmupGen = m[2].trim();
+              logWarn(
+                { op: "session_do.warmup.skip_restore_container_alive", session_id: this.state.session_id, marker: this.currentWarmupGen },
+                "skipping workspace restore — container still warm with previous /workspace",
+              );
+            }
+          } catch { /* probe failed → fall through to normal restore path */ }
+
           let hasGitRepo = false;
           if (this.state.session_id) {
             const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
@@ -1747,7 +1768,9 @@ export class SessionDO extends DurableObject<Env> {
               (r) => r.type === "github_repository" || r.type === "github_repo",
             );
           }
-          if (hasGitRepo) {
+          if (containerWarmAlready) {
+            // already short-circuited above with a warning log
+          } else if (hasGitRepo) {
             logWarn(
               { op: "session_do.warmup.skip_restore_github_repo", session_id: this.state.session_id },
               "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
