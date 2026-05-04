@@ -144,12 +144,14 @@ const injectVaultCredsHandler = async (
 };
 
 export class OmaSandbox extends Sandbox {
-  // Default in @cloudflare/containers is `interceptHttps = false`, which means
-  // HTTPS requests bypass the outbound handler entirely. Linear MCP and most
-  // other targets are HTTPS, so we must opt in for credential injection to
-  // happen. The SDK creates a per-instance ephemeral CA and trusts it inside
-  // the container automatically.
-  override interceptHttps = true;
+  // HTTPS interception is broken in @cloudflare/sandbox 0.9.1: container
+  // PID 1 exits with "Certificate not found, refusing to start without
+  // HTTPS interception enabled" right after start, killing the container
+  // every few seconds. Until SDK ships a fix (or we work around the
+  // ephemeral-disk cert lifecycle), interception OFF — vault Bearer
+  // injection only fires for HTTP outbound. HTTPS-only targets (Linear
+  // MCP) need a different path.
+  override interceptHttps = false;
 
   // Container lifecycle: 5-minute idle TTL. Cost-friendly default.
   override sleepAfter = "5m";
