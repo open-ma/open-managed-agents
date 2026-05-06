@@ -20,7 +20,7 @@
     "typecheck": "tsc --noEmit && pnpm run typecheck:node",
     "typecheck:node": "pnpm --filter @open-managed-agents/sandbox typecheck && pnpm --filter @open-managed-agents/main-node typecheck && pnpm --filter @open-managed-agents/oma-vault typecheck",
     "test": "vitest run && pnpm run test:packages",
-    "test:packages": "pnpm --filter @open-managed-agents/session-runtime test",
+    "test:packages": "pnpm --filter @open-managed-agents/session-runtime test && pnpm --filter @open-managed-agents/main-node test",
     "changeset": "changeset",
     "version-packages": "changeset version",
     "release": "pnpm -r --filter='@openma/*' build && changeset publish"

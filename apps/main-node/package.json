@@ -10,6 +10,7 @@
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
+    "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -38,6 +39,7 @@
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",
     "@types/turndown": "^5.0.5",
-    "tsx": "^4.19.0"
+    "tsx": "^4.19.0",
+    "vitest": "^4.1.3"
   }
 }
