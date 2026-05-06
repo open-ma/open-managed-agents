@@ -435,12 +435,59 @@ export interface AgentMcpToolResultEvent extends EventBase {
 
 export interface UserDefineOutcomeEvent extends EventBase {
   type: "user.define_outcome";
+  /**
+   * Server-minted on ingest, prefix `outc_`. Echoed back on the persisted
+   * event so downstream `span.outcome_evaluation_*` events can name which
+   * outcome they pertain to. AMA-spec compatible.
+   */
   outcome_id?: string;
   description: string;
-  rubric?: string;  // text rubric or file reference
+  /**
+   * Rubric for the LLM-judge path. AMA accepts either inline text or a
+   * pointer to an uploaded file.
+   *
+   * Back-compat: a bare string is treated as `{ type: "text", content }` —
+   * old clients that pre-date this schema bump keep working.
+   *
+   * Mutually exclusive with `verifier`; at least one of the two is required.
+   */
+  rubric?: string | RubricSpec;
+  /**
+   * OMA superset over AMA: a deterministic / scriptable check. When set,
+   * takes precedence over `rubric`. Wire shape mirrors @oma/eval-core
+   * `RewardSpec` (script / verifiable / composite / reward_model). Typed
+   * structurally here so api-types stays a leaf package.
+   */
+  verifier?: OutcomeVerifierSpec;
   max_iterations?: number; // default 3, max 20
 }
 
+/**
+ * AMA outcome rubric union. The `file` variant resolves the rubric content
+ * from the OMA Files API at outcome trigger time; the resolved text is
+ * cached in session state so re-iteration doesn't re-fetch.
+ */
+export type RubricSpec =
+  | { type: "text"; content: string }
+  | { type: "file"; file_id: string };
+
+/**
+ * Wire shape of @oma/eval-core RewardSpec, restated here so api-types
+ * stays a leaf (eval-core depends on api-types). Validation + dispatch
+ * lives in eval-core; this type just keeps `user.define_outcome` typed
+ * end-to-end.
+ */
+export interface OutcomeVerifierSpec {
+  type: "script" | "verifiable" | "composite" | "reward_model";
+  [key: string]: unknown;
+}
+
+/**
+ * @deprecated Legacy spelling — emit `span.outcome_evaluation_end` instead.
+ * Kept as a type alias so old persisted events parse, and rl/collector
+ * keeps reading historical sessions. New emit sites use
+ * `SpanOutcomeEvaluationEndEvent`.
+ */
 export interface OutcomeEvaluationEvent extends EventBase {
   type: "outcome.evaluation_end";
   result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed";
@@ -605,6 +652,12 @@ export interface SpanModelRequestEndEvent extends EventBase {
 
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {
   type: "span.outcome_evaluation_start";
+  /** AMA-spec: which outcome this iteration belongs to. Optional for
+   *  back-compat — pre-Phase-4 events lack it. */
+  outcome_id?: string;
+  /** 0-indexed revision counter. AMA: `0` = first evaluation, `1` = first
+   *  re-evaluation after revision, etc. Pre-Phase-4 emitters used 1-indexed;
+   *  consumers should treat both as monotonic counters when comparing. */
   iteration: number;
 }
 
@@ -631,14 +684,57 @@ export interface SpanCompactionSummarizeEndEvent extends EventBase {
 
 export interface SpanOutcomeEvaluationOngoingEvent extends EventBase {
   type: "span.outcome_evaluation_ongoing";
-  iteration: number;
+  /** AMA-spec: which outcome this heartbeat belongs to. Optional for
+   *  back-compat. */
+  outcome_id?: string;
+  /** 0-indexed iteration this heartbeat belongs to. Optional — heartbeats
+   *  may fire before the start span has the iteration cemented. */
+  iteration?: number;
 }
 
 export interface SpanOutcomeEvaluationEndEvent extends EventBase {
   type: "span.outcome_evaluation_end";
-  result: "satisfied" | "needs_revision" | "max_iterations_reached" | "failed";
+  /** AMA-spec: matches the parent `span.outcome_evaluation_start.id`.
+   *  Optional for back-compat. */
+  outcome_evaluation_start_id?: string;
+  /** AMA-spec: which outcome this verdict belongs to. Optional for
+   *  back-compat. */
+  outcome_id?: string;
+  /**
+   * Verdict enum, AMA-aligned (5 values):
+   *   - `satisfied` — rubric met, session transitions to idle
+   *   - `needs_revision` — agent gets the explanation back, starts a new
+   *     iteration cycle
+   *   - `max_iterations_reached` — terminal, no further evaluation cycles
+   *   - `failed` — verifier threw / returned malformed score / rubric
+   *     fundamentally doesn't match the task
+   *   - `interrupted` — `user.interrupt` arrived mid-evaluation; only
+   *     emitted if the matching `span.outcome_evaluation_start` had already
+   *     fired
+   */
+  result:
+    | "satisfied"
+    | "needs_revision"
+    | "max_iterations_reached"
+    | "failed"
+    | "interrupted";
+  /** 0-indexed iteration this verdict applies to. */
   iteration: number;
+  /** Human-readable rationale for the verdict. AMA names this
+   *  `explanation`; pre-Phase-4 emitters used `feedback`. Both fields are
+   *  populated on emit so old consumers keep working. */
+  explanation?: string;
+  /** @deprecated Use `explanation`. Kept on the wire for back-compat with
+   *  consumers that haven't migrated. New emitters set both. */
   feedback?: string;
+  /** AMA-spec grader token usage. Populated when the verifier reports it
+   *  via `Score.metadata.usage` or by accumulating in-process LLM calls. */
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
 }
 
 // Aux events — platform-internal LLM calls made on behalf of a tool
