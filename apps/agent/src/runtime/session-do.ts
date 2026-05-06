@@ -28,21 +28,21 @@ import type {
   UserToolConfirmationEvent,
   UserCustomToolResultEvent,
   UserDefineOutcomeEvent,
-  RubricSpec,
-  OutcomeVerifierSpec,
-  OutcomeEvaluationEvent,
   AgentMessageEvent,
   AgentToolUseEvent,
-  SpanOutcomeEvaluationStartEvent,
-  SpanOutcomeEvaluationOngoingEvent,
-  SpanOutcomeEvaluationEndEvent,
 } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
 import { resolveModel } from "../harness/provider";
 import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
-import { evaluateOutcome } from "../harness/outcome-evaluator";
+import { generateText } from "ai";
+import { extractTextFromContent } from "@open-managed-agents/shared";
+import {
+  runOutcomeSupervisor,
+  type ActiveOutcomeState,
+  type OutcomeEvaluationRecord,
+} from "./outcome-supervisor";
 import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
@@ -117,54 +117,15 @@ interface PendingToolCall {
  * Automatically persisted to SQLite and broadcast to WebSocket clients.
  */
 /**
- * Currently-active outcome (Phase 4 / AMA alignment). Sessions may chain
- * outcomes sequentially; only one is active at a time. After a terminal
- * `span.outcome_evaluation_end` (satisfied / max_iterations_reached /
- * failed / interrupted) this slot clears, and the resolved evaluation
- * lands in `state.outcome_evaluations[]`.
+ * `ActiveOutcomeState` (one slot — only one outcome supported at a time,
+ * per AMA spec) and `OutcomeEvaluationRecord` (the aggregate row written
+ * to `state.outcome_evaluations[]` on every terminal verdict) are
+ * defined in outcome-supervisor.ts so the supervisor unit-test fixture
+ * has a single source of truth. Re-exported here as the local aliases
+ * the SessionState below uses.
  */
-interface ActiveOutcome {
-  /** AMA-spec id, prefix `outc_`. Echoed on every event tied to this outcome. */
-  outcome_id: string;
-  description: string;
-  /**
-   * Rubric as received on the wire. May be a bare string (legacy) or a
-   * `{type:"text"|"file", ...}` envelope. The resolved markdown lives in
-   * `rubric_content` after first read so re-iteration doesn't re-fetch.
-   */
-  rubric?: string | RubricSpec;
-  /** Resolved rubric markdown — populated lazily at supervisor build time. */
-  rubric_content?: string;
-  /** OMA-superset rule-based check. Mutually exclusive with the LLM-judge path. */
-  verifier?: OutcomeVerifierSpec;
-  max_iterations?: number;
-}
-
-/**
- * Aggregate row returned by GET /v1/sessions/:id `.outcome_evaluations[]`.
- * Mirrors AMA's session-retrieve response shape.
- */
-interface PersistedOutcomeEvaluation {
-  outcome_id: string;
-  result:
-    | "satisfied"
-    | "needs_revision"
-    | "max_iterations_reached"
-    | "failed"
-    | "interrupted";
-  iteration: number;
-  /** AMA-name; pre-Phase-4 events used `feedback`. Both kept on persist. */
-  explanation?: string;
-  /** Back-compat alias of explanation. Old consumers read this. */
-  feedback?: string;
-  usage?: {
-    input_tokens: number;
-    output_tokens: number;
-    cache_creation_input_tokens?: number;
-    cache_read_input_tokens?: number;
-  };
-  processed_at?: string;
-}
+type ActiveOutcome = ActiveOutcomeState;
+type PersistedOutcomeEvaluation = OutcomeEvaluationRecord;
 
 interface SessionState {
   agent_id: string;
@@ -3178,99 +3139,111 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Outcome self-evaluation loop (properly loops until satisfied or max iterations)
+      // Outcome self-evaluation loop. Phase 4 / AMA-aligned: delegated
+      // to the standalone supervisor module which builds a Verifier
+      // (verifierForSpec for the OMA-superset rule-based path,
+      // LlmJudgeVerifier for the AMA-default LLM-judge path), runs it
+      // against a Trajectory built from the current event log, maps the
+      // Score onto the AMA 5-result enum, emits
+      // span.outcome_evaluation_{start,ongoing,end}, and persists each
+      // terminal verdict to state.outcome_evaluations[]. The loop
+      // re-injects the verifier's `reason` as a user.message + re-runs
+      // the harness on `needs_revision`.
       const outcome = this.state.outcome;
       if (outcome) {
-        let iteration = this.state.outcome_iteration || 1;
-        const maxIterations = Math.min(outcome.max_iterations || 3, 20);
-        const outcomeModelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
-        const model = resolveModel(outcomeModelId || ctx.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
-
-        while (iteration <= maxIterations) {
-          // Collect agent output from recent events
-          const recentEvents = history.getEvents();
-          const agentMessages = recentEvents.filter(
-            (e: SessionEvent) => e.type === "agent.message",
+        const outcomeModelId =
+          typeof agent.model === "string" ? agent.model : agent.model?.id;
+        const judgeModel = resolveModel(
+          outcomeModelId ||
+            ctx.env.ANTHROPIC_MODEL ||
+            "claude-sonnet-4-6",
+          ctx.env.ANTHROPIC_API_KEY,
+          ctx.env.ANTHROPIC_BASE_URL,
+        );
+        try {
+          await runOutcomeSupervisor({
+            outcome,
+            initialIteration: this.state.outcome_iteration ?? 0,
+            tenantId: this.state.tenant_id,
+            filesBucket: this.env.FILES_BUCKET ?? null,
+            abortSignal: effectiveAbortSignal,
+            judgeModelId: outcomeModelId,
+            getEvents: () => history.getEvents(),
+            appendAndBroadcast: (event) => {
+              history.append(event);
+              this.broadcastEvent(event);
+            },
+            broadcastOnly: (event) => this.broadcastEvent(event),
+            persistState: (delta) => {
+              const next = { ...this.state };
+              if ("outcome" in delta) next.outcome = delta.outcome ?? null;
+              if (typeof delta.outcome_iteration === "number") {
+                next.outcome_iteration = delta.outcome_iteration;
+              }
+              if (delta.outcome_evaluations) {
+                next.outcome_evaluations = delta.outcome_evaluations;
+              }
+              this.setState(next);
+            },
+            readEvaluations: () => this.state.outcome_evaluations ?? [],
+            makeVerifierContext: () => ({
+              sessionId: this.state.session_id,
+              runExec: async (cmd, opts) => {
+                const sb = this.getOrCreateSandbox();
+                const raw = await sb.exec(cmd, opts?.timeoutMs ?? 600_000);
+                // sandbox.exec returns "exit=N\n<merged-output>"
+                const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+                return m
+                  ? { exit_code: parseInt(m[1], 10), output: m[2] }
+                  : { exit_code: -1, output: raw };
+              },
+            }),
+            makeJudgeFn: () => async (prompt, signal) => {
+              const result = await generateText({
+                model: judgeModel,
+                system: prompt.system,
+                messages: [{ role: "user", content: prompt.user }],
+                maxOutputTokens: 800,
+                abortSignal: signal,
+              });
+              const text =
+                result.text ||
+                extractTextFromContent(
+                  (result as unknown as { content?: unknown }).content,
+                );
+              const u = (result as unknown as {
+                usage?: {
+                  inputTokens?: number;
+                  outputTokens?: number;
+                  cachedInputTokens?: number;
+                  cacheReadInputTokens?: number;
+                  cacheCreationInputTokens?: number;
+                };
+              }).usage;
+              const usage = u
+                ? {
+                    input_tokens: u.inputTokens ?? 0,
+                    output_tokens: u.outputTokens ?? 0,
+                    cache_creation_input_tokens:
+                      u.cacheCreationInputTokens ?? u.cachedInputTokens,
+                    cache_read_input_tokens: u.cacheReadInputTokens,
+                  }
+                : undefined;
+              return { text, usage };
+            },
+            runHarnessTurn: async (msg) => {
+              await harness.run({ ...ctx, userMessage: msg });
+            },
+          });
+        } catch (err) {
+          // Supervisor itself blew up (e.g. a persistState callback
+          // threw). Surface as a session warning — the supervisor's own
+          // failure path already handled verifier-internal errors and
+          // emitted a `failed` end span.
+          logWarn(
+            { op: "outcome.supervisor", session_id: this.state.session_id, err },
+            "outcome supervisor crashed",
           );
-          const agentOutput = agentMessages
-            .map((e: SessionEvent) => {
-              const msg = e as AgentMessageEvent;
-              return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
-            })
-            .join("\n");
-          // v1-additive (docs/trajectory-v1-spec.md "Causality"):
-          // outcome.evaluation_end.parent_event_id → the agent.message
-          // being evaluated. The eval rolls up *all* recent agent.message
-          // events into one verdict; the last one is the most recent
-          // turn the model produced and is what callers walking the
-          // ancestry care about ("which turn did this verdict apply to").
-          const lastAgentMessageId = agentMessages.length > 0
-            ? (agentMessages[agentMessages.length - 1] as AgentMessageEvent).id
-            : undefined;
-
-          // Span: outcome evaluation start
-          this.broadcastEvent({ type: "span.outcome_evaluation_start", iteration });
-
-          const ongoingEvent: SessionEvent = {
-            type: "span.outcome_evaluation_ongoing",
-            iteration,
-          };
-          history.append(ongoingEvent);
-          this.broadcastEvent(ongoingEvent);
-
-          const evalResult = await evaluateOutcome(model, outcome, agentOutput);
-
-          if (evalResult.result === "satisfied") {
-            const evalEvent: OutcomeEvaluationEvent = {
-              type: "outcome.evaluation_end",
-              result: "satisfied",
-              iteration,
-              feedback: evalResult.feedback,
-              ...(lastAgentMessageId ? { parent_event_id: lastAgentMessageId } : {}),
-            };
-            history.append(evalEvent);
-            this.broadcastEvent(evalEvent);
-            this.setState({ ...this.state, outcome: null });
-            break;
-          }
-
-          if (iteration >= maxIterations) {
-            const evalEvent: OutcomeEvaluationEvent = {
-              type: "outcome.evaluation_end",
-              result: "max_iterations_reached",
-              iteration,
-              ...(lastAgentMessageId ? { parent_event_id: lastAgentMessageId } : {}),
-            };
-            history.append(evalEvent);
-            this.broadcastEvent(evalEvent);
-            this.setState({ ...this.state, outcome: null });
-            break;
-          }
-
-          // Needs revision — inject feedback and re-run
-          const evalEvent: OutcomeEvaluationEvent = {
-            type: "outcome.evaluation_end",
-            result: "needs_revision",
-            iteration,
-            feedback: evalResult.feedback,
-            ...(lastAgentMessageId ? { parent_event_id: lastAgentMessageId } : {}),
-          };
-          history.append(evalEvent);
-          this.broadcastEvent(evalEvent);
-
-          iteration += 1;
-          this.setState({ ...this.state, outcome_iteration: iteration });
-
-          const feedbackMsg: UserMessageEvent = {
-            type: "user.message",
-            content: [{
-              type: "text",
-              text: `[Outcome Evaluation - Iteration ${iteration - 1}] Needs revision:\n${evalResult.feedback}\n\nPlease address the feedback and try again.`,
-            }],
-          };
-          history.append(feedbackMsg);
-          this.broadcastEvent(feedbackMsg);
-          await harness.run({ ...ctx, userMessage: feedbackMsg });
         }
       }
 
