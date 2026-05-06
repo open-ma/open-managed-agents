@@ -13,9 +13,11 @@
  */
 
 import { hostname } from "node:os";
+import { join } from "node:path";
+import { mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import { readCreds } from "../lib/config.js";
-import { osTag } from "../lib/platform.js";
-import { detectAll } from "@open-managed-agents/acp-runtime/registry";
+import { osTag, currentProfile, paths } from "../lib/platform.js";
+import { detectAll, loadRegistry } from "@open-managed-agents/acp-runtime/registry";
 import { SessionManager } from "../lib/session-manager.js";
 import { detectLocalSkills } from "../lib/local-skills.js";
 import { printBanner, log, c } from "../lib/style.js";
@@ -40,7 +42,18 @@ export async function runDaemon(): Promise<void> {
     process.exit(2);
   }
 
-  printBanner(`daemon — runtime ${creds.runtimeId.slice(0, 8)}… → ${creds.serverUrl}`, PKG_VERSION);
+  const profile = currentProfile();
+  const profileTag = profile ? `  [profile=${profile}]` : "";
+  printBanner(`daemon — runtime ${creds.runtimeId.slice(0, 8)}… → ${creds.serverUrl}${profileTag}`, PKG_VERSION);
+
+  // Warm the merged ACP registry cache (official @cdn.agentclientprotocol.com
+  // + OMA overlay) once at startup. All downstream sync resolveKnownAgent /
+  // detect / detectAll calls in this process then read from the cached
+  // merged list. Network failure here is non-fatal — registry-fetch falls
+  // back to disk cache, then to overlay-only; the daemon must keep working
+  // for users on planes / dev networks.
+  const cachePath = join(paths().configDir, "registry-cache.json");
+  await loadRegistry({ cachePath });
 
   // Convert https:// → wss:// (or http→ws for dev). The exchange flow
   // wrote whatever scheme the user passed via --server-url to setup.
@@ -48,21 +61,109 @@ export async function runDaemon(): Promise<void> {
   const wsUrl = `${wsBase}/agents/runtime/_attach`;
 
   let backoffMs = RECONNECT_BACKOFF_MIN_MS;
-  let stopping = false;
 
-  const stop = (sig: string) => {
+  // Graceful shutdown: drain in-flight turns up to 10s, then dispose
+  // (which keeps spawn cwds so ACP recovery via session/load works on
+  // the next session.start). Mirrors the cloud agent's DO-eviction
+  // recovery model — see SessionManager.drain() for the full flow.
+  // A second signal escapes immediately; the user wants out NOW. The
+  // 10s deadline is tuned to launchd's default ExitTimeOut of 20s — we
+  // drain for 10, plus ~2s grace + ~1s of dispose, leaving headroom
+  // before launchd would SIGKILL us.
+  const DRAIN_DEADLINE_MS = 10_000;
+  let draining = false;
+  let stopping = false;
+  const stop = (sig: string, force = false) => {
     if (stopping) return;
-    stopping = true;
-    log.step(`${sig} received, shutting down`);
-    // Tear down agents first so the child processes get SIGTERM-style
-    // dispose instead of being orphaned when the daemon process exits.
-    void sessions.disposeAll();
-    if (currentWs) {
-      try { currentWs.close(1000, "shutdown"); } catch { /* already closing */ }
+    if (draining && !force) {
+      // Second signal during drain → escalate to force.
+      log.warn(`${sig} again — abandoning drain, exiting now`);
+      stopping = true;
+      try { unlinkSync(join(paths().configDir, "daemon.pid")); } catch { /* missing */ }
+      void sessions.disposeAll();
+      if (currentWs) {
+        try { currentWs.close(1000, "shutdown"); } catch { /* already closing */ }
+      }
+      return;
     }
+    draining = true;
+    log.step(`${sig} received, draining (${DRAIN_DEADLINE_MS / 1000}s deadline; sessions recover via session/load on reconnect)`);
+    try { unlinkSync(join(paths().configDir, "daemon.pid")); } catch { /* missing or perms */ }
+    void (async () => {
+      const r = await sessions.drain(DRAIN_DEADLINE_MS, {
+        onProgress: (active, msLeft) => {
+          log.hint(`${active} turns active, ${Math.ceil(msLeft / 1000)}s left`);
+        },
+      }).catch((e) => {
+        log.err(`drain failed: ${(e as Error).message}`);
+        return { initialTurns: 0, abortedTurns: 0, sessions: 0 };
+      });
+      const naturallyCompleted = r.initialTurns - r.abortedTurns;
+      if (r.abortedTurns > 0) {
+        log.warn(
+          `deadline reached — aborted ${r.abortedTurns} in-flight turn(s); ` +
+            `they'll resume via ACP session/load when the server reconnects`,
+        );
+      }
+      log.ok(
+        `drained ${r.sessions} session(s) (${naturallyCompleted}/${r.initialTurns} turns completed cleanly)`,
+      );
+      stopping = true;
+      if (currentWs) {
+        try { currentWs.close(1000, "shutdown"); } catch { /* already closing */ }
+      }
+    })();
   };
   process.on("SIGTERM", () => stop("SIGTERM"));
   process.on("SIGINT", () => stop("SIGINT"));
+
+  // Write a pid file so `oma bridge agents refresh` can find this process
+  // by profile (paths().configDir is profile-aware) and signal it. Best-
+  // effort: a missing pid file just means the refresh verb degrades to
+  // "daemon not found" — daemon itself keeps working.
+  try {
+    mkdirSync(paths().configDir, { recursive: true });
+    writeFileSync(join(paths().configDir, "daemon.pid"), String(process.pid), "utf-8");
+  } catch (e) {
+    process.stderr.write(`! pid file write failed (non-fatal): ${(e as Error).message}\n`);
+  }
+
+  // SIGHUP — `oma bridge agents refresh`. Side-channel re-detection: do
+  // NOT touch the WS, do NOT restart sessions, do NOT kill ACP children.
+  // Just re-fetch the official ACP registry, re-snapshot npm/uv installs,
+  // re-scan local skills, and re-send the hello manifest so the relay's
+  // runtime row reflects whatever the user just installed (or removed).
+  process.on("SIGHUP", () => {
+    void (async () => {
+      log.step("SIGHUP — refreshing agent detection");
+      try {
+        await loadRegistry({ cachePath, forceRefresh: true });
+        const agents = (await detectAll()).map((a) => ({ id: a.id, binary: a.spec.command }));
+        const localSkillsDetailed = await detectLocalSkills();
+        const localSkills: Record<string, Array<{ id: string; name?: string; description?: string; source: string; source_label?: string }>> = {};
+        for (const [agentId, skills] of Object.entries(localSkillsDetailed)) {
+          if (!skills) continue;
+          localSkills[agentId] = skills.map(({ path: _path, ...rest }) => rest);
+        }
+        if (currentWs && currentWs.readyState === WebSocket.OPEN) {
+          currentWs.send(JSON.stringify({
+            type: "hello",
+            machine_id: creds.machineId,
+            hostname: hostname(),
+            os: osTag(),
+            version: PKG_VERSION,
+            agents,
+            local_skills: localSkills,
+          }));
+          log.ok(`re-published manifest  (${agents.length} agents)`);
+        } else {
+          log.warn("WS not attached — manifest will be re-sent on next connect");
+        }
+      } catch (e) {
+        log.warn(`refresh failed: ${(e as Error).message}`);
+      }
+    })();
+  });
 
   let currentWs: WebSocket | null = null;
   // SessionManager survives WS drops — keeps the ACP child processes alive
