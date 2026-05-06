@@ -65,6 +65,20 @@ export class NodeHarnessRuntime implements HarnessRuntime {
   history: SqlHistoryStore;
   sandbox: SandboxExecutor;
   pendingConfirmations?: string[];
+  /**
+   * Per-runtime serial chain for SqlEventLog writes. The harness fires
+   * many `broadcast()` calls in close succession (span_start, span_first_
+   * token, tool_use, tool_result, …); each used to do a fire-and-forget
+   * appendAsync. SqlEventLog mints `seq` via `SELECT COALESCE(MAX(seq),
+   * 0) + 1`, which races on Postgres (true concurrent connections) and
+   * occasionally collides on the sessions PK. Better-sqlite3 hides the
+   * race because its underlying I/O is sync, but PG users hit
+   * `duplicate key value violates unique constraint
+   * "session_events_pkey"`. Serialising the writes through a single
+   * Promise chain preserves logical event order AND eliminates the seq
+   * collision without needing per-row locking.
+   */
+  private writeChain: Promise<void> = Promise.resolve();
 
   constructor(private opts: NodeHarnessRuntimeOptions) {
     this.history = new SqlHistoryStore(opts.log);
@@ -81,20 +95,27 @@ export class NodeHarnessRuntime implements HarnessRuntime {
    * survives crash) AND publishes to the in-process hub for live SSE
    * subscribers. The order matters: persist first so a hub subscriber
    * that races a DB read after the publish always sees the event.
+   *
+   * Persists are serialised through `writeChain` so concurrent calls
+   * don't collide on the per-session seq counter (see writeChain
+   * comment above).
    */
   broadcast = (event: SessionEvent): void => {
     this.history.appendInPlace(event);
-    void this.opts.log
-      .appendAsync(event)
-      .then(() => {
-        // Re-read the latest seq so the hub publish carries it (SSE clients
-        // need it for Last-Event-ID resume). Cheap: index lookup on PK.
-        return this.opts.log.getEventsAsync().then((all) => {
-          const last = all[all.length - 1];
-          if (last) this.opts.hub.publish(this.opts.sessionId, last);
-        });
+    this.writeChain = this.writeChain
+      .then(() => this.opts.log.appendAsync(event))
+      .then(() => this.opts.log.getEventsAsync())
+      .then((all) => {
+        const last = all[all.length - 1];
+        if (last) this.opts.hub.publish(this.opts.sessionId, last);
       })
-      .catch((err) => console.warn("[node-harness] broadcast persist failed", err));
+      .catch((err) => {
+        console.warn("[node-harness] broadcast persist failed", err);
+        // Reset the chain so a single failure doesn't poison every
+        // subsequent broadcast (the SQL adapter typically recovers on
+        // the next attempt — connection wasn't lost, just a constraint
+        // hit).
+      });
   };
 
   // Stream lifecycle events: broadcast-only (NOT persisted to events log,
