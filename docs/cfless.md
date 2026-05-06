@@ -61,6 +61,47 @@ ANTHROPIC_API_KEY=sk-... pnpm --filter @open-managed-agents/main-node start
 State lives at `./data/` (sqlite db + per-session sandbox workdirs).
 Wipe + restart for a clean slate.
 
+## Postgres backend
+
+The default compose puts everything in SQLite. For multi-instance deploys,
+larger sessions tables (50M+ rows), or to share an existing PG cluster,
+use the Postgres compose:
+
+```bash
+docker compose -f docker-compose.cfless.pg.yml up --build
+curl localhost:8787/health
+# → {"status":"ok","backends":{"agents":"postgres","events":"postgres","db":"postgres ..."}}
+```
+
+What changes vs the SQLite stack:
+
+- `oma-server` reads `DATABASE_URL=postgres://oma:oma@postgres:5432/oma`
+  (set in `docker-compose.cfless.pg.yml`); the same SqlClient port serves
+  every store package, so business code is identical.
+- `oma-vault` follows the same dispatch — when `DATABASE_URL` is a
+  postgres URL the sidecar reads credentials from PG (otherwise it falls
+  back to the bundled SQLite path).
+- A `postgres:16-alpine` service ships with the compose, persisted on a
+  named volume `oma-pgdata`. No host port published; only `oma-server`
+  reaches it on the bridge network. Add `ports: ["5432:5432"]` if you
+  want `psql` access from the host.
+- `better-auth` still sits on its own SQLite file at `/app/data/auth.db`
+  — the kysely-adapter wants a node-postgres `Pool`, not the
+  `postgres.js` driver this codebase uses for the main store. It's a
+  small file (<1k rows) and the `./data` bind-mount keeps it co-located
+  with backups.
+
+To point at an existing PG (instead of the bundled `postgres` service),
+remove the `postgres` service block and override `DATABASE_URL` /
+`oma-vault.DATABASE_URL` in `.env`:
+
+```bash
+DATABASE_URL=postgres://user:pw@my-pg.internal:5432/oma_prod
+```
+
+Both backends pass the same crash-recovery test surface (55 tests across
+adapter / recovery-logic / SIGKILL bootstrap / CF DO eviction).
+
 ## Crash recovery demo
 
 OMA's CFless mode persists session state to SQLite + the event log on
