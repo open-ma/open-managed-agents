@@ -418,13 +418,38 @@ function findLastAgentMessageId(
  * stay valid for any verifier that ignores them (script / verifiable /
  * llm_judge); composite verifiers that recurse into reward_model would
  * need richer construction — handle that when the use case lands.
+ *
+ * Wraps each SessionEvent into the StoredEvent shape the eval-core
+ * scorer helpers expect (`{ seq, type, data: JSON.stringify(event), ts }`).
+ * `history.getEvents()` returns the deserialized SessionEvent stream
+ * (top-level fields), but the helpers parse `e.data` to get the
+ * structured payload — so without the wrap, `getToolUses` /
+ * `getAgentMessageTexts` / etc. all return empty.
  */
 function makeMinimalTrajectory(
   events: StoredEvent[] | SessionEvent[],
 ): Trajectory {
-  // Both StoredEvent and SessionEvent satisfy the eval-core scorer
-  // helpers' minimal expectations (`{type, data?}`). The cast is safe
-  // because verifier consumers only read these fields.
+  const wrapped: StoredEvent[] = events.map((e, i) => {
+    // If the event already carries the StoredEvent envelope (eval-runner
+    // path, which fetches via /events endpoint), pass it through.
+    if (
+      typeof (e as StoredEvent).data === "string" &&
+      typeof (e as StoredEvent).seq === "number"
+    ) {
+      return e as StoredEvent;
+    }
+    // Supervisor path: history.getEvents() returns deserialized events.
+    // Wrap into StoredEvent so the scorer helpers see the structured
+    // payload via parseData.
+    const ts =
+      (e as { processed_at?: string }).processed_at ?? new Date(0).toISOString();
+    return {
+      seq: i,
+      type: (e as { type?: string }).type ?? "unknown",
+      data: JSON.stringify(e),
+      ts,
+    };
+  });
   return {
     schema_version: "oma.trajectory.v1",
     trajectory_id: "supervisor-inline",
@@ -434,9 +459,9 @@ function makeMinimalTrajectory(
     model: { id: "supervisor-inline", provider: "" },
     started_at: new Date(0).toISOString(),
     outcome: "running",
-    events: events as StoredEvent[],
+    events: wrapped,
     summary: {
-      num_events: events.length,
+      num_events: wrapped.length,
       num_turns: 0,
       num_tool_calls: 0,
       num_tool_errors: 0,
