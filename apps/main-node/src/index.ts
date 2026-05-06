@@ -35,6 +35,7 @@
  */
 
 import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import {
   createBetterSqlite3SqlClient,
@@ -74,7 +75,7 @@ import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/lo
 import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { mkdirSync } from "node:fs";
-import { dirname, join } from "node:path";
+import { dirname, join, relative } from "node:path";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
@@ -1208,6 +1209,51 @@ v1.get("/integrations/slack/installations", (c) => c.json({ data: [] }));
 v1.get("/integrations/slack/credentials", (c) => c.json({ data: [] }));
 
 app.route("/v1", v1);
+
+// ── Console UI ─────────────────────────────────────────────────────────
+//
+// When CONSOLE_DIR is set (and points at an apps/console build output),
+// serve the SPA from there. Two passes:
+//
+//   1. serveStatic at "*" picks up real asset files (/assets/index.js,
+//      /favicon.ico, etc).
+//   2. SPA fallback at "*" returns index.html for anything else — so
+//      client-side routes like /agents/abc render the app shell, then the
+//      client router takes over.
+//
+// API and auth paths are mounted earlier in the chain, so they win the
+// route match before serveStatic gets a look. /auth-info, /auth/*, /v1/*
+// are untouched.
+//
+// CFless deployments that don't ship the console (e.g. SDK-only) just
+// leave CONSOLE_DIR unset; the SPA fallback short-circuits and the
+// normal 404 handler runs.
+//
+// CF prod has the equivalent via the ASSETS binding (apps/main wrangler
+// `assets.directory: ../console/dist` + `not_found_handling: SPA`).
+// Same UX, different mechanism.
+const consoleDir = process.env.CONSOLE_DIR;
+if (consoleDir) {
+  // serveStatic uses fs.statSync against `${root}/${path}`; root is
+  // resolved relative to process.cwd(). main-node's cwd inside docker
+  // is /app/apps/main-node — passing the absolute /app/apps/console/dist
+  // wouldn't work since serveStatic strips leading `/` from root. We
+  // pass it relative-to-cwd by computing here.
+  const cwd = process.cwd();
+  const rootRel = consoleDir.startsWith("/")
+    ? relative(cwd, consoleDir)
+    : consoleDir;
+  app.use(
+    "/*",
+    serveStatic({
+      root: rootRel,
+      // SPA fallback — serveStatic returns null on miss; our explicit
+      // get("*") below catches and returns index.html for the SPA shell.
+    }),
+  );
+  app.get("/*", serveStatic({ root: rootRel, path: "index.html" }));
+  console.log(`[main-node] console UI served from ${consoleDir} (cwd-rel: ${rootRel})`);
+}
 
 app.notFound((c) => c.json({ error: "not found" }, 404));
 app.onError((err, c) => {
