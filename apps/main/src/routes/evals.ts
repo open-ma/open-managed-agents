@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { Env } from "@open-managed-agents/shared";
+import type { Env, RewardSpec } from "@open-managed-agents/shared";
 import type { EvalRunStatus } from "@open-managed-agents/evals-store";
 import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
@@ -27,6 +27,22 @@ export interface EvalTaskSpec {
   // Default 1. When > 1, server spawns N sessions per task and stores N
   // trajectory_ids; pass@k / pass^k computed by downstream scorer layer.
   trials?: number;
+  /**
+   * Phase 2: declarative reward / verification spec. Optional.
+   *   - undefined  → eval-runner falls back to "trial reached idle = pass"
+   *                 (the Phase 1 placeholder; reward.verifier_id =
+   *                 "eval-runner.trial-status.v1")
+   *   - { type: "script", verify_script } → ScriptVerifier runs the script
+   *                 in the sandbox via /exec and grades by exit code
+   *   - { type: "verifiable", scorer, opts } → wraps a named Scorer from
+   *                 packages/eval-core/src/scorers/scorers.ts
+   *   - { type: "composite", components: [...] } → weighted aggregate
+   *   - { type: "reward_model", endpoint } → external HTTP grader
+   *
+   * JSON wire shape matches RLTask.reward so the same task definitions
+   * work for both eval and RL. See packages/eval-core/src/verifier/types.ts.
+   */
+  reward?: RewardSpec;
 }
 
 export type { EvalRunStatus };

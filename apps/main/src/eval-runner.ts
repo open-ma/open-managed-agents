@@ -12,15 +12,15 @@
 // writeSetupFiles below), then (3) send the spec's first user message and
 // wait for idle, repeating for each subsequent message.
 
-import type { Env, AgentConfig, EnvironmentConfig, StoredEvent } from "@open-managed-agents/shared";
-import { buildTrajectory } from "@open-managed-agents/shared";
+import type { Env, AgentConfig, EnvironmentConfig, StoredEvent, Trajectory, RewardResult, VerifierContext } from "@open-managed-agents/shared";
+import { buildTrajectory, verifierForSpec, NoRunVerifier } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
 import { buildCfServices, getCfServicesForTenant, type Services } from "@open-managed-agents/services";
 import type { EvalRunRow, EvalRunStatus } from "@open-managed-agents/evals-store";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { kvKey } from "./kv-helpers";
-import type { EvalRunRecord, EvalTaskResult, EvalTaskSpec } from "./routes/evals";
+import type { EvalRunRecord, EvalTaskResult, EvalTaskSpec, EvalTrialResult } from "./routes/evals";
 
 // ---------- Sandbox helpers (mirrors routes/sessions.ts) ----------
 
@@ -330,13 +330,148 @@ async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string)
   }
 }
 
+/**
+ * Build a VerifierContext that lets a Verifier reach back into the agent
+ * sandbox via /exec. Used by `script` + (future) `composite` Verifiers.
+ * Stays a function (not closure-captured at module scope) so each call
+ * resolves the binding fresh — environments can re-enter ready/not-ready
+ * state during a long run.
+ */
+function buildVerifierContext(env: Env, run: EvalRunRecord, sessionId: string): VerifierContext {
+  return {
+    sessionId,
+    runExec: async (cmd, opts) => {
+      const binding = await getSandboxBinding(env, run.environment_id, run.tenant_id);
+      if (!binding) throw new Error("environment binding lost");
+      const res = await fwd(binding, `/sessions/${sessionId}/exec`, "POST", JSON.stringify({
+        command: cmd,
+        timeout_ms: opts?.timeoutMs ?? 600_000,
+      }));
+      if (!res.ok) {
+        const body = await res.text().catch(() => "");
+        return { exit_code: -1, output: `HTTP ${res.status}: ${body.slice(0, 200)}` };
+      }
+      const data = (await res.json()) as { exit_code?: number; output?: string };
+      return { exit_code: data.exit_code ?? -1, output: data.output ?? "" };
+    },
+  };
+}
+
+/**
+ * Run the trial's RewardSpec against the built trajectory and return a
+ * RewardResult ready to drop into `Trajectory.reward`. When no spec is
+ * declared on the task, fall back to the Phase 1 placeholder (idle =
+ * pass) so existing eval runs keep producing the same reward semantics.
+ */
+async function runVerifier(
+  env: Env,
+  run: EvalRunRecord,
+  task: EvalTaskResult,
+  trial: EvalTrialResult,
+  sessionId: string,
+  trajectory: Trajectory,
+): Promise<RewardResult> {
+  const computedAt = new Date().toISOString();
+  const reward = task.spec.reward;
+
+  // No spec → Phase 1 fallback. "Trial reached idle without timeout/error"
+  // is the implicit verifier; eval-runner gates this entry point on that
+  // being true, so always 1. Marked with a stable verifier_id so consumers
+  // can distinguish unconfigured-task rewards from real verifier output.
+  if (!reward) {
+    return {
+      raw_rewards: { outcome: 1 },
+      final_reward: 1,
+      verifier_id: "eval-runner.trial-status.v1",
+      computed_at: computedAt,
+    };
+  }
+
+  const ctx = buildVerifierContext(env, run, sessionId);
+  let verifier;
+  try {
+    verifier = verifierForSpec(reward, ctx);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logWarn(
+      { op: "eval.verifier.spec_invalid", run_id: run.id, task_id: task.spec.id, err: msg },
+      "verifier spec rejected; recording 0 reward",
+    );
+    return {
+      raw_rewards: { spec_invalid: 0 },
+      final_reward: 0,
+      verifier_id: "verifier-spec-invalid.v1",
+      computed_at: computedAt,
+    };
+  }
+
+  let score;
+  try {
+    score = await verifier.check(trajectory);
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logWarn(
+      { op: "eval.verifier.check_threw", run_id: run.id, task_id: task.spec.id, verifier_id: verifier.id, err: msg },
+      "verifier check threw; recording 0 reward",
+    );
+    return {
+      raw_rewards: { verifier_error: 0 },
+      final_reward: 0,
+      verifier_id: verifier.id,
+      computed_at: computedAt,
+    };
+  }
+
+  // Translate Score → RewardResult. `criteria` (if provided by the
+  // verifier) is the breakdown; otherwise we reify a single-key map so
+  // downstream code (Console reward bar, RL reward stats) sees a stable
+  // shape regardless of which Verifier produced it.
+  const criteria = (score.metadata as { criteria?: Record<string, number> } | undefined)?.criteria;
+  const rawRewards = criteria && Object.keys(criteria).length > 0
+    ? criteria
+    : { value: score.value };
+  // Avoid mutating verifier-owned structures (CompositeVerifier reuses
+  // `criteria` across its own metadata and downstream propagation).
+  const persisted: Record<string, number> = {};
+  for (const [k, v] of Object.entries(rawRewards)) {
+    if (typeof v === "number" && Number.isFinite(v)) persisted[k] = v;
+  }
+
+  return {
+    raw_rewards: persisted,
+    final_reward: score.value,
+    verifier_id: verifier.id,
+    computed_at: computedAt,
+  };
+}
+
+/**
+ * Synthesize a RewardResult for a failure trial — there's no useful
+ * execution to grade, so we tag the trajectory with NoRunVerifier so
+ * Console / RL stats can distinguish "scored 0" from "never scored".
+ */
+async function synthesizeNoRunReward(reasonHint: string): Promise<RewardResult> {
+  // NoRunVerifier ignores its trajectory arg; we still call it so the
+  // reward field is built via the same Verifier abstraction as everything
+  // else (one code path = one shape).
+  const verifier = new NoRunVerifier(reasonHint);
+  const score = await verifier.check({} as Trajectory);
+  return {
+    raw_rewards: { failure: 0 },
+    final_reward: score.value,
+    verifier_id: verifier.id,
+    computed_at: new Date().toISOString(),
+  };
+}
+
 async function buildAndStoreTrajectory(
   env: Env,
   run: EvalRunRecord,
   task: EvalTaskResult,
-  trial: import("./routes/evals").EvalTrialResult,
+  trial: EvalTrialResult,
   sessionId: string,
-  finalReward: number,
+  reward: RewardResult,
+  outcomeOverride?: Trajectory["outcome"],
 ): Promise<{ trajectory_id: string; final_reward: number }> {
   const t = run.tenant_id;
   const services = await getServices(env, t);
@@ -381,42 +516,64 @@ async function buildAndStoreTrajectory(
     },
   });
 
-  // --- Trajectory v1 Phase 1 enrichment ---
+  // --- Trajectory v1 envelope enrichment ---
   // Wire eval-runner-owned fields into the envelope BEFORE storage so the
   // persisted trajectory carries reward / task_id / group_id / a corrected
-  // outcome on its own. Phase 3 (Console UI) will read these directly;
-  // Phase 2 will swap the static reward for a Verifier abstraction.
+  // outcome on its own. Phase 3 (Console UI) will read these directly.
 
   // task_id / group_id — eval-runner is the only caller that knows them.
-  // Non-eval session trajectories (built via /v1/sessions/:id/trajectory)
-  // correctly leave both undefined.
   trajectory.task_id = task.spec.id;
   trajectory.group_id = run.id;
 
-  // outcome timeout override — `deriveOutcome` can't see eval-runner's
-  // wall-clock budget. We do. If the trial bailed via the per-trial
-  // timeout_ms guard (the `trial timeout: ...` error string is set by
-  // advanceTrial) the trajectory's outcome should be `timeout`, not
-  // whatever deriveOutcome produced (likely `running` — the session
-  // never reached status_idle / status_terminated / session.error).
-  if (trial.error && /timeout/i.test(trial.error)) {
+  // outcome override — `deriveOutcome` can't see eval-runner's wall-clock
+  // budget or setup-error short-circuits. Caller passes the right outcome
+  // when known (timeout / failure on bootstrap-error trials). Otherwise
+  // we infer from the trial's error string for the "trial timeout" path.
+  if (outcomeOverride) {
+    trajectory.outcome = outcomeOverride;
+  } else if (trial.error && /timeout/i.test(trial.error)) {
     trajectory.outcome = "timeout";
   }
 
-  // reward — Phase 1 placeholder verifier. Caller provides the scalar
-  // (today: 0/1 from did-the-trial-finalize-successfully). Phase 2 will
-  // replace this with the unified Verifier abstraction (see
-  // docs/handoff-verifier-framework.md).
-  trajectory.reward = {
-    raw_rewards: { outcome: finalReward },
-    final_reward: finalReward,
-    verifier_id: "eval-runner.trial-status.v1",
-    computed_at: new Date().toISOString(),
-  };
+  trajectory.reward = reward;
 
   // Store trajectory under a stable key; for now use trajectory_id as the only key
   await env.CONFIG_KV.put(kvKey(t, "trajectory", trajectory.trajectory_id), JSON.stringify(trajectory));
-  return { trajectory_id: trajectory.trajectory_id, final_reward: finalReward };
+  return { trajectory_id: trajectory.trajectory_id, final_reward: reward.final_reward };
+}
+
+/**
+ * Best-effort no-run trajectory persistence for failure trials. Used
+ * when a trial dies before producing useful execution (setup error,
+ * postUserMessage failure, per-trial wall-clock timeout). Synthesizes a
+ * reward with NoRunVerifier so the Console / RL stats can still query
+ * the failure timeline through the canonical Trajectory envelope.
+ *
+ * Failure to build the trajectory is logged and swallowed — we still
+ * want the trial.status=failed transition to land even if the events
+ * endpoint is currently 500-ing.
+ */
+async function persistFailureTrajectory(
+  env: Env,
+  run: EvalRunRecord,
+  task: EvalTaskResult,
+  trial: EvalTrialResult,
+  sessionId: string,
+  outcome: Trajectory["outcome"],
+  reasonHint: string,
+): Promise<void> {
+  try {
+    const reward = await synthesizeNoRunReward(reasonHint);
+    const result = await buildAndStoreTrajectory(env, run, task, trial, sessionId, reward, outcome);
+    trial.trajectory_id = result.trajectory_id;
+    trial.reward = result.final_reward;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    logWarn(
+      { op: "eval.failure_trajectory.skip", run_id: run.id, task_id: task.spec.id, session_id: sessionId, err: msg },
+      "could not build failure-trial trajectory; trial.failed without trajectory_id",
+    );
+  }
 }
 
 // ---------- Single-tick advance (per-trial) ----------
@@ -425,15 +582,16 @@ async function advanceTrial(
   env: Env,
   run: EvalRunRecord,
   task: EvalTaskResult,
-  trial: import("./routes/evals").EvalTrialResult,
+  trial: EvalTrialResult,
 ): Promise<boolean> {
   // Returns true if any progress was made (caller should save).
   if (trial.status === "completed" || trial.status === "failed") return false;
 
   // Bootstrap: create session + write setup_files (if any) + send first message
   if (trial.status === "pending") {
+    let sessionId: string | undefined;
     try {
-      const sessionId = await createTaskSession(env, run, task);
+      sessionId = await createTaskSession(env, run, task);
       trial.session_id = sessionId;
       trial.status = "running";
       trial.started_at = new Date().toISOString();
@@ -454,6 +612,15 @@ async function advanceTrial(
       trial.status = "failed";
       trial.error = err instanceof Error ? err.message : String(err);
       trial.ended_at = new Date().toISOString();
+      // Phase 2 failure-trial gap fix: when a session was successfully
+      // created but the trial died before producing useful execution
+      // (setup_files, setup_script, or first postUserMessage failed),
+      // build a no-run trajectory so the failure is queryable through
+      // the canonical Trajectory envelope. If `createTaskSession` itself
+      // threw there's no sessionId — nothing to build, leave it bare.
+      if (sessionId) {
+        await persistFailureTrajectory(env, run, task, trial, sessionId, "failure", trial.error);
+      }
       return true;
     }
   }
@@ -477,6 +644,11 @@ async function advanceTrial(
       trial.status = "failed";
       trial.error = `trial timeout: ${Math.round(elapsed / 1000)}s exceeded budget ${Math.round(timeoutMs / 1000)}s (m_idx=${trial.current_message_index ?? 0})`;
       trial.ended_at = new Date().toISOString();
+      // Phase 2 failure-trial gap fix: stale-session timeout is the most
+      // diagnostically valuable failure shape (model hung mid-tool,
+      // sandbox crashed, status endpoint broken). The trajectory will
+      // contain the partial event stream up to the freeze point.
+      await persistFailureTrajectory(env, run, task, trial, trial.session_id, "timeout", trial.error);
       return true;
     }
   }
@@ -495,28 +667,54 @@ async function advanceTrial(
       trial.status = "failed";
       trial.error = err instanceof Error ? err.message : String(err);
       trial.ended_at = new Date().toISOString();
+      // Phase 2 failure-trial gap fix: postUserMessage failure mid-run
+      // — the agent already produced N-1 turns of trajectory worth
+      // archiving even if turn N can't be sent.
+      await persistFailureTrajectory(env, run, task, trial, trial.session_id, "failure", trial.error);
       return true;
     }
   }
 
-  // All messages sent and session idle → build trajectory and finalize.
-  // Reaching this point means every spec.messages[] turn ran to idle without
-  // exceeding timeout_ms or hitting an error path; per Phase 1's
-  // trial-status-as-reward (the placeholder until the Verifier abstraction
-  // lands in Phase 2), that's a 1.0. Trajectory storage failure below is
-  // infrastructure, not verification — rolls back to running for retry,
-  // gives up at 3 attempts and demotes to failed (with the trajectory then
-  // never persisted, so no reward to write).
+  // All messages sent and session idle → build trajectory + run verifier.
+  // Reaching this point means every spec.messages[] turn ran to idle
+  // without exceeding timeout_ms or hitting an error path; the verifier
+  // (or the Phase 1 placeholder fallback when no spec is declared)
+  // grades the resulting trajectory and supplies the reward. Trajectory
+  // storage failure below is infrastructure, not verification — rolls
+  // back to running for retry, gives up at 3 attempts and demotes to
+  // failed (with the trajectory then never persisted, so no reward to
+  // write).
   try {
-    const finalReward = 1;
-    const result = await buildAndStoreTrajectory(env, run, task, trial, trial.session_id, finalReward);
-    trial.trajectory_id = result.trajectory_id;
+    // Build the trajectory once and run the verifier against it. The
+    // verifier may itself reach back into the sandbox via /exec (script
+    // RewardSpec); the canonical Trajectory is what gets graded.
+    // Synthesize a placeholder reward first so buildAndStoreTrajectory
+    // has something to wire in; immediately replace with the verified
+    // reward and re-store so persisted state matches what the verifier
+    // produced. Two writes is fine — eval finalize is bounded once per
+    // trial, the second store atomically overwrites the first.
+    const placeholder = await synthesizeNoRunReward("pre-verify placeholder");
+    const built = await buildAndStoreTrajectory(env, run, task, trial, trial.session_id, placeholder);
+    // Re-fetch the trajectory we just wrote (the verifier needs the
+    // enriched envelope: events + summary + outcome). Cheap: it's local KV.
+    const t = run.tenant_id;
+    const stored = await env.CONFIG_KV.get(kvKey(t, "trajectory", built.trajectory_id), "text");
+    if (!stored) throw new Error(`trajectory ${built.trajectory_id} disappeared after store`);
+    const trajectory = JSON.parse(stored) as Trajectory;
+    const reward = await runVerifier(env, run, task, trial, trial.session_id, trajectory);
+    trajectory.reward = reward;
+    await env.CONFIG_KV.put(
+      kvKey(t, "trajectory", built.trajectory_id),
+      JSON.stringify(trajectory),
+    );
+
+    trial.trajectory_id = built.trajectory_id;
     trial.status = "completed";
     trial.ended_at = new Date().toISOString();
     // Mirror Trajectory.reward.final_reward onto the trial for Console
     // back-compat. Phase 3 will switch the UI to read trajectory.reward
     // directly and this can drop.
-    trial.reward = result.final_reward;
+    trial.reward = reward.final_reward;
     return true;
   } catch (err: unknown) {
     // Bounded retry: events fetch can transiently 500 under storage
