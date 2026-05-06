@@ -346,7 +346,13 @@ export class DefaultHarness implements HarnessInterface {
       try {
       const r = streamText({
       model,
-      system: cached.system,
+      // Empty system prompt → omit entirely. Anthropic's API rejects an
+      // empty `system` block ("system: text content blocks must be non-
+      // empty"); the AI SDK forwards the empty string as a block instead
+      // of skipping it. Pass undefined so the SDK omits the field.
+      system: cached.system && (typeof cached.system !== "string" || cached.system.length > 0)
+        ? cached.system
+        : undefined,
       messages: finalMessages,
       tools: cached.tools,
       stopWhen: stepCountIs(100),
@@ -839,11 +845,16 @@ function applyAnthropicCacheControl(
   // (1) System block as cached SystemModelMessage. Required for system to
   // cache at all — string-form `system` is wrapped by the provider with no
   // providerOptions, which means cache_control is omitted on the wire.
-  const system: SystemModelMessage = {
-    role: "system",
-    content: systemPrompt,
-    providerOptions: ephemeral,
-  };
+  //
+  // Skip the cache_control wrapper when systemPrompt is empty: Anthropic's
+  // API rejects `cache_control` on empty text blocks ("system.0:
+  // cache_control cannot be set for empty text blocks"), and an empty
+  // system isn't worth caching anyway. Pass the empty string through —
+  // the SDK omits the system block entirely when given an empty string,
+  // which is the desired wire shape.
+  const system: SystemModelMessage | string = systemPrompt
+    ? { role: "system", content: systemPrompt, providerOptions: ephemeral }
+    : systemPrompt;
 
   // (2) Tools: tag the LAST tool's providerOptions so the entire tools
   // block becomes a 2nd cache breakpoint.
