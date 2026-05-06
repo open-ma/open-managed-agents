@@ -262,6 +262,41 @@ function shellQuote(s: string): string {
   return `'${s.replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Run the spec's `setup_script` in the sandbox via /exec, BEFORE the first
+ * user.message. Mirrors writeSetupFiles in spirit — env prep that should
+ * not pollute the agent trajectory. Failure marks the trial failed
+ * synchronously; the agent never sees a half-staged container.
+ *
+ * 30-minute hard timeout matches BG_TASK_MAX_LIFETIME_MS in the sandbox
+ * runtime — long-enough for git clone of large repos + pip install of
+ * heavy ML deps + dataset downloads, short-enough that a stuck setup
+ * doesn't burn container compute forever.
+ */
+async function runSetupScript(
+  env: Env,
+  run: EvalRunRecord,
+  sessionId: string,
+  script: string,
+): Promise<void> {
+  const binding = await getSandboxBinding(env, run.environment_id, run.tenant_id);
+  if (!binding) throw new Error("environment binding lost");
+  const res = await fwd(binding, `/sessions/${sessionId}/exec`, "POST", JSON.stringify({
+    command: script,
+    timeout_ms: 30 * 60 * 1000,
+  }));
+  if (!res.ok) {
+    const body = await res.text();
+    throw new Error(`setup_script HTTP ${res.status}: ${body.slice(0, 200)}`);
+  }
+  const data = (await res.json()) as { exit_code?: number; output?: string };
+  if (data.exit_code !== 0) {
+    throw new Error(
+      `setup_script exit=${data.exit_code}: ${(data.output ?? "").slice(0, 4000)}`,
+    );
+  }
+}
+
 async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string): Promise<string | null> {
   const binding = await getSandboxBinding(env, run.environment_id, run.tenant_id);
   if (!binding) return null;
@@ -352,6 +387,9 @@ async function advanceTrial(
       // wastes tokens, occasionally drops or rewrites content).
       if (task.spec.setup_files && task.spec.setup_files.length > 0) {
         await writeSetupFiles(env, run, sessionId, task.spec.setup_files);
+      }
+      if (task.spec.setup_script && task.spec.setup_script.trim().length > 0) {
+        await runSetupScript(env, run, sessionId, task.spec.setup_script);
       }
       // Send first message immediately
       await postUserMessage(env, run, sessionId, task.spec.messages[0]);
