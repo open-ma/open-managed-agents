@@ -77,6 +77,7 @@ export default defineConfig({
           label: 'Contribute',
           items: [
             { label: 'Contributing', slug: 'contribute' },
+            { label: 'State Machines', slug: 'contribute/state-machines' },
             { label: 'Recovery & Idempotency', slug: 'contribute/recovery-and-idempotency' },
           ],
         },
