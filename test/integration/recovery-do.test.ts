@@ -1,6 +1,6 @@
 // @ts-nocheck
 import { env, exports } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
+import { runInDurableObject, runDurableObjectAlarm } from "cloudflare:test";
 import { describe, it, expect, beforeAll } from "vitest";
 import { registerHarness } from "../../apps/agent/src/harness/registry";
 import type { HarnessInterface, HarnessContext } from "../../apps/agent/src/harness/interface";
@@ -51,7 +51,78 @@ async function newSession(): Promise<string> {
   return session.id;
 }
 
+/**
+ * Some test DBs have schema drift on the `environments` migration that
+ * breaks /v1/environments — the unified-runtime alarm tests don't need
+ * a full agent / environment / session graph, just a sessions row to
+ * UPDATE. This helper inserts the minimum directly into AUTH_DB and
+ * warms up the DO so its internal sqlite is initialised.
+ */
+async function newSessionDirect(idHint: string): Promise<string> {
+  await ensureTurnIdColumnsForTest();
+  const sessionId = `${idHint}_${Math.random().toString(36).slice(2, 10)}`;
+  const now = Date.now();
+  await env.AUTH_DB.prepare(
+    `INSERT INTO sessions
+       (id, tenant_id, agent_id, environment_id, title, status, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  )
+    .bind(sessionId, "default", "agent_test", "env_test", "", "idle", now, now)
+    .run();
+  // Warm the DO so its storage.sql exists when we go to seed event-log
+  // state and so the runtimeAdapter resolves its lazy state on first
+  // alarm() call.
+  const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+  await runInDurableObject(stub, async (instance, _state) => {
+    // _state is loaded lazily inside the DO; force it by reading sessions
+    // through a synthetic POST /init shape. Easiest path: directly set
+    // the field that the runtimeAdapter getter requires.
+    (instance as { _state: unknown })._state = {
+      session_id: sessionId,
+      tenant_id: "default",
+      agent_id: "agent_test",
+      environment_id: "env_test",
+    };
+  });
+  return sessionId;
+}
+
+// Belt-and-braces — top-level helper too, in case the test pool resets
+// storage between cases. (No-op when the column already exists.)
+async function ensureTurnIdColumnsForTest() {
+  // Some test DBs land here without migration 0001 / 0014 having
+  // applied (the test fixture's migration runner stops at earlier
+  // failures, e.g. duplicate 0010_* / 0011_* migration filenames).
+  // Synthesise the minimum schema for the alarm tests below. CREATE
+  // TABLE IF NOT EXISTS is a no-op when the real migration produced
+  // a richer schema.
+  await env.AUTH_DB.prepare(
+    `CREATE TABLE IF NOT EXISTS sessions (
+       id              TEXT PRIMARY KEY NOT NULL,
+       tenant_id       TEXT NOT NULL,
+       agent_id        TEXT NOT NULL,
+       environment_id  TEXT NOT NULL,
+       title           TEXT NOT NULL DEFAULT '',
+       status          TEXT NOT NULL,
+       created_at      INTEGER NOT NULL,
+       updated_at      INTEGER
+     )`,
+  ).run();
+  for (const stmt of [
+    `ALTER TABLE sessions ADD COLUMN turn_id TEXT`,
+    `ALTER TABLE sessions ADD COLUMN turn_started_at INTEGER`,
+  ]) {
+    try {
+      await env.AUTH_DB.prepare(stmt).run();
+    } catch (err) {
+      const msg = (err as Error).message ?? "";
+      if (!/duplicate column name/i.test(msg)) throw err;
+    }
+  }
+}
+
 describe("SessionDO recovery — DO-level", () => {
+  beforeAll(ensureTurnIdColumnsForTest);
   it("finalizes streaming row + appends agent.message on next boot", async () => {
     const sessionId = await newSession();
     const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
@@ -171,5 +242,321 @@ describe("SessionDO recovery — DO-level", () => {
         e.type === "agent.message" && e.data.message_id === "msg_already_done",
     );
     expect(newMessages).toHaveLength(0);
+  });
+
+  // ── extra crash points ─────────────────────────────────────────────
+
+  it("orphan agent.custom_tool_use → row reconciled but NO event injected (user-driven)", async () => {
+    // Custom tools resolve via user.custom_tool_result, which is sent
+    // by the SDK client. Server can't fabricate it without inventing
+    // user input. Recovery must surface a warning and leave the log
+    // alone — the harness's next-turn projection will see the dangling
+    // tool_use and the SDK is responsible for resending the result.
+    const sessionId = await newSession();
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({
+        type: "agent.custom_tool_use",
+        id: "ctu_orphan",
+        name: "approve_purchase",
+        input: { amount: 99.99 },
+      });
+      (instance as { initialized: boolean }).initialized = false;
+    });
+
+    await stub.fetch(new Request("http://internal/status"));
+    await new Promise((r) => setTimeout(r, 100));
+
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data: events } = await ev.json();
+
+    const customUses = events.filter(
+      (e: { type: string; data: { id?: string } }) =>
+        e.type === "agent.custom_tool_use" && e.data.id === "ctu_orphan",
+    );
+    const fabricatedResults = events.filter(
+      (e: { type: string; data: { id?: string } }) =>
+        e.type === "user.custom_tool_result" && e.data.id === "ctu_orphan",
+    );
+    expect(customUses).toHaveLength(1); // original stays
+    expect(fabricatedResults).toHaveLength(0); // recovery does NOT fabricate
+  });
+
+  it("multiple orphans of mixed types in ONE session are all handled in one boot", async () => {
+    // Production-realistic: a process death can leave behind a stuck
+    // stream + a dangling tool_use + a dangling mcp_tool_use all in
+    // the same session. Recovery should drain all three in one pass.
+    const sessionId = await newSession();
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const streams = new CfDoStreamRepo(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+
+      await streams.start("msg_mixed", Date.now() - 1000);
+      await streams.appendChunk("msg_mixed", "partial");
+
+      history.append({
+        type: "agent.tool_use",
+        id: "tu_mixed",
+        name: "bash",
+        input: { command: "ls" },
+      });
+      history.append({
+        type: "agent.mcp_tool_use",
+        id: "mtu_mixed",
+        name: "search",
+        server_label: "linear",
+      });
+      // Plus one resolved pair to show recovery doesn't touch them.
+      history.append({
+        type: "agent.tool_use",
+        id: "tu_resolved",
+        name: "read",
+      });
+      history.append({
+        type: "agent.tool_result",
+        tool_use_id: "tu_resolved",
+        content: "ok",
+      });
+
+      (instance as { initialized: boolean }).initialized = false;
+    });
+
+    await stub.fetch(new Request("http://internal/status"));
+    await new Promise((r) => setTimeout(r, 200));
+
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data: events } = await ev.json();
+
+    // Stuck stream → agent.message synthesised.
+    const synth = events.find(
+      (e: { type: string; data: { message_id?: string } }) =>
+        e.type === "agent.message" && e.data.message_id === "msg_mixed",
+    );
+    expect(synth, "stuck stream finalised").toBeDefined();
+    expect(synth.data.content[0].text).toBe("partial");
+
+    // Orphan tool_use → tool_result injected.
+    const toolResult = events.find(
+      (e: { type: string; data: { tool_use_id?: string } }) =>
+        e.type === "agent.tool_result" && e.data.tool_use_id === "tu_mixed",
+    );
+    expect(toolResult, "tool_use placeholder injected").toBeDefined();
+
+    // Orphan mcp_tool_use → mcp_tool_result injected with is_error.
+    const mcpResult = events.find(
+      (e: { type: string; data: { mcp_tool_use_id?: string } }) =>
+        e.type === "agent.mcp_tool_result" && e.data.mcp_tool_use_id === "mtu_mixed",
+    );
+    expect(mcpResult, "mcp_tool_use placeholder injected").toBeDefined();
+    expect(mcpResult.data.is_error).toBe(true);
+
+    // Already-resolved pair untouched (only one tool_result for tu_resolved).
+    const resolvedResults = events.filter(
+      (e: { type: string; data: { tool_use_id?: string } }) =>
+        e.type === "agent.tool_result" && e.data.tool_use_id === "tu_resolved",
+    );
+    expect(resolvedResults).toHaveLength(1);
+
+    // Stream row reached terminal state.
+    await runInDurableObject(stub, async (_instance, state) => {
+      const streams = new CfDoStreamRepo(state.storage.sql);
+      const row = await streams.get("msg_mixed");
+      expect(row?.status).toBe("interrupted");
+    });
+  });
+
+  it("stream with no buffered chunks → placeholder text on agent.message", async () => {
+    // Edge: process died before the LLM emitted its first delta. The
+    // streams row exists but chunks_json is []. recovery.ts uses a
+    // default text so the synthesised agent.message is never empty
+    // (empty text would break harness projections).
+    const sessionId = await newSession();
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const streams = new CfDoStreamRepo(state.storage.sql);
+      await streams.start("msg_silent", Date.now());
+      // No appendChunk — stream died before first delta.
+      (instance as { initialized: boolean }).initialized = false;
+    });
+
+    await stub.fetch(new Request("http://internal/status"));
+    await new Promise((r) => setTimeout(r, 100));
+
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data: events } = await ev.json();
+
+    const synth = events.find(
+      (e: { type: string; data: { message_id?: string } }) =>
+        e.type === "agent.message" && e.data.message_id === "msg_silent",
+    );
+    expect(synth).toBeDefined();
+    expect(synth.data.content[0].text).toMatch(/interrupted/i);
+  });
+
+  // ── unified-runtime turn-marker eviction (alarm() path) ─────────────
+
+  it("orphan turn marker (sessions.status='running') is reconciled by alarm() → _checkOrphanTurns", async () => {
+    // Production scenario: DO is evicted mid-turn. The sessions row in
+    // D1 still has status='running' + turn_id set — the in-memory
+    // SessionDO never got to run its endTurn. When the next alarm
+    // fires (rearmed 30s out by hintTurnInFlight), _checkOrphanTurns
+    // sees the row, runs recovery, and flips status back to idle.
+    const sessionId = await newSessionDirect("alarm_orphan");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Plant the orphan-turn marker directly in D1 (the row already
+    // exists at status='idle' from newSessionDirect; UPDATE in place).
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind(
+        "turn_evicted",
+        Date.now() - 30_000,
+        Date.now(),
+        sessionId,
+      )
+      .run();
+
+    // Trigger the alarm() callback. runDurableObjectAlarm only fires
+    // if a storage alarm is set, so set one in the past first; the
+    // workerd runtime then runs alarm() the moment we call.
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Read back the D1 row.
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id, turn_started_at FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+    expect(after.turn_id).toBeNull();
+    expect(after.turn_started_at).toBeNull();
+  });
+
+  it("alarm() with NO orphan turn is a clean no-op (sessions row stays idle)", async () => {
+    // Defensive: alarms fire for many reasons (schedule rows, container
+    // keepalive). _checkOrphanTurns must be a true no-op when there's
+    // nothing to recover, NOT a stray UPDATE that flips a healthy
+    // session into a weird state.
+    const sessionId = await newSessionDirect("alarm_noop");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // newSessionDirect leaves the row idle; confirm baseline.
+    const before = await env.AUTH_DB.prepare(
+      `SELECT status FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(before.status).toBe("idle");
+
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+    expect(after.turn_id).toBeNull();
+  });
+
+  it("orphan turn marker with NO event-log state still flips status to 'idle'", async () => {
+    // Minimal-orphan case: the process died before writing the first
+    // event (right after beginTurn returned). recovery.ts reads an
+    // empty log + zero streams — report is empty. But _checkOrphanTurns
+    // STILL must call adapter.endTurn so the sessions row doesn't
+    // stay stuck at 'running' forever.
+    const sessionId = await newSessionDirect("orphan_minimal");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead", Date.now(), Date.now(), sessionId)
+      .run();
+
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+    expect(after.turn_id).toBeNull();
+  });
+
+  it("orphan turn + dangling tool_use in same session: alarm reconciles row AND injects placeholder", async () => {
+    // The full crash-recovery story end-to-end on CF: a turn died with
+    // unflushed event-log state (orphan tool_use) AND the sessions row
+    // marked running. _checkOrphanTurns calls onFiberRecovered →
+    // recoverAgentTurn (which does the event-log recovery) THEN flips
+    // status to idle. Both effects must occur in the same alarm pass.
+    const sessionId = await newSessionDirect("orphan_combined");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Seed the event-log orphan inside the DO and arm the alarm in the
+    // same RPC so we don't pay two round-trips.
+    await runInDurableObject(stub, async (_instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({
+        type: "agent.tool_use",
+        id: "tu_combined",
+        name: "bash",
+      });
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    // Plant the orphan-turn marker in D1.
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_combined", Date.now() - 5_000, Date.now(), sessionId)
+      .run();
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 200));
+
+    // Sessions row reconciled.
+    const sess = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(sess.status).toBe("idle");
+    expect(sess.turn_id).toBeNull();
+
+    // Event-log placeholder injected.
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data: events } = await ev.json();
+    const placeholder = events.find(
+      (e: { type: string; data: { tool_use_id?: string } }) =>
+        e.type === "agent.tool_result" && e.data.tool_use_id === "tu_combined",
+    );
+    expect(placeholder).toBeDefined();
   });
 });
