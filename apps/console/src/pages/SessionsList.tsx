@@ -4,6 +4,7 @@ import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { ListPage } from "../components/ListPage";
 
 interface Session {
   id: string; title?: string; agent_id: string; environment_id: string;
@@ -49,6 +50,22 @@ function SlackBadge({ metadata }: { metadata?: Record<string, unknown> }) {
   );
 }
 
+/** Tiny "🧪 Eval" pill shown when a session was spawned by an eval-runner trial. */
+function EvalBadge({ metadata }: { metadata?: Record<string, unknown> }) {
+  const ev = metadata?.eval as { run_id?: string; task_id?: string } | undefined;
+  if (!ev?.run_id) return null;
+  return (
+    <a
+      href={`/evals/${ev.run_id}`}
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-info-subtle text-info hover:opacity-80 transition-opacity"
+      title={`Eval run ${ev.run_id}${ev.task_id ? ` · task ${ev.task_id}` : ""}`}
+    >
+      🧪 {ev.task_id ?? "Eval"}
+    </a>
+  );
+}
+
 export function SessionsList() {
   const { api } = useApi();
   const nav = useNavigate();
@@ -63,7 +80,7 @@ export function SessionsList() {
   }>>([]);
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
-  const [auxLoading, setAuxLoading] = useState(true);
+  const [, setAuxLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({
     agent: "", environment_id: "", title: "",
@@ -121,13 +138,6 @@ export function SessionsList() {
   };
 
   useEffect(() => { loadAux(); }, []);
-
-  // Compatibility shim: the rest of this file calls `load()` after creating
-  // / archiving a session. Refresh both the paginated table and aux dropdowns.
-  const load = async () => {
-    await refreshSessions();
-    await loadAux();
-  };
 
   // Computed: which agent is selected, and is it bound to a local runtime?
   // The Environment picker, the Create-button enable condition, and the
@@ -219,96 +229,91 @@ export function SessionsList() {
     return true;
   });
 
+  // Compatibility shim: keep `load()` reference for any future caller.
+  // Currently unused after refresh-on-create kicks off via refreshSessions.
+  void refreshSessions;
+
+  const agentFilter = agents.length > 0 ? (
+    <select
+      value={filterAgent}
+      onChange={(e) => setFilterAgent(e.target.value)}
+      className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg focus:border-brand focus:outline-none transition-colors"
+    >
+      <option value="">Agent: All</option>
+      {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+    </select>
+  ) : null;
+
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Sessions</h1>
-          <p className="text-fg-muted text-sm">Trace and debug agent sessions.</p>
-        </div>
-        <Button onClick={() => { setShowCreate(true); if (!form.agent && agents[0]) setForm(f => ({ ...f, agent: agents[0].id })); if (!form.environment_id && envs[0]) setForm(f => ({ ...f, environment_id: envs[0].id })); }}>
-          + New session
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-4 mb-4">
-        <div className="relative">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Go to session ID..."
-            className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-56"
-          />
-        </div>
-        {agents.length > 0 && (
-          <select
-            value={filterAgent}
-            onChange={(e) => setFilterAgent(e.target.value)}
-            className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg focus:border-brand focus:outline-none transition-colors"
-          >
-            <option value="">Agent: All</option>
-            {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
-        )}
-      </div>
-
-      {loading ? (
-        <div className="flex items-center justify-center py-16"><svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg></div>
-      ) : displayed.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle">
-          <p className="text-lg mb-1">{search || filterAgent ? "No matching sessions" : "No sessions yet"}</p>
-          <p className="text-sm">{search || filterAgent ? "Try different filters." : "Sessions will appear here once created through the API."}</p>
-        </div>
-      ) : (
-        <div className="border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
-                <th className="text-left px-4 py-2.5">ID</th>
-                <th className="text-left px-4 py-2.5">Name</th>
-                <th className="text-left px-4 py-2.5">Status</th>
-                <th className="text-left px-4 py-2.5">Agent</th>
-                <th className="text-left px-4 py-2.5">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map((s) => (
-                <tr key={s.id} onClick={() => nav(`/sessions/${s.id}`)} className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
-                  <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[180px]" title={s.id}>{s.id}</td>
-                  <td className="px-4 py-3 font-medium text-fg">
-                    <span className="inline-flex items-center gap-2">
-                      {s.title || "Untitled"}
-                      <LinearBadge metadata={s.metadata} />
-                      <SlackBadge metadata={s.metadata} />
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(s.status)}`}>
-                      {s.status || "idle"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-fg-muted font-mono text-xs">{s.agent_id}</td>
-                  <td className="px-4 py-3 text-fg-muted">{new Date(s.created_at).toLocaleDateString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {hasMore && (
-            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
-              <button
-                onClick={loadMore}
-                disabled={isLoadingMore}
-                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {isLoadingMore ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
+    <ListPage<Session>
+      title="Sessions"
+      subtitle="Trace and debug agent sessions."
+      createLabel="+ New session"
+      onCreate={() => {
+        setShowCreate(true);
+        if (!form.agent && agents[0]) setForm(f => ({ ...f, agent: agents[0].id }));
+        if (!form.environment_id && envs[0]) setForm(f => ({ ...f, environment_id: envs[0].id }));
+      }}
+      searchPlaceholder="Go to session ID..."
+      searchValue={search}
+      onSearchChange={setSearch}
+      filters={agentFilter}
+      data={displayed}
+      loading={loading}
+      getRowKey={(s) => s.id}
+      onRowClick={(s) => nav(`/sessions/${s.id}`)}
+      hasMore={hasMore}
+      onLoadMore={loadMore}
+      loadingMore={isLoadingMore}
+      emptyTitle={search || filterAgent ? "No matching sessions" : "No sessions yet"}
+      emptySubtitle={
+        search || filterAgent
+          ? "Try different filters."
+          : "Sessions will appear here once created through the API."
+      }
+      columns={[
+        {
+          key: "id",
+          label: "ID",
+          className: "font-mono text-xs text-fg-muted truncate max-w-[180px]",
+          render: (s) => <span title={s.id}>{s.id}</span>,
+        },
+        {
+          key: "name",
+          label: "Name",
+          className: "font-medium text-fg",
+          render: (s) => (
+            <span className="inline-flex items-center gap-2">
+              {s.title || "Untitled"}
+              <LinearBadge metadata={s.metadata} />
+              <SlackBadge metadata={s.metadata} />
+              <EvalBadge metadata={s.metadata} />
+            </span>
+          ),
+        },
+        {
+          key: "status",
+          label: "Status",
+          render: (s) => (
+            <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(s.status)}`}>
+              {s.status || "idle"}
+            </span>
+          ),
+        },
+        {
+          key: "agent",
+          label: "Agent",
+          className: "text-fg-muted font-mono text-xs",
+          render: (s) => s.agent_id,
+        },
+        {
+          key: "created",
+          label: "Created",
+          className: "text-fg-muted",
+          render: (s) => new Date(s.created_at).toLocaleDateString(),
+        },
+      ]}
+    >
       <Modal
         open={showCreate}
         onClose={() => setShowCreate(false)}
@@ -436,6 +441,6 @@ export function SessionsList() {
           </details>
         </div>
       </Modal>
-    </div>
+    </ListPage>
   );
 }

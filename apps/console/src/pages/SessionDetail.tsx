@@ -4,9 +4,13 @@ import { useApi } from "../lib/api";
 import { Markdown } from "../components/Markdown";
 import { formatDuration, formatRelative, shortenId } from "../lib/format";
 import { Badge, StatusPill } from "../components/Badge";
+import { Modal } from "../components/Modal";
+import { Button } from "../components/Button";
 import { AgentIcon, ClockIcon, DurationIcon, EnvIcon, VaultIcon } from "../components/icons";
 import { TimelineView } from "../components/timeline/TimelineView";
 import type { Event } from "../lib/events";
+import type { Trajectory, TrajectoryOutcome } from "../lib/trajectory";
+import { rewardHeadline, outcomeToStatusTone } from "../lib/trajectory";
 
 type View = "chat" | "timeline";
 
@@ -57,6 +61,14 @@ export function SessionDetail() {
     eventKind?: string;
   } | null>(null);
   const [status, setStatus] = useState("idle");
+  /** Lazy-fetched Trajectory v1 envelope. Drives the outcome + reward
+   *  chips in the header strip and the Trajectory viewer modal. We don't
+   *  block initial render on this — chips render as `—` until it lands.
+   *  Sentinels mirror EvalRunDetail: "loading" while in flight, "error"
+   *  if the fetch failed (404 = trajectory not built yet, 5xx = sandbox
+   *  flaky); both keep the trigger from re-firing every render. */
+  const [trajectory, setTrajectory] = useState<Trajectory | "loading" | "error" | undefined>(undefined);
+  const [showTrajectory, setShowTrajectory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenKeys = useRef(new Set<string>());
   const abortRef = useRef<AbortController | null>(null);
@@ -298,6 +310,18 @@ export function SessionDetail() {
     abortRef.current = abort;
     streamEvents(id, addEvent, abort.signal);
 
+    // Lazy-fetch the Trajectory envelope so the header chips have the
+    // outcome + reward to show. Decoupled from session/events fetches —
+    // trajectory builds on-demand off the events log, so a 5xx here is
+    // independent of session metadata loading. We do this once per
+    // session id and let the user reopen the page to refresh. Live
+    // sessions intentionally don't poll: trajectory.outcome === "running"
+    // is fine, the StatusPill already shows the live status.
+    setTrajectory("loading");
+    api<Trajectory>(`/v1/sessions/${id}/trajectory`)
+      .then((t) => setTrajectory(t))
+      .catch(() => setTrajectory("error"));
+
     return () => { abort.abort(); };
   }, [id]);
 
@@ -333,6 +357,15 @@ export function SessionDetail() {
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <StatusPill status={status as "idle" | "running" | "terminated" | "error" | string} />
+          {/* Trajectory outcome chip — only when the trajectory has actually
+              finished. While the session is still running we let StatusPill
+              carry the "Running…" signal alone (per Phase 3 spec) instead of
+              double-pilling. */}
+          <TrajectoryOutcomeChip trajectory={trajectory} />
+          {/* Reward chip — final_reward + verifier_id tooltip. Hidden when
+              the verifier hasn't run (no trajectory.reward) so we don't
+              imply "no reward = score 0". */}
+          <TrajectoryRewardChip trajectory={trajectory} />
           {/* Always render env + agent + vault badges so an operator can
               see what makes up this session at a glance. Name falls back
               to a short ID slice if the snapshot didn't carry one — better
@@ -375,6 +408,24 @@ export function SessionDetail() {
         {view === "timeline" && (
           <span className="ml-auto text-xs text-fg-subtle font-mono">{events.length} events</span>
         )}
+        {/* Trajectory viewer trigger — pushed to the right edge of the tab
+            row. Disabled until the lazy fetch resolves so the click never
+            opens an empty modal. Errors keep the button enabled (the modal
+            shows the error). */}
+        <button
+          onClick={() => setShowTrajectory(true)}
+          disabled={trajectory === undefined || trajectory === "loading"}
+          className={`${view === "timeline" ? "ml-3" : "ml-auto"} text-xs text-fg-muted hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed border border-border hover:border-border-strong rounded px-2 py-1 transition-colors my-1.5`}
+          title={
+            trajectory === "loading"
+              ? "Loading trajectory…"
+              : trajectory === "error"
+              ? "Trajectory unavailable — click to inspect error"
+              : "View raw Trajectory v1 envelope"
+          }
+        >
+          Trajectory
+        </button>
       </div>
 
       {/* Linear context (when triggered by a Linear webhook) */}
@@ -496,7 +547,127 @@ export function SessionDetail() {
           />
         )}
       </div>
+      <TrajectoryViewerModal
+        open={showTrajectory}
+        onClose={() => setShowTrajectory(false)}
+        sessionId={id ?? ""}
+        trajectory={trajectory}
+      />
     </div>
+  );
+}
+
+/** Outcome chip rendered in the session header strip. Hidden while
+ *  the trajectory is loading / errored / still running so we never
+ *  paint an inaccurate state. The "running" outcome is intentionally
+ *  squelched here — StatusPill already renders the live status. */
+function TrajectoryOutcomeChip({
+  trajectory,
+}: {
+  trajectory: Trajectory | "loading" | "error" | undefined;
+}) {
+  if (!trajectory || trajectory === "loading" || trajectory === "error") return null;
+  if (trajectory.outcome === "running") return null;
+  const tone = outcomeToStatusTone(trajectory.outcome);
+  return (
+    <StatusPill
+      status={tone}
+      label={`Outcome: ${trajectory.outcome}`}
+    />
+  );
+}
+
+/** Reward chip rendered in the session header strip. Pure read-out of
+ *  the verifier output; tooltip shows verifier_id for debugging. */
+function TrajectoryRewardChip({
+  trajectory,
+}: {
+  trajectory: Trajectory | "loading" | "error" | undefined;
+}) {
+  if (!trajectory || trajectory === "loading" || trajectory === "error") return null;
+  const r = trajectory.reward;
+  if (!r) return null;
+  const headline = rewardHeadline(r);
+  const isPass = r.final_reward >= 0.99;
+  const isFail = r.final_reward <= 0;
+  // Reuse StatusPill tone tokens so the visual language stays consistent
+  // with the outcome chip next to it (success = same green, failure = red).
+  const tone = isPass ? "completed" : isFail ? "errored" : "neutral";
+  const titleParts = [
+    `Reward: ${r.final_reward.toFixed(4)}`,
+    r.verifier_id ? `verifier: ${r.verifier_id}` : null,
+    r.computed_at ? `computed: ${new Date(r.computed_at).toLocaleString()}` : null,
+  ].filter(Boolean) as string[];
+  return (
+    <span title={titleParts.join(" · ")}>
+      <StatusPill status={tone} label={`Reward: ${headline}`} />
+    </span>
+  );
+}
+
+/** Trajectory viewer modal — Phase 3 minimum-viable: pretty-printed
+ *  JSON with a Download button. Anthropic Messages / Inspect AI / OTel
+ *  projections are Phase 4. The download uses an in-memory blob URL
+ *  so we don't have to round-trip to a server endpoint. */
+function TrajectoryViewerModal({
+  open,
+  onClose,
+  sessionId,
+  trajectory,
+}: {
+  open: boolean;
+  onClose: () => void;
+  sessionId: string;
+  trajectory: Trajectory | "loading" | "error" | undefined;
+}) {
+  const ready = trajectory && trajectory !== "loading" && trajectory !== "error";
+  const json = ready ? JSON.stringify(trajectory, null, 2) : "";
+
+  function download() {
+    if (!ready) return;
+    const blob = new Blob([json], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = `trajectory-${sessionId}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  return (
+    <Modal
+      open={open}
+      onClose={onClose}
+      title="Trajectory"
+      subtitle={ready ? `${trajectory.trajectory_id} · session ${sessionId}` : `session ${sessionId}`}
+      maxWidth="max-w-4xl"
+      footer={
+        <>
+          <Button variant="ghost" onClick={onClose}>Close</Button>
+          <Button onClick={download} disabled={!ready}>Download JSON</Button>
+        </>
+      }
+    >
+      {trajectory === "loading" && (
+        <div className="text-sm text-fg-subtle">Loading trajectory…</div>
+      )}
+      {trajectory === "error" && (
+        <div className="text-sm text-danger">
+          Trajectory unavailable. The session may not have any events yet, or the
+          sandbox worker is unreachable. Retry by reloading the page.
+        </div>
+      )}
+      {trajectory === undefined && (
+        <div className="text-sm text-fg-subtle">No trajectory loaded yet.</div>
+      )}
+      {ready && (
+        <pre className="font-mono text-[11px] bg-bg-surface border border-border rounded px-3 py-2 overflow-auto max-h-[60vh] text-fg whitespace-pre">
+          {json}
+        </pre>
+      )}
+    </Modal>
   );
 }
 

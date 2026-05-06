@@ -1,8 +1,9 @@
-import { useEffect, useState, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { ListPage } from "../components/ListPage";
 import type { ModelCard } from "@open-managed-agents/api-types";
 
 const PROVIDERS = [
@@ -119,73 +120,80 @@ export function ModelCardsList() {
   };
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Model Cards</h1>
-          <p className="text-fg-muted text-sm">Configure model providers, API keys, and endpoints.</p>
-        </div>
-        <Button onClick={() => { setShowCreate(true); setError(""); }}>+ New model card</Button>
-      </div>
-
-      {loading ? (
-        <div className="text-fg-subtle text-sm py-8 text-center">Loading...</div>
-      ) : cards.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle">
-          <p className="text-lg mb-1">No model cards yet</p>
-          <p className="text-sm">Add a model card to configure API credentials for your agents.</p>
+    <ListPage<ModelCard>
+      title="Model Cards"
+      subtitle="Configure model providers, API keys, and endpoints."
+      createLabel="+ New model card"
+      onCreate={() => { setShowCreate(true); setError(""); }}
+      data={cards}
+      loading={loading}
+      getRowKey={(c) => c.id}
+      hasMore={hasMore}
+      onLoadMore={loadMore}
+      loadingMore={isLoadingMore}
+      emptyTitle="No model cards yet"
+      emptySubtitle={
+        <>
+          <p>Add a model card to configure API credentials for your agents.</p>
           <p className="text-xs mt-3">Without model cards, agents use the environment ANTHROPIC_API_KEY.</p>
-        </div>
-      ) : (
-        <div className="border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-bg-surface text-fg-subtle text-xs uppercase tracking-wider">
-                <th className="text-left px-4 py-2.5">Name</th>
-                <th className="text-left px-4 py-2.5">API Format</th>
-                <th className="text-left px-4 py-2.5">Model ID</th>
-                <th className="text-left px-4 py-2.5">API Key</th>
-                <th className="text-left px-4 py-2.5">Base URL</th>
-                <th className="text-left px-4 py-2.5">Default</th>
-                <th className="text-right px-4 py-2.5">Actions</th>
-              </tr>
-            </thead>
-            <tbody>
-              {cards.map((c) => (
-                <tr key={c.id} className="border-t border-border hover:bg-bg-surface transition-colors">
-                  <td className="px-4 py-3">
-                    <div className="font-medium text-fg">{c.name}</div>
-                    <div className="text-xs text-fg-subtle font-mono">{c.id}</div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`px-2 py-0.5 rounded text-xs font-medium ${providerBadge(c.provider)}`}>{providerLabel(c.provider)}</span>
-                  </td>
-                  <td className="px-4 py-3 text-fg-muted font-mono text-xs">{c.model_id}</td>
-                  <td className="px-4 py-3 text-fg-subtle font-mono text-xs">****{c.api_key_preview}</td>
-                  <td className="px-4 py-3 text-fg-muted text-xs truncate max-w-[200px]">{c.base_url || "\u2014"}</td>
-                  <td className="px-4 py-3">{c.is_default && <span className="text-xs text-fg-muted bg-bg-surface px-1.5 py-0.5 rounded">default</span>}</td>
-                  <td className="px-4 py-3 text-right">
-                    <button onClick={() => startEdit(c)} className="text-xs text-fg-muted hover:text-fg mr-3">Edit</button>
-                    <button onClick={() => remove(c.id)} className="text-xs text-fg-subtle hover:text-danger">Delete</button>
-                  </td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {hasMore && (
-            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
-              <button
-                onClick={loadMore}
-                disabled={isLoadingMore}
-                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {isLoadingMore ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
+        </>
+      }
+      columns={[
+        {
+          key: "name",
+          label: "Name",
+          render: (c) => (
+            <>
+              <div className="font-medium text-fg">{c.name}</div>
+              <div className="text-xs text-fg-subtle font-mono">{c.id}</div>
+            </>
+          ),
+        },
+        {
+          key: "provider",
+          label: "API Format",
+          render: (c) => (
+            <span className={`px-2 py-0.5 rounded text-xs font-medium ${providerBadge(c.provider)}`}>
+              {providerLabel(c.provider)}
+            </span>
+          ),
+        },
+        {
+          key: "model_id",
+          label: "Model ID",
+          className: "text-fg-muted font-mono text-xs",
+          render: (c) => c.model_id,
+        },
+        {
+          key: "api_key",
+          label: "API Key",
+          className: "text-fg-subtle font-mono text-xs",
+          render: (c) => `****${c.api_key_preview}`,
+        },
+        {
+          key: "base_url",
+          label: "Base URL",
+          className: "text-fg-muted text-xs truncate max-w-[200px]",
+          render: (c) => c.base_url || "—",
+        },
+        {
+          key: "default",
+          label: "Default",
+          render: (c) => c.is_default ? <span className="text-xs text-fg-muted bg-bg-surface px-1.5 py-0.5 rounded">default</span> : null,
+        },
+        {
+          key: "actions",
+          label: "Actions",
+          className: "text-right",
+          render: (c) => (
+            <>
+              <button onClick={() => startEdit(c)} className="text-xs text-fg-muted hover:text-fg mr-3">Edit</button>
+              <button onClick={() => remove(c.id)} className="text-xs text-fg-subtle hover:text-danger">Delete</button>
+            </>
+          ),
+        },
+      ]}
+    >
       <Modal open={showCreate} onClose={closeDialog} title={editingId ? "Edit Model Card" : "New Model Card"}
         footer={<><Button variant="ghost" onClick={closeDialog}>Cancel</Button><Button onClick={save} disabled={!form.name || !form.model_id || (!editingId && !form.api_key)}>{editingId ? "Save" : "Create"}</Button></>}>
         <form autoComplete="off" onSubmit={(e) => e.preventDefault()} className="space-y-3">
@@ -293,6 +301,6 @@ export function ModelCardsList() {
           </label>
         </form>
       </Modal>
-    </div>
+    </ListPage>
   );
 }

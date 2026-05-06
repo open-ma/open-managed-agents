@@ -5,6 +5,8 @@ import { logWarn } from "@open-managed-agents/shared";
 import { unzipSync } from "fflate";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import type { Services } from "@open-managed-agents/services";
+import type { BlobStore } from "@open-managed-agents/blob-store";
 
 const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
 
@@ -396,7 +398,7 @@ interface PersistArgs {
 
 async function persistNewSkill(
   env: Env,
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   args: PersistArgs,
 ): Promise<
@@ -456,7 +458,7 @@ async function persistNewSkill(
 
 async function persistNewVersion(
   env: Env,
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   args: PersistArgs,
