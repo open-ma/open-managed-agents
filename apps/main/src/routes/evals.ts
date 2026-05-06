@@ -47,6 +47,14 @@ export interface EvalTrialResult {
    * Field is absent until the first failure (treat as 0).
    */
   finalize_retry_count?: number;
+  /**
+   * Final reward for this trial in [0, 1]. Mirrored from
+   * `Trajectory.reward.final_reward` (eval-runner writes both at finalize
+   * time). Kept as a top-level field for Console back-compat — Phase 3 will
+   * switch the UI to read `trajectory.reward` and this can be dropped.
+   * v1-additive: absent on trials produced before reward wiring landed.
+   */
+  reward?: number;
 }
 
 export interface EvalTaskResult {

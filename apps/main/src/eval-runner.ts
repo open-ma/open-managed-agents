@@ -330,7 +330,14 @@ async function getSessionStatus(env: Env, run: EvalRunRecord, sessionId: string)
   }
 }
 
-async function buildAndStoreTrajectory(env: Env, run: EvalRunRecord, sessionId: string): Promise<string> {
+async function buildAndStoreTrajectory(
+  env: Env,
+  run: EvalRunRecord,
+  task: EvalTaskResult,
+  trial: import("./routes/evals").EvalTrialResult,
+  sessionId: string,
+  finalReward: number,
+): Promise<{ trajectory_id: string; final_reward: number }> {
   const t = run.tenant_id;
   const services = await getServices(env, t);
   const sessionRow = await services.sessions.get({ tenantId: t, sessionId });
@@ -374,9 +381,42 @@ async function buildAndStoreTrajectory(env: Env, run: EvalRunRecord, sessionId: 
     },
   });
 
+  // --- Trajectory v1 Phase 1 enrichment ---
+  // Wire eval-runner-owned fields into the envelope BEFORE storage so the
+  // persisted trajectory carries reward / task_id / group_id / a corrected
+  // outcome on its own. Phase 3 (Console UI) will read these directly;
+  // Phase 2 will swap the static reward for a Verifier abstraction.
+
+  // task_id / group_id — eval-runner is the only caller that knows them.
+  // Non-eval session trajectories (built via /v1/sessions/:id/trajectory)
+  // correctly leave both undefined.
+  trajectory.task_id = task.spec.id;
+  trajectory.group_id = run.id;
+
+  // outcome timeout override — `deriveOutcome` can't see eval-runner's
+  // wall-clock budget. We do. If the trial bailed via the per-trial
+  // timeout_ms guard (the `trial timeout: ...` error string is set by
+  // advanceTrial) the trajectory's outcome should be `timeout`, not
+  // whatever deriveOutcome produced (likely `running` — the session
+  // never reached status_idle / status_terminated / session.error).
+  if (trial.error && /timeout/i.test(trial.error)) {
+    trajectory.outcome = "timeout";
+  }
+
+  // reward — Phase 1 placeholder verifier. Caller provides the scalar
+  // (today: 0/1 from did-the-trial-finalize-successfully). Phase 2 will
+  // replace this with the unified Verifier abstraction (see
+  // docs/handoff-verifier-framework.md).
+  trajectory.reward = {
+    raw_rewards: { outcome: finalReward },
+    final_reward: finalReward,
+    verifier_id: "eval-runner.trial-status.v1",
+    computed_at: new Date().toISOString(),
+  };
+
   // Store trajectory under a stable key; for now use trajectory_id as the only key
   await env.CONFIG_KV.put(kvKey(t, "trajectory", trajectory.trajectory_id), JSON.stringify(trajectory));
-  return trajectory.trajectory_id;
+  return { trajectory_id: trajectory.trajectory_id, final_reward: finalReward };
 }
 
 // ---------- Single-tick advance (per-trial) ----------
@@ -459,12 +499,24 @@ async function advanceTrial(
     }
   }
 
-  // All messages sent and session idle → build trajectory and finalize
+  // All messages sent and session idle → build trajectory and finalize.
+  // Reaching this point means every spec.messages[] turn ran to idle without
+  // exceeding timeout_ms or hitting an error path; per Phase 1's
+  // trial-status-as-reward (the placeholder until the Verifier abstraction
+  // lands in Phase 2), that's a 1.0. Trajectory storage failure below is
+  // infrastructure, not verification — rolls back to running for retry,
+  // gives up at 3 attempts and demotes to failed (with the trajectory then
+  // never persisted, so no reward to write).
   try {
-    const trajectoryId = await buildAndStoreTrajectory(env, run, trial.session_id);
-    trial.trajectory_id = trajectoryId;
+    const finalReward = 1;
+    const result = await buildAndStoreTrajectory(env, run, task, trial, trial.session_id, finalReward);
+    trial.trajectory_id = result.trajectory_id;
     trial.status = "completed";
     trial.ended_at = new Date().toISOString();
+    // Mirror Trajectory.reward.final_reward onto the trial for Console
+    // back-compat. Phase 3 will switch the UI to read trajectory.reward
+    // directly and this can drop.
+    trial.reward = result.final_reward;
     return true;
   } catch (err: unknown) {
     // Bounded retry: events fetch can transiently 500 under storage
