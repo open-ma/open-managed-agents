@@ -1,0 +1,20 @@
+{
+  "name": "@open-managed-agents/session-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./recovery": "./src/recovery.ts",
+    "./ports": "./src/ports.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/event-log": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*"
+  }
+}

@@ -136,13 +136,18 @@ await sql.exec(`
   );
 
   CREATE TABLE IF NOT EXISTS "sessions" (
-    "id"           TEXT PRIMARY KEY NOT NULL,
-    "tenant_id"    TEXT NOT NULL,
-    "agent_id"     TEXT,
-    "status"       TEXT NOT NULL,
-    "title"        TEXT,
-    "created_at"   BIGINT NOT NULL,
-    "updated_at"   BIGINT NOT NULL
+    "id"              TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"       TEXT NOT NULL,
+    "agent_id"        TEXT,
+    "status"          TEXT NOT NULL,
+    "title"           TEXT,
+    -- turn_id + turn_started_at: unified-runtime turn marker. Set on
+    -- beginTurn(), cleared on endTurn(). orphan detection scans
+    -- WHERE status='running'. Mirrors apps/main/migrations/0014.
+    "turn_id"         TEXT,
+    "turn_started_at" BIGINT,
+    "created_at"      BIGINT NOT NULL,
+    "updated_at"      BIGINT NOT NULL
   );
   CREATE INDEX IF NOT EXISTS "idx_sessions_status"
     ON "sessions" ("status", "tenant_id");
