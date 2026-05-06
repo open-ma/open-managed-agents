@@ -13,7 +13,7 @@
 //     isolation — runs on the host filesystem. Don't ship to prod with
 //     untrusted agents.
 //   - E2BSandbox (TODO) — wraps @e2b/sdk for Firecracker microVM
-//     isolation. Production CFless path.
+//     isolation. Production self-host path.
 
 export interface ProcessHandle {
   id: string;

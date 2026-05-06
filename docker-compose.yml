@@ -1,11 +1,11 @@
-# CFless OMA — single-instance docker-compose for local trials and small
+# Self-host OMA — single-instance docker-compose for local trials and small
 # self-host deploys. Uses SQLite + local FS for storage; if you outgrow
 # this (multi-instance, real DB, S3 blob) swap in services for postgres /
-# minio and point the env vars accordingly (see docs/cfless.md).
+# minio and point the env vars accordingly (see docs/self-host.md).
 #
 # Quick start:
-#   1. Copy .env.cfless.example → .env (fill ANTHROPIC_API_KEY)
-#   2. docker compose -f docker-compose.cfless.yml up --build
+#   1. Copy .env.example → .env (fill ANTHROPIC_API_KEY)
+#   2. docker compose -f docker-compose.yml up --build
 #   3. curl localhost:8787/health
 #
 # Persistence: ./data on the host is bind-mounted at /app/data in the

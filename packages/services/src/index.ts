@@ -25,7 +25,7 @@
 //     for every tenant — zero behaviour change. Phase 4 swaps in the
 //     static-binding resolver.
 //
-// The CFless escape hatch:
+// The self-host escape hatch:
 //   - Today only `buildCfServices` exists.
 //   - When self-hosting on Node + Postgres becomes a real target, add a
 //     `buildNodeServices(opts: { pg, ... })` that returns the same `Services`
@@ -125,7 +125,7 @@ export interface Services {
    * File-bytes blob store (R2 FILES_BUCKET in CF, local-FS / S3 in Node).
    * Null when the underlying storage isn't configured — routes that need it
    * return 500 with a "not configured" message, matching pre-port behavior.
-   * The CFless adapter (forthcoming) returns a non-null blob store wired to
+   * The self-host adapter (forthcoming) returns a non-null blob store wired to
    * S3 / local FS — routes never see runtime-specific types.
    */
   filesBlob: BlobStore | null;
@@ -250,9 +250,9 @@ export function buildServices(env: Env, db: D1Database): Services {
     // Control-plane services: always query env.AUTH_DB, never the per-tenant db.
     tenantShardDirectory: createCfTenantShardDirectoryService({ controlPlaneDb: env.AUTH_DB }),
     shardPool: createCfShardPoolService({ controlPlaneDb: env.AUTH_DB }),
-    // File blob storage. CF: R2 binding; CFless: S3 / local-FS adapter.
+    // File blob storage. CF: R2 binding; self-host: S3 / local-FS adapter.
     filesBlob: blobStoreFromR2(env.FILES_BUCKET),
-    // Generic KV. CF: CONFIG_KV binding; CFless: SQL-table-backed adapter.
+    // Generic KV. CF: CONFIG_KV binding; self-host: SQL-table-backed adapter.
     kv: new CfKvStore(env.CONFIG_KV),
   };
 }

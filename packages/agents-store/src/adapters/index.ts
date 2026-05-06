@@ -1,4 +1,4 @@
-// Adapter wiring for the agents-store. Both CF (D1) and CFless (any
+// Adapter wiring for the agents-store. Both CF (D1) and self-host (any
 // SqlClient — typically better-sqlite3 via createBetterSqlite3SqlClient)
 // factories live here behind a single SqlAgentRepo class.
 
@@ -26,7 +26,7 @@ export function createCfAgentService(
 }
 
 /**
- * CFless / Node deployment factory. Caller passes any SqlClient — typically
+ * Node deployment factory. Caller passes any SqlClient — typically
  * BetterSqlite3SqlClient (`createBetterSqlite3SqlClient(path)`) for embedded
  * SQLite, but a future PG adapter would slot in identically.
  *

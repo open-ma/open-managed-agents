@@ -4,7 +4,7 @@
 // driver dep lives in your deployment's package.json:
 //   pnpm add e2b -w   # or wherever you build the Node entry
 //
-// Production path for CFless: each session becomes a Firecracker microVM
+// Production path for self-host: each session becomes a Firecracker microVM
 // spun up via E2B's API. Boot time ~250ms cold from a warm pool, sub-200MB
 // memory, full filesystem, network access controlled by the template image.
 //

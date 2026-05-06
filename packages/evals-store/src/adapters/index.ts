@@ -1,4 +1,4 @@
-// Adapter wiring. Both Cloudflare (D1) and CFless / Node (any SqlClient)
+// Adapter wiring. Both Cloudflare (D1) and Node (any SqlClient)
 // deployment factories live here behind a single SqlEvalRunRepo class.
 
 export { SqlEvalRunRepo } from "./sql-eval-run-repo";

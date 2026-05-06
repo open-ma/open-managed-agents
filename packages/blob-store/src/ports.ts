@@ -12,7 +12,7 @@
 //
 // Memory-store has its own narrower text-only BlobStore in
 // packages/memory-store/src/ports.ts; the two will likely converge later
-// once the full CFless migration is settled.
+// once the full self-host migration is settled.
 
 /**
  * What can be PUT to a blob. Mirrors R2 / S3 SDK accepted shapes.

@@ -1,13 +1,13 @@
-# CFless OMA — single-instance + Postgres backend.
+# Self-host OMA — single-instance + Postgres backend.
 #
-# Same shape as docker-compose.cfless.yml but with a postgres service in
+# Same shape as docker-compose.yml but with a postgres service in
 # place of the SQLite file. better-auth still sits on its own sqlite file
 # (kysely-adapter limitation, see apps/main-node/src/index.ts:246-251);
 # everything else (agents/sessions/events/memories/vaults) goes to PG.
 #
 # Quick start:
-#   1. Copy .env.cfless.example → .env (fill ANTHROPIC_API_KEY)
-#   2. docker compose -f docker-compose.cfless.pg.yml up --build
+#   1. Copy .env.example → .env (fill ANTHROPIC_API_KEY)
+#   2. docker compose -f docker-compose.postgres.yml up --build
 #   3. curl localhost:8787/health
 #
 # When to use this over the SQLite compose:

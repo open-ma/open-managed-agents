@@ -1,4 +1,4 @@
-// Adapter wiring. Both Cloudflare (D1) and CFless / Node (any SqlClient)
+// Adapter wiring. Both Cloudflare (D1) and Node (any SqlClient)
 // deployment factories live here behind a single SqlModelCardRepo class.
 
 export { SqlModelCardRepo } from "./sql-model-card-repo";

@@ -15,7 +15,7 @@
 //
 // What this is NOT for: store-package internal KV usage like
 // KvOutboundSnapshotRepo / KvSessionSecretRepo — those are already runtime-
-// isolated by the adapter pattern; their CFless cousins will be SQL-table-
+// isolated by the adapter pattern; their self-host cousins will be SQL-table-
 // backed Sqlite/Pg adapters built in Phase C, not KvStore wrappers.
 
 export interface KvPutOptions {
@@ -52,7 +52,7 @@ export interface KvListResult {
  * The port. Implementations:
  *   - CfKvStore (adapters/cf.ts) — wraps a CF KVNamespace
  *   - InMemoryKvStore (adapters/in-memory.ts) — for tests / dev
- *   - SqliteKvStore / PgKvStore — TODO when CFless storage lands
+ *   - SqliteKvStore / PgKvStore — TODO when self-host storage lands
  */
 export interface KvStore {
   get(key: string): Promise<string | null>;

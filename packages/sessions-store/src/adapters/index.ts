@@ -1,4 +1,4 @@
-// Adapter wiring. Both Cloudflare (D1) and CFless / Node (any SqlClient)
+// Adapter wiring. Both Cloudflare (D1) and Node (any SqlClient)
 // deployment factories live here behind a single SqlSessionRepo class.
 
 export { SqlSessionRepo } from "./sql-session-repo";

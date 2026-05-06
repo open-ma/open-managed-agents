@@ -4,7 +4,7 @@
 // fetches the bytes, and asks "convert this to markdown". On Cloudflare
 // Workers AI does it via env.AI.toMarkdown(); on Node we'll plug in
 // turndown / pdf-parse / mammoth (separate adapter, not in this package
-// yet — added when CFless lands).
+// yet — added when the self-host adapters land).
 //
 // The port deliberately mirrors Workers AI's input/output shape (one
 // {name, blob} item per input, returns either a single result or an

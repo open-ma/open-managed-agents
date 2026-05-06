@@ -7,7 +7,7 @@ is wired at startup.
 
 | Mode | One-liner | When to pick |
 |---|---|---|
-| **Local CFless** | `docker compose up` (or `pnpm --filter main-node start`) — single Node process + sqlite/pg + LocalSubprocess sandbox + `oma-vault` sidecar | Self-host, Fly.io / Render / VPS, no Cloudflare account, full control over data + binaries |
+| **Self-host** | `docker compose up` (or `pnpm --filter main-node start`) — single Node process + sqlite/pg + LocalSubprocess sandbox + `oma-vault` sidecar | Self-host, Fly.io / Render / VPS, no Cloudflare account, full control over data + binaries |
 | **CF local** | `pnpm dev` — `wrangler dev` on the main + agent workers with local D1/KV/R2/DO simulators | Develop against the CF runtime without touching prod; tests; one-off prod-shape repro |
 | **CF prod** | `pnpm deploy` (`scripts/deploy.sh`) — three workers (main / agent / integrations) on Cloudflare's network | Production at scale; you want CF to handle scaling, durability, edge presence; OK with vendor lock-in |
 
@@ -16,7 +16,7 @@ diff at a glance.
 
 ---
 
-## Local CFless
+## Self-host
 
 **One process, one box.** Everything runs in a single Node process, with
 optional sidecar (`oma-vault`) for outbound credential injection.
@@ -75,11 +75,11 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 
 ```bash
 # 1. Configure
-cp .env.cfless.example .env
+cp .env.example .env
 $EDITOR .env  # ANTHROPIC_API_KEY + BETTER_AUTH_SECRET
 
 # 2. Run (Docker compose: oma-server + oma-vault)
-docker compose -f docker-compose.cfless.yml up --build
+docker compose -f docker-compose.yml up --build
 
 # 3. Sanity
 curl localhost:8787/health
@@ -282,7 +282,7 @@ pnpm deploy
 
 ## Side-by-side matrix
 
-| Concern | Local CFless | CF Local | CF Prod |
+| Concern | Self-host | CF Local | CF Prod |
 |---|---|---|---|
 | Process count | 1 (oma-server) + 1 sidecar (oma-vault) | 2 wrangler dev (main + agent) | 3 workers (main + agent + integrations) |
 | HTTP runtime | Hono on Node | workerd | workerd at edge |
@@ -311,10 +311,10 @@ pnpm deploy
 ## Picking a topology
 
 - **Building OMA features** → CF Local. Closest to prod, fast iteration.
-- **Self-hosting OMA on your own infra** → Local CFless. Single binary,
+- **Self-hosting OMA on your own infra** → Self-host. Single binary,
   predictable costs, no CF account needed.
 - **Running OMA at scale for users** → CF Prod. The whole stack was built
-  for this; the CFless mode is the "you can leave if you want" escape
+  for this; the self-host mode is the "you can leave if you want" escape
   hatch, not the optimization target.
 
 ## Cross-topology contracts
@@ -323,7 +323,7 @@ The same `Services` container is built on every topology:
 
 ```typescript
 const services = buildServices(env);
-// On CFless this returns sqlite/pg-backed adapters.
+// On self-host this returns sqlite/pg-backed adapters.
 // On CF (local + prod) this returns D1/R2/KV-backed adapters.
 // Routes / harness / store services treat them identically.
 ```

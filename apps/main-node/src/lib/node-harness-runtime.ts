@@ -1,5 +1,5 @@
 // NodeHarnessRuntime — implements the apps/agent HarnessRuntime port for the
-// CFless Node host. Maps the harness's broadcast/history/sandbox calls onto
+// self-host Node host. Maps the harness's broadcast/history/sandbox calls onto
 // the SqlEventLog + EventStreamHub + a stub SandboxExecutor.
 //
 // Phase B-harness scope: text-only completion. The stub SandboxExecutor

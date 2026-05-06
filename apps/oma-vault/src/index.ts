@@ -1,5 +1,5 @@
 /**
- * apps/oma-vault — outbound credential injector for CFless OMA.
+ * apps/oma-vault — outbound credential injector for Self-host OMA.
  *
  * Architecture:
  *
@@ -21,7 +21,7 @@
  * request time — apps/oma-vault reads vault credentials directly from the
  * shared sqlite db.
  *
- * This is the CFless analog of @cloudflare/sandbox's outboundByHost +
+ * This is the self-host analog of @cloudflare/sandbox's outboundByHost +
  * MAIN_MCP.outboundForward pattern. Same security model: per-sandbox CA,
  * MITM proxy, credential matched on hostname, inject header, forward.
  */

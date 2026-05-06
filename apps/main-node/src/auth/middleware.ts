@@ -1,4 +1,4 @@
-// Auth middleware for the CFless Node side. Runs before /v1/* routes.
+// Auth middleware for the self-host Node side. Runs before /v1/* routes.
 // Resolution priority:
 //
 //   1. AUTH_DISABLED=1 → tenant_id = "default" for every request

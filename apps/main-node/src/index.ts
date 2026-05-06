@@ -1,5 +1,5 @@
 /**
- * apps/main-node — CFless Node entry for the Open Managed Agents API.
+ * apps/main-node — self-host Node entry for the Open Managed Agents API.
  *
  * Phase B-resume milestone: persistent sessions + event log + SSE with
  * Last-Event-ID resume + crash recovery on restart. Proves the storage
@@ -112,7 +112,7 @@ if (usePostgres) {
   backendDescription = `sqlite ${dbPath}`;
 }
 
-// Apply schemas. Idempotent. CFless deploys eventually replace this with a
+// Apply schemas. Idempotent. self-host deploys eventually replace this with a
 // proper migrations runner.
 await sql.exec(`
   CREATE TABLE IF NOT EXISTS "agents" (
@@ -351,7 +351,7 @@ if (!authDisabled) {
 const agentsService: AgentService = createSqliteAgentService({ client: sql });
 
 // Memory store: SQLite for index/audit + local filesystem for content blobs.
-// Production CFless can swap LocalFsBlobStore for an S3-compatible adapter
+// Production self-host can swap LocalFsBlobStore for an S3-compatible adapter
 // (Tigris / MinIO / etc.) — same BlobStore port.
 const memoryBlobs = new LocalFsBlobStore({
   baseDir: process.env.MEMORY_BLOB_DIR ?? "./data/memory-blobs",
@@ -442,7 +442,7 @@ app.get("/auth-info", (c) =>
             ? ["google"]
             : []),
         ],
-    // Turnstile not wired on the CFless side. Console renders without
+    // Turnstile not wired on the self-host side. Console renders without
     // captcha when this is null.
     turnstile_site_key: null,
   }),
@@ -1235,7 +1235,7 @@ app.route("/v1", v1);
 // route match before serveStatic gets a look. /auth-info, /auth/*, /v1/*
 // are untouched.
 //
-// CFless deployments that don't ship the console (e.g. SDK-only) just
+// self-host deployments that don't ship the console (e.g. SDK-only) just
 // leave CONSOLE_DIR unset; the SPA fallback short-circuits and the
 // normal 404 handler runs.
 //

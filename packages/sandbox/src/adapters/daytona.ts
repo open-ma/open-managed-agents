@@ -6,7 +6,7 @@
 // we don't want to pay the latency before we know we need it.
 //
 // Driver dep is a peer with peerDependenciesMeta.optional so this package
-// compiles + runs without `@daytonaio/sdk` installed. CFless deploys that
+// compiles + runs without `@daytonaio/sdk` installed. self-host deploys that
 // want this adapter install it: `pnpm add @daytonaio/sdk`.
 //
 // Auth: pass apiKey in opts OR set DAYTONA_API_KEY in process.env.
