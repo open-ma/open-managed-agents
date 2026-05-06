@@ -71,7 +71,6 @@ import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
 import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
-import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/local-subprocess";
 import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { mkdirSync } from "node:fs";
@@ -653,89 +652,50 @@ v1.post("/sessions/:id/events", async (c) => {
  * Pick a sandbox backend per env. Defaults to LocalSubprocessSandbox for
  * trusted-dev usage; remote/isolated backends opt in via SANDBOX_PROVIDER.
  *
- *   SANDBOX_PROVIDER=subprocess (default)
- *   SANDBOX_PROVIDER=daytona    — Daytona Cloud (DAYTONA_API_KEY required)
- *   SANDBOX_PROVIDER=litebox    — BoxLite micro-VM (local, hardware iso)
- *
- * Each adapter is dynamically imported so the deps that aren't peer-installed
- * (e.g. @daytonaio/sdk in a litebox-only deploy) don't crash startup.
+ * Dependency-inverted: this function knows ONLY a name → import-path
+ * map. Each adapter exports a `sandboxFactory: SandboxFactory` (defined
+ * in `packages/sandbox/src/ports.ts`) that reads its own env vars
+ * (DAYTONA_API_KEY, BOXRUN_URL, etc.) inside its own file. Adding a 7th
+ * sandbox = create the file + register a name here. main-node never
+ * grows an `if` chain.
  */
+const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
+  subprocess: "@open-managed-agents/sandbox/adapters/local-subprocess",
+  litebox: "@open-managed-agents/sandbox/adapters/litebox",
+  boxlite: "@open-managed-agents/sandbox/adapters/litebox",
+  boxrun: "@open-managed-agents/sandbox/adapters/boxrun",
+  daytona: "@open-managed-agents/sandbox/adapters/daytona",
+  e2b: "@open-managed-agents/sandbox/adapters/e2b",
+};
+
 async function buildSandbox(
   sessionId: string,
   workdir: string,
 ): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
   const provider = (process.env.SANDBOX_PROVIDER ?? "subprocess").toLowerCase();
-  if (provider === "daytona") {
-    const { DaytonaSandbox } = await import(
-      "@open-managed-agents/sandbox/adapters/daytona"
+  const path = SANDBOX_PROVIDER_PATHS[provider];
+  if (!path) {
+    throw new Error(
+      `SANDBOX_PROVIDER=${provider} not recognized; valid values: ${Object.keys(
+        SANDBOX_PROVIDER_PATHS,
+      ).join(", ")}`,
     );
-    // Same s3 memory bucket env vars as the E2B branch — both remote
-    // backends share the same s3fs mount approach for /mnt/memory.
-    const mb = (process.env.MEMORY_S3_ENDPOINT &&
-      process.env.MEMORY_S3_ACCESS_KEY &&
-      process.env.MEMORY_S3_SECRET_KEY &&
-      process.env.MEMORY_S3_BUCKET)
-      ? {
-          endpoint: process.env.MEMORY_S3_ENDPOINT,
-          accessKey: process.env.MEMORY_S3_ACCESS_KEY,
-          secretKey: process.env.MEMORY_S3_SECRET_KEY,
-          bucketName: process.env.MEMORY_S3_BUCKET,
-        }
-      : undefined;
-    return new DaytonaSandbox({
+  }
+  // Dynamic import so deps the operator hasn't installed (e.g.
+  // @daytonaio/sdk in a litebox-only deploy) don't crash startup.
+  const mod = (await import(path)) as {
+    sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
+  };
+  return mod.sandboxFactory(
+    {
       sessionId,
-      apiKey: process.env.DAYTONA_API_KEY,
-      apiUrl: process.env.DAYTONA_API_URL,
-      image: process.env.SANDBOX_IMAGE,
-      memoryBucket: mb,
-    });
-  }
-  if (provider === "litebox" || provider === "boxlite") {
-    const { LiteBoxSandbox } = await import(
-      "@open-managed-agents/sandbox/adapters/litebox"
-    );
-    return new LiteBoxSandbox({
-      image: process.env.SANDBOX_IMAGE,
-      memoryMib: process.env.LITEBOX_MEMORY_MIB
-        ? Number(process.env.LITEBOX_MEMORY_MIB)
-        : undefined,
-      cpus: process.env.LITEBOX_CPUS ? Number(process.env.LITEBOX_CPUS) : undefined,
-      name: `oma-${sessionId}`,
-    });
-  }
-  if (provider === "e2b") {
-    const { createE2BSandbox } = await import(
-      "@open-managed-agents/sandbox/adapters/e2b"
-    );
-    // Memory bucket config for the s3fs mount (shared with the daytona
-    // branch — both remote sandboxes use the same MEMORY_S3_* env vars).
-    // Without these set, mountMemoryStore throws — agents in remote
-    // sandboxes either get s3-backed memory or none.
-    const mb = (process.env.MEMORY_S3_ENDPOINT &&
-      process.env.MEMORY_S3_ACCESS_KEY &&
-      process.env.MEMORY_S3_SECRET_KEY &&
-      process.env.MEMORY_S3_BUCKET)
-      ? {
-          endpoint: process.env.MEMORY_S3_ENDPOINT,
-          accessKey: process.env.MEMORY_S3_ACCESS_KEY,
-          secretKey: process.env.MEMORY_S3_SECRET_KEY,
-          bucketName: process.env.MEMORY_S3_BUCKET,
-        }
-      : undefined;
-    return await createE2BSandbox({
-      apiKey: process.env.E2B_API_KEY,
-      templateId: process.env.SANDBOX_IMAGE,
-      memoryBucket: mb,
-    });
-  }
-  // Default: subprocess.
-  return new LocalSubprocessSandbox({
-    workdir,
-    // Memory blob root — when set, mountMemoryStore symlinks
-    // .mnt/memory/<storeName> straight to <root>/<storeId>/. memoryBlobs is
-    // always present in this build (it's a hard dep of memoryService).
-    memoryRoot: memoryBlobs.baseDir,
-  });
+      workdir,
+      // Memory blob root — adapters that mount via host-fs (LocalSubprocess)
+      // read this; remote ones (Daytona/E2B) ignore it and use s3fs.
+      memoryRoot: memoryBlobs.baseDir,
+    },
+    process.env,
+  );
 }
 
 /**
