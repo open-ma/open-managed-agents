@@ -222,7 +222,17 @@ export type ContentBlock = TextBlock | ImageBlock | DocumentBlock;
 export interface EventBase {
   id?: string;
   processed_at?: string;
-  parent_event_id?: string; // optional causal predecessor in product domain (e.g. tool_result → tool_use, outcome.evaluation_end → agent.message it evaluated)
+  /**
+   * Optional causal predecessor in the product domain. v1-additive
+   * (docs/trajectory-v1-spec.md "Causality"): existing data without this
+   * field stays valid; consumers must not require it. Conventions:
+   *   agent.tool_result.parent_event_id            → agent.tool_use.id
+   *   agent.thread_message_received.parent_event_id → agent.thread_message_sent.id
+   *   outcome.evaluation_end.parent_event_id        → agent.message.id evaluated
+   *   user.message (wakeup).parent_event_id         → span.wakeup_scheduled.id
+   * Other event types may set it where the relationship is unambiguous.
+   */
+  parent_event_id?: string;
   /**
    * Free-form harness/platform metadata. Wire-compatible extension point —
    * existing consumers ignore unknown fields. Use to namespace harness-emitted
