@@ -171,6 +171,22 @@ async function createTaskSession(env: Env, run: EvalRunRecord, task: EvalTaskRes
   });
   const sessionId = session.id;
 
+  // Tag the session so the Console can pick eval sessions out of the
+  // general session list (mirrors the Linear / Slack metadata pattern).
+  // Console's SessionsList renders an EvalBadge linking back to the run.
+  try {
+    await services.sessions.update({
+      tenantId: t,
+      sessionId,
+      metadata: { eval: { run_id: run.id, task_id: task.id } },
+    });
+  } catch (err) {
+    logWarn(
+      { op: "eval.session.tag", session_id: sessionId, run_id: run.id, task_id: task.id, err },
+      "eval session metadata tag failed; session usable but won't show eval badge in console",
+    );
+  }
+
   await fwd(binding, `/sessions/${sessionId}/init`, "PUT", JSON.stringify({
     agent_id: run.agent_id,
     environment_id: run.environment_id,
