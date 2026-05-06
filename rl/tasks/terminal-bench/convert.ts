@@ -228,6 +228,180 @@ function buildVerifyScript(testContent: string): string {
   ].join("\n");
 }
 
+/**
+ * Translate a terminal-bench task Dockerfile into a `setup_script` that
+ * runs in our sandbox via /exec before the agent's first message. We
+ * extract RUN, WORKDIR, ENV, and COPY directives — everything else
+ * (FROM, comments, build args) is dropped because:
+ *   - FROM is moot: we run inside our own openma/sandbox-base image
+ *   - comments and benchmark canary strings have no runtime semantics
+ *
+ * Skips RUN commands that install packages our base image already provides
+ * (git, tmux, asciinema) — saves a few seconds and avoids apt cache misses
+ * in the sandbox container.
+ *
+ * Translates /app paths to /workspace via the existing rewritePaths to
+ * keep everything inside the persistence boundary (only /workspace is
+ * snapshotted by createBackup).
+ *
+ * COPY <src> <dst> is rendered as a heredoc that writes the source file
+ * content into <dst>. Source paths are resolved relative to taskDir.
+ *
+ * Returns undefined if the resulting script is empty (no executable
+ * directives — pure FROM-only Dockerfile, e.g. tasks that don't need
+ * any pre-staging beyond the base image).
+ */
+function dockerfileToSetupScript(dockerfile: string, taskDir: string): string | undefined {
+  // Pre-pass: handle backslash line continuations the way Docker does.
+  const physicalLines = dockerfile.split(/\r?\n/);
+  const logical: string[] = [];
+  let buf = "";
+  for (const raw of physicalLines) {
+    if (/^\s*#/.test(raw) || raw.trim() === "") {
+      if (buf) { logical.push(buf); buf = ""; }
+      continue;
+    }
+    if (raw.endsWith("\\")) {
+      buf += raw.slice(0, -1);
+    } else {
+      buf += raw;
+      logical.push(buf);
+      buf = "";
+    }
+  }
+  if (buf) logical.push(buf);
+
+  // Packages already in openma/sandbox-base — skip RUN apt-get install
+  // lines whose payload is exactly these (a common no-op in TB tasks).
+  const BASE_HAS = new Set(["git", "tmux", "asciinema", "curl", "wget", "vim", "jq"]);
+
+  let cwd = "/";
+  const lines: string[] = [
+    "set -euo pipefail",
+    "# Auto-generated from terminal-bench Dockerfile by rl/tasks/terminal-bench/convert.ts",
+    "",
+  ];
+  for (const lineRaw of logical) {
+    const line = lineRaw.trim();
+    const m = /^([A-Z]+)\s+(.*)$/.exec(line);
+    if (!m) continue;
+    const [, op, rest] = m;
+    switch (op) {
+      case "FROM":
+      case "MAINTAINER":
+      case "LABEL":
+      case "ARG":
+      case "VOLUME":
+      case "EXPOSE":
+      case "USER":
+      case "CMD":
+      case "ENTRYPOINT":
+      case "HEALTHCHECK":
+      case "STOPSIGNAL":
+      case "ONBUILD":
+      case "SHELL":
+        // Image-build / runtime config; not applicable when running inside
+        // an existing container.
+        break;
+      case "WORKDIR": {
+        cwd = rewritePaths(rest.replace(/^["']|["']$/g, ""));
+        lines.push(`mkdir -p ${shellQuoteArg(cwd)} && cd ${shellQuoteArg(cwd)}`);
+        break;
+      }
+      case "ENV": {
+        // ENV KEY=value or ENV KEY value
+        const env = parseEnvLine(rest);
+        for (const [k, v] of env) {
+          lines.push(`export ${k}=${shellQuoteArg(rewritePaths(v))}`);
+        }
+        break;
+      }
+      case "RUN": {
+        const cmd = rewritePaths(rest);
+        if (isInstallNoop(cmd, BASE_HAS)) {
+          lines.push(`# skipped (base image has it): ${cmd.slice(0, 80)}`);
+          break;
+        }
+        lines.push(cmd);
+        break;
+      }
+      case "COPY":
+      case "ADD": {
+        // Best-effort: read the source file from taskDir and embed via
+        // heredoc. Wildcards / multi-source COPY isn't supported — the
+        // converter throws so the operator can fix the Dockerfile or
+        // hand-author the setup_script.
+        const parts = rest.split(/\s+/).filter(Boolean);
+        if (parts.length !== 2) {
+          throw new Error(
+            `convert.ts COPY/ADD with !=2 args not supported: \`${rest}\` (taskDir=${taskDir})`,
+          );
+        }
+        const [src, dstRaw] = parts;
+        const dst = rewritePaths(dstRaw);
+        const srcPath = join(taskDir, src);
+        if (!existsSync(srcPath)) {
+          throw new Error(`COPY source missing: ${srcPath}`);
+        }
+        const content = readFileSync(srcPath, "utf-8");
+        const sentinel = `OMA_DOCKERCOPY_${Math.random().toString(16).slice(2, 14).toUpperCase()}`;
+        if (content.includes(sentinel)) {
+          throw new Error(`COPY heredoc sentinel collision for ${srcPath}`);
+        }
+        const lastSlash = dst.lastIndexOf("/");
+        const dir = lastSlash > 0 ? dst.slice(0, lastSlash) : "/";
+        lines.push(`mkdir -p ${shellQuoteArg(dir)}`);
+        lines.push(`cat > ${shellQuoteArg(dst)} <<'${sentinel}'`);
+        lines.push(content);
+        lines.push(sentinel);
+        break;
+      }
+      default:
+        throw new Error(`convert.ts: unhandled Dockerfile directive ${op}: ${rest.slice(0, 80)}`);
+    }
+  }
+
+  // Drop the trailing 3 boilerplate lines (set -euo pipefail + comment + blank)
+  // if nothing else got appended.
+  if (lines.length === 3) return undefined;
+  return lines.join("\n") + "\n";
+}
+
+function shellQuoteArg(s: string): string {
+  return `'${s.replace(/'/g, `'\\''`)}'`;
+}
+
+function parseEnvLine(rest: string): [string, string][] {
+  // Two forms: `KEY=value [KEY2=value2 ...]` or legacy `KEY value`
+  if (!rest.includes("=") || /^\S+\s+\S/.test(rest) && !/=/.test(rest.split(/\s/)[0])) {
+    const sp = rest.indexOf(" ");
+    return [[rest.slice(0, sp), rest.slice(sp + 1)]];
+  }
+  // Naive split — sufficient for terminal-bench corpus, doesn't handle quoted
+  // values with spaces. Throws so we notice if a task needs richer parsing.
+  const out: [string, string][] = [];
+  for (const tok of rest.split(/\s+/)) {
+    const eq = tok.indexOf("=");
+    if (eq < 0) {
+      throw new Error(`ENV token without '=': "${tok}" in "${rest}"`);
+    }
+    out.push([tok.slice(0, eq), tok.slice(eq + 1)]);
+  }
+  return out;
+}
+
+function isInstallNoop(cmd: string, baseHas: Set<string>): boolean {
+  // Match `apt-get install` (with -y / --no-install-recommends / --yes etc)
+  // and check whether every package in the install list is in baseHas.
+  const m = /apt-get\s+(?:-\S+\s+)*update(?:\s*&&\s*apt-get\s+(?:-\S+\s+)*install\s+([^\n;|&]+))?/.exec(cmd);
+  if (!m || !m[1]) return false;
+  const args = m[1].split(/\s+/).filter(Boolean);
+  // Drop apt-get flags
+  const pkgs = args.filter(a => !a.startsWith("-"));
+  if (pkgs.length === 0) return false;
+  return pkgs.every(p => baseHas.has(p));
+}
+
 function convertTask(name: string) {
   const taskDir = join(TB_SOURCE, name);
   if (!existsSync(taskDir)) {
@@ -235,17 +409,43 @@ function convertTask(name: string) {
   }
   const yamlPath = join(taskDir, "task.yaml");
   const testPath = join(taskDir, "tests", "test_outputs.py");
+  const dockerfilePath = join(taskDir, "Dockerfile");
+  const runTestsPath = join(taskDir, "run-tests.sh");
   if (!existsSync(yamlPath)) throw new Error(`missing task.yaml: ${yamlPath}`);
-  if (!existsSync(testPath)) throw new Error(`missing tests/test_outputs.py: ${testPath}`);
 
   const yaml = parseTaskYaml(readFileSync(yamlPath, "utf-8"));
-  const testContent = readFileSync(testPath, "utf-8");
-
   if (!yaml.instruction || yaml.instruction.trim() === "") {
     throw new Error(`empty instruction for ${name}`);
   }
 
-  const verifyScript = buildVerifyScript(rewritePaths(testContent));
+  // Two verifier shapes are common in terminal-bench:
+  //   (a) tests/test_outputs.py — pytest written by the task author, embedded
+  //       via heredoc in our verify_script
+  //   (b) run-tests.sh — bash that does its own setup + invokes pytest (used
+  //       by swe-bench-* style tasks). We embed the script verbatim and
+  //       trust its exit code.
+  // (a) wins if both exist, since it's the more recent convention.
+  let verifyScript: string;
+  if (existsSync(testPath)) {
+    const testContent = readFileSync(testPath, "utf-8");
+    verifyScript = buildVerifyScript(rewritePaths(testContent));
+  } else if (existsSync(runTestsPath)) {
+    const runTests = readFileSync(runTestsPath, "utf-8");
+    verifyScript = rewritePaths(runTests);
+  } else {
+    throw new Error(`no verifier found: expected tests/test_outputs.py or run-tests.sh in ${taskDir}`);
+  }
+
+  // Dockerfile setup → setup_script. Extract RUN / WORKDIR / ENV / COPY
+  // and translate to a bash script the eval-runner runs in /exec before
+  // the agent's first message. Skipped if no Dockerfile (legacy tasks).
+  let setupScript: string | undefined;
+  if (existsSync(dockerfilePath)) {
+    const dockerfile = readFileSync(dockerfilePath, "utf-8");
+    setupScript = dockerfileToSetupScript(dockerfile, taskDir);
+  }
+
+  const verifyScriptFinal = verifyScript;
 
   const taskMessage = [
     rewritePaths(yaml.instruction.trim()),
@@ -261,9 +461,10 @@ function convertTask(name: string) {
         id: `tb-${name}`,
         description: `terminal-bench: ${name} (${yaml.category ?? "?"}, ${yaml.difficulty ?? "?"})`,
         message: taskMessage,
+        ...(setupScript ? { setup_script: setupScript } : {}),
         reward: {
           type: "script" as const,
-          verify_script: verifyScript,
+          verify_script: verifyScriptFinal,
           weights: { verifiable: 1.0, efficiency: 0 },
         },
         max_turns: 50,
