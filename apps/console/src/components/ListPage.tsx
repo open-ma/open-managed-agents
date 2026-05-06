@@ -1,42 +1,93 @@
 import { type ReactNode } from "react";
+import { Button } from "./Button";
 
 interface Column<T> {
   key: string;
   label: string;
   render?: (item: T) => ReactNode;
+  /** Class merged into both the <th> and the <td> for this column. */
   className?: string;
 }
 
 interface ListPageProps<T> {
+  /** Page title (rendered in `font-display`). */
   title: string;
-  subtitle: string;
-  createLabel: string;
-  onCreate: () => void;
+  /** Subtitle below the title — accepts ReactNode so callers can drop in
+   *  inline `<code>` snippets, links, etc. (e.g. MemoryStoresList shows the
+   *  mount path in the subtitle). */
+  subtitle: ReactNode;
+
+  /** Primary "create" button. Both must be set for the button to render —
+   *  read-only pages (EvalRunsList) just omit them. */
+  createLabel?: string;
+  onCreate?: () => void;
+
+  /** Extra controls rendered to the LEFT of the create button in the
+   *  header row. Use for secondary CTAs like SkillsList's "ClawHub". */
+  headerActions?: ReactNode;
+
+  /** Built-in search input. Render only when `onSearchChange` is provided. */
   searchPlaceholder?: string;
   searchValue?: string;
   onSearchChange?: (v: string) => void;
+
+  /** Built-in "Show archived" checkbox. Render only when the change handler
+   *  is provided. Pages that drive this server-side just wire it through. */
   showArchived?: boolean;
   onShowArchivedChange?: (v: boolean) => void;
+
+  /** Extra filter controls rendered alongside search/archived in the
+   *  controls row — e.g. an agent dropdown (SessionsList) or all/active
+   *  tabs (Environments, Vaults). */
+  filters?: ReactNode;
+
+  /** Standard table columns. Cell rendering is via `render` or, if absent,
+   *  string coercion of `item[key]`. */
   columns: Column<T>[];
   data: T[];
+
   loading?: boolean;
   emptyTitle?: string;
-  emptySubtitle?: string;
+  /** ReactNode so callers can include code snippets, links etc. */
+  emptySubtitle?: ReactNode;
+
   onRowClick?: (item: T) => void;
   getRowKey: (item: T) => string;
+
+  /** Cursor pagination (mirrors useCursorList). When `onLoadMore` is set
+   *  and `hasMore` is true, a "Load more" footer is rendered below the
+   *  table; while `loadingMore` is true the button shows a loading state. */
+  hasMore?: boolean;
+  onLoadMore?: () => void;
+  loadingMore?: boolean;
+
+  /** Anything to render below the table — typically modals tied to the
+   *  page (create dialog, detail dialog, etc.). */
   children?: ReactNode;
 }
 
+/**
+ * Reusable list-page chrome shared across the console (Sessions, Agents,
+ * Environments, etc.). Provides the standard header / controls row / table
+ * shell / loading + empty states / cursor-paginated load-more so each page
+ * only declares its columns and renderers.
+ *
+ * Pages keep ownership of their modals — pass them via `children`. Any
+ * truly per-page filter UI (tabs, dropdowns) goes through the `filters`
+ * slot.
+ */
 export function ListPage<T>({
   title,
   subtitle,
   createLabel,
   onCreate,
+  headerActions,
   searchPlaceholder,
   searchValue,
   onSearchChange,
   showArchived,
   onShowArchivedChange,
+  filters,
   columns,
   data,
   loading,
@@ -44,26 +95,37 @@ export function ListPage<T>({
   emptySubtitle,
   onRowClick,
   getRowKey,
+  hasMore,
+  onLoadMore,
+  loadingMore,
   children,
 }: ListPageProps<T>) {
+  const hasControlsRow =
+    !!onSearchChange || !!onShowArchivedChange || !!filters;
+  const showCreate = !!onCreate && !!createLabel;
+
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-4 md:px-8 md:py-6">
+    <div className="flex-1 overflow-y-auto px-4 py-4 md:p-8 lg:p-10">
       {/* Header */}
       <div className="flex items-start justify-between mb-6 gap-3">
         <div className="min-w-0">
-          <h1 className="font-display text-lg md:text-xl font-semibold text-fg truncate">{title}</h1>
-          <p className="text-sm text-fg-muted mt-0.5">{subtitle}</p>
+          <h1 className="font-display text-lg md:text-xl font-semibold tracking-tight text-fg truncate">
+            {title}
+          </h1>
+          <div className="text-sm text-fg-muted mt-0.5">{subtitle}</div>
         </div>
-        <button
-          onClick={onCreate}
-          className="px-3 py-2 md:px-4 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover transition-colors shrink-0"
-        >
-          {createLabel}
-        </button>
+        {(headerActions || showCreate) && (
+          <div className="flex items-center gap-2 shrink-0">
+            {headerActions}
+            {showCreate && (
+              <Button onClick={onCreate}>{createLabel}</Button>
+            )}
+          </div>
+        )}
       </div>
 
-      {/* Controls */}
-      {(onSearchChange || onShowArchivedChange) && (
+      {/* Controls row */}
+      {hasControlsRow && (
         <div className="flex flex-col sm:flex-row items-start sm:items-center gap-3 sm:gap-4 mb-4">
           {onSearchChange && (
             <div className="relative w-full sm:w-auto">
@@ -87,10 +149,12 @@ export function ListPage<T>({
                 value={searchValue ?? ""}
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder={searchPlaceholder ?? "Search..."}
-                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-full sm:w-64"
+                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-full sm:w-64"
               />
             </div>
           )}
+
+          {filters}
 
           {onShowArchivedChange && (
             <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer select-none">
@@ -106,7 +170,7 @@ export function ListPage<T>({
         </div>
       )}
 
-      {/* Table */}
+      {/* Table / loading / empty */}
       {loading ? (
         <div className="flex items-center justify-center py-16">
           <svg
@@ -131,52 +195,67 @@ export function ListPage<T>({
           </svg>
         </div>
       ) : data.length === 0 ? (
-        <div className="text-center py-16">
-          <p className="text-fg-muted">{emptyTitle}</p>
+        <div className="text-center py-16 text-fg-subtle">
+          <p className="text-lg mb-1">{emptyTitle}</p>
           {emptySubtitle && (
-            <p className="text-sm text-fg-subtle mt-1">{emptySubtitle}</p>
+            <div className="text-sm">{emptySubtitle}</div>
           )}
         </div>
       ) : (
-        <div className="border border-border rounded-lg overflow-x-auto mt-4">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
-                {columns.map((col) => (
-                  <th
-                    key={col.key}
-                    className={`text-left px-4 py-2.5 ${col.className ?? ""}`}
-                  >
-                    {col.label}
-                  </th>
-                ))}
-              </tr>
-            </thead>
-            <tbody>
-              {data.map((item) => (
-                <tr
-                  key={getRowKey(item)}
-                  onClick={onRowClick ? () => onRowClick(item) : undefined}
-                  className={`border-t border-border transition-colors ${
-                    onRowClick
-                      ? "hover:bg-bg-surface cursor-pointer"
-                      : ""
-                  }`}
-                >
+        <div className="border border-border rounded-lg overflow-hidden">
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead>
+                <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
                   {columns.map((col) => (
-                    <td
+                    <th
                       key={col.key}
-                      className={`px-4 py-3 ${col.className ?? ""}`}
+                      className={`text-left px-4 py-2.5 ${col.className ?? ""}`}
                     >
-                      {col.render
-                        ? col.render(item)
-                        : String((item as Record<string, unknown>)[col.key] ?? "")}
-                    </td>
+                      {col.label}
+                    </th>
                   ))}
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {data.map((item) => (
+                  <tr
+                    key={getRowKey(item)}
+                    onClick={onRowClick ? () => onRowClick(item) : undefined}
+                    className={`border-t border-border transition-colors ${
+                      onRowClick
+                        ? "hover:bg-bg-surface cursor-pointer"
+                        : "hover:bg-bg-surface"
+                    }`}
+                  >
+                    {columns.map((col) => (
+                      <td
+                        key={col.key}
+                        className={`px-4 py-3 ${col.className ?? ""}`}
+                      >
+                        {col.render
+                          ? col.render(item)
+                          : String(
+                              (item as Record<string, unknown>)[col.key] ?? "",
+                            )}
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+          {hasMore && onLoadMore && (
+            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
+              <button
+                onClick={onLoadMore}
+                disabled={loadingMore}
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+              >
+                {loadingMore ? "Loading…" : "Load more"}
+              </button>
+            </div>
+          )}
         </div>
       )}
 
