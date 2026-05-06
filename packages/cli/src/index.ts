@@ -2198,10 +2198,11 @@ function usage() {
   }
   console.log(`
   Bridge (local runtime):
-    oma bridge setup [--force] [--no-service]    Pair this machine with OMA (one-time OAuth)
-    oma bridge daemon                            Run the bridge in foreground
+    oma bridge setup [--force] [--no-service]    Pair this machine with OMA + start daemon
     oma bridge status                            Show creds + probe server reachability
-    oma bridge uninstall                         Remove launchd service + creds
+    oma bridge agents refresh                    Re-detect agents + offer wrapper installs
+    oma bridge uninstall                         Stop service + remove creds
+    (oma bridge daemon                           Internal: launched by service mgr / debugging)
 
   API Reference:
     oma api                                    Show all HTTP endpoints
@@ -2306,10 +2307,11 @@ async function main() {
         console.error(
           "oma bridge — pair a local ACP agent with OMA\n\n" +
           "  oma bridge setup [--server-url=…] [--no-service] [--force] [--yes]\n" +
-          "  oma bridge daemon\n" +
-          "  oma bridge status\n" +
-          "  oma bridge uninstall\n" +
-          "  oma bridge agents refresh [--yes]   # re-scan + offer-install missing wrappers + signal daemon\n" +
+          "                                       Pair + install service + start daemon\n" +
+          "  oma bridge status                    Creds + service kind + probe server\n" +
+          "  oma bridge agents refresh [--yes]    Re-scan + offer-install wrappers + reload\n" +
+          "  oma bridge uninstall                 Stop service + remove creds\n" +
+          "  oma bridge daemon                    (internal — launched by service mgr / for debug)\n" +
           "\n" +
           "  Use --profile <name> (or OMA_PROFILE=<name>) to run multiple\n" +
           "  daemons side-by-side (e.g. prod in launchd + staging foreground).\n",

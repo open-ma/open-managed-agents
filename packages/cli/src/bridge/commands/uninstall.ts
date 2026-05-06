@@ -1,7 +1,8 @@
 /**
- * `oma bridge uninstall` — tear down launchd / systemd unit, remove
- * credentials, attempt server-side revoke. Best-effort: each step
- * continues on failure so a partially-broken install can still be cleaned.
+ * `oma bridge uninstall` — tear down launchd / systemd / Task Scheduler
+ * registration, remove credentials, attempt server-side revoke. Best-
+ * effort: each step continues on failure so a partially-broken install
+ * can still be cleaned.
  *
  * Server-side revoke is best-effort because:
  *   - The user may have already deleted the runtime via web UI (DELETE
@@ -15,9 +16,9 @@
  * runtimes offline after no heartbeat; user can delete manually).
  */
 
-import { uninstall as uninstallLaunchd } from "../lib/launchd.js";
+import { uninstall as uninstallService } from "../lib/service-manager.js";
 import { readCreds, deleteCreds } from "../lib/config.js";
-import { paths, currentPlatform } from "../lib/platform.js";
+import { paths } from "../lib/platform.js";
 import { printBanner, log, c, sym } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 
@@ -25,15 +26,21 @@ export async function runUninstall(): Promise<void> {
   printBanner("uninstall — remove daemon + local credentials", PKG_VERSION);
 
   // Step 1: stop the service first, so it isn't in the middle of writing
-  // to creds file when we delete it.
-  if (currentPlatform() === "darwin") {
-    try {
-      const r = await uninstallLaunchd();
-      if (r.removed) log.ok(`launchd plist removed  ${c.dim(paths().serviceFile ?? "")}`);
-      else process.stderr.write(`${sym.dot()} ${c.dim("launchd plist not present")}\n`);
-    } catch (e) {
-      log.warn(`launchd uninstall failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  // to creds file when we delete it. The façade dispatches to the right
+  // platform mechanism (launchctl unload / systemctl --user disable /
+  // schtasks /delete) and returns a kind tag for the log message.
+  try {
+    const r = await uninstallService();
+    const tag =
+      r.kind === "launchd"      ? "launchd plist" :
+      r.kind === "systemd"      ? "systemd unit" :
+      r.kind === "windows-task" ? "Task Scheduler task" :
+                                  "service";
+    if (r.removed) log.ok(`${tag} removed  ${c.dim(paths().serviceFile ?? paths().configDir)}`);
+    else process.stderr.write(`${sym.dot()} ${c.dim(`${tag} not present`)}\n`);
+    if (r.warning) log.hint(c.dim(r.warning));
+  } catch (e) {
+    log.warn(`service uninstall failed: ${e instanceof Error ? e.message : String(e)}`);
   }
 
   // Step 2: best-effort server-side revoke.
@@ -65,3 +72,4 @@ export async function runUninstall(): Promise<void> {
 
   process.stderr.write(`\n${c.bold("Done.")}\n\n`);
 }
+
