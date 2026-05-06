@@ -299,4 +299,380 @@ describe("main-node crash recovery (real process, SIGKILL)", () => {
     expect(row?.status).toBe("idle");
     expect(row?.turn_id).toBeNull();
   });
+
+  // ─── crash points with realistic in-flight state ─────────────────────
+  //
+  // The tests above only seed the sessions row. Real production crashes
+  // also leave behind partial event-log + stream-table state. These
+  // tests seed that state directly and assert the recovery path
+  // (recoverInterruptedState inside machine.onWake) finalizes/injects
+  // the right placeholders so the next user.message sees a clean
+  // tool-use bijection + stream-status pair.
+
+  it("crash with stuck stream → recovery finalizes it as 'interrupted' + appends agent.message with buffered chunks", async () => {
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const now = Date.now();
+      seedOrphanSession(db, "sess_streaming", "turn_streaming", now);
+      // Stream row in 'streaming' status with two buffered chunks
+      // simulates a process death mid-LLM.
+      db.prepare(
+        `INSERT INTO session_streams
+           (session_id, message_id, status, chunks_json, started_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run(
+        "sess_streaming",
+        "msg_partial",
+        "streaming",
+        JSON.stringify(["Hello, ", "world"]),
+        now - 30_000,
+      );
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    h = await startMainNode({ dataDir });
+
+    const db = new Database(dbPath, { readonly: true });
+    const sessRow = db
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id = ?`)
+      .get("sess_streaming") as { status: string; turn_id: string | null };
+    const streamRow = db
+      .prepare(
+        `SELECT status, chunks_json FROM session_streams WHERE session_id=? AND message_id=?`,
+      )
+      .get("sess_streaming", "msg_partial") as { status: string; chunks_json: string };
+    const events = db
+      .prepare(
+        `SELECT type, data FROM session_events WHERE session_id=? ORDER BY seq`,
+      )
+      .all("sess_streaming") as Array<{ type: string; data: string }>;
+    db.close();
+
+    if (sessRow.status !== "idle") {
+      // eslint-disable-next-line no-console
+      console.error("main-node logs:\n" + h.logBuf.join(""));
+    }
+
+    expect(sessRow.status).toBe("idle");
+    expect(sessRow.turn_id).toBeNull();
+    expect(streamRow.status).toBe("interrupted");
+    // recovery appended one synthetic agent.message carrying the joined chunks.
+    const synthesised = events.find((e) => e.type === "agent.message");
+    expect(synthesised).toBeDefined();
+    const parsed = JSON.parse(synthesised!.data) as {
+      message_id: string;
+      content: Array<{ type: string; text: string }>;
+    };
+    expect(parsed.message_id).toBe("msg_partial");
+    expect(parsed.content[0].text).toBe("Hello, world");
+  });
+
+  it("crash with orphan agent.tool_use → recovery injects placeholder agent.tool_result so next LLM call doesn't 400", async () => {
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const now = Date.now();
+      seedOrphanSession(db, "sess_tool_orphan", "turn_tool", now);
+      // event log: single agent.tool_use with no matching tool_result.
+      // Anthropic strictly rejects an unmatched tool_use on the next
+      // turn — recovery's job is to inject a placeholder.
+      seedEvent(db, "sess_tool_orphan", 1, {
+        type: "agent.tool_use",
+        id: "use_dangling",
+        name: "bash",
+        input: { command: "echo hi" },
+      });
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    h = await startMainNode({ dataDir });
+
+    const db = new Database(dbPath, { readonly: true });
+    const sessRow = db
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id = ?`)
+      .get("sess_tool_orphan") as { status: string; turn_id: string | null };
+    const events = db
+      .prepare(
+        `SELECT type, data FROM session_events WHERE session_id=? ORDER BY seq`,
+      )
+      .all("sess_tool_orphan") as Array<{ type: string; data: string }>;
+    db.close();
+
+    if (sessRow.status !== "idle") {
+      // eslint-disable-next-line no-console
+      console.error("main-node logs:\n" + h.logBuf.join(""));
+    }
+
+    expect(sessRow.status).toBe("idle");
+    expect(events).toHaveLength(2);
+    expect(events[0].type).toBe("agent.tool_use");
+    expect(events[1].type).toBe("agent.tool_result");
+    const result = JSON.parse(events[1].data) as {
+      tool_use_id: string;
+      content: string;
+    };
+    expect(result.tool_use_id).toBe("use_dangling");
+    expect(result.content).toMatch(/interrupted/i);
+  });
+
+  it("crash with orphan agent.mcp_tool_use → recovery injects placeholder mcp_tool_result with is_error=true", async () => {
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const now = Date.now();
+      seedOrphanSession(db, "sess_mcp_orphan", "turn_mcp", now);
+      seedEvent(db, "sess_mcp_orphan", 1, {
+        type: "agent.mcp_tool_use",
+        id: "mcp_dangling",
+        name: "search",
+        server_name: "tavily",
+        input: { q: "anthropic" },
+      });
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    h = await startMainNode({ dataDir });
+
+    const db = new Database(dbPath, { readonly: true });
+    const events = db
+      .prepare(
+        `SELECT type, data FROM session_events WHERE session_id=? ORDER BY seq`,
+      )
+      .all("sess_mcp_orphan") as Array<{ type: string; data: string }>;
+    db.close();
+
+    expect(events).toHaveLength(2);
+    expect(events[1].type).toBe("agent.mcp_tool_result");
+    const result = JSON.parse(events[1].data) as {
+      mcp_tool_use_id: string;
+      is_error: boolean;
+    };
+    expect(result.mcp_tool_use_id).toBe("mcp_dangling");
+    expect(result.is_error).toBe(true);
+  });
+
+  it("crash with orphan agent.custom_tool_use → row reconciled but NO event injected (user-driven)", async () => {
+    // Session row should still flip to idle, but recovery must NOT
+    // fabricate a user.custom_tool_result — that's user-driven (the SDK
+    // confirms the tool's outcome). The orphan stands alone with a
+    // warning-only signal.
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const now = Date.now();
+      seedOrphanSession(db, "sess_custom_orphan", "turn_custom", now);
+      seedEvent(db, "sess_custom_orphan", 1, {
+        type: "agent.custom_tool_use",
+        id: "custom_dangling",
+        name: "approve_purchase",
+        input: { amount: 99.99 },
+      });
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    h = await startMainNode({ dataDir });
+
+    const db = new Database(dbPath, { readonly: true });
+    const sessRow = db
+      .prepare(`SELECT status FROM sessions WHERE id = ?`)
+      .get("sess_custom_orphan") as { status: string };
+    const events = db
+      .prepare(
+        `SELECT type FROM session_events WHERE session_id=? ORDER BY seq`,
+      )
+      .all("sess_custom_orphan") as Array<{ type: string }>;
+    db.close();
+
+    expect(sessRow.status).toBe("idle");
+    // Only the original event remains — no user.custom_tool_result auto-injected.
+    expect(events).toHaveLength(1);
+    expect(events[0].type).toBe("agent.custom_tool_use");
+  });
+
+  it("crash with stale orphan (turn_started_at 24h ago) is still recovered (no time-based cutoff)", async () => {
+    // No max-age filter on listOrphanTurns — once status='running' is
+    // seen, recovery runs regardless of how long ago the turn started.
+    // This pins the contract; if we ever add a stale-turn purge, it
+    // should be a separate code path (e.g. periodic GC), not a guard
+    // that hides genuine orphans.
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const dayAgo = Date.now() - 24 * 60 * 60 * 1000;
+      seedOrphanSession(db, "sess_ancient", "turn_ancient", dayAgo);
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    h = await startMainNode({ dataDir });
+
+    const db = new Database(dbPath, { readonly: true });
+    const row = db
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id = ?`)
+      .get("sess_ancient") as { status: string; turn_id: string | null };
+    db.close();
+    expect(row.status).toBe("idle");
+    expect(row.turn_id).toBeNull();
+  });
+
+  it("mixed-state bootstrap: clean idle + orphan stream + orphan tool_use + clean session — all handled correctly", async () => {
+    // Reality check: production data won't be uniform. Bootstrap must
+    // cope with a mix of states without leaving any session stuck.
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const now = Date.now();
+      // Clean idle — no recovery needed.
+      db.prepare(
+        `INSERT INTO sessions (id, tenant_id, agent_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run("sess_clean", "default", null, "idle", now, now);
+      // Orphan with stuck stream.
+      seedOrphanSession(db, "sess_stream", "turn_stream", now);
+      db.prepare(
+        `INSERT INTO session_streams
+           (session_id, message_id, status, chunks_json, started_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).run("sess_stream", "msg_x", "streaming", JSON.stringify(["partial"]), now);
+      // Orphan with dangling tool_use.
+      seedOrphanSession(db, "sess_tool", "turn_tool", now);
+      seedEvent(db, "sess_tool", 1, {
+        type: "agent.tool_use",
+        id: "u_x",
+        name: "bash",
+      });
+      // Another clean idle.
+      db.prepare(
+        `INSERT INTO sessions (id, tenant_id, agent_id, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      ).run("sess_clean2", "default", null, "idle", now, now);
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    h = await startMainNode({ dataDir });
+
+    const db = new Database(dbPath, { readonly: true });
+    const stillRunning = db
+      .prepare(`SELECT COUNT(*) AS n FROM sessions WHERE status='running'`)
+      .get() as { n: number };
+    const streamRow = db
+      .prepare(
+        `SELECT status FROM session_streams WHERE session_id=? AND message_id=?`,
+      )
+      .get("sess_stream", "msg_x") as { status: string };
+    const toolEvents = db
+      .prepare(
+        `SELECT type FROM session_events WHERE session_id=? ORDER BY seq`,
+      )
+      .all("sess_tool") as Array<{ type: string }>;
+    db.close();
+
+    expect(stillRunning.n).toBe(0);
+    expect(streamRow.status).toBe("interrupted");
+    // Original tool_use + injected tool_result.
+    expect(toolEvents.map((e) => e.type)).toEqual([
+      "agent.tool_use",
+      "agent.tool_result",
+    ]);
+  });
+
+  it("double crash: orphan recovered, then SIGKILL during normal idle, then restart — second restart finds nothing to recover", async () => {
+    // Sanity check: the bootstrap path must converge. After the first
+    // recovery, restarting again should be a clean idle boot (no rows
+    // in 'running'). Catches a hypothetical bug where recovery leaves
+    // status='running' when it injects events.
+    h = await startMainNode({ dataDir });
+    const dbPath = join(dataDir, "oma.db");
+    {
+      const db = new Database(dbPath);
+      const now = Date.now();
+      seedOrphanSession(db, "sess_d1", "turn_d1", now);
+      seedEvent(db, "sess_d1", 1, {
+        type: "agent.tool_use",
+        id: "u_d1",
+        name: "bash",
+      });
+      db.close();
+    }
+    await killHard(h);
+    h = null;
+
+    // First restart — recovers the orphan.
+    h = await startMainNode({ dataDir });
+    {
+      const db = new Database(dbPath, { readonly: true });
+      const r = db
+        .prepare(`SELECT status FROM sessions WHERE id=?`)
+        .get("sess_d1") as { status: string };
+      db.close();
+      expect(r.status).toBe("idle");
+    }
+
+    // Crash again. No orphan this time; just normal kill.
+    await killHard(h);
+    h = null;
+
+    // Second restart — bootstrap should find zero orphans.
+    h = await startMainNode({ dataDir });
+    const db = new Database(dbPath, { readonly: true });
+    const stillRunning = db
+      .prepare(`SELECT COUNT(*) AS n FROM sessions WHERE status='running'`)
+      .get() as { n: number };
+    const events = db
+      .prepare(`SELECT type FROM session_events WHERE session_id=? ORDER BY seq`)
+      .all("sess_d1") as Array<{ type: string }>;
+    db.close();
+    expect(stillRunning.n).toBe(0);
+    // No second tool_result injected on the second restart — recovery
+    // is idempotent, the matched tool_use/tool_result pair stays as is.
+    expect(events.map((e) => e.type)).toEqual([
+      "agent.tool_use",
+      "agent.tool_result",
+    ]);
+  });
 });
+
+// ── seed helpers ─────────────────────────────────────────────────────
+
+function seedOrphanSession(
+  db: Database.Database,
+  sessionId: string,
+  turnId: string,
+  startedAt: number,
+): void {
+  db.prepare(
+    `INSERT INTO sessions
+       (id, tenant_id, agent_id, status, turn_id, turn_started_at, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+  ).run(sessionId, "default", null, "running", turnId, startedAt, startedAt, startedAt);
+}
+
+function seedEvent(
+  db: Database.Database,
+  sessionId: string,
+  seq: number,
+  event: Record<string, unknown>,
+): void {
+  db.prepare(
+    `INSERT INTO session_events (session_id, seq, type, data, ts)
+     VALUES (?, ?, ?, ?, ?)`,
+  ).run(sessionId, seq, event.type as string, JSON.stringify(event), Date.now());
+}

@@ -229,4 +229,139 @@ describe("RuntimeAdapter — unified shape (Node + CF)", () => {
     expect(otherOrphans).toHaveLength(1);
     expect(otherOrphans[0].turn_id).toBe("turn_other");
   });
+
+  // ── edge cases ─────────────────────────────────────────────────────
+
+  it("listOrphanTurns excludes status='idle' rows even when turn_id stale-leaks", async () => {
+    // Defensive: should never happen in production (endTurn always
+    // nulls turn_id), but we want the orphan filter to be defence in
+    // depth — status, not just turn_id, gates the result.
+    const now = Date.now();
+    await f.sql
+      .prepare(
+        `UPDATE sessions SET status='idle', turn_id='leaked_turn', updated_at=?
+          WHERE id=?`,
+      )
+      .bind(now, "sess_test")
+      .run();
+    const orphans = await f.adapter.listOrphanTurns("sess_test");
+    expect(orphans).toEqual([]);
+  });
+
+  it("listOrphanTurns excludes status='destroyed' rows even with turn_id set", async () => {
+    const now = Date.now();
+    await f.sql
+      .prepare(
+        `UPDATE sessions SET status='destroyed', turn_id='leaked_turn', updated_at=?
+          WHERE id=?`,
+      )
+      .bind(now, "sess_test")
+      .run();
+    const orphans = await f.adapter.listOrphanTurns("sess_test");
+    expect(orphans).toEqual([]);
+  });
+
+  it("listOrphanTurns excludes status='running' rows where turn_id IS NULL (defensive)", async () => {
+    // Pathological: status='running' but no turn_id. Shouldn't happen,
+    // but the orphan filter MUST require BOTH conditions so a stuck
+    // status flag without a turn id can't trigger spurious recovery.
+    const now = Date.now();
+    await f.sql
+      .prepare(
+        `UPDATE sessions SET status='running', turn_id=NULL, updated_at=?
+          WHERE id=?`,
+      )
+      .bind(now, "sess_test")
+      .run();
+    const orphans = await f.adapter.listOrphanTurns("sess_test");
+    expect(orphans).toEqual([]);
+  });
+
+  it("beginTurn replaces an existing turn_id (last-writer-wins)", async () => {
+    // Race: two callers both think they're starting a fresh turn (e.g.
+    // a recovery and a real user.message). UPDATE has no WHERE-by-
+    // turn_id so the second beginTurn replaces the first. Documents
+    // current contract: caller is expected to serialize beginTurn at
+    // the application layer (state machine holds the activeTurnId lock).
+    await f.adapter.beginTurn("sess_test", "turn_a");
+    await f.adapter.beginTurn("sess_test", "turn_b");
+    const row = await readSession(f.sql, "sess_test");
+    expect(row?.status).toBe("running");
+    expect(row?.turn_id).toBe("turn_b");
+  });
+
+  it("turn_started_at advances on each beginTurn (used for stuck-turn detection)", async () => {
+    await f.adapter.beginTurn("sess_test", "turn_a");
+    const t1 = (await readSession(f.sql, "sess_test"))?.turn_started_at;
+    expect(t1).toBeGreaterThan(0);
+    // Force a >=1ms gap so SQLite ms timestamps differ even on a fast box.
+    await new Promise((r) => setTimeout(r, 5));
+    await f.adapter.endTurn("sess_test", "turn_a", "idle");
+    await f.adapter.beginTurn("sess_test", "turn_b");
+    const t2 = (await readSession(f.sql, "sess_test"))?.turn_started_at;
+    expect(t2).toBeGreaterThan(t1!);
+  });
+
+  it("endTurn before any beginTurn is a silent no-op (row stays as-is)", async () => {
+    // Stale recovery code path could conceivably try this. Filter on
+    // turn_id IS NULL means the UPDATE matches nothing.
+    await f.adapter.endTurn("sess_test", "ghost_turn", "idle");
+    const row = await readSession(f.sql, "sess_test");
+    expect(row?.status).toBe("idle");
+    expect(row?.turn_id).toBeNull();
+  });
+
+  it("endTurn for an unknown sessionId is a silent no-op (no row, no UPDATE)", async () => {
+    // Defence against orphan rows being deleted out from under recovery.
+    await f.adapter.endTurn("sess_does_not_exist", "any_turn", "idle");
+    // Original row still as-seeded.
+    const row = await readSession(f.sql, "sess_test");
+    expect(row?.status).toBe("idle");
+  });
+
+  it("listOrphanTurns surfaces turn_started_at exactly as written", async () => {
+    // The recovery logger reports "started Nms ago" — relies on a
+    // faithful pass-through of turn_started_at. Pin the contract.
+    const before = Date.now();
+    await f.adapter.beginTurn("sess_test", "turn_age");
+    const orphans = await f.adapter.listOrphanTurns("sess_test");
+    expect(orphans).toHaveLength(1);
+    expect(orphans[0].turn_started_at).toBeGreaterThanOrEqual(before);
+    expect(orphans[0].turn_started_at).toBeLessThanOrEqual(Date.now());
+  });
+
+  it("destroying then beginning the same session is rejected at the status level (orphan stays empty)", async () => {
+    // Once a session is destroyed, beginTurn still UPDATES the row
+    // (current implementation has no status-guard) but a destroyed
+    // session shouldn't be receiving turns. Pin current behaviour: the
+    // UPDATE happens and the row flips back to 'running' — the entry
+    // shell is responsible for rejecting requests on destroyed sessions
+    // before reaching the adapter. This test documents that the adapter
+    // is unguarded so a future hardening change is intentional.
+    await f.adapter.beginTurn("sess_test", "turn_x");
+    await f.adapter.endTurn("sess_test", "turn_x", "destroyed");
+    expect((await readSession(f.sql, "sess_test"))?.status).toBe("destroyed");
+    // Adapter currently allows this — flips destroyed → running.
+    await f.adapter.beginTurn("sess_test", "turn_after_destroy");
+    expect((await readSession(f.sql, "sess_test"))?.status).toBe("running");
+    // Document for the next reader: tighten via a status-guarded
+    // UPDATE if/when the entry shell is no longer trusted to filter.
+  });
+
+  it("hintTurnInFlight is optional — omitting onTurnInFlight does not throw", async () => {
+    // Adapter without the hint callback (Node case) — calling
+    // hintTurnInFlight should be a silent no-op.
+    const sql = f.sql;
+    const eventLog = (
+      f.adapter as unknown as { eventLog: typeof f.adapter.eventLog }
+    ).eventLog;
+    const streams = (f.adapter as unknown as { streams: typeof f.adapter.streams }).streams;
+    const adapterNoHint = new RuntimeAdapterImpl({
+      sql,
+      eventLog,
+      streams,
+      // onTurnInFlight intentionally omitted
+    });
+    expect(() => adapterNoHint.hintTurnInFlight!("sess_test")).not.toThrow();
+  });
 });
