@@ -224,6 +224,34 @@ The same `apps/console` build that ships with CF prod talks to main-node.
 Auth path is `/auth/*` (matches CF), data routes are `/v1/*`. Cookie auth
 via better-auth.
 
+**Two ways to serve it:**
+
+### Single port (production / `docker compose up`)
+
+The main-node Docker image embeds `apps/console/dist` and main-node's
+`serveStatic` middleware mounts it at `"*"` with index.html SPA fallback.
+Open `http://localhost:8787` and you get the Console — same port as the
+API. CF prod has the equivalent via the `ASSETS` binding; same UX,
+different mechanism.
+
+```bash
+docker compose -f docker-compose.cfless.yml up -d
+open http://localhost:8787
+```
+
+To skip the console build (smaller API-only image, ~250MB → ~245MB):
+
+```bash
+docker build -f apps/main-node/Dockerfile --build-arg SKIP_CONSOLE=1 \
+  -t openma/main-node:api-only .
+# then unset CONSOLE_DIR in your runtime env
+```
+
+### Vite dev server (development)
+
+Hot-reload on console source changes. main-node still runs separately
+on 8787; vite proxies `/v1` + `/auth` to it.
+
 ```bash
 # Terminal 1: main-node
 ANTHROPIC_API_KEY=sk-... BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
@@ -239,11 +267,11 @@ DATABASE_PATH=$(pwd)/data/oma.db OMA_VAULT_CA_DIR=$(pwd)/data/oma-vault-ca \
   pnpm --filter @open-managed-agents/oma-vault start
 ```
 
-Open `http://localhost:5173`, sign up via email + password. The
-verification OTP is printed to main-node's stdout — paste into the
-console verify-signup screen. Operators wiring real email replace the
-`sendVerificationOTP` callback in `apps/main-node/src/auth/config.ts`
-with a Resend / SES / SMTP call.
+Open `http://localhost:5173` (dev) or `http://localhost:8787` (docker),
+sign up via email + password. The verification OTP is printed to
+main-node's stdout — paste into the console verify-signup screen.
+Operators wiring real email replace the `sendVerificationOTP` callback
+in `apps/main-node/src/auth/config.ts` with a Resend / SES / SMTP call.
 
 Endpoints main-node implements for the console:
 - `/auth-info` (provider list)
