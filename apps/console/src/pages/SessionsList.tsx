@@ -57,7 +57,7 @@ function EvalBadge({ metadata }: { metadata?: Record<string, unknown> }) {
     <a
       href={`/evals/${ev.run_id}`}
       onClick={(e) => e.stopPropagation()}
-      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 hover:bg-amber-100"
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-info-subtle text-info hover:opacity-80 transition-opacity"
       title={`Eval run ${ev.run_id}${ev.task_id ? ` · task ${ev.task_id}` : ""}`}
     >
       🧪 {ev.task_id ?? "Eval"}
