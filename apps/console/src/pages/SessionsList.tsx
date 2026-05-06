@@ -49,6 +49,22 @@ function SlackBadge({ metadata }: { metadata?: Record<string, unknown> }) {
   );
 }
 
+/** Tiny "🧪 Eval" pill shown when a session was spawned by an eval-runner trial. */
+function EvalBadge({ metadata }: { metadata?: Record<string, unknown> }) {
+  const ev = metadata?.eval as { run_id?: string; task_id?: string } | undefined;
+  if (!ev?.run_id) return null;
+  return (
+    <a
+      href={`/evals/${ev.run_id}`}
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-amber-50 text-amber-700 hover:bg-amber-100"
+      title={`Eval run ${ev.run_id}${ev.task_id ? ` · task ${ev.task_id}` : ""}`}
+    >
+      🧪 {ev.task_id ?? "Eval"}
+    </a>
+  );
+}
+
 export function SessionsList() {
   const { api } = useApi();
   const nav = useNavigate();
@@ -282,6 +298,7 @@ export function SessionsList() {
                       {s.title || "Untitled"}
                       <LinearBadge metadata={s.metadata} />
                       <SlackBadge metadata={s.metadata} />
+                      <EvalBadge metadata={s.metadata} />
                     </span>
                   </td>
                   <td className="px-4 py-3">
