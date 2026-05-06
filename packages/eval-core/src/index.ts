@@ -13,3 +13,4 @@ export * from "./trajectory/types";
 export * from "./trajectory/build";
 export * from "./trajectory/projections/anthropic-messages";
 export * from "./scorers";
+export * from "./verifier";
