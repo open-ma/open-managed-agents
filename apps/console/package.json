@@ -8,6 +8,7 @@
     "preview": "vite preview"
   },
   "dependencies": {
+    "@open-managed-agents/acp-runtime": "workspace:*",
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
     "better-auth": "^1.6.3",
