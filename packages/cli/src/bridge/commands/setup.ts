@@ -25,12 +25,14 @@ import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { writeCreds, readCreds, getOrCreateMachineId } from "../lib/config.js";
-import { paths, currentPlatform, osTag } from "../lib/platform.js";
+import { paths, currentPlatform, currentProfile, osTag } from "../lib/platform.js";
 import { install as installLaunchd, readInstalledCliEntry, type InstallOptions } from "../lib/launchd.js";
-import { detectAll } from "@open-managed-agents/acp-runtime/registry";
+import { detectAll, loadRegistry } from "@open-managed-agents/acp-runtime/registry";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 import { probeRuntimeToken } from "../lib/probe.js";
+import { auditAndOfferWrappers } from "../lib/wrapper-audit.js";
+import { join } from "node:path";
 
 /** Snapshot of the current process's node + cli entry. Frozen here (not at
  *  daemon start) because launchd doesn't source the user's shell — the only
@@ -56,11 +58,22 @@ interface SetupOpts {
   noService?: boolean;
   /** Force a fresh OAuth even if credentials.json already exists. */
   force?: boolean;
+  /** Skip y/N prompts in the wrapper-install audit; install all
+   *  offerable npm-distributed wrappers automatically. Useful for CI /
+   *  scripted setup. Binary-distributed wrappers still print info only. */
+  yes?: boolean;
 }
 
 
 export async function runSetup(opts: SetupOpts): Promise<void> {
-  printBanner(`setup — register this machine with ${opts.serverUrl}`, PKG_VERSION);
+  const profile = currentProfile();
+  const profileTag = profile ? `  [profile=${profile}]` : "";
+  printBanner(`setup — register this machine with ${opts.serverUrl}${profileTag}`, PKG_VERSION);
+
+  // Warm the merged ACP registry (official + OMA overlay) so subsequent
+  // detect/warn/missing-list calls have the full 35+ agents available.
+  // Cache lives under the profile-aware configDir; non-fatal on failure.
+  await loadRegistry({ cachePath: join(paths().configDir, "registry-cache.json") });
 
   // Fast path: if creds already exist (and the user didn't pass --force),
   // probe the server first. This catches the "I deleted the runtime in the
@@ -111,6 +124,13 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
         } else {
           log.hint("run `oma bridge daemon` to start the bridge");
         }
+        // Re-running `oma bridge setup` is the natural moment for a
+        // user to discover "I just installed claude — should I get
+        // the wrapper?". Audit even on the fast path (existing creds)
+        // so this discoverability isn't lost.
+        const fastPathAgents: Array<{ id: string; binary?: string }> =
+          (await detectAll()).map((a) => ({ id: a.id, binary: a.spec.command }));
+        await auditAndOfferWrappers(fastPathAgents, { yes: opts.yes });
         process.stderr.write(`\n${c.bold("Up to date.")}\n\n`);
         return;
       }
@@ -146,35 +166,23 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
   // Quick agent scan so the user can see what we'll report on first daemon
   // startup. Manifest gets re-sent on every WS attach so this is just for
   // setup-time feedback.
-  let agents = await detectAll();
+  let agents: Array<{ id: string; binary?: string }> =
+    (await detectAll()).map((a) => ({ id: a.id, binary: a.spec.command }));
 
-  // If `claude` (Claude Code itself) is on PATH but its ACP wrapper isn't,
-  // install the wrapper for the user. Anyone running `oma bridge setup` is
-  // already opting into running a daemon on their box; needing them to also
-  // remember a separate `npm i -g @agentclientprotocol/claude-agent-acp` step is
-  // friction with no upside. We only do this when `claude` is present —
-  // we're not pre-installing wrappers for users who haven't picked
-  // Claude Code as their day-to-day CLI.
+  // Auto-install convenience for ACP **wrappers** — entries in the
+  // merged registry that overlay marks `wraps: "<binary>"`. We DON'T
+  // install anything without asking the user first: setup scans for
+  // upstream agents (claude, codex, …) the user has on PATH but whose
+  // ACP wrapper is missing, then prompts y/N per wrapper. Non-TTY
+  // contexts (CI, scripts piping into setup) skip prompts entirely;
+  // user can run `oma bridge agents install` later, same flow.
   //
-  // Package history: this used to be `@zed-industries/claude-code-acp` (binary
-  // name `claude-code-acp`). The project moved to `agentclientprotocol` org
-  // and renamed both the npm package and the binary in v0.31.x; the old name
-  // is npm-deprecated and stuck on agent-sdk 0.2.44, which has an internal
-  // capability/handler inconsistency that makes Linear-style MCP servers
-  // (anything that triggers the elicitation handler-registration path) fail
-  // with `Client does not support elicitation capability`. The new name is
-  // on agent-sdk 0.2.121+ where that path is fixed.
-  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-agent-acp");
-  if (!hasClaudeAcp && (await isOnPath("claude"))) {
-    log.step("found `claude` on PATH — installing ACP wrapper @agentclientprotocol/claude-agent-acp");
-    const ok = await npmInstallGlobal("@agentclientprotocol/claude-agent-acp");
-    if (ok) {
-      log.ok("claude-agent-acp installed");
-      agents = await detectAll();
-    } else {
-      log.warn("auto-install failed — install manually: npm i -g @agentclientprotocol/claude-agent-acp");
-    }
-  }
+  // Strict scope: only ACP **wrappers** (entries whose `wraps` is set).
+  // Agents that have built-in ACP (gemini, hermes, opencode, openclaw,
+  // …) are NEVER offered for install — those are the agents themselves,
+  // not wrappers; users install them via their own toolchain and the
+  // daemon's detect picks them up automatically.
+  agents = await auditAndOfferWrappers(agents, { yes: opts.yes });
 
   if (agents.length > 0) {
     log.ok(`agents detected  ${c.dim(agents.map((a: { id: string }) => a.id).join(", "))}`);
@@ -182,6 +190,13 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
     log.warn("no ACP agents on PATH yet");
     log.hint("install one, e.g. `npm i -g @agentclientprotocol/claude-agent-acp`");
   }
+
+  // (Pre-A2 we listed every "other ACP agent you could install" here —
+  // 33+ npm/binary recipes. Removed: it contradicted the new
+  // detect-only display rule, and the auditAndOfferWrappers above
+  // already prompted for wrappers the user actually has upstream
+  // binaries for. Users who later install something can run
+  // `oma bridge agents refresh`.)
 
   if (opts.noService || currentPlatform() !== "darwin") {
     process.stderr.write("\n");

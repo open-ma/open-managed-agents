@@ -32,9 +32,10 @@
  *     URLs in the bundle are already rewritten to point at OMA's mcp-proxy.
  */
 
+import { spawn as childSpawn } from "node:child_process";
 import { AcpRuntimeImpl } from "@open-managed-agents/acp-runtime";
 import { NodeSpawner } from "@open-managed-agents/acp-runtime/node-spawner";
-import { KNOWN_ACP_AGENTS } from "@open-managed-agents/acp-runtime/registry";
+import { resolveKnownAgent } from "@open-managed-agents/acp-runtime/registry";
 import type { AcpSession } from "@open-managed-agents/acp-runtime";
 import { ensureSessionCwd, removeSessionCwd, writeBundle } from "./session-cwd.js";
 import { setupClaudeConfigDir } from "./claude-config-dir.js";
@@ -112,6 +113,11 @@ export class SessionManager {
   #runtime = new AcpRuntimeImpl(this.#spawner);
   #sessions = new Map<string, ActiveSession>();
   #env: SessionManagerEnv = { apiKey: "", apiUrl: "", runtimeToken: "" };
+  /** Set by `drain()` to refuse new session.start while in-flight turns
+   *  finish. Existing sessions keep accepting prompts so a user mid-turn
+   *  doesn't hit "session not ready" mid-stream just because the daemon
+   *  is on its way out. */
+  #draining = false;
 
   constructor(send: Sender) {
     this.#send = send;
@@ -129,6 +135,20 @@ export class SessionManager {
     return this.#sessions.has(session_id);
   }
 
+  /** Sum of in-flight turns across all sessions. A turn registers itself
+   *  in `sess.turns` when `prompt()` starts and removes itself in the
+   *  finally block when the ACP child finishes streaming. drain() polls
+   *  this to know when it's safe to exit. */
+  activeTurnCount(): number {
+    let n = 0;
+    for (const s of this.#sessions.values()) n += s.turns.size;
+    return n;
+  }
+
+  sessionCount(): number {
+    return this.#sessions.size;
+  }
+
   /** Re-announce alive sessions to the server (used after WS reconnect). */
   announceAll(): void {
     for (const [session_id, sess] of this.#sessions) {
@@ -137,6 +157,20 @@ export class SessionManager {
   }
 
   async start(p: SessionStartParams): Promise<void> {
+    // Refuse new sessions while we're draining for shutdown — the
+    // server will see the error, mark the runtime briefly offline, and
+    // route the next session.start to whichever daemon comes up next.
+    // Existing sessions in this.#sessions keep working until drain
+    // either completes them or hits the deadline.
+    if (this.#draining) {
+      this.#send({
+        type: "session.error",
+        session_id: p.session_id,
+        turn_id: "",
+        message: "daemon draining for restart — retry in a few seconds",
+      });
+      return;
+    }
     // Idempotent: if we already have this session, just re-ack ready.
     const existing = this.#sessions.get(p.session_id);
     if (existing) {
@@ -148,12 +182,46 @@ export class SessionManager {
       return;
     }
 
-    const agent = KNOWN_ACP_AGENTS.find((a) => a.id === p.agent_id);
+    // Canonicalize: an AgentConfig row may carry a pre-A2 alias (e.g.
+    // "claude-code-acp" or "codex-cli"); resolveKnownAgent maps it to
+    // the current canonical entry so the rest of the spawn logic stays
+    // alias-blind.
+    const agent = resolveKnownAgent(p.agent_id);
     if (!agent) {
       this.#send({
         type: "session.error",
         session_id: p.session_id,
         message: `unknown ACP agent: ${p.agent_id}`,
+      });
+      return;
+    }
+    if (agent.id !== p.agent_id) {
+      process.stderr.write(
+        `  ↪ canonicalized acp_agent_id ${p.agent_id} → ${agent.id} (legacy alias)\n`,
+      );
+    }
+
+    // Verify the canonical binary is on PATH before spawning. Pre-A2 we
+    // also tried a `legacySpec` fallback; that's been removed because it
+    // hid the real problem (deprecated wrapper packages have known
+    // protocol bugs) and because the daemon's detect() now reports
+    // honestly — if an agent isn't on PATH the user shouldn't have been
+    // able to pick it in the Console at all. Defense in depth: still
+    // surface a clean error here in case detection went stale (e.g.
+    // user uninstalled mid-session).
+    const onPath = await new Promise<boolean>((resolve) => {
+      const probe = process.platform === "win32" ? "where" : "which";
+      const p = childSpawn(probe, [agent.spec.command], { stdio: "ignore" });
+      p.once("error", () => resolve(false));
+      p.once("exit", (code) => resolve(code === 0));
+    });
+    if (!onPath) {
+      this.#send({
+        type: "session.error",
+        session_id: p.session_id,
+        message:
+          `binary not on PATH for ${agent.id}: \`${agent.spec.command}\`` +
+          (agent.installHint ? `. Install: ${agent.installHint}` : ""),
       });
       return;
     }
@@ -167,7 +235,10 @@ export class SessionManager {
     let bundleMcpServers: BundleMcpServer[] = [];
     let bundleEnv: BundleEnvVar[] = [];
     try {
-      const bundle = await this.#fetchBundle(p.session_id, p.agent_id);
+      // Send the canonical id to main so the bundle generator picks the
+      // right per-agent layout (.claude/skills vs .opencode/agents vs
+      // inline) regardless of which alias the AgentConfig row stores.
+      const bundle = await this.#fetchBundle(p.session_id, agent.id);
       if (bundle) {
         await writeBundle(sessionCwd, bundle.files);
         blocklist = bundle.local_skill_blocklist ?? [];
@@ -178,12 +249,13 @@ export class SessionManager {
       process.stderr.write(`  ! bundle fetch failed (non-fatal): ${(e as Error).message}\n`);
     }
 
-    // For Claude Code we redirect ~/.claude → <cwd>/.claude-config so the
-    // user's per-agent local-skill blocklist actually filters what the
-    // child sees. Other ACP agents don't share Claude Code's filesystem
-    // layout — leave their env untouched.
+    // For Claude Code we redirect ~/.claude → <cwd>/.claude-config so
+    // the user's per-agent local-skill blocklist actually filters what
+    // the child sees. Other ACP agents don't share Claude Code's
+    // filesystem layout — leave their env untouched. Match by canonical
+    // id so the legacy alias still gets the CLAUDE_CONFIG_DIR treatment.
     const extraEnv: Record<string, string | undefined> = {};
-    if (p.agent_id === "claude-agent-acp") {
+    if (agent.id === "claude-acp") {
       try {
         const cfgDir = await setupClaudeConfigDir(sessionCwd, new Set(blocklist));
         extraEnv.CLAUDE_CONFIG_DIR = cfgDir;
@@ -335,6 +407,76 @@ export class SessionManager {
   async disposeAll(): Promise<void> {
     const ids = [...this.#sessions.keys()];
     await Promise.all(ids.map((id) => this.#killChild(id)));
+  }
+
+  /**
+   * Graceful drain for upgrade/restart. Caller (daemon SIGTERM handler)
+   * awaits this before exiting so in-flight ACP turns get to finish
+   * naturally instead of being SIGTERM'd mid-stream.
+   *
+   * Recovery model — mirrors the cloud agent's DO-eviction recovery
+   * (apps/agent/src/runtime/turn-runtime.ts:268 recoverAgentTurn):
+   *
+   *   1. Set #draining → start() rejects new sessions; server retries.
+   *   2. Poll activeTurnCount every 200ms until either:
+   *        - all turns drained naturally (clean session.complete) → break
+   *        - deadline elapsed → abort remaining turns. Their prompt()
+   *          loops unwind, emit session.error, and the ACP children
+   *          checkpoint their conversation state to disk (each ACP
+   *          implementation owns its own persistence; e.g. claude-acp
+   *          stores into ~/.claude/projects/...).
+   *   3. disposeAll() — KEEPS spawn cwds. Same shape as a clean
+   *      shutdown.
+   *
+   * The next time the server sends session.start for any of these ids
+   * it includes `resume.acp_session_id`. The new daemon respawns a
+   * fresh ACP child in the preserved cwd and calls session/load to
+   * restore conversation history (session-manager.ts:311 →
+   * session.ts:108). Worst case the user re-prompts the cut-off turn;
+   * partial response on their screen is the only artifact.
+   *
+   * Idempotent: a second call while one is in progress no-ops past the
+   * existing drain.
+   */
+  async drain(deadlineMs: number, opts?: { onProgress?: (active: number, msLeft: number) => void }): Promise<{ initialTurns: number; abortedTurns: number; sessions: number }> {
+    if (this.#draining) {
+      const t0 = Date.now();
+      while (this.#sessions.size > 0 && Date.now() - t0 < deadlineMs) {
+        await new Promise((r) => setTimeout(r, 200));
+      }
+      return { initialTurns: 0, abortedTurns: 0, sessions: 0 };
+    }
+    this.#draining = true;
+    const initialTurns = this.activeTurnCount();
+    const initialSessions = this.#sessions.size;
+    const t0 = Date.now();
+    while (this.activeTurnCount() > 0) {
+      const elapsed = Date.now() - t0;
+      if (elapsed >= deadlineMs) break;
+      opts?.onProgress?.(this.activeTurnCount(), deadlineMs - elapsed);
+      await new Promise((r) => setTimeout(r, 200));
+    }
+    // Anything still streaming at deadline: abort the model call. The
+    // ACP child sees the cancellation, checkpoints whatever conversation
+    // state it tracks to its own on-disk store, and is then disposed by
+    // disposeAll below. Recovery happens on the next session.start with
+    // resume.acp_session_id (see method-level docstring).
+    let aborted = 0;
+    for (const sess of this.#sessions.values()) {
+      for (const ctrl of sess.turns.values()) {
+        ctrl.abort();
+        aborted += 1;
+      }
+    }
+    if (aborted > 0) {
+      // Brief grace so each ACP child can flush its checkpoint to disk
+      // before its stdio gets torn down by dispose. ~2s is generous —
+      // claude-acp / codex-acp / opencode all persist on every event,
+      // not at end-of-turn, so the on-disk state is already current.
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+    await this.disposeAll();
+    return { initialTurns, abortedTurns: aborted, sessions: initialSessions };
   }
 
   /** Kill the ACP child + drop in-memory state. Does NOT touch the spawn
