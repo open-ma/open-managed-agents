@@ -6,7 +6,8 @@
   "exports": {
     ".": "./src/index.ts",
     "./node-spawner": "./src/spawners/node.ts",
-    "./registry": "./src/registry.ts"
+    "./registry": "./src/registry.ts",
+    "./known-agents": "./src/known-agents.ts"
   },
   "dependencies": {
     "@agentclientprotocol/sdk": "^0.20.0",
