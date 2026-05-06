@@ -45,7 +45,10 @@ interface CollectorConfig {
 
 function rewardFromFeedback(events: SSEEvent[]): RewardResult | null {
   const outcomeEvents = events.filter(
-    (e) => e.type === "session.outcome_evaluated" || e.type === "outcome.evaluation_end",
+    (e) =>
+      e.type === "session.outcome_evaluated" ||
+      e.type === "outcome.evaluation_end" ||
+      e.type === "span.outcome_evaluation_end",
   );
   if (outcomeEvents.length === 0) return null;
 
