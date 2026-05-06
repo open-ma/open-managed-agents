@@ -1,1 +1,7 @@
-export type { ProcessHandle, SandboxExecutor } from "./ports";
+export type {
+  ProcessHandle,
+  SandboxExecutor,
+  SandboxFactory,
+  SandboxFactoryContext,
+  SandboxFactoryEnv,
+} from "./ports";

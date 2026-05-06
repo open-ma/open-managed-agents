@@ -105,3 +105,62 @@ export interface SandboxExecutor {
    */
   renewActivityTimeout?(): Promise<void>;
 }
+
+// ─── Factory contract ──────────────────────────────────────────────────
+//
+// Dependency-inversion entry point. Every adapter exports a single
+// `sandboxFactory: SandboxFactory`; the host (main-node, future shells)
+// only knows the provider name → import path map and never reads any
+// adapter-specific env var. Adding a new adapter is "create file +
+// register name in the map" — host code doesn't grow.
+//
+// Each factory reads its own env vars off the SandboxFactoryEnv arg
+// (just `process.env` repackaged for testability). All factories see
+// the same shared `ctx` (sessionId, per-session workdir, memory root)
+// so adapters that don't need them just ignore them — the host never
+// branches on which subset to pass.
+
+export interface SandboxFactoryContext {
+  /** Per-session id — adapters use it for naming, scoping, etc. */
+  sessionId: string;
+  /** Per-session host workdir. LocalSubprocess uses this as the cwd
+   *  for child processes; remote / VM adapters can ignore it. */
+  workdir: string;
+  /** Memory blob root on the host. Adapters that mount memory stores
+   *  via symlink (LocalSubprocess) read from this; remote adapters
+   *  (Daytona/E2B) typically use s3fs and ignore it. */
+  memoryRoot?: string;
+}
+
+/** Read-only view of process env handed to the factory. Whole `process.env`
+ *  is fine in practice — adapters cherry-pick the keys they care about
+ *  (e.g. BoxRun reads `BOXRUN_URL`, E2B reads `E2B_API_KEY`). */
+export type SandboxFactoryEnv = Readonly<Record<string, string | undefined>>;
+
+export type SandboxFactory = (
+  ctx: SandboxFactoryContext,
+  env: SandboxFactoryEnv,
+) => Promise<SandboxExecutor>;
+
+// ─── Shared adapter helpers ─────────────────────────────────────────
+//
+// Lives here (not in any specific adapter file) so adapters can share
+// without cross-importing each other — cross-imports drag Node-only
+// modules into the CF Worker type-check graph (which excludes the
+// individual adapter files).
+
+/** Pluck S3-compatible memory-bucket config out of process env. Returns
+ *  undefined when any required key is missing — adapters interpret that
+ *  as "no remote memory mount available". Both Daytona and E2B share
+ *  this shape (s3fs config). */
+export function readS3MemoryBucket(env: SandboxFactoryEnv):
+  | { endpoint: string; accessKey: string; secretKey: string; bucketName: string }
+  | undefined {
+  const e = env.MEMORY_S3_ENDPOINT;
+  const a = env.MEMORY_S3_ACCESS_KEY;
+  const s = env.MEMORY_S3_SECRET_KEY;
+  const b = env.MEMORY_S3_BUCKET;
+  return e && a && s && b
+    ? { endpoint: e, accessKey: a, secretKey: s, bucketName: b }
+    : undefined;
+}

@@ -17,7 +17,7 @@ import {
 import { promises as fs } from "node:fs";
 import { mkdirSync, rmSync, symlinkSync } from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
-import type { ProcessHandle, SandboxExecutor } from "../ports";
+import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
 
 export interface LocalSubprocessSandboxOptions {
   /** Per-session working directory. Created if missing. */
@@ -370,3 +370,12 @@ class BackgroundProcess implements ProcessHandle {
     return this.exitCode === 0 ? "completed" : "error";
   }
 }
+
+// ── Factory (DIP entry point) ───────────────────────────────────────
+
+export const sandboxFactory: SandboxFactory = async (ctx) => {
+  return new LocalSubprocessSandbox({
+    workdir: ctx.workdir,
+    memoryRoot: ctx.memoryRoot,
+  });
+};

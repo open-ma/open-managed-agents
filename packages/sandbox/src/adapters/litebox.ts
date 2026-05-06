@@ -23,7 +23,7 @@
 // the first exec/readFile/writeFile call. We track this via `created` —
 // once true, mutating ops that affect ctor opts throw.
 
-import type { ProcessHandle, SandboxExecutor } from "../ports";
+import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
 import { promises as fs, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
@@ -281,3 +281,14 @@ export class LiteBoxSandbox implements SandboxExecutor {
     return out;
   }
 }
+
+// ── Factory (DIP entry point) ───────────────────────────────────────
+
+export const sandboxFactory: SandboxFactory = async (ctx, env) => {
+  return new LiteBoxSandbox({
+    image: env.SANDBOX_IMAGE,
+    memoryMib: env.LITEBOX_MEMORY_MIB ? Number(env.LITEBOX_MEMORY_MIB) : undefined,
+    cpus: env.LITEBOX_CPUS ? Number(env.LITEBOX_CPUS) : undefined,
+    name: `oma-${ctx.sessionId}`,
+  });
+};

@@ -17,7 +17,8 @@
 // Auth: pass apiKey at construction. If unset, the SDK reads E2B_API_KEY
 // from process.env.
 
-import type { ProcessHandle, SandboxExecutor } from "../ports";
+import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import { readS3MemoryBucket } from "../ports";
 
 // Structural types so this file compiles without `e2b` installed. The
 // driver shape is matched at runtime; mismatches surface as adapter
@@ -327,3 +328,13 @@ function shellEscape(value: string): string {
   // ' '\'' ' idiom which is portable across POSIX shells.
   return `'${value.replace(/'/g, "'\\''")}'`;
 }
+
+// ── Factory (DIP entry point) ───────────────────────────────────────
+
+export const sandboxFactory: SandboxFactory = async (_ctx, env) => {
+  return await createE2BSandbox({
+    apiKey: env.E2B_API_KEY,
+    templateId: env.SANDBOX_IMAGE,
+    memoryBucket: readS3MemoryBucket(env),
+  });
+};

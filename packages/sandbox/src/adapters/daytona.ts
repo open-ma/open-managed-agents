@@ -29,7 +29,8 @@
 // SECURITY: Daytona runs each sandbox in an isolated VM so this is the
 // safer choice for production / untrusted agents vs LocalSubprocessSandbox.
 
-import type { ProcessHandle, SandboxExecutor } from "../ports";
+import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import { readS3MemoryBucket } from "../ports";
 import { promises as fs } from "node:fs";
 
 export interface DaytonaSandboxOptions {
@@ -376,3 +377,15 @@ export class DaytonaSandbox implements SandboxExecutor {
 function shellEscape(s: string): string {
   return `'${s.replace(/'/g, "'\\''")}'`;
 }
+
+// ── Factory (DIP entry point) ───────────────────────────────────────
+
+export const sandboxFactory: SandboxFactory = async (ctx, env) => {
+  return new DaytonaSandbox({
+    sessionId: ctx.sessionId,
+    apiKey: env.DAYTONA_API_KEY,
+    apiUrl: env.DAYTONA_API_URL,
+    image: env.SANDBOX_IMAGE,
+    memoryBucket: readS3MemoryBucket(env),
+  });
+};

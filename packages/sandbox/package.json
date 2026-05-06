@@ -8,7 +8,8 @@
     "./adapters/local-subprocess": "./src/adapters/local-subprocess.ts",
     "./adapters/e2b": "./src/adapters/e2b.ts",
     "./adapters/daytona": "./src/adapters/daytona.ts",
-    "./adapters/litebox": "./src/adapters/litebox.ts"
+    "./adapters/litebox": "./src/adapters/litebox.ts",
+    "./adapters/boxrun": "./src/adapters/boxrun.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
