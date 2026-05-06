@@ -678,7 +678,24 @@ app.get("/:id", async (c) => {
       const fullStatus = (await fullStatusRes.json()) as {
         status: string;
         usage: { input_tokens: number; output_tokens: number };
-        outcome_evaluations: Array<{ result: string; iteration: number; feedback?: string }>;
+        // Phase 4 / AMA-aligned: every terminal `span.outcome_evaluation_end`
+        // for this session, in iteration order. AMA returns this verbatim
+        // under `outcome_evaluations[]` from GET /v1/sessions/:id.
+        outcome_evaluations: Array<{
+          outcome_id?: string;
+          result: string;
+          iteration: number;
+          explanation?: string;
+          /** @deprecated alias of `explanation`. */
+          feedback?: string;
+          usage?: {
+            input_tokens: number;
+            output_tokens: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+          };
+          processed_at?: string;
+        }>;
       };
       response.status = fullStatus.status;
       response.usage = fullStatus.usage;
