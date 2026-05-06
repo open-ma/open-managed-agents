@@ -859,6 +859,11 @@ export class SessionDO extends DurableObject<Env> {
                 type: "agent.tool_result",
                 tool_use_id: customResult.custom_tool_use_id,
                 content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
+                // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+                // matching agent.custom_tool_use's EventBase.id IS the
+                // custom_tool_use_id (AgentCustomToolUseEvent.id overrides
+                // EventBase.id with `id: string`).
+                parent_event_id: customResult.custom_tool_use_id,
               };
               history.append(toolResultEvent);
               this.broadcastEvent(toolResultEvent);
@@ -2261,6 +2266,9 @@ export class SessionDO extends DurableObject<Env> {
               type: "agent.tool_result",
               tool_use_id: pending.toolCallId,
               content: resultStr,
+              // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+              // matching agent.tool_use's EventBase.id IS pending.toolCallId.
+              parent_event_id: pending.toolCallId,
             };
             history.append(toolResultEvent);
             this.broadcastEvent(toolResultEvent);
@@ -2269,6 +2277,7 @@ export class SessionDO extends DurableObject<Env> {
               type: "agent.tool_result",
               tool_use_id: pending.toolCallId,
               content: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              parent_event_id: pending.toolCallId,
             };
             history.append(toolResultEvent);
             this.broadcastEvent(toolResultEvent);
@@ -2282,6 +2291,9 @@ export class SessionDO extends DurableObject<Env> {
         type: "agent.tool_result",
         tool_use_id: confirmation.tool_use_id,
         content: `Denied: ${denyMsg}`,
+        // v1-additive: matching agent.tool_use's EventBase.id IS the
+        // tool_use_id the confirmation references.
+        parent_event_id: confirmation.tool_use_id,
       };
       history.append(toolResultEvent);
       this.broadcastEvent(toolResultEvent);
@@ -3050,13 +3062,24 @@ export class SessionDO extends DurableObject<Env> {
         while (iteration <= maxIterations) {
           // Collect agent output from recent events
           const recentEvents = history.getEvents();
-          const agentOutput = recentEvents
-            .filter((e: SessionEvent) => e.type === "agent.message")
+          const agentMessages = recentEvents.filter(
+            (e: SessionEvent) => e.type === "agent.message",
+          );
+          const agentOutput = agentMessages
             .map((e: SessionEvent) => {
               const msg = e as AgentMessageEvent;
               return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
             })
             .join("\n");
+          // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+          // outcome.evaluation_end.parent_event_id → the agent.message
+          // being evaluated. The eval rolls up *all* recent agent.message
+          // events into one verdict; the last one is the most recent
+          // turn the model produced and is what callers walking the
+          // ancestry care about ("which turn did this verdict apply to").
+          const lastAgentMessageId = agentMessages.length > 0
+            ? (agentMessages[agentMessages.length - 1] as AgentMessageEvent).id
+            : undefined;
 
           // Span: outcome evaluation start
           this.broadcastEvent({ type: "span.outcome_evaluation_start", iteration });
@@ -3076,6 +3099,7 @@ export class SessionDO extends DurableObject<Env> {
               result: "satisfied",
               iteration,
               feedback: evalResult.feedback,
+              ...(lastAgentMessageId ? { parent_event_id: lastAgentMessageId } : {}),
             };
             history.append(evalEvent);
             this.broadcastEvent(evalEvent);
@@ -3088,6 +3112,7 @@ export class SessionDO extends DurableObject<Env> {
               type: "outcome.evaluation_end",
               result: "max_iterations_reached",
               iteration,
+              ...(lastAgentMessageId ? { parent_event_id: lastAgentMessageId } : {}),
             };
             history.append(evalEvent);
             this.broadcastEvent(evalEvent);
@@ -3101,6 +3126,7 @@ export class SessionDO extends DurableObject<Env> {
             result: "needs_revision",
             iteration,
             feedback: evalResult.feedback,
+            ...(lastAgentMessageId ? { parent_event_id: lastAgentMessageId } : {}),
           };
           history.append(evalEvent);
           this.broadcastEvent(evalEvent);
