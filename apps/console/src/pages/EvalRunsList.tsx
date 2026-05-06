@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
-import { StatusPill } from "../components/Badge";
 
 interface EvalRunSummary {
   id: string;
@@ -22,11 +21,13 @@ interface EvalRunSummary {
   }>;
 }
 
-function statusToPill(s: string): "running" | "completed" | "errored" | "idle" {
-  if (s === "completed") return "completed";
-  if (s === "failed") return "errored";
-  if (s === "running") return "running";
-  return "idle";
+function statusCls(s: string): string {
+  switch (s) {
+    case "completed": return "bg-success-subtle text-success";
+    case "failed":    return "bg-danger-subtle text-danger";
+    case "running":   return "bg-info-subtle text-info";
+    default:          return "bg-bg-surface text-fg-muted";
+  }
 }
 
 function timeAgo(iso?: string): string {
@@ -49,8 +50,6 @@ function durationStr(start?: string, end?: string): string {
 }
 
 function passRateStr(r: EvalRunSummary): string {
-  // Sum trial passes across all tasks. trial_pass_count is server-aggregated
-  // from per-trial reward in the eval-runner finalize step.
   let pass = 0;
   let total = 0;
   for (const t of r.tasks) {
@@ -66,7 +65,6 @@ export function EvalRunsList() {
   const nav = useNavigate();
   const [runs, setRuns] = useState<EvalRunSummary[]>([]);
   const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -76,83 +74,86 @@ export function EvalRunsList() {
         if (cancelled) return;
         setRuns(res.data);
         setLoading(false);
-      } catch (err) {
+      } catch {
         if (cancelled) return;
-        setError(err instanceof Error ? err.message : "load failed");
         setLoading(false);
       }
     }
     load();
-    // Light auto-refresh while there's any active run.
     const id = setInterval(() => {
       if (cancelled) return;
       const anyActive = runs.some(r => r.status === "pending" || r.status === "running");
       if (anyActive) load();
     }, 5_000);
     return () => { cancelled = true; clearInterval(id); };
-    // intentionally only on mount; the interval re-evaluates `runs` via closure
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  if (loading) {
-    return <div className="p-6 text-sm text-gray-500">Loading…</div>;
-  }
-  if (error) {
-    return <div className="p-6 text-sm text-red-600">{error}</div>;
-  }
-
   return (
-    <div className="p-6">
-      <div className="flex items-center justify-between mb-4">
-        <h1 className="text-xl font-semibold">Eval Runs</h1>
-        <div className="text-xs text-gray-500">
-          Submit runs via <code className="bg-gray-100 px-1 rounded">POST /v1/evals/runs</code> or
-          {" "}<code className="bg-gray-100 px-1 rounded">npx tsx rl/tasks/terminal-bench/run-cloud.ts</code>
+    <div>
+      <div className="flex items-start justify-between mb-6">
+        <div>
+          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Eval Runs</h1>
+          <p className="text-fg-muted text-sm">Benchmark trajectories submitted via the eval API.</p>
         </div>
       </div>
-      {runs.length === 0 ? (
-        <div className="border rounded p-8 text-center text-sm text-gray-500">
-          No eval runs yet. Submit one to see it here.
+
+      {loading ? (
+        <div className="flex items-center justify-center py-16">
+          <svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none">
+            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+          </svg>
+        </div>
+      ) : runs.length === 0 ? (
+        <div className="text-center py-16 text-fg-subtle">
+          <p className="text-lg mb-1">No eval runs yet</p>
+          <p className="text-sm">
+            Submit one with{" "}
+            <code className="px-1 py-0.5 bg-bg-surface rounded text-fg-muted">POST /v1/evals/runs</code>{" "}
+            or{" "}
+            <code className="px-1 py-0.5 bg-bg-surface rounded text-fg-muted">npx tsx rl/tasks/terminal-bench/run-cloud.ts</code>.
+          </p>
         </div>
       ) : (
-        <div className="border rounded overflow-hidden">
+        <div className="border border-border rounded-lg overflow-hidden">
           <table className="w-full text-sm">
-            <thead className="bg-gray-50">
-              <tr className="text-left text-xs text-gray-600">
-                <th className="px-3 py-2">Run ID</th>
-                <th className="px-3 py-2">Status</th>
-                <th className="px-3 py-2">Pass rate</th>
-                <th className="px-3 py-2">Tasks</th>
-                <th className="px-3 py-2">Duration</th>
-                <th className="px-3 py-2">Started</th>
-                <th className="px-3 py-2">Agent</th>
+            <thead>
+              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
+                <th className="text-left px-4 py-2.5">ID</th>
+                <th className="text-left px-4 py-2.5">Status</th>
+                <th className="text-left px-4 py-2.5">Pass rate</th>
+                <th className="text-left px-4 py-2.5">Tasks</th>
+                <th className="text-left px-4 py-2.5">Duration</th>
+                <th className="text-left px-4 py-2.5">Started</th>
+                <th className="text-left px-4 py-2.5">Agent</th>
               </tr>
             </thead>
             <tbody>
               {runs.map(r => (
                 <tr
                   key={r.id}
-                  className="border-t hover:bg-blue-50 cursor-pointer"
                   onClick={() => nav(`/evals/${r.id}`)}
+                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors"
                 >
-                  <td className="px-3 py-2 font-mono text-xs">{r.id}</td>
-                  <td className="px-3 py-2">
-                    <StatusPill status={statusToPill(r.status)} label={r.status} />
+                  <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[220px]" title={r.id}>
+                    {r.id}
                   </td>
-                  <td className="px-3 py-2">{passRateStr(r)}</td>
-                  <td className="px-3 py-2">
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(r.status)}`}>
+                      {r.status}
+                    </span>
+                  </td>
+                  <td className="px-4 py-3 text-fg font-medium">{passRateStr(r)}</td>
+                  <td className="px-4 py-3 text-fg-muted">
                     {r.completed_count}/{r.task_count}
                     {r.failed_count > 0 && (
-                      <span className="text-red-600 ml-1">({r.failed_count} fail)</span>
+                      <span className="text-danger ml-1">({r.failed_count} fail)</span>
                     )}
                   </td>
-                  <td className="px-3 py-2 text-gray-600">
-                    {durationStr(r.started_at, r.ended_at)}
-                  </td>
-                  <td className="px-3 py-2 text-gray-600" title={r.started_at}>
-                    {timeAgo(r.started_at)}
-                  </td>
-                  <td className="px-3 py-2 font-mono text-xs text-gray-600">{r.agent_id}</td>
+                  <td className="px-4 py-3 text-fg-muted">{durationStr(r.started_at, r.ended_at)}</td>
+                  <td className="px-4 py-3 text-fg-muted" title={r.started_at}>{timeAgo(r.started_at)}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-fg-muted">{r.agent_id}</td>
                 </tr>
               ))}
             </tbody>

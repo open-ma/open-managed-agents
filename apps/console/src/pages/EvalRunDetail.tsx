@@ -1,7 +1,6 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
-import { StatusPill } from "../components/Badge";
 
 interface EvalTrial {
   trial_index: number;
@@ -50,11 +49,13 @@ interface EvalRunDetail {
   tasks: EvalTask[];
 }
 
-function statusToPill(s: string): "running" | "completed" | "errored" | "idle" {
-  if (s === "completed") return "completed";
-  if (s === "failed") return "errored";
-  if (s === "running") return "running";
-  return "idle";
+function statusCls(s: string): string {
+  switch (s) {
+    case "completed": return "bg-success-subtle text-success";
+    case "failed":    return "bg-danger-subtle text-danger";
+    case "running":   return "bg-info-subtle text-info";
+    default:          return "bg-bg-surface text-fg-muted";
+  }
 }
 
 function durationStr(start?: string, end?: string): string {
@@ -111,9 +112,18 @@ export function EvalRunDetail() {
     });
   }
 
-  if (loading) return <div className="p-6 text-sm text-gray-500">Loading…</div>;
-  if (error) return <div className="p-6 text-sm text-red-600">{error}</div>;
-  if (!run) return <div className="p-6 text-sm text-gray-500">Run not found.</div>;
+  if (loading) {
+    return (
+      <div className="flex items-center justify-center py-16">
+        <svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none">
+          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+        </svg>
+      </div>
+    );
+  }
+  if (error) return <div className="text-center py-16 text-danger">{error}</div>;
+  if (!run) return <div className="text-center py-16 text-fg-subtle">Run not found.</div>;
 
   let totalPass = 0;
   let totalTrials = 0;
@@ -123,210 +133,210 @@ export function EvalRunDetail() {
   }
 
   return (
-    <div className="p-6 space-y-4">
+    <div className="space-y-6">
       <div>
         <button
           onClick={() => nav("/evals")}
-          className="text-sm text-blue-600 hover:underline"
+          className="text-sm text-fg-subtle hover:text-fg transition-colors"
         >
           ← All runs
         </button>
       </div>
-      <div className="flex items-center gap-3">
-        <h1 className="text-xl font-semibold font-mono">{run.id}</h1>
-        <StatusPill status={statusToPill(run.status)} label={run.status} />
+
+      <div>
+        <div className="flex items-center gap-3 mb-1">
+          <h1 className="font-display text-xl font-semibold tracking-tight text-fg font-mono">{run.id}</h1>
+          <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(run.status)}`}>
+            {run.status}
+          </span>
+        </div>
+        <p className="text-fg-muted text-sm">Submitted {new Date(run.started_at).toLocaleString()}</p>
       </div>
 
-      <div className="grid grid-cols-4 gap-4 border rounded p-4 text-sm">
-        <div>
-          <div className="text-xs text-gray-500">Pass rate</div>
-          <div className="text-lg font-semibold">
+      <div className="grid grid-cols-4 gap-3">
+        <div className="border border-border rounded-lg p-4">
+          <div className="text-xs text-fg-subtle uppercase tracking-wider mb-1">Pass rate</div>
+          <div className="text-2xl font-semibold text-fg">
             {totalTrials > 0 ? `${totalPass}/${totalTrials}` : "—"}
           </div>
         </div>
-        <div>
-          <div className="text-xs text-gray-500">Tasks</div>
-          <div className="text-lg font-semibold">
+        <div className="border border-border rounded-lg p-4">
+          <div className="text-xs text-fg-subtle uppercase tracking-wider mb-1">Tasks</div>
+          <div className="text-2xl font-semibold text-fg">
             {run.completed_count}/{run.task_count}
-            {run.failed_count > 0 && (
-              <span className="text-red-600 text-sm ml-1">({run.failed_count} fail)</span>
-            )}
           </div>
+          {run.failed_count > 0 && (
+            <div className="text-danger text-xs mt-0.5">{run.failed_count} failed</div>
+          )}
         </div>
-        <div>
-          <div className="text-xs text-gray-500">Duration</div>
-          <div className="text-lg font-semibold">{durationStr(run.started_at, run.ended_at)}</div>
+        <div className="border border-border rounded-lg p-4">
+          <div className="text-xs text-fg-subtle uppercase tracking-wider mb-1">Duration</div>
+          <div className="text-2xl font-semibold text-fg">{durationStr(run.started_at, run.ended_at)}</div>
         </div>
-        <div>
-          <div className="text-xs text-gray-500">Started</div>
-          <div className="text-sm font-mono" title={run.started_at}>
-            {new Date(run.started_at).toLocaleString()}
+        <div className="border border-border rounded-lg p-4">
+          <div className="text-xs text-fg-subtle uppercase tracking-wider mb-1">Started</div>
+          <div className="text-sm font-mono text-fg-muted" title={run.started_at}>
+            {new Date(run.started_at).toLocaleTimeString()}
           </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-2 gap-4 text-sm">
-        <div className="border rounded p-3">
-          <div className="text-xs text-gray-500 mb-1">Agent</div>
+      <div className="grid grid-cols-2 gap-3">
+        <div className="border border-border rounded-lg p-3">
+          <div className="text-xs text-fg-subtle uppercase tracking-wider mb-1">Agent</div>
           <Link
             to={`/agents/${run.agent_id}`}
-            className="font-mono text-blue-600 hover:underline"
+            className="font-mono text-sm text-brand hover:underline"
           >
             {run.agent_id}
           </Link>
         </div>
-        <div className="border rounded p-3">
-          <div className="text-xs text-gray-500 mb-1">Environment</div>
-          <span className="font-mono">{run.environment_id}</span>
+        <div className="border border-border rounded-lg p-3">
+          <div className="text-xs text-fg-subtle uppercase tracking-wider mb-1">Environment</div>
+          <span className="font-mono text-sm text-fg-muted">{run.environment_id}</span>
         </div>
       </div>
 
       {run.error && (
-        <div className="border border-red-300 bg-red-50 rounded p-3 text-sm">
-          <div className="font-semibold text-red-700">Run-level error</div>
-          <pre className="mt-1 text-xs whitespace-pre-wrap text-red-800">{run.error}</pre>
+        <div className="border border-danger-subtle bg-danger-subtle/40 rounded-lg p-3">
+          <div className="text-sm font-semibold text-danger mb-1">Run-level error</div>
+          <pre className="text-xs whitespace-pre-wrap text-fg">{run.error}</pre>
         </div>
       )}
 
-      <div className="border rounded overflow-hidden">
+      <div className="border border-border rounded-lg overflow-hidden">
         <table className="w-full text-sm">
-          <thead className="bg-gray-50">
-            <tr className="text-left text-xs text-gray-600">
-              <th className="px-3 py-2 w-8" />
-              <th className="px-3 py-2">Task</th>
-              <th className="px-3 py-2">Status</th>
-              <th className="px-3 py-2">Pass</th>
-              <th className="px-3 py-2">Trials</th>
+          <thead>
+            <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
+              <th className="w-8 px-2 py-2.5" />
+              <th className="text-left px-4 py-2.5">Task</th>
+              <th className="text-left px-4 py-2.5">Status</th>
+              <th className="text-left px-4 py-2.5">Pass</th>
+              <th className="text-left px-4 py-2.5">Trials</th>
             </tr>
           </thead>
           <tbody>
             {run.tasks.map(t => {
               const isOpen = expanded.has(t.id);
               return [
-                <tr key={t.id} className="border-t">
-                  <td className="px-3 py-2 cursor-pointer" onClick={() => toggleExpand(t.id)}>
-                    {isOpen ? "▼" : "▶"}
+                <tr
+                  key={t.id}
+                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors"
+                  onClick={() => toggleExpand(t.id)}
+                >
+                  <td className="text-fg-subtle px-2 py-3 text-center">{isOpen ? "▾" : "▸"}</td>
+                  <td className="px-4 py-3 font-mono text-xs text-fg">{t.id}</td>
+                  <td className="px-4 py-3">
+                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(t.status)}`}>
+                      {t.status}
+                    </span>
                   </td>
-                  <td className="px-3 py-2 font-mono text-xs">{t.id}</td>
-                  <td className="px-3 py-2">
-                    <StatusPill status={statusToPill(t.status)} label={t.status} />
-                  </td>
-                  <td className="px-3 py-2">
+                  <td className="px-4 py-3 text-fg font-medium">
                     {(t.trial_pass_count ?? 0)}/{t.trial_total ?? t.trials.length}
                   </td>
-                  <td className="px-3 py-2 text-xs text-gray-600">
+                  <td className="px-4 py-3 text-xs text-fg-muted">
                     {t.trials.map(tr => tr.status).join(", ")}
                   </td>
                 </tr>,
                 isOpen && (
-                  <tr key={`${t.id}-trials`} className="border-t bg-gray-50">
+                  <tr key={`${t.id}-trials`} className="border-t border-border bg-bg-surface">
                     <td />
-                    <td colSpan={4} className="px-3 py-2">
+                    <td colSpan={4} className="px-4 py-3 space-y-3">
                       <table className="w-full text-xs">
                         <thead>
-                          <tr className="text-gray-500">
-                            <th className="text-left py-1 pr-3">#</th>
-                            <th className="text-left py-1 pr-3">Status</th>
-                            <th className="text-left py-1 pr-3">Reward</th>
-                            <th className="text-left py-1 pr-3">Exit</th>
-                            <th className="text-left py-1 pr-3">Dur</th>
-                            <th className="text-left py-1 pr-3">Turns</th>
-                            <th className="text-left py-1">Session</th>
+                          <tr className="text-fg-subtle">
+                            <th className="text-left py-1 pr-3 font-medium">#</th>
+                            <th className="text-left py-1 pr-3 font-medium">Status</th>
+                            <th className="text-left py-1 pr-3 font-medium">Reward</th>
+                            <th className="text-left py-1 pr-3 font-medium">Exit</th>
+                            <th className="text-left py-1 pr-3 font-medium">Dur</th>
+                            <th className="text-left py-1 pr-3 font-medium">Turns</th>
+                            <th className="text-left py-1 font-medium">Session</th>
                           </tr>
                         </thead>
                         <tbody>
                           {t.trials.map(tr => (
                             <tr key={tr.trial_index}>
-                              <td className="py-1 pr-3 text-gray-500">{tr.trial_index}</td>
+                              <td className="py-1 pr-3 text-fg-subtle">{tr.trial_index}</td>
                               <td className="py-1 pr-3">
-                                <StatusPill status={statusToPill(tr.status)} label={tr.status} />
+                                <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(tr.status)}`}>
+                                  {tr.status}
+                                </span>
                               </td>
                               <td className="py-1 pr-3">
                                 {tr.reward != null ? (
-                                  <span
-                                    className={
-                                      tr.reward >= 1
-                                        ? "text-green-700 font-semibold"
-                                        : "text-gray-500"
-                                    }
-                                  >
+                                  <span className={tr.reward >= 1 ? "text-success font-semibold" : "text-fg-subtle"}>
                                     {tr.reward}
                                   </span>
                                 ) : (
-                                  "—"
+                                  <span className="text-fg-subtle">—</span>
                                 )}
                               </td>
-                              <td className="py-1 pr-3 font-mono">{tr.exit_code ?? "—"}</td>
-                              <td className="py-1 pr-3">
-                                {durationStr(tr.started_at, tr.ended_at)}
-                              </td>
-                              <td className="py-1 pr-3">{tr.turns ?? "—"}</td>
+                              <td className="py-1 pr-3 font-mono text-fg-muted">{tr.exit_code ?? "—"}</td>
+                              <td className="py-1 pr-3 text-fg-muted">{durationStr(tr.started_at, tr.ended_at)}</td>
+                              <td className="py-1 pr-3 text-fg-muted">{tr.turns ?? "—"}</td>
                               <td className="py-1">
                                 {tr.session_id ? (
                                   <Link
                                     to={`/sessions/${tr.session_id}`}
-                                    className="text-blue-600 hover:underline font-mono"
+                                    className="text-brand hover:underline font-mono"
                                   >
                                     {tr.session_id}
                                   </Link>
                                 ) : (
-                                  <span className="text-gray-400">—</span>
+                                  <span className="text-fg-subtle">—</span>
                                 )}
                               </td>
                             </tr>
                           ))}
-                          {t.trials.some(tr => tr.error) && (
-                            <tr>
-                              <td colSpan={7} className="py-1 text-red-700">
-                                {t.trials
-                                  .filter(tr => tr.error)
-                                  .map(tr => (
-                                    <div key={tr.trial_index}>
-                                      trial {tr.trial_index}: {tr.error}
-                                    </div>
-                                  ))}
-                              </td>
-                            </tr>
-                          )}
-                          {t.trials.some(tr => tr.output_tail) && (
-                            <tr>
-                              <td colSpan={7} className="py-1">
-                                <details>
-                                  <summary className="cursor-pointer text-gray-600">
-                                    verify_script output (tail)
-                                  </summary>
-                                  {t.trials
-                                    .filter(tr => tr.output_tail)
-                                    .map(tr => (
-                                      <pre
-                                        key={tr.trial_index}
-                                        className="mt-1 p-2 bg-white border rounded text-[11px] overflow-auto max-h-64"
-                                      >
-                                        trial {tr.trial_index}:{"\n"}
-                                        {tr.output_tail}
-                                      </pre>
-                                    ))}
-                                </details>
-                              </td>
-                            </tr>
-                          )}
                         </tbody>
                       </table>
+
+                      {t.trials.some(tr => tr.error) && (
+                        <div className="text-xs text-danger space-y-0.5">
+                          {t.trials
+                            .filter(tr => tr.error)
+                            .map(tr => (
+                              <div key={tr.trial_index}>trial {tr.trial_index}: {tr.error}</div>
+                            ))}
+                        </div>
+                      )}
+
+                      {t.trials.some(tr => tr.output_tail) && (
+                        <details>
+                          <summary className="cursor-pointer text-xs text-fg-subtle hover:text-fg">
+                            verify_script output (tail)
+                          </summary>
+                          {t.trials
+                            .filter(tr => tr.output_tail)
+                            .map(tr => (
+                              <pre
+                                key={tr.trial_index}
+                                className="mt-1 p-2 bg-bg border border-border rounded text-[11px] overflow-auto max-h-64 text-fg"
+                              >
+                                trial {tr.trial_index}:{"\n"}
+                                {tr.output_tail}
+                              </pre>
+                            ))}
+                        </details>
+                      )}
+
                       {t.spec.setup_script && (
-                        <details className="mt-2">
-                          <summary className="cursor-pointer text-gray-600 text-xs">
+                        <details>
+                          <summary className="cursor-pointer text-xs text-fg-subtle hover:text-fg">
                             setup_script
                           </summary>
-                          <pre className="mt-1 p-2 bg-white border rounded text-[11px] overflow-auto max-h-48">
+                          <pre className="mt-1 p-2 bg-bg border border-border rounded text-[11px] overflow-auto max-h-48 text-fg">
                             {t.spec.setup_script}
                           </pre>
                         </details>
                       )}
-                      <details className="mt-2">
-                        <summary className="cursor-pointer text-gray-600 text-xs">
+
+                      <details>
+                        <summary className="cursor-pointer text-xs text-fg-subtle hover:text-fg">
                           first message
                         </summary>
-                        <pre className="mt-1 p-2 bg-white border rounded text-[11px] overflow-auto max-h-48 whitespace-pre-wrap">
+                        <pre className="mt-1 p-2 bg-bg border border-border rounded text-[11px] overflow-auto max-h-48 whitespace-pre-wrap text-fg">
                           {t.spec.messages[0]}
                         </pre>
                       </details>
