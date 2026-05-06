@@ -11,7 +11,7 @@ import {
   type PartialStream,
 } from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn, generateEventId } from "@open-managed-agents/shared";
+import { logWarn, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
   CfDoEventLog,
@@ -36,7 +36,6 @@ import type {
   UserToolConfirmationEvent,
   UserCustomToolResultEvent,
   UserDefineOutcomeEvent,
-  OutcomeEvaluationEvent,
   AgentMessageEvent,
   AgentToolUseEvent,
 } from "@open-managed-agents/shared";
@@ -45,7 +44,13 @@ import { resolveHarness } from "../harness/registry";
 import { resolveModel } from "../harness/provider";
 import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
-import { evaluateOutcome } from "../harness/outcome-evaluator";
+import { generateText } from "ai";
+import { extractTextFromContent } from "@open-managed-agents/shared";
+import {
+  runOutcomeSupervisor,
+  type ActiveOutcomeState,
+  type OutcomeEvaluationRecord,
+} from "./outcome-supervisor";
 import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
@@ -119,19 +124,48 @@ interface PendingToolCall {
  * Persistent session state managed by Agent's setState/state system.
  * Automatically persisted to SQLite and broadcast to WebSocket clients.
  */
+/**
+ * `ActiveOutcomeState` (one slot — only one outcome supported at a time,
+ * per AMA spec) and `OutcomeEvaluationRecord` (the aggregate row written
+ * to `state.outcome_evaluations[]` on every terminal verdict) are
+ * defined in outcome-supervisor.ts so the supervisor unit-test fixture
+ * has a single source of truth. Re-exported here as the local aliases
+ * the SessionState below uses.
+ */
+type ActiveOutcome = ActiveOutcomeState;
+type PersistedOutcomeEvaluation = OutcomeEvaluationRecord;
+
 interface SessionState {
   agent_id: string;
   environment_id: string;
   session_id: string;
   tenant_id: string;
   title: string;
-  status: "idle" | "running" | "terminated";
+  /**
+   * Stored only as a back-compat read for sessions written before status
+   * became derived. New code MUST NOT write to this field. The runtime
+   * status comes from `deriveStatus()`, which queries `cf_agents_runs`
+   * for fiber existence + `terminated_at` for the destroy gate. See
+   * docs/contribute/recovery-and-idempotency.mdx for the rationale.
+   */
+  status?: "idle" | "running" | "terminated";
+  /** ms timestamp when /destroy ran. Replaces the persistent `terminated`
+   *  status — the only state value that needed to survive in storage; the
+   *  rest are derivable from cf_agents_runs row presence. */
+  terminated_at: number | null;
   input_tokens: number;
   output_tokens: number;
   vault_ids: string[];
   pending_tool_calls: PendingToolCall[];
-  outcome: { description: string; rubric?: string; max_iterations?: number } | null;
+  outcome: ActiveOutcome | null;
   outcome_iteration: number;
+  /**
+   * Phase 4: AMA-aligned aggregate of every terminal `span.outcome_evaluation_end`
+   * for this session. Returned as-is by GET /v1/sessions/:id under
+   * `outcome_evaluations`. Sequential outcomes (each kicked off by a fresh
+   * `user.define_outcome`) append here in iteration order.
+   */
+  outcome_evaluations?: PersistedOutcomeEvaluation[];
   /**
    * Tenant config snapshots provided at /init by main worker. Used by
    * getAgentConfig/getEnvConfig/getVaultCredentials so SessionDO doesn't
@@ -160,7 +194,7 @@ const INITIAL_SESSION_STATE: SessionState = {
   session_id: "",
   tenant_id: "default",
   title: "",
-  status: "idle",
+  terminated_at: null,
   input_tokens: 0,
   output_tokens: 0,
   vault_ids: [],
@@ -494,7 +528,7 @@ export class SessionDO extends DurableObject<Env> {
     cron?: string;
     prompt: string;
   }): Promise<{ id: string; fire_at?: string; cron?: string; kind: "one_shot" | "cron" }> {
-    if (this.state.status === "terminated") {
+    if (this.deriveStatus() === "terminated") {
       throw new Error("session is terminated; cannot schedule wakeup");
     }
     const provided = [args.delay_seconds, args.at, args.cron].filter((x) => x != null);
@@ -585,7 +619,7 @@ export class SessionDO extends DurableObject<Env> {
     kind: "one_shot" | "cron";
     parent_event_id?: string;
   }): Promise<void> {
-    if (this.state.status === "terminated") {
+    if (this.deriveStatus() === "terminated") {
       // Skip silently — terminated sessions should not be resurrected.
       // For cron schedules the row stays in agents-fw storage; ops can
       // cancel via list/cancel tools or a future REST surface.
@@ -682,11 +716,9 @@ export class SessionDO extends DurableObject<Env> {
     );
     this.ensureSchema();
 
-    // Persisted state from before eviction is stale — clear it so drain
-    // doesn't see status="running" and skip.
-    if (this.state.status === "running") {
-      this.setState({ ...this.state, status: "idle" });
-    }
+    // Status is derived from cf_agents_runs row presence — onFiberRecovered
+    // is invoked AFTER _checkRunFibers DELETEs the orphan, so deriveStatus
+    // automatically reads "idle" here. No manual state mutation needed.
 
     const history = new SqliteHistory(
       this.ctx.storage.sql,
@@ -761,7 +793,8 @@ export class SessionDO extends DurableObject<Env> {
           this.broadcastEvent(ev);
         },
         forceIdle: () => {
-          this.setState({ ...this.state, status: "idle" });
+          // Status auto-derives to "idle" once recoverAgentTurn returns
+          // and cf_agents_runs is empty. Just emit the trajectory event.
           const idleEvent: SessionEvent = { type: "session.status_idle" };
           history.append(idleEvent);
           this.broadcastEvent(idleEvent);
@@ -812,8 +845,12 @@ export class SessionDO extends DurableObject<Env> {
    * drainEventQueue is already active.
    */
   private async drainEventQueue(): Promise<void> {
-    // Concurrency guard — only one drain loop at a time
-    if (this.state.status === "running" || this.state.status === "terminated") {
+    // Concurrency guard — only one drain loop at a time. Status is derived
+    // from cf_agents_runs presence, so eviction in the setState→runFiber
+    // window can't strand the session at "running": the next caller derives
+    // "idle" automatically once the orphan fiber row is cleaned up.
+    const currentStatus = this.deriveStatus();
+    if (currentStatus === "running" || currentStatus === "terminated") {
       return;
     }
 
@@ -834,7 +871,8 @@ export class SessionDO extends DurableObject<Env> {
         break;
       }
 
-      this.setState({ ...this.state, status: "running" });
+      // No setState({status:"running"}) — runFiber's INSERT into
+      // cf_agents_runs is the single source of truth for "in flight."
       // Fresh per-turn dedup window for agent.message broadcasts. See
       // broadcastedMessageIds field doc for the recovery-replay context.
       this.broadcastedMessageIds.clear();
@@ -864,6 +902,11 @@ export class SessionDO extends DurableObject<Env> {
                 type: "agent.tool_result",
                 tool_use_id: customResult.custom_tool_use_id,
                 content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
+                // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+                // matching agent.custom_tool_use's EventBase.id IS the
+                // custom_tool_use_id (AgentCustomToolUseEvent.id overrides
+                // EventBase.id with `id: string`).
+                parent_event_id: customResult.custom_tool_use_id,
               };
               history.append(toolResultEvent);
               this.broadcastEvent(toolResultEvent);
@@ -887,7 +930,8 @@ export class SessionDO extends DurableObject<Env> {
         const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
         history.append(errorEvent);
         this.broadcastEvent(errorEvent);
-        this.setState({ ...this.state, status: "idle" });
+        // Status auto-derives once runFiber's finally block DELETEs the
+        // cf_agents_runs row. No setState needed.
         break; // Stop draining on error — let the client decide what to do
       }
     }
@@ -1061,7 +1105,7 @@ export class SessionDO extends DurableObject<Env> {
         environment_snapshot: params.environment_snapshot,
         vault_credentials: params.vault_credentials,
         event_hooks: params.event_hooks,
-        status: "idle",
+        terminated_at: null,
       });
 
       // Outbound credential snapshot — DELETED. The legacy path published
@@ -1151,7 +1195,7 @@ export class SessionDO extends DurableObject<Env> {
       // up. The outbound interceptor RPCs into main on each call and main
       // re-checks session.archived_at, so an archived session's outbound
       // calls naturally fail without any KV cleanup needed.
-      this.setState({ ...this.state, status: "terminated" });
+      this.setState({ ...this.state, terminated_at: Date.now() });
 
       const terminatedEvent: SessionEvent = {
         type: "session.status_terminated",
@@ -1237,7 +1281,7 @@ export class SessionDO extends DurableObject<Env> {
           this.currentAbortController.abort();
           this.currentAbortController = null;
         }
-        this.setState({ ...this.state, status: "idle" });
+        // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
         const idleEvent: SessionEvent = { type: "session.status_idle" };
         history.append(body as UserInterruptEvent);
         history.append(idleEvent);
@@ -1270,9 +1314,47 @@ export class SessionDO extends DurableObject<Env> {
 
       if (body.type === "user.define_outcome") {
         const e = body as UserDefineOutcomeEvent;
-        this.setState({ ...this.state, outcome: { description: e.description, rubric: e.rubric, max_iterations: e.max_iterations }, outcome_iteration: 1 });
-        history.append(e);
-        this.broadcastEvent(e);
+        // AMA-spec: validate at-least-one-of(rubric|verifier). Reject the
+        // event before persisting so callers get a clean 400 instead of a
+        // silently degraded supervisor loop.
+        const hasRubric =
+          typeof e.rubric === "string"
+            ? e.rubric.trim().length > 0
+            : !!e.rubric && (
+                (e.rubric.type === "text" && !!e.rubric.content) ||
+                (e.rubric.type === "file" && !!e.rubric.file_id)
+              );
+        if (!hasRubric && !e.verifier) {
+          return new Response(
+            "user.define_outcome requires at least one of `rubric` or `verifier`",
+            { status: 400 },
+          );
+        }
+        // Mint outcome_id server-side (AMA-style `outc_…` prefix). Honour
+        // a client-supplied id only when it's already prefixed (used by
+        // tests / replays); otherwise mint fresh.
+        const outcome_id =
+          e.outcome_id && e.outcome_id.startsWith("outc_")
+            ? e.outcome_id
+            : generateOutcomeId();
+        const echoed: UserDefineOutcomeEvent = { ...e, outcome_id };
+        // Sequential outcomes: any prior `state.outcome` is dropped (it
+        // either already terminated and was nulled by the supervisor, or
+        // we're explicitly replacing it). Existing `outcome_evaluations`
+        // history stays intact.
+        this.setState({
+          ...this.state,
+          outcome: {
+            outcome_id,
+            description: echoed.description,
+            rubric: echoed.rubric,
+            verifier: echoed.verifier,
+            max_iterations: echoed.max_iterations,
+          },
+          outcome_iteration: 0,
+        });
+        history.append(echoed);
+        this.broadcastEvent(echoed);
         return new Response(null, { status: 202 });
       }
 
@@ -1352,7 +1434,7 @@ export class SessionDO extends DurableObject<Env> {
     // GET /status
     if (request.method === "GET" && url.pathname === "/status") {
       return Response.json({
-        status: this.state.status,
+        status: this.deriveStatus(),
         agent_id: this.state.agent_id,
         environment_id: this.state.environment_id,
         usage: {
@@ -1544,22 +1626,49 @@ export class SessionDO extends DurableObject<Env> {
       return Response.json({ data: threadEvents });
     }
 
-    // GET /full-status — session status with usage and outcome evaluations
+    // GET /full-status — session status with usage and outcome evaluations.
+    //
+    // Phase 4 / AMA alignment: outcome_evaluations is now sourced from
+    // `state.outcome_evaluations` (written by the supervisor loop on every
+    // terminal `span.outcome_evaluation_end`). Falls back to scanning the
+    // event log for legacy spellings (`session.outcome_evaluated`,
+    // `outcome.evaluation_end`, `span.outcome_evaluation_end`) so sessions
+    // written before this change still surface their verdicts.
     if (request.method === "GET" && url.pathname === "/full-status") {
       const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      const allEvents = history.getEvents();
 
-      // Collect outcome evaluations
-      const outcomeEvaluations = allEvents
-        .filter((e) => e.type === "session.outcome_evaluated")
-        .map((e: any) => ({
-          result: e.result,
-          iteration: e.iteration,
-          feedback: e.feedback,
-        }));
+      const stateEvaluations = this.state.outcome_evaluations ?? [];
+      let outcomeEvaluations: PersistedOutcomeEvaluation[] = stateEvaluations;
+      if (outcomeEvaluations.length === 0) {
+        // Back-compat scan. Only runs for sessions whose supervisor never
+        // wrote into state.outcome_evaluations[] (pre-Phase-4 emit
+        // sites). Cheap because the event scan is local to this DO.
+        const allEvents = history.getEvents();
+        outcomeEvaluations = allEvents
+          .filter(
+            (e) =>
+              e.type === "session.outcome_evaluated" ||
+              e.type === "outcome.evaluation_end" ||
+              e.type === "span.outcome_evaluation_end",
+          )
+          .map((e: SessionEvent) => {
+            const ev = e as Partial<PersistedOutcomeEvaluation> & {
+              feedback?: string;
+            };
+            return {
+              outcome_id: ev.outcome_id ?? "",
+              result: (ev.result ?? "needs_revision") as PersistedOutcomeEvaluation["result"],
+              iteration: typeof ev.iteration === "number" ? ev.iteration : 0,
+              explanation: ev.explanation ?? ev.feedback,
+              feedback: ev.feedback ?? ev.explanation,
+              usage: ev.usage,
+              processed_at: (e as { processed_at?: string }).processed_at,
+            };
+          });
+      }
 
       return Response.json({
-        status: this.state.status,
+        status: this.deriveStatus(),
         usage: {
           input_tokens: this.state.input_tokens,
           output_tokens: this.state.output_tokens,
@@ -2341,6 +2450,9 @@ export class SessionDO extends DurableObject<Env> {
               type: "agent.tool_result",
               tool_use_id: pending.toolCallId,
               content: resultStr,
+              // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+              // matching agent.tool_use's EventBase.id IS pending.toolCallId.
+              parent_event_id: pending.toolCallId,
             };
             history.append(toolResultEvent);
             this.broadcastEvent(toolResultEvent);
@@ -2349,6 +2461,7 @@ export class SessionDO extends DurableObject<Env> {
               type: "agent.tool_result",
               tool_use_id: pending.toolCallId,
               content: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              parent_event_id: pending.toolCallId,
             };
             history.append(toolResultEvent);
             this.broadcastEvent(toolResultEvent);
@@ -2362,6 +2475,9 @@ export class SessionDO extends DurableObject<Env> {
         type: "agent.tool_result",
         tool_use_id: confirmation.tool_use_id,
         content: `Denied: ${denyMsg}`,
+        // v1-additive: matching agent.tool_use's EventBase.id IS the
+        // tool_use_id the confirmation references.
+        parent_event_id: confirmation.tool_use_id,
       };
       history.append(toolResultEvent);
       this.broadcastEvent(toolResultEvent);
@@ -2735,7 +2851,7 @@ export class SessionDO extends DurableObject<Env> {
       const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
       history.append(errorEvent);
       this.broadcastEvent(errorEvent);
-      this.setState({ ...this.state, status: "idle" });
+      // Status auto-derives — no setState needed
       return;
     }
 
@@ -3119,85 +3235,111 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Outcome self-evaluation loop (properly loops until satisfied or max iterations)
+      // Outcome self-evaluation loop. Phase 4 / AMA-aligned: delegated
+      // to the standalone supervisor module which builds a Verifier
+      // (verifierForSpec for the OMA-superset rule-based path,
+      // LlmJudgeVerifier for the AMA-default LLM-judge path), runs it
+      // against a Trajectory built from the current event log, maps the
+      // Score onto the AMA 5-result enum, emits
+      // span.outcome_evaluation_{start,ongoing,end}, and persists each
+      // terminal verdict to state.outcome_evaluations[]. The loop
+      // re-injects the verifier's `reason` as a user.message + re-runs
+      // the harness on `needs_revision`.
       const outcome = this.state.outcome;
       if (outcome) {
-        let iteration = this.state.outcome_iteration || 1;
-        const maxIterations = Math.min(outcome.max_iterations || 3, 20);
-        const outcomeModelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
-        const model = resolveModel(outcomeModelId || ctx.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
-
-        while (iteration <= maxIterations) {
-          // Collect agent output from recent events
-          const recentEvents = history.getEvents();
-          const agentOutput = recentEvents
-            .filter((e: SessionEvent) => e.type === "agent.message")
-            .map((e: SessionEvent) => {
-              const msg = e as AgentMessageEvent;
-              return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
-            })
-            .join("\n");
-
-          // Span: outcome evaluation start
-          this.broadcastEvent({ type: "span.outcome_evaluation_start", iteration });
-
-          const ongoingEvent: SessionEvent = {
-            type: "span.outcome_evaluation_ongoing",
-            iteration,
-          };
-          history.append(ongoingEvent);
-          this.broadcastEvent(ongoingEvent);
-
-          const evalResult = await evaluateOutcome(model, outcome, agentOutput);
-
-          if (evalResult.result === "satisfied") {
-            const evalEvent: OutcomeEvaluationEvent = {
-              type: "outcome.evaluation_end",
-              result: "satisfied",
-              iteration,
-              feedback: evalResult.feedback,
-            };
-            history.append(evalEvent);
-            this.broadcastEvent(evalEvent);
-            this.setState({ ...this.state, outcome: null });
-            break;
-          }
-
-          if (iteration >= maxIterations) {
-            const evalEvent: OutcomeEvaluationEvent = {
-              type: "outcome.evaluation_end",
-              result: "max_iterations_reached",
-              iteration,
-            };
-            history.append(evalEvent);
-            this.broadcastEvent(evalEvent);
-            this.setState({ ...this.state, outcome: null });
-            break;
-          }
-
-          // Needs revision — inject feedback and re-run
-          const evalEvent: OutcomeEvaluationEvent = {
-            type: "outcome.evaluation_end",
-            result: "needs_revision",
-            iteration,
-            feedback: evalResult.feedback,
-          };
-          history.append(evalEvent);
-          this.broadcastEvent(evalEvent);
-
-          iteration += 1;
-          this.setState({ ...this.state, outcome_iteration: iteration });
-
-          const feedbackMsg: UserMessageEvent = {
-            type: "user.message",
-            content: [{
-              type: "text",
-              text: `[Outcome Evaluation - Iteration ${iteration - 1}] Needs revision:\n${evalResult.feedback}\n\nPlease address the feedback and try again.`,
-            }],
-          };
-          history.append(feedbackMsg);
-          this.broadcastEvent(feedbackMsg);
-          await harness.run({ ...ctx, userMessage: feedbackMsg });
+        const outcomeModelId =
+          typeof agent.model === "string" ? agent.model : agent.model?.id;
+        const judgeModel = resolveModel(
+          outcomeModelId ||
+            ctx.env.ANTHROPIC_MODEL ||
+            "claude-sonnet-4-6",
+          ctx.env.ANTHROPIC_API_KEY,
+          ctx.env.ANTHROPIC_BASE_URL,
+        );
+        try {
+          await runOutcomeSupervisor({
+            outcome,
+            initialIteration: this.state.outcome_iteration ?? 0,
+            tenantId: this.state.tenant_id,
+            filesBucket: this.env.FILES_BUCKET ?? null,
+            abortSignal: effectiveAbortSignal,
+            judgeModelId: outcomeModelId,
+            getEvents: () => history.getEvents(),
+            appendAndBroadcast: (event) => {
+              history.append(event);
+              this.broadcastEvent(event);
+            },
+            broadcastOnly: (event) => this.broadcastEvent(event),
+            persistState: (delta) => {
+              const next = { ...this.state };
+              if ("outcome" in delta) next.outcome = delta.outcome ?? null;
+              if (typeof delta.outcome_iteration === "number") {
+                next.outcome_iteration = delta.outcome_iteration;
+              }
+              if (delta.outcome_evaluations) {
+                next.outcome_evaluations = delta.outcome_evaluations;
+              }
+              this.setState(next);
+            },
+            readEvaluations: () => this.state.outcome_evaluations ?? [],
+            makeVerifierContext: () => ({
+              sessionId: this.state.session_id,
+              runExec: async (cmd, opts) => {
+                const sb = this.getOrCreateSandbox();
+                const raw = await sb.exec(cmd, opts?.timeoutMs ?? 600_000);
+                // sandbox.exec returns "exit=N\n<merged-output>"
+                const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+                return m
+                  ? { exit_code: parseInt(m[1], 10), output: m[2] }
+                  : { exit_code: -1, output: raw };
+              },
+            }),
+            makeJudgeFn: () => async (prompt, signal) => {
+              const result = await generateText({
+                model: judgeModel,
+                system: prompt.system,
+                messages: [{ role: "user", content: prompt.user }],
+                maxOutputTokens: 800,
+                abortSignal: signal,
+              });
+              const text =
+                result.text ||
+                extractTextFromContent(
+                  (result as unknown as { content?: unknown }).content,
+                );
+              const u = (result as unknown as {
+                usage?: {
+                  inputTokens?: number;
+                  outputTokens?: number;
+                  cachedInputTokens?: number;
+                  cacheReadInputTokens?: number;
+                  cacheCreationInputTokens?: number;
+                };
+              }).usage;
+              const usage = u
+                ? {
+                    input_tokens: u.inputTokens ?? 0,
+                    output_tokens: u.outputTokens ?? 0,
+                    cache_creation_input_tokens:
+                      u.cacheCreationInputTokens ?? u.cachedInputTokens,
+                    cache_read_input_tokens: u.cacheReadInputTokens,
+                  }
+                : undefined;
+              return { text, usage };
+            },
+            runHarnessTurn: async (msg) => {
+              await harness.run({ ...ctx, userMessage: msg });
+            },
+          });
+        } catch (err) {
+          // Supervisor itself blew up (e.g. a persistState callback
+          // threw). Surface as a session warning — the supervisor's own
+          // failure path already handled verifier-internal errors and
+          // emitted a `failed` end span.
+          logWarn(
+            { op: "outcome.supervisor", session_id: this.state.session_id, err },
+            "outcome supervisor crashed",
+          );
         }
       }
 
@@ -3284,7 +3426,7 @@ export class SessionDO extends DurableObject<Env> {
       // Client can send a new user.message to retry.
     } finally {
       this.currentAbortController = null;
-      this.setState({ ...this.state, status: "idle" });
+      // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
       // Workspace backup is fired by OmaSandbox.onActivityExpired when the
       // container's sleepAfter elapses (see oma-sandbox.ts) — exactly one
       // snapshot per quiet period. Explicit /destroy snapshots eagerly via
@@ -3329,6 +3471,32 @@ export class SessionDO extends DurableObject<Env> {
       throw new Error("SessionDO.state read before init");
     }
     return this._state;
+  }
+
+  /**
+   * Live-derived session status. Single source of truth — replaces the old
+   * mutable `state.status` field which had a race window between the
+   * `setState({status:"running"})` write and the cf_agents_runs INSERT
+   * inside runFiber. With derivation that race is impossible: status is
+   * always consistent with whatever cf_agents_runs holds at query time.
+   *
+   * - `terminated_at` set → "terminated" (destroy is the only persistent
+   *   state value that needs to survive restarts)
+   * - any cf_agents_runs row → "running"
+   * - else → "idle"
+   *
+   * Back-compat: if a session was written before this refactor, its
+   * `state.status` may still be "terminated"; honor that as a fallback
+   * gate so old sessions don't accept new events post-destroy.
+   */
+  deriveStatus(): "idle" | "running" | "terminated" {
+    if (this._state?.terminated_at != null || this._state?.status === "terminated") {
+      return "terminated";
+    }
+    const hasFiber = this.ctx.storage.sql
+      .exec("SELECT 1 FROM cf_agents_runs LIMIT 1")
+      .toArray().length > 0;
+    return hasFiber ? "running" : "idle";
   }
 
   setState(next: SessionState): void {

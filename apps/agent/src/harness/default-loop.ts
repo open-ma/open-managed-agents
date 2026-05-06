@@ -62,6 +62,13 @@ function emitToolCallEvent(
       type: "agent.thread_message_sent",
       to_thread_id: toolCallId,
       content: [{ type: "text", text: String(callInput.message || "") }],
+      // v1-additive (docs/trajectory-v1-spec.md "Causality"): mint a
+      // deterministic id keyed on toolCallId so the matching
+      // `agent.thread_message_received` (emitted in emitToolResultEvent)
+      // can set parent_event_id back to the same value. There is exactly
+      // one sent / received pair per call_agent_* tool invocation, so
+      // a derived-from-toolCallId id collides with nothing.
+      id: threadSentEventId(toolCallId),
     });
   }
 
@@ -90,6 +97,19 @@ function emitToolCallEvent(
       input: callInput,
     });
   }
+}
+
+/**
+ * Deterministic id for the `agent.thread_message_sent` event paired with
+ * a given call_agent_* tool invocation. Lets the eventual
+ * `agent.thread_message_received` set parent_event_id = this id without
+ * sharing state across the two emit callbacks.
+ *
+ * Format mirrors the `sevt-` prefix `generateEventId` mints so downstream
+ * id-format sniffing keeps working.
+ */
+function threadSentEventId(toolCallId: string): string {
+  return `sevt-thread-sent-${toolCallId}`;
 }
 
 /**
@@ -127,12 +147,21 @@ function emitToolResultEvent(
       type: "agent.mcp_tool_result",
       mcp_tool_use_id: toolCallId,
       content: typeof content === "string" ? content : JSON.stringify(content),
+      // v1-additive: causal predecessor is the matching agent.mcp_tool_use,
+      // whose EventBase.id is set explicitly to toolCallId in
+      // emitToolCallEvent above. Same identity, no extra plumbing.
+      parent_event_id: toolCallId,
     });
   } else {
     runtime.broadcast({
       type: "agent.tool_result",
       tool_use_id: toolCallId,
       content,
+      // v1-additive: causal predecessor is the matching agent.tool_use,
+      // whose EventBase.id is set explicitly to toolCallId in
+      // emitToolCallEvent above. (AgentToolUseEvent.id overrides
+      // EventBase.id, so tool_use_id IS the parent's EventBase.id.)
+      parent_event_id: toolCallId,
     });
   }
 
@@ -144,6 +173,9 @@ function emitToolResultEvent(
       type: "agent.thread_message_received",
       from_thread_id: toolCallId,
       content: [{ type: "text", text }],
+      // v1-additive: causal predecessor is the agent.thread_message_sent
+      // emitted in emitToolCallEvent above for the same toolCallId.
+      parent_event_id: threadSentEventId(toolCallId),
     });
   }
 }
