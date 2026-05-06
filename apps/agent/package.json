@@ -30,6 +30,7 @@
     "@open-managed-agents/outbound-snapshots-store": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
     "@open-managed-agents/services": "workspace:*",
+    "@open-managed-agents/session-runtime": "workspace:*",
     "@open-managed-agents/session-secrets-store": "workspace:*",
     "@open-managed-agents/sessions-store": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
