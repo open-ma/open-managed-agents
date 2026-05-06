@@ -190,10 +190,14 @@ const MAX_PENDING_WAKEUPS = 20;
 // ── Constants inherited from cf-agents v0.11.2 schema ──────────────────
 //
 // We replaced `extends Agent` with `extends DurableObject` and reimplemented
-// the small surface SessionDO actually used (state, schedule+alarm, runFiber,
-// keepAlive). The cf_agents_* table NAMES are kept verbatim so existing prod
-// DOs migrate transparently — sessions in flight at deploy time keep their
-// SQL rows readable by the new code path. See _ensureCfAgentsSchema() below.
+// the small surface SessionDO actually used (state, schedule+alarm). Phase 3
+// (this codebase) further dropped the runFiber/keepAlive primitives in favor
+// of the unified RuntimeAdapter (begin/end on the shared `sessions` table).
+// The cf_agents_state + cf_agents_schedules table NAMES are kept verbatim
+// so existing prod DOs migrate transparently — schedule rows in flight at
+// deploy time keep their SQL rows readable by the new code path. The
+// cf_agents_runs table was dropped in Phase 4; orphan markers now live on
+// `sessions.turn_id`. See _ensureCfAgentsSchema() below.
 const STATE_ROW_ID = "cf_state_row_id";
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
 const HUNG_SCHEDULE_TIMEOUT_SECONDS = 30;
@@ -653,13 +657,16 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Called by the agents library when a runFiber row in cf_agents_runs
-   * survives DO restart (i.e. the fiber was interrupted by eviction). For
-   * us, fibers are named "turn:{seq}" — one per drain iteration. Recovery
-   * strategy: emit a status_rescheduled marker so observers can see a
-   * recovery happened, reset stale state.status, then re-drain. The
-   * unprocessed user.message at seq is still pending (we never emitted
-   * status_idle for it) so drain re-runs the harness, and generateText
+   * Called by _checkOrphanTurns when an orphan turn (sessions row marked
+   * status='running' with a turn_id we don't own) is detected at alarm
+   * wake or cold-start. Historically this was wired into the cf-agents
+   * runFiber/onFiberRecovered hook; Phase 3 unified the trigger via the
+   * RuntimeAdapter, so the entry shape is identical to what the old
+   * fiber API produced — { id, name, snapshot:null }. Recovery itself
+   * works the same way: emit a session.status_rescheduled marker so
+   * observers see what happened, reset stale state.status, and re-drain.
+   * The unprocessed user.message at seq is still pending (we never
+   * emitted status_idle for it) so drain re-runs the harness; generateText
    * sees prior tool_use/tool_result rows in history and continues from
    * roughly where it left off (at-least-once semantics — a tool may be
    * re-decided once, but no tool effect is lost since each result is in
@@ -667,11 +674,11 @@ export class SessionDO extends DurableObject<Env> {
    */
   async onFiberRecovered(ctx: { id: string; name: string; snapshot: unknown }): Promise<void> {
     if (!ctx.name.startsWith("turn:")) {
-      console.warn(`[fiber-recover] unknown fiber: ${ctx.name}`);
+      console.warn(`[orphan-recover] unknown turn name: ${ctx.name}`);
       return;
     }
     console.warn(
-      `[fiber-recover] turn fiber ${ctx.name} (id=${ctx.id}) interrupted; routing through recoverAgentTurn`,
+      `[orphan-recover] turn ${ctx.name} (id=${ctx.id}) interrupted; routing through recoverAgentTurn`,
     );
     this.ensureSchema();
 
@@ -724,7 +731,7 @@ export class SessionDO extends DurableObject<Env> {
       async (rctx) => {
         const reschedEvent: SessionEvent = {
           type: "session.status_rescheduled",
-          reason: `Recovered after DO eviction (fiber ${ctx.name}, recovery ${rctx.recoveryCount}/5)`,
+          reason: `Recovered after DO eviction (turn ${ctx.name}, recovery ${rctx.recoveryCount}/5)`,
         };
         history.append(reschedEvent);
         this.broadcastEvent(reschedEvent);
@@ -836,10 +843,13 @@ export class SessionDO extends DurableObject<Env> {
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
-        // Run the turn through the two-primitive runtime: keepAliveWhile
-        // outermost (DO stays alive for full turn lifetime), runFiber
-        // inside (so onFiberRecovered can detect orphan after eviction),
-        // backup/persist synchronously at end (no waitUntil race).
+        // Run the turn through the unified runtime: adapter.beginTurn /
+        // endTurn write the marker on `sessions.turn_id`, hintTurnInFlight
+        // wires CF's setAlarm-30s keep-alive, backup/persist runs
+        // synchronously at end (no waitUntil race). Same shape Node's
+        // SessionStateMachine uses; the body here stays in SessionDO
+        // because DO has CF-only features (DO state push, schedule API,
+        // sandbox warmup, sub-agents) the machine doesn't speak.
         await runAgentTurn(
           this.turnRuntimeAdapter(),
           turnName,
@@ -1207,10 +1217,13 @@ export class SessionDO extends DurableObject<Env> {
         // Fire-and-forget the drain. ctx.waitUntil is a no-op inside DO classes
         // (Workers Context API is stateless-only — see CF docs), so don't try
         // to use it. The DO is kept alive instead by:
-        //   (a) the cf-agents keepAlive() heartbeat (30s alarm) registered
-        //       by runFiber inside drainEventQueue, AND
-        //   (b) keepAliveWhile() wrapping the long model fetch in
-        //       harness/default-loop.ts so streaming holds the DO active.
+        //   (a) the unified RuntimeAdapter's hintTurnInFlight callback —
+        //       wired in this DO's constructor to setAlarm(now+30s). The
+        //       alarm() handler rearms itself while a turn is still in
+        //       flight (sessions row status='running'), AND
+        //   (b) the keepAliveWhile no-op the harness still receives in
+        //       its HarnessRuntime — purely a stub today; the alarm-
+        //       rearm path covers what it used to defend.
         // The 5s recoverEventQueue schedule above is the safety-net
         // re-trigger if this background promise dies before drain runs.
         console.log("[post /event] user.message appended, firing drainEventQueue");
@@ -3297,10 +3310,13 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // cf-agents replacement primitives (state, schedule, alarm, runFiber,
-  // keepAlive). Schema + algorithms inherited from cf-agents v0.11.2 so
-  // existing prod DOs migrate transparently — all SQL row layouts and
-  // callback-name conventions match what cf-agents wrote.
+  // cf-agents replacement primitives (state, schedule, alarm). Schema +
+  // algorithms inherited from cf-agents v0.11.2 so existing prod DOs
+  // migrate transparently — SQL row layouts and callback-name conventions
+  // match what cf-agents wrote. Phase 3 dropped runFiber/keepAlive in
+  // favor of the unified RuntimeAdapter (begin/end on the shared
+  // `sessions` table); orphan-turn detection in alarm() now reads
+  // sessions.turn_id, not cf_agents_runs.
   // ═══════════════════════════════════════════════════════════════════════
 
   // ── State (cf_agents_state, single row) ────────────────────────────────
@@ -3350,7 +3366,7 @@ export class SessionDO extends DurableObject<Env> {
     );
   }
 
-  // ── Schema bootstrap (cf_agents_state / cf_agents_schedules / cf_agents_runs) ──
+  // ── Schema bootstrap (cf_agents_state / cf_agents_schedules) ──
 
   private _ensureCfAgentsSchema(): void {
     // Idempotent. Schema lifted verbatim from cf-agents v0.11.2 so existing
@@ -3380,20 +3396,18 @@ export class SessionDO extends DurableObject<Env> {
         retry_options TEXT
       )
     `);
-    // cf_agents_runs table is no longer written to. Schema kept here as
-    // CREATE IF NOT EXISTS so old prod DOs migrating through this code
-    // don't crash on stale references — the table will be dropped
-    // entirely in Phase 4 once everything has rolled. Orphan-turn
-    // marker now lives on the unified `sessions.turn_id` column (see
-    // apps/main/migrations/0014_session_turn_id.sql).
-    sql.exec(`
-      CREATE TABLE IF NOT EXISTS cf_agents_runs (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        snapshot TEXT,
-        created_at INTEGER NOT NULL
-      )
-    `);
+    // cf_agents_runs is gone. Phase 3 stopped writing it; Phase 4 (this
+    // commit) drops the table entirely on every cold-start, idempotent
+    // because DROP TABLE IF EXISTS. Old prod DOs that booted the
+    // previous code still had it; first cold-start under this code path
+    // sweeps it. Any in-flight rows from before the deploy are
+    // recovered via _checkOrphanTurns which now reads `sessions.turn_id`
+    // (populated by the unified RuntimeAdapter.beginTurn). For sessions
+    // that started under the old fiber path AND were mid-turn at deploy
+    // time, the turn_id column is null — those sessions just silently
+    // flip to "user must resend" which is the same UX as the old
+    // 5-recovery cap exhausting.
+    sql.exec(`DROP TABLE IF EXISTS cf_agents_runs`);
     // Stale-row cleanup: the alarm-based stall detector was removed in the
     // Gap 10 simplification, but live prod DOs still have its interval
     // schedule rows. Each alarm tick now logs "callback not found" and
@@ -3559,8 +3573,10 @@ export class SessionDO extends DurableObject<Env> {
 
   /**
    * Pick the soonest alarm time across (a) ready due schedules, (b) hung
-   * interval reset, (c) keepAlive heartbeat (when refs > 0). Algorithm
-   * verbatim from cf-agents v0.11.2 _scheduleNextAlarm.
+   * interval reset. Phase 3 dropped the keepAlive refcount branch — keep-
+   * alive now flows through hintTurnInFlight (sets a 30s alarm at
+   * beginTurn) plus the alarm() handler's rearm-while-inflight check.
+   * Schedule logic itself is verbatim from cf-agents v0.11.2.
    */
   private async _scheduleNextAlarm(): Promise<void> {
     const nowMs = Date.now();
