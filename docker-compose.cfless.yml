@@ -31,8 +31,12 @@ services:
       ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
       ANTHROPIC_CUSTOM_HEADERS: ${ANTHROPIC_CUSTOM_HEADERS:-}
       # Storage paths inside the container — mapped to ./data on host.
+      # All absolute so they don't surprise-resolve relative to pnpm's
+      # cwd (which becomes /app/apps/main-node under `pnpm --filter ... start`).
       DATABASE_PATH: /app/data/oma.db
+      AUTH_DATABASE_PATH: /app/data/auth.db
       SANDBOX_WORKDIR: /app/data/sandboxes
+      MEMORY_BLOB_DIR: /app/data/memory-blobs
       # Outbound credential injection via the oma-vault sidecar. When set,
       # LocalSubprocessSandbox.setOutboundContext wires the subprocess env
       # to route HTTPS traffic through oma-vault for header injection.
@@ -42,7 +46,6 @@ services:
       # (all requests become tenant_id="default") for local single-user
       # demos. BETTER_AUTH_SECRET signs cookies; generate with
       # `openssl rand -hex 32` and put in .env.
-      AUTH_DATABASE_PATH: /app/data/auth.db
       BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
       AUTH_DISABLED: ${AUTH_DISABLED:-}
       PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
