@@ -31,6 +31,7 @@
     "@cloudflare/workers-types": "^4.20250410.0",
     "@playwright/test": "^1.59.1",
     "@types/node": "^25.6.0",
+    "fflate": "^0.8.2",
     "jsonc-parser": "^3.3.1",
     "typescript": "^5.8.0",
     "vitest": "^4.1.3",
@@ -39,7 +40,6 @@
   "dependencies": {
     "@ai-sdk/anthropic": "3.0.69",
     "@ai-sdk/openai": "^3.0.53",
-    "agents": "^0.11.2",
     "ai": "6.0.158",
     "better-auth": "^1.6.3",
     "drizzle-orm": "^0.45.2",

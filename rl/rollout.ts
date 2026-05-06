@@ -1,6 +1,7 @@
 import type { RLTask, RLTaskSet, RolloutConfig, RolloutResult, Trajectory, TokenUsage } from "./types.js";
 import { eventsToTrajectory } from "./trajectory.js";
 import { computeReward, batchRewardStats } from "./reward.js";
+import { runScriptVerifier } from "./verifier.js";
 import {
   createAgent,
   createSession,
@@ -89,6 +90,21 @@ async function executeTask(
       config.model,
       startTime,
     );
+
+    if (task.reward.type === "script" && task.reward.verify_script) {
+      try {
+        const vr = await runScriptVerifier(
+          sendAndWait,
+          handle.sessionId,
+          task.reward.verify_script,
+          600_000,
+        );
+        trajectory.metadata.verifier_result = vr;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        trajectory.metadata.verifier_result = { exit_code: -1, output: `verifier_error: ${msg}` };
+      }
+    }
 
     const reward = await computeReward(trajectory, task);
     trajectory.reward = reward;

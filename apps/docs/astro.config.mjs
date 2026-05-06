@@ -75,7 +75,10 @@ export default defineConfig({
         },
         {
           label: 'Contribute',
-          items: [{ label: 'Contributing', slug: 'contribute' }],
+          items: [
+            { label: 'Contributing', slug: 'contribute' },
+            { label: 'Recovery & Idempotency', slug: 'contribute/recovery-and-idempotency' },
+          ],
         },
         {
           label: '↗ Console',

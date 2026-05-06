@@ -1,4 +1,15 @@
-import { Agent } from "agents";
+import { DurableObject } from "cloudflare:workers";
+import { nanoid } from "nanoid";
+import { parseCronExpression } from "cron-schedule";
+import {
+  runAgentTurn,
+  recoverAgentTurn,
+  clearTurnRecoveryCount,
+  TurnAborted,
+  type TurnRuntimeAgent,
+  type RecoveryDecision,
+  type PartialStream,
+} from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn, generateEventId } from "@open-managed-agents/shared";
 import {
@@ -41,10 +52,6 @@ import { mountResources } from "./resource-mounter";
 import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
 import {
   findLatestBackup as findWorkspaceBackup,
-  recordBackup as recordWorkspaceBackup,
-  coordinateBackup,
-  DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-  type BackupCoordinatorState,
 } from "./workspace-backups";
 
 interface SessionInitParams {
@@ -173,13 +180,31 @@ const INITIAL_SESSION_STATE: SessionState = {
 // obvious within seconds of the first model call.
 const MAX_PENDING_WAKEUPS = 20;
 
-export class SessionDO extends Agent<Env, SessionState> {
-  // 30s keepAlive heartbeat (also the agents-lib default) — held automatically
-  // for the duration of any runFiber() callback. Prevents idle DO eviction
-  // during long generateText turns.
-  static options = { keepAliveIntervalMs: 30_000 };
+// ── Constants inherited from cf-agents v0.11.2 schema ──────────────────
+//
+// We replaced `extends Agent` with `extends DurableObject` and reimplemented
+// the small surface SessionDO actually used (state, schedule+alarm, runFiber,
+// keepAlive). The cf_agents_* table NAMES are kept verbatim so existing prod
+// DOs migrate transparently — sessions in flight at deploy time keep their
+// SQL rows readable by the new code path. See _ensureCfAgentsSchema() below.
+const STATE_ROW_ID = "cf_state_row_id";
+const KEEP_ALIVE_INTERVAL_MS = 30_000;
+const HUNG_SCHEDULE_TIMEOUT_SECONDS = 30;
 
-  initialState = INITIAL_SESSION_STATE;
+export class SessionDO extends DurableObject<Env> {
+  // ── cf-agents-replacement state (see _ensureCfAgentsSchema below) ─────
+  private _state: SessionState | undefined;
+  private _initialized = false;
+  private _keepAliveRefs = 0;
+  private _runFiberActiveFibers = new Set<string>();
+  private _runFiberRecoveryInProgress = false;
+
+  constructor(ctx: DurableObjectState, env: Env) {
+    super(ctx, env);
+    this._ensureCfAgentsSchema();
+    this._loadStateFromSql();
+    this._initialized = true;
+  }
 
   /** Build a tenant-scoped KV key */
   private tk(...parts: string[]): string {
@@ -264,13 +289,34 @@ export class SessionDO extends Agent<Env, SessionState> {
     return out;
   }
 
-  // Disable Agent's observability to avoid SpanParent I/O isolation
-  // errors in vitest-pool-workers (multiple DOs share one isolate).
-  observability = null as unknown as Agent<Env, SessionState>["observability"];
+  // observability stub kept as a defensive no-op slot — was set to null when
+  // we used cf-agents Agent (which auto-instantiated an observability sink that
+  // tripped SpanParent I/O isolation errors in vitest-pool-workers). After
+  // dropping cf-agents the field is unused but harmless to keep so any
+  // straggler `this.observability?.foo()` call elsewhere stays a no-op.
+  observability: { emit?: (event: unknown) => void } | null = null;
   private initialized = false;
   private sandbox: SandboxExecutor | null = null;
   private wrappedSandbox: SandboxExecutor | null = null;
   private sandboxWarmupPromise: Promise<void> | null = null;
+  /** Per-warmup random tag mirrored to /tmp/.oma-warm in the container.
+   *  Lets the wrapSandboxWithLazyWarmup proxy detect a recycled container
+   *  (CF Sandbox can die independently of SessionDO via OOM, sleepAfter,
+   *  host migration). On mismatch we re-warm so restoreWorkspaceBackup
+   *  runs and /workspace gets repopulated from the latest backup. */
+  private currentWarmupGen: string | null = null;
+  /**
+   * Per-turn dedup of `agent.message` broadcasts. Recovery's
+   * `loadRecoveryContext` reads prior agent messages out of SQL so the
+   * next streamText resumes with the right context, but each recovery
+   * attempt also calls `persistAgentMessage` for any partial streams it
+   * found — without this Set, every recovery re-`broadcastEvent`s the
+   * same message_id, producing the duplicate-broadcast storm we saw on
+   * `sess-lyh1t4ilelc87ypk` 2026-05-02 (12 dupes at 5x recovery cap fire).
+   * Reset at the START of each new turn (drainEventQueue loop) so a
+   * legitimately re-emitted message_id in a new turn isn't suppressed.
+   */
+  private broadcastedMessageIds: Set<string> = new Set();
   /**
    * Browser session backed by Cloudflare Browser Rendering binding. Lazy-created
    * on first browser_* tool call (in-memory only — recreated if DO hibernates).
@@ -286,19 +332,6 @@ export class SessionDO extends Agent<Env, SessionState> {
   private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   private currentAbortController: AbortController | null = null;
-  /** Last time we wrote a workspace backup (ms). Used to debounce per-turn
-   *  snapshots so a chatty agent doesn't spam BACKUP_BUCKET PUTs. Forced
-   *  backups (session destroy) ignore this. */
-  private lastWorkspaceBackupAt = 0;
-  /** Min interval between turn-end backups. Forced backups bypass this. */
-  private static readonly WORKSPACE_BACKUP_DEBOUNCE_MS = 60_000;
-  /** Single in-flight workspace backup promise — coalesces concurrent calls
-   *  so a turn-end fire-and-forget backup + a DELETE force backup don't race
-   *  on the same container (CF Sandbox SDK rejects the second concurrent
-   *  createBackup with HTTP 500). Force callers `await` the in-flight one
-   *  instead of starting a new one — the FS state is the same since no
-   *  agent ops can run during a backup. */
-  private workspaceBackupInFlight: Promise<void> | null = null;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -402,7 +435,7 @@ export class SessionDO extends Agent<Env, SessionState> {
    *  This wrapper just glues it to DO storage + WS broadcast. */
   private async recoverInterruptedState(): Promise<void> {
     if (!this.streams) return;
-    const history = new SqliteHistory(this.ctx.storage.sql);
+    const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
     try {
       const { warnings } = await runRecovery(this.streams, history);
       for (const w of warnings) {
@@ -595,16 +628,19 @@ export class SessionDO extends Agent<Env, SessionState> {
     kind: "one_shot" | "cron";
   }> {
     type WakeupPayload = { prompt?: string; kind?: "one_shot" | "cron" };
-    const schedules = this.getSchedules<WakeupPayload>();
+    const schedules = this.getSchedules();
     return schedules
       .filter((s) => s.callback === "onScheduledWakeup")
-      .map((s) => ({
-        id: s.id,
-        fire_at: typeof s.time === "number" ? new Date(s.time * 1000).toISOString() : undefined,
-        cron: s.type === "cron" ? s.cron : undefined,
-        prompt: s.payload?.prompt ?? "",
-        kind: s.payload?.kind ?? "one_shot",
-      }));
+      .map((s) => {
+        const payload = (s.payload ?? {}) as WakeupPayload;
+        return {
+          id: s.id,
+          fire_at: typeof s.time === "number" ? new Date(s.time * 1000).toISOString() : undefined,
+          cron: s.type === "cron" ? s.cron : undefined,
+          prompt: payload.prompt ?? "",
+          kind: payload.kind ?? "one_shot",
+        };
+      });
   }
 
   /**
@@ -626,8 +662,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       return;
     }
     console.warn(
-      `[fiber-recover] turn fiber ${ctx.name} (id=${ctx.id}) interrupted; re-draining. ` +
-        `snapshot=${JSON.stringify(ctx.snapshot)}`,
+      `[fiber-recover] turn fiber ${ctx.name} (id=${ctx.id}) interrupted; routing through recoverAgentTurn`,
     );
     this.ensureSchema();
 
@@ -637,17 +672,116 @@ export class SessionDO extends Agent<Env, SessionState> {
       this.setState({ ...this.state, status: "idle" });
     }
 
-    // Audit marker so the trajectory shows we recovered (vs silently
-    // re-running). Doesn't change scoring.
-    const history = new SqliteHistory(this.ctx.storage.sql);
-    const reschedEvent: SessionEvent = {
-      type: "session.status_rescheduled",
-      reason: `Recovered after DO eviction (fiber ${ctx.name})`,
-    };
-    history.append(reschedEvent);
-    this.broadcastEvent(reschedEvent);
+    const history = new SqliteHistory(
+      this.ctx.storage.sql,
+      this.env.FILES_BUCKET ?? null,
+      `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+    );
 
-    await this.drainEventQueue();
+    const decision = await recoverAgentTurn(
+      this.turnRuntimeAdapter(),
+      ctx,
+      // loadRecoveryContext: read SQL events + streams to reconstruct the
+      // state at the moment of interruption. We deliberately do NOT use
+      // ctx.snapshot from cf-agents stash — OMA's events table already
+      // carries richer canonical state.
+      async () => {
+        const lastUserMsgSeq = this.getLastEventSeq("user.message");
+        const eventsAfter = this.getEventsBetween(lastUserMsgSeq, Number.MAX_SAFE_INTEGER);
+        const partialStreams: PartialStream[] = [];
+        try {
+          const cursor = this.ctx.storage.sql.exec(
+            `SELECT message_id, status, chunks_json FROM streams WHERE status IN ('streaming', 'interrupted') ORDER BY started_at`,
+          );
+          for (const row of cursor) {
+            try {
+              const chunks = JSON.parse(row.chunks_json as string) as string[];
+              partialStreams.push({
+                message_id: row.message_id as string,
+                partial_text: chunks.join(""),
+                status: (row.status as "streaming" | "interrupted"),
+              });
+            } catch {}
+          }
+        } catch {
+          // streams table might not exist yet (older session); fine, return empty
+        }
+        return { history: eventsAfter, partialStreams };
+      },
+      // Resume policy: always continue. recoverAgentTurn caps at 5 attempts;
+      // on the 6th the cap fires and we get a session.error + force-idle
+      // automatically (no need to track it here). Persist partial agent
+      // messages so the trajectory shows what was streamed before the cut.
+      async (rctx) => {
+        const reschedEvent: SessionEvent = {
+          type: "session.status_rescheduled",
+          reason: `Recovered after DO eviction (fiber ${ctx.name}, recovery ${rctx.recoveryCount}/5)`,
+        };
+        history.append(reschedEvent);
+        this.broadcastEvent(reschedEvent);
+        return { continue: true, persistPartial: true };
+      },
+      {
+        emitEvent: (e) => {
+          history.append(e);
+          this.broadcastEvent(e);
+        },
+        persistAgentMessage: (text, message_id) => {
+          // Recovery's loadRecoveryContext seeds streamText with prior
+          // partials; each recovery iteration also passes those same
+          // (text, message_id) tuples through this callback. Without
+          // dedup we'd re-append + re-broadcast each one per recovery
+          // attempt — observed as 12 duplicate agent.message events at
+          // 5x cap fire. Set is in-memory + per-turn (cleared at the
+          // start of each drainEventQueue iteration).
+          if (this.broadcastedMessageIds.has(message_id)) return;
+          this.broadcastedMessageIds.add(message_id);
+          const ev: SessionEvent = {
+            type: "agent.message",
+            id: message_id,
+            content: [{ type: "text", text }],
+          } as unknown as SessionEvent;
+          history.append(ev);
+          this.broadcastEvent(ev);
+        },
+        forceIdle: () => {
+          this.setState({ ...this.state, status: "idle" });
+          const idleEvent: SessionEvent = { type: "session.status_idle" };
+          history.append(idleEvent);
+          this.broadcastEvent(idleEvent);
+        },
+        maxRecoveries: 5,
+      },
+    );
+
+    if (decision.continue) {
+      await this.drainEventQueue();
+    }
+  }
+
+  /**
+   * Read events strictly between two seq values (exclusive on both ends).
+   * Helper used by recoverAgentTurn's loadRecoveryContext.
+   */
+  private getEventsBetween(afterSeq: number, beforeSeq: number): SessionEvent[] {
+    const out: SessionEvent[] = [];
+    try {
+      const cursor = this.ctx.storage.sql.exec(
+        `SELECT data FROM events WHERE seq > ? AND seq < ? ORDER BY seq`,
+        afterSeq,
+        beforeSeq,
+      );
+      for (const row of cursor) {
+        try {
+          out.push(JSON.parse(row.data as string) as SessionEvent);
+        } catch {
+          // Skip rows that fail to parse (read-side resilience).
+        }
+      }
+    } catch {
+      // events table may not exist yet
+    }
+    return out;
   }
 
   /**
@@ -664,12 +798,10 @@ export class SessionDO extends Agent<Env, SessionState> {
   private async drainEventQueue(): Promise<void> {
     // Concurrency guard — only one drain loop at a time
     if (this.state.status === "running" || this.state.status === "terminated") {
-      console.log(`[drain] skipped: status=${this.state.status}`);
       return;
     }
 
-    console.log("[drain] starting");
-    const history = new SqliteHistory(this.ctx.storage.sql);
+    const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
     while (true) {
       const lastIdleSeq = Math.max(
@@ -683,46 +815,55 @@ export class SessionDO extends Agent<Env, SessionState> {
       ]);
 
       if (!pendingUserEvent) {
-        console.log("[drain] queue empty, done");
         break;
       }
 
-      console.log(`[drain] processing event seq=${pendingUserEvent.seq}`);
       this.setState({ ...this.state, status: "running" });
+      // Fresh per-turn dedup window for agent.message broadcasts. See
+      // broadcastedMessageIds field doc for the recovery-replay context.
+      this.broadcastedMessageIds.clear();
 
+      const turnName = `turn:${pendingUserEvent.seq}`;
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
-        // Wrap each turn's work in a durable fiber so:
-        //  - keepAlive() heartbeat protects against idle DO eviction
-        //  - cf_agents_runs row is created at start, deleted on success
-        //  - if interrupted, onFiberRecovered fires on DO restart and we
-        //    re-drain (history-based replay — generateText sees prior
-        //    tool_use/tool_result rows and continues)
-        await this.runFiber(`turn:${pendingUserEvent.seq}`, async (ctx) => {
-          ctx.stash({ user_event_seq: pendingUserEvent.seq, type: event.type });
-
-          if (event.type === "user.message") {
-            await this.processUserMessage(event as UserMessageEvent);
-          } else if (event.type === "user.tool_confirmation") {
-            await this.handleToolConfirmation(event as UserToolConfirmationEvent, history);
-          } else if (event.type === "user.custom_tool_result") {
-            const customResult = event as UserCustomToolResultEvent;
-            const toolResultEvent: SessionEvent = {
-              type: "agent.tool_result",
-              tool_use_id: customResult.custom_tool_use_id,
-              content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
-            };
-            history.append(toolResultEvent);
-            this.broadcastEvent(toolResultEvent);
-            const resumeMsg: UserMessageEvent = {
-              type: "user.message",
-              content: [{ type: "text", text: "" }],
-            };
-            await this.processUserMessage(resumeMsg, 0, true);
-          }
-        });
+        // Run the turn through the two-primitive runtime: keepAliveWhile
+        // outermost (DO stays alive for full turn lifetime), runFiber
+        // inside (so onFiberRecovered can detect orphan after eviction),
+        // backup/persist synchronously at end (no waitUntil race).
+        await runAgentTurn(
+          this.turnRuntimeAdapter(),
+          turnName,
+          async () => {
+            if (event.type === "user.message") {
+              await this.processUserMessage(event as UserMessageEvent);
+            } else if (event.type === "user.tool_confirmation") {
+              await this.handleToolConfirmation(event as UserToolConfirmationEvent, history);
+            } else if (event.type === "user.custom_tool_result") {
+              const customResult = event as UserCustomToolResultEvent;
+              const toolResultEvent: SessionEvent = {
+                type: "agent.tool_result",
+                tool_use_id: customResult.custom_tool_use_id,
+                content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
+              };
+              history.append(toolResultEvent);
+              this.broadcastEvent(toolResultEvent);
+              const resumeMsg: UserMessageEvent = {
+                type: "user.message",
+                content: [{ type: "text", text: "" }],
+              };
+              await this.processUserMessage(resumeMsg, 0, true);
+            }
+          },
+          {},
+        );
+        // Turn finished cleanly — clear any prior recovery counter so the
+        // next turn doesn't inherit stale state.
+        await clearTurnRecoveryCount(this.turnRuntimeAdapter(), turnName);
       } catch (err) {
+        if (err instanceof TurnAborted) {
+          console.warn(`[drain] turn ${turnName} aborted: ${err.cause.kind}`);
+        }
         const errorMsg = this.describeError(err);
         const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
         history.append(errorEvent);
@@ -731,6 +872,25 @@ export class SessionDO extends Agent<Env, SessionState> {
         break; // Stop draining on error — let the client decide what to do
       }
     }
+  }
+
+  /**
+   * Build the small adapter that turn-runtime needs from this DO. We
+   * bind keepAliveWhile + runFiber to `this` and expose ctx.storage as
+   * a plain object so turn-runtime doesn't need to access protected
+   * members of cf-agents Agent.
+   */
+  private turnRuntimeAdapter(): TurnRuntimeAgent {
+    return {
+      keepAliveWhile: <T,>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
+      runFiber: <T,>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>) =>
+        this.runFiber(name, fn),
+      storage: {
+        get: <T = unknown,>(key: string) => this.ctx.storage.get<T>(key),
+        put: <T = unknown,>(key: string, value: T) => this.ctx.storage.put(key, value),
+        delete: (key: string) => this.ctx.storage.delete(key).then(() => undefined),
+      },
+    };
   }
 
   /**
@@ -768,6 +928,29 @@ export class SessionDO extends Agent<Env, SessionState> {
    * handle everything here and only delegate alarm() to Agent's scheduler.
    */
   async fetch(request: Request): Promise<Response> {
+    try {
+      return await this.fetchInner(request);
+    } catch (err) {
+      // Top-level catch so a single bad row / parse / unhandled throw doesn't
+      // collapse to opaque "Internal Server Error" text from the runtime.
+      // Caller gets structured JSON + the route they hit + a stable shape.
+      const url = new URL(request.url);
+      const msg = err instanceof Error ? (err.message || err.name) : String(err);
+      const stack = err instanceof Error && err.stack ? err.stack.split("\n").slice(0, 5).join("\n") : undefined;
+      console.error(`[session-do.fetch] ${request.method} ${url.pathname} → 500: ${msg}\n${stack ?? ""}`);
+      return new Response(
+        JSON.stringify({
+          error: "internal_error",
+          message: msg.slice(0, 500),
+          method: request.method,
+          path: url.pathname,
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+  }
+
+  private async fetchInner(request: Request): Promise<Response> {
     this.ensureSchema();
     const url = new URL(request.url);
 
@@ -838,7 +1021,23 @@ export class SessionDO extends Agent<Env, SessionState> {
       // D1 keyed by (tenant, env). Next session in the same scope's warmup
       // looks it up and restoreBackup's it. Force=true bypasses the
       // turn-end debounce so we always get a final snapshot.
-      await this.maybeBackupWorkspace({ force: true });
+      //
+      // Force-create the sandbox wrapper if this.sandbox is null (SessionDO
+      // was hibernated, in-memory ref lost). Without this, a hibernated
+      // SessionDO that gets a /destroy request would skip both the backup
+      // AND the actual container destroy, leaving the container running
+      // until sleepAfter SIGTERM (with no final snapshot).
+      if (!this.sandbox) {
+        try { this.getOrCreateSandbox(); } catch {}
+      }
+      // Final snapshot — awaited so the squashfs lands in BACKUP_BUCKET
+      // before sandbox.destroy() wipes the container. Implementation lives
+      // on OmaSandbox.snapshotWorkspaceNow (single source of truth, also
+      // used by the sleepAfter onActivityExpired hook). Best-effort: any
+      // failure logs and we proceed with destroy.
+      if (this.sandbox?.snapshotWorkspaceNow) {
+        try { await this.sandbox.snapshotWorkspaceNow(); } catch {}
+      }
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -866,7 +1065,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         type: "session.status_terminated",
         reason: "session_deleted",
       };
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       history.append(terminatedEvent);
       this.broadcastEvent(terminatedEvent);
 
@@ -882,7 +1081,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       const mountFileIds = raw._mount_file_ids;
       delete (raw as { _mount_file_ids?: string[] })._mount_file_ids;
       const body = raw as SessionEvent;
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
       // Auto-mount referenced files into the sandbox FS so agent's bash/read
       // tools see them at /mnt/session/uploads/{file_id}, while the model
@@ -923,9 +1122,17 @@ export class SessionDO extends Agent<Env, SessionState> {
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        console.log("[post /event] user.message appended, firing drainEventQueue (no await)");
+        // Fire-and-forget the drain. ctx.waitUntil is a no-op inside DO classes
+        // (Workers Context API is stateless-only — see CF docs), so don't try
+        // to use it. The DO is kept alive instead by:
+        //   (a) the cf-agents keepAlive() heartbeat (30s alarm) registered
+        //       by runFiber inside drainEventQueue, AND
+        //   (b) keepAliveWhile() wrapping the long model fetch in
+        //       harness/default-loop.ts so streaming holds the DO active.
+        // The 5s recoverEventQueue schedule above is the safety-net
+        // re-trigger if this background promise dies before drain runs.
+        console.log("[post /event] user.message appended, firing drainEventQueue");
         this.drainEventQueue();
-        console.log("[post /event] returning 202");
         return new Response(null, { status: 202 });
       }
 
@@ -1002,7 +1209,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         | { kind: "tool_use"; id: string; name?: string; tool_kind?: "builtin" | "mcp" | "custom" };
       const body = (await request.json().catch(() => ({}))) as { seed?: Seed[] };
       const seeds = body.seed ?? [];
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       for (const s of seeds) {
         if (s.kind === "stream") {
           await this.streams.start(s.message_id, Date.now());
@@ -1038,7 +1245,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       this.ctx.acceptWebSocket(pair[1]);
 
       // Replay existing events to new connection
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       const events = history.getEvents();
       for (const event of events) {
         pair[1].send(JSON.stringify(event));
@@ -1073,19 +1280,82 @@ export class SessionDO extends Agent<Env, SessionState> {
 
       // Fetch limit + 1 to determine has_more
       const query = `SELECT seq, type, data, ts FROM events WHERE seq > ? ORDER BY seq ${order} LIMIT ?`;
-      const rows = this.ctx.storage.sql
-        .exec(query, afterSeq, limit + 1)
-        .toArray();
+      // Retry the SQL exec on transient "Durable Object storage operation
+      // exceeded timeout" errors only — these surface during write-contention
+      // storms (e.g. 49+ concurrent model_request_start events), and a
+      // 100-ms-backoff retry window is enough to clear them. All other
+      // errors (parse, schema, NULL row) propagate untouched to the
+      // top-level 500 handler so real bugs aren't swallowed.
+      let rows: ReturnType<ReturnType<typeof this.ctx.storage.sql.exec>["toArray"]>;
+      {
+        let lastErr: unknown;
+        let attempt = 0;
+        const maxAttempts = 3;
+        for (;;) {
+          try {
+            rows = this.ctx.storage.sql.exec(query, afterSeq, limit + 1).toArray();
+            break;
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const transient = /storage operation exceeded timeout|object to be reset/i.test(msg);
+            attempt++;
+            if (!transient || attempt >= maxAttempts) {
+              lastErr = err;
+              break;
+            }
+            await new Promise((r) => setTimeout(r, 100 * attempt));
+          }
+        }
+        if (!rows!) throw lastErr;
+      }
 
       const hasMore = rows.length > limit;
       const resultRows = hasMore ? rows.slice(0, limit) : rows;
 
-      const events = resultRows.map((row) => ({
-        seq: row.seq,
-        type: row.type,
-        data: JSON.parse(row.data as string),
-        ts: row.ts,
-      }));
+      const events = resultRows.map((row) => {
+        let data: unknown;
+        try {
+          data = JSON.parse(row.data as string);
+        } catch (err) {
+          // One bad row used to throw and 500 the whole endpoint, hiding all
+          // valid events for the session. Surface the parse failure in-band
+          // so callers can still iterate the rest of the trajectory.
+          const msg = err instanceof Error ? err.message : String(err);
+          data = { _parse_error: msg, _raw_preview: String(row.data ?? "").slice(0, 200) };
+        }
+        return {
+          seq: row.seq,
+          type: row.type,
+          data,
+          ts: row.ts,
+        };
+      });
+
+      // Resolve any spilled events back from R2 so callers see full payloads.
+      // Lazy + parallel — small events skip the R2 fetch entirely.
+      if (this.env.FILES_BUCKET) {
+        await Promise.all(
+          events.map(async (e) => {
+            const meta = (e.data as { _spilled?: { r2_key: string; original_bytes: number } } | null)?._spilled;
+            if (!meta) return;
+            try {
+              const obj = await this.env.FILES_BUCKET!.get(meta.r2_key);
+              if (!obj) {
+                (e.data as Record<string, unknown>)._spill_lost = true;
+                return;
+              }
+              const text = await obj.text();
+              try {
+                e.data = JSON.parse(text);
+              } catch (parseErr) {
+                (e.data as Record<string, unknown>)._spill_parse_error = (parseErr instanceof Error ? parseErr.message : String(parseErr)).slice(0, 200);
+              }
+            } catch (err) {
+              (e.data as Record<string, unknown>)._spill_get_error = (err instanceof Error ? err.message : String(err)).slice(0, 200);
+            }
+          }),
+        );
+      }
 
       const lastSeq = resultRows.length > 0 ? resultRows[resultRows.length - 1].seq : null;
       return Response.json({
@@ -1112,6 +1382,53 @@ export class SessionDO extends Agent<Env, SessionState> {
       });
     }
 
+    // POST /exec — run a raw shell command in this session's sandbox
+    // WITHOUT going through the agent. Designed for eval / verifier
+    // workflows where the harness needs to run pytest (or similar) on
+    // post-agent state without trusting the agent to invoke a tool.
+    // Returns { exit_code, output } where output is the combined
+    // stdout+stderr text. Body:
+    //   { command: string, timeout_ms?: number (default 60000) }
+    if (request.method === "POST" && url.pathname === "/exec") {
+      const body = (await request.json()) as { command?: string; timeout_ms?: number };
+      const command = body.command;
+      const timeoutMs = body.timeout_ms ?? 60_000;
+      if (!command || typeof command !== "string") {
+        return new Response(JSON.stringify({ error: "command (string) required" }), {
+          status: 400,
+          headers: { "content-type": "application/json" },
+        });
+      }
+      try {
+        const sandbox = this.getOrCreateSandbox();
+        // Wrap multi-line / set-e style scripts in a subshell `( ... )` so
+        // they run in a child process. Otherwise commands like `set -e`
+        // followed by a failing step (e.g. pytest exit 1) terminate the
+        // underlying persistent shell session — every subsequent exec
+        // fails with SessionTerminatedError. Subshell parens preserve
+        // newlines verbatim (unlike `bash -c "<json-stringified>"` which
+        // would escape \n as a literal backslash-n).
+        const needsSubshell = command.includes("\n") || /\bset\s+-[a-z]*e[a-z]*\b/.test(command);
+        const wrapped = needsSubshell ? `( ${command}\n)` : command;
+        const raw = await sandbox.exec(wrapped, timeoutMs);
+        // sandbox.exec returns "exit=N\n<merged-output>"
+        const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+        const exit_code = m ? parseInt(m[1], 10) : -1;
+        const output = m ? m[2] : raw;
+        return Response.json({
+          exit_code,
+          output: output.length > 100_000 ? output.slice(0, 100_000) + "\n...(truncated)" : output,
+          truncated: output.length > 100_000,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return Response.json(
+          { exit_code: -1, output: `sandbox exec error: ${msg}`, error: true },
+          { status: 500 },
+        );
+      }
+    }
+
     // GET /threads — list all threads in this session
     if (request.method === "GET" && url.pathname === "/threads") {
       const threadList = Array.from(this.threads.entries()).map(([id, t]) => ({
@@ -1126,7 +1443,7 @@ export class SessionDO extends Agent<Env, SessionState> {
     const threadEventsMatch = url.pathname.match(/^\/threads\/([^/]+)\/events$/);
     if (request.method === "GET" && threadEventsMatch) {
       const threadId = threadEventsMatch[1];
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       const allEvents = history.getEvents();
       const threadEvents = allEvents.filter((e: any) => e.thread_id === threadId);
       return Response.json({ data: threadEvents });
@@ -1134,7 +1451,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     // GET /full-status — session status with usage and outcome evaluations
     if (request.method === "GET" && url.pathname === "/full-status") {
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       const allEvents = history.getEvents();
 
       // Collect outcome evaluations
@@ -1239,6 +1556,14 @@ export class SessionDO extends Agent<Env, SessionState> {
    * answer turns) skip the 3s container cold-start entirely; turns that do
    * use tools overlap the warmup with model fetch/TTFT.
    *
+   * Container-recycle detection: CF Sandbox container has its own idle
+   * lifecycle independent of SessionDO. If it dies (sleepAfter, OOM, host
+   * migration), our cached sandboxWarmupPromise still resolves but the
+   * underlying /workspace is empty. We probe a per-warmup marker file
+   * (/tmp/.oma-warm) — if missing or value-mismatched, invalidate cache
+   * and re-warmup so restoreWorkspaceBackup runs again. Probe is one
+   * `cat`, throttled to once per 30s to bound steady-state cost.
+   *
    * The non-method properties and helpers like setEnvVars are passed
    * through synchronously — they don't talk to the container itself.
    */
@@ -1253,13 +1578,42 @@ export class SessionDO extends Agent<Env, SessionState> {
       "mountWorkspace",
       "gitCheckout",
     ]);
+    const ensureWarm = async (): Promise<void> => {
+      // Cold path — warmup never ran or was reset by a recycle below.
+      if (!this.sandboxWarmupPromise) {
+        await this.warmUpSandbox();
+        return;
+      }
+      // Warm path — wait for the cached promise (handles concurrent calls).
+      await this.sandboxWarmupPromise;
+      // Probe marker every call. Container can recycle (OOM, sleepAfter,
+      // host migration) between any two calls; throttling the probe
+      // misses fast-cluster-then-die patterns. ~5ms cost per tool call.
+      let probed: string | null = null;
+      try {
+        const raw_out = await raw.exec("cat /tmp/.oma-warm 2>/dev/null");
+        const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(raw_out);
+        probed = (m && m[1] === "0") ? m[2].trim() : "";
+      } catch { probed = null; }
+      if (probed === this.currentWarmupGen) return; // alive, marker matches
+      // Container recycled — reset cache and re-warm now (which includes
+      // restoreWorkspaceBackup) so the upcoming user call sees /workspace
+      // restored, not an empty fresh container.
+      logWarn(
+        { op: "session_do.warmup.recycle_detected", session_id: this.state.session_id, expected: this.currentWarmupGen, got: probed },
+        "container marker mismatch — re-warming",
+      );
+      this.sandboxWarmupPromise = null;
+      this.currentWarmupGen = null;
+      await this.warmUpSandbox();
+    };
     return new Proxy(raw, {
       get: (target, prop, receiver) => {
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") return value;
         if (!needsWarm.has(prop as string)) return value.bind(target);
         return async (...args: unknown[]) => {
-          await this.warmUpSandbox();
+          await ensureWarm();
           return (value as (...a: unknown[]) => unknown).apply(target, args);
         };
       },
@@ -1330,7 +1684,7 @@ export class SessionDO extends Agent<Env, SessionState> {
   private warmUpSandbox(): Promise<void> {
     if (!this.sandboxWarmupPromise) {
       this.sandboxWarmupPromise = this.doWarmUpSandbox().catch((err) => {
-        // Clear cached promise on failure so next call retries
+        // Clear cached promise on failure so next call retries.
         this.sandboxWarmupPromise = null;
         throw err;
       });
@@ -1364,11 +1718,6 @@ export class SessionDO extends Agent<Env, SessionState> {
         throw new Error(`Sandbox container failed to start after 10 attempts. Last error: ${lastError}`);
       }
 
-      // Mount R2-backed /workspace for persistent file storage
-      if (sandbox instanceof CloudflareSandbox) {
-        await sandbox.mountWorkspace();
-      }
-
       // Restore the most recent workspace backup for (tenant, environment)
       // BEFORE mountResources runs, so the agent picks up where it left
       // off. Per CF's recommended pattern (changelog 2026-02-23, "pick up
@@ -1386,6 +1735,27 @@ export class SessionDO extends Agent<Env, SessionState> {
         this.env.AUTH_DB
       ) {
         try {
+          // If /tmp/.oma-warm is present, the container survived since a
+          // previous warmup — /workspace is already populated by whoever
+          // wrote the marker. Skip restore: re-running it would download
+          // the latest backup over a live /workspace, throwing away any
+          // writes since that backup. This is the path that lets a verify
+          // exec arriving N minutes after the agent turn just see the
+          // files the agent wrote, no D1 round-trip needed.
+          let containerWarmAlready = false;
+          try {
+            const probed = await sandbox.exec("cat /tmp/.oma-warm 2>/dev/null");
+            const m = /^exit=(-?\d+)\n([\s\S]*)$/.exec(probed);
+            if (m && m[1] === "0" && m[2].trim().length > 0) {
+              containerWarmAlready = true;
+              this.currentWarmupGen = m[2].trim();
+              logWarn(
+                { op: "session_do.warmup.skip_restore_container_alive", session_id: this.state.session_id, marker: this.currentWarmupGen },
+                "skipping workspace restore — container still warm with previous /workspace",
+              );
+            }
+          } catch { /* probe failed → fall through to normal restore path */ }
+
           let hasGitRepo = false;
           if (this.state.session_id) {
             const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
@@ -1394,7 +1764,9 @@ export class SessionDO extends Agent<Env, SessionState> {
               (r) => r.type === "github_repository" || r.type === "github_repo",
             );
           }
-          if (hasGitRepo) {
+          if (containerWarmAlready) {
+            // already short-circuited above with a warning log
+          } else if (hasGitRepo) {
             logWarn(
               { op: "session_do.warmup.skip_restore_github_repo", session_id: this.state.session_id },
               "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
@@ -1404,10 +1776,23 @@ export class SessionDO extends Agent<Env, SessionState> {
               this.env.AUTH_DB,
               this.state.tenant_id,
               this.state.environment_id,
+              this.state.session_id ?? "unknown",
               Date.now(),
             );
             if (handle) {
-              const ok = await sandbox.restoreWorkspaceBackup(handle);
+              const restoreStart = Date.now();
+              const result = await sandbox.restoreWorkspaceBackup(handle);
+              const restoreMs = Date.now() - restoreStart;
+              const ok = result.ok;
+              const restoreError = result.error;
+              try {
+                this.persistAndBroadcastEvent({
+                  type: "session.warning",
+                  message: ok
+                    ? `workspace_restored backup_id=${handle.id} elapsed_ms=${restoreMs}`
+                    : `workspace_restore_failed backup_id=${handle.id} elapsed_ms=${restoreMs} error=${(restoreError ?? "unknown").slice(0, 300)}`,
+                } as unknown as SessionEvent);
+              } catch {}
               if (!ok) {
                 logWarn(
                   {
@@ -1416,10 +1801,19 @@ export class SessionDO extends Agent<Env, SessionState> {
                     tenant_id: this.state.tenant_id,
                     environment_id: this.state.environment_id,
                     backup_id: handle.id,
+                    elapsed_ms: restoreMs,
+                    error: restoreError,
                   },
-                  "workspace backup restore returned false (likely expired) — continuing with empty workspace",
+                  "workspace backup restore failed — continuing with empty workspace",
                 );
               }
+            } else {
+              try {
+                this.persistAndBroadcastEvent({
+                  type: "session.warning",
+                  message: `workspace_restore_skipped reason=no-backup-for-session`,
+                } as unknown as SessionEvent);
+              } catch {}
             }
           }
         } catch (err) {
@@ -1573,18 +1967,64 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
 
       // Bind the outbound handler with this session's identifying context.
-      // Per-call vault lookup happens in main via env.MAIN_MCP.outboundForward
-      // — the agent worker (and the sandbox itself) never see plaintext
-      // vault credentials. See apps/agent/src/oma-sandbox.ts file header.
-      // Always bind when we have a session_id; the handler itself decides
-      // per-call whether a credential exists for the request's hostname.
+      // Per-call vault lookup happens in main via env.MAIN_MCP.lookupOutboundCredential
+      // — the agent worker briefly holds the bearer token to inject the
+      // Authorization header. Container never sees plaintext (auth is
+      // added on agent worker side; SDK's TLS-MITM re-encrypts to
+      // container). The handler is a transparent HTTP proxy: body
+      // streams through, response is returned unchanged.
+      //
+      // **MUST call this for every session, vault or not.** Cloudflare's
+      // sandbox-container PID 1 runs trustRuntimeCert() at startup which
+      // polls /etc/cloudflare/certs/cloudflare-containers-ca.crt for 5s.
+      // The cert is only pushed by the platform once `setOutboundHandler`
+      // has been called from the worker side. Skipping this call for
+      // no-vault sessions made every such container exit(1) at the 5s
+      // mark with "Certificate not found, refusing to start without
+      // HTTPS interception enabled" — see cf-sandbox-cert-demo bisection
+      // 2026-05-04. The handler itself is a no-op transparent proxy when
+      // no vault credentials match the request host (oma-sandbox.ts:82-97).
+      //
+      // R2 traffic (createBackup / restoreBackup squashfs PUT/GET/HEAD)
+      // is routed away from this catch-all by the static `outboundByHost`
+      // entry in oma-sandbox.ts — without that bypass the materialize-and-
+      // re-PUT flow corrupts the squashfs blob (sandbox-sdk#619).
       if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id) {
         await sandbox.setOutboundContext({
           tenantId: this.state.tenant_id,
           sessionId: this.state.session_id,
         });
       }
+
+      // Hand backup context to OmaSandbox so its onActivityExpired hook
+      // (sleepAfter teardown) writes the final /workspace snapshot scoped
+      // to this (tenant, env, session). Container DO is keyed by sessionId,
+      // so this only needs to land once per warmup. Restoration on the
+      // next session uses (tenant, env) — see findWorkspaceBackup above.
+      if (sandbox.setBackupContext && this.state.session_id && this.state.tenant_id && this.state.environment_id) {
+        await sandbox.setBackupContext({
+          tenantId: this.state.tenant_id,
+          environmentId: this.state.environment_id,
+          sessionId: this.state.session_id,
+        });
+      }
+
+      // Drop a per-warmup marker so the proxy can detect a recycled
+      // container later (just check `cat /tmp/.oma-warm` matches the
+      // gen we set). /tmp clears on restart so the absence IS the signal.
+      const gen = crypto.randomUUID().slice(0, 12);
+      try {
+        await sandbox.exec(`echo ${gen} > /tmp/.oma-warm`);
+        this.currentWarmupGen = gen;
+      } catch (err) {
+        logWarn(
+          { op: "session_do.warmup.write_marker", session_id: this.state.session_id, err },
+          "warmup marker write failed; proxy will pessimistically re-warm",
+        );
+        this.currentWarmupGen = null;
+      }
     } catch (err) {
+      this.currentWarmupGen = null;
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
       this.broadcastEvent({
         type: "agent.message",
@@ -1614,7 +2054,7 @@ export class SessionDO extends Agent<Env, SessionState> {
    */
   private persistAndBroadcastEvent(event: SessionEvent) {
     try {
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       history.append(event);
     } catch (err) {
       console.warn(`[persistAndBroadcastEvent] history.append failed: ${(err as Error).message}`);
@@ -1908,11 +2348,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     try {
       const sched = await this.schedule(3, "pollBackgroundTasks");
       // Emit debug event so we can verify schedule was set
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       history.append({ type: "span.background_task_scheduled", task_id: taskId, schedule_id: sched?.id } as any);
       this.broadcastEvent({ type: "span.background_task_scheduled", task_id: taskId, schedule_id: sched?.id } as any);
     } catch (err) {
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       history.append({ type: "session.error", error: `watchBackgroundTask schedule failed: ${err}` });
       this.broadcastEvent({ type: "session.error", error: `watchBackgroundTask schedule failed: ${err}` });
     }
@@ -1932,17 +2372,49 @@ export class SessionDO extends Agent<Env, SessionState> {
     );
 
     const tasks = this.ctx.storage.sql.exec(
-      `SELECT task_id, pid, output_file FROM background_tasks`
+      `SELECT task_id, pid, output_file, created_at FROM background_tasks`
     ).toArray();
 
     if (!tasks.length) return;
 
     const sandbox = this.getOrCreateSandbox();
     let anyPending = false;
+    const BG_TASK_MAX_LIFETIME_MS = 30 * 60 * 1000;
 
     for (const task of tasks) {
-      const { task_id, pid, output_file } = task as { task_id: string; pid: string; output_file: string };
+      const { task_id, pid, output_file, created_at } = task as { task_id: string; pid: string; output_file: string; created_at: string };
       try {
+        // Hard lifetime cap — bg tasks can keep the container (and the
+        // worker billing meter) alive forever otherwise. SIGKILL the pid,
+        // inject a synthetic user.message so the agent sees the kill and
+        // doesn't block on a notification that's never coming.
+        const ageMs = Date.now() - Date.parse(created_at + "Z");
+        const overCap = Number.isFinite(ageMs) && ageMs > BG_TASK_MAX_LIFETIME_MS;
+        if (overCap) {
+          let killNote = "";
+          if (pid && /^\d+$/.test(pid)) {
+            try { await sandbox.exec(`kill -9 ${pid} 2>/dev/null; true`, 5000); } catch (e) {
+              killNote = ` (kill failed: ${(e as Error).message ?? e})`;
+            }
+          }
+          let output = "";
+          try { output = await sandbox.readFile(output_file); } catch {}
+          const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
+          const ageMin = Math.round(ageMs / 60000);
+          const notifEvent: SessionEvent = {
+            type: "user.message",
+            content: [{
+              type: "text",
+              text: `<task_notification>\nBackground task ${task_id} exceeded the 30-minute lifetime cap and was killed${killNote}.\nRan for: ${ageMin} min\nOutput file (partial): ${output_file}\n\n${output.slice(0, 3000)}\n</task_notification>`,
+            }],
+          };
+          history.append(notifEvent);
+          this.broadcastEvent(notifEvent);
+          this.ctx.storage.sql.exec(`DELETE FROM background_tasks WHERE task_id = ?`, task_id);
+          await this.drainEventQueue();
+          continue;
+        }
+
         // Check if process is still running
         let taskDone = false;
         if (!pid || pid === "undefined" || !/^\d+$/.test(pid)) {
@@ -1966,7 +2438,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         let output = "";
         try { output = await sandbox.readFile(output_file); } catch {}
 
-        const history = new SqliteHistory(this.ctx.storage.sql);
+        const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
         const notifEvent: SessionEvent = {
           type: "user.message",
           content: [{
@@ -1991,7 +2463,9 @@ export class SessionDO extends Agent<Env, SessionState> {
       }
     }
 
-    // Schedule next poll if there are still pending tasks
+    // Schedule next poll if there are still pending tasks. Container
+    // sleepAfter (20m) is comfortably longer than typical bg-task wait,
+    // and each sandbox.exec() in the next poll auto-renews the timer.
     if (anyPending) {
       try {
         await this.schedule(5, "pollBackgroundTasks");
@@ -2120,6 +2594,7 @@ export class SessionDO extends Agent<Env, SessionState> {
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
+        keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
       },
     };
 
@@ -2161,7 +2636,7 @@ export class SessionDO extends Agent<Env, SessionState> {
 
     const agent = await this.getAgentConfig(agentId);
     if (!agent) {
-      const history = new SqliteHistory(this.ctx.storage.sql);
+      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
       const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
       history.append(errorEvent);
       this.broadcastEvent(errorEvent);
@@ -2169,7 +2644,7 @@ export class SessionDO extends Agent<Env, SessionState> {
       return;
     }
 
-    const history = new SqliteHistory(this.ctx.storage.sql);
+    const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
     // Reuse session-level sandbox (singleton) — files persist across turns.
     // Returned object is a lazy proxy: the underlying container is warmed up
@@ -2441,9 +2916,13 @@ export class SessionDO extends Agent<Env, SessionState> {
       });
     }
 
-    // Create an abort controller for this execution
+    // Create an abort controller for this execution. Stall detection now
+    // lives inside default-loop.ts (in-closure setTimeout next to the
+    // streamText call) so we no longer compose with a DO-instance
+    // controller here.
     const abortController = new AbortController();
     this.currentAbortController = abortController;
+    const effectiveAbortSignal = abortController.signal;
 
     // --- Harness receives a fully-prepared context ---
     const ctx: HarnessContext = {
@@ -2488,7 +2967,8 @@ export class SessionDO extends Agent<Env, SessionState> {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
         pendingConfirmations: [],
-        abortSignal: abortController.signal,
+        abortSignal: effectiveAbortSignal,
+        keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
       },
     };
 
@@ -2710,86 +3190,11 @@ export class SessionDO extends Agent<Env, SessionState> {
     } finally {
       this.currentAbortController = null;
       this.setState({ ...this.state, status: "idle" });
-      // Snapshot /workspace at turn end (debounced — see maybeBackupWorkspace).
-      // CF Sandbox kills the container + deletes /workspace after 10 minutes
-      // idle, so without a fresh snapshot here the next session resumes from
-      // the previous turn's state at best, empty at worst. Fire-and-forget
-      // via waitUntil so it doesn't add latency to the turn's completion.
-      this.ctx.waitUntil(this.maybeBackupWorkspace());
+      // Workspace backup is fired by OmaSandbox.onActivityExpired when the
+      // container's sleepAfter elapses (see oma-sandbox.ts) — exactly one
+      // snapshot per quiet period. Explicit /destroy snapshots eagerly via
+      // sandbox.snapshotWorkspaceNow(). Per-turn backup is intentionally off.
     }
-  }
-
-  /**
-   * Snapshot /workspace into BACKUP_BUCKET via createBackup + record the
-   * handle in D1. Triggers:
-   *   - End of each agent turn (debounced, fire-and-forget via waitUntil)
-   *   - Session destroy (force=true, awaited so it completes before
-   *     sandbox.destroy())
-   *
-   * Per-turn debouncing matters because CF Sandbox's 10-minute idle timeout
-   * stops the container AND deletes its filesystem. Without a fresh backup
-   * since the last meaningful state change, the next session loses that
-   * work. Debounce keeps cost reasonable (no spam during chatty turns) but
-   * the destroy path always forces a final snapshot.
-   *
-   * Best-effort throughout: failures are logged + swallowed. A missing
-   * backup means the next session starts from the previous backup or
-   * empty — never a hard error for the user.
-   */
-  private async maybeBackupWorkspace(opts?: { force?: boolean }): Promise<void> {
-    if (
-      !(this.sandbox instanceof CloudflareSandbox) ||
-      !this.state.tenant_id ||
-      !this.state.environment_id ||
-      !this.env.AUTH_DB
-    ) {
-      return;
-    }
-    const sandbox = this.sandbox;
-    const tenantId = this.state.tenant_id;
-    const environmentId = this.state.environment_id;
-    const authDb = this.env.AUTH_DB;
-    const sessionId = this.state.session_id;
-    // Coordination (debounce + in-flight coalesce) lives in workspace-backups.ts
-    // as a pure function so it's unit-testable. State adapter routes the get/set
-    // through the SessionDO's own instance fields so the existing storage model
-    // (mutable instance fields) is preserved.
-    // eslint-disable-next-line @typescript-eslint/no-this-alias
-    const this_ = this;
-    const state: BackupCoordinatorState = {
-      get lastBackupAt(): number { return this_.lastWorkspaceBackupAt; },
-      set lastBackupAt(v: number) { this_.lastWorkspaceBackupAt = v; },
-      get inFlight(): Promise<void> | null { return this_.workspaceBackupInFlight; },
-      set inFlight(v: Promise<void> | null) { this_.workspaceBackupInFlight = v; },
-    };
-    return coordinateBackup(
-      state,
-      {
-        debounceMs: SessionDO.WORKSPACE_BACKUP_DEBOUNCE_MS,
-        now: () => Date.now(),
-        doBackup: async () => {
-          const handle = await sandbox.createWorkspaceBackup({
-            name: `session-${sessionId ?? "unknown"}`,
-            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-          });
-          if (!handle) return;
-          await recordWorkspaceBackup(authDb, {
-            tenantId,
-            environmentId,
-            handle,
-            nowMs: Date.now(),
-            ttlSec: DEFAULT_WORKSPACE_BACKUP_TTL_SEC,
-            sessionId,
-          });
-        },
-      },
-      opts,
-    ).catch((err: unknown) => {
-      logWarn(
-        { op: "session_do.workspace_backup", session_id: sessionId, force: !!opts?.force, err },
-        "workspace backup failed (best-effort)",
-      );
-    });
   }
 
   /**
@@ -2808,4 +3213,489 @@ export class SessionDO extends Agent<Env, SessionState> {
     }
     return String(err) || "Unknown error";
   }
+
+  // ═══════════════════════════════════════════════════════════════════════
+  // cf-agents replacement primitives (state, schedule, alarm, runFiber,
+  // keepAlive). Schema + algorithms inherited from cf-agents v0.11.2 so
+  // existing prod DOs migrate transparently — all SQL row layouts and
+  // callback-name conventions match what cf-agents wrote.
+  // ═══════════════════════════════════════════════════════════════════════
+
+  // ── State (cf_agents_state, single row) ────────────────────────────────
+
+  get state(): SessionState {
+    if (this._state === undefined) {
+      // Defensive — constructor calls _loadStateFromSql before any user code
+      // runs, so this should be impossible. If it fires, something called
+      // .state before super() ran.
+      throw new Error("SessionDO.state read before init");
+    }
+    return this._state;
+  }
+
+  setState(next: SessionState): void {
+    this._state = next;
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)`,
+      STATE_ROW_ID,
+      JSON.stringify(next),
+    );
+  }
+
+  private _loadStateFromSql(): void {
+    const rows = this.ctx.storage.sql
+      .exec<{ state: string | null }>(
+        `SELECT state FROM cf_agents_state WHERE id = ?`,
+        STATE_ROW_ID,
+      )
+      .toArray();
+    if (rows.length > 0 && rows[0].state) {
+      try {
+        this._state = JSON.parse(rows[0].state) as SessionState;
+        return;
+      } catch (err) {
+        console.warn(
+          `[session_do] failed to parse persisted state, falling back to INITIAL_SESSION_STATE: ${(err as Error).message}`,
+        );
+      }
+    }
+    // First boot, or corrupted — seed with INITIAL_SESSION_STATE and persist.
+    this._state = { ...INITIAL_SESSION_STATE };
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_state (id, state) VALUES (?, ?)`,
+      STATE_ROW_ID,
+      JSON.stringify(this._state),
+    );
+  }
+
+  // ── Schema bootstrap (cf_agents_state / cf_agents_schedules / cf_agents_runs) ──
+
+  private _ensureCfAgentsSchema(): void {
+    // Idempotent. Schema lifted verbatim from cf-agents v0.11.2 so existing
+    // prod rows survive the base-class swap. We don't bother with the
+    // schema-version migration logic from cf-agents (CURRENT_SCHEMA_VERSION
+    // tracking) because we're at the latest schema and only do create-IF-NOT-EXISTS.
+    const sql = this.ctx.storage.sql;
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS cf_agents_state (
+        id TEXT PRIMARY KEY NOT NULL,
+        state TEXT
+      )
+    `);
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS cf_agents_schedules (
+        id TEXT PRIMARY KEY NOT NULL,
+        callback TEXT,
+        payload TEXT,
+        type TEXT NOT NULL CHECK(type IN ('scheduled', 'delayed', 'cron', 'interval')),
+        time INTEGER,
+        delayInSeconds INTEGER,
+        cron TEXT,
+        intervalSeconds INTEGER,
+        running INTEGER DEFAULT 0,
+        created_at INTEGER DEFAULT (unixepoch()),
+        execution_started_at INTEGER,
+        retry_options TEXT
+      )
+    `);
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS cf_agents_runs (
+        id TEXT PRIMARY KEY NOT NULL,
+        name TEXT NOT NULL,
+        snapshot TEXT,
+        created_at INTEGER NOT NULL
+      )
+    `);
+    // Stale-row cleanup: the alarm-based stall detector was removed in the
+    // Gap 10 simplification, but live prod DOs still have its interval
+    // schedule rows. Each alarm tick now logs "callback not found" and
+    // force-resets the row, then re-fires — pure noise that masks real
+    // errors in observability. One-shot delete clears it.
+    sql.exec(`DELETE FROM cf_agents_schedules WHERE callback = '_oma_stallCheckHeartbeat'`);
+  }
+
+  // ── Schedule API (mirrors cf-agents) ──────────────────────────────────
+
+  /**
+   * Schedule a method to run later. `when` accepts:
+   *   - Date          → run at that absolute time
+   *   - number        → run after this many seconds
+   *   - cron string   → recurring (e.g. "0 9 * * *")
+   * `callback` is the name of a method on `this` to invoke. Payload is
+   * JSON-stringified into the row and JSON-parsed back into the first arg.
+   * Returns a Schedule with at least `.id` and `.callback`.
+   */
+  async schedule<T = unknown>(
+    when: Date | number | string,
+    callback: keyof this | string,
+    payload?: T,
+  ): Promise<{ id: string; callback: string; type: SessionScheduleType; time: number; payload: T; cron?: string; delayInSeconds?: number }> {
+    const callbackName = String(callback);
+    if (typeof (this as unknown as Record<string, unknown>)[callbackName] !== "function") {
+      throw new Error(`this.${callbackName} is not a function`);
+    }
+    const payloadJson = JSON.stringify(payload);
+    const id = nanoid(9);
+
+    let type: SessionScheduleType;
+    let timestamp: number;
+    let cron: string | undefined;
+    let delayInSeconds: number | undefined;
+    if (when instanceof Date) {
+      type = "scheduled";
+      timestamp = Math.floor(when.getTime() / 1000);
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, time) VALUES (?, ?, ?, 'scheduled', ?)`,
+        id, callbackName, payloadJson, timestamp,
+      );
+    } else if (typeof when === "number") {
+      type = "delayed";
+      delayInSeconds = when;
+      timestamp = Math.floor(Date.now() / 1000) + when;
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, delayInSeconds, time) VALUES (?, ?, ?, 'delayed', ?, ?)`,
+        id, callbackName, payloadJson, when, timestamp,
+      );
+    } else if (typeof when === "string") {
+      type = "cron";
+      cron = when;
+      const next = parseCronExpression(when).getNextDate(new Date());
+      timestamp = Math.floor(next.getTime() / 1000);
+      this.ctx.storage.sql.exec(
+        `INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, cron, time) VALUES (?, ?, ?, 'cron', ?, ?)`,
+        id, callbackName, payloadJson, when, timestamp,
+      );
+    } else {
+      throw new Error(`Invalid schedule type: ${JSON.stringify(when)}(${typeof when}) for ${callbackName}`);
+    }
+
+    await this._scheduleNextAlarm();
+    return { id, callback: callbackName, type, time: timestamp, payload: payload as T, cron, delayInSeconds };
+  }
+
+  async scheduleEvery<T = unknown>(
+    intervalSeconds: number,
+    callback: keyof this | string,
+    payload?: T,
+  ): Promise<{ id: string; callback: string; type: "interval"; intervalSeconds: number; time: number }> {
+    if (typeof intervalSeconds !== "number" || intervalSeconds <= 0) {
+      throw new Error("intervalSeconds must be a positive number");
+    }
+    const callbackName = String(callback);
+    if (typeof (this as unknown as Record<string, unknown>)[callbackName] !== "function") {
+      throw new Error(`this.${callbackName} is not a function`);
+    }
+    const payloadJson = JSON.stringify(payload);
+    const existing = this.ctx.storage.sql
+      .exec<{ id: string; intervalSeconds: number; time: number }>(
+        `SELECT id, intervalSeconds, time FROM cf_agents_schedules WHERE type = 'interval' AND callback = ? AND intervalSeconds = ? AND payload IS ? LIMIT 1`,
+        callbackName, intervalSeconds, payloadJson,
+      )
+      .toArray();
+    if (existing.length > 0) {
+      const row = existing[0];
+      return { id: row.id, callback: callbackName, type: "interval", intervalSeconds: row.intervalSeconds, time: row.time };
+    }
+    const id = nanoid(9);
+    const timestamp = Math.floor(Date.now() / 1000) + intervalSeconds;
+    this.ctx.storage.sql.exec(
+      `INSERT OR REPLACE INTO cf_agents_schedules (id, callback, payload, type, intervalSeconds, time, running) VALUES (?, ?, ?, 'interval', ?, ?, 0)`,
+      id, callbackName, payloadJson, intervalSeconds, timestamp,
+    );
+    await this._scheduleNextAlarm();
+    return { id, callback: callbackName, type: "interval", intervalSeconds, time: timestamp };
+  }
+
+  getSchedule<T = unknown>(id: string): { id: string; callback: string; payload: T; type: string; time: number; cron?: string } | undefined {
+    const row = this.ctx.storage.sql
+      .exec<{ id: string; callback: string; payload: string; type: string; time: number; cron: string | null }>(
+        `SELECT id, callback, payload, type, time, cron FROM cf_agents_schedules WHERE id = ? LIMIT 1`,
+        id,
+      )
+      .toArray()[0];
+    if (!row) return undefined;
+    return {
+      id: row.id,
+      callback: row.callback,
+      payload: this._safeParse(row.payload) as T,
+      type: row.type,
+      time: row.time,
+      cron: row.cron ?? undefined,
+    };
+  }
+
+  getSchedules(criteria: { type?: string; timeRange?: { start?: Date; end?: Date } } = {}): Array<{
+    id: string;
+    callback: string;
+    payload: unknown;
+    type: string;
+    time: number;
+    cron?: string;
+  }> {
+    let query = "SELECT id, callback, payload, type, time, cron FROM cf_agents_schedules WHERE 1=1";
+    const params: Array<string | number> = [];
+    if (criteria.type) { query += " AND type = ?"; params.push(criteria.type); }
+    if (criteria.timeRange) {
+      const start = criteria.timeRange.start ?? new Date(0);
+      const end = criteria.timeRange.end ?? new Date(8.64e15);
+      query += " AND time >= ? AND time <= ?";
+      params.push(Math.floor(start.getTime() / 1000), Math.floor(end.getTime() / 1000));
+    }
+    return this.ctx.storage.sql
+      .exec<{ id: string; callback: string; payload: string; type: string; time: number; cron: string | null }>(query, ...params)
+      .toArray()
+      .map((row) => ({
+        id: row.id,
+        callback: row.callback,
+        payload: this._safeParse(row.payload),
+        type: row.type,
+        time: row.time,
+        cron: row.cron ?? undefined,
+      }));
+  }
+
+  async cancelSchedule(id: string): Promise<boolean> {
+    const before = this.ctx.storage.sql
+      .exec<{ id: string }>(`SELECT id FROM cf_agents_schedules WHERE id = ? LIMIT 1`, id)
+      .toArray();
+    if (before.length === 0) return false;
+    this.ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id = ?`, id);
+    await this._scheduleNextAlarm();
+    return true;
+  }
+
+  private _safeParse(s: string | null | undefined): unknown {
+    if (!s) return undefined;
+    try { return JSON.parse(s); } catch { return undefined; }
+  }
+
+  /**
+   * Pick the soonest alarm time across (a) ready due schedules, (b) hung
+   * interval reset, (c) keepAlive heartbeat (when refs > 0). Algorithm
+   * verbatim from cf-agents v0.11.2 _scheduleNextAlarm.
+   */
+  private async _scheduleNextAlarm(): Promise<void> {
+    const nowMs = Date.now();
+    const hungCutoffSec = Math.floor(nowMs / 1000) - HUNG_SCHEDULE_TIMEOUT_SECONDS;
+    const readyRows = this.ctx.storage.sql
+      .exec<{ time: number }>(
+        `SELECT time FROM cf_agents_schedules WHERE type != 'interval' OR running = 0 OR coalesce(execution_started_at, 0) <= ? ORDER BY time ASC LIMIT 1`,
+        hungCutoffSec,
+      )
+      .toArray();
+    const recoveringRows = this.ctx.storage.sql
+      .exec<{ execution_started_at: number | null }>(
+        `SELECT execution_started_at FROM cf_agents_schedules WHERE type = 'interval' AND running = 1 AND coalesce(execution_started_at, 0) > ? ORDER BY execution_started_at ASC LIMIT 1`,
+        hungCutoffSec,
+      )
+      .toArray();
+    let nextMs: number | null = null;
+    if (readyRows.length > 0) nextMs = Math.max(readyRows[0].time * 1000, nowMs + 1);
+    if (recoveringRows.length > 0 && recoveringRows[0].execution_started_at !== null) {
+      const recoveryMs = (recoveringRows[0].execution_started_at + HUNG_SCHEDULE_TIMEOUT_SECONDS) * 1000;
+      nextMs = nextMs === null ? recoveryMs : Math.min(nextMs, recoveryMs);
+    }
+    if (this._keepAliveRefs > 0) {
+      const keepAliveMs = nowMs + KEEP_ALIVE_INTERVAL_MS;
+      nextMs = nextMs === null ? keepAliveMs : Math.min(nextMs, keepAliveMs);
+    }
+    if (nextMs !== null) {
+      await this.ctx.storage.setAlarm(nextMs);
+    } else {
+      await this.ctx.storage.deleteAlarm();
+    }
+  }
+
+  /**
+   * Alarm entry point. Fired by CF runtime when setAlarm() time is reached.
+   * Dispatches all due schedules in time order, then runs housekeeping
+   * (orphan-fiber recovery), then re-arms the next alarm.
+   */
+  async alarm(): Promise<void> {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const due = this.ctx.storage.sql
+      .exec<{
+        id: string;
+        callback: string;
+        payload: string;
+        type: string;
+        cron: string | null;
+        intervalSeconds: number | null;
+        running: number;
+        execution_started_at: number | null;
+      }>(`SELECT id, callback, payload, type, cron, intervalSeconds, running, execution_started_at FROM cf_agents_schedules WHERE time <= ?`, nowSec)
+      .toArray();
+
+    for (const row of due) {
+      // Skip interval rows whose previous execution is still running unless
+      // it's been hung past the timeout (then forcibly reset).
+      if (row.type === "interval" && row.running === 1) {
+        const startedAt = row.execution_started_at ?? 0;
+        const elapsed = nowSec - startedAt;
+        if (elapsed < HUNG_SCHEDULE_TIMEOUT_SECONDS) {
+          continue;
+        }
+        console.warn(`[schedule] forcing reset of hung interval schedule ${row.id} (started ${elapsed}s ago)`);
+      }
+      if (row.type === "interval") {
+        this.ctx.storage.sql.exec(
+          `UPDATE cf_agents_schedules SET running = 1, execution_started_at = ? WHERE id = ?`,
+          nowSec, row.id,
+        );
+      }
+
+      const callback = (this as unknown as Record<string, unknown>)[row.callback];
+      if (typeof callback !== "function") {
+        console.error(`[schedule] callback ${row.callback} not found on SessionDO; skipping ${row.id}`);
+        continue;
+      }
+      let parsedPayload: unknown;
+      try { parsedPayload = JSON.parse(row.payload); }
+      catch (err) {
+        console.error(`[schedule] payload parse failed for ${row.id} (${row.callback}):`, err);
+        // Delete the unparseable row so the alarm doesn't loop on it forever.
+        this.ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id = ?`, row.id);
+        continue;
+      }
+      try {
+        await (callback as (p: unknown, r: unknown) => Promise<unknown>).call(this, parsedPayload, row);
+      } catch (err) {
+        console.error(`[schedule] callback "${row.callback}" (${row.id}) threw:`, err);
+        // Don't crash the alarm — log and continue. cf-agents has retry options
+        // but we don't use them in any current callsite.
+      }
+
+      // Reschedule cron / interval, delete one-shots
+      if (row.type === "cron" && row.cron) {
+        try {
+          const nextTime = parseCronExpression(row.cron).getNextDate(new Date());
+          const nextSec = Math.floor(nextTime.getTime() / 1000);
+          this.ctx.storage.sql.exec(`UPDATE cf_agents_schedules SET time = ? WHERE id = ?`, nextSec, row.id);
+        } catch (err) {
+          console.error(`[schedule] cron parse failed during reschedule for ${row.id}:`, err);
+          this.ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id = ?`, row.id);
+        }
+      } else if (row.type === "interval") {
+        const interval = row.intervalSeconds ?? 0;
+        const nextSec = Math.floor(Date.now() / 1000) + interval;
+        this.ctx.storage.sql.exec(
+          `UPDATE cf_agents_schedules SET running = 0, execution_started_at = NULL, time = ? WHERE id = ?`,
+          nextSec, row.id,
+        );
+      } else {
+        this.ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id = ?`, row.id);
+      }
+    }
+
+    // Housekeeping: orphan-fiber recovery
+    await this._checkRunFibers();
+
+    // Container keepalive: while there's at least one background_tasks row,
+    // ping the sandbox container to reset its sleepAfter timer. Means
+    // long-running `python script.py &` jobs that the agent is waiting on
+    // don't get killed by the 5-minute idle TTL. Cheap (~5 ms RPC).
+    try {
+      const rows = this.ctx.storage.sql
+        .exec("SELECT 1 FROM background_tasks LIMIT 1")
+        .toArray();
+      if (rows.length > 0) {
+        const sb = this.getOrCreateSandbox();
+        if (typeof (sb as { renewActivityTimeout?: () => Promise<void> }).renewActivityTimeout === "function") {
+          await (sb as { renewActivityTimeout: () => Promise<void> }).renewActivityTimeout();
+        }
+      }
+    } catch {
+      // background_tasks table missing or container down — alarm continues
+    }
+
+    await this._scheduleNextAlarm();
+  }
+
+  // ── Fiber API (cf_agents_runs, orphan recovery) ────────────────────────
+
+  /**
+   * Run an async function as a "durable fiber". The DO row is registered in
+   * cf_agents_runs at start, deleted on completion. If the DO is evicted
+   * mid-execution, the row remains and is detected as an orphan by
+   * `_checkRunFibers` on the next alarm wake — which then dispatches
+   * `onFiberRecovered` (overridden by SessionDO).
+   *
+   * Skip the cf-agents `stash`/AsyncLocalStorage mechanism entirely —
+   * turn-runtime.ts has its own snapshot/recovery model in Primitive 2.
+   */
+  async runFiber<T>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>): Promise<T> {
+    const id = nanoid();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO cf_agents_runs (id, name, snapshot, created_at) VALUES (?, ?, NULL, ?)`,
+      id, name, Date.now(),
+    );
+    this._runFiberActiveFibers.add(id);
+    const dispose = await this.keepAlive();
+    try {
+      return await fn({ id, snapshot: null });
+    } finally {
+      this._runFiberActiveFibers.delete(id);
+      this.ctx.storage.sql.exec(`DELETE FROM cf_agents_runs WHERE id = ?`, id);
+      dispose();
+    }
+  }
+
+  private async _checkRunFibers(): Promise<void> {
+    if (this._runFiberRecoveryInProgress) return;
+    this._runFiberRecoveryInProgress = true;
+    try {
+      const rows = this.ctx.storage.sql
+        .exec<{ id: string; name: string; snapshot: string | null }>(
+          `SELECT id, name, snapshot FROM cf_agents_runs`,
+        )
+        .toArray();
+      for (const row of rows) {
+        if (this._runFiberActiveFibers.has(row.id)) continue;
+        let snapshot: unknown = null;
+        if (row.snapshot) try { snapshot = JSON.parse(row.snapshot); }
+        catch { console.warn(`[fiber] corrupted snapshot for ${row.id}, treating as null`); }
+        try {
+          await this.onFiberRecovered({ id: row.id, name: row.name, snapshot });
+        } catch (err) {
+          console.error(`[fiber] recovery failed for "${row.name}" (${row.id}):`, err);
+        }
+        this.ctx.storage.sql.exec(`DELETE FROM cf_agents_runs WHERE id = ?`, row.id);
+      }
+    } finally {
+      this._runFiberRecoveryInProgress = false;
+    }
+  }
+
+  // ── KeepAlive API (refcount + alarm) ──────────────────────────────────
+
+  /**
+   * Increment keepAlive refcount and ensure the next alarm fires within
+   * KEEP_ALIVE_INTERVAL_MS. Returns a dispose function — call it (or use
+   * keepAliveWhile) to decrement the refcount when work is done.
+   *
+   * No actual heartbeat schedule row is written; the alarm itself does the
+   * keepalive work because `_scheduleNextAlarm` checks `_keepAliveRefs > 0`
+   * and re-arms within the interval. Same approach as cf-agents 0.11.2.
+   */
+  async keepAlive(): Promise<() => void> {
+    this._keepAliveRefs++;
+    if (this._keepAliveRefs === 1) {
+      await this._scheduleNextAlarm();
+    }
+    let disposed = false;
+    return () => {
+      if (disposed) return;
+      disposed = true;
+      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
+    };
+  }
+
+  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
+    const dispose = await this.keepAlive();
+    try { return await fn(); }
+    finally { dispose(); }
+  }
 }
+
+// ── Schedule type (cf-agents-compatible) ───────────────────────────────
+type SessionScheduleType = "scheduled" | "delayed" | "cron" | "interval";

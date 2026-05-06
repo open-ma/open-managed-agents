@@ -131,6 +131,7 @@ export interface Trajectory {
     domain_name?: string;
     data_source?: string;
     collected_at: string;
+    verifier_result?: { exit_code: number; output: string };
   };
 }
 
