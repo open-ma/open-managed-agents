@@ -1569,19 +1569,46 @@ export class SessionDO extends DurableObject<Env> {
       return Response.json({ data: threadEvents });
     }
 
-    // GET /full-status — session status with usage and outcome evaluations
+    // GET /full-status — session status with usage and outcome evaluations.
+    //
+    // Phase 4 / AMA alignment: outcome_evaluations is now sourced from
+    // `state.outcome_evaluations` (written by the supervisor loop on every
+    // terminal `span.outcome_evaluation_end`). Falls back to scanning the
+    // event log for legacy spellings (`session.outcome_evaluated`,
+    // `outcome.evaluation_end`, `span.outcome_evaluation_end`) so sessions
+    // written before this change still surface their verdicts.
     if (request.method === "GET" && url.pathname === "/full-status") {
       const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      const allEvents = history.getEvents();
 
-      // Collect outcome evaluations
-      const outcomeEvaluations = allEvents
-        .filter((e) => e.type === "session.outcome_evaluated")
-        .map((e: any) => ({
-          result: e.result,
-          iteration: e.iteration,
-          feedback: e.feedback,
-        }));
+      const stateEvaluations = this.state.outcome_evaluations ?? [];
+      let outcomeEvaluations: PersistedOutcomeEvaluation[] = stateEvaluations;
+      if (outcomeEvaluations.length === 0) {
+        // Back-compat scan. Only runs for sessions whose supervisor never
+        // wrote into state.outcome_evaluations[] (pre-Phase-4 emit
+        // sites). Cheap because the event scan is local to this DO.
+        const allEvents = history.getEvents();
+        outcomeEvaluations = allEvents
+          .filter(
+            (e) =>
+              e.type === "session.outcome_evaluated" ||
+              e.type === "outcome.evaluation_end" ||
+              e.type === "span.outcome_evaluation_end",
+          )
+          .map((e: SessionEvent) => {
+            const ev = e as Partial<PersistedOutcomeEvaluation> & {
+              feedback?: string;
+            };
+            return {
+              outcome_id: ev.outcome_id ?? "",
+              result: (ev.result ?? "needs_revision") as PersistedOutcomeEvaluation["result"],
+              iteration: typeof ev.iteration === "number" ? ev.iteration : 0,
+              explanation: ev.explanation ?? ev.feedback,
+              feedback: ev.feedback ?? ev.explanation,
+              usage: ev.usage,
+              processed_at: (e as { processed_at?: string }).processed_at,
+            };
+          });
+      }
 
       return Response.json({
         status: this.deriveStatus(),
