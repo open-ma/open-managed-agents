@@ -79,6 +79,7 @@ import { dirname, join, relative } from "node:path";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
+import { SessionRegistry } from "./registry.js";
 import { createAuth } from "./auth/config.js";
 import { createAuthMiddleware } from "./auth/middleware.js";
 import { ensureTenantSchema } from "./auth/tenants.js";
@@ -364,36 +365,12 @@ const hub = new InProcessEventStreamHub();
 //   - streams with status='streaming': finalize as 'interrupted' so the
 //     events log stays consistent (mirrors recovery.ts on the CF side).
 
-async function restoreInterruptedSessions(): Promise<void> {
-  const orphans = await sql
-    .prepare(`SELECT id FROM sessions WHERE status = 'running'`)
-    .all<{ id: string }>();
-  for (const row of orphans.results ?? []) {
-    const sid = row.id;
-    const log = newEventLog(sid);
-    await log.appendAsync({
-      type: "session.error",
-      error: "process_restart_recovery",
-      message:
-        "The session host process restarted while this session was running. Resend your last user.message to retry.",
-    } as unknown as SessionEvent);
-    await sql
-      .prepare(`UPDATE sessions SET status = 'idle', updated_at = ? WHERE id = ?`)
-      .bind(Date.now(), sid)
-      .run();
-    // Finalise any half-streamed messages so the events log is consistent.
-    await sql
-      .prepare(
-        `UPDATE session_streams
-           SET status = 'interrupted', completed_at = ?, error_text = ?
-         WHERE session_id = ? AND status = 'streaming'`,
-      )
-      .bind(Date.now(), "process_restart", sid)
-      .run();
-    console.log(`[main-node] crash-recovered session ${sid}`);
-  }
-}
-await restoreInterruptedSessions();
+// Orphan-session recovery now lives in SessionRegistry.bootstrap()
+// (constructed below, after buildSandbox / buildTools / etc are
+// defined). It calls SessionStateMachine.onWake on every session whose
+// row was left status='running' by a prior process — same code path
+// that CF SessionDO will run on alarm() in Phase 3, sourced from
+// @open-managed-agents/session-runtime.
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
@@ -623,21 +600,27 @@ v1.post("/sessions/:id/events", async (c) => {
   for (const ev of newOnes) hub.publish(sid, ev);
 
   // If any of the new events is a user.message and the session has an
-  // agent bound, kick a harness turn. Fire-and-forget — the SSE client
-  // gets streamed agent.message_chunk events as the LLM runs.
+  // agent bound, kick a harness turn through the registry. Fire-and-forget
+  // — the SSE client gets streamed agent.message_chunk events as the LLM
+  // runs.
   const hasUserMessage = body.events.some((e) => e.type === "user.message");
   if (hasUserMessage && session.agent_id) {
-    void runHarnessTurn(c.var.tenant_id, sid, session.agent_id, body.events.find(
+    const userMessage = body.events.find(
       (e) => e.type === "user.message",
-    ) as UserMessageEvent).catch((err) => {
-      console.error("[main-node] harness turn failed", err);
-      // Surface as session.error so SSE clients learn the turn died.
-      void log.appendAsync({
-        type: "session.error",
-        error: "harness_turn_failed",
-        message: err instanceof Error ? err.message : String(err),
-      } as unknown as SessionEvent);
-    });
+    ) as UserMessageEvent;
+    const agentId = session.agent_id;
+    void sessionRegistry
+      .getOrCreate(sid, c.var.tenant_id)
+      .then((entry) => entry.machine.runHarnessTurn(agentId, userMessage))
+      .catch((err) => {
+        console.error("[main-node] harness turn failed", err);
+        // Surface as session.error so SSE clients learn the turn died.
+        void log.appendAsync({
+          type: "session.error",
+          error: "harness_turn_failed",
+          message: err instanceof Error ? err.message : String(err),
+        } as unknown as SessionEvent);
+      });
   }
 
   return c.json({ accepted: body.events.length, harness_triggered: hasUserMessage && !!session.agent_id }, 202);
@@ -733,48 +716,25 @@ async function buildSandbox(
 }
 
 /**
- * Run one DefaultHarness turn for `sessionId` against `agentId` with the
- * given user message. Builds a HarnessContext on the fly: agent config from
- * agentsService, model from resolveModel + ANTHROPIC_API_KEY, tools from
- * buildTools (with the no-sandbox stub). Marks the session 'running' for the
- * duration so crash-recovery on restart finds it.
+ * SessionRegistry — single source of session lifecycle, shared by the
+ * /v1/sessions/:id/events route, the bootstrap recovery sweep, and any
+ * future reconciliation callers. The registry holds the per-process
+ * deps in its closure and lazily builds a SessionStateMachine per
+ * active session.
+ *
+ * What used to live as the inline `runHarnessTurn` function below is
+ * now SessionStateMachine.runHarnessTurn (in the @open-managed-agents/
+ * session-runtime package). Same body, different home.
  */
-async function runHarnessTurn(
-  tenantId: string,
-  sessionId: string,
-  agentId: string,
-  userMessage: UserMessageEvent,
-): Promise<void> {
-  const agent = await agentsService.get({ tenantId, agentId });
-  if (!agent) throw new Error(`agent ${agentId} not found`);
-
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
-
-  await sql
-    .prepare(`UPDATE sessions SET status = 'running', updated_at = ? WHERE id = ?`)
-    .bind(Date.now(), sessionId)
-    .run();
-
-  try {
-    const log = newEventLog(sessionId);
-    const sandboxWorkdir = join(
-      process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
-      sessionId,
-    );
-    const sandbox = await buildSandbox(sessionId, sandboxWorkdir);
-    // Wire outbound credential injection. Reads OMA_VAULT_PROXY_URL +
-    // OMA_VAULT_CA_CERT from process.env; no-op when unset (sandbox bash
-    // talks to upstreams directly with no header injection). The TenantId
-    // / sessionId carry context for future per-session vault scoping —
-    // today's matcher uses hostname only, so they're informational.
-    // setOutboundContext / mountMemoryStore are optional on the
-    // SandboxExecutor port — adapters that can't intercept outbound TLS
-    // (Daytona) or mount host dirs simply don't define them.
-    await sandbox.setOutboundContext?.({ tenantId, sessionId });
-
-    // Mount memory stores bound to this session. Each row →
-    // sandbox.mountMemoryStore({storeName, storeId, readOnly}).
+const sessionRegistry = new SessionRegistry({
+  sql,
+  hub,
+  agentsService,
+  memoryService,
+  newEventLog,
+  buildSandbox,
+  sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
+  buildMemoryMounter: (sessionId, tenantId) => async ({ sandbox }) => {
     const memoryBindings = await sql
       .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
       .bind(sessionId)
@@ -789,48 +749,70 @@ async function runHarnessTurn(
         readOnly: binding.access === "read_only",
       });
     }
-    const runtime = new NodeHarnessRuntime({ sessionId, log, hub, sandbox });
-    await runtime.refreshHistory();
-
-    const model = resolveModel(
+  },
+  buildModel: (agent) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    return resolveModel(
       agent.model,
       apiKey,
       process.env.ANTHROPIC_BASE_URL,
-      undefined, // compat: default to Anthropic
+      undefined,
       parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS),
     );
-    const tools = await buildTools(agent, runtime.sandbox, {
+  },
+  buildTools: async (agent, sandbox) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    return buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: apiKey,
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
-      // toMarkdown wired via @open-managed-agents/markdown's Node adapter
-      // (turndown for HTML; other formats fall through to raw curl with
-      // a warning). On CF this slot gets cfWorkersAiToMarkdown(env.AI).
+      // toMarkdown wired via @open-managed-agents/markdown's Node adapter.
       toMarkdown: toMarkdownProvider,
     });
-
+  },
+  buildHarness: () => {
+    // Wrap DefaultHarness to satisfy the machine's looser ctx type;
+    // we hand it a HarnessContext we built ourselves in
+    // buildHarnessContext, so the cast is safe.
+    const h = new DefaultHarness();
+    return { run: (ctx: unknown) => h.run(ctx as HarnessContext) };
+  },
+  buildHarnessContext: async (input) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    const runtime = new NodeHarnessRuntime({
+      sessionId: input.sessionId,
+      log: input.eventLog,
+      hub,
+      sandbox: input.sandbox,
+    });
+    // Read the event log into the runtime's SqlHistoryStore cache so
+    // default-loop's eventsToMessages projection sees the conversation
+    // context BEFORE harness.run reads from it.
+    await runtime.refreshHistory();
     const ctx: HarnessContext = {
-      agent,
-      userMessage,
-      session_id: sessionId,
-      tools,
-      model,
-      systemPrompt: agent.system ?? "",
+      agent: input.agent,
+      userMessage: input.userMessage,
+      session_id: input.sessionId,
+      tools: input.tools as HarnessContext["tools"],
+      model: input.model,
+      systemPrompt: input.agent.system ?? "",
       env: {
         ANTHROPIC_API_KEY: apiKey,
         ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
       },
       runtime,
     };
+    return ctx;
+  },
+});
 
-    const harness = new DefaultHarness();
-    await harness.run(ctx);
-  } finally {
-    await sql
-      .prepare(`UPDATE sessions SET status = 'idle', updated_at = ? WHERE id = ?`)
-      .bind(Date.now(), sessionId)
-      .run();
-  }
-}
+// Bootstrap orphan recovery: replaces the inline restoreInterruptedSessions
+// pre-loop with the unified machine.onWake path. Anything left status='running'
+// from a prior process gets reconciled (placeholder events injected,
+// status flipped to 'idle') the same way CF will after Phase 3.
+await sessionRegistry.bootstrap();
 
 // POST /v1/sessions/:id/_test_emit — manual event injector. Stand-in for
 // what a real harness loop does when an LLM produces an agent.message.
