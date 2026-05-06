@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
+import { ListPage } from "../components/ListPage";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
@@ -57,7 +58,7 @@ export function AgentsList() {
      *  when the user picks an acp agent. */
     local_skills?: Record<string, Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>>;
   }>>([]);
-  const [auxLoading, setAuxLoading] = useState(true);
+  const [, setAuxLoading] = useState(true);
   const [createError, setCreateError] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -81,7 +82,6 @@ export function AgentsList() {
     hasMore,
     loadMore,
     refresh: refreshAgents,
-    setItems: setAgents,
   } = useCursorList<Agent>("/v1/agents", { limit: 50, params: agentsParams });
 
   // Aux fetches that aren't paginated UI surfaces — refreshed on mount and
@@ -110,13 +110,8 @@ export function AgentsList() {
 
   useEffect(() => { loadAux(); }, []);
 
-  // Keep load() name as a thin wrapper for the rest of the file (create /
-  // archive / delete callbacks call it). Refreshes both the paginated list
-  // and the aux data.
-  const load = async () => {
-    await refreshAgents();
-    await loadAux();
-  };
+  // Keep refresh hook reachable for create / archive callbacks.
+  void refreshAgents;
 
   const create = async () => {
     setCreateError("");
@@ -175,13 +170,8 @@ export function AgentsList() {
       setForm({ ...form, skills: [...form.skills, { type: "anthropic", skill_id: skillId }] });
     }
   };
-  const addCustomSkill = () => setForm({ ...form, skills: [...form.skills, { type: "custom", skill_id: "", version: "latest" }] });
-  const updateCustomSkill = (i: number, field: string, val: string) => {
-    const updated = [...form.skills];
-    updated[i] = { ...updated[i], [field]: val };
-    setForm({ ...form, skills: updated });
-  };
   const removeSkill = (i: number) => setForm({ ...form, skills: form.skills.filter((_, j) => j !== i) });
+  void removeSkill; // referenced by future-edit affordances; keep import-time safe.
 
   const addCallable = (agentId: string) => {
     if (form.callableAgents.find(c => c.id === agentId)) return;
@@ -314,86 +304,68 @@ export function AgentsList() {
   });
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Agents</h1>
-          <p className="text-fg-muted text-sm">Create and manage autonomous agents.</p>
-        </div>
-        <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover transition-colors">
-          + New agent
-        </button>
-      </div>
-
-      <div className="flex items-center gap-4 mb-4">
-        <div className="relative">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Go to agent ID..."
-            className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-56"
-          />
-        </div>
-        <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer select-none">
-          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} className="rounded accent-brand" />
-          Show archived
-        </label>
-      </div>
-
-      {loading ? (
-        <div className="flex items-center justify-center py-16"><svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg></div>
-      ) : displayed.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle">
-          <p className="text-lg mb-1">{search ? "No matching agents" : "No agents yet"}</p>
-          <p className="text-sm">{search ? "Try a different search term." : "Create your first agent to get started."}</p>
-          {!search && <button onClick={() => nav("/")} className="mt-3 text-sm text-brand hover:underline">Get started with the quickstart guide →</button>}
-        </div>
-      ) : (
-        <div className="border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
-                <th className="text-left px-4 py-2.5">ID</th>
-                <th className="text-left px-4 py-2.5">Name</th>
-                <th className="text-left px-4 py-2.5">Model</th>
-                <th className="text-left px-4 py-2.5">Status</th>
-                <th className="text-left px-4 py-2.5">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map((a) => (
-                <tr key={a.id} onClick={() => nav(`/agents/${a.id}`)}
-                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
-                  <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[180px]" title={a.id}>{a.id}</td>
-                  <td className="px-4 py-3 font-medium text-fg">{a.name}</td>
-                  <td className="px-4 py-3 text-fg-muted">{modelStr(a.model)}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full ${a.archived_at ? "bg-bg-surface text-fg-subtle" : "bg-success-subtle text-success"}`}>
-                      {a.archived_at ? "archived" : "active"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-fg-muted">{new Date(a.created_at).toLocaleDateString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-          {hasMore && (
-            <div className="flex justify-center border-t border-border bg-bg-surface py-3">
-              <button
-                onClick={loadMore}
-                disabled={isLoadingMore}
-                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
-              >
-                {isLoadingMore ? "Loading…" : "Load more"}
-              </button>
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* Create dialog */}
+    <ListPage<Agent>
+      title="Agents"
+      subtitle="Create and manage autonomous agents."
+      createLabel="+ New agent"
+      onCreate={() => setShowCreate(true)}
+      searchPlaceholder="Go to agent ID..."
+      searchValue={search}
+      onSearchChange={setSearch}
+      showArchived={showArchived}
+      onShowArchivedChange={setShowArchived}
+      data={displayed}
+      loading={loading}
+      getRowKey={(a) => a.id}
+      onRowClick={(a) => nav(`/agents/${a.id}`)}
+      hasMore={hasMore}
+      onLoadMore={loadMore}
+      loadingMore={isLoadingMore}
+      emptyTitle={search ? "No matching agents" : "No agents yet"}
+      emptySubtitle={
+        search ? (
+          "Try a different search term."
+        ) : (
+          <>
+            <p>Create your first agent to get started.</p>
+            <button onClick={() => nav("/")} className="mt-3 text-sm text-brand hover:underline">
+              Get started with the quickstart guide →
+            </button>
+          </>
+        )
+      }
+      columns={[
+        {
+          key: "id",
+          label: "ID",
+          className: "font-mono text-xs text-fg-muted truncate max-w-[180px]",
+          render: (a) => <span title={a.id}>{a.id}</span>,
+        },
+        { key: "name", label: "Name", className: "font-medium text-fg" },
+        {
+          key: "model",
+          label: "Model",
+          className: "text-fg-muted",
+          render: (a) => modelStr(a.model),
+        },
+        {
+          key: "status",
+          label: "Status",
+          render: (a) => (
+            <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full ${a.archived_at ? "bg-bg-surface text-fg-subtle" : "bg-success-subtle text-success"}`}>
+              {a.archived_at ? "archived" : "active"}
+            </span>
+          ),
+        },
+        {
+          key: "created",
+          label: "Created",
+          className: "text-fg-muted",
+          render: (a) => new Date(a.created_at).toLocaleDateString(),
+        },
+      ]}
+    >
+      {/* Create dialog — kept hand-rolled (template→form/yaml/json multi-step UI not a fit for the standard Modal) */}
       {showCreate && (
         <div className="fixed inset-0 bg-bg-overlay flex items-center justify-center z-50" onClick={closeCreate}>
           <div className="bg-bg rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
@@ -841,6 +813,6 @@ export function AgentsList() {
           </div>
         </div>
       )}
-    </div>
+    </ListPage>
   );
 }
