@@ -10,13 +10,15 @@
  */
 
 import { readCreds } from "../lib/config.js";
-import { paths } from "../lib/platform.js";
+import { paths, currentProfile } from "../lib/platform.js";
 import { printBanner, log, c, sym } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 import { probeRuntimeToken } from "../lib/probe.js";
 
 export async function runStatus(): Promise<void> {
-  printBanner("status", PKG_VERSION);
+  const profile = currentProfile();
+  const profileTag = profile ? `  [profile=${profile}]` : "";
+  printBanner(`status${profileTag}`, PKG_VERSION);
   const p = paths();
   const creds = await readCreds();
 

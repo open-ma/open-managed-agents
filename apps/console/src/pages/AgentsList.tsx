@@ -6,6 +6,7 @@ import { ListPage } from "../components/ListPage";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
+import { KNOWN_ACP_AGENTS, resolveKnownAgent } from "@open-managed-agents/acp-runtime/known-agents";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
@@ -578,15 +579,46 @@ export function AgentsList() {
                         {form.runtimeId && (
                           <div className="mt-2">
                             <label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</label>
-                            <select
-                              value={form.acpAgentId}
-                              onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
-                              className={inputCls}
-                            >
-                              {(runtimes.find((r) => r.id === form.runtimeId)?.agents ?? []).map((a) => (
-                                <option key={a.id} value={a.id}>{a.id}</option>
-                              ))}
-                            </select>
+                            {(() => {
+                              const detectedAgents = runtimes.find((r) => r.id === form.runtimeId)?.agents ?? [];
+                              const detectedIds = new Set(detectedAgents.map((a) => a.id));
+                              // OMA promotes 4 agents as "first class" in
+                              // the UI: claude-acp, codex-acp, openclaw,
+                              // hermes (see overlay's `featured` flag).
+                              // Featured-detected render on top so the
+                              // common case is one click. Anything not
+                              // detected by the daemon is intentionally
+                              // hidden — users must install via cli first.
+                              const featuredIds = new Set(
+                                KNOWN_ACP_AGENTS.filter((e) => e.featured).map((e) => e.id),
+                              );
+                              const featuredDetected = detectedAgents.filter((a) => featuredIds.has(a.id));
+                              const otherDetected = detectedAgents.filter((a) => !featuredIds.has(a.id));
+                              return (
+                                <>
+                                  <select
+                                    value={form.acpAgentId}
+                                    onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
+                                    className={inputCls}
+                                  >
+                                    {featuredDetected.length > 0 && (
+                                      <optgroup label="★ Featured">
+                                        {featuredDetected.map((a) => (
+                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                        ))}
+                                      </optgroup>
+                                    )}
+                                    {otherDetected.length > 0 && (
+                                      <optgroup label="Other detected on this runtime">
+                                        {otherDetected.map((a) => (
+                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                        ))}
+                                      </optgroup>
+                                    )}
+                                  </select>
+                                </>
+                              );
+                            })()}
                             <p className="text-xs text-fg-subtle mt-1">
                               Each turn spawns this ACP child on the runtime. Model + skills come from the daemon-fetched bundle.
                             </p>
@@ -595,8 +627,15 @@ export function AgentsList() {
                                 Default = all visible (empty blocklist). User unchecks
                                 to hide a global skill from this agent. */}
                             {(() => {
+                              // Canonicalize first: form.acpAgentId may be a
+                              // legacy alias on stale rows ("claude-code-acp"),
+                              // but the daemon emits local_skills under the
+                              // canonical key ("claude-agent-acp"). Without
+                              // resolving here the blocklist would silently
+                              // show empty even though skills exist.
+                              const canonicalId = resolveKnownAgent(form.acpAgentId)?.id ?? form.acpAgentId;
                               const localSkills =
-                                runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[form.acpAgentId] ?? [];
+                                runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[canonicalId] ?? [];
                               if (!localSkills.length) return null;
                               const allowed = new Set(localSkills.map((s) => s.id))
                               for (const id of form.localSkillBlocklist) allowed.delete(id);

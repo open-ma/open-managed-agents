@@ -29,14 +29,11 @@ export const c = {
 };
 
 /**
- * OMA wordmark — bracket + comma-feather lockup, mirroring the Console SVG
+ * OMA horse-head mark, mirroring the Console SVG
  * (apps/console/public/logo.svg). Rendered with 8-dot Braille so width
  * stays consistent across monospace fonts and terminals without
  * graphics protocols. Color is the brand orange (#FF6B50, 24-bit ANSI);
  * non-truecolor terminals show it monochrome.
- *
- * Exported so other commands can reuse the exact same banner — single
- * source of truth for "what does oma bridge look like at startup".
  */
 export function logo(): string {
   const lines = [
