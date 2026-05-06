@@ -29,6 +29,7 @@ import { spawn } from "node:child_process";
 import checkbox, { Separator } from "@inquirer/checkbox";
 import { detectAll, getKnownAgents, type KnownAgentEntry } from "@open-managed-agents/acp-runtime/registry";
 import { log, c } from "./style.js";
+import { installBinaryWrapper, platformKey, binDir } from "./binary-installer.js";
 
 export interface AuditOptions {
   /** Skip prompts; install all offerable npm wrappers. */
@@ -102,13 +103,20 @@ export async function auditAndOfferWrappers(
     return agents;
   }
 
-  // Decide what to install. --yes auto-takes every npm wrapper; TTY
-  // shows the multi-select.
+  // Decide what to install. --yes auto-takes every wrapper we can install
+  // unattended on this host: every npm wrapper, plus any binary wrapper
+  // whose registry entry has an archive for our platform-arch. Binary
+  // entries with no current-platform archive are still skipped (no
+  // tarball to fetch — `downloadUrl` is the user's manual path).
   let toInstall: AuditRow[];
   if (opts.yes) {
-    toInstall = rows.filter(
-      (r) => r.status.kind === "wrapper-needs-install" && r.status.install.kind === "npm",
-    );
+    toInstall = rows.filter((r) => {
+      if (r.status.kind !== "wrapper-needs-install") return false;
+      const inst = r.status.install;
+      if (inst.kind === "npm") return true;
+      if (inst.kind === "binary") return Boolean(inst.archives[platformKey()]);
+      return false;
+    });
   } else {
     const choices = buildChoices(rows);
     if (!choices.some((c) => "value" in c && !("disabled" in c && c.disabled))) {
@@ -123,12 +131,14 @@ export async function auditAndOfferWrappers(
       pageSize: Math.min(20, choices.length + 2),
       loop: false,
     }).catch(() => [] as string[]);
-    toInstall = rows.filter(
-      (r) =>
-        r.status.kind === "wrapper-needs-install" &&
-        r.status.install.kind === "npm" &&
-        selected.includes(r.id),
-    );
+    toInstall = rows.filter((r) => {
+      if (r.status.kind !== "wrapper-needs-install") return false;
+      if (!selected.includes(r.id)) return false;
+      const inst = r.status.install;
+      if (inst.kind === "npm") return true;
+      if (inst.kind === "binary") return Boolean(inst.archives[platformKey()]);
+      return false;
+    });
   }
 
   if (toInstall.length === 0) {
@@ -138,14 +148,37 @@ export async function auditAndOfferWrappers(
 
   let installed = 0;
   for (const r of toInstall) {
-    if (r.status.kind !== "wrapper-needs-install" || r.status.install.kind !== "npm") continue;
-    log.step(`installing ${r.status.install.package}`);
-    const ok = await npmInstallGlobal(r.status.install.package);
-    if (ok) {
-      log.ok(`${r.id} installed`);
-      installed += 1;
-    } else {
-      log.warn(`install failed — try manually: npm i -g ${r.status.install.package}`);
+    if (r.status.kind !== "wrapper-needs-install") continue;
+    const inst = r.status.install;
+    if (inst.kind === "npm") {
+      log.step(`installing ${inst.package}`);
+      const ok = await npmInstallGlobal(inst.package);
+      if (ok) {
+        log.ok(`${r.id} installed`);
+        installed += 1;
+      } else {
+        log.warn(`install failed — try manually: npm i -g ${inst.package}`);
+      }
+    } else if (inst.kind === "binary") {
+      // Binary wrapper: download tarball/zip for this platform-arch,
+      // extract under ~/.local/share/oma/wrappers/<id>/, symlink the
+      // cmd into ~/.local/bin/. installBinaryWrapper streams progress
+      // to stderr via onProgress.
+      log.step(`downloading ${r.id} (binary, ${platformKey()})`);
+      const result = await installBinaryWrapper({
+        id: r.id,
+        install: inst,
+        onProgress: (m) => process.stderr.write(`  ${c.dim(m)}\n`),
+      });
+      if (result.ok) {
+        log.ok(`${r.id} installed → ${c.dim(result.binPath ?? "")}`);
+        if (result.hint) log.hint(result.hint);
+        installed += 1;
+      } else {
+        log.warn(`${r.id} install failed: ${result.error ?? "unknown"}`);
+        if (result.hint) log.hint(result.hint);
+        if (inst.downloadUrl) log.hint(`manual: ${inst.downloadUrl}`);
+      }
     }
   }
 
@@ -158,7 +191,10 @@ export async function auditAndOfferWrappers(
 /**
  * Build the @inquirer/checkbox choices array, grouped via Separator.
  *   Group 1: detected entries (built-in or wrapper) — disabled-info.
- *   Group 2: missing wrappers — selectable (npm) or disabled (binary).
+ *   Group 2: missing wrappers — selectable when we can install them on
+ *            this host (npm always; binary if registry has an archive
+ *            for the current platform-arch). Otherwise disabled with a
+ *            "manual install only" note pointing at downloadUrl.
  *
  * checkbox renders Separator lines as plain text dividers and disabled
  * choices as non-interactive lines; only the un-disabled choices
@@ -186,21 +222,33 @@ function buildChoices(rows: AuditRow[]) {
   }
   if (missing.length) {
     out.push(new Separator(c.dim("─── ACP wrappers available to install ───")));
+    const pk = platformKey();
     for (const r of missing) {
       if (r.status.kind !== "wrapper-needs-install") continue;
       const wrapsLabel = c.dim(`wraps \`${r.status.wraps}\``);
-      if (r.status.install.kind === "npm") {
+      const inst = r.status.install;
+      if (inst.kind === "npm") {
         out.push({
-          name: `${r.id.padEnd(18)}${wrapsLabel} ${c.dim(`— npm i -g ${r.status.install.package}`)}`,
+          name: `${r.id.padEnd(18)}${wrapsLabel} ${c.dim(`— npm i -g ${inst.package}`)}`,
           value: r.id,
           checked: false,
         });
       } else {
-        out.push({
-          name: `${r.id.padEnd(18)}${wrapsLabel} ${c.dim(`— binary; download from ${r.status.install.downloadUrl}`)}`,
-          value: r.id,
-          disabled: " (manual download required)",
-        });
+        // binary: enable iff registry has an archive for this host.
+        const archive = inst.archives[pk];
+        if (archive) {
+          out.push({
+            name: `${r.id.padEnd(18)}${wrapsLabel} ${c.dim(`— binary release (${pk}) → ~/.local/bin/`)}`,
+            value: r.id,
+            checked: false,
+          });
+        } else {
+          out.push({
+            name: `${r.id.padEnd(18)}${wrapsLabel} ${c.dim(`— no ${pk} build` + (inst.downloadUrl ? `; see ${inst.downloadUrl}` : ""))}`,
+            value: r.id,
+            disabled: " (manual download required)",
+          });
+        }
       }
     }
   }
@@ -211,16 +259,22 @@ function buildChoices(rows: AuditRow[]) {
 function printAuditPlain(rows: AuditRow[]): void {
   process.stderr.write("\n");
   log.step(`ACP audit (${rows.length} relevant on this machine):`);
+  const pk = platformKey();
   for (const r of rows) {
     let line: string;
     if (r.status.kind === "builtin-detected") {
       line = `  ${c.green("✓")} ${r.id.padEnd(18)} ${c.dim("built-in ACP")}`;
     } else if (r.status.kind === "wrapper-detected") {
       line = `  ${c.green("✓")} ${r.id.padEnd(18)} ${c.dim(`wrapper for \`${r.status.wraps}\``)}`;
-    } else if (r.status.install.kind === "npm") {
-      line = `  ${c.yellow("○")} ${r.id.padEnd(18)} ${c.dim(`wraps \`${r.status.wraps}\` — npm i -g ${r.status.install.package}`)}`;
     } else {
-      line = `  ${c.yellow("○")} ${r.id.padEnd(18)} ${c.dim(`wraps \`${r.status.wraps}\` — binary, see ${r.status.install.downloadUrl}`)}`;
+      const inst = r.status.install;
+      if (inst.kind === "npm") {
+        line = `  ${c.yellow("○")} ${r.id.padEnd(18)} ${c.dim(`wraps \`${r.status.wraps}\` — npm i -g ${inst.package}`)}`;
+      } else if (inst.archives[pk]) {
+        line = `  ${c.yellow("○")} ${r.id.padEnd(18)} ${c.dim(`wraps \`${r.status.wraps}\` — binary release (${pk}) → ${binDir}`)}`;
+      } else {
+        line = `  ${c.yellow("○")} ${r.id.padEnd(18)} ${c.dim(`wraps \`${r.status.wraps}\` — no ${pk} build` + (inst.downloadUrl ? `, see ${inst.downloadUrl}` : ""))}`;
+      }
     }
     process.stderr.write(line + "\n");
   }
