@@ -11,7 +11,7 @@ import {
   type PartialStream,
 } from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn, generateEventId } from "@open-managed-agents/shared";
+import { logWarn, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
   ensureSchema as ensureEventLogSchema,
@@ -28,9 +28,14 @@ import type {
   UserToolConfirmationEvent,
   UserCustomToolResultEvent,
   UserDefineOutcomeEvent,
+  RubricSpec,
+  OutcomeVerifierSpec,
   OutcomeEvaluationEvent,
   AgentMessageEvent,
   AgentToolUseEvent,
+  SpanOutcomeEvaluationStartEvent,
+  SpanOutcomeEvaluationOngoingEvent,
+  SpanOutcomeEvaluationEndEvent,
 } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
@@ -111,6 +116,56 @@ interface PendingToolCall {
  * Persistent session state managed by Agent's setState/state system.
  * Automatically persisted to SQLite and broadcast to WebSocket clients.
  */
+/**
+ * Currently-active outcome (Phase 4 / AMA alignment). Sessions may chain
+ * outcomes sequentially; only one is active at a time. After a terminal
+ * `span.outcome_evaluation_end` (satisfied / max_iterations_reached /
+ * failed / interrupted) this slot clears, and the resolved evaluation
+ * lands in `state.outcome_evaluations[]`.
+ */
+interface ActiveOutcome {
+  /** AMA-spec id, prefix `outc_`. Echoed on every event tied to this outcome. */
+  outcome_id: string;
+  description: string;
+  /**
+   * Rubric as received on the wire. May be a bare string (legacy) or a
+   * `{type:"text"|"file", ...}` envelope. The resolved markdown lives in
+   * `rubric_content` after first read so re-iteration doesn't re-fetch.
+   */
+  rubric?: string | RubricSpec;
+  /** Resolved rubric markdown — populated lazily at supervisor build time. */
+  rubric_content?: string;
+  /** OMA-superset rule-based check. Mutually exclusive with the LLM-judge path. */
+  verifier?: OutcomeVerifierSpec;
+  max_iterations?: number;
+}
+
+/**
+ * Aggregate row returned by GET /v1/sessions/:id `.outcome_evaluations[]`.
+ * Mirrors AMA's session-retrieve response shape.
+ */
+interface PersistedOutcomeEvaluation {
+  outcome_id: string;
+  result:
+    | "satisfied"
+    | "needs_revision"
+    | "max_iterations_reached"
+    | "failed"
+    | "interrupted";
+  iteration: number;
+  /** AMA-name; pre-Phase-4 events used `feedback`. Both kept on persist. */
+  explanation?: string;
+  /** Back-compat alias of explanation. Old consumers read this. */
+  feedback?: string;
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+    cache_creation_input_tokens?: number;
+    cache_read_input_tokens?: number;
+  };
+  processed_at?: string;
+}
+
 interface SessionState {
   agent_id: string;
   environment_id: string;
@@ -133,8 +188,15 @@ interface SessionState {
   output_tokens: number;
   vault_ids: string[];
   pending_tool_calls: PendingToolCall[];
-  outcome: { description: string; rubric?: string; max_iterations?: number } | null;
+  outcome: ActiveOutcome | null;
   outcome_iteration: number;
+  /**
+   * Phase 4: AMA-aligned aggregate of every terminal `span.outcome_evaluation_end`
+   * for this session. Returned as-is by GET /v1/sessions/:id under
+   * `outcome_evaluations`. Sequential outcomes (each kicked off by a fresh
+   * `user.define_outcome`) append here in iteration order.
+   */
+  outcome_evaluations?: PersistedOutcomeEvaluation[];
   /**
    * Tenant config snapshots provided at /init by main worker. Used by
    * getAgentConfig/getEnvConfig/getVaultCredentials so SessionDO doesn't
@@ -1195,9 +1257,47 @@ export class SessionDO extends DurableObject<Env> {
 
       if (body.type === "user.define_outcome") {
         const e = body as UserDefineOutcomeEvent;
-        this.setState({ ...this.state, outcome: { description: e.description, rubric: e.rubric, max_iterations: e.max_iterations }, outcome_iteration: 1 });
-        history.append(e);
-        this.broadcastEvent(e);
+        // AMA-spec: validate at-least-one-of(rubric|verifier). Reject the
+        // event before persisting so callers get a clean 400 instead of a
+        // silently degraded supervisor loop.
+        const hasRubric =
+          typeof e.rubric === "string"
+            ? e.rubric.trim().length > 0
+            : !!e.rubric && (
+                (e.rubric.type === "text" && !!e.rubric.content) ||
+                (e.rubric.type === "file" && !!e.rubric.file_id)
+              );
+        if (!hasRubric && !e.verifier) {
+          return new Response(
+            "user.define_outcome requires at least one of `rubric` or `verifier`",
+            { status: 400 },
+          );
+        }
+        // Mint outcome_id server-side (AMA-style `outc_…` prefix). Honour
+        // a client-supplied id only when it's already prefixed (used by
+        // tests / replays); otherwise mint fresh.
+        const outcome_id =
+          e.outcome_id && e.outcome_id.startsWith("outc_")
+            ? e.outcome_id
+            : generateOutcomeId();
+        const echoed: UserDefineOutcomeEvent = { ...e, outcome_id };
+        // Sequential outcomes: any prior `state.outcome` is dropped (it
+        // either already terminated and was nulled by the supervisor, or
+        // we're explicitly replacing it). Existing `outcome_evaluations`
+        // history stays intact.
+        this.setState({
+          ...this.state,
+          outcome: {
+            outcome_id,
+            description: echoed.description,
+            rubric: echoed.rubric,
+            verifier: echoed.verifier,
+            max_iterations: echoed.max_iterations,
+          },
+          outcome_iteration: 0,
+        });
+        history.append(echoed);
+        this.broadcastEvent(echoed);
         return new Response(null, { status: 202 });
       }
 
