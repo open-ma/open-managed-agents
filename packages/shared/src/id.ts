@@ -17,3 +17,8 @@ export const generateResourceId = () => `sesrsc-${nanoid()}`;
 export const generateEventId = () => `sevt-${nanoid()}`;
 export const generateModelCardId = () => `mdl-${nanoid()}`;
 export const generateEvalRunId = () => `evrun-${nanoid()}`;
+// Outcome id — Anthropic Managed Agents spec uses an `outc_` prefix on every
+// `user.define_outcome` echo so subsequent `span.outcome_evaluation_*`
+// events can name which outcome they pertain to (sessions can chain
+// outcomes sequentially; same session, different outcome ids).
+export const generateOutcomeId = () => `outc_${nanoid()}`;
