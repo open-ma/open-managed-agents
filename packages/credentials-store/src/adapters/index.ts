@@ -19,7 +19,7 @@ export function createCfCredentialService(
   });
 }
 
-/** CFless / Node deployment factory — accepts any SqlClient. */
+/** Node deployment factory — accepts any SqlClient. */
 export function createSqliteCredentialService(
   deps: { client: SqlClient },
   opts?: { logger?: Logger },

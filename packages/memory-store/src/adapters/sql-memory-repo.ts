@@ -16,7 +16,7 @@ import type { Actor, MemoryRow } from "../types";
  * `memory_versions` tables.
  *
  * Backend-agnostic: takes a {@link SqlClient}, which works with Cloudflare D1
- * and better-sqlite3 / Postgres (CFless). Schema is plain SQLite-flavoured.
+ * and better-sqlite3 / Postgres (self-host). Schema is plain SQLite-flavoured.
  *
  * The `*WithVersion` methods use client.batch so the index update + audit row
  * are atomic in a single transaction. The `upsertFromEvent` /

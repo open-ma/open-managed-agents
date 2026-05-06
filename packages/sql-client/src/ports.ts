@@ -12,7 +12,7 @@
 //
 // Keeping the chain identical means existing D1-backed repo code (e.g.
 // packages/agents-store/src/adapters/d1-agent-repo.ts) becomes runtime-
-// agnostic with `D1Database` swapped for `SqlClient`. A CFless deployment
+// agnostic with `D1Database` swapped for `SqlClient`. A self-host deployment
 // then constructs `BetterSqlite3SqlClient(localDb)` and the same repo runs
 // on Node + sqlite without further edits.
 //
@@ -67,7 +67,7 @@ export interface SqlStatement {
 }
 
 /**
- * The port. CFless implementations live in adapters/.
+ * The port. self-host implementations live in adapters/.
  *
  * `batch` MUST execute the statements atomically (all succeed or all roll
  * back). Returned array is per-statement meta in the same order.

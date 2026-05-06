@@ -152,7 +152,7 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     // HTTP(S)_PROXY env vars + tell node/curl/python to trust the local CA.
     //
     // Both env vars are read from the host process — they're set in
-    // docker-compose.cfless.yml (or the operator's env) and shared between
+    // docker-compose.yml (or the operator's env) and shared between
     // main-node and the sandbox subprocess. If either is missing the agent
     // just talks to upstreams directly with no credential injection — same
     // as the CF path with no oma-vault binding.
@@ -190,7 +190,7 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
    * (would require root + a writable /mnt) — bash that hard-codes
    * /mnt/memory/ paths won't see the mount; tools and $OMA_MEMORY_DIR-aware
    * bash will. This matches the spirit of CF's mount but with weaker
-   * compat — documented in docs/cfless.md.
+   * compat — documented in docs/self-host.md.
    *
    * read_only mode is best-effort: we record the flag so the read/write
    * tools can refuse writes via path resolver, but the on-disk dir remains

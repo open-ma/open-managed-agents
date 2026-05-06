@@ -21,7 +21,7 @@ import type { AgentRow, AgentVersionRow } from "../types";
  * and `agent_versions` tables defined in apps/main/migrations/0002_agents_tables.sql.
  *
  * Backend-agnostic: takes a {@link SqlClient}, which works with Cloudflare D1
- * (CF deployments) and better-sqlite3 / Postgres (CFless). The schema is plain
+ * (CF deployments) and better-sqlite3 / Postgres (self-host). The schema is plain
  * SQLite-flavoured DDL — D1 IS SQLite, and better-sqlite3 reads the same
  * statements without modification. A future Postgres adapter would need a
  * separate migration with PG-flavour types but the repo logic stays.

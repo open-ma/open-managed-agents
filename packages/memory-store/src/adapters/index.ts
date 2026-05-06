@@ -1,4 +1,4 @@
-// Adapter wiring for the memory-store. Both CF (D1 + R2) and CFless
+// Adapter wiring for the memory-store. Both CF (D1 + R2) and self-host
 // (any SqlClient + any BlobStore) factories live here behind a single
 // SqlMemoryRepo / SqlMemoryStoreRepo / SqlMemoryVersionRepo class trio.
 //
@@ -44,9 +44,9 @@ export function createCfMemoryStoreService(
 }
 
 /**
- * CFless / Node deployment factory. Caller passes any SqlClient and any
- * BlobStore implementation. For the simplest CFless path, use
- * createBetterSqlite3SqlClient + LocalFsBlobStore. Production CFless can
+ * Node deployment factory. Caller passes any SqlClient and any
+ * BlobStore implementation. For the simplest self-host path, use
+ * createBetterSqlite3SqlClient + LocalFsBlobStore. Production self-host can
  * swap the BlobStore for an S3-compatible adapter (Tigris / MinIO / etc.).
  */
 export function createSqliteMemoryStoreService(

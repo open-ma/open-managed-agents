@@ -1,37 +1,58 @@
-# CFless OMA — single-process Node deployment
+# Self-host OMA — single-process Node deployment
 
 A Node-side build of Open Managed Agents that runs on a single VPS / Mac /
 Docker host without any Cloudflare account, Workers, Durable Objects, or
-Containers. Storage is SQLite + local filesystem. Sandboxes are local
-subprocesses by default; switch to E2B for Firecracker isolation when
-you're past trusted-developer territory.
+Containers. Storage is SQLite or Postgres + local filesystem. Sandboxes
+are local subprocesses by default; switch to E2B for Firecracker isolation
+when you're past trusted-developer territory.
 
 > **One of three deployment topologies.** See [deployment.md](./deployment.md)
-> for the full Local CFless / CF Local / CF Prod comparison + decision
-> matrix. This doc covers Local CFless specifically.
+> for the full Self-host / CF Local / CF Prod comparison + decision
+> matrix. This doc covers Self-host specifically.
 
-> **Status:** Working PoC. The CFless route is a parallel implementation of
+> **Status:** Working PoC. The self-host route is a parallel implementation of
 > the same `Services` abstractions used on Cloudflare, including better-auth
 > multi-tenant. See "What works / doesn't" below.
 
-## Quick start (Docker)
+## Choose a backend
+
+One image, two compose files — pick the one that matches your durability
+& concurrency story. You can switch later (see [Migrating between
+backends](#migrating-between-backends) below).
+
+| | SQLite + LocalFs (default) | Postgres + LocalFs |
+|---|---|---|
+| Compose file | `docker-compose.yml` | `docker-compose.postgres.yml` |
+| Best for | Single-user self-host, dev, demo, ≤10 GB sessions | Multi-instance, ≥50M sessions/events rows, share existing PG |
+| Concurrency | One writer (single oma-server) | Many writers; HA-able |
+| Backups | `cp ./data/*.db` or [litestream](https://litestream.io) → S3 | `pg_dump` / managed PG snapshots |
+| Extra services | None | + `postgres:16-alpine` (or external PG) |
+| When to switch | "I want PG already" / "want to scale out" | — |
+
+**Same Docker image either way** (`openma/main-node:dev` built from
+`apps/main-node/Dockerfile`) — `DATABASE_URL` env at runtime decides.
+SQLite needs only `DATABASE_PATH`; Postgres needs `DATABASE_URL=
+postgres://…`. better-auth's tiny `auth.db` stays SQLite on both
+backends — see "auth still on SQLite" note in the Postgres section.
+
+## Quick start (Docker, SQLite)
 
 ```bash
 # 1. Get an Anthropic API key. Any Anthropic-compatible endpoint works.
-cp .env.cfless.example .env
+cp .env.example .env
 $EDITOR .env  # set ANTHROPIC_API_KEY
 
-# 2. Start
-docker compose -f docker-compose.cfless.yml up --build
+# 2. Start (first time builds the image; subsequent runs skip --build)
+docker compose -f docker-compose.yml up -d --build
 
 # 3. Sanity check
 curl localhost:8787/health
-# → {"status":"ok","runtime":"node",...}
+# → {"status":"ok","runtime":"node","backends":{"db":"sqlite ..."},...}
 
 # 4. Create + drive an agent
 AID=$(curl -s -X POST localhost:8787/v1/agents \
   -H 'content-type: application/json' \
-  -d '{"name":"shell","model":"claude-sonnet-4-6","system":"Use bash to answer.","tools":[{"type":"agent_toolset_20260401"}]}' \
+  -d '{"name":"shell","model":"claude-sonnet-4-6","system":"Use bash to answer.","tools":[{"type":"bash"}]}' \
   | jq -r .id)
 
 SID=$(curl -s -X POST localhost:8787/v1/sessions \
@@ -46,8 +67,16 @@ curl -s -X POST localhost:8787/v1/sessions/$SID/events \
   -H 'content-type: application/json' \
   -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Run: ls -la / | head"}]}]}'
 
-# Watch the SSE — you should see agent.message_chunk → agent.tool_use →
-# agent.tool_result → agent.message → session.status_idle
+# Watch the SSE — you should see agent.tool_use → agent.tool_result →
+# agent.message → session.status_idle
+```
+
+Subsequent commands:
+
+```bash
+docker compose -f docker-compose.yml logs -f   # follow logs
+docker compose -f docker-compose.yml down       # stop, keep ./data
+docker compose -f docker-compose.yml down -v    # stop, wipe volumes
 ```
 
 ## Quick start (no Docker)
@@ -63,48 +92,135 @@ Wipe + restart for a clean slate.
 
 ## Postgres backend
 
-The default compose puts everything in SQLite. For multi-instance deploys,
-larger sessions tables (50M+ rows), or to share an existing PG cluster,
-use the Postgres compose:
+When to flip to Postgres: multi-instance, large tables (50M+ rows on
+sessions/events), or because you'd rather operate the PG cluster you
+already have than introduce a new SQLite footprint.
 
 ```bash
-docker compose -f docker-compose.cfless.pg.yml up --build
+# 1. Same .env (Postgres compose already sets DATABASE_URL internally)
+cp .env.example .env
+$EDITOR .env  # set ANTHROPIC_API_KEY
+
+# 2. Start — brings up postgres:16-alpine + oma-server + oma-vault
+docker compose -f docker-compose.postgres.yml up -d --build
+
+# 3. Sanity check — note backends.db reports postgres
 curl localhost:8787/health
-# → {"status":"ok","backends":{"agents":"postgres","events":"postgres","db":"postgres ..."}}
+# → {"status":"ok","backends":{"agents":"postgres","events":"postgres","db":"postgres ..."},...}
 ```
+
+Curl flow + console URL are identical — application code is backend-
+agnostic. Same `openma/main-node:dev` image, just different env.
 
 What changes vs the SQLite stack:
 
 - `oma-server` reads `DATABASE_URL=postgres://oma:oma@postgres:5432/oma`
-  (set in `docker-compose.cfless.pg.yml`); the same SqlClient port serves
+  (set in `docker-compose.postgres.yml`); the same SqlClient port serves
   every store package, so business code is identical.
 - `oma-vault` follows the same dispatch — when `DATABASE_URL` is a
   postgres URL the sidecar reads credentials from PG (otherwise it falls
-  back to the bundled SQLite path).
+  back to the bundled SQLite path). The two services MUST agree on the
+  backend or vault credential injection won't see anything to inject.
 - A `postgres:16-alpine` service ships with the compose, persisted on a
   named volume `oma-pgdata`. No host port published; only `oma-server`
   reaches it on the bridge network. Add `ports: ["5432:5432"]` if you
   want `psql` access from the host.
-- `better-auth` still sits on its own SQLite file at `/app/data/auth.db`
+- **better-auth still sits on its own SQLite file** at `/app/data/auth.db`
   — the kysely-adapter wants a node-postgres `Pool`, not the
   `postgres.js` driver this codebase uses for the main store. It's a
   small file (<1k rows) and the `./data` bind-mount keeps it co-located
-  with backups.
+  with backups. Plan ~50KB / 1000 users.
 
-To point at an existing PG (instead of the bundled `postgres` service),
-remove the `postgres` service block and override `DATABASE_URL` /
-`oma-vault.DATABASE_URL` in `.env`:
+### Pointing at an existing Postgres cluster
+
+To use a managed PG (RDS / Neon / Supabase / your own cluster) instead
+of the bundled `postgres` service, drop the `postgres` service block
+from `docker-compose.postgres.yml` and override `DATABASE_URL` in
+`.env`:
 
 ```bash
+# .env
 DATABASE_URL=postgres://user:pw@my-pg.internal:5432/oma_prod
+# OMA_VAULT_DATABASE_URL=...   # if you want the vault sidecar to use a different DB
 ```
+
+The schema bootstraps on first start (`CREATE TABLE IF NOT EXISTS`
+across all 13 tables); no separate migration step. Re-running is safe.
+
+### Migrating between backends
+
+Switching directions in either direction means moving rows; no
+in-place upgrade. Two paths:
+
+**SQLite → Postgres (one-way).** Spin up the PG stack pointed at a
+fresh DB. Then export from SQLite + import via `psql`:
+
+```bash
+# SQLite side
+sqlite3 ./data/oma.db ".dump agents agent_versions sessions session_events session_streams memories memory_stores memory_versions vaults credentials session_memory_stores tenant membership" > /tmp/oma-dump.sql
+# Strip SQLite-specific pragmas (BEGIN/COMMIT survive; PRAGMA / sqlite_sequence don't)
+sed -i '/^PRAGMA\|sqlite_sequence/d' /tmp/oma-dump.sql
+# PG side
+docker exec -i oma-postgres psql -U oma -d oma < /tmp/oma-dump.sql
+```
+
+`agent.id`, `session.id` etc. are TEXT, BIGINT timestamps work in both,
+JSON columns are TEXT not jsonb — no schema translation needed beyond
+the pragma strip.
+
+**Postgres → SQLite (one-way).** Less common, but possible: `pg_dump
+--inserts --data-only` + a sed pass to `INSERT OR REPLACE`, then
+`sqlite3 oma.db < dump.sql`. Auth.db is unaffected (already SQLite on
+both sides).
+
+### Backups & operations
+
+| | SQLite + LocalFs | Postgres + LocalFs |
+|---|---|---|
+| Hot backup | [litestream](https://litestream.io) replicates `./data/*.db` to S3 continuously | `pg_dump` cron / managed PG snapshots / WAL streaming |
+| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it |
+| Sandbox workdirs | Always on local FS — back up `./data/sandboxes/` separately | Same |
+| Memory blobs | `./data/memory-blobs/` — back up separately or set `MEMORY_S3_*` (s3fs mount) | Same |
+| auth.db | Always SQLite — back up `./data/auth.db` | Same |
 
 Both backends pass the same crash-recovery test surface (55 tests across
 adapter / recovery-logic / SIGKILL bootstrap / CF DO eviction).
 
+## Operator gotchas
+
+Things I'd document if I were the on-call who got paged:
+
+- **`AUTH_DISABLED=1` must be in `.env`, not the shell.** `docker
+  compose` substitutes `${AUTH_DISABLED}` from the compose-time env
+  (your `.env` at the compose dir). Putting it in the shell only is
+  silently ignored.
+- **`docker compose restart` does NOT re-read env.** After editing
+  `.env`, use `docker compose up -d --force-recreate oma-server` to
+  pick up changes (or `down` then `up`).
+- **`agent.system` defaults to empty.** The Anthropic API rejects
+  `system: [{type:"text", text:""}]` — main-node passes `undefined`
+  when system is empty. If you ever see "system: text content blocks
+  must be non-empty", your model proxy is stricter than the SDK
+  expects. Set a non-empty `system` on the agent.
+- **`tools=8` even when you set `tools:[]` on the agent.** main-node's
+  `buildTools` always wires the harness's standard set (bash, read,
+  write, edit, glob, grep, web_fetch, web_search). Per-agent tool
+  filtering happens at routing time, not at build time. To disable a
+  tool entirely, omit it from `agent.tools`; the harness will see it
+  but never invoke it.
+- **`oma-vault` won't see PG credentials if you set `DATABASE_URL`
+  on `oma-server` only.** Both services share the same store; if you
+  want vault credential injection on PG, both must point at PG. The
+  PG compose handles this for you; if you customise, mirror the env.
+- **First boot from an old `oma.db`.** The unified-runtime refactor
+  added two columns to `sessions` (`turn_id`, `turn_started_at`).
+  main-node runs `ALTER TABLE … ADD COLUMN` idempotently on every
+  start; existing dbs upgrade in place. If you see `no such column:
+  turn_id`, you're on a pre-migration build — pull a newer image.
+
 ## Crash recovery demo
 
-OMA's CFless mode persists session state to SQLite + the event log on
+OMA's self-host mode persists session state to SQLite + the event log on
 every write, so a `kill -9` on the Node process doesn't lose the
 conversation.
 
@@ -122,17 +238,19 @@ curl -N localhost:8787/v1/sessions/$SID/events/stream
 # (Ctrl-C to stop)
 
 # 3. Hard-kill the server. (Or `docker compose down --no-stop` then `up`.)
-docker kill oma-server -s SIGKILL
+docker kill -s SIGKILL oma-server
 
 # 4. Restart.
-docker compose -f docker-compose.cfless.yml up
+docker compose -f docker-compose.yml up -d
 
 # 5. Reconnect SSE with the last seen seq — only events after seq 3 stream.
 curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
 # Or `Last-Event-ID: 0` to replay everything.
 ```
 
-## What works on CFless today
+The same demo works on the Postgres compose unchanged.
+
+## What works on the self-host build today
 
 | Feature | Status |
 |---|---|
@@ -276,7 +394,7 @@ API. CF prod has the equivalent via the `ASSETS` binding; same UX,
 different mechanism.
 
 ```bash
-docker compose -f docker-compose.cfless.yml up -d
+docker compose -f docker-compose.yml up -d
 open http://localhost:8787
 ```
 

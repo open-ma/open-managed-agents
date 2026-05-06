@@ -2,7 +2,7 @@
 // SqlClient (D1 / better-sqlite3 / postgres.js when wired) — schema is plain
 // SQLite-flavoured DDL with portable types.
 //
-// This is the CFless cousin of cf-do/index.ts, which scopes everything to a
+// This is the self-host cousin of cf-do/index.ts, which scopes everything to a
 // per-DO SQLite namespace. Here we share one SqlClient across all sessions
 // in a process, so every table carries an explicit `session_id` column and
 // every read/write is filtered by it. The repo instance is bound to one

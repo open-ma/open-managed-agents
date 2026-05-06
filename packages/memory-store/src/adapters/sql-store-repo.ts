@@ -7,7 +7,7 @@ import type { MemoryStoreRow } from "../types";
  * memory_stores table defined in apps/main/migrations/0001_schema.sql.
  *
  * Backend-agnostic: takes a {@link SqlClient}, which works with Cloudflare D1
- * and better-sqlite3 / Postgres (CFless). The schema is plain SQLite-flavoured
+ * and better-sqlite3 / Postgres (self-host). The schema is plain SQLite-flavoured
  * DDL — D1 IS SQLite, and better-sqlite3 reads the same statements without
  * modification.
  */

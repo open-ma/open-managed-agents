@@ -19,7 +19,7 @@ export function createCfVaultService(
   });
 }
 
-/** CFless / Node deployment factory — accepts any SqlClient. */
+/** Node deployment factory — accepts any SqlClient. */
 export function createSqliteVaultService(
   deps: { client: SqlClient },
   opts?: { logger?: Logger },

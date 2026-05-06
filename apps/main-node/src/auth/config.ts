@@ -1,4 +1,4 @@
-// CFless better-auth configuration. Sqlite-backed regardless of the main
+// self-host better-auth configuration. Sqlite-backed regardless of the main
 // DB backend — auth tables are tiny, bcrypt + session-token rows live
 // alongside the main sqlite or in their own ./data/auth.db when the main
 // store is Postgres. Postgres-backed auth is future work; the cost of two
@@ -75,7 +75,7 @@ export function createAuth(opts: CreateAuthOpts): Auth {
       // after sign-up.email even when requireEmailVerification is false. We
       // wire the plugin so console doesn't 404 on
       // /auth/email-otp/send-verification-otp; the actual OTP delivery is
-      // console.log on the CFless path (operator pipes stdout to a real
+      // console.log on the self-host path (operator pipes stdout to a real
       // sender when they wire EMAIL_FROM + Resend/SES/etc).
       emailOTP({
         otpLength: 6,

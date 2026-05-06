@@ -388,7 +388,7 @@ export async function buildTools(
   // Browser tools (Cloudflare Browser Rendering binding). Requires both an
   // active session passed in AND the agent to opt in to "browser" in its toolset.
   // Lazy-imported because @cloudflare/playwright is workerd-only and pulling
-  // it at module-load time would block CFless / Node consumers from importing
+  // it at module-load time would block Node consumers from importing
   // this file at all.
   if (env?.browser && enabled.has("browser")) {
     const { buildBrowserTools } = await import("./browser-tools");
@@ -786,7 +786,7 @@ export async function buildTools(
 
         // ── Step 1: Fetch URL → blob → markdown converter ──
         // CF: Workers AI's toMarkdown converts HTML/PDF/DOCX/etc. without
-        // an external service. Node (CFless): turndown / pdf-parse /
+        // an external service. Node (self-host): turndown / pdf-parse /
         // mammoth. Either way, the tool calls a portable
         // ToMarkdownProvider port — runtime detail lives in the adapter.
         let markdown: string | null = null;

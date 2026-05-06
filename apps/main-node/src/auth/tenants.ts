@@ -1,4 +1,4 @@
-// Tenant + membership management for the CFless Node side. Mirrors the
+// Tenant + membership management for the self-host Node side. Mirrors the
 // helpers in apps/main/src/auth-config.ts (getTenantId, hasMembership,
 // ensureTenant) but takes a SqlClient instead of D1Database — so it works
 // against either backend (sqlite or pg) without forking.

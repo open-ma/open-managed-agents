@@ -1,6 +1,6 @@
 // Adapter wiring for the control-plane shard router store. All reads and
 // writes target the control-plane DB (env.AUTH_DB on CF, the shared SQL
-// client on CFless).
+// client on the self-host build).
 
 export { SqlTenantShardDirectoryRepo } from "./sql-tenant-shard-repo";
 export { SqlShardPoolRepo } from "./sql-shard-pool-repo";

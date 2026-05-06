@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# CFless OMA — outbound credential injector sidecar.
+# Self-host OMA — outbound credential injector sidecar.
 #
 # Reads vault credentials from the shared sqlite db (mounted at
 # /app/data/oma.db, same path as oma-server) and exposes a mockttp HTTPS
@@ -10,7 +10,7 @@
 #
 # Build:
 #   docker build -f apps/oma-vault/Dockerfile -t openma/oma-vault:dev .
-# Run (compose): see docker-compose.cfless.yml at repo root.
+# Run (compose): see docker-compose.yml at repo root.
 
 # ─── Stage 1: deps (and native compile) ────────────────────────────────────
 FROM node:22-slim AS deps

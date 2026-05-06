@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1.7
 #
-# CFless OMA — Node-side single-process image.
+# Self-host OMA — Node-side single-process image.
 #
 # Build:
 #   docker build -f apps/main-node/Dockerfile -t openma/main-node:dev .
@@ -9,7 +9,7 @@
 #     -v $(pwd)/data:/app/data \
 #     -e ANTHROPIC_API_KEY=sk-... \
 #     openma/main-node:dev
-# Run (compose): see docker-compose.cfless.yml at repo root.
+# Run (compose): see docker-compose.yml at repo root.
 #
 # What's intentionally NOT here yet (Phase G+ work):
 #   - Compiled JS bundle. We run via tsx in the container too — same toolchain

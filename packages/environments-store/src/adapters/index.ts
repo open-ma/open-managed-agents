@@ -1,4 +1,4 @@
-// Adapter wiring. Both Cloudflare (D1) and CFless / Node (any SqlClient)
+// Adapter wiring. Both Cloudflare (D1) and Node (any SqlClient)
 // deployment factories live here behind a single SqlEnvironmentRepo class.
 
 export { SqlEnvironmentRepo } from "./sql-environment-repo";
@@ -20,7 +20,7 @@ export function createCfEnvironmentService(
 }
 
 /**
- * CFless / Node deployment factory. Caller passes any SqlClient
+ * Node deployment factory. Caller passes any SqlClient
  * (better-sqlite3, postgres.js wrapper, etc.).
  */
 export function createSqliteEnvironmentService(

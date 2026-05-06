@@ -1,4 +1,4 @@
-// Node implementation of ToMarkdownProvider for CFless deployments.
+// Node implementation of ToMarkdownProvider for self-host deployments.
 //
 // Lazy-imports `turndown` for HTML→markdown. Other formats (PDF, DOCX, etc.)
 // fall through to a placeholder result the harness logs and skips. The
