@@ -117,7 +117,18 @@ interface SessionState {
   session_id: string;
   tenant_id: string;
   title: string;
-  status: "idle" | "running" | "terminated";
+  /**
+   * Stored only as a back-compat read for sessions written before status
+   * became derived. New code MUST NOT write to this field. The runtime
+   * status comes from `deriveStatus()`, which queries `cf_agents_runs`
+   * for fiber existence + `terminated_at` for the destroy gate. See
+   * docs/contribute/recovery-and-idempotency.mdx for the rationale.
+   */
+  status?: "idle" | "running" | "terminated";
+  /** ms timestamp when /destroy ran. Replaces the persistent `terminated`
+   *  status — the only state value that needed to survive in storage; the
+   *  rest are derivable from cf_agents_runs row presence. */
+  terminated_at: number | null;
   input_tokens: number;
   output_tokens: number;
   vault_ids: string[];
@@ -152,7 +163,7 @@ const INITIAL_SESSION_STATE: SessionState = {
   session_id: "",
   tenant_id: "default",
   title: "",
-  status: "idle",
+  terminated_at: null,
   input_tokens: 0,
   output_tokens: 0,
   vault_ids: [],
@@ -480,7 +491,7 @@ export class SessionDO extends DurableObject<Env> {
     cron?: string;
     prompt: string;
   }): Promise<{ id: string; fire_at?: string; cron?: string; kind: "one_shot" | "cron" }> {
-    if (this.state.status === "terminated") {
+    if (this.deriveStatus() === "terminated") {
       throw new Error("session is terminated; cannot schedule wakeup");
     }
     const provided = [args.delay_seconds, args.at, args.cron].filter((x) => x != null);
@@ -571,7 +582,7 @@ export class SessionDO extends DurableObject<Env> {
     kind: "one_shot" | "cron";
     parent_event_id?: string;
   }): Promise<void> {
-    if (this.state.status === "terminated") {
+    if (this.deriveStatus() === "terminated") {
       // Skip silently — terminated sessions should not be resurrected.
       // For cron schedules the row stays in agents-fw storage; ops can
       // cancel via list/cancel tools or a future REST surface.
@@ -665,11 +676,9 @@ export class SessionDO extends DurableObject<Env> {
     );
     this.ensureSchema();
 
-    // Persisted state from before eviction is stale — clear it so drain
-    // doesn't see status="running" and skip.
-    if (this.state.status === "running") {
-      this.setState({ ...this.state, status: "idle" });
-    }
+    // Status is derived from cf_agents_runs row presence — onFiberRecovered
+    // is invoked AFTER _checkRunFibers DELETEs the orphan, so deriveStatus
+    // automatically reads "idle" here. No manual state mutation needed.
 
     const history = new SqliteHistory(
       this.ctx.storage.sql,
@@ -744,7 +753,8 @@ export class SessionDO extends DurableObject<Env> {
           this.broadcastEvent(ev);
         },
         forceIdle: () => {
-          this.setState({ ...this.state, status: "idle" });
+          // Status auto-derives to "idle" once recoverAgentTurn returns
+          // and cf_agents_runs is empty. Just emit the trajectory event.
           const idleEvent: SessionEvent = { type: "session.status_idle" };
           history.append(idleEvent);
           this.broadcastEvent(idleEvent);
@@ -795,8 +805,12 @@ export class SessionDO extends DurableObject<Env> {
    * drainEventQueue is already active.
    */
   private async drainEventQueue(): Promise<void> {
-    // Concurrency guard — only one drain loop at a time
-    if (this.state.status === "running" || this.state.status === "terminated") {
+    // Concurrency guard — only one drain loop at a time. Status is derived
+    // from cf_agents_runs presence, so eviction in the setState→runFiber
+    // window can't strand the session at "running": the next caller derives
+    // "idle" automatically once the orphan fiber row is cleaned up.
+    const currentStatus = this.deriveStatus();
+    if (currentStatus === "running" || currentStatus === "terminated") {
       return;
     }
 
@@ -817,7 +831,8 @@ export class SessionDO extends DurableObject<Env> {
         break;
       }
 
-      this.setState({ ...this.state, status: "running" });
+      // No setState({status:"running"}) — runFiber's INSERT into
+      // cf_agents_runs is the single source of truth for "in flight."
       // Fresh per-turn dedup window for agent.message broadcasts. See
       // broadcastedMessageIds field doc for the recovery-replay context.
       this.broadcastedMessageIds.clear();
@@ -867,7 +882,8 @@ export class SessionDO extends DurableObject<Env> {
         const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
         history.append(errorEvent);
         this.broadcastEvent(errorEvent);
-        this.setState({ ...this.state, status: "idle" });
+        // Status auto-derives once runFiber's finally block DELETEs the
+        // cf_agents_runs row. No setState needed.
         break; // Stop draining on error — let the client decide what to do
       }
     }
@@ -968,7 +984,7 @@ export class SessionDO extends DurableObject<Env> {
         environment_snapshot: params.environment_snapshot,
         vault_credentials: params.vault_credentials,
         event_hooks: params.event_hooks,
-        status: "idle",
+        terminated_at: null,
       });
 
       // Outbound credential snapshot — DELETED. The legacy path published
@@ -1058,7 +1074,7 @@ export class SessionDO extends DurableObject<Env> {
       // up. The outbound interceptor RPCs into main on each call and main
       // re-checks session.archived_at, so an archived session's outbound
       // calls naturally fail without any KV cleanup needed.
-      this.setState({ ...this.state, status: "terminated" });
+      this.setState({ ...this.state, terminated_at: Date.now() });
 
       const terminatedEvent: SessionEvent = {
         type: "session.status_terminated",
@@ -1141,7 +1157,7 @@ export class SessionDO extends DurableObject<Env> {
           this.currentAbortController.abort();
           this.currentAbortController = null;
         }
-        this.setState({ ...this.state, status: "idle" });
+        // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
         const idleEvent: SessionEvent = { type: "session.status_idle" };
         history.append(body as UserInterruptEvent);
         history.append(idleEvent);
@@ -1256,7 +1272,7 @@ export class SessionDO extends DurableObject<Env> {
     // GET /status
     if (request.method === "GET" && url.pathname === "/status") {
       return Response.json({
-        status: this.state.status,
+        status: this.deriveStatus(),
         agent_id: this.state.agent_id,
         environment_id: this.state.environment_id,
         usage: {
@@ -1463,7 +1479,7 @@ export class SessionDO extends DurableObject<Env> {
         }));
 
       return Response.json({
-        status: this.state.status,
+        status: this.deriveStatus(),
         usage: {
           input_tokens: this.state.input_tokens,
           output_tokens: this.state.output_tokens,
@@ -2639,7 +2655,7 @@ export class SessionDO extends DurableObject<Env> {
       const errorEvent: SessionEvent = { type: "session.error", error: "Agent not found" };
       history.append(errorEvent);
       this.broadcastEvent(errorEvent);
-      this.setState({ ...this.state, status: "idle" });
+      // Status auto-derives — no setState needed
       return;
     }
 
@@ -3188,7 +3204,7 @@ export class SessionDO extends DurableObject<Env> {
       // Client can send a new user.message to retry.
     } finally {
       this.currentAbortController = null;
-      this.setState({ ...this.state, status: "idle" });
+      // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
       // Workspace backup is fired by OmaSandbox.onActivityExpired when the
       // container's sleepAfter elapses (see oma-sandbox.ts) — exactly one
       // snapshot per quiet period. Explicit /destroy snapshots eagerly via
@@ -3230,6 +3246,32 @@ export class SessionDO extends DurableObject<Env> {
       throw new Error("SessionDO.state read before init");
     }
     return this._state;
+  }
+
+  /**
+   * Live-derived session status. Single source of truth — replaces the old
+   * mutable `state.status` field which had a race window between the
+   * `setState({status:"running"})` write and the cf_agents_runs INSERT
+   * inside runFiber. With derivation that race is impossible: status is
+   * always consistent with whatever cf_agents_runs holds at query time.
+   *
+   * - `terminated_at` set → "terminated" (destroy is the only persistent
+   *   state value that needs to survive restarts)
+   * - any cf_agents_runs row → "running"
+   * - else → "idle"
+   *
+   * Back-compat: if a session was written before this refactor, its
+   * `state.status` may still be "terminated"; honor that as a fallback
+   * gate so old sessions don't accept new events post-destroy.
+   */
+  deriveStatus(): "idle" | "running" | "terminated" {
+    if (this._state?.terminated_at != null || this._state?.status === "terminated") {
+      return "terminated";
+    }
+    const hasFiber = this.ctx.storage.sql
+      .exec("SELECT 1 FROM cf_agents_runs LIMIT 1")
+      .toArray().length > 0;
+    return hasFiber ? "running" : "idle";
   }
 
   setState(next: SessionState): void {
