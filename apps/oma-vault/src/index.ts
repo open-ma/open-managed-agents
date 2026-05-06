@@ -166,10 +166,31 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
   // Strip any incoming Authorization headers — the agent must not be able
   // to override the injected value or smuggle a stolen token. Mirrors the
   // Infisical Agent Vault + CF outboundByHost zero-trust behaviour.
+  //
+  // Also strip hop-by-hop / connection-level headers that would confuse
+  // node:fetch's outbound — `host` (we let fetch infer from the URL),
+  // `content-length` (fetch sets it), proxy-* headers, etc. Without this
+  // strip, fetch() throws "fetch failed" when the inbound `host:
+  // oma-vault:14322` clashes with the upstream URL's actual host.
+  const STRIP = new Set([
+    "authorization",
+    "x-api-key",
+    "x-goog-api-key",
+    "host",
+    "content-length",
+    "connection",
+    "keep-alive",
+    "proxy-authorization",
+    "proxy-connection",
+    "te",
+    "trailer",
+    "transfer-encoding",
+    "upgrade",
+  ]);
   const headers: Record<string, string> = {};
   for (const [k, v] of Object.entries(req.headers)) {
     const lower = k.toLowerCase();
-    if (lower === "authorization" || lower === "x-api-key" || lower === "x-goog-api-key") continue;
+    if (STRIP.has(lower)) continue;
     if (typeof v === "string") headers[k] = v;
     else if (Array.isArray(v)) headers[k] = v.join(", ");
   }
@@ -179,19 +200,37 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     console.log(
       `[oma-vault] inject ${matched.injectHeader.name} for ${url} (cred=${matched.credentialId})`,
     );
+  } else {
+    console.log(`[oma-vault] passthrough ${req.method} ${url}`);
   }
 
   // Forward to upstream. Read body as buffer to handle binary uploads.
   const bodyBuf = req.body.buffer;
-  const upstream = await fetch(url, {
-    method: req.method,
-    headers,
-    body: bodyBuf.byteLength > 0 ? bodyBuf : undefined,
-    redirect: "manual",
-  });
+  let upstream: Response;
+  try {
+    upstream = await fetch(url, {
+      method: req.method,
+      headers,
+      body: bodyBuf.byteLength > 0 ? bodyBuf : undefined,
+      redirect: "manual",
+    });
+  } catch (err) {
+    const msg = (err as Error).message ?? String(err);
+    console.error(`[oma-vault] forward failed for ${url}:`, msg);
+    return {
+      statusCode: 502,
+      headers: { "content-type": "text/plain" },
+      body: `oma-vault: upstream forward failed: ${msg}`,
+    };
+  }
 
   const respHeaders: Record<string, string> = {};
   upstream.headers.forEach((v, k) => {
+    // content-encoding would force the client to re-decompress something
+    // we already have decoded. content-length will be wrong post-buffer.
+    // Drop both; let the client re-derive.
+    const lower = k.toLowerCase();
+    if (lower === "content-encoding" || lower === "content-length") return;
     respHeaders[k] = v;
   });
 

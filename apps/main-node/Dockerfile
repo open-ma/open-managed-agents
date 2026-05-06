@@ -56,11 +56,20 @@ COPY tsconfig.json ./
 # ─── Stage 2: runtime ──────────────────────────────────────────────────────
 FROM node:22-slim AS runtime
 
-# tsx + better-sqlite3 native module both need basic runtime libs only.
+# Tools the agent's bash subprocess relies on. node:22-slim ships almost
+# nothing — `curl`, `git`, `ca-certificates` are the bare minimum for the
+# harness's bash + read/write/web_fetch tools to do anything useful.
+# `python3` is here so build-tooling that shells out to `python` (mostly
+# memory store demos + agent-written scripts) doesn't immediately die.
+# tsx + better-sqlite3 native module also need basic runtime libs only.
 # corepack is needed at runtime so `pnpm start` resolves; alternatively we
 # could invoke tsx directly via node_modules/.bin but corepack matches the
 # dev workflow exactly.
-RUN corepack enable
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends \
+       curl ca-certificates git python3 \
+  && rm -rf /var/lib/apt/lists/* \
+  && corepack enable
 WORKDIR /app
 
 # Copy the whole monorepo from deps (includes node_modules, source, schemas).

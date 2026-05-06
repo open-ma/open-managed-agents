@@ -43,6 +43,22 @@ export interface SandboxExecutor {
     tenantId: string;
     sessionId: string;
   }): Promise<void>;
+  /**
+   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
+   * its onActivityExpired hook (sleepAfter teardown) records the final
+   * /workspace snapshot scoped to this session.
+   */
+  setBackupContext?(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
+   * Trigger an immediate /workspace snapshot via OmaSandbox. Used by the
+   * explicit-destroy path to capture state before sandbox.destroy() wipes
+   * the container.
+   */
+  snapshotWorkspaceNow?(): Promise<void>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
   /**
@@ -69,14 +85,23 @@ export interface SandboxExecutor {
     ttlSec: number;
   }): Promise<{ id: string; dir: string; localBucket?: boolean } | null>;
   /**
-   * Restore a previously-created backup into /workspace. Best-effort: false
-   * means caller should treat /workspace as empty.
+   * Restore a previously-created backup into /workspace. Returns
+   * `{ok:true}` on success, `{ok:false, error?}` when the backup is
+   * missing/expired/etc. Best-effort: callers treat ok=false as "/workspace
+   * is empty, proceed". Matches the apps/agent SandboxExecutor signature so
+   * adapters can satisfy both ports without divergence.
    */
   restoreWorkspaceBackup?(handle: {
     id: string;
     dir: string;
     localBucket?: boolean;
-  }): Promise<boolean>;
+  }): Promise<{ ok: boolean; error?: string }>;
   /** Destroy the sandbox — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
+  /**
+   * Tell the sandbox container "I'm still active". Resets CF Container's
+   * sleepAfter inactivity timer; long-running bg tasks keep the box alive
+   * via this. No-op on impls that don't auto-sleep.
+   */
+  renewActivityTimeout?(): Promise<void>;
 }
