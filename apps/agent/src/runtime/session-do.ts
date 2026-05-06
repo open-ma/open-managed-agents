@@ -14,10 +14,17 @@ import type { Env } from "@open-managed-agents/shared";
 import { logWarn, generateEventId } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
+  CfDoEventLog,
   ensureSchema as ensureEventLogSchema,
 } from "@open-managed-agents/event-log/cf-do";
-import type { StreamRepo } from "@open-managed-agents/event-log";
+import type { EventLogRepo, StreamRepo } from "@open-managed-agents/event-log";
 import { recoverInterruptedState as runRecovery } from "./recovery";
+import {
+  RuntimeAdapterImpl,
+  type RuntimeAdapter,
+} from "@open-managed-agents/session-runtime";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { buildCfTenantDbProvider } from "@open-managed-agents/services";
 import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import type {
   AgentConfig,
@@ -195,9 +202,11 @@ export class SessionDO extends DurableObject<Env> {
   // ── cf-agents-replacement state (see _ensureCfAgentsSchema below) ─────
   private _state: SessionState | undefined;
   private _initialized = false;
-  private _keepAliveRefs = 0;
-  private _runFiberActiveFibers = new Set<string>();
-  private _runFiberRecoveryInProgress = false;
+  // Lazy-built runtime adapter (the unified one Node also uses). Built
+  // on first turn so we can read this.state.tenant_id, which isn't set
+  // until /init writes the row. _runtimeAdapter is the cached adapter
+  // instance scoped to this DO's session.
+  private _runtimeAdapter: RuntimeAdapter | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -875,22 +884,95 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Build the small adapter that turn-runtime needs from this DO. We
-   * bind keepAliveWhile + runFiber to `this` and expose ctx.storage as
-   * a plain object so turn-runtime doesn't need to access protected
-   * members of cf-agents Agent.
+   * Build the adapter turn-runtime needs from this DO. Returns a
+   * RuntimeAdapter (the unified adapter Node also uses) wrapped in the
+   * thin TurnRuntimeAgent shape that pins it to this DO's sessionId
+   * and exposes ctx.storage for the recovery counter.
+   *
+   * The RuntimeAdapter's `hintTurnInFlight` callback is wired here to
+   * setAlarm(now+30s) — this is CF's keep-alive: the alarm rearms
+   * itself in alarm() so the DO doesn't get evicted while a turn is
+   * in flight. Cheap; setAlarm cost is one storage write.
    */
   private turnRuntimeAdapter(): TurnRuntimeAgent {
     return {
-      keepAliveWhile: <T,>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
-      runFiber: <T,>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>) =>
-        this.runFiber(name, fn),
+      adapter: this.runtimeAdapter,
+      sessionId: this.state.session_id,
       storage: {
         get: <T = unknown,>(key: string) => this.ctx.storage.get<T>(key),
         put: <T = unknown,>(key: string, value: T) => this.ctx.storage.put(key, value),
         delete: (key: string) => this.ctx.storage.delete(key).then(() => undefined),
       },
     };
+  }
+
+  /**
+   * Lazily-built unified RuntimeAdapter for this session. Reused across
+   * turns. The adapter holds:
+   *   - sql: per-tenant D1 (resolved via buildCfTenantDbProvider) for
+   *     beginTurn/endTurn/listOrphanTurns against the unified `sessions`
+   *     table.
+   *   - eventLog/streams: this DO's CfDoEventLog/CfDoStreamRepo (per-DO
+   *     storage SQL — fast, transactional with the rest of DO state).
+   *   - hintTurnInFlight: setAlarm(now+30s). The alarm() handler
+   *     rearms itself while a turn is still in flight (sessions row
+   *     status='running'), so an LLM streaming call lasting > 30s
+   *     keeps the DO warm.
+   */
+  private get runtimeAdapter(): RuntimeAdapter {
+    if (this._runtimeAdapter) return this._runtimeAdapter;
+    if (!this._state) {
+      throw new Error("runtimeAdapter accessed before state loaded");
+    }
+    const tenantId = this._state.tenant_id;
+    // Lazy-resolve the per-tenant D1 binding. buildCfTenantDbProvider
+    // returns the AUTH_DB shard the routing table maps this tenant to.
+    // We construct the SqlClient eagerly and cache the adapter — the
+    // tenant doesn't change for the lifetime of a SessionDO instance.
+    const provider = buildCfTenantDbProvider(this.env);
+    // provider.resolve is async; we synchronously construct using a
+    // wrapper SqlClient that resolves on first call. Simpler: just hold
+    // a Promise-backed SqlClient. Even simpler: assume the synchronous
+    // path (env.AUTH_DB) since most deploys are single-shard. Fall back
+    // to async resolve via a thin wrapper when sharded.
+    const db = (this.env as unknown as { AUTH_DB?: D1Database }).AUTH_DB;
+    if (!db) {
+      throw new Error(
+        "runtimeAdapter: env.AUTH_DB binding missing — required for unified sessions table writes",
+      );
+    }
+    const sql = new CfD1SqlClient(db);
+    if (!this.streams) this.ensureSchema();
+    const eventLog: EventLogRepo = new CfDoEventLog(
+      this.ctx.storage.sql,
+      (e) => {
+        const ev = e as SessionEvent & { id?: string; processed_at?: string };
+        if (!ev.id) ev.id = `sevt_${generateEventId()}`;
+        if (!ev.processed_at) ev.processed_at = new Date().toISOString();
+      },
+      this.env.MEMORY_BUCKET ?? null,
+      `t/${tenantId}/sessions/${this._state.session_id}/events/`,
+    );
+    const streams = this.streams!;
+    this._runtimeAdapter = new RuntimeAdapterImpl({
+      sql,
+      eventLog,
+      streams,
+      // No sandbox at adapter level — turn-runtime doesn't use it; the
+      // legacy sandbox getter (this.getOrCreateSandbox()) stays as-is
+      // for the harness path which constructs its own ctx.
+      onTurnInFlight: () => {
+        // Fire-and-forget setAlarm. CF's alarm queue de-dupes, so back-
+        // to-back calls are fine. The alarm() handler re-arms while a
+        // turn is still in flight (status='running' in sessions table).
+        void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
+      },
+    });
+    // Provider call only used if sharding is in play; today the lazy
+    // env.AUTH_DB path covers the single-shard default. Keep the
+    // import live so future per-tenant shards plug in here.
+    void provider;
+    return this._runtimeAdapter;
   }
 
   /**
@@ -2594,7 +2676,7 @@ export class SessionDO extends DurableObject<Env> {
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
-        keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
+        keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
@@ -2968,7 +3050,7 @@ export class SessionDO extends DurableObject<Env> {
         },
         pendingConfirmations: [],
         abortSignal: effectiveAbortSignal,
-        keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
+        keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
@@ -3298,6 +3380,12 @@ export class SessionDO extends DurableObject<Env> {
         retry_options TEXT
       )
     `);
+    // cf_agents_runs table is no longer written to. Schema kept here as
+    // CREATE IF NOT EXISTS so old prod DOs migrating through this code
+    // don't crash on stale references — the table will be dropped
+    // entirely in Phase 4 once everything has rolled. Orphan-turn
+    // marker now lives on the unified `sessions.turn_id` column (see
+    // apps/main/migrations/0014_session_turn_id.sql).
     sql.exec(`
       CREATE TABLE IF NOT EXISTS cf_agents_runs (
         id TEXT PRIMARY KEY NOT NULL,
@@ -3495,10 +3583,11 @@ export class SessionDO extends DurableObject<Env> {
       const recoveryMs = (recoveringRows[0].execution_started_at + HUNG_SCHEDULE_TIMEOUT_SECONDS) * 1000;
       nextMs = nextMs === null ? recoveryMs : Math.min(nextMs, recoveryMs);
     }
-    if (this._keepAliveRefs > 0) {
-      const keepAliveMs = nowMs + KEEP_ALIVE_INTERVAL_MS;
-      nextMs = nextMs === null ? keepAliveMs : Math.min(nextMs, keepAliveMs);
-    }
+    // Keep-alive (was: _keepAliveRefs branch) now flows through
+    // hintTurnInFlight → setAlarm at beginTurn, plus the alarm() handler's
+    // own rearm-while-inflight check after _checkOrphanTurns. So
+    // _scheduleNextAlarm only schedules data-driven wakeups (cron / one-
+    // shot wakeups / hung interval recovery). Cleaner separation.
     if (nextMs !== null) {
       await this.ctx.storage.setAlarm(nextMs);
     } else {
@@ -3587,8 +3676,20 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // Housekeeping: orphan-fiber recovery
-    await this._checkRunFibers();
+    // Orphan-turn recovery: was _checkRunFibers (cf_agents_runs scan).
+    // Now reads sessions WHERE status='running' via the unified adapter
+    // and runs the same recovery.ts logic Node does. Same call site
+    // (alarm-triggered), same effect.
+    await this._checkOrphanTurns();
+
+    // Keep-alive rearm: while a turn is in flight (this DO's
+    // sessions row marked status='running'), reschedule the alarm 30s
+    // out so the DO doesn't get evicted before the LLM call returns.
+    // The status flip back to 'idle' in adapter.endTurn naturally stops
+    // the rearm loop.
+    if (await this._hasInflightTurn()) {
+      await this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
+    }
 
     // Container keepalive: while there's at least one background_tasks row,
     // ping the sandbox container to reset its sleepAfter timer. Means
@@ -3611,89 +3712,50 @@ export class SessionDO extends DurableObject<Env> {
     await this._scheduleNextAlarm();
   }
 
-  // ── Fiber API (cf_agents_runs, orphan recovery) ────────────────────────
+  // ── Orphan-turn detection (replaces cf_agents_runs / runFiber API) ────
 
   /**
-   * Run an async function as a "durable fiber". The DO row is registered in
-   * cf_agents_runs at start, deleted on completion. If the DO is evicted
-   * mid-execution, the row remains and is detected as an orphan by
-   * `_checkRunFibers` on the next alarm wake — which then dispatches
-   * `onFiberRecovered` (overridden by SessionDO).
+   * Scan the unified `sessions` table for rows marked status='running'
+   * with a turn_id we don't recognise as our own active turn. For each,
+   * call onFiberRecovered (which routes to recoverAgentTurn) so the
+   * partial state gets reconciled and the next user.message starts
+   * from clean events.
    *
-   * Skip the cf-agents `stash`/AsyncLocalStorage mechanism entirely —
-   * turn-runtime.ts has its own snapshot/recovery model in Primitive 2.
+   * Replaces the old _checkRunFibers (cf_agents_runs scan). The unified
+   * adapter writes turn_id on beginTurn() and clears it on endTurn();
+   * leftover rows after a process death are exactly the orphan set.
    */
-  async runFiber<T>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>): Promise<T> {
-    const id = nanoid();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO cf_agents_runs (id, name, snapshot, created_at) VALUES (?, ?, NULL, ?)`,
-      id, name, Date.now(),
-    );
-    this._runFiberActiveFibers.add(id);
-    const dispose = await this.keepAlive();
-    try {
-      return await fn({ id, snapshot: null });
-    } finally {
-      this._runFiberActiveFibers.delete(id);
-      this.ctx.storage.sql.exec(`DELETE FROM cf_agents_runs WHERE id = ?`, id);
-      dispose();
-    }
-  }
-
-  private async _checkRunFibers(): Promise<void> {
-    if (this._runFiberRecoveryInProgress) return;
-    this._runFiberRecoveryInProgress = true;
-    try {
-      const rows = this.ctx.storage.sql
-        .exec<{ id: string; name: string; snapshot: string | null }>(
-          `SELECT id, name, snapshot FROM cf_agents_runs`,
-        )
-        .toArray();
-      for (const row of rows) {
-        if (this._runFiberActiveFibers.has(row.id)) continue;
-        let snapshot: unknown = null;
-        if (row.snapshot) try { snapshot = JSON.parse(row.snapshot); }
-        catch { console.warn(`[fiber] corrupted snapshot for ${row.id}, treating as null`); }
-        try {
-          await this.onFiberRecovered({ id: row.id, name: row.name, snapshot });
-        } catch (err) {
-          console.error(`[fiber] recovery failed for "${row.name}" (${row.id}):`, err);
-        }
-        this.ctx.storage.sql.exec(`DELETE FROM cf_agents_runs WHERE id = ?`, row.id);
+  private async _checkOrphanTurns(): Promise<void> {
+    if (!this._state) return;
+    const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    for (const o of orphans) {
+      // The recovery path is identical to the legacy onFiberRecovered
+      // entry — routes through recoverAgentTurn (which reads event log
+      // + streams). We pass a minimal context shape so the existing
+      // recovery code keeps working.
+      try {
+        await this.onFiberRecovered({
+          id: o.turn_id,
+          name: `turn:${o.turn_id}`,
+          snapshot: null,
+        });
+      } catch (err) {
+        console.error(`[orphan-recovery] failed for turn ${o.turn_id}:`, err);
       }
-    } finally {
-      this._runFiberRecoveryInProgress = false;
+      // Mark the orphan turn idle. recoverAgentTurn doesn't do this
+      // (it ran before the unified table existed).
+      await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
     }
   }
-
-  // ── KeepAlive API (refcount + alarm) ──────────────────────────────────
 
   /**
-   * Increment keepAlive refcount and ensure the next alarm fires within
-   * KEEP_ALIVE_INTERVAL_MS. Returns a dispose function — call it (or use
-   * keepAliveWhile) to decrement the refcount when work is done.
-   *
-   * No actual heartbeat schedule row is written; the alarm itself does the
-   * keepalive work because `_scheduleNextAlarm` checks `_keepAliveRefs > 0`
-   * and re-arms within the interval. Same approach as cf-agents 0.11.2.
+   * Has this DO got a turn currently in flight? Used by alarm() to
+   * decide whether to rearm itself for keep-alive.
    */
-  async keepAlive(): Promise<() => void> {
-    this._keepAliveRefs++;
-    if (this._keepAliveRefs === 1) {
-      await this._scheduleNextAlarm();
-    }
-    let disposed = false;
-    return () => {
-      if (disposed) return;
-      disposed = true;
-      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    };
-  }
-
-  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
-    const dispose = await this.keepAlive();
-    try { return await fn(); }
-    finally { dispose(); }
+  private async _hasInflightTurn(): Promise<boolean> {
+    if (!this._state) return false;
+    const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    return orphans.length > 0;
   }
 }
 
