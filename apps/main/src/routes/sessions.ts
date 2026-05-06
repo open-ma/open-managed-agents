@@ -101,8 +101,6 @@ async function getSandboxBinding(
         const [, sessionId, rest] = match;
         const doId = env.SESSION_DO!.idFromName(sessionId);
         const stub = env.SESSION_DO!.get(doId);
-        // Workaround for cloudflare/workerd#2240
-        (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
         return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
           method: req.method,
           headers: req.headers,
@@ -181,8 +179,6 @@ function sessionDoFallbackFetcher(env: Env): Fetcher | null {
       const [, sessionId, rest] = match;
       const doId = env.SESSION_DO!.idFromName(sessionId);
       const stub = env.SESSION_DO!.get(doId);
-      // Workaround for cloudflare/workerd#2240
-      (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
       return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
         method: req.method,
         headers: req.headers,

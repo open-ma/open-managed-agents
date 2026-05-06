@@ -45,13 +45,10 @@ function newStub(label: string): { stub: DurableObjectStub; sessionId: string } 
 }
 
 async function ensureAlive(stub: DurableObjectStub, sessionId: string): Promise<void> {
-  // partyserver/agents requires .name to be set before fetch/alarm dispatch.
-  // Without this, the framework's runFiber path (which alarm uses) throws
-  // "Attempting to read .name on SessionDO before it was set" — known
-  // workerd quirk for direct DO RPC entry. setName is write-once-idempotent.
-  await (stub as { setName: (n: string) => Promise<void> }).setName(sessionId);
   // Hitting any endpoint runs ensureSchema() and warms the DO so this.schedule()
   // can write to cf_agents_schedules. /status is the lightest endpoint.
+  // (setName workaround removed — partyserver was dropped in Phase 3 of
+  // the unified-runtime refactor; the .name read no longer happens.)
   await stub.fetch(new Request("http://internal/status"));
 }
 
