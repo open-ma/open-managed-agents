@@ -69,6 +69,13 @@ function checkSandboxExec(_trajectory: Trajectory, _check: VerifyCheck): number 
 // --- Script verifier (run a verify_script in the sandbox via a follow-up turn) ---
 
 /**
+ * @deprecated Phase 2 (trajectory-v1) replaced this with the canonical
+ * `ScriptVerifier` from `@open-managed-agents/eval-core`, which executes
+ * `verify_script` directly in the sandbox via the `/exec` endpoint
+ * (deterministic, no model token cost, hard timeout). Kept exported only
+ * to avoid breaking external imports during the deprecation window;
+ * remove once no consumer imports it (Phase 4 cleanup).
+ *
  * Run a verify_script in the agent's sandbox by sending a follow-up message,
  * then parse the agent's reply for `EXIT_CODE=<n>`. Used for `RewardSpec.type
  * === "script"` tasks (e.g. terminal-bench pytest tests).
