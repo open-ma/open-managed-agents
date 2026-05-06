@@ -1,0 +1,261 @@
+---
+title: SessionDO & Sandbox State Machines
+description: The states and transitions for the session DO (agent loop) and the sandbox container, including how each survives Cloudflare eviction.
+---
+
+import { Aside } from '@astrojs/starlight/components';
+
+Two cooperating state machines drive the agent runtime. SessionDO owns
+conversation state and the agent loop; OmaSandbox (the container DO) owns
+the workspace and exec surface. They communicate over RPC and have
+independent lifecycles — knowing which one is in which state is the
+fastest way to debug "why didn't my session resume."
+
+## SessionDO state machine
+
+Three states. Status is **derived**, not stored — there's no
+`state.status` field for code paths to mutate inconsistently.
+
+```
+                           +-----------+
+              first /init  |   idle    |
+        ----------------->  |           |  <----------------+
+                           +-----------+                   |
+                                 |                         |
+        user.message arrives,    |                         |
+        drainEventQueue starts   |                         |
+        runFiber INSERT          v                         |
+                           +-----------+                   |
+                           |  running  |                   |
+                           |           |                   |
+                           +-----------+                   |
+                                 |                         |
+        runFiber DELETE          |                         |
+        (turn done OR aborted    +-------------------------+
+         OR onFiberRecovered)
+                                 |
+                       /destroy  |
+                                 v
+                           +-------------+
+                           | terminated  |  (sticks; rejects all events)
+                           +-------------+
+```
+
+### Derivation (the rule)
+
+```ts
+deriveStatus(): "idle" | "running" | "terminated" {
+  if (state.terminated_at != null
+      || state.status === "terminated") return "terminated"; // legacy back-compat
+  if (cf_agents_runs has any row)        return "running";
+  return "idle";
+}
+```
+
+### Transitions
+
+| Trigger | What changes in storage | Resulting derived status |
+|---|---|---|
+| `POST /init` | `cf_agents_state` row written, `terminated_at: null` | `idle` |
+| `POST /event user.message` arrives | `events` row append. If `drain` reaches `runFiber`, it INSERTs a row into `cf_agents_runs` | `idle` → `running` |
+| Turn finishes cleanly | `runFiber.finally` DELETEs the `cf_agents_runs` row + appends `session.status_idle` event | `running` → `idle` |
+| Turn errors out | `session.error` event appended; `runFiber.finally` DELETEs row | `running` → `idle` |
+| DO evicted mid-turn | Nothing; eviction does no writes | derived value continues to read `running` (the row is still there) |
+| `_checkRunFibers` finds orphan | DELETEs the row, then calls `onFiberRecovered` | `running` → `idle` until recovery's own `runFiber` re-INSERTs |
+| `recoverAgentTurn` re-issues turn | Fresh `runFiber` INSERTs new row | `idle` → `running` |
+| 5 recoveries exceeded | `forceIdle` callback emits `session.status_idle` event; recovery counter cleared | `running` → `idle` |
+| `user.interrupt` | `currentAbortController.abort()` fires; runFiber's `try` catches → `finally` DELETEs row | `running` → `idle` |
+| `DELETE /destroy` | `setState({...state, terminated_at: Date.now()})`; sandbox.snapshotWorkspaceNow + sandbox.destroy | any → `terminated` |
+
+### Why no `running` is stored
+
+Earlier the code wrote `setState({status: "running"})` before
+`runFiber` INSERTed its row into `cf_agents_runs`. Those writes were
+separated by ≥3 await boundaries. An eviction landing in that window
+left `state.status="running"` with no orphan fiber to recover, so
+`_checkRunFibers` had nothing to do, `drainEventQueue` saw "running"
+and returned, and the session deadlocked until a manual
+`user.interrupt`. With derivation the divergence is impossible — the
+fiber row is the status.
+
+### Wake-up triggers
+
+A SessionDO that's been evicted resumes when any of these arrive:
+
+- HTTP fetch into the DO (user message, console events poll, verify exec)
+- Alarm dispatch from `cf_agents_schedules` (next due time)
+- WebSocket frame from a hibernated client
+- Direct RPC from another worker
+
+On wake the constructor reloads `state` from SQL. The alarm path also
+runs `_checkRunFibers` on every fire — that's the recovery hook.
+
+## Sandbox container state machine
+
+OmaSandbox is the container Durable Object (extends `Sandbox` from
+`@cloudflare/sandbox`). Its lifecycle is managed by Cloudflare, not by
+SessionDO directly — SessionDO just makes RPC calls (`exec`, `readFile`,
+`setOutboundHandler`, etc.) and the platform handles boot/sleep/destroy.
+
+```
+                        +---------+
+              first RPC |  cold   |
+              -------->  |  (no    |
+                        | container)|
+                        +---------+
+                              |
+                  spawn       |    container boot
+                  container   v
+                        +---------------+
+                        | warming-up    |
+                        |  - PID 1 boot |
+                        |  - 5s cert    |
+                        |    polling    |
+                        +---------------+
+                              |
+                              | trustRuntimeCert resolves (cert
+                              | pushed within 5s by setOutboundHandler)
+                              v
+                        +---------------+
+              SessionDO |   active      |  <----------------+
+              RPCs      |  /workspace   |                   | renewActivityTimeout
+              hit it,   |  populated by |                   | (each RPC, plus our
+              every RPC |  restore or   |                   |  alarm-driven keepalive
+              resets    |  empty        |                   |  while bg tasks live)
+              the idle  +---------------+                   |
+              timer           |                             |
+                              |                             |
+                  no RPC for  |                             |
+                  sleepAfter  v                             |
+                              | onActivityExpired() override:|
+                              | 1. snapshotWorkspaceNow      |
+                              |    (createBackup → R2 +      |
+                              |    recordBackup → D1)        |
+                              | 2. super.onActivityExpired() |
+                              |    -> super.stop()           |
+                              v
+                        +---------------+
+                        |  stopping     |
+                        +---------------+
+                              |
+                              | onStop({exitCode: 0, reason: "exit"})
+                              v
+                        +---------+
+                        |  cold   |
+                        +---------+
+```
+
+### Cert race (gone, but worth understanding)
+
+When `interceptHttps = true`, the container's PID 1 polls
+`/etc/cloudflare/certs/cloudflare-containers-ca.crt` for 5 seconds at
+startup. The cert is only pushed by the Cloudflare platform once
+SessionDO calls `sandbox.setOutboundHandler(...)`. If you skip that
+call, the cert never lands and PID 1 exits with "Certificate not
+found." See the
+[CF sandbox cert push](#) note for the bisection that got us here.
+
+The warmup sequence in SessionDO's `warmUpSandbox`:
+
+1. Probe `sandbox.exec("true")` until container responds (10 attempts).
+2. Probe `cat /tmp/.oma-warm` — if a non-empty marker exists, the
+   container's `/workspace` is already populated; **skip restore**.
+3. Otherwise, look up the latest backup in D1 by
+   `(tenant, env, session)` and call `sandbox.restoreWorkspaceBackup`
+   if found.
+4. Mount any `memory_store` / `env` / `github_repository` resources.
+5. Call `sandbox.setOutboundContext({tenantId, sessionId})` —
+   triggers cert push and registers the vault-injection handler.
+6. Call `sandbox.setBackupContext({tenantId, environmentId, sessionId})`
+   — gives OmaSandbox the tuple it needs at sleepAfter time.
+7. Write a fresh `/tmp/.oma-warm` marker so future warmups can detect
+   that this container is still alive.
+
+### Outbound traffic (active state)
+
+```
+container's libcurl issues HTTPS request
+  -> CF Sandbox MITM
+       -> outboundByHost lookup (static):
+             "*.r2.cloudflarestorage.com"  -> raw fetch (passthrough)
+             other host                    -> catch-all handler
+                                              -> injectVaultCredsHandler
+                                                   -> RPC main worker
+                                                       lookupOutboundCredential
+                                                   -> Authorization injected
+                                                       (or null = passthrough)
+                                                   -> upstream fetch
+```
+
+R2 traffic must bypass the catch-all because the
+materialize-and-re-PUT path corrupts the squashfs blob —
+[cloudflare/sandbox-sdk#619](https://github.com/cloudflare/sandbox-sdk/issues/619).
+
+### Sleep & backup
+
+The 5-minute idle timer (`sleepAfter = "5m"`) fires
+`onActivityExpired`. We override it to call `snapshotWorkspaceNow`
+first — that's the only point in the lifecycle where /workspace is
+guaranteed to still exist before the SDK tears the container down. The
+snapshot writes to R2 (`BACKUP_BUCKET`) and records the handle in
+`workspace_backups` D1 (keyed by `tenant_id + environment_id +
+source_session_id`). 7-day TTL by default.
+
+`renewActivityTimeout` is RPCed by SessionDO's alarm any time it sees
+a row in `background_tasks` — that keeps the container alive past the
+5-minute window for `bash run_in_background` jobs that the agent is
+waiting on. Capped at 30 minutes total per task (see
+`pollBackgroundTasks`'s `BG_TASK_MAX_LIFETIME_MS`).
+
+### Explicit destroy
+
+`SessionDO.fetch DELETE /destroy` calls
+`sandbox.snapshotWorkspaceNow()` (eager — won't survive
+`sandbox.destroy()` otherwise), then `sandbox.destroy()`. That's the
+only path that takes a final snapshot before the container goes away.
+
+## How the two interact
+
+```
+SessionDO                                   OmaSandbox (container DO)
+=========                                   =========================
+warmUpSandbox()
+  ├─ sandbox.exec("true")  ─────────────> cold → warming-up → active
+  ├─ sandbox.exec("cat /tmp/.oma-warm")
+  │     marker absent → restore needed
+  ├─ sandbox.restoreWorkspaceBackup(h) ──> mount squashfs into /workspace
+  ├─ sandbox.setOutboundContext()      ──> cert push + register handler
+  ├─ sandbox.setBackupContext()        ──> stash (tenant, env, session)
+  └─ sandbox.exec("echo $gen > /tmp/.oma-warm")
+
+drainEventQueue()
+  └─ runFiber("turn:1")                  ┐
+       └─ streamText                     │ — agent runs tools via
+            └─ sandbox.exec / writeFile  ┘   sandbox RPC; container
+                                              stays active
+
+(turn ends; runFiber DELETEs cf_agents_runs row)
+(no traffic for 5 min)
+
+                           sleepAfter fires
+                           OmaSandbox.onActivityExpired()
+                             ├─ snapshotWorkspaceNow()
+                             │    ├─ createBackup → R2
+                             │    └─ recordBackup  → D1 row
+                             └─ super.onActivityExpired() → stop
+                           OmaSandbox.onStop({exitCode: 0})
+
+(next turn arrives)
+warmUpSandbox()
+  ├─ sandbox.exec("true")  ─────────────> cold → warming-up → active
+  ├─ sandbox.exec("cat /tmp/.oma-warm")
+  │     marker absent (new container, /tmp wiped) → restore needed
+  ├─ findLatestBackup() in D1 (the row sleepAfter just wrote)
+  └─ sandbox.restoreWorkspaceBackup(h) ──> /workspace restored
+```
+
+The container can die independently of SessionDO and vice versa.
+SessionDO's `wrapSandboxWithLazyWarmup` proxy detects container
+recycle by re-probing `/tmp/.oma-warm` before each call — if the
+marker is gone, the cached `sandboxWarmupPromise` is reset and the
+next call re-runs `warmUpSandbox`.
