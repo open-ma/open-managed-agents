@@ -13,12 +13,10 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
-    "@open-managed-agents/credentials-store": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
-    "@open-managed-agents/vaults-store": "workspace:*",
     "better-sqlite3": "^11.5.0",
-    "mockttp": "^4.3.1"
+    "mockttp": "4.3.1"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.13",

@@ -81,7 +81,12 @@ services:
       DATABASE_PATH: /app/data/oma.db
       OMA_VAULT_CA_DIR: /app/data/oma-vault-ca
       OMA_VAULT_PORT: "14322"
-      OMA_TENANT: ${OMA_TENANT:-default}
+      # Tenant scope. Default "*" matches active credentials across ALL
+      # tenants by hostname — fine for single-operator self-host (every
+      # vault belongs to "me"), unsafe for shared multi-tenant deploys
+      # where two tenants might both register the same host. Override
+      # with OMA_TENANT=tn_xxx in .env for multi-user prod.
+      OMA_TENANT: ${OMA_TENANT:-*}
     volumes:
       - ./data:/app/data
     restart: unless-stopped

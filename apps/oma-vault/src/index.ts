@@ -31,12 +31,6 @@ import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { getLocal, generateCACertificate, type CompletedRequest } from "mockttp";
 import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
-import {
-  createSqliteVaultService,
-} from "@open-managed-agents/vaults-store";
-import {
-  createSqliteCredentialService,
-} from "@open-managed-agents/credentials-store";
 import type { CredentialAuth } from "@open-managed-agents/shared";
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
@@ -44,13 +38,15 @@ import type { CredentialAuth } from "@open-managed-agents/shared";
 const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
 const caDir = process.env.OMA_VAULT_CA_DIR ?? "./data/oma-vault-ca";
 const port = Number(process.env.OMA_VAULT_PORT ?? 14322);
-const tenantId = process.env.OMA_TENANT ?? "default";
+// Tenant scoping: default "*" means look across ALL tenants by host. Set to
+// a specific `tn_xxx` id to lock the proxy to a single tenant — required
+// for multi-user prod deploys, since cross-tenant matching can leak a
+// credential between tenants when both register the same host.
+const scopeTenantId = process.env.OMA_TENANT ?? "*";
 
 mkdirSync(resolve(caDir), { recursive: true });
 
 const sql = await createBetterSqlite3SqlClient(dbPath);
-const vaults = createSqliteVaultService({ client: sql });
-const creds = createSqliteCredentialService({ client: sql });
 
 // ─── CA management ───────────────────────────────────────────────────────
 //
@@ -97,6 +93,31 @@ interface MatchedCred {
  * URL(credential.mcp_server_url).host. Wildcards / suffix match TBD when
  * we hit a use case (e.g. `*.googleapis.com` for google credentials).
  */
+/**
+ * Find the active credential whose mcp_server_url host matches the request
+ * host. Returns the header to inject, or null when no credential applies.
+ *
+ * Today's matcher: exact hostname match against
+ * URL(credential.mcp_server_url).host. Wildcards / suffix match TBD when
+ * we hit a use case (e.g. `*.googleapis.com` for google credentials).
+ *
+ * Cross-tenant note: with better-auth multi-tenant, credentials live under
+ * per-user tenants (tn_xxx), not under a static OMA_TENANT. The proxy
+ * intercepts traffic from any sandbox and has no way to attribute the
+ * request to a specific tenant from its hostname alone — we'd need a
+ * per-session port or a sandbox-side header tag for that.
+ *
+ * For the PoC we look across ALL tenants by host, matching the first
+ * active credential. SECURITY LIMITATION: if two tenants both register a
+ * credential for the same host (e.g. `https://api.github.com`), the
+ * second tenant's request can pick up the first tenant's token. Not OK
+ * for shared multi-tenant deploys; OK for single-operator self-host
+ * (every credential ultimately belongs to "me"). Document the limit.
+ *
+ * Setting OMA_TENANT to a specific tenant id locks lookup to that tenant
+ * only — recommended for prod multi-user deploys until per-session
+ * attribution lands.
+ */
 async function findCredentialForUrl(url: string): Promise<MatchedCred | null> {
   let host: string;
   try {
@@ -104,29 +125,38 @@ async function findCredentialForUrl(url: string): Promise<MatchedCred | null> {
   } catch {
     return null;
   }
-  const allVaults = await vaults.list({ tenantId, includeArchived: false });
-  for (const vault of allVaults) {
-    const vaultCreds = await creds.list({
-      tenantId,
-      vaultId: vault.id,
-      includeArchived: false,
-    });
-    for (const cred of vaultCreds) {
-      if (!cred.auth.mcp_server_url) continue;
-      try {
-        const credHost = new URL(cred.auth.mcp_server_url).host;
-        if (credHost !== host) continue;
-      } catch {
-        continue;
-      }
-      const headerSpec = authToHeader(cred.auth);
-      if (!headerSpec) continue;
-      return {
-        vaultId: vault.id,
-        credentialId: cred.id,
-        injectHeader: headerSpec,
-      };
-    }
+  // Cross-tenant lookup against the partial unique index
+  // idx_credentials_mcp_url_active. The index contains hostname-as-substring
+  // (LIKE) is unindexed; we materialize candidates by parsing mcp_server_url.
+  // Acceptable cost: typical deploys have O(10) credentials.
+  type Row = { id: string; tenant_id: string; vault_id: string; auth: string };
+  // Cross-tenant lookup. When OMA_TENANT="*" we accept any tenant; when
+  // it's a specific tenant id we filter to that one (recommended for
+  // multi-user prod deploys).
+  const result = await sql
+    .prepare(
+      `SELECT id, tenant_id, vault_id, auth
+         FROM credentials
+        WHERE archived_at IS NULL
+          AND mcp_server_url IS NOT NULL
+          AND ( ? = '*' OR tenant_id = ? )`,
+    )
+    .bind(scopeTenantId, scopeTenantId)
+    .all<Row>();
+  for (const row of result.results ?? []) {
+    let auth: CredentialAuth;
+    try { auth = JSON.parse(row.auth) as CredentialAuth; } catch { continue; }
+    if (!auth.mcp_server_url) continue;
+    let credHost: string;
+    try { credHost = new URL(auth.mcp_server_url).host; } catch { continue; }
+    if (credHost !== host) continue;
+    const headerSpec = authToHeader(auth);
+    if (!headerSpec) continue;
+    return {
+      vaultId: row.vault_id,
+      credentialId: row.id,
+      injectHeader: headerSpec,
+    };
   }
   return null;
 }
@@ -244,6 +274,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
 await proxy.start(port);
 
 console.log(`[oma-vault] listening on http://0.0.0.0:${port}`);
+console.log(`[oma-vault] tenant scope: ${scopeTenantId === "*" ? "all tenants (single-operator deploy)" : scopeTenantId}`);
 console.log(`[oma-vault] CA cert: ${resolve(caDir, "ca.crt")}`);
 console.log(`[oma-vault] sandbox env to set:`);
 console.log(`  HTTPS_PROXY=http://localhost:${port}`);
