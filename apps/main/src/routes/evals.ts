@@ -14,6 +14,13 @@ const app = new Hono<{
 export interface EvalTaskSpec {
   id: string;
   setup_files?: { path: string; content: string }[];
+  /**
+   * Bash run in the sandbox via /exec before the first message. Used to
+   * stage env state that doesn't fit `setup_files` (git clone at a
+   * specific commit, dataset download, system package install). Failure
+   * (exit != 0) marks the trial failed before the agent ever starts.
+   */
+  setup_script?: string;
   messages: string[]; // sequence of user message texts to send
   timeout_ms?: number; // per-message wait timeout
   // P0a — number of independent trials of this task to run.
