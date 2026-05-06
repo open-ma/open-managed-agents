@@ -435,6 +435,9 @@ importers:
       mockttp:
         specifier: 4.3.1
         version: 4.3.1
+      postgres:
+        specifier: ^3.4.0
+        version: 3.4.9
     devDependencies:
       '@types/better-sqlite3':
         specifier: ^7.6.13

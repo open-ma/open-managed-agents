@@ -30,11 +30,22 @@ import { promises as fs } from "node:fs";
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { getLocal, generateCACertificate, type CompletedRequest } from "mockttp";
-import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
+import {
+  createBetterSqlite3SqlClient,
+  createPostgresSqlClient,
+  type SqlClient,
+} from "@open-managed-agents/sql-client";
 import type { CredentialAuth } from "@open-managed-agents/shared";
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
+// Backend selection mirrors main-node: DATABASE_URL (postgres:// /
+// postgresql://) wins, else fall back to better-sqlite3 with DATABASE_PATH.
+// Vault credentials are written by main-node into the same store, so the
+// two services MUST agree on the backend or oma-vault won't see the rows.
+const dbUrl = process.env.DATABASE_URL ?? "";
+const usePostgres =
+  dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://");
 const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
 const caDir = process.env.OMA_VAULT_CA_DIR ?? "./data/oma-vault-ca";
 const port = Number(process.env.OMA_VAULT_PORT ?? 14322);
@@ -46,7 +57,12 @@ const scopeTenantId = process.env.OMA_TENANT ?? "*";
 
 mkdirSync(resolve(caDir), { recursive: true });
 
-const sql = await createBetterSqlite3SqlClient(dbPath);
+const sql: SqlClient = usePostgres
+  ? await createPostgresSqlClient(dbUrl)
+  : await createBetterSqlite3SqlClient(dbPath);
+console.log(
+  `[oma-vault] sql backend: ${usePostgres ? `postgres ${new URL(dbUrl).host}` : `sqlite ${dbPath}`}`,
+);
 
 // ─── CA management ───────────────────────────────────────────────────────
 //

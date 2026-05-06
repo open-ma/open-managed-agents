@@ -241,6 +241,29 @@ await sql.exec(`
 await ensureEventLogSchema(sql);
 await ensureTenantSchema(sql);
 
+// ── In-place migrations for upgrades ──────────────────────────────────
+//
+// CREATE TABLE IF NOT EXISTS leaves an existing-but-older `sessions`
+// table alone, so a self-host upgrading from a pre-Phase 1 image
+// won't get the new turn_id columns automatically. Apply ALTER TABLE
+// idempotently here. SQLite has no ADD COLUMN IF NOT EXISTS — wrap
+// in try/catch and tolerate "duplicate column" / "column ... already
+// exists" (PG) errors.
+async function addColumnIfMissing(table: string, column: string, type: string) {
+  try {
+    await sql.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}" ${type}`);
+  } catch (err) {
+    const msg = (err as Error).message ?? "";
+    if (!/duplicate column name|already exists/i.test(msg)) throw err;
+  }
+}
+await addColumnIfMissing("sessions", "turn_id", "TEXT");
+await addColumnIfMissing(
+  "sessions",
+  "turn_started_at",
+  usePostgres ? "BIGINT" : "BIGINT",
+);
+
 // ─── Auth ───────────────────────────────────────────────────────────────
 //
 // better-auth on a separate sqlite file. PG-backed auth is a future-work

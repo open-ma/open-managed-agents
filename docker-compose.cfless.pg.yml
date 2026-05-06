@@ -1,0 +1,108 @@
+# CFless OMA — single-instance + Postgres backend.
+#
+# Same shape as docker-compose.cfless.yml but with a postgres service in
+# place of the SQLite file. better-auth still sits on its own sqlite file
+# (kysely-adapter limitation, see apps/main-node/src/index.ts:246-251);
+# everything else (agents/sessions/events/memories/vaults) goes to PG.
+#
+# Quick start:
+#   1. Copy .env.cfless.example → .env (fill ANTHROPIC_API_KEY)
+#   2. docker compose -f docker-compose.cfless.pg.yml up --build
+#   3. curl localhost:8787/health
+#
+# When to use this over the SQLite compose:
+#   - Multiple oma-server instances behind a load balancer (sqlite is
+#     single-writer; PG handles concurrent writes natively).
+#   - You already operate a PG cluster and want one less DB engine.
+#   - Larger sessions tables (PG handles 100M+ row indices better).
+
+services:
+  oma-server:
+    build:
+      context: .
+      dockerfile: apps/main-node/Dockerfile
+    image: openma/main-node:dev
+    container_name: oma-server
+    ports:
+      - "${OMA_PORT:-8787}:8787"
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_CUSTOM_HEADERS: ${ANTHROPIC_CUSTOM_HEADERS:-}
+      # Main store: postgres. main-node detects postgres:// scheme on
+      # DATABASE_URL and routes every store package through the PG adapter.
+      DATABASE_URL: postgres://oma:oma@postgres:5432/oma
+      # Auth still sqlite — the better-auth kysely adapter expects a
+      # node-postgres `Pool`, not the `postgres.js` driver we use for the
+      # main store. Small file (<1k rows in practice); same /app/data
+      # bind-mount as the SQLite compose so backups stay co-located.
+      AUTH_DATABASE_PATH: /app/data/auth.db
+      SANDBOX_WORKDIR: /app/data/sandboxes
+      MEMORY_BLOB_DIR: /app/data/memory-blobs
+      OMA_VAULT_PROXY_URL: http://oma-vault:14322
+      OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      AUTH_DISABLED: ${AUTH_DISABLED:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      oma-vault:
+        condition: service_started
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  postgres:
+    image: postgres:16-alpine
+    container_name: oma-postgres
+    environment:
+      POSTGRES_USER: oma
+      POSTGRES_PASSWORD: oma
+      POSTGRES_DB: oma
+    volumes:
+      - oma-pgdata:/var/lib/postgresql/data
+    # No host port published — only oma-server reaches it on the internal
+    # bridge network. Add `ports: ["5432:5432"]` if you want psql access
+    # from the host.
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U oma -d oma"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+      start_period: 5s
+    restart: unless-stopped
+
+  # Same outbound credential injector as the SQLite compose. The vault
+  # data ends up in PG (oma-vault and oma-server share the same store
+  # via the SqlVaultRepo abstraction), but oma-vault still reads from
+  # its own DATABASE_URL — point it at the same postgres.
+  oma-vault:
+    build:
+      context: .
+      dockerfile: apps/oma-vault/Dockerfile
+    image: openma/oma-vault:dev
+    container_name: oma-vault
+    environment:
+      DATABASE_URL: postgres://oma:oma@postgres:5432/oma
+      OMA_VAULT_CA_DIR: /app/data/oma-vault-ca
+      OMA_VAULT_PORT: "14322"
+      OMA_TENANT: ${OMA_TENANT:-*}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  oma-pgdata:
