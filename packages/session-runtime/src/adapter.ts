@@ -23,6 +23,13 @@ export interface RuntimeAdapterOptions {
   sandbox?: SandboxExecutor;
   /** Per-platform shell hook. CF: setAlarm(now+30s). Node: leave unset. */
   onTurnInFlight?: (sessionId: string) => void;
+  /** Optional symmetric hook fired after endTurn's UPDATE lands. CF
+   *  uses it to decrement an in-memory in-flight counter that backs the
+   *  sync `deriveStatus()` API (the unified marker is on D1's
+   *  `sessions.turn_id` which the DO can't read sync, so we mirror
+   *  begin/end here). Node leaves it unset — fly/k8s read status from
+   *  the row directly. */
+  onTurnEnded?: (sessionId: string, turnId: TurnId) => void;
 }
 
 export class RuntimeAdapterImpl implements RuntimeAdapter {
@@ -31,6 +38,7 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
   readonly streams: StreamRepo;
   readonly sandbox?: SandboxExecutor;
   private readonly onTurnInFlight?: (sessionId: string) => void;
+  private readonly onTurnEnded?: (sessionId: string, turnId: TurnId) => void;
 
   constructor(opts: RuntimeAdapterOptions) {
     this.sql = opts.sql;
@@ -38,6 +46,7 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
     this.streams = opts.streams;
     this.sandbox = opts.sandbox;
     this.onTurnInFlight = opts.onTurnInFlight;
+    this.onTurnEnded = opts.onTurnEnded;
   }
 
   async beginTurn(sessionId: string, turnId: TurnId): Promise<void> {
@@ -68,6 +77,7 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
       )
       .bind(status, now, sessionId, turnId)
       .run();
+    this.onTurnEnded?.(sessionId, turnId);
   }
 
   async listOrphanTurns(sessionId: string): Promise<OrphanTurn[]> {
