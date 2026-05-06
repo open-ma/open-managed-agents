@@ -144,9 +144,11 @@ interface SessionState {
   /**
    * Stored only as a back-compat read for sessions written before status
    * became derived. New code MUST NOT write to this field. The runtime
-   * status comes from `deriveStatus()`, which queries `cf_agents_runs`
-   * for fiber existence + `terminated_at` for the destroy gate. See
-   * docs/contribute/recovery-and-idempotency.mdx for the rationale.
+   * status comes from `deriveStatus()`, which checks the in-memory
+   * inflight-turn hint counter (mirrored from D1's `sessions.turn_id`
+   * via the RuntimeAdapter callbacks) + `terminated_at` for the destroy
+   * gate. See docs/contribute/recovery-and-idempotency.mdx for the
+   * rationale.
    */
   status?: "idle" | "running" | "terminated";
   /** ms timestamp when /destroy ran. Replaces the persistent `terminated`
@@ -245,6 +247,21 @@ export class SessionDO extends DurableObject<Env> {
   // until /init writes the row. _runtimeAdapter is the cached adapter
   // instance scoped to this DO's session.
   private _runtimeAdapter: RuntimeAdapter | null = null;
+
+  /**
+   * In-memory mirror of "is there a turn currently running in this DO?"
+   * Maintained via the RuntimeAdapter's onTurnInFlight / onTurnEnded
+   * callbacks (wired in the lazy `runtimeAdapter` getter below). Used
+   * by deriveStatus() — the unified marker on D1's `sessions.turn_id`
+   * is the source of truth, but reading it requires an async D1
+   * round-trip and deriveStatus is called sync from the API layer.
+   *
+   * Lost on eviction; re-seeded on next alarm() via _checkOrphanTurns
+   * (which reads the D1 row authoritatively). Worst case: a stale
+   * "idle" between cold-start and the first alarm — alarm fires
+   * immediately on cold-start with an in-flight turn.
+   */
+  private _inflightTurnHints = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1020,6 +1037,15 @@ export class SessionDO extends DurableObject<Env> {
         // to-back calls are fine. The alarm() handler re-arms while a
         // turn is still in flight (status='running' in sessions table).
         void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
+        // In-memory mirror so deriveStatus() (sync, called from many
+        // places) can answer "running" without an async D1 round-trip.
+        // The unified marker on D1's sessions.turn_id is the source of
+        // truth; this is just a local cache. _checkOrphanTurns rebuilds
+        // it on cold start.
+        this._inflightTurnHints += 1;
+      },
+      onTurnEnded: () => {
+        if (this._inflightTurnHints > 0) this._inflightTurnHints -= 1;
       },
     });
     // Provider call only used if sharding is in play; today the lazy
@@ -3493,10 +3519,12 @@ export class SessionDO extends DurableObject<Env> {
     if (this._state?.terminated_at != null || this._state?.status === "terminated") {
       return "terminated";
     }
-    const hasFiber = this.ctx.storage.sql
-      .exec("SELECT 1 FROM cf_agents_runs LIMIT 1")
-      .toArray().length > 0;
-    return hasFiber ? "running" : "idle";
+    // cf_agents_runs was dropped in Phase 4; the unified-runtime marker
+    // for "is there an in-flight turn" lives on D1's `sessions.turn_id`,
+    // which is async. _inflightTurnHints is the sync local mirror set
+    // by the RuntimeAdapter callbacks (onTurnInFlight / onTurnEnded).
+    // _checkOrphanTurns rebuilds it on cold-start by reading D1.
+    return this._inflightTurnHints > 0 ? "running" : "idle";
   }
 
   setState(next: SessionState): void {
