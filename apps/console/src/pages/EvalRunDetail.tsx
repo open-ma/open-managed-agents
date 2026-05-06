@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
+import type { Trajectory } from "../lib/trajectory";
+import { rewardHeadline } from "../lib/trajectory";
 
 interface EvalTrial {
   trial_index: number;
@@ -76,6 +78,15 @@ export function EvalRunDetail() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
+  /** Cache of trajectory fetches keyed by session_id. Populated lazily when
+   *  the user expands a task row — we don't pull every trial's trajectory
+   *  on initial page load (could be hundreds of trials per run). The
+   *  sentinel "loading" / "error" states keep the UI honest while inflight
+   *  / after a failure (404 = trajectory not built yet, 5xx = sandbox flaky)
+   *  so we don't retry on every render. */
+  const [trajectories, setTrajectories] = useState<
+    Map<string, Trajectory | "loading" | "error">
+  >(new Map());
 
   useEffect(() => {
     if (!id) return;
@@ -110,6 +121,40 @@ export function EvalRunDetail() {
       else next.add(taskId);
       return next;
     });
+    // Lazy-fetch trajectories for any trial in this task that has a
+    // session_id and hasn't been requested yet. The fetch result lands in
+    // `trajectories` keyed by session_id; render reads from that map.
+    const task = run?.tasks.find(t => t.id === taskId);
+    if (!task) return;
+    for (const tr of task.trials) {
+      if (!tr.session_id) continue;
+      // Avoid re-fetching anything already in flight, completed, or failed.
+      if (trajectories.has(tr.session_id)) continue;
+      void fetchTrajectory(tr.session_id);
+    }
+  }
+
+  async function fetchTrajectory(sessionId: string) {
+    setTrajectories(prev => {
+      if (prev.has(sessionId)) return prev;
+      const next = new Map(prev);
+      next.set(sessionId, "loading");
+      return next;
+    });
+    try {
+      const traj = await api<Trajectory>(`/v1/sessions/${sessionId}/trajectory`);
+      setTrajectories(prev => {
+        const next = new Map(prev);
+        next.set(sessionId, traj);
+        return next;
+      });
+    } catch {
+      setTrajectories(prev => {
+        const next = new Map(prev);
+        next.set(sessionId, "error");
+        return next;
+      });
+    }
   }
 
   if (loading) {
@@ -264,13 +309,10 @@ export function EvalRunDetail() {
                                 </span>
                               </td>
                               <td className="py-1 pr-3">
-                                {tr.reward != null ? (
-                                  <span className={tr.reward >= 1 ? "text-success font-semibold" : "text-fg-subtle"}>
-                                    {tr.reward}
-                                  </span>
-                                ) : (
-                                  <span className="text-fg-subtle">—</span>
-                                )}
+                                <TrialReward
+                                  fallback={tr.reward}
+                                  trajectory={tr.session_id ? trajectories.get(tr.session_id) : undefined}
+                                />
                               </td>
                               <td className="py-1 pr-3 font-mono text-fg-muted">{tr.exit_code ?? "—"}</td>
                               <td className="py-1 pr-3 text-fg-muted">{durationStr(tr.started_at, tr.ended_at)}</td>
@@ -291,6 +333,29 @@ export function EvalRunDetail() {
                           ))}
                         </tbody>
                       </table>
+
+                      {t.trials.some(tr => tr.session_id && trajectories.get(tr.session_id) && trajectories.get(tr.session_id) !== "loading" && trajectories.get(tr.session_id) !== "error") && (
+                        <details>
+                          <summary className="cursor-pointer text-xs text-fg-subtle hover:text-fg">
+                            reward breakdown
+                          </summary>
+                          <div className="mt-1 space-y-2">
+                            {t.trials.map(tr => {
+                              if (!tr.session_id) return null;
+                              const traj = trajectories.get(tr.session_id);
+                              if (!traj || traj === "loading" || traj === "error") return null;
+                              if (!traj.reward) return null;
+                              return (
+                                <RewardBreakdown
+                                  key={tr.trial_index}
+                                  trialIndex={tr.trial_index}
+                                  reward={traj.reward}
+                                />
+                              );
+                            })}
+                          </div>
+                        </details>
+                      )}
 
                       {t.trials.some(tr => tr.error) && (
                         <div className="text-xs text-danger space-y-0.5">
@@ -348,6 +413,104 @@ export function EvalRunDetail() {
           </tbody>
         </table>
       </div>
+    </div>
+  );
+}
+
+/** Reward cell on a trial row.
+ *
+ *  Prefers `Trajectory.reward.final_reward` (the unified Verifier output)
+ *  when the lazy-fetched trajectory is available — that's the v1 story.
+ *  Falls back to the legacy `EvalTrialResult.reward` (from when the eval
+ *  runner stamped a single number directly on the trial) so trials whose
+ *  trajectory isn't built yet still render something useful.
+ *
+ *  Sentinel handling:
+ *   - "loading" → small dim placeholder (no extra chrome)
+ *   - "error"   → fallback + "trajectory unavailable" tooltip
+ *   - undefined → fallback only (parent task wasn't expanded yet) */
+function TrialReward({
+  fallback,
+  trajectory,
+}: {
+  fallback: number | undefined;
+  trajectory: Trajectory | "loading" | "error" | undefined;
+}) {
+  if (trajectory && trajectory !== "loading" && trajectory !== "error" && trajectory.reward) {
+    const r = trajectory.reward;
+    const headline = rewardHeadline(r);
+    const isPass = r.final_reward >= 0.99;
+    const isFail = r.final_reward <= 0;
+    const cls = isPass
+      ? "text-success font-semibold"
+      : isFail
+      ? "text-danger font-semibold"
+      : "text-fg";
+    return (
+      <div className="leading-tight">
+        <div className={cls}>{headline}</div>
+        {r.verifier_id && (
+          <div className="text-[10px] text-fg-subtle font-mono">graded by {r.verifier_id}</div>
+        )}
+      </div>
+    );
+  }
+  if (trajectory === "loading") {
+    return <span className="text-fg-subtle text-[10px]">loading…</span>;
+  }
+  if (fallback != null) {
+    const tooltip = trajectory === "error" ? "trajectory unavailable; using legacy reward" : undefined;
+    return (
+      <span
+        className={fallback >= 1 ? "text-success font-semibold" : "text-fg-subtle"}
+        title={tooltip}
+      >
+        {fallback}
+      </span>
+    );
+  }
+  if (trajectory === "error") {
+    return <span className="text-fg-subtle text-[10px]" title="trajectory fetch failed">trajectory unavailable</span>;
+  }
+  return <span className="text-fg-subtle">—</span>;
+}
+
+/** Per-trial raw_rewards table. Renders one row per criterion in
+ *  `RewardResult.raw_rewards`. Hidden in a <details> in the parent so
+ *  large multi-criterion verifiers don't blow out the row height. */
+function RewardBreakdown({
+  trialIndex,
+  reward,
+}: {
+  trialIndex: number;
+  reward: { raw_rewards: Record<string, number>; final_reward: number; verifier_id?: string };
+}) {
+  const entries = Object.entries(reward.raw_rewards);
+  return (
+    <div className="border border-border rounded p-2 bg-bg">
+      <div className="text-[11px] text-fg-subtle mb-1 flex items-baseline gap-2">
+        <span>trial {trialIndex}</span>
+        {reward.verifier_id && (
+          <span className="font-mono">{reward.verifier_id}</span>
+        )}
+        <span className="ml-auto text-fg">
+          final = <span className="font-semibold">{reward.final_reward.toFixed(2)}</span>
+        </span>
+      </div>
+      {entries.length === 0 ? (
+        <div className="text-[11px] text-fg-subtle italic">no raw_rewards recorded</div>
+      ) : (
+        <table className="w-full text-[11px]">
+          <tbody>
+            {entries.map(([k, v]) => (
+              <tr key={k} className="border-t border-border/40">
+                <td className="py-0.5 pr-2 font-mono text-fg-muted">{k}</td>
+                <td className="py-0.5 text-right text-fg">{Number.isFinite(v) ? v.toFixed(2) : String(v)}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
     </div>
   );
 }
