@@ -103,8 +103,20 @@ export interface Env {
       url: string;
       method: string;
       headers: Record<string, string>;
-      body: string | null;
-    }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
+      body: ArrayBuffer | null;
+    }): Promise<{ status: number; headers: Record<string, string>; body: ArrayBuffer }>;
+    /**
+     * Lightweight credential lookup for the transparent outbound proxy.
+     * Returns the bearer token to inject for `hostname`, or null if no
+     * vault credential matches. Used by oma-sandbox.ts inject_vault_creds
+     * to keep body + response off the RPC wire (preserves HEAD,
+     * streaming, SigV4 signed headers, etc).
+     */
+    lookupOutboundCredential(opts: {
+      tenantId: string;
+      sessionId: string;
+      hostname: string;
+    }): Promise<{ type: "bearer"; token: string } | null>;
   };
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).

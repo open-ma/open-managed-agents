@@ -451,8 +451,8 @@ function stampEvent(event: SessionEvent): SessionEvent {
 export class SqliteHistory implements HistoryStore {
   private repo: CfDoEventLog;
 
-  constructor(sql: SqlStorage) {
-    this.repo = new CfDoEventLog(sql, stampEvent);
+  constructor(sql: SqlStorage, r2: R2Bucket | null = null, r2KeyPrefix: string = "") {
+    this.repo = new CfDoEventLog(sql, stampEvent, r2, r2KeyPrefix);
     // Idempotent — first construction in a DO bootstraps the schema; later
     // ones see CREATE TABLE IF NOT EXISTS as a no-op.
     ensureCfDoSchema(sql);
@@ -464,6 +464,11 @@ export class SqliteHistory implements HistoryStore {
 
   getEvents(afterSeq?: number): SessionEvent[] {
     return this.repo.getEvents(afterSeq);
+  }
+
+  /** Resolve any `_spilled` references back to full events via R2. */
+  async resolveSpilledEvents(events: SessionEvent[]): Promise<SessionEvent[]> {
+    return this.repo.resolveSpilledEvents(events);
   }
 
   getMessages(): ModelMessage[] {

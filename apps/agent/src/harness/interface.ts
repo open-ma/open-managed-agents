@@ -134,6 +134,19 @@ export interface HarnessRuntime {
   reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
   pendingConfirmations?: string[];
   abortSignal?: AbortSignal;
+  /**
+   * Wrap a long async operation (e.g. model fetch + stream consumption) so
+   * the underlying Durable Object stays alive — refcounted keepAlive that
+   * actually prevents CF eviction during the await. Without this the
+   * 30s alarm-driven keepAlive heartbeat is the only thing reminding CF
+   * the DO is busy, which is too coarse: CF can evict between heartbeats
+   * if no request handler is on the stack and no fetch is pending in a
+   * way the runtime credits.
+   *
+   * Implementation: SessionDO injects `(fn) => this.keepAliveWhile(fn)`
+   * (cf-agents Agent.keepAliveWhile). Always returns whatever fn returns.
+   */
+  keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export interface HarnessContext {
@@ -208,3 +221,99 @@ export interface HistoryStore {
   getEvents(afterSeq?: number): SessionEvent[];
 }
 
+export interface ProcessHandle {
+  id: string;
+  pid: number;
+  kill(signal: string): Promise<void>;
+  getLogs(): Promise<{ stdout: string; stderr: string }>;
+  getStatus(): Promise<string>;
+}
+
+export interface SandboxExecutor {
+  exec(command: string, timeout?: number): Promise<string>;
+  /** Start a process without blocking. Returns handle for kill/status/logs. */
+  startProcess?(command: string): Promise<ProcessHandle | null>;
+  /** Set global environment variables for all subsequent exec calls. */
+  setEnvVars?(envVars: Record<string, string>): Promise<void>;
+  /** Native git checkout (if supported by sandbox). */
+  gitCheckout?(repoUrl: string, options: { branch?: string; targetDir?: string }): Promise<unknown>;
+  /** Register secrets injected only for commands matching a prefix (e.g. "git", "gh"). */
+  registerCommandSecrets?(commandPrefix: string, secrets: Record<string, string>): void;
+  /**
+   * Bind the outbound handler with this session's identifying context. The
+   * sandbox's outbound interceptor uses (tenantId, sessionId) to RPC into
+   * main on each outbound HTTPS call; main resolves the matching vault
+   * credential live and injects the Authorization header. The agent worker
+   * never holds plaintext credentials.
+   */
+  setOutboundContext?(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
+   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
+   * its onActivityExpired hook (sleepAfter teardown) records the final
+   * /workspace snapshot scoped to this session. See oma-sandbox.ts for
+   * the actual backup logic.
+   */
+  setBackupContext?(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
+   * Trigger an immediate /workspace snapshot via OmaSandbox. Used by the
+   * explicit-destroy path to capture state before sandbox.destroy() wipes
+   * the container; the sleepAfter teardown handles itself via
+   * onActivityExpired without needing this call.
+   */
+  snapshotWorkspaceNow?(): Promise<void>;
+  readFile(path: string): Promise<string>;
+  writeFile(path: string, content: string): Promise<string>;
+  /**
+   * Write raw bytes to a sandbox path. Use this for binary files (PDFs,
+   * images, archives) — the string-based writeFile would corrupt them via
+   * UTF-8 round-tripping.
+   */
+  writeFileBytes?(path: string, bytes: Uint8Array): Promise<string>;
+  /**
+   * Mount a memory store into the sandbox at /mnt/memory/<storeName>/.
+   * Backed by the MEMORY_BUCKET R2 binding with prefix scoping. Read-only
+   * mounts reject writes. The agent uses standard file tools to interact;
+   * no memory-specific tools are registered (Anthropic-aligned).
+   */
+  mountMemoryStore?(opts: {
+    storeName: string;
+    storeId: string;
+    readOnly: boolean;
+  }): Promise<void>;
+  /**
+   * Snapshot /workspace into R2 via squashfs. Returns a serializable
+   * handle; null on failure. Used by session-do.ts to checkpoint the
+   * workspace at session destroy. See workspace-backups.ts for the D1
+   * persistence layer that survives the snapshot handle across sessions.
+   */
+  createWorkspaceBackup?(opts: {
+    name?: string;
+    ttlSec: number;
+  }): Promise<{ id: string; dir: string; localBucket?: boolean } | null>;
+  /**
+   * Restore a previously-created backup into /workspace. Returns true on
+   * success, false if the backup is missing/expired/etc. Best-effort: a
+   * false return means the caller should treat /workspace as empty.
+   */
+  restoreWorkspaceBackup?(handle: {
+    id: string;
+    dir: string;
+    localBucket?: boolean;
+  }): Promise<{ ok: boolean; error?: string }>;
+  /** Destroy the sandbox container — kills processes, unmounts, stops. */
+  destroy?(): Promise<void>;
+  /**
+   * Tell the sandbox container "I'm still active". Resets the CF Container's
+   * sleepAfter inactivity timer so it doesn't auto-stop while we have
+   * long-running bg tasks waiting for results. Cheap (~RPC roundtrip).
+   * No-op if the implementation doesn't support it.
+   */
+  renewActivityTimeout?(): Promise<void>;
+}

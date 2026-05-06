@@ -1045,6 +1045,17 @@ async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_
 
   const url = new URL(c.req.url);
   const res = await forwardToSandbox(binding, `/sessions/${id}/events${url.search}`, c.req.raw, "GET");
+  if (!res.ok) {
+    // Sandbox/agent worker can return non-JSON 500s (e.g. SqliteHistory throws,
+    // R2 spill resolve fails, DO storage timeout). Pass through the raw body so
+    // the caller sees the real cause instead of "Unexpected token … is not
+    // valid JSON" from a JSON-greedy res.json().
+    const body = await res.text();
+    return new Response(body, {
+      status: res.status,
+      headers: { "content-type": res.headers.get("content-type") ?? "text/plain" },
+    });
+  }
   const result = await res.json();
   return c.json(result);
 }
@@ -1308,13 +1319,13 @@ app.get("/:id/threads", async (c) => {
   return c.json(await res.json());
 });
 
-// POST /v1/sessions/:id/sandbox/exec — run a raw shell command in this
-// session's sandbox WITHOUT going through the agent. Designed for
-// eval / verifier workflows where the harness needs to run pytest (or
-// similar) on the post-agent state without trusting the model to invoke a
-// tool. Body: { command: string, timeout_ms?: number (default 60000) }
+// POST /v1/sessions/:id/exec — run a raw shell command in this session's
+// sandbox WITHOUT going through the agent. Designed for eval / verifier
+// workflows where the harness needs to run pytest (or similar) on the
+// post-agent state without trusting the model to invoke a tool. Body:
+// { command: string, timeout_ms?: number (default 60000) }
 // Returns: { exit_code: number, output: string, truncated: boolean }
-app.post("/:id/sandbox/exec", async (c) => {
+app.post("/:id/exec", async (c) => {
   const id = c.req.param("id");
   const t = c.get("tenant_id");
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
@@ -1324,7 +1335,7 @@ app.post("/:id/sandbox/exec", async (c) => {
   const binding = sbRes.binding;
   if (!binding) return bindingErrorResponse(c, sbRes);
 
-  const res = await forwardToSandbox(binding, `/sessions/${id}/sandbox/exec`, c.req.raw, "POST");
+  const res = await forwardToSandbox(binding, `/sessions/${id}/exec`, c.req.raw, "POST");
   // Pass status through (exec can legitimately return 500 on sandbox error)
   const body = await res.text();
   return new Response(body, {

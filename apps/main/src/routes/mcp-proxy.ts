@@ -321,7 +321,7 @@ export async function forwardWithRefresh(
   target: ProxyTarget,
   method: string,
   inboundHeaders: Headers,
-  body: string | null,
+  body: BodyInit | null,
   /** Audit context — surfaces in structured log lines so production
    *  incidents have a "who called what when" trail without us having to
    *  thread it through every call. tenantId comes from the function arg
