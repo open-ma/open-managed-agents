@@ -6,7 +6,9 @@
   "exports": {
     ".": "./src/index.ts",
     "./recovery": "./src/recovery.ts",
-    "./ports": "./src/ports.ts"
+    "./ports": "./src/ports.ts",
+    "./adapter": "./src/adapter.ts",
+    "./machine": "./src/machine.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
@@ -15,6 +17,8 @@
     "@open-managed-agents/event-log": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
-    "@open-managed-agents/sql-client": "workspace:*"
+    "@open-managed-agents/sql-client": "workspace:*",
+    "ai": "^6.0.158",
+    "nanoid": "^5.1.0"
   }
 }

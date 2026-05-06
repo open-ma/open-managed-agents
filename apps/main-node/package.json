@@ -23,6 +23,7 @@
     "@open-managed-agents/markdown": "workspace:*",
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/session-runtime": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
