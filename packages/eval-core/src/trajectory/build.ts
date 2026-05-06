@@ -53,11 +53,25 @@ function deriveOutcome(events: StoredEvent[], status: string | undefined): Traje
   // Find the LAST status / terminal event. Avoid bug where an early
   // status_idle (e.g. from a warmup turn) was treated as the trajectory's
   // outcome even though later turns are still in flight.
+  //
+  // Spec mapping (docs/trajectory-v1-spec.md, TrajectoryOutcome):
+  //   session.error              → failure
+  //   user.interrupt             → interrupted
+  //   session.status_terminated  → interrupted (operator/user-driven stop;
+  //                                NOT a hard failure — distinct from
+  //                                session.error which fires on real errors)
+  //   session.status_idle        → success
+  //   anything else (still running or only saw status_running) → running
+  //
+  // "timeout" is NOT detectable from the event stream alone — wall-clock
+  // / max-turn limits live in the eval-runner / outcome-evaluator layer.
+  // Callers that own that signal (e.g. eval-runner) mutate
+  // `trajectory.outcome = "timeout"` after this function returns.
   for (let i = events.length - 1; i >= 0; i--) {
     const t = events[i].type;
     if (t === "session.error") return "failure";
     if (t === "user.interrupt") return "interrupted";
-    if (t === "session.status_terminated") return "failure";
+    if (t === "session.status_terminated") return "interrupted";
     if (t === "session.status_idle") return "success";
     if (t === "session.status_running") return "running";
   }
