@@ -123,6 +123,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../../packages/shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../../packages/sql-client
       '@open-managed-agents/vaults-store':
         specifier: workspace:*
         version: link:../../packages/vaults-store

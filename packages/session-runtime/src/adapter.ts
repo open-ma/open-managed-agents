@@ -18,7 +18,9 @@ export interface RuntimeAdapterOptions {
   sql: SqlClient;
   eventLog: EventLogRepo;
   streams: StreamRepo;
-  sandbox: SandboxExecutor;
+  /** Optional — only SessionStateMachine.runHarnessTurn uses this.
+   *  turn-runtime.ts callers (CF SessionDO today) leave it unset. */
+  sandbox?: SandboxExecutor;
   /** Per-platform shell hook. CF: setAlarm(now+30s). Node: leave unset. */
   onTurnInFlight?: (sessionId: string) => void;
 }
@@ -27,7 +29,7 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
   readonly sql: SqlClient;
   readonly eventLog: EventLogRepo;
   readonly streams: StreamRepo;
-  readonly sandbox: SandboxExecutor;
+  readonly sandbox?: SandboxExecutor;
   private readonly onTurnInFlight?: (sessionId: string) => void;
 
   constructor(opts: RuntimeAdapterOptions) {

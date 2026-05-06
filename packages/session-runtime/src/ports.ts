@@ -50,7 +50,10 @@ export interface RuntimeAdapter {
   readonly sql: SqlClient;
   readonly eventLog: EventLogRepo;
   readonly streams: StreamRepo;
-  readonly sandbox: SandboxExecutor;
+  /** Optional — only callers that actually need to hand a sandbox to
+   *  the harness (SessionStateMachine.runHarnessTurn) require this.
+   *  turn-runtime.ts only uses lifecycle methods. */
+  readonly sandbox?: SandboxExecutor;
 
   /**
    * Mark a turn as in flight on the sessions row. Atomic with respect to
