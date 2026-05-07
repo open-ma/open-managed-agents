@@ -182,23 +182,10 @@
         { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
         { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory-staging" }
       ],
-      "queues": {
-        "consumers": [
-          {
-            "queue": "managed-agents-memory-events-staging",
-            "max_batch_size": 25,
-            "max_batch_timeout": 5,
-            "max_retries": 5,
-            "dead_letter_queue": "managed-agents-memory-events-staging-dlq"
-          },
-          {
-            "queue": "managed-agents-memory-events-staging-dlq",
-            "max_batch_size": 10,
-            "max_batch_timeout": 30,
-            "max_retries": 1
-          }
-        ]
-      },
+      // Memory queue consumers intentionally NOT registered here for
+      // staging — `managed-agents-lane-mem-anthropic` (lane worker)
+      // owns them in this account and CF allows only one consumer per
+      // queue. Re-add only if lane is decommissioned.
       "send_email": [
         { "name": "SEND_EMAIL" }
       ],
