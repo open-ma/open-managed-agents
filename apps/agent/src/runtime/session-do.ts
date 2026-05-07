@@ -947,8 +947,23 @@ export class SessionDO extends DurableObject<Env> {
         const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
         history.append(errorEvent);
         this.broadcastEvent(errorEvent);
-        // Status auto-derives once runFiber's finally block DELETEs the
-        // cf_agents_runs row. No setState needed.
+
+        // AMA RetryStatusTerminal: certain model errors are unrecoverable
+        // and must transition the session to `terminated` state. Today we
+        // catch the billing-fatal HTTP statuses (402 payment required,
+        // 403 forbidden — Anthropic returns these when an org is out of
+        // credit / over spend cap; retrying the same key won't succeed).
+        // Other terminal sources (MCP auth refresh failure) live in the
+        // tools.ts / binding-mcp-transport path and are not visible here.
+        if (
+          err instanceof TurnAborted &&
+          err.cause.kind === "model_error" &&
+          (err.cause.status === 402 || err.cause.status === 403)
+        ) {
+          this.terminate("billing");
+        }
+        // Status auto-derives from sessions.turn_id once the
+        // RuntimeAdapter.endTurn callback fires. No setState needed.
         break; // Stop draining on error — let the client decide what to do
       }
     }
@@ -1221,21 +1236,29 @@ export class SessionDO extends DurableObject<Env> {
       // up. The outbound interceptor RPCs into main on each call and main
       // re-checks session.archived_at, so an archived session's outbound
       // calls naturally fail without any KV cleanup needed.
-      this.setState({ ...this.state, terminated_at: Date.now() });
-
-      const terminatedEvent: SessionEvent = {
-        type: "session.status_terminated",
-        reason: "session_deleted",
-      };
-      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      history.append(terminatedEvent);
-      this.broadcastEvent(terminatedEvent);
+      this.terminate("session_deleted");
 
       return new Response("ok");
     }
 
     // POST /event — receive user event, kick off harness
     if (request.method === "POST" && url.pathname === "/event") {
+      // AMA semantics: a terminated session is one-way; reject new
+      // events at the door so callers see a clean 409 envelope rather
+      // than appending a dead-letter event the harness will never run.
+      // Mirrors the main worker's archived_at check on POST /v1/sessions/:id/events.
+      if (this._state?.terminated_at != null || this._state?.status === "terminated") {
+        return new Response(
+          JSON.stringify({
+            type: "error",
+            error: {
+              type: "invalid_request_error",
+              message: "Session is terminated and cannot receive new events",
+            },
+          }),
+          { status: 409, headers: { "content-type": "application/json" } },
+        );
+      }
       const raw = (await request.json()) as SessionEvent & { _mount_file_ids?: string[] };
       // Sidecar field set by main worker's events POST resolver. Strip it
       // before persisting — it is delivery metadata, not part of the canonical
@@ -3535,6 +3558,47 @@ export class SessionDO extends DurableObject<Env> {
     // by the RuntimeAdapter callbacks (onTurnInFlight / onTurnEnded).
     // _checkOrphanTurns rebuilds it on cold-start by reading D1.
     return this._inflightTurnHints > 0 ? "running" : "idle";
+  }
+
+  /**
+   * Drive the session to AMA's `terminated` lifecycle terminus.
+   * Idempotent — second call no-ops if `terminated_at` already set.
+   *
+   * AMA semantics (BetaManagedAgentsSessionStatusTerminatedEvent):
+   * "Indicates the session has terminated, either due to an error or
+   * completion." Once terminated the session is one-way; the route layer
+   * must reject POST /events with 409 going forward.
+   *
+   * Reasons currently emitted:
+   *   - "session_deleted" — DELETE /v1/sessions/:id (destroy path)
+   *   - "billing"         — model rejected request (402/403); not
+   *                         recoverable without operator intervention
+   *
+   * Follow-up sources to wire (see AMA RetryStatusTerminal):
+   *   - "mcp_auth"  — MCP server permanent-auth-failure path lives in
+   *                   tools.ts / binding-mcp-transport, separate from
+   *                   the drainEventQueue catch
+   *   - "completed" — explicit "session done" signal (no concept in
+   *                   OMA today)
+   */
+  private terminate(reason: string): void {
+    if (this._state?.terminated_at != null) return;
+    this.setState({ ...this.state, terminated_at: Date.now() });
+    if (this.currentAbortController) {
+      this.currentAbortController.abort();
+      this.currentAbortController = null;
+    }
+    const event: SessionEvent = {
+      type: "session.status_terminated",
+      reason,
+    };
+    const history = new SqliteHistory(
+      this.ctx.storage.sql,
+      this.env.FILES_BUCKET ?? null,
+      `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+    );
+    history.append(event);
+    this.broadcastEvent(event);
   }
 
   setState(next: SessionState): void {
