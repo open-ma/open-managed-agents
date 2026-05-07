@@ -246,13 +246,18 @@ jobs:
         if: ${{ env.R2_ENDPOINT != '' && env.R2_ACCESS_KEY_ID != '' && env.R2_SECRET_ACCESS_KEY != '' }}
         run: |
           set -e
-          cd apps/agent
-          W=sandbox-default
-          echo "$R2_ENDPOINT"          | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null
-          echo "$R2_ACCESS_KEY_ID"     | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null
-          echo "$R2_SECRET_ACCESS_KEY" | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null
-          echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID       --name "$W" >/dev/null
-          echo "✓ R2_* synced to $W"
+          # Both agent (sandbox-default, FUSE mounts) and main
+          # (managed-agents, /v1/internal/.../uploads/presign signing) need
+          # the same R2 S3 keys.
+          for entry in "apps/agent:sandbox-default" "apps/main:managed-agents"; do
+            dir="${entry%%:*}"; W="${entry##*:}"
+            (cd "$dir" && \
+              echo "$R2_ENDPOINT"           | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null && \
+              echo "$R2_ACCESS_KEY_ID"      | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null && \
+              echo "$R2_SECRET_ACCESS_KEY"  | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null && \
+              echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID        --name "$W" >/dev/null)
+            echo "✓ R2_* synced to $W"
+          done
 
       # --- Post-deploy verification ---
       - name: Verify deployment
