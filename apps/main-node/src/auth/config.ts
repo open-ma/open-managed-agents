@@ -66,21 +66,25 @@ export function createAuth(opts: CreateAuthOpts): Auth {
     database: opts.authDb as never,
     emailAndPassword: {
       enabled: true,
-      // PoC: skip email verification. Add EMAIL_FROM + sendEmail integration
-      // when the deployer wants it.
+      // Self-host default: no email verification. better-auth signs the
+      // user up + creates a session immediately; the Console hands them
+      // to the app on first submit. Flip via AUTH_REQUIRE_EMAIL_VERIFY=1
+      // when you want a real email-verify gate (and you've wired
+      // sendVerificationOTP below to a real sender like Resend/SES).
       requireEmailVerification: false,
     },
     plugins: [
-      // emailOTP — the console's Login flow always sends a verify-signup OTP
-      // after sign-up.email even when requireEmailVerification is false. We
-      // wire the plugin so console doesn't 404 on
-      // /auth/email-otp/send-verification-otp; the actual OTP delivery is
-      // console.log on the self-host path (operator pipes stdout to a real
-      // sender when they wire EMAIL_FROM + Resend/SES/etc).
+      // emailOTP is wired ONLY for password-reset (POST /auth/email-otp/
+      // forget-password) and for the verify-on-signup gate when an
+      // operator explicitly opts into email verification. Default
+      // self-host (no SMTP, just docker compose up) does not send any
+      // OTP at signup — Console reads /auth-info, sees `email-otp` is
+      // absent from providers, and sends the user straight to the app.
       emailOTP({
         otpLength: 6,
         expiresIn: 300,
-        sendVerificationOnSignUp: true,
+        sendVerificationOnSignUp:
+          process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
         async sendVerificationOTP({ email, otp, type }) {
           const labels: Record<string, string> = {
             "sign-in": "sign-in code",

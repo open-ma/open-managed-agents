@@ -1,17 +1,43 @@
 ---
 title: Self-host Overview
-description: Run openma on your own Cloudflare account. Architecture, requirements, and what you'll need to set up before deploying.
+description: Two ways to self-host openma — on Cloudflare Workers, or as a single Node process. Same code, same API, different I/O.
 ---
 
 import { Card, CardGrid, Aside, LinkCard } from '@astrojs/starlight/components';
 
-You can run all of openma — the API, the Console, the integrations gateway, and the agent runtime — on your own Cloudflare account. The same code that powers [openma.dev](https://app.openma.dev) is the code in the public repo; nothing is held back.
+You can run all of openma — the API, the Console, the integrations gateway, and the agent runtime — yourself. The same code that powers [openma.dev](https://app.openma.dev) is the code in the public repo; nothing is held back.
 
-This page describes what you're getting into. The next page, [Deploy](/self-host/deploy/), is the step-by-step.
+## Two paths
 
-## Architecture at a glance
+Pick the one that matches your hosting story:
 
-openma deploys as **four Workers** plus a set of bindings:
+<CardGrid>
+  <Card title="Node + Docker (no Cloudflare)" icon="seti:docker">
+    `docker compose up`. Single Node process, SQLite or Postgres, local sandbox. Run on a VPS, your laptop, fly.io, your k8s cluster — anywhere with Linux/macOS. **No Cloudflare account.**
+  </Card>
+  <Card title="Cloudflare Workers" icon="cloudflare">
+    `wrangler deploy`. Three Workers + DO + Containers + D1 + R2 + KV. Edge-distributed, no host management. Requires a Cloudflare Workers Paid plan.
+  </Card>
+</CardGrid>
+
+**Same harness, business logic, event log, and crash-recovery semantics
+on both** — they share `packages/*` (every store sits behind a port +
+adapter). Switch between them by changing env vars, not code.
+
+| | Node + Docker | Cloudflare |
+|---|---|---|
+| Where it runs | Your VPS / Mac / k8s / fly.io | Cloudflare Workers + DO + Containers |
+| Storage | SQLite or Postgres + local FS | D1 + KV + R2 |
+| Sandbox | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
+| Time to running | ~2 min | ~10 min once configured |
+| Best for | OSS / on-prem / no CF account / data-resident | Edge scale / no host mgmt / already on CF |
+| Cost floor | Hetzner €5–50/mo, or your own hardware | Workers Paid plan ($5/mo) + usage |
+
+## Architecture (Cloudflare deploy)
+
+For the Node + Docker deploy, see [Node + Docker](/self-host/node-docker/).
+
+The Cloudflare deploy is **four Workers** plus a set of bindings:
 
 | Worker | Purpose |
 |---|---|
@@ -81,9 +107,14 @@ If you want stricter isolation (per-tenant D1 databases), set `PER_TENANT_DB_ENA
 ## Where to go next
 
 <LinkCard
-  title="Deploy"
+  title="Node + Docker"
+  href="/self-host/node-docker/"
+  description="`docker compose up`. SQLite or Postgres. Sandbox modes. Login. Vault sidecar. Operator gotchas."
+/>
+<LinkCard
+  title="Deploy on Cloudflare"
   href="/self-host/deploy/"
-  description="Step-by-step: clone, set bindings, set secrets, deploy."
+  description="Step-by-step: clone, set bindings, set secrets, wrangler deploy."
 />
 <LinkCard
   title="OAuth Apps"

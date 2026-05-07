@@ -12,7 +12,7 @@
 
 # Open Managed Agents
 
-**An open-source meta-harness for AI agents, running on Cloudflare.**
+**An open-source meta-harness for AI agents.**
 
 Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, and crash recovery out of the box.
 
@@ -20,63 +20,82 @@ Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tool
 
 ---
 
-## Getting Started
+## Two ways to run OMA
 
-### 1. Install
+The same harness, business logic, and event-log model run on both. Pick the
+one that matches your hosting story:
+
+| | **Self-host (Node)** | **Cloudflare** |
+|---|---|---|
+| Where it lives | Your VPS / Mac / Docker host / fly.io / your k8s | Cloudflare Workers + DO + Containers |
+| Storage | SQLite or Postgres + local FS | D1 + KV + R2 |
+| Sandbox | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
+| Time to running | `docker compose up` (~2 min) | wrangler deploy (~10 min once configured) |
+| Best for | OSS users, on-prem, no CF account, data-resident deploys | Edge scale, no host management, already on CF |
+
+**Same SDK.** Same `/v1/agents` / `/v1/sessions` API. Same Console UI. Same
+crash-recovery semantics. Switch between them by changing env vars, not code.
+
+---
+
+## Quick start: self-host (Docker)
+
+```bash
+git clone https://github.com/anthropics/open-managed-agents.git
+cd open-managed-agents
+cp .env.example .env
+$EDITOR .env   # set ANTHROPIC_API_KEY + BETTER_AUTH_SECRET (openssl rand -hex 32)
+
+# SQLite + LocalSubprocess sandbox (default — fastest path)
+docker compose up -d
+
+# Or Postgres backend
+# docker compose -f docker-compose.postgres.yml up -d
+
+curl localhost:8787/health
+# → {"status":"ok","backends":{"db":"sqlite ..."}, ...}
+
+open http://localhost:8787   # Console UI on the same port
+```
+
+Smoke test the harness end-to-end:
+
+```bash
+AID=$(curl -s -X POST localhost:8787/v1/agents -H 'content-type: application/json' \
+  -d '{"name":"hello","model":"claude-sonnet-4-6","tools":[{"type":"bash"}]}' | jq -r .id)
+
+SID=$(curl -s -X POST localhost:8787/v1/sessions -H 'content-type: application/json' \
+  -d "{\"agent_id\":\"$AID\"}" | jq -r .id)
+
+curl -s -X POST localhost:8787/v1/sessions/$SID/events -H 'content-type: application/json' \
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Run: uname -a"}]}]}'
+```
+
+Full self-host guide (sandbox modes, Postgres, BoxRun, vault sidecar,
+Console UI, operator gotchas): **[docs.openma.dev/self-host](https://docs.openma.dev/self-host)**
+
+---
+
+## Quick start: Cloudflare deploy
+
+Requires [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) (for Durable Objects + Containers).
 
 ```bash
 git clone https://github.com/anthropics/open-managed-agents.git
 cd open-managed-agents
 npm install
-```
 
-### 2. Run Locally
-
-No Cloudflare account needed. Everything runs locally via Wrangler.
-
-```bash
-cp .dev.vars.example .dev.vars
-```
-
-Edit `.dev.vars`:
-
-```
-API_KEY=dev-test-key
-ANTHROPIC_API_KEY=sk-ant-xxx
-```
-
-```bash
+# Local dev (no CF account needed) — wrangler dev with simulators
+cp .dev.vars.example .dev.vars && $EDITOR .dev.vars   # ANTHROPIC_API_KEY=...
 npm run dev
 # API   → http://localhost:8787
 # Console → http://localhost:5173
-```
-
-Verify:
-
-```bash
-curl localhost:8787/health
-# {"status":"ok"}
-```
-
-### 3. Deploy to Cloudflare
-
-Requires [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) (for Durable Objects + Containers).
-
-```bash
-# Login
-npx wrangler login
-
-# Create infrastructure
-npx wrangler kv namespace create CONFIG_KV
-# → paste the namespace ID into wrangler.jsonc
-
-npx wrangler r2 bucket create managed-agents-workspace  # optional, for file persistence
-
-# Set secrets
-npx wrangler secret put API_KEY
-npx wrangler secret put ANTHROPIC_API_KEY
 
 # Deploy
+npx wrangler login
+npx wrangler kv namespace create CONFIG_KV   # paste id into wrangler.jsonc
+npx wrangler secret put API_KEY
+npx wrangler secret put ANTHROPIC_API_KEY
 npm run deploy
 # → https://openma.dev (or https://managed-agents.<your-subdomain>.workers.dev for a personal deploy)
 ```
