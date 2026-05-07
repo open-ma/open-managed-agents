@@ -25,7 +25,7 @@
 //     for every tenant — zero behaviour change. Phase 4 swaps in the
 //     static-binding resolver.
 //
-// The CFless escape hatch:
+// The self-host escape hatch:
 //   - Today only `buildCfServices` exists.
 //   - When self-hosting on Node + Postgres becomes a real target, add a
 //     `buildNodeServices(opts: { pg, ... })` that returns the same `Services`
@@ -89,6 +89,8 @@ import {
   createCfTenantShardDirectoryService,
   createCfShardPoolService,
 } from "@open-managed-agents/tenant-dbs-store";
+import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
+import { type KvStore, CfKvStore } from "@open-managed-agents/kv-store";
 import { parseStoreBackends, pickBackend } from "./store-backends";
 
 export { parseStoreBackends, pickBackend } from "./store-backends";
@@ -119,6 +121,25 @@ export interface Services {
   /** Control-plane: per-shard status / capacity / tenant count. Used for
    *  shard selection at sign-up + capacity monitoring. */
   shardPool: ShardPoolService;
+  /**
+   * File-bytes blob store (R2 FILES_BUCKET in CF, local-FS / S3 in Node).
+   * Null when the underlying storage isn't configured — routes that need it
+   * return 500 with a "not configured" message, matching pre-port behavior.
+   * The self-host adapter (forthcoming) returns a non-null blob store wired to
+   * S3 / local FS — routes never see runtime-specific types.
+   */
+  filesBlob: BlobStore | null;
+  /**
+   * Generic key-value store (CONFIG_KV in CF, SQL-table-backed in Node).
+   * Used by routes that don't yet have a dedicated store package — quotas
+   * counters, skill metadata, api-key records, OAuth state, eval trajectory
+   * blobs, etc. Required at the type level: CONFIG_KV is non-optional in
+   * the Env shape; tests inject an InMemoryKvStore instead. Store packages
+   * with their own KV adapters (KvSessionSecretRepo / KvOutboundSnapshotRepo)
+   * keep their direct KVNamespace dependency — they'll get full SQL-table
+   * replacements in Phase C, not KvStore wrappers.
+   */
+  kv: KvStore;
 }
 
 /**
@@ -229,6 +250,10 @@ export function buildServices(env: Env, db: D1Database): Services {
     // Control-plane services: always query env.AUTH_DB, never the per-tenant db.
     tenantShardDirectory: createCfTenantShardDirectoryService({ controlPlaneDb: env.AUTH_DB }),
     shardPool: createCfShardPoolService({ controlPlaneDb: env.AUTH_DB }),
+    // File blob storage. CF: R2 binding; self-host: S3 / local-FS adapter.
+    filesBlob: blobStoreFromR2(env.FILES_BUCKET),
+    // Generic KV. CF: CONFIG_KV binding; self-host: SQL-table-backed adapter.
+    kv: new CfKvStore(env.CONFIG_KV),
   };
 }
 

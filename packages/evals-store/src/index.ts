@@ -17,4 +17,4 @@ export * from "./ports";
 export { EvalRunService } from "./service";
 export type { EvalRunServiceDeps } from "./service";
 
-export { createCfEvalRunService, D1EvalRunRepo } from "./adapters";
+export { createCfEvalRunService, createSqliteEvalRunService, SqlEvalRunRepo } from "./adapters";

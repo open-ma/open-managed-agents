@@ -23,12 +23,18 @@ export {
 } from "./service";
 export type { MemoryStoreServiceDeps } from "./service";
 
-// Re-export the CF factory at the top level so callers don't have to know
-// about the adapters subdir.
-export { createCfMemoryStoreService } from "./adapters";
+// Re-export the CF + SQLite factories at the top level so callers don't
+// have to know about the adapters subdir. LocalFsBlobStore is intentionally
+// NOT re-exported — it lives behind the
+// `@open-managed-agents/memory-store/adapters/local-fs-blob` subpath so
+// the CF tsc pass doesn't have to typecheck Node-only imports.
 export {
-  D1MemoryStoreRepo,
-  D1MemoryRepo,
-  D1MemoryVersionRepo,
+  createCfMemoryStoreService,
+  createSqliteMemoryStoreService,
+} from "./adapters";
+export {
+  SqlMemoryStoreRepo,
+  SqlMemoryRepo,
+  SqlMemoryVersionRepo,
   CfR2BlobStore,
 } from "./adapters";

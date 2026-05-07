@@ -5,31 +5,41 @@
  * stale-chunk + heartbeat + ctx.waitUntil-backup that grew up inside
  * default-loop.ts and session-do.ts. The contract is:
  *
- *   1. **runAgentTurn**  — keep the DO alive for the entire turn lifetime
- *      and synchronously persist workspace state before returning success
- *      or surfacing a typed `TurnError`. NO internal retry — the caller
- *      (eval-runner / app) decides what to do. Stall detection lives in
- *      the harness next to streamText (default-loop.ts), not here.
+ *   1. **runAgentTurn**  — mark the turn in flight on the unified
+ *      `sessions` table (status='running', turn_id=...) so cold starts
+ *      can detect orphans, and synchronously persist workspace state
+ *      before returning success or surfacing a typed `TurnError`. NO
+ *      internal retry — the caller (eval-runner / app) decides what to
+ *      do. Stall detection lives in the harness next to streamText
+ *      (default-loop.ts), not here.
  *
- *   2. **recoverAgentTurn** — after a DO eviction, read SQL events +
- *      streams to reconstruct the state at the moment of interruption,
- *      then hand a typed `RecoveryContext` to the caller's resume
- *      function. The caller decides whether to persist any partials and
- *      whether to continue. We cap recovery attempts per turn to bound
- *      runaway loops.
+ *   2. **recoverAgentTurn** — after a process death (DO eviction, Node
+ *      restart, container OOM kill), read SQL events + streams to
+ *      reconstruct the state at the moment of interruption, then hand a
+ *      typed `RecoveryContext` to the caller's resume function. The
+ *      caller decides whether to persist any partials and whether to
+ *      continue. We cap recovery attempts per turn to bound runaway
+ *      loops.
  *
  * Background on the design:
- *   - Cloudflare's Project Think uses keepAliveWhile { runFiber { fn } }
- *     for the chat path; we copy that nesting verbatim for Primitive 1.
- *   - Think doesn't actually solve Tier-4 (real container) workspace
- *     persistence — for that we have to implement synchronous
- *     `persistWorkspace` ourselves. That part is OMA-original.
- *   - We deliberately do NOT use cf-agents `ctx.stash`. OMA's events
- *     and streams tables already carry richer state than a single
- *     snapshot blob; the recovery path reconstructs from those.
+ *   - Lifecycle is now expressed as RuntimeAdapter.beginTurn /
+ *     hintTurnInFlight / endTurn — the same shape used by Node
+ *     (apps/main-node) and CF (apps/agent SessionDO). The cf-agents
+ *     `keepAliveWhile { runFiber { fn } }` chain that lived here in
+ *     v0.x has been ripped out: marker rows live on `sessions.turn_id`
+ *     not in `cf_agents_runs`; CF's keep-alive (setAlarm 30s) is now
+ *     a callback the per-platform shell wires via
+ *     adapter.hintTurnInFlight.
+ *   - Workspace persistence remains OMA-original: synchronous backup
+ *     before runAgentTurn returns.
+ *   - We deliberately do NOT carry a per-turn snapshot. OMA's events
+ *     and streams tables already carry richer state than any blob; the
+ *     recovery path reconstructs from those.
  */
 
+import { nanoid } from "nanoid";
 import type { SessionEvent } from "@open-managed-agents/shared";
+import type { RuntimeAdapter, TurnId } from "@open-managed-agents/session-runtime";
 
 // ─── Adapter interface ──────────────────────────────────────────────────
 //
@@ -38,10 +48,12 @@ import type { SessionEvent } from "@open-managed-agents/shared";
 // outside; SessionDO constructs one bound to itself and passes it in.
 
 export interface TurnRuntimeAgent {
-  /** cf-agents `keepAliveWhile` — bound to the SessionDO instance. */
-  keepAliveWhile<T>(fn: () => Promise<T>): Promise<T>;
-  /** cf-agents `runFiber` — bound to the SessionDO instance. cf-agents passes a FiberContext with id + snapshot (no name). */
-  runFiber<T>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>): Promise<T>;
+  /** Unified runtime adapter — beginTurn / endTurn / listOrphanTurns + the
+   *  underlying eventLog/streams used by recovery. CF SessionDO and Node
+   *  registry both build one of these the same way. */
+  adapter: RuntimeAdapter;
+  /** Session id this adapter is bound to — passed to beginTurn/endTurn. */
+  sessionId: string;
   /** Subset of DurableObjectStorage we use for the recovery counter. */
   storage: {
     get<T = unknown>(key: string): Promise<T | undefined>;
@@ -113,53 +125,60 @@ export async function runAgentTurn<T>(
   opts: RunAgentTurnOptions = {},
 ): Promise<T> {
   const turnStartedAt = Date.now();
+  const turnId: TurnId = nanoid();
 
   const ctx: TurnContext = {
     turnName,
     signal: opts.parentSignal ?? new AbortController().signal,
   };
 
-  // The actual nest. Mirrors Think's pattern:
-  //   keepAliveWhile { runFiber { try { fn; persist } catch { persist; throw } } }
-  // Outer keepAliveWhile holds the DO for the full duration so the model
-  // fetch + tool exec + backup all complete in one lifetime.
+  // Mark the turn in flight on the unified `sessions` table. Cold-start
+  // detection (CF: alarm; Node: registry.bootstrap) finds these via
+  // adapter.listOrphanTurns. The hint callback is the per-platform
+  // shell's keep-alive — CF wires setAlarm(now+30s) here so the DO
+  // doesn't get evicted mid-turn; Node leaves it unset (fly/k8s won't
+  // evict in-flight HTTP).
+  await agent.adapter.beginTurn(agent.sessionId, turnId);
+  agent.adapter.hintTurnInFlight?.(agent.sessionId);
+
   try {
-    return await agent.keepAliveWhile(async () => {
-      return await agent.runFiber(turnName, async () => {
-        let result: T;
+    let result: T;
+    try {
+      result = await fn(ctx);
+    } catch (err) {
+      // Try to persist whatever partial state landed before re-throwing
+      // so the next turn / verifier / debugger doesn't lose evidence.
+      if (opts.persistWorkspace) {
         try {
-          result = await fn(ctx);
-        } catch (err) {
-          // Try to persist whatever partial state landed before re-throwing
-          // so the next turn / verifier / debugger doesn't lose evidence.
-          if (opts.persistWorkspace) {
-            try {
-              await opts.persistWorkspace();
-            } catch (persistErr) {
-              console.warn(
-                `[turn] persistWorkspace also failed during error path: ${persistErr instanceof Error ? persistErr.message : String(persistErr)}`,
-              );
-            }
-          }
-          throw classifyError(err, {
-            sinceTurnStart: Date.now() - turnStartedAt,
-          });
+          await opts.persistWorkspace();
+        } catch (persistErr) {
+          console.warn(
+            `[turn] persistWorkspace also failed during error path: ${persistErr instanceof Error ? persistErr.message : String(persistErr)}`,
+          );
         }
-        // Happy path: persist before returning. Failure here is a real
-        // turn failure — caller deserves to know the agent finished but
-        // its state didn't land.
-        if (opts.persistWorkspace) {
-          try {
-            await opts.persistWorkspace();
-          } catch (err) {
-            const msg = err instanceof Error ? err.message : String(err);
-            throw new TurnAborted({ kind: "backup_failed", message: msg });
-          }
-        }
-        return result;
+      }
+      throw classifyError(err, {
+        sinceTurnStart: Date.now() - turnStartedAt,
       });
-    });
+    }
+    // Happy path: persist before returning. Failure here is a real
+    // turn failure — caller deserves to know the agent finished but its
+    // state didn't land.
+    if (opts.persistWorkspace) {
+      try {
+        await opts.persistWorkspace();
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        throw new TurnAborted({ kind: "backup_failed", message: msg });
+      }
+    }
+    return result;
   } finally {
+    try {
+      await agent.adapter.endTurn(agent.sessionId, turnId, "idle");
+    } catch (err) {
+      console.warn(`[turn] endTurn failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
     const totalElapsed = Date.now() - turnStartedAt;
     console.log(`[turn] END name=${turnName} elapsed=${totalElapsed}ms`);
   }

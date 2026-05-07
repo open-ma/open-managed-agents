@@ -1,6 +1,8 @@
 packages:
   - 'packages/*'
   - 'apps/main'
+  - 'apps/main-node'
+  - 'apps/oma-vault'
   - 'apps/agent'
   - 'apps/console'
   - 'apps/integrations'
