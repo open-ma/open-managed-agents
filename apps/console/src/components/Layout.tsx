@@ -50,6 +50,7 @@ const navGroups: NavGroup[] = [
       { to: "/sessions", label: "Sessions", icon: SessionsIcon },
       { to: "/evals", label: "Eval Runs", icon: SessionsIcon },
       { to: "/usage", label: "Usage", icon: DurationIcon },
+      { to: "/billing", label: "Billing", icon: ApiKeysIcon },
     ],
   },
   {
