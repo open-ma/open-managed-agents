@@ -221,13 +221,13 @@ jobs:
         if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
         run: |
           set -e
-          for entry in "apps/main:managed-agents" "apps/integrations:managed-agents-integrations" "apps/agent:sandbox-default"; do
+          for entry in "apps/main:managed-agents" "apps/integrations:managed-agents-integrations"; do
             dir="${entry%%:*}"
             worker="${entry##*:}"
             (cd "$dir" && echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name "$worker" >/dev/null)
             echo "  ✓ $worker"
           done
-          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to main + integrations + agent"
+          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to main + integrations"
 
       # Sync R2 FUSE creds to sandbox-default. Same drift-prevention reasoning
       # as INTEGRATIONS_INTERNAL_SECRET above: agent worker uses these for
@@ -246,18 +246,13 @@ jobs:
         if: ${{ env.R2_ENDPOINT != '' && env.R2_ACCESS_KEY_ID != '' && env.R2_SECRET_ACCESS_KEY != '' }}
         run: |
           set -e
-          # Both agent (sandbox-default, FUSE mounts) and main
-          # (managed-agents, /v1/internal/.../uploads/presign signing) need
-          # the same R2 S3 keys.
-          for entry in "apps/agent:sandbox-default" "apps/main:managed-agents"; do
-            dir="${entry%%:*}"; W="${entry##*:}"
-            (cd "$dir" && \
-              echo "$R2_ENDPOINT"           | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null && \
-              echo "$R2_ACCESS_KEY_ID"      | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null && \
-              echo "$R2_SECRET_ACCESS_KEY"  | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null && \
-              echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID        --name "$W" >/dev/null)
-            echo "✓ R2_* synced to $W"
-          done
+          cd apps/agent
+          W=sandbox-default
+          echo "$R2_ENDPOINT"          | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null
+          echo "$R2_ACCESS_KEY_ID"     | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null
+          echo "$R2_SECRET_ACCESS_KEY" | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null
+          echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID       --name "$W" >/dev/null
+          echo "✓ R2_* synced to $W"
 
       # --- Post-deploy verification ---
       - name: Verify deployment

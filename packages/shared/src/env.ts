@@ -74,12 +74,6 @@ export interface Env {
   // Shared with apps/integrations gateway. Gates /v1/internal/* endpoints.
   // Must match INTEGRATIONS_INTERNAL_SECRET on the integrations worker.
   INTEGRATIONS_INTERNAL_SECRET?: string;
-  // Public origin of the OMA main worker (e.g. https://app.openma.dev).
-  // Injected into the sandbox container env on warmup so the agent can
-  // call /v1/internal/sessions/<id>/uploads/presign for R2 presigned PUT
-  // URLs (mount-bucket writes are blocked at SDK level — see
-  // sandbox-sdk#619/#660). Set per-env in apps/agent/wrangler.jsonc vars.
-  OMA_BASE_URL?: string;
   // Service binding to apps/integrations for proxying install initiation
   // calls from the Console (single-origin, no CORS).
   INTEGRATIONS?: Fetcher;

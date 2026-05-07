@@ -79,7 +79,7 @@ jobs:
         if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
         run: |
           set -e
-          for entry in "apps/main:managed-agents-staging" "apps/integrations:managed-agents-integrations-staging" "apps/agent:sandbox-default-staging"; do
+          for entry in "apps/main:managed-agents-staging" "apps/integrations:managed-agents-integrations-staging"; do
             dir="${entry%%:*}"; worker="${entry##*:}"
             (cd "$dir" && echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name "$worker" >/dev/null) || true
             echo "  ✓ $worker"
@@ -95,18 +95,13 @@ jobs:
         if: ${{ env.R2_ENDPOINT != '' && env.R2_ACCESS_KEY_ID != '' && env.R2_SECRET_ACCESS_KEY != '' }}
         run: |
           set -e
-          # Both agent (sandbox-default-staging, FUSE mounts) and main
-          # (managed-agents-staging, /v1/internal/.../uploads/presign signing)
-          # need the same R2 S3 keys.
-          for entry in "apps/agent:sandbox-default-staging" "apps/main:managed-agents-staging"; do
-            dir="${entry%%:*}"; W="${entry##*:}"
-            (cd "$dir" && \
-              echo "$R2_ENDPOINT"           | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null && \
-              echo "$R2_ACCESS_KEY_ID"      | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null && \
-              echo "$R2_SECRET_ACCESS_KEY"  | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null && \
-              echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID        --name "$W" >/dev/null)
-            echo "✓ R2_* synced to $W"
-          done
+          cd apps/agent
+          W=sandbox-default-staging
+          echo "$R2_ENDPOINT"           | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null
+          echo "$R2_ACCESS_KEY_ID"      | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null
+          echo "$R2_SECRET_ACCESS_KEY"  | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null
+          echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID        --name "$W" >/dev/null
+          echo "✓ R2_* synced to $W"
 
       - name: Sync ANTHROPIC_API_KEY to staging agent worker
         env:
