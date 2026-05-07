@@ -1,15 +1,28 @@
 /**
  * Detect ACP-compatible local skills installed on the user's machine.
  *
- * Currently scans Claude Code skill paths only (other ACP agents have their
- * own conventions; codex / gemini / opencode each store skills/plugins
- * differently). Add new agent types as detection grows.
+ * Per-agent ecosystems (different conventions):
+ *   - claude-acp        → ~/.claude/skills/<id>/SKILL.md + plugin skills
+ *   - gemini            → ~/.gemini/extensions/<name>/gemini-extension.json
+ *   - opencode          → ~/.opencode/agents/<id>.md + ~/.config/opencode/agents/<id>.md
+ *   - codex-acp         → only ~/.codex/AGENTS.md (single global doc; not a
+ *                         per-skill dir, so no enumerable items to blocklist)
+ *   - hermes            → no documented per-skill dir convention yet
+ *   - openclaw          → wraps other agents; no skill ecosystem of its own
+ *
+ * (ids match the official ACP registry's slugs; pre-A2 ids like
+ * "claude-agent-acp" or "gemini-cli" route here via overlay aliases.)
+ *
+ * Skills with no detection support just return an empty array (or omit the
+ * key entirely) — the Console UI handles undefined / [] identically.
  *
  * Output is sent to the platform in the daemon's `hello` manifest so the
  * Console can show "what's available locally" and so per-agent settings
- * can blocklist specific skills (the platform tells us which to hide via
- * the bundle response on each session.start, and we filter by NOT
- * symlinking blocklisted dirs into the spawn cwd's CLAUDE_CONFIG_DIR).
+ * can blocklist specific skills. For claude-acp the daemon enforces the
+ * blocklist by NOT symlinking dirs into the spawn cwd's
+ * CLAUDE_CONFIG_DIR; the other agents don't yet have an analogous
+ * filesystem-level filter, so blocklist for them is informational only
+ * (we still wire the UI so users can see what's installed).
  */
 
 import { readdir, readFile, stat } from "node:fs/promises";
@@ -43,11 +56,26 @@ const HOME = homedir();
  * Scan all known skill locations on this machine. Each skill is detected
  * exactly once (deduped by id within an agent kind; later entries shadow
  * earlier — same precedence claude-code uses, project > plugin > global).
+ *
+ * Per-agent detectors run in parallel; each one returns [] on missing
+ * dirs / IO errors so a failure on one agent doesn't drop the others.
  */
 export async function detectLocalSkills(): Promise<LocalSkillManifest> {
-  return {
-    "claude-agent-acp": await detectClaudeCodeSkills(),
-  };
+  const [claude, gemini, opencode] = await Promise.all([
+    detectClaudeCodeSkills(),
+    detectGeminiExtensions(),
+    detectOpencodeAgents(),
+  ]);
+  const out: LocalSkillManifest = {};
+  // Only emit keys with non-empty arrays — keeps the manifest small for
+  // typical users who only have one agent installed, and lets the UI
+  // distinguish "agent not detected" from "agent detected, no skills".
+  // Keys are the canonical (post-A2) ACP registry ids — pre-A2 ids
+  // route here via overlay aliases on the lookup side.
+  if (claude.length) out["claude-acp"] = claude;
+  if (gemini.length) out["gemini"] = gemini;
+  if (opencode.length) out["opencode"] = opencode;
+  return out;
 }
 
 async function detectClaudeCodeSkills(): Promise<LocalSkill[]> {
@@ -134,4 +162,87 @@ async function readSkillMeta(file: string): Promise<{ name?: string; description
     if (para) description = para.slice(0, 200) + (para.length > 200 ? "…" : "");
   }
   return { name, description };
+}
+
+/**
+ * Detect Gemini CLI extensions:
+ *   ~/.gemini/extensions/<name>/gemini-extension.json
+ * Each extension is a directory; the JSON manifest has `name` (we use the
+ * directory name as id since `name` may collide with an MCP server name in
+ * the same file). Description comes from `description` field if present,
+ * else from the contextFileName (default GEMINI.md).
+ */
+async function detectGeminiExtensions(): Promise<LocalSkill[]> {
+  const root = join(HOME, ".gemini", "extensions");
+  let entries: string[];
+  try { entries = await readdir(root); } catch { return []; }
+  const out: LocalSkill[] = [];
+  for (const id of entries) {
+    if (id.startsWith(".")) continue;
+    const extDir = join(root, id);
+    let st;
+    try { st = await stat(extDir); } catch { continue; }
+    if (!st.isDirectory()) continue;
+    // Require the manifest to exist — bare directories aren't extensions.
+    let manifest: { name?: string; description?: string; contextFileName?: string } = {};
+    try {
+      const raw = await readFile(join(extDir, "gemini-extension.json"), "utf-8");
+      manifest = JSON.parse(raw);
+    } catch { continue; }
+    let description = manifest.description;
+    if (!description) {
+      // Fall back to first paragraph of the context file.
+      const ctxName = manifest.contextFileName ?? "GEMINI.md";
+      const meta = await readSkillMeta(join(extDir, ctxName));
+      description = meta.description;
+    }
+    out.push({
+      id,
+      name: manifest.name ?? id,
+      description,
+      source: "global",
+      path: extDir,
+    });
+  }
+  return out;
+}
+
+/**
+ * Detect OpenCode custom agents (markdown files with YAML frontmatter):
+ *   ~/.opencode/agents/<id>.md
+ *   ~/.config/opencode/agents/<id>.md
+ *
+ * OpenCode's "agents" play the same role as Claude's skills in the bridge
+ * UX — pick which ones the spawned ACP child can see. Body of the file is
+ * a system prompt; frontmatter has `description`, `mode`, `model`, etc.
+ */
+async function detectOpencodeAgents(): Promise<LocalSkill[]> {
+  const seen = new Map<string, LocalSkill>();
+  const dirs = [
+    join(HOME, ".opencode", "agents"),
+    join(HOME, ".config", "opencode", "agents"),
+  ];
+  for (const dir of dirs) {
+    let entries: string[];
+    try { entries = await readdir(dir); } catch { continue; }
+    for (const file of entries) {
+      if (!file.endsWith(".md") || file.startsWith(".")) continue;
+      const id = file.slice(0, -3);
+      const path = join(dir, file);
+      let st;
+      try { st = await stat(path); } catch { continue; }
+      if (!st.isFile()) continue;
+      const meta = await readSkillMeta(path);
+      // Later entries (XDG config) shadow earlier (~/.opencode) — matches
+      // OpenCode's own precedence rules per their docs.
+      seen.set(id, {
+        id,
+        name: meta.name ?? id,
+        description: meta.description,
+        source: "global",
+        path,
+      });
+    }
+  }
+  return [...seen.values()];
 }
