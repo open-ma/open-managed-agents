@@ -290,6 +290,28 @@ export class OmaSandbox extends Sandbox {
         exitCode: ec,
         exitReason: reason,
       });
+      // Mirror to the hosted billing worker if its service binding is
+      // present. Self-host deployments leave BILLING unbound — this
+      // soft-skips and the wallet bookkeeping is simply absent.
+      if (env.BILLING) {
+        try {
+          await env.BILLING.recordUsage({
+            tenantId: ctx.tenantId,
+            sessionId: ctx.sessionId,
+            agentId: ctx.agentId,
+            runtimeKind: "cloud",
+            sandboxActiveSeconds: seconds,
+            startedAt,
+            endedAt,
+          });
+        } catch (err) {
+          // Best-effort; the usage_events row is the authoritative record
+          // and billing can reconcile from that out-of-band on next sweep.
+          console.error(
+            `[oma-sandbox] BILLING.recordUsage failed: ${(err as Error)?.message ?? err}`,
+          );
+        }
+      }
       await this.ctx.storage.delete(ACTIVE_STARTED_KEY);
     } catch (err) {
       console.error(

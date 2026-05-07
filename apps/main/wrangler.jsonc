@@ -69,10 +69,17 @@
     { "binding": "VECTORIZE", "index_name": "memory-search" }
   ],
 
-  // Service bindings to agent workers
+  // Service bindings to agent workers + (optional) usage-meter extension.
+  // USAGE_METER + USAGE_METER_HTTP are duck-typed contracts (see
+  // packages/shared/src/env.ts Env.USAGE_METER). Anyone can implement
+  // them — billing, anti-abuse, regulatory caps, lab tracking. Self-host
+  // omits both bindings; usage_events still records every session for
+  // observability either way.
   "services": [
     { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" },
     { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+    // , { "binding": "USAGE_METER", "service": "<your-meter-worker>", "entrypoint": "UsageMeter" }
+    // , { "binding": "USAGE_METER_HTTP", "service": "<your-meter-worker>" }
   ],
 
   "migrations": [
