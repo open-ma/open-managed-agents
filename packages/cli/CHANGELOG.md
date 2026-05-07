@@ -1,5 +1,21 @@
 # @openma/cli
 
+## 0.4.1
+
+### Patch Changes
+
+- [#41](https://github.com/open-ma/open-managed-agents/pull/41) [`e370a4a`](https://github.com/open-ma/open-managed-agents/commit/e370a4ab550ca18a37e27761695fb9bbd2e8bdb7) Thanks [@hrhrng](https://github.com/hrhrng)! - `oma bridge setup` now exits cleanly after "Done." instead of hanging
+  for ~5 minutes on idle keep-alive HTTP sockets from the registry CDN
+  fetch and the runtime-token probe. Daemon was already started by
+  launchd / systemd / Task Scheduler — only the foreground setup process
+  itself was waiting on the undici dispatcher to time out its sockets.
+  Force-exits at end of runSetup, matching how npm / pnpm / gh handle
+  the same constraint in their CLI commands.
+
+  Adds an opt-in `OMA_DEBUG_HANDLES=1` env var that prints active
+  handles + requests every 2s — useful for diagnosing future "process
+  won't exit" regressions without redeploying.
+
 ## 0.4.0
 
 ### Minor Changes
