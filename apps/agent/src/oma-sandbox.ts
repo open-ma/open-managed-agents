@@ -25,14 +25,20 @@
 import { Sandbox } from "@cloudflare/sandbox";
 import type { Env } from "@open-managed-agents/shared";
 import { recordBackup } from "./runtime/workspace-backups";
+import { recordSandboxUsage } from "./runtime/usage-events";
 
 const BACKUP_TTL_SEC = 7 * 24 * 3600;
 const BACKUP_CTX_KEY = "oma_backup_ctx";
+// Wall-clock ms of the most recent warmup completion. Cleared on
+// onStop / onActivityExpired after a usage_events row is written, so
+// the next warmup-after-sleep cycle records its own row.
+const ACTIVE_STARTED_KEY = "oma_active_started_at";
 
 interface BackupContext {
   tenantId: string;
   environmentId: string;
   sessionId: string;
+  agentId?: string;
 }
 
 // Match the SDK's OutboundHandlerContext shape (see @cloudflare/containers).
@@ -178,6 +184,14 @@ export class OmaSandbox extends Sandbox {
    */
   async setBackupContext(ctx: BackupContext): Promise<void> {
     await this.ctx.storage.put(BACKUP_CTX_KEY, ctx);
+    // Mark active-time start once per warmup cycle. Idempotent: if the
+    // SDK calls setBackupContext twice on the same live container (resume,
+    // re-entry), keep the original start so duration spans the full
+    // active window. The key is cleared in onStop after recording.
+    const existing = await this.ctx.storage.get<number>(ACTIVE_STARTED_KEY);
+    if (existing == null) {
+      await this.ctx.storage.put(ACTIVE_STARTED_KEY, Date.now());
+    }
   }
 
   /**
@@ -250,6 +264,38 @@ export class OmaSandbox extends Sandbox {
     const reason = typeof params.reason === "string" ? params.reason : "unknown";
     // 137 = SIGKILL (likely OOM or destroy()); 143 = SIGTERM (graceful)
     console.log(`[oma-sandbox] onStop exit=${ec} reason=${reason}`);
+
+    // Emit a usage_events row covering the wall-clock window between the
+    // most recent setBackupContext (warmup completion) and now. Best-effort:
+    // a missing context, missing start key, or D1 failure all silently
+    // skip — we never want to throw from a teardown hook.
+    try {
+      const env = this.env as Env;
+      if (!env.AUTH_DB) return;
+      const ctx = (await this.ctx.storage.get(BACKUP_CTX_KEY)) as
+        | BackupContext
+        | undefined;
+      const startedAt = await this.ctx.storage.get<number>(ACTIVE_STARTED_KEY);
+      if (!ctx || startedAt == null) return;
+      const endedAt = Date.now();
+      const seconds = Math.max(0, Math.round((endedAt - startedAt) / 1000));
+      await recordSandboxUsage(env.AUTH_DB, {
+        tenantId: ctx.tenantId,
+        sessionId: ctx.sessionId,
+        agentId: ctx.agentId,
+        environmentId: ctx.environmentId,
+        startedAt,
+        endedAt,
+        sandboxActiveSeconds: seconds,
+        exitCode: ec,
+        exitReason: reason,
+      });
+      await this.ctx.storage.delete(ACTIVE_STARTED_KEY);
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] usage record on stop failed: ${(err as Error)?.message ?? err}`,
+      );
+    }
   }
 }
 
