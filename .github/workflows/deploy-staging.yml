@@ -22,7 +22,7 @@ jobs:
       - run: pnpm install --frozen-lockfile
 
       - name: Build console (assets bundled into main worker)
-        run: pnpm --filter @open-managed-agents/console build
+        run: pnpm --filter managed-agents-console build
 
       # Deploy main worker to staging — `--env staging` activates the
       # `env.staging` block in apps/main/wrangler.jsonc (separate name,
