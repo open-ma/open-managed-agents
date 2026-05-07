@@ -28,20 +28,12 @@ import { mkdir, writeFile, unlink, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { paths, currentPlatform } from "./platform.js";
+import { buildUnit, type BuilderOpts } from "./service-templates.js";
 
-export interface InstallOptions {
-  /** Absolute path to the node binary that should run the daemon. Almost
-   *  always `process.execPath` of the process running `oma bridge setup`. */
-  nodePath: string;
-  /** Absolute path to the cli's bundled entrypoint (dist/index.js). The
-   *  caller should pass `realpathSync(process.argv[1])` so npm/npx symlinks
-   *  in `node_modules/.bin/` are resolved to the real file. */
-  cliEntry: string;
-  /** PATH to expose to the daemon process. Used for spawn'd ACP children
-   *  that still carry `#!/usr/bin/env node` shebangs. Defaults to a
-   *  freeze of the setup-time PATH with dirname(nodePath) prepended. */
-  envPath?: string;
-}
+export type InstallOptions = BuilderOpts;
+// Re-export for back-compat. Implementation lives in service-templates
+// so unit tests can exercise it without node:child_process at import.
+export { buildUnit };
 
 export interface InstallResult {
   /** True when systemd accepted the unit and started the daemon. False
@@ -56,49 +48,6 @@ export interface InstallResult {
   /** Stderr from systemctl on failure paths — surfaced so the user can
    *  diagnose without a separate journalctl detour. */
   warning?: string;
-}
-
-function buildUnit(opts: InstallOptions): string {
-  const p = paths();
-  const nodeDir = dirname(opts.nodePath);
-  const setupPath = process.env.PATH ?? "";
-  const envPath = opts.envPath ?? dedupPath(setupPath ? `${nodeDir}:${setupPath}` : nodeDir);
-
-  // systemd's StandardOutput=append: requires journald to know the file;
-  // simpler + identical to launchd: append both streams to one log file.
-  // We write a Type=simple unit (the default) since the daemon doesn't
-  // double-fork and stays in foreground — matches our launchd KeepAlive
-  // expectation that PID 1 of the cgroup is the actual daemon.
-  return `[Unit]
-Description=OMA Bridge Daemon
-Documentation=https://github.com/open-ma/open-managed-agents
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=${opts.nodePath} ${opts.cliEntry} bridge daemon
-Restart=always
-RestartSec=10
-Environment=PATH=${envPath}
-StandardOutput=append:${p.logFile}
-StandardError=append:${p.logFile}
-
-[Install]
-WantedBy=default.target
-`;
-}
-
-function dedupPath(p: string): string {
-  const seen = new Set<string>();
-  return p
-    .split(":")
-    .filter((part) => {
-      if (!part || seen.has(part)) return false;
-      seen.add(part);
-      return true;
-    })
-    .join(":");
 }
 
 export async function install(opts: InstallOptions): Promise<InstallResult> {

@@ -38,16 +38,13 @@ import { dirname, join } from "node:path";
 import { spawn } from "node:child_process";
 import { homedir } from "node:os";
 import { paths, currentPlatform } from "./platform.js";
+import { buildShim, type BuilderOpts } from "./service-templates.js";
 
-export interface InstallOptions {
-  /** Absolute path to the node binary to spawn. process.execPath. */
-  nodePath: string;
-  /** Absolute path to the cli's bundled entrypoint (dist/index.js). */
-  cliEntry: string;
-  /** PATH to expose to the daemon process. Defaults to setup-time PATH
-   *  with dirname(nodePath) prepended. */
-  envPath?: string;
-}
+export type InstallOptions = BuilderOpts;
+// Re-export for back-compat with anything that imports buildShim from
+// here. Implementation lives in service-templates so unit tests can
+// exercise it without node:child_process at import time.
+export { buildShim };
 
 export interface InstallResult {
   /** True when schtasks accepted the task and the daemon is queued to
@@ -67,32 +64,6 @@ export interface InstallResult {
  *  daemon state collects in one place. */
 function shimPath(): string {
   return join(paths().configDir, "daemon.cmd");
-}
-
-function buildShim(opts: InstallOptions): string {
-  const nodeDir = dirname(opts.nodePath);
-  const setupPath = process.env.PATH ?? "";
-  const envPath = opts.envPath ?? dedupPathSemicolon(setupPath ? `${nodeDir};${setupPath}` : nodeDir);
-  const logFile = paths().logFile;
-
-  // Windows .cmd, not .bat — both work but .cmd is the modern choice
-  // (no auto-quoting differences from inherited cmd.exe of yore).
-  // @echo off keeps the command itself out of the log.
-  // Append, don't overwrite, so logs survive across daemon restarts.
-  return [
-    "@echo off",
-    `set "PATH=${envPath}"`,
-    `"${opts.nodePath}" "${opts.cliEntry}" bridge daemon >> "${logFile}" 2>&1`,
-  ].join("\r\n") + "\r\n";
-}
-
-function dedupPathSemicolon(p: string): string {
-  const seen = new Set<string>();
-  return p.split(";").filter((part) => {
-    if (!part || seen.has(part)) return false;
-    seen.add(part);
-    return true;
-  }).join(";");
 }
 
 export async function install(opts: InstallOptions): Promise<InstallResult> {
