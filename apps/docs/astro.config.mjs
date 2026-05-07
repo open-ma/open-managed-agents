@@ -60,7 +60,8 @@ export default defineConfig({
           label: 'Self-host',
           items: [
             { label: 'Overview', slug: 'self-host/overview' },
-            { label: 'Deploy', slug: 'self-host/deploy' },
+            { label: 'Node + Docker (no Cloudflare)', slug: 'self-host/node-docker' },
+            { label: 'Deploy on Cloudflare', slug: 'self-host/deploy' },
             { label: 'OAuth Apps', slug: 'self-host/oauth-apps' },
             { label: 'Operations', slug: 'self-host/operations' },
           ],

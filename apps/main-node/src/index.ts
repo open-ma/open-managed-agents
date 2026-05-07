@@ -436,7 +436,13 @@ app.get("/auth-info", (c) =>
       ? []
       : [
           "email",
-          "email-otp",
+          // Only advertise email-otp when the operator opted into a real
+          // verification gate. Default self-host (no SMTP) skips OTP so
+          // Console takes the user straight from sign-up → app, avoiding
+          // a verify screen with no way to receive the code.
+          ...(process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1"
+            ? ["email-otp"]
+            : []),
           ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
             ? ["google"]
             : []),
