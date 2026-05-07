@@ -265,15 +265,44 @@ export class OmaSandbox extends Sandbox {
 
 // Per-host bypass for R2 — createBackup / restoreBackup do raw S3-style
 // PUT/GET/HEAD against `*.r2.cloudflarestorage.com` from inside the
-// container. Routing those through inject_vault_creds (which materializes
-// bodies + uses Workers fetch) corrupts the squashfs blob — see
-// cloudflare/sandbox-sdk#619 ("Failed to mount squashfs: This doesn't
-// look like a squashfs image" when interceptHttps + custom handler).
-// outboundByHost runs at line 217 of @cloudflare/containers/lib/container.js
-// BEFORE the catch-all handler, so a passthrough fetch here keeps the
-// raw bytes + headers intact and restoreBackup actually works.
+// container, and so do agent-driven presigned PUTs from the
+// /v1/internal/sessions/:id/uploads/presign flow. Routing those through
+// inject_vault_creds (which materializes bodies + uses Workers fetch)
+// corrupts the squashfs blob — see cloudflare/sandbox-sdk#619 ("Failed
+// to mount squashfs: This doesn't look like a squashfs image" when
+// interceptHttps + custom handler). outboundByHost runs at line 217 of
+// @cloudflare/containers/lib/container.js BEFORE the catch-all handler.
+//
+// PUT body shape: Workers fetch ignores user-set Content-Length and
+// switches stream bodies to chunked encoding (per
+// developers.cloudflare.com/workers/runtime-apis/request — "Any value
+// manually set by user code in the Headers will be ignored"). R2 returns
+// 411 MissingContentLength on chunked PUTs (sandbox-sdk#660). To
+// preserve Content-Length, we materialize the body to ArrayBuffer for
+// PUT/POST/PATCH/DELETE and let Workers fetch derive the size from a
+// known-length source. GET/HEAD pass through unchanged so squashfs reads
+// keep their byte-exact streaming behaviour.
+const r2OutboundPassthrough = async (request: Request): Promise<Response> => {
+  if (request.method === "GET" || request.method === "HEAD") {
+    return fetch(request);
+  }
+  const bodyBytes = await request.arrayBuffer();
+  // Strip the Cf-derived headers that confuse upstream signature-checks
+  // when the request is replayed through Workers fetch.
+  const outHeaders = new Headers(request.headers);
+  for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
+  return fetch(
+    new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      body: bodyBytes,
+      redirect: "manual",
+    }),
+  );
+};
+
 (OmaSandbox as unknown as {
   outboundByHost: Record<string, (req: Request) => Promise<Response>>;
 }).outboundByHost = {
-  "*.r2.cloudflarestorage.com": (req: Request) => fetch(req),
+  "*.r2.cloudflarestorage.com": r2OutboundPassthrough,
 };
