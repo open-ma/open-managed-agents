@@ -1460,6 +1460,77 @@ app.get("/:id/resources", async (c) => {
   }
 });
 
+// GET /v1/sessions/:id/resources/:resource_id — single resource detail.
+// Anthropic SDK calls this via `client.beta.sessions.resources.retrieve(...)`.
+// Service layer already exposes getResource; just shape it for the wire.
+app.get("/:id/resources/:resource_id", async (c) => {
+  try {
+    const row = await c.var.services.sessions.getResource({
+      tenantId: c.get("tenant_id"),
+      sessionId: c.req.param("id"),
+      resourceId: c.req.param("resource_id"),
+    });
+    if (!row) return c.json({ error: "Resource not found" }, 404);
+    return c.json(row.resource);
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
+});
+
+// POST /v1/sessions/:id/resources/:resource_id — update resource. Anthropic
+// SDK calls this via `client.beta.sessions.resources.update(...)`. The
+// sessions-store service doesn't yet expose updateResource (only get / list /
+// delete), so this returns 501 with a typed envelope rather than a 404 the
+// SDK couldn't classify. Follow-up: add SessionsStore.updateResource +
+// adapter (D1 in-place patch on the resource JSON column).
+app.post("/:id/resources/:resource_id", (c) =>
+  c.json(
+    {
+      error: {
+        type: "not_implemented",
+        message: "session resource update not yet implemented on this server",
+      },
+      type: "error",
+    },
+    501,
+  ),
+);
+
+// GET /v1/sessions/:id/threads/:thread_id — single thread metadata. Threads
+// live in the sandbox worker (DO state); the agent worker only exposes
+// /threads (list) + /threads/:tid/events (event log) — not a per-thread
+// metadata endpoint. Returning 501 keeps the route catalog complete for
+// SDK callers without faking a payload. Follow-up: add the metadata
+// endpoint to apps/agent/src/runtime/session-do.ts and forward here.
+app.get("/:id/threads/:thread_id", (c) =>
+  c.json(
+    {
+      error: {
+        type: "not_implemented",
+        message: "thread metadata endpoint not yet implemented on this server",
+      },
+      type: "error",
+    },
+    501,
+  ),
+);
+
+// POST /v1/sessions/:id/threads/:thread_id/archive — archive a thread.
+// Same story as the thread metadata endpoint above — sandbox worker has no
+// concept of archived threads yet. Follow-up alongside the get.
+app.post("/:id/threads/:thread_id/archive", (c) =>
+  c.json(
+    {
+      error: {
+        type: "not_implemented",
+        message: "thread archive endpoint not yet implemented on this server",
+      },
+      type: "error",
+    },
+    501,
+  ),
+);
+
 app.delete("/:id/resources/:resource_id", async (c) => {
   const sessionId = c.req.param("id");
   const resourceId = c.req.param("resource_id");

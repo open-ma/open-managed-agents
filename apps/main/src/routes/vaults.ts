@@ -246,6 +246,44 @@ app.post("/:id/credentials/:cred_id", async (c) => {
   }
 });
 
+// GET /v1/vaults/:id/credentials/:cred_id — single credential read.
+// Anthropic SDK calls this via `client.beta.vaults.credentials.retrieve(...)`.
+// Returns the credential WITHOUT secret material (stripSecrets), same contract
+// as the other credential endpoints in this file.
+app.get("/:id/credentials/:cred_id", async (c) => {
+  const t = c.get("tenant_id");
+  try {
+    const cred = await c.var.services.credentials.get({
+      tenantId: t,
+      vaultId: c.req.param("id"),
+      credentialId: c.req.param("cred_id"),
+    });
+    if (!cred) return c.json({ error: "Credential not found" }, 404);
+    return c.json(toApiCred(stripSecrets(cred)));
+  } catch (err) {
+    return handleError(err);
+  }
+});
+
+// POST /v1/vaults/:id/credentials/:cred_id/mcp_oauth_validate — verify the
+// stored OAuth credential against the MCP server it points at. Anthropic's
+// flow runs a probe handshake to check token freshness + scope. We don't
+// implement live OAuth refresh on the server side yet (cred refresh happens
+// inside the integrations worker on-demand at session init), so return 501.
+// Follow-up: wire integrations worker's MCP probe RPC + return its result.
+app.post("/:id/credentials/:cred_id/mcp_oauth_validate", (c) =>
+  c.json(
+    {
+      error: {
+        type: "not_implemented",
+        message: "MCP OAuth credential validation not yet implemented on this server",
+      },
+      type: "error",
+    },
+    501,
+  ),
+);
+
 // POST /v1/vaults/:id/credentials/:cred_id/archive — archive credential
 app.post("/:id/credentials/:cred_id/archive", async (c) => {
   const t = c.get("tenant_id");
