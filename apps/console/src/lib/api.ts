@@ -2,6 +2,23 @@ const BASE = "";
 
 import { useToast } from "../components/Toast";
 
+/** Parse an error message out of an API response body. The server now emits
+ *  the Anthropic-compatible envelope `{type:"error", error:{type, message},
+ *  request_id}`; older endpoints (and external callers) may still return the
+ *  legacy `{error: "<string>"}`. Handle both so toasts render a real message
+ *  in either case. */
+export function readApiErrorMessage(body: unknown, status: number): string {
+  if (body && typeof body === "object") {
+    const e = (body as { error?: unknown }).error;
+    if (typeof e === "string") return e;
+    if (e && typeof e === "object") {
+      const m = (e as { message?: unknown }).message;
+      if (typeof m === "string") return m;
+    }
+  }
+  return `HTTP ${status}`;
+}
+
 /** localStorage key for the active tenant the Console wants to operate as.
  *  Sent on every /v1/* request as `x-active-tenant`; the backend validates
  *  membership before honoring. Single-tenant users never write this. */
@@ -76,7 +93,7 @@ export function useApi() {
     }
     if (!res.ok) {
       const body = await res.json().catch(() => ({}));
-      const message = (body as { error?: string }).error || `HTTP ${res.status}`;
+      const message = readApiErrorMessage(body, res.status);
 
       // Safety net for stale-tenant lockout. The primary fix is in Login.tsx
       // (clears localStorage on every successful auth transition). This still
@@ -137,7 +154,7 @@ export function useApi() {
         // previously the .then closure swallowed everything, so a 401 / 500
         // on the SSE handshake meant the timeline just never updated.
         const body = await res.json().catch(() => ({}));
-        const message = (body as { error?: string }).error || `HTTP ${res.status}`;
+        const message = readApiErrorMessage(body, res.status);
         toast(`/v1/sessions/${sessionId}/events/stream: ${message}`, "error");
         return;
       }
