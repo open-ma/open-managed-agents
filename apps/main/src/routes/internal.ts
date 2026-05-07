@@ -1,10 +1,9 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig } from "@open-managed-agents/shared";
-import { generateFileId, generateVaultId } from "@open-managed-agents/shared";
+import { generateVaultId } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
-import { AwsClient } from "aws4fetch";
 
 // Internal endpoints, called only by the integrations gateway worker via the
 // `MAIN` service binding. Auth is a shared header secret — no better-auth
@@ -585,97 +584,6 @@ async function fetchVaultCredentials(
 // (apps/agent/wrangler.jsonc → script_name: "managed-agents") and calls
 // `runtime_room_stub.fetch("http://runtime-room/_attach_harness", ...)`.
 // One less worker hop, no shared INTEGRATIONS_INTERNAL_SECRET on agent.
-
-// POST /v1/internal/sessions/:id/uploads/presign
-//
-// Generates an R2 presigned PUT URL the sandbox can curl directly. Path
-// chosen because mount-bucket writes are blocked at SDK level —
-// interceptHttps + outboundByHost(*.r2.cloudflarestorage.com) routes s3fs
-// PUT through Workers fetch which strips Content-Length, R2 returns 411
-// MissingContentLength (sandbox-sdk#619, sandbox-sdk#660).
-//
-// Presigned URLs sidestep this because R2's signed-query path uses
-// SignedHeaders=host only and treats the body as UNSIGNED-PAYLOAD, so the
-// chunked transfer the Workers fetch layer produces is accepted. This is
-// the same pattern @cloudflare/sandbox createBackup uses internally
-// (sandbox-PAYx1CcU.js:6409 generatePresignedPutUrl).
-//
-// Auth: x-internal-secret. Same model as the rest of /v1/internal/*. The
-// agent worker injects this secret into the sandbox container env on
-// warmup so the agent can `curl -X POST -H x-internal-secret: $S ...`.
-//
-// Body: { filename, media_type?, expires_sec? }
-// Response: { upload_url, file_id, r2_key, expires_at, http_method,
-//             headers_to_set: { "Content-Type": ... } }
-//
-// R2 key scheme: t/<tenantId>/session-outputs/<sessionId>/<file_id>/<filename>
-//   - matches GET /v1/sessions/:id/outputs prefix scan in routes/sessions.ts
-//     so listed outputs include presigned uploads with no extra wiring
-const FILES_BUCKET_NAME = "managed-agents-files";
-
-app.post("/sessions/:id/uploads/presign", async (c) => {
-  const sessionId = c.req.param("id");
-  const session = await c.var.services.sessions.getById({ sessionId });
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const tenantId = (session as { tenant_id?: string }).tenant_id;
-  if (!tenantId) return c.json({ error: "Session row missing tenant_id" }, 500);
-
-  const body = await c.req
-    .json<{ filename?: string; media_type?: string; expires_sec?: number }>()
-    .catch(() => ({} as { filename?: string; media_type?: string; expires_sec?: number }));
-  const filename = (body.filename ?? "").trim();
-  if (!filename || filename.includes("/") || filename.includes("..")) {
-    return c.json({ error: "filename required (no slashes, no ..)" }, 400);
-  }
-  const mediaType = body.media_type || "application/octet-stream";
-  // Cap presign lifetime at 1 hour. R2 silently truncates >7 days but we
-  // never want a multi-day stale URL floating around.
-  const expiresSec = Math.min(Math.max(body.expires_sec ?? 900, 60), 3600);
-
-  if (!c.env.R2_ENDPOINT || !c.env.R2_ACCESS_KEY_ID || !c.env.R2_SECRET_ACCESS_KEY) {
-    return c.json(
-      { error: "R2 presigned URLs not configured (R2_ENDPOINT / R2_ACCESS_KEY_ID / R2_SECRET_ACCESS_KEY missing)" },
-      503,
-    );
-  }
-
-  const fileId = generateFileId();
-  const r2KeyParts = [
-    "t",
-    tenantId,
-    "session-outputs",
-    sessionId,
-    fileId,
-    filename,
-  ];
-  const r2Key = r2KeyParts.join("/");
-
-  const url = new URL(c.env.R2_ENDPOINT.replace(/\/+$/, ""));
-  url.pathname = "/" + [FILES_BUCKET_NAME, ...r2KeyParts]
-    .map(encodeURIComponent)
-    .join("/");
-  url.searchParams.set("X-Amz-Expires", String(expiresSec));
-
-  const aws = new AwsClient({
-    accessKeyId: c.env.R2_ACCESS_KEY_ID,
-    secretAccessKey: c.env.R2_SECRET_ACCESS_KEY,
-    service: "s3",
-    region: "auto",
-  });
-  const signed = await aws.sign(
-    new Request(url, { method: "PUT", headers: { "content-type": mediaType } }),
-    { aws: { signQuery: true } },
-  );
-
-  return c.json({
-    upload_url: signed.url,
-    http_method: "PUT",
-    headers_to_set: { "Content-Type": mediaType },
-    file_id: fileId,
-    r2_key: r2Key,
-    expires_at: new Date(Date.now() + expiresSec * 1000).toISOString(),
-  });
-});
 
 export default app;
 

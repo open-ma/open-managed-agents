@@ -25,7 +25,6 @@
     "@open-managed-agents/tenant-db": "workspace:*",
     "@open-managed-agents/tenant-dbs-store": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
-    "aws4fetch": "^1.0.20",
     "fflate": "^0.8.2",
     "hono": "^4.7.0"
   }
