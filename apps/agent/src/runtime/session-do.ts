@@ -11,7 +11,7 @@ import {
   type PartialStream,
 } from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
+import { logWarn, log, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
   CfDoEventLog,
@@ -2038,12 +2038,22 @@ export class SessionDO extends DurableObject<Env> {
                 );
               }
             } else {
-              try {
-                this.persistAndBroadcastEvent({
-                  type: "session.warning",
-                  message: `workspace_restore_skipped reason=no-backup-for-session`,
-                } as unknown as SessionEvent);
-              } catch {}
+              // No backup found — fresh session, expected case. Log
+              // for ops/debugging only; don't emit as session.warning
+              // because a "warning" event leaks into the trajectory
+              // and confuses operators reading session timelines (it's
+              // not actually a problem). Failed restore (above) and
+              // successful restore (above) are different — those ARE
+              // worth a session event.
+              log(
+                {
+                  op: "session_do.warmup.no_backup",
+                  session_id: this.state.session_id,
+                  tenant_id: this.state.tenant_id,
+                  environment_id: this.state.environment_id,
+                },
+                "no workspace backup found for this session — starting fresh",
+              );
             }
           }
         } catch (err) {
