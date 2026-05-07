@@ -909,13 +909,29 @@ app.post("/:id/events", async (c) => {
         }
       }
     }
-    await forwardToSandbox(
+    const sandboxRes = await forwardToSandbox(
       binding,
       `/sessions/${id}/event`,
       c.req.raw,
       "POST",
       JSON.stringify(outgoing),
     );
+    // SessionDO returns 409 when the session is terminated_at != null
+    // (added in session-do.ts to align with AMA RetryStatusTerminal).
+    // Without this passthrough the client would see 202 unconditionally
+    // and never learn the event was rejected. Forward any non-2xx as-is
+    // so the canonical error envelope SessionDO emitted reaches the
+    // caller verbatim — including its `request_id` and typed `error.type`.
+    if (sandboxRes.status >= 400) {
+      const body = await sandboxRes.text();
+      return new Response(body, {
+        status: sandboxRes.status,
+        headers: {
+          "content-type":
+            sandboxRes.headers.get("content-type") ?? "application/json",
+        },
+      });
+    }
   }
 
   return c.body(null, 202);
