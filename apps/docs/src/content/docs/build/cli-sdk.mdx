@@ -1,16 +1,16 @@
 ---
 title: CLI & SDK
-description: The open-managed-agents Node CLI and the @openma/sdk TypeScript client — your two ways to talk to the API without curl.
+description: The open-managed-agents Node CLI and using @anthropic-ai/sdk against openma — your two ways to talk to the API without curl.
 ---
 
 import { Tabs, TabItem, Aside, LinkCard } from '@astrojs/starlight/components';
 
-openma ships two developer-facing packages:
+openma is callable via two routes:
 
 - **`@openma/cli`** — a Node CLI for scripting against the API.
-- **`@openma/sdk`** — a typed TypeScript client. Wraps REST + SSE; one async iterator per turn; runs anywhere `fetch` exists (Node ≥ 20, Bun, Deno, browsers, Cloudflare Workers).
+- **`@anthropic-ai/sdk`** — the official Anthropic TypeScript SDK, pointed at openma's `baseURL`. The openma API is wire-compatible with Anthropic's Managed Agents API, so the same SDK works against both.
 
-Both live in this repo (`packages/cli`, `packages/sdk`).
+The CLI lives in this repo (`packages/cli`).
 
 ## CLI
 
@@ -81,24 +81,28 @@ Run `oma --help` or `oma <command> --help` for the full surface.
 
 ## SDK
 
-`@openma/sdk` is a typed TypeScript client. Discriminated-union events, async-iterator streaming, runs on Node ≥ 20, Bun, Deno, browsers, and Cloudflare Workers (anywhere `fetch` exists).
+The openma API is **wire-compatible with [Anthropic's Managed Agents API](https://docs.anthropic.com/)**, so the recommended client is the official `@anthropic-ai/sdk` pointed at our `baseURL`. One SDK, two providers — moving between them is a config line.
+
+<Aside type="caution" title="@openma/sdk is deprecated">
+  The standalone `@openma/sdk` package is no longer maintained. Existing installs keep working, but new projects should use `@anthropic-ai/sdk` as shown below.
+</Aside>
 
 ### Install
 
 <Tabs syncKey="pkg-mgr">
   <TabItem label="npm">
     ```bash
-    npm i @openma/sdk
+    npm i @anthropic-ai/sdk
     ```
   </TabItem>
   <TabItem label="pnpm">
     ```bash
-    pnpm add @openma/sdk
+    pnpm add @anthropic-ai/sdk
     ```
   </TabItem>
   <TabItem label="bun">
     ```bash
-    bun add @openma/sdk
+    bun add @anthropic-ai/sdk
     ```
   </TabItem>
 </Tabs>
@@ -106,91 +110,73 @@ Run `oma --help` or `oma <command> --help` for the full surface.
 ### Quick start
 
 ```ts
-import { OpenMA } from "@openma/sdk";
+import Anthropic from "@anthropic-ai/sdk";
 
-const oma = new OpenMA({ apiKey: process.env.OMA_API_KEY! });
-
-// Streaming chat — async iterator over typed events.
-for await (const ev of oma.sessions.chat(sessionId, "Hello")) {
-  if (ev.type === "agent.message_chunk") process.stdout.write(ev.delta);
-}
-```
-
-### Three streams, one channel
-
-Text, thinking, and tool-input deltas all flow over the same SSE iterator. Each carries a correlation id (`message_id`, `thinking_id`, `tool_use_id`) that matches the eventually-committed canonical event:
-
-```ts
-for await (const ev of oma.sessions.chat(sessionId, "Use bash to print uptime")) {
-  switch (ev.type) {
-    case "agent.message_chunk":      // live text delta
-      process.stdout.write(ev.delta); break;
-    case "agent.thinking_chunk":     // live extended-thinking delta
-      process.stderr.write(`💭 ${ev.delta}`); break;
-    case "agent.tool_use":           // canonical tool call (id matches any prior input chunks)
-      console.log(`→ ${ev.name}`, ev.input); break;
-    case "agent.tool_result":
-      console.log(`← ${ev.content}`); break;
-    case "session.warning":          // recovery scan flagged an interrupted stream
-      console.warn(`⚠ ${ev.source}: ${ev.message}`); break;
-    case "session.status_idle":
-      return;                        // turn done; server closes the stream
-  }
-}
-```
-
-### chatComplete — accumulated turn
-
-When you don't need token-by-token rendering:
-
-```ts
-const reply = await oma.sessions.chatComplete(sessionId, "Hello", {
-  onText: (delta) => process.stdout.write(delta), // optional incremental hook
+const client = new Anthropic({
+  baseURL: "https://openma.dev",
+  apiKey: process.env.OMA_API_KEY!,
 });
 
-console.log(reply.text);          // assembled assistant text
-console.log(reply.thinking);      // string[] — one per reasoning block
-console.log(reply.toolCalls);     // {id, name, input}[]
-console.log(reply.toolResults);   // {tool_use_id, content, is_error?}[]
-```
+// Create an environment.
+const env = await client.beta.environments.create({
+  name: "my-env",
+  config: {
+    type: "cloud",
+    networking: { type: "unrestricted" },
+    packages: { type: "packages", pip: ["pandas"] },
+  },
+});
 
-### tail — long-lived monitor
-
-```ts
-// Replays history on connect, then streams every future event. Never
-// closes; pass an AbortSignal or break out to stop.
-for await (const ev of oma.sessions.tail(sessionId, { signal: ac.signal })) {
-  console.log(ev.type, ev);
-}
-```
-
-### Errors
-
-```ts
-import { OpenMAError } from "@openma/sdk";
-
-try {
-  await oma.sessions.get("sess-bogus");
-} catch (err) {
-  if (err instanceof OpenMAError) {
-    console.error(err.status, err.body); // typed body when the server returns JSON
-    if (err.status === 404) { /* ... */ }
-  }
+// List sessions.
+for await (const sess of client.beta.sessions.list({ limit: 10 })) {
+  console.log(sess.id, sess.title);
 }
 ```
 
 ### Resources covered
 
-| Resource | Methods |
-|---|---|
-| `oma.agents` | `list`, `get`, `create`, `update`, `delete` |
-| `oma.sessions` | `list`, `get`, `create`, `chat`, `chatComplete`, `tail`, `events`, `message`, `interrupt`, `archive`, `delete` |
-| `oma.environments` | `list`, `get`, `create`, `delete` |
+Every namespace in the official SDK works against openma:
 
-More resources land per release — file an issue if something you need is missing.
+| Namespace | Notes |
+|---|---|
+| `client.beta.environments` | `list`, `create`, `retrieve`, `update`, `archive`, `delete` |
+| `client.beta.agents` | `list`, `create`, `retrieve`, `update`, `archive`, plus `versions` sub-resource |
+| `client.beta.sessions` | `list`, `create`, `retrieve`, `update`, `archive`, `delete`, plus `events`, `resources`, `threads` sub-resources |
+| `client.beta.vaults` | `list`, `create`, `retrieve`, `update`, `archive`, `delete`, plus `credentials` sub-resource |
+| `client.beta.memoryStores` | `list`, `create`, `retrieve`, `archive`, `delete`, plus `memories`, `memoryVersions` sub-resources (`update` not yet implemented server-side) |
+| `client.beta.files` | full `list/upload/retrieve/delete` |
+| `client.beta.skills` | full coverage |
+| `client.beta.models` | full coverage |
+
+### OMA-specific endpoints
+
+Endpoints that don't exist in Anthropic's API (tenants, OAuth, integrations, evals, cost reports, runtimes, …) live under `/v1/oma/*`. They aren't typed in the official SDK — call them via the underlying client:
+
+```ts
+const usage = await client._client.get("/v1/oma/cost_report");
+```
+
+Or use plain `fetch` — every OMA endpoint is JSON, no extra runtime needed.
+
+### Errors
+
+The server returns Anthropic-standard error envelopes, so the SDK's typed errors work as documented:
+
+```ts
+import Anthropic from "@anthropic-ai/sdk";
+
+try {
+  await client.beta.sessions.retrieve("sess-bogus");
+} catch (err) {
+  if (err instanceof Anthropic.APIError) {
+    console.error(err.status, err.error); // {error: {type, message}, request_id, type: "error"}
+    if (err.error?.error?.type === "not_found_error") { /* ... */ }
+  }
+}
+```
 
 <Aside type="tip" title="Or just call fetch">
-  Every endpoint is plain JSON or SSE. If you want zero dependencies, point `fetch` at the [REST API](/build/api/) directly — the SDK is sugar, not a requirement. The `@openma/cli` source (`packages/cli/src/`) is a small reference implementation you can lift.
+  Every endpoint is plain JSON or SSE. If you want zero dependencies, point `fetch` at the [REST API](/build/api/) directly — the SDK is sugar, not a requirement.
 </Aside>
 
 ## Where to go next

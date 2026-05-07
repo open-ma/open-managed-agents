@@ -113,6 +113,10 @@ export interface AgentConfig {
 // --- Environment ---
 
 export interface EnvironmentConfig {
+  /** Always `"environment"` on the wire — Anthropic SDK uses this discriminator
+   *  to recognize the resource type. Optional so existing internal callers that
+   *  construct EnvironmentConfig literals without the field still compile. */
+  type?: "environment";
   id: string;
   name: string;
   description?: string;
@@ -171,6 +175,10 @@ export interface EnvironmentConfig {
 export type SessionStatus = "idle" | "running" | "rescheduled" | "terminated";
 
 export interface SessionMeta {
+  /** Always `"session"` on the wire — Anthropic SDK uses this discriminator
+   *  to recognize the resource type. Optional so existing internal callers
+   *  that build SessionMeta literals without the field still compile. */
+  type?: "session";
   id: string;
   agent_id: string;
   environment_id: string;

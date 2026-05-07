@@ -224,6 +224,7 @@ export class EnvironmentService {
  */
 export function toEnvironmentConfig(row: EnvironmentRow): EnvironmentConfig {
   const env: EnvironmentConfig = {
+    type: "environment",
     id: row.id,
     name: row.name,
     config: row.config,

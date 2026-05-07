@@ -41,10 +41,12 @@ function mapSessionError(c: Context, err: unknown): Response {
 }
 
 /** Strip server-internal fields from a session row before returning to API.
- *  Legacy SessionMeta did not expose tenant_id; keep that contract. */
-function toApiSession<T extends { tenant_id?: string }>(row: T): Omit<T, "tenant_id"> {
+ *  Legacy SessionMeta did not expose tenant_id; keep that contract.
+ *  Adds `type: "session"` discriminator so @anthropic-ai/sdk callers see the
+ *  same shape claude.ai returns (existing OMA SDK callers ignore the field). */
+function toApiSession<T extends { tenant_id?: string }>(row: T): Omit<T, "tenant_id"> & { type: "session" } {
   const { tenant_id: _t, ...rest } = row;
-  return rest;
+  return { type: "session" as const, ...rest } as Omit<T, "tenant_id"> & { type: "session" };
 }
 
 /**
@@ -656,7 +658,7 @@ app.get("/", async (c) => {
     agentId: agentIdFilter,
     ...parsePageQuery(c),
   });
-  return jsonPage(c, page, toApiSession);
+  return jsonPage(c, page, (row) => toApiSession(row));
 });
 
 // GET /v1/sessions/:id — get session (status from sandbox worker)

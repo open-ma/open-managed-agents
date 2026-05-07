@@ -232,8 +232,10 @@ app.get("/:id", async (c) => {
   return c.json(toEnvironmentConfig(row));
 });
 
-// PUT /v1/environments/:id — update environment (re-prepares image if config changed)
-app.put("/:id", async (c) => {
+// PUT (and POST) /v1/environments/:id — update environment (re-prepares image if config changed)
+// POST alias mirrors Anthropic Managed-Agents SDK convention so users can drop in
+// `client.beta.environments.update(...)` from the official @anthropic-ai/sdk unchanged.
+app.on(["PUT", "POST"], "/:id", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
   const existing = await c.var.services.environments.get({ tenantId: t, environmentId: id });

@@ -34,6 +34,7 @@ import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
 import { memoryRetentionTick } from "./cron/memory-retention";
 import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { globalErrorHandler, requestMetricsMiddleware } from "./lib/observability";
+import { errorEnvelopeMiddleware } from "./lib/error-envelope";
 import type { R2EventMessage } from "@open-managed-agents/shared";
 
 // Main worker: CRUD + routing layer.
@@ -48,9 +49,34 @@ const app = new Hono<{ Bindings: Env }>();
 // and unhandled exceptions. Pairs with globalErrorHandler below.
 app.use("*", requestMetricsMiddleware);
 
+// Normalize all 4xx/5xx JSON bodies into the Anthropic-compatible error
+// envelope (`{type:"error", error:{type,message}, request_id}`) so callers
+// of the official @anthropic-ai/sdk can `catch (e) { if (e.error?.error?.type
+// === 'authentication_error') ... }`. Runs second so it sees the response
+// body produced by every downstream middleware/handler. See lib/error-envelope.ts.
+app.use("*", errorEnvelopeMiddleware);
+
 // Catch-all for anything that escapes per-route try/catch. Logs +
 // records to AE before returning a clean 500 (no internal leak in body).
 app.onError(globalErrorHandler);
+
+// Hono's default notFound is a plain "404 Not Found" body — wrap it in the
+// Anthropic envelope so SDK callers can `if (e.error?.error?.type ===
+// 'not_found_error')` instead of relying on raw status codes. Returning a
+// JSON body here makes errorEnvelopeMiddleware's already-canonical short
+// path kick in.
+app.notFound((c) =>
+  c.json(
+    {
+      type: "error" as const,
+      error: {
+        type: "not_found_error",
+        message: `No route matched ${c.req.method} ${c.req.path}`,
+      },
+    },
+    404,
+  ),
+);
 
 app.get("/health", (c) => c.json({ status: "ok" }));
 
@@ -109,6 +135,30 @@ app.route("/v1/runtimes", runtimesRoutes);
 // MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a
 // path-prefix skip) — auth is the Bearer oma_* the ACP child sends.
 app.route("/v1/mcp-proxy", mcpProxyRoutes);
+
+// /v1/oma/* aliases — OMA-only namespaces re-mounted under an `oma/` prefix
+// so the public surface can grow into a clean two-tier API:
+//   /v1/<resource>      — Anthropic-compatible (agents, sessions, vaults, ...)
+//   /v1/oma/<resource>  — OMA-specific extensions (oauth, tenants, evals, ...)
+//
+// New code (and external callers) should prefer the /v1/oma/* paths.
+// Internal Console/CLI keep using the bare paths until follow-up cleanup
+// (the bare mounts above stay live for now). New OMA-only endpoints should
+// be added here only, not above.
+app.route("/v1/oma/clawhub", clawhubRoutes);
+app.route("/v1/oma/api_keys", apiKeysRoutes);
+app.route("/v1/oma/me", meRoutes);
+app.route("/v1/oma/tenants", tenantsRoutes);
+app.route("/v1/oma/evals", evalsRoutes);
+app.route("/v1/oma/cost_report", costReportRoutes);
+app.route("/v1/oma/integrations", integrationsRoutes);
+app.route("/v1/oma/runtimes", runtimesRoutes);
+app.route("/v1/oma/oauth", oauthRoutes);
+app.route("/v1/oma/model_cards", modelCardsRoutes);
+// /v1/mcp-proxy is intentionally NOT aliased: auth.ts path-prefix skip is
+// scoped to that exact prefix, and the proxy does its own session-ownership
+// check downstream. Re-mounting under /v1/oma/mcp-proxy would route through
+// the standard authMiddleware and break the ACP child's transport.
 // Daemon-facing routes — outside /v1/* so authMiddleware doesn't run.
 // Apply tenantDbMiddleware + servicesMiddleware so daemon endpoints (like
 // /agents/runtime/sessions/:sid/bundle) can use c.get("services").

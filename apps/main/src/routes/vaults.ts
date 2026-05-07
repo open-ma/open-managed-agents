@@ -62,6 +62,7 @@ function handleError(err: unknown): Response {
 /** Strip server-internal fields from a vault row before returning to API. */
 function toApiVault(v: { id: string; name: string; created_at: string; updated_at: string | null; archived_at: string | null }) {
   return {
+    type: "vault" as const,
     id: v.id,
     name: v.name,
     created_at: v.created_at,
@@ -118,6 +119,29 @@ app.get("/:id", async (c) => {
   const vault = await c.var.services.vaults.get({ tenantId: t, vaultId: id });
   if (!vault) return c.json({ error: "Vault not found" }, 404);
   return c.json(toApiVault(vault));
+});
+
+// POST/PUT /v1/vaults/:id — update vault. Anthropic SDK uses POST; PUT accepted
+// for compat. Body: { display_name?, metadata? } — `display_name` maps to our
+// `name`; metadata not yet plumbed through the store, currently ignored.
+app.on(["PUT", "POST"], "/:id", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const body = await c.req.json<{
+    display_name?: string;
+    name?: string;
+    metadata?: Record<string, string | null>;
+  }>();
+  try {
+    const vault = await c.var.services.vaults.update({
+      tenantId: t,
+      vaultId: id,
+      name: body.display_name ?? body.name,
+    });
+    return c.json(toApiVault(vault));
+  } catch (err) {
+    return handleError(err);
+  }
 });
 
 // POST /v1/vaults/:id/archive — archive vault (cascades to credentials)
