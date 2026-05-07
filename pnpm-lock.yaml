@@ -314,6 +314,9 @@ importers:
       '@open-managed-agents/vaults-store':
         specifier: workspace:*
         version: link:../../packages/vaults-store
+      aws4fetch:
+        specifier: ^1.0.20
+        version: 1.0.20
       fflate:
         specifier: ^0.8.2
         version: 0.8.2

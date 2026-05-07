@@ -2047,6 +2047,38 @@ export class SessionDO extends DurableObject<Env> {
         });
       }
 
+      // Inject the artefact-delivery env so the agent can call back into
+      // OMA's /v1/internal/sessions/<id>/uploads/presign for an R2
+      // presigned PUT URL. Mount-bucket writes are blocked at SDK level
+      // (sandbox-sdk#619/#660 — outboundByHost(*.r2) → Workers fetch
+      // strips Content-Length → R2 411), so deliverable artefacts go
+      // through presigned URLs instead. The agent's system prompt is
+      // expected to do (after producing /workspace/<file>):
+      //   curl -sS -X POST -H "x-internal-secret: $OMA_INTERNAL_SECRET" \
+      //     "$OMA_BASE_URL/v1/internal/sessions/$OMA_SESSION_ID/uploads/presign" \
+      //     -d '{"filename":"<file>","media_type":"<mime>"}'
+      // then PUT the file at the returned upload_url. file_id surfaces
+      // via GET /v1/sessions/:id/outputs (R2 prefix list).
+      if (
+        sandbox.setEnvVars &&
+        this.state.session_id &&
+        this.env.OMA_BASE_URL &&
+        this.env.INTEGRATIONS_INTERNAL_SECRET
+      ) {
+        try {
+          await sandbox.setEnvVars({
+            OMA_SESSION_ID: this.state.session_id,
+            OMA_BASE_URL: this.env.OMA_BASE_URL,
+            OMA_INTERNAL_SECRET: this.env.INTEGRATIONS_INTERNAL_SECRET,
+          });
+        } catch (err) {
+          logWarn(
+            { op: "session_do.warmup.set_oma_env", session_id: this.state.session_id, err },
+            "setEnvVars OMA_* failed; agent presigned upload won't work",
+          );
+        }
+      }
+
       // Hand backup context to OmaSandbox so its onActivityExpired hook
       // (sleepAfter teardown) writes the final /workspace snapshot scoped
       // to this (tenant, env, session). Container DO is keyed by sessionId,
