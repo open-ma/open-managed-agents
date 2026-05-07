@@ -801,6 +801,48 @@ app.delete("/:id", async (c) => {
     sessionId: id,
   });
 
+  // Cascade-delete the /mnt/session/outputs/ R2 prefix. These objects have
+  // no D1 file row (listed via R2 prefix scan, not promoted to file_id),
+  // so the files-store deleteBySession above doesn't catch them. Without
+  // this, every artefact the agent wrote to /mnt/session/outputs/ leaks
+  // forever — and worse, becomes unreachable too because the outputs
+  // route 404s once the session row is gone.
+  if (c.env.FILES_BUCKET) {
+    const prefix = SESSION_OUTPUTS_PREFIX(t, id);
+    let cursor: string | undefined;
+    let deleted = 0;
+    try {
+      do {
+        const list: R2Objects = await c.env.FILES_BUCKET.list({ prefix, cursor, limit: 1000 });
+        if (list.objects.length) {
+          await Promise.all(
+            list.objects.map((o: R2Object) =>
+              c.env.FILES_BUCKET!.delete(o.key).catch((err) => {
+                logWarn(
+                  { op: "session.delete.outputs_cleanup", session_id: id, tenant_id: t, r2_key: o.key, err },
+                  "outputs R2 delete failed",
+                );
+              }),
+            ),
+          );
+          deleted += list.objects.length;
+        }
+        cursor = list.truncated ? list.cursor : undefined;
+      } while (cursor);
+      if (deleted > 0) {
+        logWarn(
+          { op: "session.delete.outputs_cleanup", session_id: id, tenant_id: t, deleted },
+          `cleared ${deleted} session-outputs object(s)`,
+        );
+      }
+    } catch (err) {
+      logWarn(
+        { op: "session.delete.outputs_cleanup_list", session_id: id, tenant_id: t, err },
+        "outputs prefix list failed; some objects may leak",
+      );
+    }
+  }
+
   return c.json({ type: "session_deleted", id });
 });
 
