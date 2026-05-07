@@ -639,7 +639,15 @@ app.get("/", async (c) => {
     ).filter((s): s is SkillMeta => s !== null);
   }
   const builtins = sourceParam === "custom" ? [] : BUILTIN_SKILLS;
-  return c.json({ data: [...builtins, ...customs].map(toApiSkill) });
+  // Skills LIST returns all builtins + all tenant customs in one shot — no
+  // pagination today. Emit the Anthropic-required `has_more` + `next_page`
+  // fields explicitly: BetaListSkillsResponse marks both required even when
+  // there's only one page.
+  return c.json({
+    data: [...builtins, ...customs].map(toApiSkill),
+    has_more: false,
+    next_page: null,
+  });
 });
 
 // ---------------------------------------------------------------------------
