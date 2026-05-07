@@ -1,6 +1,6 @@
 {
   "name": "@openma/cli",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "description": "CLI for the openma managed agents platform",
   "type": "module",
   "bin": {
@@ -41,6 +41,7 @@
   },
   "devDependencies": {
     "@agentclientprotocol/sdk": "^0.20.0",
+    "@inquirer/checkbox": "^5.1.4",
     "@open-managed-agents/acp-runtime": "workspace:*",
     "@open-managed-agents/api-types": "workspace:*",
     "@types/node": "^22.0.0",

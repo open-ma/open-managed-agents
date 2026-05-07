@@ -10,8 +10,11 @@
  *      shuts down.
  *   5. CLI POSTs /agents/runtime/exchange { code, state, machine_id, … }
  *      and persists the returned token to credentials.json.
- *   6. (macOS) Install launchd plist, kick it off → daemon is now persistent.
- *   7. Exit.
+ *   6. Install the platform's user-scope service (launchd / systemd / Task
+ *      Scheduler), which auto-starts the daemon now and at every login.
+ *      With `--no-service`, the same setup process exec's into the daemon
+ *      foreground instead so the user never has to type a second command.
+ *   7. Exit (or never returns when exec'd into daemon).
  *
  * The `state` is verified server-side (so a leaked code can't be used by a
  * different setup attempt) AND client-side (so the localhost callback
@@ -25,20 +28,29 @@ import { hostname } from "node:os";
 import { randomBytes } from "node:crypto";
 import { realpathSync } from "node:fs";
 import { writeCreds, readCreds, getOrCreateMachineId } from "../lib/config.js";
-import { paths, currentPlatform, osTag } from "../lib/platform.js";
-import { install as installLaunchd, readInstalledCliEntry, type InstallOptions } from "../lib/launchd.js";
-import { detectAll } from "@open-managed-agents/acp-runtime/registry";
+import { paths, currentProfile, osTag } from "../lib/platform.js";
+import {
+  install as installService,
+  readInstalledCliEntry,
+  detectServiceKind,
+  lingerHint,
+  type InstallOptions,
+  type InstallResult,
+} from "../lib/service-manager.js";
+import { detectAll, loadRegistry } from "@open-managed-agents/acp-runtime/registry";
 import { printBanner, log, c } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 import { probeRuntimeToken } from "../lib/probe.js";
+import { auditAndOfferWrappers } from "../lib/wrapper-audit.js";
+import { join } from "node:path";
 
 /** Snapshot of the current process's node + cli entry. Frozen here (not at
- *  daemon start) because launchd doesn't source the user's shell — the only
- *  moment we know which node the user actually wants is when they run
- *  `oma bridge setup`. realpath unwraps the npm/.bin/oma symlink so the
- *  plist points at the real dist/index.js, not at a shim that re-triggers
- *  shebang resolution. */
-function launchdInstallOpts(): InstallOptions {
+ *  daemon start) because system service managers don't source the user's
+ *  shell — the only moment we know which node the user actually wants is
+ *  when they run `oma bridge setup`. realpath unwraps the npm/.bin/oma
+ *  symlink so the unit/plist/task points at the real dist/index.js, not
+ *  at a shim that re-triggers shebang resolution. */
+function serviceInstallOpts(): InstallOptions {
   return {
     nodePath: process.execPath,
     cliEntry: realpathSync(process.argv[1]!),
@@ -52,28 +64,42 @@ interface SetupOpts {
    *  on the same Worker at openma.dev). Kept separate so dev/staging can
    *  point the browser at one host while the daemon hits another. */
   browserOrigin: string;
-  /** When true, skip launchd install (useful for dev / non-macOS). */
+  /** When true, skip system service install. The setup process exec's
+   *  into the daemon foreground at the end so the user still doesn't
+   *  type a separate command — but daemon dies when the terminal closes
+   *  / the user Ctrl-C's. Useful for dev/debugging and for hosts that
+   *  don't have a supported service manager (legacy unix). */
   noService?: boolean;
   /** Force a fresh OAuth even if credentials.json already exists. */
   force?: boolean;
+  /** Skip y/N prompts in the wrapper-install audit; install all
+   *  offerable wrappers automatically. Useful for CI / scripted setup. */
+  yes?: boolean;
 }
 
 
 export async function runSetup(opts: SetupOpts): Promise<void> {
-  printBanner(`setup — register this machine with ${opts.serverUrl}`, PKG_VERSION);
+  const profile = currentProfile();
+  const profileTag = profile ? `  [profile=${profile}]` : "";
+  printBanner(`setup — register this machine with ${opts.serverUrl}${profileTag}`, PKG_VERSION);
+
+  // Warm the merged ACP registry (official + OMA overlay) so subsequent
+  // detect/warn/missing-list calls have the full 35+ agents available.
+  // Cache lives under the profile-aware configDir; non-fatal on failure.
+  await loadRegistry({ cachePath: join(paths().configDir, "registry-cache.json") });
 
   // Fast path: if creds already exist (and the user didn't pass --force),
   // probe the server first. This catches the "I deleted the runtime in the
   // console and re-ran setup" recovery flow — without the probe we'd happily
-  // refresh the launchd plist and restart the daemon with a token the server
+  // refresh the service unit and restart the daemon with a token the server
   // no longer recognizes, leaving the runtime offline with no hint why.
   //
   // Three outcomes from probeRuntimeToken:
-  //   - ok          → original fast path (refresh plist, kick daemon, exit)
+  //   - ok          → original fast path (refresh service, kick daemon, exit)
   //   - invalid     → server forgot us; fall through to OAuth dance, same
   //                   as if --force was passed. The stale creds will be
   //                   overwritten by writeCreds() below.
-  //   - unreachable → can't tell; refresh plist anyway (offline tolerance)
+  //   - unreachable → can't tell; refresh service anyway (offline tolerance)
   //                   and warn the user that we couldn't verify.
   if (!opts.force) {
     const existing = await readCreds();
@@ -93,25 +119,18 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
         } else {
           log.hint(`runtime ${existing.runtimeId.slice(0, 8)}… (use --force to re-register)`);
         }
-        if (!opts.noService && currentPlatform() === "darwin") {
-          // Warn about plist binary drift before refreshing. The plist gets
-          // rewritten to whatever cliEntry the *current* process resolves to,
-          // so we want to surface "your daemon was running an older binary
-          // until just now" rather than silently swap it under the user.
-          const installedEntry = await readInstalledCliEntry();
-          const currentEntry = launchdInstallOpts().cliEntry;
-          if (installedEntry && installedEntry !== currentEntry) {
-            log.warn(`plist was pointing at a different binary; updating`);
-            log.hint(`old: ${c.dim(installedEntry)}`);
-            log.hint(`new: ${c.dim(currentEntry)}`);
-          }
-          await installLaunchd(launchdInstallOpts());
-          log.ok(`launchd plist refreshed  ${c.dim(paths().serviceFile ?? "")}`);
-          log.ok(`daemon restarted  ${c.dim("logs: " + paths().logFile)}`);
-        } else {
-          log.hint("run `oma bridge daemon` to start the bridge");
-        }
+        // Re-running `oma bridge setup` is the natural moment for a
+        // user to discover "I just installed claude — should I get
+        // the wrapper?". Run the audit BEFORE service refresh / exec
+        // so the prompt isn't shadowed by a foreground daemon when
+        // --no-service exec's at the end.
+        const fastPathAgents: Array<{ id: string; binary?: string }> =
+          (await detectAll()).map((a) => ({ id: a.id, binary: a.spec.command }));
+        await auditAndOfferWrappers(fastPathAgents, { yes: opts.yes });
         process.stderr.write(`\n${c.bold("Up to date.")}\n\n`);
+        await refreshServiceOrFallback(opts);
+        // refreshServiceOrFallback may have exec'd into daemon and
+        // never returned; if it did return, we exit cleanly here.
         return;
       }
     }
@@ -146,35 +165,17 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
   // Quick agent scan so the user can see what we'll report on first daemon
   // startup. Manifest gets re-sent on every WS attach so this is just for
   // setup-time feedback.
-  let agents = await detectAll();
+  let agents: Array<{ id: string; binary?: string }> =
+    (await detectAll()).map((a) => ({ id: a.id, binary: a.spec.command }));
 
-  // If `claude` (Claude Code itself) is on PATH but its ACP wrapper isn't,
-  // install the wrapper for the user. Anyone running `oma bridge setup` is
-  // already opting into running a daemon on their box; needing them to also
-  // remember a separate `npm i -g @agentclientprotocol/claude-agent-acp` step is
-  // friction with no upside. We only do this when `claude` is present —
-  // we're not pre-installing wrappers for users who haven't picked
-  // Claude Code as their day-to-day CLI.
-  //
-  // Package history: this used to be `@zed-industries/claude-code-acp` (binary
-  // name `claude-code-acp`). The project moved to `agentclientprotocol` org
-  // and renamed both the npm package and the binary in v0.31.x; the old name
-  // is npm-deprecated and stuck on agent-sdk 0.2.44, which has an internal
-  // capability/handler inconsistency that makes Linear-style MCP servers
-  // (anything that triggers the elicitation handler-registration path) fail
-  // with `Client does not support elicitation capability`. The new name is
-  // on agent-sdk 0.2.121+ where that path is fixed.
-  const hasClaudeAcp = agents.some((a: { id: string }) => a.id === "claude-agent-acp");
-  if (!hasClaudeAcp && (await isOnPath("claude"))) {
-    log.step("found `claude` on PATH — installing ACP wrapper @agentclientprotocol/claude-agent-acp");
-    const ok = await npmInstallGlobal("@agentclientprotocol/claude-agent-acp");
-    if (ok) {
-      log.ok("claude-agent-acp installed");
-      agents = await detectAll();
-    } else {
-      log.warn("auto-install failed — install manually: npm i -g @agentclientprotocol/claude-agent-acp");
-    }
-  }
+  // Auto-install convenience for ACP **wrappers** — entries in the
+  // merged registry that overlay marks `wraps: "<binary>"`. We DON'T
+  // install anything without asking the user first: setup scans for
+  // upstream agents (claude, codex, …) the user has on PATH but whose
+  // ACP wrapper is missing, then prompts in a multi-select TUI.
+  // Non-TTY contexts (CI, scripts piping into setup) skip prompts;
+  // user can run `oma bridge agents refresh` later, same flow.
+  agents = await auditAndOfferWrappers(agents, { yes: opts.yes });
 
   if (agents.length > 0) {
     log.ok(`agents detected  ${c.dim(agents.map((a: { id: string }) => a.id).join(", "))}`);
@@ -183,18 +184,126 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
     log.hint("install one, e.g. `npm i -g @agentclientprotocol/claude-agent-acp`");
   }
 
-  if (opts.noService || currentPlatform() !== "darwin") {
+  await installServiceOrFallback(opts);
+}
+
+/** Slow-path tail: install the system service if supported, otherwise
+ *  exec into the daemon foreground. Either way the user has a running
+ *  daemon by the time this returns (or the process is gone, replaced
+ *  by daemon). `--no-service` always takes the foreground path. */
+async function installServiceOrFallback(opts: SetupOpts): Promise<void> {
+  const kind = detectServiceKind();
+  if (opts.noService || kind === "unsupported") {
     process.stderr.write("\n");
-    log.step("service install skipped");
-    log.hint("run `oma bridge daemon` to start the bridge in the foreground");
+    if (kind === "unsupported") {
+      log.warn(`platform service install not supported on ${process.platform}; running daemon in foreground`);
+    } else {
+      log.step("--no-service: starting daemon in foreground");
+    }
+    log.hint("Ctrl-C to stop. To run as a system service, re-run setup without --no-service.");
+    process.stderr.write("\n");
+    execIntoDaemon();
     return;
   }
+  await installAndReport(opts);
+}
 
-  await installLaunchd(launchdInstallOpts());
-  log.ok(`launchd plist installed  ${c.dim(paths().serviceFile ?? "")}`);
-  log.ok(`daemon started  ${c.dim("logs: " + paths().logFile)}`);
+/** Fast-path tail: refresh the existing service install so it picks up
+ *  any new dist/index.js path (npm upgrade), or fall back to foreground
+ *  daemon when service mode is off / unsupported. Same return contract
+ *  as installServiceOrFallback. */
+async function refreshServiceOrFallback(opts: SetupOpts): Promise<void> {
+  const kind = detectServiceKind();
+  if (opts.noService || kind === "unsupported") {
+    // Symmetrical with installServiceOrFallback: --no-service means
+    // "start daemon foreground" no matter whether we just ran OAuth
+    // or just probed an existing creds file. User who wanted to bail
+    // out without starting a daemon would run `oma bridge status`.
+    process.stderr.write("\n");
+    log.step(opts.noService ? "--no-service: starting daemon in foreground" : `service install not supported on ${process.platform}; running daemon in foreground`);
+    log.hint("Ctrl-C to stop. To run as a system service, re-run setup without --no-service.");
+    process.stderr.write("\n");
+    execIntoDaemon();
+    return;
+  }
+  // Warn about service-binary drift before refreshing. The service file
+  // gets rewritten to whatever cliEntry the *current* process resolves
+  // to, so we want to surface "your daemon was running an older binary
+  // until just now" rather than silently swap it under the user.
+  const installedEntry = await readInstalledCliEntry();
+  const currentEntry = serviceInstallOpts().cliEntry;
+  if (installedEntry && installedEntry !== currentEntry) {
+    log.warn(`service was pointing at a different binary; updating`);
+    log.hint(`old: ${c.dim(installedEntry)}`);
+    log.hint(`new: ${c.dim(currentEntry)}`);
+  }
+  await installAndReport(opts);
+}
+
+/** Shared installer + reporter — install the service via the façade,
+ *  print a per-platform success/warning summary so the user knows what
+ *  actually happened (launchd plist installed / systemd unit started /
+ *  schtasks task registered + queued). */
+async function installAndReport(opts: SetupOpts): Promise<void> {
+  void opts; // currently unused; kept for future flag-driven branches
+  const result: InstallResult = await installService(serviceInstallOpts());
+  const where = result.installedAt ? c.dim(result.installedAt) : c.dim("(no install path)");
+  switch (result.kind) {
+    case "launchd":
+      log.ok(`launchd plist installed  ${where}`);
+      log.ok(`daemon started  ${c.dim("logs: " + paths().logFile)}`);
+      break;
+    case "systemd":
+      log.ok(`systemd unit installed  ${where}`);
+      if (result.started) {
+        log.ok(`daemon started  ${c.dim("logs: " + paths().logFile)}`);
+      } else {
+        log.warn(`unit installed but failed to start: ${result.warning ?? "unknown"}`);
+        log.hint(`try: systemctl --user status ${paths().serviceLabel}`);
+      }
+      if (!result.lingerEnabled) {
+        log.hint(lingerHint());
+      }
+      break;
+    case "windows-task":
+      log.ok(`Task Scheduler task registered  ${where}`);
+      if (result.started) {
+        log.ok(`daemon started  ${c.dim("logs: " + paths().logFile)}`);
+      } else {
+        log.warn(`task registered but failed to start now: ${result.warning ?? "unknown"}`);
+        log.hint(`it will run at next logon. To start manually: schtasks /run /tn ${paths().serviceLabel}`);
+      }
+      break;
+    case "unsupported":
+      // Should never reach here — caller checked detectServiceKind.
+      log.err(`platform unsupported`);
+      return;
+  }
   process.stderr.write("\n");
   process.stderr.write(`${c.bold("Done.")} the runtime should appear online at ${c.cyan(opts.browserOrigin)}\n\n`);
+}
+
+/** Replace this process with `oma bridge daemon` (foreground). Uses
+ *  spawn+inherit so the daemon's stdio shares the user's terminal;
+ *  setup process exits with the daemon's exit code. Profile is forwarded
+ *  via OMA_PROFILE so the daemon uses the same configDir / service label
+ *  as setup. SIGINT (Ctrl-C) flows naturally to the daemon via the
+ *  shared process group. */
+function execIntoDaemon(): never {
+  const profile = currentProfile();
+  const child = spawn(process.execPath, [process.argv[1]!, "bridge", "daemon"], {
+    stdio: "inherit",
+    env: { ...process.env, ...(profile ? { OMA_PROFILE: profile } : {}) },
+  });
+  child.once("exit", (code, signal) => {
+    if (signal) {
+      process.kill(process.pid, signal);
+      return;
+    }
+    process.exit(code ?? 0);
+  });
+  // Block until child resolves — we never return.
+  return new Promise(() => undefined) as never;
 }
 
 /** Wait for browser to redirect to localhost cb. Returns the code. */
@@ -294,28 +403,5 @@ function openBrowser(url: string): Promise<void> {
     p.once("error", reject);
     p.unref();
     setTimeout(() => resolve(), 100);
-  });
-}
-
-/** `which <cmd>` — true iff exit 0. Mirrors registry.ts:isOnPath; we don't
- *  import that one because it's not exported and it's three lines. */
-function isOnPath(cmd: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const probe = process.platform === "win32" ? "where" : "which";
-    const p = spawn(probe, [cmd], { stdio: "ignore" });
-    p.once("error", () => resolve(false));
-    p.once("exit", (code) => resolve(code === 0));
-  });
-}
-
-/** `npm install -g <pkg>`. Streams output to the user's terminal so they
- *  can see progress / EACCES / etc. Returns true on exit 0. We don't try
- *  to elevate (no sudo wrapper) — if the user's npm prefix needs root
- *  they'll see the error and can rerun setup after fixing it. */
-function npmInstallGlobal(pkg: string): Promise<boolean> {
-  return new Promise((resolve) => {
-    const p = spawn("npm", ["install", "-g", pkg], { stdio: "inherit" });
-    p.once("error", () => resolve(false));
-    p.once("exit", (code) => resolve(code === 0));
   });
 }
