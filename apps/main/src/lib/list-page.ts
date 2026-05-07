@@ -50,23 +50,28 @@ export function parsePageQuery(c: Context): PageQuery {
   };
 }
 
-/** Map a service-layer page to the wire shape and emit JSON. Emits, for
- *  every list response:
+/** Map a service-layer page to the wire shape and emit JSON.
  *
- *    - `data`       — array of the mapped items
- *    - `next_page`  — opaque token (Anthropic SDK reads `body.next_page`,
- *                     see its core/pagination.js) or `null` when no more
- *                     pages. ALWAYS present — Anthropic OpenAPI marks it
- *                     required for several namespaces (environments,
- *                     skills, user_profiles), so emit even when null
- *                     instead of omitting.
- *    - `next_cursor`— same opaque token as `next_page`, kept for the
- *                     legacy OMA Console / CLI clients that read this key
- *                     (apps/console/src/lib/useCursorList.ts). Omitted
- *                     when no more pages, mirroring the historical OMA
- *                     contract.
- *    - `has_more`   — boolean. Anthropic's BetaListSkillsResponse marks
- *                     this required; harmless on namespaces that don't.
+ *  Wire fields:
+ *    - `data`        — array of mapped items
+ *    - `next_page`   — opaque token (Anthropic SDK reads `body.next_page`,
+ *                      see its core/pagination.js). Omitted entirely when
+ *                      no more pages — matches the strict Anthropic
+ *                      schemas for agents/sessions/vaults/memory_stores
+ *                      (BetaManagedAgentsList* — `additionalProperties:
+ *                      false`, `next_page: string`). The Anthropic SDK
+ *                      reads `body.next_page || null`, so absent and null
+ *                      are equivalent at the iterator level.
+ *    - `next_cursor` — same opaque token, kept for the legacy OMA Console
+ *                      / CLI clients (apps/console/src/lib/useCursorList.ts).
+ *                      Omitted when no more pages — matches their
+ *                      historical contract.
+ *
+ *  Note: `has_more` and explicit `next_page: null` would help the few
+ *  permissive Anthropic schemas (environments, skills, files) at the
+ *  strict-validator level, but they violate the strict
+ *  `additionalProperties: false` on the larger Family A set. SDK
+ *  iteration works either way; we optimize for the stricter family.
  */
 export function jsonPage<TRow, TApi>(
   c: Context,
@@ -74,12 +79,10 @@ export function jsonPage<TRow, TApi>(
   mapFn: (row: TRow) => TApi,
 ): Response {
   const data = page.items.map(mapFn);
-  const hasMore = !!page.nextCursor;
-  const body: Record<string, unknown> = {
+  if (!page.nextCursor) return c.json({ data });
+  return c.json({
     data,
-    next_page: page.nextCursor ?? null,
-    has_more: hasMore,
-  };
-  if (hasMore) body.next_cursor = page.nextCursor;
-  return c.json(body);
+    next_page: page.nextCursor,
+    next_cursor: page.nextCursor,
+  });
 }
