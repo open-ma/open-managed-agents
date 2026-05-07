@@ -143,7 +143,7 @@ const injectVaultCredsHandler = async (
   }
 
   console.log(
-    `[oma-sandbox] outbound host=${url.hostname} method=${request.method} cred=${cred ? "yes" : "no"}`,
+    `[oma-sandbox] CATCH_ALL host=${url.hostname} method=${request.method} cred=${cred ? "yes" : "no"}`,
   );
 
   // Return upstream Response unchanged — preserves status, headers,
@@ -283,15 +283,22 @@ export class OmaSandbox extends Sandbox {
 // known-length source. GET/HEAD pass through unchanged so squashfs reads
 // keep their byte-exact streaming behaviour.
 const r2OutboundPassthrough = async (request: Request): Promise<Response> => {
+  const url = new URL(request.url);
+  console.log(
+    `[oma-sandbox] R2_BYPASS_HIT host=${url.hostname} method=${request.method} path=${url.pathname}`,
+  );
   if (request.method === "GET" || request.method === "HEAD") {
-    return fetch(request);
+    const r = await fetch(request);
+    console.log(`[oma-sandbox] R2_BYPASS GET/HEAD upstream=${r.status}`);
+    return r;
   }
   const bodyBytes = await request.arrayBuffer();
-  // Strip the Cf-derived headers that confuse upstream signature-checks
-  // when the request is replayed through Workers fetch.
   const outHeaders = new Headers(request.headers);
   for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
-  return fetch(
+  console.log(
+    `[oma-sandbox] R2_BYPASS materialize bytes=${bodyBytes.byteLength} method=${request.method}`,
+  );
+  const upstream = await fetch(
     new Request(request.url, {
       method: request.method,
       headers: outHeaders,
@@ -299,6 +306,8 @@ const r2OutboundPassthrough = async (request: Request): Promise<Response> => {
       redirect: "manual",
     }),
   );
+  console.log(`[oma-sandbox] R2_BYPASS upstream=${upstream.status}`);
+  return upstream;
 };
 
 (OmaSandbox as unknown as {
