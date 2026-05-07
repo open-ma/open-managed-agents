@@ -128,23 +128,30 @@ export interface Env {
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;
   /**
-   * Optional WorkerEntrypoint RPC binding to a hosted-only billing worker.
-   * When present (hosted deployments), main calls into it after writing a
-   * usage_events row so the wallet ledger debits in lockstep, and at
-   * sandbox start to gate the launch on a positive balance. When absent
-   * (self-host, OSS dev), all callers soft-skip — the platform works the
-   * same; there's just no wallet bookkeeping.
+   * Optional WorkerEntrypoint RPC binding for a generic usage-metering
+   * extension point. Two responsibilities:
+   *   - canStartSandbox(): pre-launch gate, e.g. for quota / balance /
+   *     anti-abuse limits
+   *   - recordUsage(): notification of completed sandbox active time
    *
-   * The billing worker lives in the private openma-hosted repo; OSS
-   * never imports it. The binding is purely a duck-typed contract here.
+   * Anyone can implement this contract — hosted billing workers, an
+   * abuse-detection sidecar, regulatory caps, lab usage tracking — OSS
+   * stays neutral. When the binding is absent (self-host, OSS dev),
+   * all callers soft-skip and the platform behaves identically; the
+   * usage_events table still records every session for observability.
+   *
+   * The implementation worker lives outside OSS; this is purely a
+   * duck-typed contract.
    */
-  BILLING?: {
-    /** Returns ok=true when the tenant can start a new cloud sandbox. */
+  USAGE_METER?: {
+    /** Pre-launch gate. Returns ok=true to permit, ok=false to refuse
+     *  (e.g. negative balance, rate-limited tenant, regulatory hold). */
     canStartSandbox(opts: {
       tenantId: string;
       agentId?: string;
     }): Promise<{ ok: boolean; balance_cents?: number; reason?: string }>;
-    /** Mirrors a usage_events row into the wallet ledger as a debit. */
+    /** Notification fired at OmaSandbox.onStop with the final active
+     *  window. Best-effort: failures are logged, never thrown. */
     recordUsage(opts: {
       tenantId: string;
       sessionId: string;

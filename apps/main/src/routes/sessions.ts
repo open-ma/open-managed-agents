@@ -438,32 +438,32 @@ app.post("/", async (c) => {
   // picked sandbox lane materially affects the run.
   const agentIsLocalRuntime = !!agentRow.runtime_binding;
 
-  // Optional hosted billing gate. When the BILLING service binding is
-  // present (hosted deployments), check the tenant has positive wallet
-  // balance before letting a cloud sandbox session through. Self-host /
-  // OSS dev deployments leave BILLING unbound and skip this — the
-  // platform behaves identically without billing bookkeeping.
-  if (!agentIsLocalRuntime && c.env.BILLING) {
+  // Optional usage-meter gate. When the USAGE_METER service binding is
+  // present, ask it whether this tenant may launch a cloud sandbox
+  // (typical implementations: wallet balance check, rate-limit, abuse
+  // gate). Self-host / OSS dev deployments leave the binding unbound
+  // and skip this — the platform behaves identically.
+  if (!agentIsLocalRuntime && c.env.USAGE_METER) {
     try {
-      const gate = await c.env.BILLING.canStartSandbox({
+      const gate = await c.env.USAGE_METER.canStartSandbox({
         tenantId: t,
         agentId: body.agent,
       });
       if (!gate.ok) {
         return c.json(
           {
-            error: gate.reason ?? "Insufficient balance",
+            error: gate.reason ?? "Sandbox launch refused by usage meter",
             balance_cents: gate.balance_cents ?? 0,
           },
           402,
         );
       }
     } catch (err) {
-      // Fail open: a billing worker outage shouldn't block all new
-      // sessions. The follow-up usage_events write still records the
-      // session so the wallet can be reconciled out-of-band.
+      // Fail open: a meter outage shouldn't block all new sessions.
+      // The follow-up usage_events write still records the session so
+      // the meter can reconcile out-of-band on next sweep.
       console.error(
-        `[sessions] BILLING.canStartSandbox failed: ${(err as Error)?.message ?? err}`,
+        `[sessions] USAGE_METER.canStartSandbox failed: ${(err as Error)?.message ?? err}`,
       );
     }
   }

@@ -42,10 +42,10 @@
   "services": [
     { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
     { "binding": "MAIN", "service": "managed-agents" }
-    // Optional: hosted billing worker. See apps/main/wrangler.template.jsonc
-    // for context. When bound, OmaSandbox.onStop mirrors each usage_events
-    // row into the wallet ledger as a debit. Self-host omits.
-    // , { "binding": "BILLING", "service": "managed-agents-billing" }
+    // Optional: usage-meter extension. See apps/main/wrangler.template.jsonc
+    // for the contract; when bound here, OmaSandbox.onStop mirrors the
+    // sandbox active window to the meter on top of the local D1 row.
+    // , { "binding": "USAGE_METER", "service": "<your-meter-worker-name>" }
   ],
 
   // Workers AI for embedding generation (memory tools).
