@@ -79,6 +79,44 @@ interface SetupOpts {
 
 
 export async function runSetup(opts: SetupOpts): Promise<void> {
+  // Diagnostic: if setup completes but the process doesn't exit, dump
+  // active handles + requests every 2s so we can find what's keeping
+  // the event loop alive. Opt-in via OMA_DEBUG_HANDLES=1 to keep it
+  // out of normal users' faces.
+  if (process.env.OMA_DEBUG_HANDLES) {
+    let tick = 0;
+    const probe = setInterval(() => {
+      tick += 1;
+      const handles = (process as unknown as { _getActiveHandles: () => unknown[] })._getActiveHandles();
+      const requests = (process as unknown as { _getActiveRequests: () => unknown[] })._getActiveRequests();
+      const hsum = handles.map((h) => (h as { constructor?: { name?: string } })?.constructor?.name ?? "?").reduce<Record<string, number>>((a, k) => { a[k] = (a[k] ?? 0) + 1; return a; }, {});
+      const rsum = requests.map((r) => (r as { constructor?: { name?: string } })?.constructor?.name ?? "?").reduce<Record<string, number>>((a, k) => { a[k] = (a[k] ?? 0) + 1; return a; }, {});
+      process.stderr.write(`\n[debug t=${tick * 2}s] handles: ${JSON.stringify(hsum)} requests: ${JSON.stringify(rsum)}\n`);
+    }, 2000);
+    probe.unref(); // don't let the probe itself keep the loop alive
+  }
+
+  try {
+    await runSetupInner(opts);
+  } finally {
+    // Force-exit the short-lived setup process. Node 18+'s built-in
+    // fetch uses an internal undici dispatcher that holds keep-alive
+    // HTTP(S) sockets open for ~5min; for a CLI command we'd rather
+    // return the user's prompt immediately than wait for those to time
+    // out. Without this, OMA_DEBUG_HANDLES shows 2x Socket + 1x
+    // TLSSocket lingering after "Done." prints (loadRegistry CDN +
+    // probeRuntimeToken API + postExchange API).
+    //
+    // process.exit(0) is the conventional fix in CLI tools (npm,
+    // pnpm, gh all do something equivalent). Anything that NEEDS to
+    // survive the exit (background analytics flush, etc.) must be
+    // done before this hits — there's nothing of that shape in
+    // setup today.
+    setImmediate(() => process.exit(0));
+  }
+}
+
+async function runSetupInner(opts: SetupOpts): Promise<void> {
   const profile = currentProfile();
   const profileTag = profile ? `  [profile=${profile}]` : "";
   printBanner(`setup — register this machine with ${opts.serverUrl}${profileTag}`, PKG_VERSION);
