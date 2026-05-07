@@ -19,6 +19,11 @@ export { outbound, outboundByHost } from "../apps/agent/src/outbound";
 // Apply D1 schema migrations on first request. Necessary because miniflare's
 // D1 starts empty and our routes (e.g. /v1/memory_stores) hit memory tables.
 // Idempotent: every CREATE uses IF NOT EXISTS, drop is a no-op rerun.
+//
+// MUST mirror the on-disk migration list at apps/main/migrations/. Add new
+// rows here whenever a migration is added; missing rows surface as
+// "no such column" / "no such table" errors at runtime. Order is
+// lexicographic-by-filename — what wrangler does in prod.
 
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0001 from "../apps/main/migrations/0001_schema.sql?raw";
@@ -27,16 +32,53 @@ import schema0002 from "../apps/main/migrations/0002_integrations_tenant_id.sql?
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0003 from "../apps/main/migrations/0003_tenant_shard.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
-import schema0010 from "../apps/main/migrations/0010_memory_anthropic_alignment.sql?raw";
+import schema0004 from "../apps/main/migrations/0004_slack_tables.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
-import schema0011 from "../apps/main/migrations/0011_workspace_backups.sql?raw";
+import schema0005 from "../apps/main/migrations/0005_membership.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0006 from "../apps/main/migrations/0006_env_image_strategy.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0007 from "../apps/main/migrations/0007_linear_dispatch_rules.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0008 from "../apps/main/migrations/0008_linear_pending_events.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0009 from "../apps/main/migrations/0009_split_github_tables.sql?raw";
+// Two 0010_* and two 0011_* migrations exist (merged from sibling PRs the
+// same day). Wrangler applies in lexicographic order by filename, so the
+// chronological merge order doesn't matter for correctness — just mirror
+// whatever wrangler would do.
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0010a from "../apps/main/migrations/0010_memory_anthropic_alignment.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0010b from "../apps/main/migrations/0010_runtimes.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0011a from "../apps/main/migrations/0011_runtime_local_skills.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0011b from "../apps/main/migrations/0011_workspace_backups.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0012 from "../apps/main/migrations/0012_slack_per_channel.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0013 from "../apps/main/migrations/0013_cursor_pagination_indexes.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0014 from "../apps/main/migrations/0014_session_turn_id.sql?raw";
 
 const MIGRATIONS_RAW: string[] = [
   schema0001 as string,
   schema0002 as string,
   schema0003 as string,
-  schema0010 as string,
-  schema0011 as string,
+  schema0004 as string,
+  schema0005 as string,
+  schema0006 as string,
+  schema0007 as string,
+  schema0008 as string,
+  schema0009 as string,
+  schema0010a as string,
+  schema0010b as string,
+  schema0011a as string,
+  schema0011b as string,
+  schema0012 as string,
+  schema0013 as string,
+  schema0014 as string,
 ];
 
 let migrationsApplied = false;

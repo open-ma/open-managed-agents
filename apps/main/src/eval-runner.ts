@@ -46,7 +46,6 @@ async function getSandboxBinding(env: Env, environmentId: string, tenantId: stri
         const [, sessionId, rest] = match;
         const doId = env.SESSION_DO!.idFromName(sessionId);
         const stub = env.SESSION_DO!.get(doId);
-        (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
         return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
           method: req.method,
           headers: req.headers,
@@ -538,7 +537,7 @@ async function buildAndStoreTrajectory(
   trajectory.reward = reward;
 
   // Store trajectory under a stable key; for now use trajectory_id as the only key
-  await env.CONFIG_KV.put(kvKey(t, "trajectory", trajectory.trajectory_id), JSON.stringify(trajectory));
+  await services.kv.put(kvKey(t, "trajectory", trajectory.trajectory_id), JSON.stringify(trajectory));
   return { trajectory_id: trajectory.trajectory_id, final_reward: reward.final_reward };
 }
 

@@ -1,9 +1,10 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
 
 const app = new Hono<{
   Bindings: Env;
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: { tenant_id: string; user_id?: string; services: Services };
 }>();
 
 async function sha256(data: string): Promise<string> {
@@ -66,14 +67,14 @@ app.post("/", async (c) => {
     name,
     created_at: now,
   };
-  await c.env.CONFIG_KV.put(`apikey:${hash}`, JSON.stringify(record));
+  await c.var.services.kv.put(`apikey:${hash}`, JSON.stringify(record));
 
   // Maintain per-tenant index
   const indexKey = `t:${tenantId}:apikeys`;
-  const existing = await c.env.CONFIG_KV.get(indexKey);
+  const existing = await c.var.services.kv.get(indexKey);
   const index: ApiKeyMeta[] = existing ? JSON.parse(existing) : [];
   index.push({ id, name, prefix: rawKey.slice(0, 8), hash, created_at: now });
-  await c.env.CONFIG_KV.put(indexKey, JSON.stringify(index));
+  await c.var.services.kv.put(indexKey, JSON.stringify(index));
 
   // Return the raw key only once — it is never stored or retrievable again
   return c.json({ id, name, key: rawKey, prefix: rawKey.slice(0, 8), created_at: now }, 201);
@@ -83,7 +84,7 @@ app.post("/", async (c) => {
 app.get("/", async (c) => {
   const tenantId = c.get("tenant_id");
   const indexKey = `t:${tenantId}:apikeys`;
-  const existing = await c.env.CONFIG_KV.get(indexKey);
+  const existing = await c.var.services.kv.get(indexKey);
   const index: ApiKeyMeta[] = existing ? JSON.parse(existing) : [];
   return c.json({ data: index.map(({ hash: _, ...rest }) => rest) });
 });
@@ -94,7 +95,7 @@ app.delete("/:id", async (c) => {
   const keyId = c.req.param("id");
 
   const indexKey = `t:${tenantId}:apikeys`;
-  const existing = await c.env.CONFIG_KV.get(indexKey);
+  const existing = await c.var.services.kv.get(indexKey);
   const index: ApiKeyMeta[] = existing ? JSON.parse(existing) : [];
   const entry = index.find((k) => k.id === keyId);
 
@@ -104,9 +105,9 @@ app.delete("/:id", async (c) => {
 
   const updated = index.filter((k) => k.id !== keyId);
   await Promise.all([
-    c.env.CONFIG_KV.put(indexKey, JSON.stringify(updated)),
+    c.var.services.kv.put(indexKey, JSON.stringify(updated)),
     entry.hash
-      ? c.env.CONFIG_KV.delete(`apikey:${entry.hash}`)
+      ? c.var.services.kv.delete(`apikey:${entry.hash}`)
       : Promise.resolve(),
   ]);
 

@@ -166,7 +166,7 @@ app.get("/authorize", async (c) => {
 
   // Verify vault exists
   const t = c.get("tenant_id");
-  const vaultData = await c.env.CONFIG_KV.get(kvKey(t, "vault", vaultId));
+  const vaultData = await c.var.services.kv.get(kvKey(t, "vault", vaultId));
   if (!vaultData) {
     return c.json({ error: "Vault not found" }, 404);
   }
@@ -219,7 +219,7 @@ app.get("/authorize", async (c) => {
     resource_uri: meta.resource.resource,
   };
 
-  await c.env.CONFIG_KV.put(
+  await c.var.services.kv.put(
     `oauth_state:${state}`,
     JSON.stringify(oauthState),
     { expirationTtl: 600 },
@@ -263,7 +263,7 @@ app.get("/callback", async (c) => {
 
   // Look up state
   const stateKey = `oauth_state:${state}`;
-  const stateData = await c.env.CONFIG_KV.get(stateKey);
+  const stateData = await c.var.services.kv.get(stateKey);
   if (!stateData) {
     return c.json({ error: "Invalid or expired OAuth state" }, 400);
   }
@@ -292,7 +292,7 @@ app.get("/callback", async (c) => {
 
   if (!tokenRes.ok) {
     const errBody = await tokenRes.text();
-    await c.env.CONFIG_KV.delete(stateKey);
+    await c.var.services.kv.delete(stateKey);
     return c.html(`<html><body><h2>Token exchange failed</h2><p>${errBody}</p><script>window.close()</script></body></html>`, 502);
   }
 
@@ -350,7 +350,7 @@ app.get("/callback", async (c) => {
   }
 
   // Clean up state
-  await c.env.CONFIG_KV.delete(stateKey);
+  await c.var.services.kv.delete(stateKey);
 
   // Redirect back to console
   const redirectUrl = new URL(oauthState.redirect_uri);

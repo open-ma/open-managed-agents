@@ -1,0 +1,243 @@
+---
+title: Node + Docker (no Cloudflare)
+description: Run openma as a single Node process or docker compose stack — no Cloudflare account, no Workers, no Durable Objects, no Containers. SQLite or Postgres backend, local or remote sandbox.
+---
+
+import { Aside, Card, CardGrid, LinkCard, Tabs, TabItem } from '@astrojs/starlight/components';
+
+If you want openma without a Cloudflare account — on a VPS, your laptop,
+fly.io, your k8s cluster, or anywhere else that runs Linux/macOS — this
+is the path. **Same code.** The harness, the event log, the recovery
+logic, the API, the Console UI: identical to the Cloudflare deploy.
+Only the I/O bindings change.
+
+<Aside type="note">
+  This page covers the **Node-side build** (`apps/main-node`). For the
+  Cloudflare deploy, see [Deploy on Cloudflare](/self-host/deploy/).
+  Pick whichever matches your hosting story.
+</Aside>
+
+## Two backends, one image
+
+| | SQLite + LocalFs (default) | Postgres + LocalFs |
+|---|---|---|
+| Compose file | `docker-compose.yml` | `docker-compose.postgres.yml` |
+| Best for | Single instance, ≤10 GB sessions, dev, demo | Multi-instance, large tables, share an existing PG cluster |
+| Concurrency | One writer per process | Many writers — HA-able |
+| Backups | `cp ./data/*.db` or [litestream](https://litestream.io) → S3 | `pg_dump` / managed PG snapshots |
+| Extra services | None | + `postgres:16-alpine` (or external PG) |
+
+**Same `openma/main-node:dev` image either way** — `DATABASE_URL` env at
+runtime decides. SQLite needs only `DATABASE_PATH`; Postgres needs
+`DATABASE_URL=postgres://...`. better-auth's small `auth.db` stays SQLite
+on both backends regardless.
+
+## Quickstart (Docker, SQLite)
+
+```bash
+git clone https://github.com/anthropics/open-managed-agents.git
+cd open-managed-agents
+cp .env.example .env
+$EDITOR .env   # set ANTHROPIC_API_KEY + BETTER_AUTH_SECRET (openssl rand -hex 32)
+
+# First time builds the image; subsequent runs skip --build
+docker compose up -d --build
+
+# Sanity
+curl localhost:8787/health
+# → {"status":"ok","backends":{"db":"sqlite ..."},...}
+
+# Console UI on the same port — sign up with email + password,
+# you'll be in the app immediately (no email-OTP gate by default)
+open http://localhost:8787
+```
+
+Drive the harness end-to-end:
+
+```bash
+AID=$(curl -s -X POST localhost:8787/v1/agents -H 'content-type: application/json' \
+  -d '{"name":"hello","model":"claude-sonnet-4-6","tools":[{"type":"bash"}]}' \
+  | jq -r .id)
+
+SID=$(curl -s -X POST localhost:8787/v1/sessions -H 'content-type: application/json' \
+  -d "{\"agent_id\":\"$AID\"}" | jq -r .id)
+
+curl -N localhost:8787/v1/sessions/$SID/events/stream &
+
+curl -s -X POST localhost:8787/v1/sessions/$SID/events -H 'content-type: application/json' \
+  -d '{"events":[{"type":"user.message","content":[{"type":"text","text":"Run uname -a"}]}]}'
+```
+
+The SSE stream prints `agent.tool_use` → `agent.tool_result` → `agent.message`
+→ `session.status_idle`.
+
+## Postgres backend
+
+```bash
+# Same .env (compose sets DATABASE_URL internally to the bundled postgres)
+docker compose -f docker-compose.postgres.yml up -d --build
+
+curl localhost:8787/health
+# → {"backends":{"agents":"postgres","events":"postgres","db":"postgres ..."}, ...}
+```
+
+Brings up `postgres:16-alpine` on a named volume `oma-pgdata`. No host
+port published — only `oma-server` reaches it on the bridge network.
+For a managed PG (RDS / Neon / Supabase / your cluster), drop the
+`postgres` service block and set `DATABASE_URL=postgres://user:pw@host:5432/oma`
+in `.env`.
+
+## Login
+
+Default self-host has **no email server**, so the auth path is plain
+email + password — sign-up creates a session immediately, no OTP screen.
+
+| Mode | When | How to enable |
+|---|---|---|
+| **email + password** (default) | Single user / team / dev / demo | Just `docker compose up`, sign up via Console |
+| **AUTH_DISABLED=1** | "I'm the only user, skip auth entirely" | `echo "AUTH_DISABLED=1" >> .env`, restart. Every request becomes `tenant_id=default`. |
+| **email + OTP gate** | Real prod, you wired up SMTP | `AUTH_REQUIRE_EMAIL_VERIFY=1`, override `sendVerificationOTP` in `apps/main-node/src/auth/config.ts` to call Resend / SES / SMTP / Postmark / etc. |
+| **Google OAuth** | Team SSO | `GOOGLE_CLIENT_ID` + `GOOGLE_CLIENT_SECRET` in `.env`. Console renders Google button automatically. |
+
+## Sandbox modes
+
+The agent's `bash` / `read` / `write` / etc. tools execute in a sandbox.
+`SANDBOX_PROVIDER` env picks the backend.
+
+| Mode | When to pick | Required env |
+|---|---|---|
+| `subprocess` (default) | Local dev, trusted agent code | None — host child_process under `./data/sandboxes/<sid>/`. Zero isolation; the agent has the host's filesystem. |
+| `litebox` | Local hardware isolation, no daemon | `SANDBOX_PROVIDER=litebox`. Host needs `/dev/kvm` (Linux) or Apple Silicon (macOS). Per-VM Firecracker-equivalent via libkrun. |
+| `boxrun` | Multi-host with KVM, OMA pods on managed k8s | `SANDBOX_PROVIDER=boxrun BOXRUN_URL=http://host:8100/v1/default`. Run `boxlite serve` on a separate KVM host; OMA pods reach it over HTTP. |
+| `daytona` | Production / untrusted code | `SANDBOX_PROVIDER=daytona DAYTONA_API_KEY=...` (+ optional `DAYTONA_API_URL`). Daytona-managed Linux VMs, one per session. |
+| `e2b` | E2B SaaS / E2B Infra self-host / Aliyun Agent Sandbox (e2b-compatible) | `SANDBOX_PROVIDER=e2b E2B_API_KEY=...` (+ optional `E2B_API_URL` for non-default endpoint). Firecracker microVMs. |
+
+**Remote sandboxes** (Daytona, E2B, BoxRun) sharing memory mounts use
+`MEMORY_S3_*` env (any S3-compatible store — AWS / R2 / OSS / MinIO).
+
+## Vault sidecar (outbound credential injection)
+
+`docker compose up` brings up an `oma-vault` container alongside
+`oma-server`. It's a mockttp HTTPS MITM proxy — when the sandbox makes
+outbound calls to a host you registered a credential for, the proxy
+injects the matching `Authorization` header. **The agent process never
+sees the secret value**; it lives only in the proxy's lookup table.
+
+Enable per-vault:
+
+```bash
+# Create a vault
+VID=$(curl -s -X POST localhost:8787/v1/vaults \
+  -H 'content-type: application/json' -H "x-api-key: $YOUR_KEY" \
+  -d '{"name":"github-prod"}' | jq -r .id)
+
+# Add a credential bound to api.github.com
+curl -s -X POST localhost:8787/v1/vaults/$VID/credentials \
+  -H 'content-type: application/json' -H "x-api-key: $YOUR_KEY" \
+  -d '{
+    "display_name":"github-pat",
+    "auth":{"type":"static_bearer","token":"ghp_xxx","mcp_server_url":"https://api.github.com"}
+  }'
+
+# Bind to a session — agent's `curl https://api.github.com/...` then sees
+# the Authorization header injected at the network layer
+```
+
+Skip the sidecar if you don't need it: `docker compose up oma-server`.
+
+## Operator gotchas
+
+- **`AUTH_DISABLED=1` belongs in `.env`, not the shell.** Compose
+  substitutes `${AUTH_DISABLED}` from the `.env` file at the compose
+  dir — exporting it only in your shell is silently ignored.
+- **`docker compose restart` does NOT re-read env.** After editing
+  `.env`, use `docker compose up -d --force-recreate oma-server`.
+- **`oma-vault` and `oma-server` MUST agree on the backend.** If you
+  set `DATABASE_URL` to a Postgres URL on `oma-server` only, the vault
+  sidecar will fall back to its own SQLite and never see the credentials
+  you wrote. The bundled compose handles this for you; if you customise,
+  mirror the env.
+- **First boot from an old `oma.db`.** `main-node` runs idempotent
+  `ALTER TABLE` for the unified-runtime turn marker columns on every
+  start, so existing dbs upgrade in place. If you ever see
+  `no such column: turn_id`, you're on a pre-migration build — pull a
+  newer image.
+
+## Migrating between backends
+
+**SQLite → Postgres** (one-way):
+
+```bash
+# Export
+sqlite3 ./data/oma.db ".dump agents agent_versions sessions session_events session_streams \
+  memories memory_stores memory_versions vaults credentials session_memory_stores \
+  tenant membership" > /tmp/oma-dump.sql
+
+# Strip SQLite-specific pragmas
+sed -i '/^PRAGMA\|sqlite_sequence/d' /tmp/oma-dump.sql
+
+# Import into Postgres
+docker exec -i oma-postgres psql -U oma -d oma < /tmp/oma-dump.sql
+```
+
+`agent.id`, `session.id` are TEXT, BIGINT timestamps work in both,
+JSON columns are TEXT not jsonb — no schema translation needed beyond
+the pragma strip.
+
+## Backups
+
+| | SQLite | Postgres |
+|---|---|---|
+| Hot backup | [litestream](https://litestream.io) replicates `./data/*.db` to S3 continuously | `pg_dump` cron / managed PG snapshots / WAL streaming |
+| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it |
+| Sandbox workdirs | Always on local FS — back up `./data/sandboxes/` separately | Same |
+| Memory blobs | `./data/memory-blobs/` — back up separately or set `MEMORY_S3_*` | Same |
+| auth.db | Always SQLite — back up `./data/auth.db` | Same |
+
+Both backends share the same crash-recovery test surface (55 tests across
+adapter, recovery logic, real-process SIGKILL bootstrap, CF DO eviction).
+
+## Crash recovery demo
+
+`main-node` persists session state on every write — `kill -9` doesn't
+lose the conversation.
+
+```bash
+# 1. Drop a few synthetic events
+SID=$(curl -s -X POST localhost:8787/v1/sessions -d '{}' | jq -r .id)
+for i in 1 2 3; do
+  curl -s -X POST localhost:8787/v1/sessions/$SID/_test_emit \
+    -H 'content-type: application/json' -d "{\"text\":\"event-$i\"}"
+done
+
+# 2. SSE shows ids 1, 2, 3
+curl -N localhost:8787/v1/sessions/$SID/events/stream
+# Ctrl-C
+
+# 3. Hard-kill — no graceful shutdown
+docker kill -s SIGKILL oma-server
+
+# 4. Restart
+docker compose up -d
+
+# 5. Resume from where you left off
+curl -N -H 'Last-Event-ID: 3' localhost:8787/v1/sessions/$SID/events/stream
+```
+
+## Where to go next
+
+<LinkCard
+  title="Operations"
+  href="/self-host/operations/"
+  description="Backups, observability, multi-tenant, R2 lifecycle, container OOM."
+/>
+<LinkCard
+  title="Reference: configuration"
+  href="/reference/configuration/"
+  description="All env vars, all knobs, all defaults."
+/>
+<LinkCard
+  title="Deploy on Cloudflare"
+  href="/self-host/deploy/"
+  description="The other path — Workers + DO + Containers + D1."
+/>

@@ -171,6 +171,15 @@ const main = resolveStaging("apps/main/wrangler.jsonc");
 main.name = NAMES.main;
 delete main.routes;
 delete main.triggers; // no cron on lanes — would still hit shared staging data N×
+// Strip queue consumers — CF allows exactly one consumer per queue, and
+// staging's main worker is already the consumer of
+// `managed-agents-memory-events-staging` (see resolveStaging suffixing).
+// Lane R2 writes still fire those events; staging's worker handles them
+// and writes to the shared D1 (which lanes also read from). Lanes
+// double-consuming would cause CF to reject deploy with code 11004
+// ("queue already has a consumer"). Same conceptual reason we strip
+// `services` for the integrations stub.
+delete main.queues;
 main.vars = {
   ...(main.vars || {}),
   // Linear / GitHub / Slack OAuth callbacks land here; must be the lane's
