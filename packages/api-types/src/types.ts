@@ -172,7 +172,7 @@ export interface EnvironmentConfig {
 
 // --- Session ---
 
-export type SessionStatus = "idle" | "running" | "rescheduled" | "terminated";
+export type SessionStatus = "idle" | "running" | "rescheduling" | "terminated";
 
 export interface SessionMeta {
   /** Always `"session"` on the wire — Anthropic SDK uses this discriminator
