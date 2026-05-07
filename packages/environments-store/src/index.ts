@@ -19,4 +19,4 @@ export * from "./ports";
 export { EnvironmentService, toEnvironmentConfig } from "./service";
 export type { EnvironmentServiceDeps } from "./service";
 
-export { createCfEnvironmentService, D1EnvironmentRepo } from "./adapters";
+export { createCfEnvironmentService, createSqliteEnvironmentService, SqlEnvironmentRepo } from "./adapters";

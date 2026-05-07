@@ -4,9 +4,16 @@ import {
   all,
   gaiaMatch,
   idleNoError,
-  RECOMMENDED_AGENT_BASE,
   type Scorer,
 } from "../../../packages/shared/src/index.js";
+// Stub: RECOMMENDED_AGENT_BASE was removed from shared in 68bf967
+// (slim-shared refactor) but gaia.ts still references it. Inline a
+// minimal placeholder so the eval runner can load this suite. The real
+// content used to live in shared and described how the agent should
+// reason; restore from git if needed.
+const RECOMMENDED_AGENT_BASE =
+  "You are an agent. Use the tools available to answer the question. " +
+  "Reason step by step.";
 import { readFileSync, existsSync } from "node:fs";
 import { resolve } from "node:path";
 

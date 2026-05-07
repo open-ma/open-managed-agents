@@ -36,3 +36,4 @@ test/eval/data/
 
 # pnpm content store (created when --store-dir=. is used locally)
 .pnpm-store/
+data/
