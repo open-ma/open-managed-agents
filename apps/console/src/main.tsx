@@ -24,6 +24,7 @@ import { RuntimesList } from "./pages/RuntimesList";
 import { ConnectRuntime } from "./pages/ConnectRuntime";
 import { EvalRunsList } from "./pages/EvalRunsList";
 import { EvalRunDetail } from "./pages/EvalRunDetail";
+import { UsageList } from "./pages/UsageList";
 import {
   IntegrationsLinearList,
   IntegrationsLinearWorkspace,
@@ -58,6 +59,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="sessions/:id" element={<SessionDetail />} />
             <Route path="evals" element={<EvalRunsList />} />
             <Route path="evals/:id" element={<EvalRunDetail />} />
+            <Route path="usage" element={<UsageList />} />
             <Route path="environments" element={<EnvironmentsList />} />
             <Route path="environments/:id" element={<EnvironmentDetail />} />
             <Route path="skills" element={<SkillsList />} />

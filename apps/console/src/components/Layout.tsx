@@ -11,6 +11,7 @@ import {
   RuntimesIcon,
   ChevronDownIcon,
   DashboardIcon,
+  DurationIcon,
   EnvIcon,
   GitHubIcon,
   LinearIcon,
@@ -48,6 +49,7 @@ const navGroups: NavGroup[] = [
       { to: "/agents", label: "Agents", icon: AgentIcon },
       { to: "/sessions", label: "Sessions", icon: SessionsIcon },
       { to: "/evals", label: "Eval Runs", icon: SessionsIcon },
+      { to: "/usage", label: "Usage", icon: DurationIcon },
     ],
   },
   {
