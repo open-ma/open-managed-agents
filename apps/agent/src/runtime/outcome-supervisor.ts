@@ -283,9 +283,10 @@ export async function runOutcomeSupervisor(
         {
           type: "text",
           text:
-            `[Outcome iteration ${iteration - 1}] needs revision:\n` +
+            `<outcome_feedback iteration="${iteration - 1}">\n` +
             `${explanation || "(no explanation)"}\n\n` +
-            `Please address the feedback and try again.`,
+            `Address the feedback and try again.\n` +
+            `</outcome_feedback>`,
         },
       ],
     };
