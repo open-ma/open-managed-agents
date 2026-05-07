@@ -1,10 +1,11 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
 import { generateId, skillFileR2Key } from "@open-managed-agents/shared";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
 
 const CLAWHUB_BASE = "https://clawhub.ai/api/v1";
 
@@ -58,7 +59,7 @@ app.post("/install", async (c) => {
     return c.json({ error: "Downloaded zip contains no files" }, 502);
   }
 
-  const bucket = c.env.FILES_BUCKET;
+  const bucket = c.var.services.filesBlob;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   // 4. Write file bytes to R2, store only manifest in KV
@@ -89,8 +90,8 @@ app.post("/install", async (c) => {
   const version = { version: versionId, files: manifest, created_at: now };
 
   await Promise.all([
-    c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill)),
-    c.env.CONFIG_KV.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
+    c.var.services.kv.put(kvKey(t, "skill", id), JSON.stringify(skill)),
+    c.var.services.kv.put(kvKey(t, "skillver", id, versionId), JSON.stringify(version)),
   ]);
 
   return c.json({ ...skill, files }, 201);

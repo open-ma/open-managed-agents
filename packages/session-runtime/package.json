@@ -1,0 +1,29 @@
+{
+  "name": "@open-managed-agents/session-runtime",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./recovery": "./src/recovery.ts",
+    "./ports": "./src/ports.ts",
+    "./adapter": "./src/adapter.ts",
+    "./machine": "./src/machine.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/event-log": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "ai": "^6.0.158",
+    "nanoid": "^5.1.0"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^11.5.0",
+    "vitest": "^4.1.3"
+  }
+}

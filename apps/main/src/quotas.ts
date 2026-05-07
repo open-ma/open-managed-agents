@@ -22,6 +22,7 @@
 
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import type { KvStore } from "@open-managed-agents/kv-store";
 
 const DEFAULT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
 
@@ -41,15 +42,15 @@ const DEFAULT_UPLOAD_MAX_BYTES = 25 * 1024 * 1024;
  */
 export async function checkDailySessionCap(
   env: Env,
+  kv: KvStore,
   tenantId: string,
 ): Promise<Response | null> {
   const cap = Number(env.SESSION_DAILY_CAP_PER_TENANT ?? 0);
   if (!cap || cap <= 0) return null; // feature off
-  if (!env.CONFIG_KV) return null;   // dev/test without KV
 
   const today = new Date().toISOString().slice(0, 10);
   const key = `quota:sessions:${tenantId}:${today}`;
-  const raw = await env.CONFIG_KV.get(key);
+  const raw = await kv.get(key);
   const current = raw ? Number(raw) : 0;
   if (current >= cap) {
     logWarn(
@@ -65,7 +66,7 @@ export async function checkDailySessionCap(
   }
   // 25h expiration — covers the rollover at midnight without us needing
   // a cleanup job.
-  await env.CONFIG_KV.put(key, String(current + 1), { expirationTtl: 25 * 3600 });
+  await kv.put(key, String(current + 1), { expirationTtl: 25 * 3600 });
   return null;
 }
 

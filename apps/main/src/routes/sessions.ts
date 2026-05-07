@@ -101,8 +101,6 @@ async function getSandboxBinding(
         const [, sessionId, rest] = match;
         const doId = env.SESSION_DO!.idFromName(sessionId);
         const stub = env.SESSION_DO!.get(doId);
-        // Workaround for cloudflare/workerd#2240
-        (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
         return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
           method: req.method,
           headers: req.headers,
@@ -181,8 +179,6 @@ function sessionDoFallbackFetcher(env: Env): Fetcher | null {
       const [, sessionId, rest] = match;
       const doId = env.SESSION_DO!.idFromName(sessionId);
       const stub = env.SESSION_DO!.get(doId);
-      // Workaround for cloudflare/workerd#2240
-      (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
       return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
         method: req.method,
         headers: req.headers,
@@ -241,7 +237,7 @@ async function resolveFileIds(
   tenantId: string,
   content: ContentBlock[],
 ): Promise<{ content: ContentBlock[]; mountFileIds: string[] }> {
-  const bucket = env.FILES_BUCKET;
+  const bucket = services.filesBlob;
   if (!bucket) return { content, mountFileIds: [] };
   const out: ContentBlock[] = [];
   const mountFileIds: string[] = [];
@@ -285,7 +281,7 @@ app.post("/", async (c) => {
   // Per-tenant DAILY cap (KV-backed). Optional via SESSION_DAILY_CAP_PER_TENANT
   // env — feature off when unset / 0. Catches sustained misuse the per-minute
   // gate above can't (5/min × 60 × 24 = 7200/day worth of containers).
-  const daily = await checkDailySessionCap(c.env, t);
+  const daily = await checkDailySessionCap(c.env, c.var.services.kv, t);
   if (daily) return daily;
   const body = await c.req.json<{
     agent: string;
@@ -591,10 +587,11 @@ app.post("/", async (c) => {
       const scopedR2Key = fileR2Key(t, scopedFileId);
 
       // R2 copy first — best-effort (legacy files may have no R2 bytes).
-      if (c.env.FILES_BUCKET) {
-        const obj = await c.env.FILES_BUCKET.get(sourceFile.r2_key);
+      const filesBucket = c.var.services.filesBlob;
+      if (filesBucket) {
+        const obj = await filesBucket.get(sourceFile.r2_key);
         if (obj) {
-          await c.env.FILES_BUCKET.put(
+          await filesBucket.put(
             scopedR2Key,
             obj.body,
             { httpMetadata: { contentType: sourceFile.media_type } },
@@ -823,10 +820,11 @@ app.delete("/:id", async (c) => {
     const orphanedFiles = await c.var.services.files.deleteBySession({
       sessionId: id,
     });
-    if (c.env.FILES_BUCKET && orphanedFiles.length) {
+    if (c.var.services.filesBlob && orphanedFiles.length) {
+      const cleanupBucket = c.var.services.filesBlob;
       await Promise.all(
         orphanedFiles.map((f) =>
-          c.env.FILES_BUCKET!.delete(f.r2_key).catch((err) => {
+          cleanupBucket.delete(f.r2_key).catch((err) => {
             logWarn(
               { op: "session.delete.r2_cleanup", session_id: id, tenant_id: t, r2_key: f.r2_key, err },
               "orphan R2 file delete failed",
@@ -931,7 +929,7 @@ app.post("/:id/files", async (c) => {
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
 
-  const bucket = c.env.FILES_BUCKET;
+  const bucket = c.var.services.filesBlob;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   const sbRes = await getSandboxBinding(c.env, session.environment_id, t);

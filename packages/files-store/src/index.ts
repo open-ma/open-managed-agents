@@ -17,4 +17,4 @@ export * from "./ports";
 export { FileService } from "./service";
 export type { FileServiceDeps } from "./service";
 
-export { createCfFileService, D1FileRepo } from "./adapters";
+export { createCfFileService, createSqliteFileService, SqlFileRepo } from "./adapters";

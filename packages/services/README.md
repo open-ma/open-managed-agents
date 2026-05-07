@@ -138,7 +138,7 @@ When you add `packages/foo-store`:
 
 That's it. No grep-and-replace across routes when you change deployment.
 
-## CFless path
+## self-host path
 
 Today only `buildCfServices` exists. To self-host on Postgres:
 
