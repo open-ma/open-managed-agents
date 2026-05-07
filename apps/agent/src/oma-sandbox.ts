@@ -290,12 +290,13 @@ export class OmaSandbox extends Sandbox {
         exitCode: ec,
         exitReason: reason,
       });
-      // Mirror to the hosted billing worker if its service binding is
-      // present. Self-host deployments leave BILLING unbound — this
-      // soft-skips and the wallet bookkeeping is simply absent.
-      if (env.BILLING) {
+      // Mirror to the usage-meter binding if present. Self-host
+      // deployments leave USAGE_METER unbound — this soft-skips and the
+      // usage_events row remains the only record (still surfaces in the
+      // Console Usage page and matches the CF Containers bill).
+      if (env.USAGE_METER) {
         try {
-          await env.BILLING.recordUsage({
+          await env.USAGE_METER.recordUsage({
             tenantId: ctx.tenantId,
             sessionId: ctx.sessionId,
             agentId: ctx.agentId,
@@ -305,10 +306,10 @@ export class OmaSandbox extends Sandbox {
             endedAt,
           });
         } catch (err) {
-          // Best-effort; the usage_events row is the authoritative record
-          // and billing can reconcile from that out-of-band on next sweep.
+          // Best-effort; usage_events is the authoritative record, the
+          // meter can reconcile from that out-of-band on next sweep.
           console.error(
-            `[oma-sandbox] BILLING.recordUsage failed: ${(err as Error)?.message ?? err}`,
+            `[oma-sandbox] USAGE_METER.recordUsage failed: ${(err as Error)?.message ?? err}`,
           );
         }
       }
