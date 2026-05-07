@@ -26,84 +26,13 @@ import { mkdir, writeFile, unlink, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { paths, currentPlatform } from "./platform.js";
+import { buildPlist, type BuilderOpts } from "./service-templates.js";
 
-export interface InstallOptions {
-  /** Absolute path to the node binary that should run the daemon. Almost
-   *  always `process.execPath` of the process running `oma bridge setup`. */
-  nodePath: string;
-  /** Absolute path to the cli's bundled entrypoint (dist/index.js). The
-   *  caller should pass `realpathSync(process.argv[1])` so npm/npx symlinks
-   *  in `node_modules/.bin/` are resolved to the real file. */
-  cliEntry: string;
-  /** PATH to expose to the daemon process. Used for spawn'd ACP children
-   *  that still carry `#!/usr/bin/env node` shebangs. Defaults to a
-   *  freeze of the setup-time PATH with dirname(nodePath) prepended. */
-  envPath?: string;
-}
-
-function buildPlist(opts: InstallOptions): string {
-  const p = paths();
-  const nodeDir = dirname(opts.nodePath);
-  const setupPath = process.env.PATH ?? "";
-  // Prepend node's dir so it always wins; freeze the rest so daemon-spawned
-  // children (claude-agent-acp etc.) can find the same tools the user can.
-  // Dedup keeps the plist readable when the user's shell already prepended
-  // nvm/asdf to PATH (otherwise we'd write the node dir twice).
-  const envPath = opts.envPath ?? dedupPath(setupPath ? `${nodeDir}:${setupPath}` : nodeDir);
-
-  // launchd's xml is unforgiving; use a single template literal with no
-  // accidental whitespace inside <string> elements.
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${p.serviceLabel}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${opts.nodePath}</string>
-    <string>${opts.cliEntry}</string>
-    <string>bridge</string>
-    <string>daemon</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
-  <key>StandardOutPath</key>
-  <string>${p.logFile}</string>
-  <key>StandardErrorPath</key>
-  <string>${p.logFile}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>${escapeXml(envPath)}</string>
-  </dict>
-</dict>
-</plist>
-`;
-}
-
-function escapeXml(s: string): string {
-  return s
-    .replace(/&/g, "&amp;")
-    .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
-}
-
-function dedupPath(p: string): string {
-  const seen = new Set<string>();
-  return p
-    .split(":")
-    .filter((part) => {
-      if (!part || seen.has(part)) return false;
-      seen.add(part);
-      return true;
-    })
-    .join(":");
-}
+export type InstallOptions = BuilderOpts;
+// Re-export for back-compat with anything that imports buildPlist from
+// here. The actual implementation lives in service-templates so unit
+// tests can exercise it without importing node:child_process.
+export { buildPlist };
 
 export async function install(opts: InstallOptions): Promise<void> {
   if (currentPlatform() !== "darwin") {

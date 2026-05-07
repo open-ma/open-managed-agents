@@ -119,17 +119,18 @@ export async function runSetup(opts: SetupOpts): Promise<void> {
         } else {
           log.hint(`runtime ${existing.runtimeId.slice(0, 8)}… (use --force to re-register)`);
         }
-        await refreshServiceOrFallback(opts);
         // Re-running `oma bridge setup` is the natural moment for a
         // user to discover "I just installed claude — should I get
-        // the wrapper?". Audit even on the fast path (existing creds)
-        // so this discoverability isn't lost.
+        // the wrapper?". Run the audit BEFORE service refresh / exec
+        // so the prompt isn't shadowed by a foreground daemon when
+        // --no-service exec's at the end.
         const fastPathAgents: Array<{ id: string; binary?: string }> =
           (await detectAll()).map((a) => ({ id: a.id, binary: a.spec.command }));
         await auditAndOfferWrappers(fastPathAgents, { yes: opts.yes });
         process.stderr.write(`\n${c.bold("Up to date.")}\n\n`);
-        // refreshServiceOrFallback may have exec'd into daemon; if it
-        // returned, we exit cleanly here.
+        await refreshServiceOrFallback(opts);
+        // refreshServiceOrFallback may have exec'd into daemon and
+        // never returned; if it did return, we exit cleanly here.
         return;
       }
     }
@@ -214,7 +215,15 @@ async function installServiceOrFallback(opts: SetupOpts): Promise<void> {
 async function refreshServiceOrFallback(opts: SetupOpts): Promise<void> {
   const kind = detectServiceKind();
   if (opts.noService || kind === "unsupported") {
-    log.hint("daemon not started by setup (no-service mode). To run now: `oma bridge daemon`");
+    // Symmetrical with installServiceOrFallback: --no-service means
+    // "start daemon foreground" no matter whether we just ran OAuth
+    // or just probed an existing creds file. User who wanted to bail
+    // out without starting a daemon would run `oma bridge status`.
+    process.stderr.write("\n");
+    log.step(opts.noService ? "--no-service: starting daemon in foreground" : `service install not supported on ${process.platform}; running daemon in foreground`);
+    log.hint("Ctrl-C to stop. To run as a system service, re-run setup without --no-service.");
+    process.stderr.write("\n");
+    execIntoDaemon();
     return;
   }
   // Warn about service-binary drift before refreshing. The service file
