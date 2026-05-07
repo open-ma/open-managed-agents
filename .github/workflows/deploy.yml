@@ -229,6 +229,31 @@ jobs:
           done
           echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to main + integrations"
 
+      # Sync R2 FUSE creds to sandbox-default. Same drift-prevention reasoning
+      # as INTEGRATIONS_INTERNAL_SECRET above: agent worker uses these for
+      # mountMemoryStore + mountSessionOutputs (s3fs FUSE → real R2 PUT on
+      # every write). Without them, mountBucket falls back to localBucket
+      # which only syncs in `wrangler dev` — not in real CF. lanes already
+      # have this loop in deploy-lane.yml; this brings sandbox-default
+      # under the same source-of-truth umbrella.
+      - name: Sync R2 secrets to sandbox-default
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          R2_ENDPOINT: ${{ secrets.R2_ENDPOINT }}
+          R2_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          R2_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+        if: ${{ env.R2_ENDPOINT != '' && env.R2_ACCESS_KEY_ID != '' && env.R2_SECRET_ACCESS_KEY != '' }}
+        run: |
+          set -e
+          cd apps/agent
+          W=sandbox-default
+          echo "$R2_ENDPOINT"          | npx wrangler secret put R2_ENDPOINT          --name "$W" >/dev/null
+          echo "$R2_ACCESS_KEY_ID"     | npx wrangler secret put R2_ACCESS_KEY_ID     --name "$W" >/dev/null
+          echo "$R2_SECRET_ACCESS_KEY" | npx wrangler secret put R2_SECRET_ACCESS_KEY --name "$W" >/dev/null
+          echo "$CLOUDFLARE_ACCOUNT_ID" | npx wrangler secret put R2_ACCOUNT_ID       --name "$W" >/dev/null
+          echo "✓ R2_* synced to $W"
+
       # --- Post-deploy verification ---
       - name: Verify deployment
         env:
