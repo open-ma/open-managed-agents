@@ -80,7 +80,12 @@
     "MEMORY_BUCKET_NAME": "managed-agents-memory",
     "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
     "BACKUP_BUCKET_NAME": "managed-agents-backups",
-    "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
+    "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242",
+    // Public origin of the OMA main worker. Injected into the sandbox env
+    // so the agent can curl /v1/internal/sessions/<id>/uploads/presign to
+    // obtain an R2 presigned PUT URL for delivering artefacts. See
+    // session-do.ts → ensureWarm setEnvVars for the injection point.
+    "OMA_BASE_URL": "https://app.openma.dev"
   },
 
   "r2_buckets": [
@@ -159,7 +164,8 @@
         "MEMORY_BUCKET_NAME": "managed-agents-memory-staging",
         "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",
         "BACKUP_BUCKET_NAME": "managed-agents-backups",
-        "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242"
+        "CLOUDFLARE_ACCOUNT_ID": "44af79e51582ca20c9003eb926540242",
+        "OMA_BASE_URL": "https://app.staging.openma.dev"
       },
       "r2_buckets": [
         { "binding": "WORKSPACE_BUCKET", "bucket_name": "managed-agents-workspace" },

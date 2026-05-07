@@ -79,7 +79,7 @@ jobs:
         if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
         run: |
           set -e
-          for entry in "apps/main:managed-agents-staging" "apps/integrations:managed-agents-integrations-staging"; do
+          for entry in "apps/main:managed-agents-staging" "apps/integrations:managed-agents-integrations-staging" "apps/agent:sandbox-default-staging"; do
             dir="${entry%%:*}"; worker="${entry##*:}"
             (cd "$dir" && echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name "$worker" >/dev/null) || true
             echo "  ✓ $worker"
