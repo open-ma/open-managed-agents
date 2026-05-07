@@ -35,6 +35,17 @@ export interface RLTask {
   description: string;
   message: string;
   setup_files?: SetupFile[];
+  /**
+   * Bash script run in the sandbox via /exec BEFORE the first user.message
+   * is sent. Use for env preparation that can't be expressed as static
+   * file writes — git clone at a specific commit, system package install,
+   * dataset download, etc. Runs after `setup_files` writes complete.
+   *
+   * The eval-runner aborts the trial if the script's exit code is nonzero,
+   * so the agent never sees a half-staged environment. Output is
+   * truncated to 4 KB and surfaced in the error trail for debugging.
+   */
+  setup_script?: string;
   reward: RewardSpec;
   max_turns?: number; // default: 5
   timeout_ms?: number; // default: 300_000
@@ -131,6 +142,7 @@ export interface Trajectory {
     domain_name?: string;
     data_source?: string;
     collected_at: string;
+    verifier_result?: { exit_code: number; output: string };
   };
 }
 

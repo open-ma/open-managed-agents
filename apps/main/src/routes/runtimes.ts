@@ -26,6 +26,8 @@
 
 import { Hono } from "hono";
 import type { Env, AgentConfig } from "@open-managed-agents/shared";
+import { skillFileR2Key } from "@open-managed-agents/shared";
+import { resolveKnownAgent } from "@open-managed-agents/acp-runtime/known-agents";
 import type { Services } from "@open-managed-agents/services";
 
 /** Browser-facing routes — mounted under /v1/runtimes. */
@@ -319,31 +321,112 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
   const agent = (session as { agent_snapshot?: AgentConfig }).agent_snapshot;
   if (!agent) return c.json({ error: "session has no agent snapshot" }, 500);
 
-  const files = renderSessionBundle(agent, acpAgentId);
+  // Runtime ownership check: a daemon can only fetch bundles for sessions
+  // whose agent is bound to the same runtime that owns this token. Without
+  // this gate, two daemons in the same tenant could read each other's
+  // session bundles by guessing sids — an info-leak that becomes a
+  // material security hole the moment the bundle starts carrying env
+  // values + mcp_servers config (next commit). Same 404 shape so the
+  // endpoint stays a non-oracle for cross-runtime sids.
+  const sessionRuntimeId = agent.runtime_binding?.runtime_id;
+  if (!sessionRuntimeId || sessionRuntimeId !== ok.runtime_id) {
+    return c.json({ error: "session not found" }, 404);
+  }
+
+  const files = await renderSessionBundle(agent, acpAgentId, c.env, ok.tenant_id);
   // Per-agent blocklist of LOCAL skills the user has on their machine
   // — daemon enforces by NOT symlinking these into the spawn-cwd's
   // CLAUDE_CONFIG_DIR. Always send an array (possibly empty) so the
   // daemon doesn't have to handle three states (undefined / empty / set).
   const local_skill_blocklist = agent.runtime_binding?.local_skill_blocklist ?? [];
-  return c.json({ files, local_skill_blocklist });
+
+  // Rewrite agent.mcp_servers (HTTP/SSE only) so they point at OMA's
+  // mcp-proxy. The daemon doesn't get the user's upstream tokens — those
+  // live in vaults and only mcp-proxy on the cloud side resolves them.
+  // The proxy URL pattern is documented in mcp-proxy.ts:10. stdio MCP
+  // servers are intentionally skipped: they require sandbox spawn
+  // semantics that don't exist on the daemon side. The Authorization
+  // header is left for the daemon to add (it has the agentApiKey via
+  // setSpawnEnv) so we don't echo the PAT back to it through this call.
+  const serverBase = new URL(c.req.url).origin;
+  const mcp_servers = (agent.mcp_servers ?? [])
+    .filter((s) => !!s.url || (s.type !== "stdio" && s.type !== "stdio_proxy"))
+    .map((s) => ({
+      type: "http" as const,
+      name: s.name,
+      url: `${serverBase}/v1/mcp-proxy/${encodeURIComponent(sid)}/${encodeURIComponent(s.name)}`,
+    }));
+
+  // Env vars — read session resources of type "env" (legacy "env_secret"
+  // accepted in case a session predates the rename) and look up each
+  // resource's value in the per-session secret store. Returned to the
+  // daemon as plain { name, value } pairs; the daemon merges them into
+  // the spawned ACP child's process.env. Empty-value resources are
+  // skipped so the child doesn't see odd "X=" entries.
+  const services2 = c.get("services");
+  const sessionResources = await services2.sessions.listResourcesBySession({ sessionId: sid });
+  const env: Array<{ name: string; value: string }> = [];
+  for (const row of sessionResources) {
+    const r = row.resource as { type?: string; name?: string };
+    if ((r.type === "env" || r.type === "env_secret") && r.name) {
+      const value = await services2.sessionSecrets.get({
+        tenantId: ok.tenant_id,
+        sessionId: sid,
+        resourceId: row.id,
+      });
+      if (value) env.push({ name: r.name, value });
+    }
+  }
+
+  return c.json({ files, local_skill_blocklist, mcp_servers, env });
 });
 
 /**
  * Render the spawn-cwd file bundle for a given (OMA agent config, ACP agent).
  *
- * The split between AGENTS.md and `.claude/skills/...` is agent-aware:
- *   - claude-code-acp: skills get their own discoverable directory tree;
- *     AGENTS.md only carries the system prompt + appendable_prompts.
- *   - everyone else: no native skill mechanism we can rely on, so skills
- *     get inlined into AGENTS.md as a `## Available Skills` section.
+ * The split between AGENTS.md and per-agent skill dirs is agent-aware:
+ *   - claude-agent-acp: skills get their own discoverable directory tree
+ *     (`.claude/skills/<id>/SKILL.md`); AGENTS.md only carries the system
+ *     prompt + appendable_prompts. Daemon also redirects CLAUDE_CONFIG_DIR
+ *     to filter the user's local skills (see local-skills.ts).
+ *   - opencode: skills materialize as `.opencode/agents/<id>.md` so the
+ *     spawned `opencode acp` child auto-discovers them as subagents per
+ *     OpenCode's per-project agent convention.
+ *   - codex-cli (via acpx), hermes, openclaw: no per-skill native
+ *     convention we can rely on, so skills get inlined into AGENTS.md as
+ *     a `## Available Skills` section. Codex reads project-root AGENTS.md
+ *     natively, so this works out of the box for it. Hermes / openclaw
+ *     just see the section as part of their system context.
+ *   - gemini-cli: extensions live as `.gemini/extensions/<id>/GEMINI.md`
+ *     with a `gemini-extension.json` manifest. Generating those manifests
+ *     correctly is out of scope for v1; we fall back to inlining for now.
+ *
+ * Skill content is fetched from KV (manifest) + R2 (file bytes), keyed
+ * off the same `t:{tenant}:skillver:{id}:{ver}` / `skillFileR2Key()`
+ * schema apps/agent uses (see skills.ts:91). Falls back to a stub when
+ * content can't be fetched (skill metadata missing, R2 unset on this
+ * lane, etc.) — better to write SOMETHING than to fail the whole session
+ * because one skill's manifest is gone.
  */
-function renderSessionBundle(
+async function renderSessionBundle(
   agent: AgentConfig,
   acpAgentId: string,
-): Array<{ path: string; content: string }> {
+  env: Env,
+  tenantId: string,
+): Promise<Array<{ path: string; content: string }>> {
   const files: Array<{ path: string; content: string }> = [];
   const skills = (agent.skills ?? []) as Array<{ skill_id: string; type: string; version?: string }>;
-  const supportsClaudeSkillsDir = acpAgentId === "claude-code-acp";
+  // Canonicalize: a stored AgentConfig may carry a pre-A2 alias (e.g.
+  // "claude-agent-acp" or even older "claude-code-acp"; the official
+  // ACP registry's id is now "claude-acp"). Resolve via overlay so the
+  // layout selector matches by current canonical id; unknown ids fall
+  // through to the safe "inline" default.
+  const resolved = resolveKnownAgent(acpAgentId);
+  const canonicalAgentId = resolved?.id ?? acpAgentId;
+  const layout: "claude-skills" | "opencode-agents" | "inline" =
+    canonicalAgentId === "claude-acp" ? "claude-skills"
+    : canonicalAgentId === "opencode" ? "opencode-agents"
+    : "inline";
 
   let agentsMd = `# ${agent.name ?? "OMA Agent"}\n\n`;
   if (agent.description) agentsMd += `${agent.description}\n\n`;
@@ -353,28 +436,85 @@ function renderSessionBundle(
   }
 
   if (skills.length > 0) {
-    if (supportsClaudeSkillsDir) {
+    if (layout === "claude-skills") {
       agentsMd += `## Skills available\n\nClaude Code skills are mounted under \`.claude/skills/\`. Available:\n`;
       for (const s of skills) agentsMd += `- ${s.skill_id} (v${s.version ?? "latest"})\n`;
       agentsMd += "\n";
       for (const s of skills) {
-        // v1: stub SKILL.md from agent metadata. Full skill content fetch
-        // (memory_store + skill_files) lands in a follow-up — see backlog.
+        const content = await loadSkillSkillMd(env, tenantId, s.skill_id, s.version);
         files.push({
           path: `.claude/skills/${s.skill_id}/SKILL.md`,
-          content: `# ${s.skill_id}\n\nSkill ${s.skill_id} (type=${s.type}, version=${s.version ?? "latest"}). Full skill content not yet bundled — see backlog.\n`,
+          content: content ?? `# ${s.skill_id}\n\nSkill ${s.skill_id} (type=${s.type}, version=${s.version ?? "latest"}). Content not bundled — manifest or R2 fetch failed.\n`,
+        });
+      }
+    } else if (layout === "opencode-agents") {
+      agentsMd += `## Skills available\n\nOpenCode subagents are materialized under \`.opencode/agents/\`. Available:\n`;
+      for (const s of skills) agentsMd += `- ${s.skill_id} (v${s.version ?? "latest"})\n`;
+      agentsMd += "\n";
+      for (const s of skills) {
+        const content = await loadSkillSkillMd(env, tenantId, s.skill_id, s.version);
+        files.push({
+          path: `.opencode/agents/${s.skill_id}.md`,
+          content: content ?? `---\ndescription: ${s.skill_id} (content unavailable)\nmode: subagent\n---\n\nSkill ${s.skill_id} (type=${s.type}, version=${s.version ?? "latest"}). Content not bundled — manifest or R2 fetch failed.\n`,
         });
       }
     } else {
+      // Inline path: drop full skill content into AGENTS.md so codex /
+      // hermes / openclaw read it as part of their system prompt. We
+      // still try to load the real SKILL.md (was missing pre-v2 — only
+      // the type/version line was emitted).
       agentsMd += `## Available Skills\n\n`;
       for (const s of skills) {
-        agentsMd += `### ${s.skill_id}\n\nType: ${s.type}, version: ${s.version ?? "latest"}\n\n`;
+        const content = await loadSkillSkillMd(env, tenantId, s.skill_id, s.version);
+        agentsMd += `### ${s.skill_id} (v${s.version ?? "latest"})\n\n`;
+        if (content) {
+          // Strip leading frontmatter so the inline section reads as one
+          // coherent doc (frontmatter inside another doc just clutters
+          // the model's context).
+          const stripped = content.replace(/^---\s*\n[\s\S]*?\n---\s*\n?/, "");
+          agentsMd += stripped.trim() + "\n\n";
+        } else {
+          agentsMd += `(Skill content unavailable; type=${s.type})\n\n`;
+        }
       }
     }
   }
 
   files.unshift({ path: "AGENTS.md", content: agentsMd });
   return files;
+}
+
+/**
+ * Pull a skill's SKILL.md from KV-recorded manifest + R2 storage. Returns
+ * null when anything in the chain is missing — caller falls back to a
+ * stub so a single bad skill doesn't break the whole spawn-cwd bundle.
+ *
+ * Mirrors the lookup chain in apps/agent/src/harness/skills.ts:91 so a
+ * skill that mounts in cloud sandbox also mounts identically in a daemon
+ * spawn-cwd. Binary skill files (icons, fonts, etc.) are deliberately
+ * not bundled: BundleFile.content is utf-8 string only — base64-encoding
+ * binary into JSON is a follow-up. SKILL.md is the load-bearing file
+ * (Claude Code reads it as the entry point); attachments are nice-to-have.
+ */
+async function loadSkillSkillMd(
+  env: Env,
+  tenantId: string,
+  skillId: string,
+  version?: string,
+): Promise<string | null> {
+  if (!env.FILES_BUCKET) return null;
+  try {
+    const metaRaw = await env.CONFIG_KV.get(`t:${tenantId}:skill:${skillId}`);
+    if (!metaRaw) return null;
+    const meta = JSON.parse(metaRaw) as { latest_version?: string };
+    const ver = (version && version !== "latest") ? version : meta.latest_version;
+    if (!ver) return null;
+    const obj = await env.FILES_BUCKET.get(skillFileR2Key(tenantId, skillId, ver, "SKILL.md"));
+    if (!obj) return null;
+    return await obj.text();
+  } catch {
+    return null;
+  }
 }
 
 /**

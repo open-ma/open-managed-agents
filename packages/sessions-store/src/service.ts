@@ -2,6 +2,7 @@ import {
   generateResourceId,
   generateSessionId,
 } from "@open-managed-agents/shared";
+import { paginateVia } from "@open-managed-agents/shared";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -57,7 +58,7 @@ export type NewResourceInput = Omit<SessionResource, "id" | "session_id" | "crea
  *   - metadata merge semantics (per-key delete on null) — was sessions.ts:489-498
  *
  * Does NOT own:
- *   - secret materials (env_secret.value, github_repository.authorization_token).
+ *   - secret materials (env.value, github_repository.authorization_token).
  *     Those continue to live in CONFIG_KV under `t:{tenant}:secret:...` keys
  *     because they're write-only blobs the route layer reads alongside the
  *     resource. Sessions store records resource METADATA only.
@@ -250,6 +251,32 @@ export class SessionService {
       limit: opts.limit ?? 100,
     };
     return this.repo.list(opts.tenantId, listOpts);
+  }
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC tie-break.
+   *  Optional `agentId` narrows to one agent's sessions. */
+  async listPage(opts: {
+    tenantId: string;
+    agentId?: string;
+    includeArchived?: boolean;
+    limit?: number;
+    cursor?: string;
+  }): Promise<{ items: SessionRow[]; nextCursor?: string }> {
+    return paginateVia({
+      cursor: opts.cursor,
+      limit: opts.limit,
+      fetch: (after, limit) =>
+        this.repo.listPage(opts.tenantId, {
+          agentId: opts.agentId,
+          includeArchived: opts.includeArchived ?? false,
+          limit,
+          after,
+        }),
+      extractCursor: (r) => ({
+        createdAt: new Date(r.created_at).getTime(),
+        id: r.id,
+      }),
+    });
   }
 
   /** Agent-delete safety check: refuse if any active session in the tenant

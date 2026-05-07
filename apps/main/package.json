@@ -7,6 +7,7 @@
   "dependencies": {
     "@cloudflare/containers": "^0.0.25",
     "@cloudflare/sandbox": "^0.9.1",
+    "@open-managed-agents/acp-runtime": "workspace:*",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
     "@open-managed-agents/cf-billing": "workspace:*",
@@ -25,6 +26,7 @@
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/tenant-db": "workspace:*",
     "@open-managed-agents/tenant-dbs-store": "workspace:*",
+    "fflate": "^0.8.2",
     "hono": "^4.7.0"
   }
 }

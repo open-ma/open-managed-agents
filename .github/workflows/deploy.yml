@@ -30,6 +30,15 @@ jobs:
       - name: Build console
         run: pnpm --filter managed-agents-console build
 
+      # Wrangler config sanity gate — catches duplicate top-level keys
+      # in any wrangler.jsonc (the JSONC last-write-wins footgun PR #28
+      # hit, where a duplicate `durable_objects` block silently dropped
+      # SESSION_DO + SANDBOX bindings on prod). Fail-fast: don't deploy
+      # if any config has dup keys or dup binding names — every prior
+      # case of these has been a real outage.
+      - name: Lint wrangler.jsonc files (no duplicate keys / bindings)
+        run: node scripts/lint-wrangler-jsonc.mjs
+
       # Apply D1 migrations BEFORE deploying any worker. New code that
       # references columns / tables added in this PR will start serving
       # traffic the moment the deploy step finishes, so the schema must
@@ -87,25 +96,29 @@ jobs:
           if grep -qiE "already exists|conflict|duplicate" /tmp/notif-create.log; then
             echo "  (event subscription exists — fine)"
           fi
+          # DLQ → main worker subscription. Wrangler's deploy step won't
+          # create this idempotently — it bails the moment ANY consumer in
+          # the wrangler.jsonc consumers[] already exists, so the new DLQ
+          # subscription never lands. Add it explicitly here. "already
+          # has a consumer" means we're done.
+          npx wrangler queues consumer add managed-agents-memory-events-dlq \
+            managed-agents --batch-size 10 --batch-timeout 30 --message-retries 1 2>&1 \
+            | tee /tmp/dlq-consumer.log || true
+          if grep -qiE "already has a consumer|already exists" /tmp/dlq-consumer.log; then
+            echo "  (DLQ consumer subscription exists — fine)"
+          fi
 
-      # --- Deploy both workers with retry ---
-      - name: Deploy agent worker
-        env:
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-        run: |
-          cd apps/agent
-          for i in 1 2 3; do
-            if npx wrangler deploy --config wrangler.jsonc; then
-              echo "Agent worker deployed successfully"
-              exit 0
-            fi
-            echo "Attempt $i/3 failed, waiting 60s before retry..."
-            sleep 60
-          done
-          echo "All attempts failed"
-          exit 1
-
+      # --- Deploy order: main FIRST, then agent. ---
+      #
+      # The agent worker has a service binding to main's `McpProxyRpc`
+      # WorkerEntrypoint class (apps/agent/wrangler.jsonc → MAIN_MCP).
+      # CF service bindings resolve at request time, not deploy time —
+      # if agent goes live before main's new entrypoint exists, every
+      # cloud-MCP call fails until main catches up. Forward order:
+      #   main (entrypoint exists) → agent (binds to it).
+      # ROLLBACK is the inverse: agent first (stop calling the new
+      # entrypoint), then main (can safely revert the class). Manual
+      # rollbacks must respect this; CF doesn't enforce it.
       - name: Deploy main worker
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
@@ -128,6 +141,32 @@ jobs:
             if [ "$i" = "3" ]; then echo "All attempts failed"; exit 1; fi
           done
 
+      - name: Deploy agent worker
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/agent
+          for i in 1 2 3; do
+            if npx wrangler deploy --config wrangler.jsonc; then
+              echo "Agent worker deployed successfully"
+              exit 0
+            fi
+            echo "Attempt $i/3 failed, waiting 60s before retry..."
+            sleep 60
+          done
+          echo "All attempts failed"
+          exit 1
+
+      # AcpProxyHarness in the agent worker calls main's /v1/internal/*
+      # endpoints (runtime-attach-harness, runtime-session-bundle), gated
+      # on this header secret. The "Sync ..." step at the end of this job
+      # makes sure agent + main + integrations all carry the same value
+      # from the GH repo secret — first observed missing on agent in
+      # prod, manifesting as "INTEGRATIONS_INTERNAL_SECRET unset" the
+      # moment a runtime-bound agent sent its first turn after a
+      # standalone agent-worker rebuild.
+
       # Integrations worker is the inbound webhook surface for Slack /
       # Linear / GitHub. Its custom domain (integrations.openma.dev) is
       # already pinned in wrangler.jsonc routes — no DOMAIN_FLAG needed.
@@ -147,6 +186,48 @@ jobs:
           done
           echo "All attempts failed"
           exit 1
+
+      # Consolidated secret sync — run AFTER all three deploys so the new
+      # bindings (if any) are live before we set values against them. For
+      # rotation of an existing secret the order doesn't matter (CF
+      # replaces atomically; both old and new code read the same name).
+      #
+      # Why GH secret as source of truth (vs manual `wrangler secret put`):
+      # the original prod was missing INTEGRATIONS_INTERNAL_SECRET on the
+      # agent worker because `wrangler secret put` had only ever been run
+      # against main and integrations — no codified record meant a worker
+      # rebuild silently dropped the secret. Pushing the same GH-stored
+      # value to the workers that need it on every deploy makes drift
+      # impossible: set the GH secret once, every subsequent push
+      # reconciles them to that value.
+      #
+      # Scope: only main + integrations. The agent worker no longer needs
+      # this secret after AcpProxyHarness was rewired to talk to the
+      # RuntimeRoom DO directly via cross-script binding (see
+      # apps/agent/wrangler.jsonc and apps/agent/src/harness/acp-proxy-loop.ts).
+      # If you re-introduce a main HTTP call from agent, add the agent
+      # worker back to this loop.
+      #
+      # Idempotent: when the value already matches the existing secret,
+      # `wrangler secret put` re-encrypts to the same plaintext — no error.
+      # `if` guard skips the whole step when the GH secret is unset, so a
+      # repo where INTEGRATIONS_INTERNAL_SECRET hasn't been added yet
+      # deploys cleanly without clobbering existing manually-set values.
+      - name: Sync INTEGRATIONS_INTERNAL_SECRET to all workers
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          INTEGRATIONS_INTERNAL_SECRET: ${{ secrets.INTEGRATIONS_INTERNAL_SECRET }}
+        if: ${{ env.INTEGRATIONS_INTERNAL_SECRET != '' }}
+        run: |
+          set -e
+          for entry in "apps/main:managed-agents" "apps/integrations:managed-agents-integrations"; do
+            dir="${entry%%:*}"
+            worker="${entry##*:}"
+            (cd "$dir" && echo "$INTEGRATIONS_INTERNAL_SECRET" | npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET --name "$worker" >/dev/null)
+            echo "  ✓ $worker"
+          done
+          echo "✓ INTEGRATIONS_INTERNAL_SECRET synced to main + integrations"
 
       # --- Post-deploy verification ---
       - name: Verify deployment

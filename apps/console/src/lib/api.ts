@@ -45,13 +45,17 @@ export function useApi() {
     init?: RequestInit
   ): Promise<T> {
     const activeTenant = getActiveTenantId();
+    // Don't auto-set JSON content-type for FormData — the browser must add
+    // multipart boundaries itself, and a manually set content-type without
+    // the boundary breaks parsing on the server.
+    const isFormData = init?.body instanceof FormData;
     let res: Response;
     try {
       res = await fetch(`${BASE}${path}`, {
         ...init,
         credentials: "include",
         headers: {
-          ...(init?.body ? { "content-type": "application/json" } : {}),
+          ...(init?.body && !isFormData ? { "content-type": "application/json" } : {}),
           // Pin the workspace for this request. Backend validates membership;
           // a stale value (deleted tenant, removed membership) yields 403 and
           // the sidebar's catch-and-retry path clears + reloads.

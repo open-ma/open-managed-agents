@@ -51,22 +51,30 @@ export async function findLatestBackup(
   db: D1Database,
   tenantId: string,
   environmentId: string,
+  sessionId: string,
   nowMs: number,
 ): Promise<WorkspaceBackupHandle | null> {
   try {
     const row = await db
       .prepare(
+        // Session-scoped: cross-session restore is never the right behavior
+        // (sessions are isolation boundaries; one session's files leaking into
+        // another's /workspace breaks reproducibility for batched eval runs).
+        // The schema's source_session_id column was added in 0011 with this
+        // exact use in mind — earlier reads ignored it and that's what caused
+        // the cross-session pollution observed in the TB pilot.
         `SELECT backup_handle FROM workspace_backups
-         WHERE tenant_id = ? AND environment_id = ? AND expires_at > ?
+         WHERE tenant_id = ? AND environment_id = ?
+           AND source_session_id = ? AND expires_at > ?
          ORDER BY created_at DESC LIMIT 1`,
       )
-      .bind(tenantId, environmentId, nowMs)
+      .bind(tenantId, environmentId, sessionId, nowMs)
       .first<{ backup_handle: string }>();
     if (!row) return null;
     return JSON.parse(row.backup_handle) as WorkspaceBackupHandle;
   } catch (err) {
     logWarn(
-      { op: "workspace_backups.find", tenant_id: tenantId, environment_id: environmentId, err },
+      { op: "workspace_backups.find", tenant_id: tenantId, environment_id: environmentId, session_id: sessionId, err },
       "workspace backup lookup failed",
     );
     return null;
@@ -105,6 +113,31 @@ export async function recordBackup(
         opts.sessionId ?? null,
       )
       .run();
+    // Overwrite semantics for per-session backups: keep only the LATEST
+    // backup for this (tenant, env, session) scope. Old D1 rows are
+    // deleted; the corresponding R2 objects become unreachable and are
+    // GC'd by the bucket's lifecycle TTL (7 days). This keeps storage
+    // cost bounded — without this, a long session that backs up every
+    // 2 minutes would accumulate thousands of squashfs blobs in R2.
+    if (opts.sessionId) {
+      try {
+        await db
+          .prepare(
+            `DELETE FROM workspace_backups
+             WHERE tenant_id = ?
+               AND environment_id = ?
+               AND source_session_id = ?
+               AND created_at < ?`,
+          )
+          .bind(opts.tenantId, opts.environmentId, opts.sessionId, opts.nowMs)
+          .run();
+      } catch (err) {
+        logWarn(
+          { op: "workspace_backups.prune_old_session", session_id: opts.sessionId, err },
+          "failed to prune older same-session backups; storage will GC via TTL",
+        );
+      }
+    }
   } catch (err) {
     logWarn(
       { op: "workspace_backups.record", tenant_id: opts.tenantId, environment_id: opts.environmentId, err },
@@ -132,80 +165,5 @@ export async function pruneExpired(db: D1Database, nowMs: number): Promise<numbe
   } catch (err) {
     logWarn({ op: "workspace_backups.prune", err }, "workspace backup prune failed");
     return -1;
-  }
-}
-
-// ============================================================
-// Coordination helper (extracted for unit testing)
-// ============================================================
-
-/**
- * State the coordinator carries between calls. Lives on the SessionDO as
- * mutable instance fields; passed in to keep this function pure.
- */
-export interface BackupCoordinatorState {
-  /** Last successful backup timestamp (ms). 0 if no backup yet. */
-  lastBackupAt: number;
-  /** Single in-flight backup promise to coalesce concurrent calls. null when idle. */
-  inFlight: Promise<void> | null;
-}
-
-export interface BackupCoordinatorDeps {
-  /** Minimum interval (ms) between non-force backups. */
-  debounceMs: number;
-  /** Async work the coordinator runs (the actual createBackup + recordBackup). */
-  doBackup: () => Promise<void>;
-  /** "Now" — injected for testability. */
-  now: () => number;
-}
-
-/**
- * Coalesce + debounce a workspace backup. Pure function over an explicit
- * state object so unit tests can drive it deterministically with a mock
- * clock + a stubbed doBackup.
- *
- * Behavior:
- *   - If a backup is in flight: force callers await it; non-force callers skip.
- *   - Otherwise: non-force callers debounced by debounceMs since lastBackupAt;
- *     force callers always proceed.
- *   - Sentinel `lastBackupAt === 0` means "no backup has ever succeeded" — the
- *     debounce never applies in that case (otherwise a small mock-clock value
- *     would suppress the very first backup; production Date.now() is large
- *     enough that this never triggered, but the semantic gap was real).
- *   - On success: lastBackupAt is updated.
- *   - On failure: lastBackupAt is NOT updated (next call may retry).
- *
- * Mutates `state` in place — that mirrors the SessionDO's instance-field
- * model and keeps the caller side cheap (no return-value to thread).
- */
-export async function coordinateBackup(
-  state: BackupCoordinatorState,
-  deps: BackupCoordinatorDeps,
-  opts?: { force?: boolean },
-): Promise<void> {
-  if (state.inFlight) {
-    return opts?.force ? state.inFlight : undefined;
-  }
-  const now = deps.now();
-  const debounced =
-    !opts?.force &&
-    state.lastBackupAt > 0 &&
-    now - state.lastBackupAt < deps.debounceMs;
-  if (debounced) {
-    return;
-  }
-  state.inFlight = (async () => {
-    try {
-      await deps.doBackup();
-      state.lastBackupAt = deps.now();
-    } catch {
-      // doBackup is responsible for its own logging; we just don't bump
-      // lastBackupAt on failure so the next call may retry sooner.
-    }
-  })();
-  try {
-    await state.inFlight;
-  } finally {
-    state.inFlight = null;
   }
 }

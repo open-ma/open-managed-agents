@@ -1,9 +1,12 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
+import { ListPage } from "../components/ListPage";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
+import { KNOWN_ACP_AGENTS, resolveKnownAgent } from "@open-managed-agents/acp-runtime/known-agents";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
@@ -24,7 +27,7 @@ const ANTHROPIC_SKILLS = [
 ];
 
 const INITIAL_FORM = {
-  name: "", model: "claude-sonnet-4-6", system: "", description: "",
+  name: "", model: "", system: "", description: "",
   modelCardId: "",
   mcpServers: [] as McpEntry[],
   skills: [] as SkillEntry[],
@@ -34,7 +37,7 @@ const INITIAL_FORM = {
   // SessionDO loop. Both fields must be set together; partial = fall back to
   // default cloud agent.
   runtimeId: "",
-  acpAgentId: "claude-code-acp",
+  acpAgentId: "claude-agent-acp",
   /** Local skill ids to HIDE from this agent's ACP child. Empty = all
    *  detected local skills are visible (the daemon's default). */
   localSkillBlocklist: [] as string[],
@@ -43,7 +46,6 @@ const INITIAL_FORM = {
 export function AgentsList() {
   const { api } = useApi();
   const nav = useNavigate();
-  const [agents, setAgents] = useState<Agent[]>([]);
   const [allAgents, setAllAgents] = useState<Agent[]>([]);
   const [customSkills, setCustomSkills] = useState<Array<{ id: string; name: string; description: string }>>([]);
   const [modelCards, setModelCards] = useState<ModelCard[]>([]);
@@ -57,7 +59,7 @@ export function AgentsList() {
      *  when the user picks an acp agent. */
     local_skills?: Record<string, Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>>;
   }>>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setAuxLoading] = useState(true);
   const [createError, setCreateError] = useState("");
   const [showArchived, setShowArchived] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
@@ -68,11 +70,27 @@ export function AgentsList() {
   const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
   const [codeValue, setCodeValue] = useState("");
 
-  const load = async () => {
-    setLoading(true);
+  // Main agents table — cursor-paginated. Filter changes (showArchived)
+  // reset to page 1 automatically.
+  const agentsParams = useMemo(
+    () => ({ include_archived: showArchived ? "true" : undefined }),
+    [showArchived],
+  );
+  const {
+    items: agents,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: refreshAgents,
+  } = useCursorList<Agent>("/v1/agents", { limit: 50, params: agentsParams });
+
+  // Aux fetches that aren't paginated UI surfaces — refreshed on mount and
+  // after agent CRUD. Pull all agents (for the callable-agents dropdown)
+  // separately so it isn't constrained by the main list's page size.
+  const loadAux = async () => {
+    setAuxLoading(true);
     try {
-      const data = await api<{ data: Agent[] }>(`/v1/agents?limit=200${showArchived ? "&include_archived=true" : ""}`);
-      setAgents(data.data);
       const all = await api<{ data: Agent[] }>("/v1/agents?limit=200");
       setAllAgents(all.data);
       try {
@@ -80,7 +98,7 @@ export function AgentsList() {
         setCustomSkills(sk.data);
       } catch {}
       try {
-        const mc = await api<{ data: ModelCard[] }>("/v1/model_cards");
+        const mc = await api<{ data: ModelCard[] }>("/v1/model_cards?limit=200");
         setModelCards(mc.data);
       } catch {}
       try {
@@ -88,10 +106,13 @@ export function AgentsList() {
         setRuntimes(rt.runtimes);
       } catch {}
     } catch {}
-    setLoading(false);
+    setAuxLoading(false);
   };
 
-  useEffect(() => { load(); }, [showArchived]);
+  useEffect(() => { loadAux(); }, []);
+
+  // Keep refresh hook reachable for create / archive callbacks.
+  void refreshAgents;
 
   const create = async () => {
     setCreateError("");
@@ -150,13 +171,8 @@ export function AgentsList() {
       setForm({ ...form, skills: [...form.skills, { type: "anthropic", skill_id: skillId }] });
     }
   };
-  const addCustomSkill = () => setForm({ ...form, skills: [...form.skills, { type: "custom", skill_id: "", version: "latest" }] });
-  const updateCustomSkill = (i: number, field: string, val: string) => {
-    const updated = [...form.skills];
-    updated[i] = { ...updated[i], [field]: val };
-    setForm({ ...form, skills: updated });
-  };
   const removeSkill = (i: number) => setForm({ ...form, skills: form.skills.filter((_, j) => j !== i) });
+  void removeSkill; // referenced by future-edit affordances; keep import-time safe.
 
   const addCallable = (agentId: string) => {
     if (form.callableAgents.find(c => c.id === agentId)) return;
@@ -223,6 +239,10 @@ export function AgentsList() {
         setForm({
           ...INITIAL_FORM,
           name: String(parsed.name || ""),
+          // Paste-mode fallback: if the pasted config has no model field,
+          // claude-sonnet-4-6 is a real, current Anthropic model id (not
+          // a placeholder), so it's a reasonable default. The form
+          // dropdown does its own dynamic option set from modelCards.
           model: String(parsed.model || "claude-sonnet-4-6"),
           system: String(parsed.system || ""),
           description: String(parsed.description || ""),
@@ -230,7 +250,7 @@ export function AgentsList() {
           skills: Array.isArray(parsed.skills) ? parsed.skills as SkillEntry[] : [],
           callableAgents: Array.isArray(parsed.callable_agents) ? parsed.callable_agents as CallableEntry[] : [],
           runtimeId: rb?.runtime_id ?? "",
-          acpAgentId: rb?.acp_agent_id ?? "claude-code-acp",
+          acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
           localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist) ? rb.local_skill_blocklist : [],
         });
       } catch { /* keep current form if parse fails */ }
@@ -285,75 +305,68 @@ export function AgentsList() {
   });
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Agents</h1>
-          <p className="text-fg-muted text-sm">Create and manage autonomous agents.</p>
-        </div>
-        <button onClick={() => setShowCreate(true)} className="px-4 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover transition-colors">
-          + New agent
-        </button>
-      </div>
-
-      <div className="flex items-center gap-4 mb-4">
-        <div className="relative">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Go to agent ID..."
-            className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-56"
-          />
-        </div>
-        <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer select-none">
-          <input type="checkbox" checked={showArchived} onChange={(e) => setShowArchived(e.target.checked)} className="rounded accent-brand" />
-          Show archived
-        </label>
-      </div>
-
-      {loading ? (
-        <div className="flex items-center justify-center py-16"><svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg></div>
-      ) : displayed.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle">
-          <p className="text-lg mb-1">{search ? "No matching agents" : "No agents yet"}</p>
-          <p className="text-sm">{search ? "Try a different search term." : "Create your first agent to get started."}</p>
-          {!search && <button onClick={() => nav("/")} className="mt-3 text-sm text-brand hover:underline">Get started with the quickstart guide →</button>}
-        </div>
-      ) : (
-        <div className="border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
-                <th className="text-left px-4 py-2.5">ID</th>
-                <th className="text-left px-4 py-2.5">Name</th>
-                <th className="text-left px-4 py-2.5">Model</th>
-                <th className="text-left px-4 py-2.5">Status</th>
-                <th className="text-left px-4 py-2.5">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map((a) => (
-                <tr key={a.id} onClick={() => nav(`/agents/${a.id}`)}
-                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
-                  <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[180px]" title={a.id}>{a.id}</td>
-                  <td className="px-4 py-3 font-medium text-fg">{a.name}</td>
-                  <td className="px-4 py-3 text-fg-muted">{modelStr(a.model)}</td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full ${a.archived_at ? "bg-bg-surface text-fg-subtle" : "bg-success-subtle text-success"}`}>
-                      {a.archived_at ? "archived" : "active"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-fg-muted">{new Date(a.created_at).toLocaleDateString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
-      {/* Create dialog */}
+    <ListPage<Agent>
+      title="Agents"
+      subtitle="Create and manage autonomous agents."
+      createLabel="+ New agent"
+      onCreate={() => setShowCreate(true)}
+      searchPlaceholder="Go to agent ID..."
+      searchValue={search}
+      onSearchChange={setSearch}
+      showArchived={showArchived}
+      onShowArchivedChange={setShowArchived}
+      data={displayed}
+      loading={loading}
+      getRowKey={(a) => a.id}
+      onRowClick={(a) => nav(`/agents/${a.id}`)}
+      hasMore={hasMore}
+      onLoadMore={loadMore}
+      loadingMore={isLoadingMore}
+      emptyTitle={search ? "No matching agents" : "No agents yet"}
+      emptySubtitle={
+        search ? (
+          "Try a different search term."
+        ) : (
+          <>
+            <p>Create your first agent to get started.</p>
+            <button onClick={() => nav("/")} className="mt-3 text-sm text-brand hover:underline">
+              Get started with the quickstart guide →
+            </button>
+          </>
+        )
+      }
+      columns={[
+        {
+          key: "id",
+          label: "ID",
+          className: "font-mono text-xs text-fg-muted truncate max-w-[180px]",
+          render: (a) => <span title={a.id}>{a.id}</span>,
+        },
+        { key: "name", label: "Name", className: "font-medium text-fg" },
+        {
+          key: "model",
+          label: "Model",
+          className: "text-fg-muted",
+          render: (a) => modelStr(a.model),
+        },
+        {
+          key: "status",
+          label: "Status",
+          render: (a) => (
+            <span className={`inline-flex items-center text-xs px-2 py-0.5 rounded-full ${a.archived_at ? "bg-bg-surface text-fg-subtle" : "bg-success-subtle text-success"}`}>
+              {a.archived_at ? "archived" : "active"}
+            </span>
+          ),
+        },
+        {
+          key: "created",
+          label: "Created",
+          className: "text-fg-muted",
+          render: (a) => new Date(a.created_at).toLocaleDateString(),
+        },
+      ]}
+    >
+      {/* Create dialog — kept hand-rolled (template→form/yaml/json multi-step UI not a fit for the standard Modal) */}
       {showCreate && (
         <div className="fixed inset-0 bg-bg-overlay flex items-center justify-center z-50" onClick={closeCreate}>
           <div className="bg-bg rounded-lg shadow-xl w-full max-w-2xl max-h-[85vh] flex flex-col" onClick={(e) => e.stopPropagation()}>
@@ -454,45 +467,64 @@ export function AgentsList() {
                     <label className="text-sm text-fg-muted block mb-1">Name *</label>
                     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="Coding Assistant" />
                   </div>
-                  <div>
-                    <label className="text-sm text-fg-muted block mb-1">Model</label>
-                    <select value={form.model} onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })} className={inputCls}>
-                      <option>claude-sonnet-4-6</option>
-                      <option>claude-opus-4-6</option>
-                      <option>claude-haiku-4-5</option>
-                      {modelCards
-                        .filter(mc => !["claude-sonnet-4-6", "claude-opus-4-6", "claude-haiku-4-5"].includes(mc.model_id))
-                        .filter((mc, i, arr) => arr.findIndex(m => m.model_id === mc.model_id) === i)
-                        .map(mc => <option key={mc.model_id} value={mc.model_id}>{mc.model_id}</option>)}
-                    </select>
-                  </div>
-                  {modelCards.length > 0 && (
-                    <div>
-                      <label className="text-sm text-fg-muted block mb-1">Model Card</label>
-                      <select
-                        value={form.modelCardId}
-                        onChange={(e) => {
-                          const cardId = e.target.value;
-                          setForm({ ...form, modelCardId: cardId });
-                          if (cardId) {
-                            const card = modelCards.find(mc => mc.id === cardId);
-                            if (card) setForm(f => ({ ...f, modelCardId: cardId, model: card.model_id }));
-                          }
-                        }}
-                        className={inputCls}
-                      >
-                        <option value="">Auto-detect by model ID</option>
-                        {modelCards.map(mc => (
-                          <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
-                        ))}
-                      </select>
-                      <p className="text-xs text-fg-subtle mt-1">Select which API credentials to use for this agent.</p>
-                    </div>
+                  {/* Model + Model Card section. Cloud agents need the
+                      dropdown + a backing model_card to make API calls;
+                      local-runtime agents (form.runtimeId set) skip the
+                      whole thing because the ACP child running on the
+                      user's daemon brings its own LLM credentials —
+                      OMA's model_id and model_card never enter the
+                      picture. We show a one-line hint instead so it's
+                      clear this isn't a bug. */}
+                  {!form.runtimeId && (
+                    <>
+                      <div>
+                        <label className="text-sm text-fg-muted block mb-1">Model</label>
+                        <select
+                          value={form.model}
+                          onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })}
+                          className={inputCls}
+                          disabled={modelCards.length === 0}
+                        >
+                          {modelCards.length === 0 && <option value="">— add a model card first —</option>}
+                          {Array.from(new Set(modelCards.map(mc => mc.model_id))).map(modelId => (
+                            <option key={modelId} value={modelId}>{modelId}</option>
+                          ))}
+                        </select>
+                      </div>
+                      {modelCards.length > 0 && (
+                        <div>
+                          <label className="text-sm text-fg-muted block mb-1">Model Card</label>
+                          <select
+                            value={form.modelCardId}
+                            onChange={(e) => {
+                              const cardId = e.target.value;
+                              setForm({ ...form, modelCardId: cardId });
+                              if (cardId) {
+                                const card = modelCards.find(mc => mc.id === cardId);
+                                if (card) setForm(f => ({ ...f, modelCardId: cardId, model: card.model_id }));
+                              }
+                            }}
+                            className={inputCls}
+                          >
+                            <option value="">Auto-detect by model ID</option>
+                            {modelCards.map(mc => (
+                              <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
+                            ))}
+                          </select>
+                          <p className="text-xs text-fg-subtle mt-1">Select which API credentials to use for this agent.</p>
+                        </div>
+                      )}
+                      {modelCards.length === 0 && (
+                        <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
+                          No model cards configured. Cloud agents need at least one card to provide LLM credentials.{" "}
+                          <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
+                        </p>
+                      )}
+                    </>
                   )}
-                  {modelCards.length === 0 && (
+                  {form.runtimeId && (
                     <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-                      No model cards configured. Agents will use the environment API key.{" "}
-                      <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
+                      Model is determined by the ACP child on the runtime ({form.acpAgentId || "—"}) — it uses its own LLM credentials.
                     </p>
                   )}
                   <div>
@@ -547,15 +579,46 @@ export function AgentsList() {
                         {form.runtimeId && (
                           <div className="mt-2">
                             <label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</label>
-                            <select
-                              value={form.acpAgentId}
-                              onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
-                              className={inputCls}
-                            >
-                              {(runtimes.find((r) => r.id === form.runtimeId)?.agents ?? []).map((a) => (
-                                <option key={a.id} value={a.id}>{a.id}</option>
-                              ))}
-                            </select>
+                            {(() => {
+                              const detectedAgents = runtimes.find((r) => r.id === form.runtimeId)?.agents ?? [];
+                              const detectedIds = new Set(detectedAgents.map((a) => a.id));
+                              // OMA promotes 4 agents as "first class" in
+                              // the UI: claude-acp, codex-acp, openclaw,
+                              // hermes (see overlay's `featured` flag).
+                              // Featured-detected render on top so the
+                              // common case is one click. Anything not
+                              // detected by the daemon is intentionally
+                              // hidden — users must install via cli first.
+                              const featuredIds = new Set(
+                                KNOWN_ACP_AGENTS.filter((e) => e.featured).map((e) => e.id),
+                              );
+                              const featuredDetected = detectedAgents.filter((a) => featuredIds.has(a.id));
+                              const otherDetected = detectedAgents.filter((a) => !featuredIds.has(a.id));
+                              return (
+                                <>
+                                  <select
+                                    value={form.acpAgentId}
+                                    onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
+                                    className={inputCls}
+                                  >
+                                    {featuredDetected.length > 0 && (
+                                      <optgroup label="★ Featured">
+                                        {featuredDetected.map((a) => (
+                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                        ))}
+                                      </optgroup>
+                                    )}
+                                    {otherDetected.length > 0 && (
+                                      <optgroup label="Other detected on this runtime">
+                                        {otherDetected.map((a) => (
+                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                        ))}
+                                      </optgroup>
+                                    )}
+                                  </select>
+                                </>
+                              );
+                            })()}
                             <p className="text-xs text-fg-subtle mt-1">
                               Each turn spawns this ACP child on the runtime. Model + skills come from the daemon-fetched bundle.
                             </p>
@@ -564,8 +627,15 @@ export function AgentsList() {
                                 Default = all visible (empty blocklist). User unchecks
                                 to hide a global skill from this agent. */}
                             {(() => {
+                              // Canonicalize first: form.acpAgentId may be a
+                              // legacy alias on stale rows ("claude-code-acp"),
+                              // but the daemon emits local_skills under the
+                              // canonical key ("claude-agent-acp"). Without
+                              // resolving here the blocklist would silently
+                              // show empty even though skills exist.
+                              const canonicalId = resolveKnownAgent(form.acpAgentId)?.id ?? form.acpAgentId;
                               const localSkills =
-                                runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[form.acpAgentId] ?? [];
+                                runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[canonicalId] ?? [];
                               if (!localSkills.length) return null;
                               const allowed = new Set(localSkills.map((s) => s.id))
                               for (const id of form.localSkillBlocklist) allowed.delete(id);
@@ -782,6 +852,6 @@ export function AgentsList() {
           </div>
         </div>
       )}
-    </div>
+    </ListPage>
   );
 }

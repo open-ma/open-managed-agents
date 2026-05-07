@@ -1,8 +1,10 @@
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { ListPage } from "../components/ListPage";
 
 interface Session {
   id: string; title?: string; agent_id: string; environment_id: string;
@@ -48,42 +50,100 @@ function SlackBadge({ metadata }: { metadata?: Record<string, unknown> }) {
   );
 }
 
+/** Tiny "🧪 Eval" pill shown when a session was spawned by an eval-runner trial. */
+function EvalBadge({ metadata }: { metadata?: Record<string, unknown> }) {
+  const ev = metadata?.eval as { run_id?: string; task_id?: string } | undefined;
+  if (!ev?.run_id) return null;
+  return (
+    <a
+      href={`/evals/${ev.run_id}`}
+      onClick={(e) => e.stopPropagation()}
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-info-subtle text-info hover:opacity-80 transition-opacity"
+      title={`Eval run ${ev.run_id}${ev.task_id ? ` · task ${ev.task_id}` : ""}`}
+    >
+      🧪 {ev.task_id ?? "Eval"}
+    </a>
+  );
+}
+
 export function SessionsList() {
   const { api } = useApi();
   const nav = useNavigate();
-  const [sessions, setSessions] = useState<Session[]>([]);
-  const [agents, setAgents] = useState<Array<{ id: string; name: string }>>([]);
+  const [agents, setAgents] = useState<Array<{
+    id: string;
+    name: string;
+    // Present iff the agent is bound to a user-registered runtime
+    // (acp-proxy harness). The New Session dialog reads this to decide
+    // whether to show the Environment picker — local-runtime sessions
+    // don't run a sandbox container so there's nothing to pick.
+    runtime_binding?: { runtime_id: string; acp_agent_id: string };
+  }>>([]);
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [, setAuxLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({
     agent: "", environment_id: "", title: "",
     vault_ids: [] as string[],
     github_url: "", github_token: "", github_branch: "",
-    env_secrets: [{ name: "", value: "" }],
+    env_vars: [{ name: "", value: "" }],
+  });
+  // Per-row toggle for masking the env value input. Default: masked. We
+  // intentionally use a text input + a visual mask via the toggle (rather
+  // than type="password") so the UI stops implying that the value is
+  // encrypted at rest — env values are stored alongside other session
+  // resources without app-level encryption today (see the "env" type
+  // rename in api-types/types.ts:801 for the matching back-end change).
+  const [revealedEnvIdx, setRevealedEnvIdx] = useState<Set<number>>(new Set());
+  const toggleEnvReveal = (idx: number) => setRevealedEnvIdx((prev) => {
+    const next = new Set(prev);
+    if (next.has(idx)) next.delete(idx); else next.add(idx);
+    return next;
   });
 
   const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
 
-  const load = async () => {
-    setLoading(true);
+  const [search, setSearch] = useState("");
+  const [filterAgent, setFilterAgent] = useState("");
+
+  // Sessions table — cursor-paginated, server-side filtered by agent_id
+  // when the filter dropdown is set. Filter change resets to page 1
+  // (useCursorList re-fetches when params change).
+  const sessionsParams = useMemo(
+    () => ({ agent_id: filterAgent || undefined }),
+    [filterAgent],
+  );
+  const {
+    items: sessions,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: refreshSessions,
+  } = useCursorList<Session>("/v1/sessions", { limit: 50, params: sessionsParams });
+
+  const loadAux = async () => {
+    setAuxLoading(true);
     try {
-      const [s, a, e, v] = await Promise.all([
-        api<{ data: Session[] }>("/v1/sessions?limit=100"),
-        api<{ data: Array<{ id: string; name: string }> }>("/v1/agents?limit=100"),
-        api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=100"),
-        api<{ data: Vault[] }>("/v1/vaults?limit=100").catch(() => ({ data: [] })),
+      const [a, e, v] = await Promise.all([
+        api<{ data: Array<{ id: string; name: string }> }>("/v1/agents?limit=200"),
+        api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=200"),
+        api<{ data: Vault[] }>("/v1/vaults?limit=200").catch(() => ({ data: [] })),
       ]);
-      setSessions(s.data);
       setAgents(a.data);
       setEnvs(e.data);
       setVaults(v.data);
     } catch {}
-    setLoading(false);
+    setAuxLoading(false);
   };
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { loadAux(); }, []);
+
+  // Computed: which agent is selected, and is it bound to a local runtime?
+  // The Environment picker, the Create-button enable condition, and the
+  // request body all key off this single source of truth.
+  const selectedAgent = agents.find((a) => a.id === form.agent);
+  const isLocalRuntime = !!selectedAgent?.runtime_binding;
 
   const create = async () => {
     try {
@@ -96,17 +156,23 @@ export function SessionsList() {
         resources.push(res);
       }
 
-      for (const s of form.env_secrets) {
+      for (const s of form.env_vars) {
         if (s.name && s.value) {
-          resources.push({ type: "env_secret", name: s.name, value: s.value });
+          // type=env (was env_secret pre-rename). Server still accepts the
+          // legacy alias so older console builds keep working — see
+          // sessions.ts:262.
+          resources.push({ type: "env", name: s.name, value: s.value });
         }
       }
 
       const body: Record<string, unknown> = {
         agent: form.agent,
-        environment_id: form.environment_id,
         title: form.title || undefined,
       };
+      // Only send environment_id when the user actually picked one. For
+      // local-runtime agents the picker is hidden and the server picks a
+      // tenant fallback (sessions.ts requires a NOT NULL env_id today).
+      if (form.environment_id) body.environment_id = form.environment_id;
       if (form.vault_ids.length > 0) body.vault_ids = form.vault_ids;
       if (resources.length > 0) body.resources = resources;
 
@@ -126,20 +192,28 @@ export function SessionsList() {
     }));
   };
 
-  const updateEnvSecret = (idx: number, field: "name" | "value", val: string) => {
+  const updateEnvVar = (idx: number, field: "name" | "value", val: string) => {
     setForm(f => {
-      const secrets = [...f.env_secrets];
-      secrets[idx] = { ...secrets[idx], [field]: val };
-      return { ...f, env_secrets: secrets };
+      const vars = [...f.env_vars];
+      vars[idx] = { ...vars[idx], [field]: val };
+      return { ...f, env_vars: vars };
     });
   };
 
-  const addEnvSecret = () => {
-    setForm(f => ({ ...f, env_secrets: [...f.env_secrets, { name: "", value: "" }] }));
+  const addEnvVar = () => {
+    setForm(f => ({ ...f, env_vars: [...f.env_vars, { name: "", value: "" }] }));
   };
 
-  const removeEnvSecret = (idx: number) => {
-    setForm(f => ({ ...f, env_secrets: f.env_secrets.filter((_, i) => i !== idx) }));
+  const removeEnvVar = (idx: number) => {
+    setForm(f => ({ ...f, env_vars: f.env_vars.filter((_, i) => i !== idx) }));
+    setRevealedEnvIdx((prev) => {
+      const next = new Set<number>();
+      for (const i of prev) {
+        if (i < idx) next.add(i);
+        else if (i > idx) next.add(i - 1);
+      }
+      return next;
+    });
   };
 
   const statusCls = (status?: string) => {
@@ -150,94 +224,96 @@ export function SessionsList() {
     }
   };
 
-  const [search, setSearch] = useState("");
-  const [filterAgent, setFilterAgent] = useState("");
-
   const displayed = sessions.filter((s) => {
     if (search && !s.id.toLowerCase().includes(search.toLowerCase()) && !(s.title || "").toLowerCase().includes(search.toLowerCase())) return false;
-    if (filterAgent && s.agent_id !== filterAgent) return false;
     return true;
   });
 
+  // Compatibility shim: keep `load()` reference for any future caller.
+  // Currently unused after refresh-on-create kicks off via refreshSessions.
+  void refreshSessions;
+
+  const agentFilter = agents.length > 0 ? (
+    <select
+      value={filterAgent}
+      onChange={(e) => setFilterAgent(e.target.value)}
+      className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg focus:border-brand focus:outline-none transition-colors"
+    >
+      <option value="">Agent: All</option>
+      {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
+    </select>
+  ) : null;
+
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6">
-        <div>
-          <h1 className="font-display text-xl font-semibold tracking-tight text-fg">Sessions</h1>
-          <p className="text-fg-muted text-sm">Trace and debug agent sessions.</p>
-        </div>
-        <Button onClick={() => { setShowCreate(true); if (!form.agent && agents[0]) setForm(f => ({ ...f, agent: agents[0].id })); if (!form.environment_id && envs[0]) setForm(f => ({ ...f, environment_id: envs[0].id })); }}>
-          + New session
-        </Button>
-      </div>
-
-      <div className="flex items-center gap-4 mb-4">
-        <div className="relative">
-          <svg className="absolute left-2.5 top-1/2 -translate-y-1/2 text-fg-subtle" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
-          <input
-            type="text"
-            value={search}
-            onChange={(e) => setSearch(e.target.value)}
-            placeholder="Go to session ID..."
-            className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-56"
-          />
-        </div>
-        {agents.length > 0 && (
-          <select
-            value={filterAgent}
-            onChange={(e) => setFilterAgent(e.target.value)}
-            className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg focus:border-brand focus:outline-none transition-colors"
-          >
-            <option value="">Agent: All</option>
-            {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-          </select>
-        )}
-      </div>
-
-      {loading ? (
-        <div className="flex items-center justify-center py-16"><svg className="animate-spin h-5 w-5 text-fg-subtle" viewBox="0 0 24 24" fill="none"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"/><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"/></svg></div>
-      ) : displayed.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle">
-          <p className="text-lg mb-1">{search || filterAgent ? "No matching sessions" : "No sessions yet"}</p>
-          <p className="text-sm">{search || filterAgent ? "Try different filters." : "Sessions will appear here once created through the API."}</p>
-        </div>
-      ) : (
-        <div className="border border-border rounded-lg overflow-hidden">
-          <table className="w-full text-sm">
-            <thead>
-              <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
-                <th className="text-left px-4 py-2.5">ID</th>
-                <th className="text-left px-4 py-2.5">Name</th>
-                <th className="text-left px-4 py-2.5">Status</th>
-                <th className="text-left px-4 py-2.5">Agent</th>
-                <th className="text-left px-4 py-2.5">Created</th>
-              </tr>
-            </thead>
-            <tbody>
-              {displayed.map((s) => (
-                <tr key={s.id} onClick={() => nav(`/sessions/${s.id}`)} className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
-                  <td className="px-4 py-3 font-mono text-xs text-fg-muted truncate max-w-[180px]" title={s.id}>{s.id}</td>
-                  <td className="px-4 py-3 font-medium text-fg">
-                    <span className="inline-flex items-center gap-2">
-                      {s.title || "Untitled"}
-                      <LinearBadge metadata={s.metadata} />
-                      <SlackBadge metadata={s.metadata} />
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(s.status)}`}>
-                      {s.status || "idle"}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3 text-fg-muted font-mono text-xs">{s.agent_id}</td>
-                  <td className="px-4 py-3 text-fg-muted">{new Date(s.created_at).toLocaleDateString()}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
-      )}
-
+    <ListPage<Session>
+      title="Sessions"
+      subtitle="Trace and debug agent sessions."
+      createLabel="+ New session"
+      onCreate={() => {
+        setShowCreate(true);
+        if (!form.agent && agents[0]) setForm(f => ({ ...f, agent: agents[0].id }));
+        if (!form.environment_id && envs[0]) setForm(f => ({ ...f, environment_id: envs[0].id }));
+      }}
+      searchPlaceholder="Go to session ID..."
+      searchValue={search}
+      onSearchChange={setSearch}
+      filters={agentFilter}
+      data={displayed}
+      loading={loading}
+      getRowKey={(s) => s.id}
+      onRowClick={(s) => nav(`/sessions/${s.id}`)}
+      hasMore={hasMore}
+      onLoadMore={loadMore}
+      loadingMore={isLoadingMore}
+      emptyTitle={search || filterAgent ? "No matching sessions" : "No sessions yet"}
+      emptySubtitle={
+        search || filterAgent
+          ? "Try different filters."
+          : "Sessions will appear here once created through the API."
+      }
+      columns={[
+        {
+          key: "id",
+          label: "ID",
+          className: "font-mono text-xs text-fg-muted truncate max-w-[180px]",
+          render: (s) => <span title={s.id}>{s.id}</span>,
+        },
+        {
+          key: "name",
+          label: "Name",
+          className: "font-medium text-fg",
+          render: (s) => (
+            <span className="inline-flex items-center gap-2">
+              {s.title || "Untitled"}
+              <LinearBadge metadata={s.metadata} />
+              <SlackBadge metadata={s.metadata} />
+              <EvalBadge metadata={s.metadata} />
+            </span>
+          ),
+        },
+        {
+          key: "status",
+          label: "Status",
+          render: (s) => (
+            <span className={`inline-flex items-center gap-1 text-xs px-2 py-0.5 rounded-full ${statusCls(s.status)}`}>
+              {s.status || "idle"}
+            </span>
+          ),
+        },
+        {
+          key: "agent",
+          label: "Agent",
+          className: "text-fg-muted font-mono text-xs",
+          render: (s) => s.agent_id,
+        },
+        {
+          key: "created",
+          label: "Created",
+          className: "text-fg-muted",
+          render: (s) => new Date(s.created_at).toLocaleDateString(),
+        },
+      ]}
+    >
       <Modal
         open={showCreate}
         onClose={() => setShowCreate(false)}
@@ -246,7 +322,7 @@ export function SessionsList() {
         footer={
           <>
             <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-            <Button onClick={create} disabled={!form.agent || !form.environment_id}>Create</Button>
+            <Button onClick={create} disabled={!form.agent || (!isLocalRuntime && !form.environment_id)}>Create</Button>
           </>
         }
       >
@@ -261,16 +337,28 @@ export function SessionsList() {
               {agents.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
             </select>
           </div>
-          <div>
-            <div className="flex items-center justify-between mb-1">
-              <label className="text-sm text-fg-muted">Environment</label>
-              <a href="/environments" className="text-xs text-brand hover:underline">Manage environments →</a>
+          {/* Environment picker is for cloud sandbox lanes — local-runtime
+              agents (acp-proxy harness) run on the user's daemon and
+              never touch a cloud sandbox, so the picker is hidden in
+              that mode. Server picks a tenant fallback when env_id is
+              omitted; see sessions.ts:resolvedEnvId. */}
+          {!isLocalRuntime && (
+            <div>
+              <div className="flex items-center justify-between mb-1">
+                <label className="text-sm text-fg-muted">Environment</label>
+                <a href="/environments" className="text-xs text-brand hover:underline">Manage environments →</a>
+              </div>
+              <select value={form.environment_id} onChange={(e) => setForm({ ...form, environment_id: e.target.value })} className={inputCls}>
+                <option value="">Select environment...</option>
+                {envs.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}
+              </select>
             </div>
-            <select value={form.environment_id} onChange={(e) => setForm({ ...form, environment_id: e.target.value })} className={inputCls}>
-              <option value="">Select environment...</option>
-              {envs.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}
-            </select>
-          </div>
+          )}
+          {isLocalRuntime && (
+            <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
+              Local runtime agents use the runtime machine's filesystem — no cloud environment needed.
+            </p>
+          )}
           <div>
             <label className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></label>
             <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className={inputCls} placeholder="My conversation" />
@@ -313,26 +401,46 @@ export function SessionsList() {
           </details>
 
           <details className="group">
-            <summary className="text-sm font-medium text-fg cursor-pointer hover:text-brand">Environment Secrets <span className="text-fg-subtle font-normal">(optional)</span></summary>
+            <summary className="text-sm font-medium text-fg cursor-pointer hover:text-brand">Environment Variables <span className="text-fg-subtle font-normal">(optional)</span></summary>
             <div className="mt-2 space-y-2 pl-1">
-              {form.env_secrets.map((s, i) => (
-                <div key={i} className="flex gap-2 items-start">
-                  <div className="flex-1">
-                    <input value={s.name} onChange={(e) => updateEnvSecret(i, "name", e.target.value)} className={inputCls} placeholder="ENV_VAR_NAME" />
+              <p className="text-xs text-fg-subtle">
+                Plain environment variables passed to the agent. For tokens that need encryption, use credential vaults instead.
+              </p>
+              {form.env_vars.map((s, i) => {
+                const revealed = revealedEnvIdx.has(i);
+                return (
+                  <div key={i} className="flex gap-2 items-start">
+                    <div className="flex-1">
+                      <input value={s.name} onChange={(e) => updateEnvVar(i, "name", e.target.value)} className={inputCls} placeholder="ENV_VAR_NAME" />
+                    </div>
+                    <div className="flex-1 relative">
+                      <input
+                        type={revealed ? "text" : "password"}
+                        value={s.value}
+                        onChange={(e) => updateEnvVar(i, "value", e.target.value)}
+                        className={`${inputCls} pr-12`}
+                        placeholder="value"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => toggleEnvReveal(i)}
+                        className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
+                        aria-label={revealed ? "Hide value" : "Show value"}
+                      >
+                        {revealed ? "hide" : "show"}
+                      </button>
+                    </div>
+                    {form.env_vars.length > 1 && (
+                      <button onClick={() => removeEnvVar(i)} className="text-fg-subtle hover:text-danger text-xs mt-2">Remove</button>
+                    )}
                   </div>
-                  <div className="flex-1">
-                    <input type="password" value={s.value} onChange={(e) => updateEnvSecret(i, "value", e.target.value)} className={inputCls} placeholder="secret value" />
-                  </div>
-                  {form.env_secrets.length > 1 && (
-                    <button onClick={() => removeEnvSecret(i)} className="text-fg-subtle hover:text-danger text-xs mt-2">Remove</button>
-                  )}
-                </div>
-              ))}
-              <button onClick={addEnvSecret} className="text-xs text-fg-muted hover:text-fg">+ Add secret</button>
+                );
+              })}
+              <button onClick={addEnvVar} className="text-xs text-fg-muted hover:text-fg">+ Add variable</button>
             </div>
           </details>
         </div>
       </Modal>
-    </div>
+    </ListPage>
   );
 }

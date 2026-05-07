@@ -20,6 +20,7 @@ import {
   SessionResourceNotFoundError,
   type NewResourceInput,
 } from "@open-managed-agents/sessions-store";
+import { jsonPage, parsePageQuery } from "../lib/list-page";
 
 const app = new Hono<{
   Bindings: Env;
@@ -161,6 +162,38 @@ function bindingErrorResponse(
 }
 
 /**
+ * Direct-to-DO fetcher used by local-runtime sessions that don't pin an
+ * environment. Skips the sandbox-worker indirection — local-runtime sessions
+ * never run a container, so the only thing the "binding" is used for is
+ * routing /sessions/:id/* to the SessionDO. This mirrors the lazy fallback
+ * already inside getSandboxBinding (see lines 91-114) but factored out so
+ * the env_id-less path doesn't have to construct a fake environmentId just
+ * to traverse a function whose first action is to look one up.
+ */
+function sessionDoFallbackFetcher(env: Env): Fetcher | null {
+  if (!env.SESSION_DO) return null;
+  return {
+    fetch: (input: RequestInfo | URL, init?: RequestInit) => {
+      const req = input instanceof Request ? input : new Request(input, init);
+      const url = new URL(req.url);
+      const match = url.pathname.match(/^\/sessions\/([^/]+)\/(.*)/);
+      if (!match) return Promise.resolve(new Response("Not found", { status: 404 }));
+      const [, sessionId, rest] = match;
+      const doId = env.SESSION_DO!.idFromName(sessionId);
+      const stub = env.SESSION_DO!.get(doId);
+      // Workaround for cloudflare/workerd#2240
+      (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
+      return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
+        method: req.method,
+        headers: req.headers,
+        body: req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined,
+      }));
+    },
+    connect: () => { throw new Error("not implemented"); },
+  } as unknown as Fetcher;
+}
+
+/**
  * Forward a request to the sandbox worker via service binding.
  */
 function forwardToSandbox(
@@ -256,11 +289,12 @@ app.post("/", async (c) => {
   if (daily) return daily;
   const body = await c.req.json<{
     agent: string;
-    environment_id: string;
+    environment_id?: string;
     title?: string;
     vault_ids?: string[];
     resources?: Array<{
-      type: "file" | "memory_store" | "github_repository" | "github_repo" | "env_secret";
+      // `env` is the canonical name; `env_secret` accepted as legacy alias.
+      type: "file" | "memory_store" | "github_repository" | "github_repo" | "env" | "env_secret";
       file_id?: string;
       memory_store_id?: string;
       mount_path?: string;
@@ -276,8 +310,8 @@ app.post("/", async (c) => {
     }>;
   }>();
 
-  if (!body.agent || !body.environment_id) {
-    return c.json({ error: "agent and environment_id are required" }, 400);
+  if (!body.agent) {
+    return c.json({ error: "agent is required" }, 400);
   }
 
   // The 8-memory-store sub-cap is enforced inside sessions-store on
@@ -308,10 +342,51 @@ app.post("/", async (c) => {
   const agentRow = await c.var.services.agents.get({ tenantId: t, agentId: body.agent });
   if (!agentRow) return c.json({ error: "Agent not found" }, 404);
 
-  // Resolve sandbox worker binding
-  const sbRes = await getSandboxBinding(c.env, body.environment_id, t);
-  const binding = sbRes.binding;
-  if (!binding) return bindingErrorResponse(c, sbRes);
+  // Local-runtime agents (acp-proxy harness) don't use the sandbox container
+  // — their loop is forwarded to the user's daemon via the RuntimeRoom DO.
+  // We still need an environment_id to satisfy the sessions schema (NOT
+  // NULL) and the SessionDO routing, but the user shouldn't have to think
+  // about it: pick the tenant's first environment as a benign default.
+  // Cloud agents continue to require an explicit environment_id because
+  // the picked sandbox lane materially affects the run.
+  //
+  // Long-term: make sessions.environment_id nullable so local-runtime
+  // sessions can store NULL — out of scope for this PR (D1 migration +
+  // sessions-store API + multiple downstream consumers).
+  const agentIsLocalRuntime = !!agentRow.runtime_binding;
+  let resolvedEnvId = body.environment_id;
+  if (!resolvedEnvId) {
+    if (!agentIsLocalRuntime) {
+      return c.json({ error: "environment_id is required for cloud agents" }, 400);
+    }
+    const envs = await c.var.services.environments.list({ tenantId: t });
+    const fallback = envs.find((e) => !e.archived_at) ?? envs[0];
+    if (!fallback) {
+      return c.json(
+        { error: "No environment configured. Create at least one environment before starting a local-runtime session." },
+        400,
+      );
+    }
+    resolvedEnvId = fallback.id;
+  }
+
+  // Resolve sandbox worker binding. Local-runtime sessions still go
+  // through the sandbox lane for SessionDO routing, but the harness skips
+  // the container — so a missing/unhealthy sandbox is technically tolerable
+  // for them. We keep the same lookup path for now to avoid two routing
+  // codepaths; if this becomes a real reliability problem (e.g. the user's
+  // first env is in `error` status), revisit and short-circuit to the
+  // SESSION_DO direct fetcher (sessionDoFallbackFetcher below).
+  const sbRes = await getSandboxBinding(c.env, resolvedEnvId, t);
+  let binding = sbRes.binding;
+  if (!binding) {
+    if (agentIsLocalRuntime) {
+      binding = sessionDoFallbackFetcher(c.env);
+      if (!binding) return bindingErrorResponse(c, sbRes);
+    } else {
+      return bindingErrorResponse(c, sbRes);
+    }
+  }
 
   // Pre-fetch snapshots so SessionDO doesn't have to read CONFIG_KV with a
   // tenant-prefixed key (which fails when sandbox-default's KV binding
@@ -319,7 +394,7 @@ app.post("/", async (c) => {
   const { tenant_id: _atid, ...agentSnapshot } = agentRow;
   const envRow = await c.var.services.environments.get({
     tenantId: t,
-    environmentId: body.environment_id,
+    environmentId: resolvedEnvId,
   });
   const environmentSnapshot = envRow ? toEnvironmentConfig(envRow) : undefined;
   const vaultIds = body.vault_ids || [];
@@ -364,7 +439,7 @@ app.post("/", async (c) => {
   const vaultCredentials = await fetchVaultCredentials(c.var.services, t, vaultIds);
 
   // Build the non-file initial resources (memory_store, github_repository,
-  // env_secret). File resources need the session id BEFORE we can create the
+  // env). File resources need the session id BEFORE we can create the
   // scoped file row, so they're handled after the session row exists.
   const nonFileInputs: NewResourceInput[] = [];
   for (const res of body.resources ?? []) {
@@ -385,9 +460,11 @@ app.post("/", async (c) => {
         mount_path: res.mount_path || "/workspace",
         checkout: res.checkout,
       });
-    } else if (res.type === "env_secret" && res.name && res.value) {
+    } else if ((res.type === "env" || res.type === "env_secret") && res.name && res.value) {
+      // Normalize on write: legacy `env_secret` always lands as `env` in
+      // the store. Read-side code only has to handle the new name.
       nonFileInputs.push({
-        type: "env_secret",
+        type: "env",
         name: res.name,
       });
     }
@@ -403,7 +480,7 @@ app.post("/", async (c) => {
     const result = await c.var.services.sessions.create({
       tenantId: t,
       agentId: body.agent,
-      environmentId: body.environment_id,
+      environmentId: resolvedEnvId,
       title: body.title || "",
       vaultIds,
       agentSnapshot,
@@ -445,7 +522,7 @@ app.post("/", async (c) => {
     "PUT",
     JSON.stringify({
       agent_id: body.agent,
-      environment_id: body.environment_id,
+      environment_id: resolvedEnvId,
       title: body.title || "",
       session_id: sessionId,
       tenant_id: t,
@@ -457,18 +534,18 @@ app.post("/", async (c) => {
     }),
   );
 
-  // Persist secret KV entries for the env_secret + github_repository inputs
-  // we created above. These continue to live in CONFIG_KV — sessions-store
+  // Persist secret KV entries for the env + github_repository inputs we
+  // created above. These continue to live in CONFIG_KV — sessions-store
   // intentionally records resource METADATA only.
   for (let i = 0; i < (body.resources?.length ?? 0); i++) {
     const res = body.resources![i];
-    if (res.type === "env_secret" && res.name && res.value) {
-      // Find the matching createdResource by metadata equality (env_secret
-      // has no meaningful natural key beyond name; the order is preserved
-      // because we built nonFileInputs in source order and sessions-store
-      // returns the same order).
+    if ((res.type === "env" || res.type === "env_secret") && res.name && res.value) {
+      // Find the matching createdResource by metadata equality (env has no
+      // meaningful natural key beyond name; the order is preserved because
+      // we built nonFileInputs in source order and sessions-store returns
+      // the same order). Read-side already normalized to type=env above.
       const created = createdResources.find(
-        (r) => r.type === "env_secret" && r.resource.type === "env_secret" && r.resource.name === res.name,
+        (r) => r.type === "env" && r.resource.type === "env" && r.resource.name === res.name,
       );
       if (created) {
         await c.var.services.sessionSecrets.put({
@@ -571,24 +648,15 @@ app.post("/", async (c) => {
   return c.json(response, 201);
 });
 
-// GET /v1/sessions — list sessions
+// GET /v1/sessions — list sessions (cursor-paginated, optional agent_id filter)
 app.get("/", async (c) => {
-  const agentIdFilter = c.req.query("agent_id");
-  const limitParam = c.req.query("limit");
-  const order = c.req.query("order") === "asc" ? "asc" : "desc";
-  const includeArchived = c.req.query("include_archived") === "true";
-  let limit = limitParam ? parseInt(limitParam, 10) : 100;
-  if (isNaN(limit) || limit < 1) limit = 100;
-  if (limit > 1000) limit = 1000;
-
-  const sessions = await c.var.services.sessions.list({
+  const agentIdFilter = c.req.query("agent_id") || undefined;
+  const page = await c.var.services.sessions.listPage({
     tenantId: c.get("tenant_id"),
-    agentId: agentIdFilter ?? undefined,
-    includeArchived,
-    order,
-    limit,
+    agentId: agentIdFilter,
+    ...parsePageQuery(c),
   });
-  return c.json({ data: sessions.map(toApiSession) });
+  return jsonPage(c, page, toApiSession);
 });
 
 // GET /v1/sessions/:id — get session (status from sandbox worker)
@@ -610,7 +678,24 @@ app.get("/:id", async (c) => {
       const fullStatus = (await fullStatusRes.json()) as {
         status: string;
         usage: { input_tokens: number; output_tokens: number };
-        outcome_evaluations: Array<{ result: string; iteration: number; feedback?: string }>;
+        // Phase 4 / AMA-aligned: every terminal `span.outcome_evaluation_end`
+        // for this session, in iteration order. AMA returns this verbatim
+        // under `outcome_evaluations[]` from GET /v1/sessions/:id.
+        outcome_evaluations: Array<{
+          outcome_id?: string;
+          result: string;
+          iteration: number;
+          explanation?: string;
+          /** @deprecated alias of `explanation`. */
+          feedback?: string;
+          usage?: {
+            input_tokens: number;
+            output_tokens: number;
+            cache_creation_input_tokens?: number;
+            cache_read_input_tokens?: number;
+          };
+          processed_at?: string;
+        }>;
       };
       response.status = fullStatus.status;
       response.usage = fullStatus.usage;
@@ -723,7 +808,7 @@ app.delete("/:id", async (c) => {
 
   // Cascade-delete the session row + every session_resources row in one
   // batch. Caller is still responsible for the per-session secret KV
-  // entries (env_secret.value, github_repository.token) and for files
+  // entries (env.value, github_repository.token) and for files
   // uploaded under this session — both are cleaned up below.
   try {
     await c.var.services.sessions.delete({ tenantId: t, sessionId: id });
@@ -975,6 +1060,17 @@ async function handleJSONEvents(c: Context<{ Bindings: Env; Variables: { tenant_
 
   const url = new URL(c.req.url);
   const res = await forwardToSandbox(binding, `/sessions/${id}/events${url.search}`, c.req.raw, "GET");
+  if (!res.ok) {
+    // Sandbox/agent worker can return non-JSON 500s (e.g. SqliteHistory throws,
+    // R2 spill resolve fails, DO storage timeout). Pass through the raw body so
+    // the caller sees the real cause instead of "Unexpected token … is not
+    // valid JSON" from a JSON-greedy res.json().
+    const body = await res.text();
+    return new Response(body, {
+      status: res.status,
+      headers: { "content-type": res.headers.get("content-type") ?? "text/plain" },
+    });
+  }
   const result = await res.json();
   return c.json(result);
 }
@@ -1169,7 +1265,12 @@ app.get("/:id/trajectory", async (c) => {
         c.req.raw,
         "GET",
       );
-      if (!res.ok) break;
+      if (!res.ok) {
+        const errBody = await res.text().catch(() => "");
+        throw new Error(
+          `events fetch failed: ${res.status} ${errBody.slice(0, 200)} (after_seq=${afterSeq})`,
+        );
+      }
       const body = (await res.json()) as { data?: StoredEvent[]; has_more?: boolean };
       const batch = body.data || [];
       all.push(...batch);
@@ -1231,6 +1332,31 @@ app.get("/:id/threads", async (c) => {
 
   const res = await forwardToSandbox(binding, `/sessions/${id}/threads`, c.req.raw, "GET");
   return c.json(await res.json());
+});
+
+// POST /v1/sessions/:id/exec — run a raw shell command in this session's
+// sandbox WITHOUT going through the agent. Designed for eval / verifier
+// workflows where the harness needs to run pytest (or similar) on the
+// post-agent state without trusting the model to invoke a tool. Body:
+// { command: string, timeout_ms?: number (default 60000) }
+// Returns: { exit_code: number, output: string, truncated: boolean }
+app.post("/:id/exec", async (c) => {
+  const id = c.req.param("id");
+  const t = c.get("tenant_id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
+
+  const res = await forwardToSandbox(binding, `/sessions/${id}/exec`, c.req.raw, "POST");
+  // Pass status through (exec can legitimately return 500 on sandbox error)
+  const body = await res.text();
+  return new Response(body, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
 });
 
 // GET /v1/sessions/:id/threads/:thread_id/events — thread events

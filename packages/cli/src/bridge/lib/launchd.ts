@@ -6,56 +6,33 @@
  * StandardOutPath / StandardErrorPath → logs go to ~/Library/Logs/oma/
  * so users can `tail -f` without dealing with `log show` filters.
  *
- * The plist invokes the same `oma bridge` binary that's on PATH (the one
- * the user installed with `npm i -g @openma/cli`). If the user
- * uninstalls the npm package, the plist will still try to start it on next
- * load and fail — `oma bridge uninstall` removes the plist explicitly.
+ * Why we call node directly instead of the `oma` shim: the shim's shebang
+ * is `#!/usr/bin/env node`, and launchd does NOT source the user's shell
+ * init — so on nvm/asdf/volta machines `env node` fails with 127 and the
+ * daemon never starts (KeepAlive then loops forever, see issue logs).
+ * We freeze process.execPath at setup time as the absolute node path and
+ * point ProgramArguments at the cli's dist/index.js directly. dirname(node)
+ * is also prepended to EnvironmentVariables.PATH so spawned ACP children
+ * (which still carry `#!/usr/bin/env node` shebangs) can resolve node too.
+ * This is the same pattern PM2 uses for `pm2 startup` — the working node
+ * path at setup is the one we commit to. Users who later nvm-uninstall
+ * that node version need to re-run `oma bridge setup` (or the daemon
+ * loops 127 again). That re-setup is a one-liner so we accept the cost
+ * over the alternatives (ship our own node, write shell wrappers per
+ * version manager, etc).
  */
 
-import { mkdir, writeFile, unlink } from "node:fs/promises";
+import { mkdir, writeFile, unlink, readFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import { spawn } from "node:child_process";
 import { paths, currentPlatform } from "./platform.js";
+import { buildPlist, type BuilderOpts } from "./service-templates.js";
 
-export interface InstallOptions {
-  /** Absolute path to the daemon binary (the bin entry of @openma/cli). */
-  binaryPath: string;
-}
-
-function buildPlist(opts: InstallOptions): string {
-  const p = paths();
-  // launchd's xml is unforgiving; use a single template literal with no
-  // accidental whitespace inside <string> elements.
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>Label</key>
-  <string>${p.serviceLabel}</string>
-  <key>ProgramArguments</key>
-  <array>
-    <string>${opts.binaryPath}</string>
-    <string>daemon</string>
-  </array>
-  <key>RunAtLoad</key>
-  <true/>
-  <key>KeepAlive</key>
-  <true/>
-  <key>ThrottleInterval</key>
-  <integer>10</integer>
-  <key>StandardOutPath</key>
-  <string>${p.logFile}</string>
-  <key>StandardErrorPath</key>
-  <string>${p.logFile}</string>
-  <key>EnvironmentVariables</key>
-  <dict>
-    <key>PATH</key>
-    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
-  </dict>
-</dict>
-</plist>
-`;
-}
+export type InstallOptions = BuilderOpts;
+// Re-export for back-compat with anything that imports buildPlist from
+// here. The actual implementation lives in service-templates so unit
+// tests can exercise it without importing node:child_process.
+export { buildPlist };
 
 export async function install(opts: InstallOptions): Promise<void> {
   if (currentPlatform() !== "darwin") {
@@ -105,4 +82,27 @@ function runLaunchctl(args: string[]): Promise<void> {
       else reject(new Error(`launchctl ${args.join(" ")} exited ${code}: ${stderr.trim()}`));
     });
   });
+}
+
+/**
+ * Read the cliEntry path the currently-installed plist points at, or null
+ * if no plist is installed / can't be parsed. Used by `oma bridge setup` to
+ * detect when an npm upgrade landed a new dist/index.js but the plist still
+ * points at an older build (often a dev path under the project tree).
+ */
+export async function readInstalledCliEntry(): Promise<string | null> {
+  const p = paths();
+  if (!p.serviceFile) return null;
+  let xml: string;
+  try {
+    xml = await readFile(p.serviceFile, "utf-8");
+  } catch {
+    return null;
+  }
+  // ProgramArguments is an array; second <string> is the cli entry (first is
+  // the node binary). Match the array contents and pick element [1].
+  const arr = xml.match(/<key>ProgramArguments<\/key>\s*<array>([\s\S]*?)<\/array>/);
+  if (!arr) return null;
+  const strings = [...arr[1].matchAll(/<string>([^<]*)<\/string>/g)].map((m) => m[1]);
+  return strings[1] ?? null;
 }

@@ -68,61 +68,65 @@ export class CloudflareSandbox implements SandboxExecutor {
     name?: string;
     ttlSec: number;
   }): Promise<{ id: string; dir: string; localBucket?: boolean } | null> {
-    try {
-      const sandbox = await this.getSandbox();
-      // Detect dev mode: in wrangler dev there are no R2 S3 keys (no
-      // presigned URLs available), so the SDK requires localBucket: true
-      // which uses BACKUP_BUCKET binding directly. In prod we omit it and
-      // the SDK uses presigned URLs.
-      const isDev = !this.env.R2_ENDPOINT || !this.env.R2_ACCESS_KEY_ID;
-      const backup = await sandbox.createBackup({
-        dir: "/workspace",
-        name: opts.name,
-        ttl: opts.ttlSec,
-        // Skip the obvious bloat. node_modules can be 100s of MB and is
-        // re-installable. Same for build caches.
-        excludes: ["node_modules", ".cache", "__pycache__", ".next", "target"],
-        // If /workspace is a git repo, respect .gitignore — it covers
-        // build artifacts the project itself declared as expendable.
-        gitignore: true,
-        ...(isDev ? { localBucket: true } : {}),
-      });
-      return {
-        id: backup.id,
-        dir: backup.dir,
-        localBucket: backup.localBucket,
-      };
-    } catch (err) {
-      console.warn(
-        `[sandbox] createWorkspaceBackup failed: ${err instanceof Error ? err.message : err}`,
-      );
-      return null;
-    }
+    const sandbox = await this.getSandbox();
+    // Detect dev mode: in wrangler dev there are no R2 S3 keys (no
+    // presigned URLs available), so the SDK requires localBucket: true
+    // which uses BACKUP_BUCKET binding directly. In prod we omit it and
+    // the SDK uses presigned URLs.
+    const isDev = !this.env.R2_ENDPOINT || !this.env.R2_ACCESS_KEY_ID;
+    // Don't catch — let caller surface the SDK error in trajectory.
+    // Earlier swallowed errors made silent backup failures look identical
+    // to "no backup needed" from the perspective of the next session.
+    const backup = await sandbox.createBackup({
+      dir: "/workspace",
+      name: opts.name,
+      ttl: opts.ttlSec,
+      // Skip the obvious bloat. node_modules can be 100s of MB and is
+      // re-installable. Same for build caches.
+      excludes: ["node_modules", ".cache", "__pycache__", ".next", "target"],
+      // If /workspace is a git repo, respect .gitignore — it covers
+      // build artifacts the project itself declared as expendable.
+      gitignore: true,
+      ...(isDev ? { localBucket: true } : {}),
+    });
+    return {
+      id: backup.id,
+      dir: backup.dir,
+      localBucket: backup.localBucket,
+    };
   }
 
   /**
-   * Restore a previously created backup into /workspace. Returns true on
-   * success, false on failure (e.g. backup expired in R2). Best-effort:
-   * failure is logged and the caller continues with an empty /workspace.
+   * Restore a previously created backup into /workspace. Returns
+   * `{ ok: true }` on success, `{ ok: false, error: <message> }` on
+   * failure. Best-effort: failure is logged AND surfaced to the caller
+   * so observability can capture the underlying reason (expired squashfs,
+   * R2 fetch error, container restoreArchive non-success, etc.).
+   *
+   * Earlier shape (`Promise<boolean>`) only returned a bare boolean which
+   * meant a silently-failing restore looked identical to "no backup
+   * existed" — diagnosed during 2026-05-02 TB pilot when hello-world
+   * file vanished post-recycle but no error surfaced.
    */
   async restoreWorkspaceBackup(handle: {
     id: string;
     dir: string;
     localBucket?: boolean;
-  }): Promise<boolean> {
+  }): Promise<{ ok: boolean; error?: string }> {
     try {
       const sandbox = await this.getSandbox();
       await sandbox.restoreBackup(handle);
-      return true;
+      return { ok: true };
     } catch (err) {
       // Common: backup expired (BACKUP_EXPIRED), R2 lifecycle deleted the
-      // squashfs, etc. Either way, fall through to empty workspace — agent
-      // can re-clone / re-install as if it's a fresh session.
+      // squashfs, container's restoreArchive failed, etc. Either way, fall
+      // through to empty workspace — agent can re-clone / re-install as
+      // if it's a fresh session. Surface the message so callers can log.
+      const msg = err instanceof Error ? err.message : String(err);
       console.warn(
-        `[sandbox] restoreWorkspaceBackup failed (likely expired): ` +
-        `${err instanceof Error ? err.message : err}`,
+        `[sandbox] restoreWorkspaceBackup failed: ${msg}`,
       );
-      return false;
+      return { ok: false, error: msg.slice(0, 500) };
     }
   }
 
@@ -209,26 +213,26 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;
     const injectedSecrets = this.getSecretsForCommand(command);
-
-    const execPromise = sandbox.exec(command, {
-      timeout: timeoutMs,
-      env: injectedSecrets,
-    }).then((result: any) => {
-      const out = result.stdout || "";
-      const err = result.stderr || "";
-      const combined = `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
-      return this.appendSecretRetryHint(command, combined, injectedSecrets);
-    }).catch((err: any) => {
-      throw new Error(`exec("${command.slice(0, 80)}") failed: ${err?.message || err}`);
-    });
-
-    const timeoutPromise = new Promise<string>((_, reject) =>
-      setTimeout(() => reject(new Error(
-        `Command timed out after ${Math.round(timeoutMs / 1000)}s: ${command.slice(0, 100)}`
-      )), timeoutMs + 10000)
-    );
-
-    return Promise.race([execPromise, timeoutPromise]);
+    try {
+      const execPromise = sandbox.exec(command, {
+        timeout: timeoutMs,
+        env: injectedSecrets,
+      }).then((result: { stdout?: string; stderr?: string; exitCode?: number }) => {
+        const out = result.stdout || "";
+        const err = result.stderr || "";
+        const combined = `exit=${result.exitCode}\n${out}${err ? "\nstderr: " + err : ""}`;
+        return this.appendSecretRetryHint(command, combined, injectedSecrets);
+      });
+      const timeoutPromise = new Promise<string>((_, reject) =>
+        setTimeout(() => reject(new Error(
+          `Command timed out after ${Math.round(timeoutMs / 1000)}s: ${command.slice(0, 100)}`,
+        )), timeoutMs + 10000),
+      );
+      return await Promise.race([execPromise, timeoutPromise]);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      throw new Error(`exec("${command.slice(0, 80)}") failed: ${msg}`);
+    }
   }
 
   async startProcess(command: string): Promise<ProcessHandle | null> {
@@ -255,9 +259,14 @@ export class CloudflareSandbox implements SandboxExecutor {
     const sandbox = await this.getSandbox();
     try {
       const result = await sandbox.readFile(path, { encoding: "utf-8" });
-      // Handle both string and {content: string} return formats
-      return typeof result === "string" ? result : result.content;
+      // Handle both string and {success, content} shapes
+      if (typeof result === "string") return result;
+      if ((result as { success?: boolean }).success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
+      return (result as { content: string }).content;
     } catch (err: any) {
+      console.warn(`[sandbox.readFile] FAILED path=${path} err=${err?.message || err}`);
       throw new Error(`readFile(${path}) failed: ${err?.message || err}`);
     }
   }
@@ -265,9 +274,13 @@ export class CloudflareSandbox implements SandboxExecutor {
   async writeFile(path: string, content: string): Promise<string> {
     const sandbox = await this.getSandbox();
     try {
-      await sandbox.writeFile(path, content);
+      const result = await sandbox.writeFile(path, content);
+      if (result && (result as { success?: boolean }).success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
       return "ok";
     } catch (err: any) {
+      console.warn(`[sandbox.writeFile] FAILED path=${path} err=${err?.message || err}`);
       throw new Error(`writeFile(${path}) failed: ${err?.message || err}`);
     }
   }
@@ -287,9 +300,13 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
     const b64 = btoa(bin);
     try {
-      await sandbox.writeFile(path, b64, { encoding: "base64" });
+      const result = await sandbox.writeFile(path, b64, { encoding: "base64" });
+      if (result && (result as { success?: boolean }).success === false) {
+        throw new Error(`SDK returned success=false: ${JSON.stringify(result)}`);
+      }
       return "ok";
     } catch (err: any) {
+      console.warn(`[sandbox.writeFileBytes] FAILED path=${path} err=${err?.message || err}`);
       throw new Error(`writeFileBytes(${path}) failed: ${err?.message || err}`);
     }
   }
@@ -305,24 +322,84 @@ export class CloudflareSandbox implements SandboxExecutor {
 
   /**
    * Bind the OmaSandbox `inject_vault_creds` outbound handler with the
-   * session's vault credentials. After this call, any HTTPS request the
-   * container makes whose hostname matches a credential's `mcp_server_url`
-   * gets a Bearer header injected before being forwarded upstream.
-   * The credentials never leave the Workers runtime.
+   * session's identifying context (tenantId, sessionId). The handler runs
+   * in the agent worker scope; on every outbound HTTPS request the
+   * sandbox makes, it RPCs to main with these identifiers, main does the
+   * vault lookup live, injects the bearer, and forwards. The agent
+   * worker's address space never holds plaintext vault credentials —
+   * mirrors Anthropic Managed Agents' "credential proxy outside the
+   * harness" pattern (see apps/agent/src/oma-sandbox.ts file header).
    */
-  async setVaultCredentialsForOutbound(
-    vault_credentials: Array<{ vault_id: string; credentials: unknown[] }>,
-  ): Promise<void> {
-    if (!vault_credentials.length) return;
+  async setOutboundContext(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (!opts.tenantId || !opts.sessionId) return;
     try {
       const sandbox = await this.getSandbox();
       const hasFn = typeof sandbox.setOutboundHandler === "function";
-      console.log(`[sandbox] setVaultCredentialsForOutbound vaults=${vault_credentials.length} hasFn=${hasFn}`);
+      console.log(
+        `[sandbox] setOutboundContext tenant=${opts.tenantId.slice(0, 8)} sid=${opts.sessionId.slice(0, 12)} hasFn=${hasFn}`,
+      );
       if (!hasFn) return;
-      await sandbox.setOutboundHandler("inject_vault_creds", { vault_credentials });
-      console.log(`[sandbox] setOutboundHandler bound`);
+      await sandbox.setOutboundHandler("inject_vault_creds", {
+        tenantId: opts.tenantId,
+        sessionId: opts.sessionId,
+      });
+      console.log(`[sandbox] setOutboundHandler bound (RPC mode)`);
     } catch (err) {
-      console.error(`[sandbox] setVaultCredentialsForOutbound failed: ${(err as Error).message ?? err}`);
+      console.error(
+        `[sandbox] setOutboundContext failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
+   * its `onActivityExpired` hook (fires right before sleepAfter teardown)
+   * can write the final /workspace snapshot into AUTH_DB scoped to this
+   * session. Best-effort — failure here just means the next session in
+   * this scope falls back to the previous backup or empty workspace.
+   */
+  async setBackupContext(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (!opts.tenantId || !opts.environmentId || !opts.sessionId) return;
+    try {
+      const sandbox = (await this.getSandbox()) as unknown as {
+        setBackupContext?: (ctx: { tenantId: string; environmentId: string; sessionId: string }) => Promise<void>;
+      };
+      if (typeof sandbox.setBackupContext !== "function") return;
+      await sandbox.setBackupContext({
+        tenantId: opts.tenantId,
+        environmentId: opts.environmentId,
+        sessionId: opts.sessionId,
+      });
+    } catch (err) {
+      console.error(
+        `[sandbox] setBackupContext failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * Trigger an immediate /workspace snapshot via the OmaSandbox helper.
+   * Used by /destroy to get a final snapshot before sandbox.destroy() —
+   * sleepAfter teardown handles itself via onActivityExpired. Best-effort.
+   */
+  async snapshotWorkspaceNow(): Promise<void> {
+    try {
+      const sandbox = (await this.getSandbox()) as unknown as {
+        snapshotWorkspaceNow?: () => Promise<void>;
+      };
+      if (typeof sandbox.snapshotWorkspaceNow !== "function") return;
+      await sandbox.snapshotWorkspaceNow();
+    } catch (err) {
+      console.error(
+        `[sandbox] snapshotWorkspaceNow failed: ${(err as Error).message ?? err}`,
+      );
     }
   }
 
@@ -331,6 +408,21 @@ export class CloudflareSandbox implements SandboxExecutor {
     try {
       const sandbox = await this.getSandbox();
       if (typeof sandbox.destroy === "function") await sandbox.destroy();
+    } catch {}
+  }
+
+  /**
+   * Reset the CF Container's sleepAfter inactivity timer. SessionDO calls
+   * this from its alarm while there are background_tasks rows so a long-
+   * running `python script.py &` survives past sleepAfter without us doing
+   * any actual work for it. Fail-soft if SDK doesn't expose the method.
+   */
+  async renewActivityTimeout(): Promise<void> {
+    try {
+      const sandbox = await this.getSandbox();
+      if (typeof sandbox.renewActivityTimeout === "function") {
+        await sandbox.renewActivityTimeout();
+      }
     } catch {}
   }
 

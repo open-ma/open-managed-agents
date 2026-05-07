@@ -5,6 +5,7 @@ import { join, dirname } from "node:path";
 import { mkdirSync, readFileSync, writeFileSync, unlinkSync, existsSync, chmodSync } from "node:fs";
 import { randomBytes } from "node:crypto";
 import type { AgentConfig, ModelCard, SessionMeta } from "@open-managed-agents/api-types";
+import { currentProfile } from "./bridge/lib/platform.js";
 
 // ─── Config ───
 
@@ -62,7 +63,16 @@ function credentialsPath(): string {
   // XDG-style on Linux/macOS; HOME/.config on macOS by default.
   const xdg = process.env.XDG_CONFIG_HOME;
   const base = xdg && xdg.length > 0 ? xdg : join(homedir(), ".config");
-  return join(base, "oma", "credentials.json");
+  // Profile suffix mirrors paths() in bridge/lib/platform.ts. Default
+  // (no OMA_PROFILE) → credentials.json. Profile=staging →
+  // credentials.staging.json. Same OMA_PROFILE env var routes both
+  // sides; set once via --profile or env, applies to cli auth + bridge.
+  // currentProfile() validates the slug and throws on bad input — we
+  // want that error to surface here so a typoed --profile doesn't
+  // silently route to a junk path.
+  const profile = currentProfile();
+  const file = profile ? `credentials.${profile}.json` : "credentials.json";
+  return join(base, "oma", file);
 }
 
 function migrateV1ToV2(v1: StoredCredentialsV1): StoredCredentialsV2 {
@@ -2187,6 +2197,13 @@ function usage() {
     console.log(`    ${c.usage.padEnd(42)} ${c.desc}`);
   }
   console.log(`
+  Bridge (local runtime):
+    oma bridge setup [--force] [--no-service]    Pair this machine with OMA + start daemon
+    oma bridge status                            Show creds + probe server reachability
+    oma bridge agents refresh                    Re-detect agents + offer wrapper installs
+    oma bridge uninstall                         Stop service + remove creds
+    (oma bridge daemon                           Internal: launched by service mgr / debugging)
+
   API Reference:
     oma api                                    Show all HTTP endpoints
     oma api <resource>                         Show endpoints for a resource
@@ -2208,6 +2225,38 @@ async function main() {
   if (!args.length || ["-h", "--help", "help"].includes(args[0])) { usage(); process.exit(0); }
   if (args[0] === "api") { apiRef(args[1]); return; }
 
+  // Global --profile <name> flag: must be parsed BEFORE bridge dispatch
+  // and BEFORE any code that reads paths()/credentialsPath(), since both
+  // resolve OMA_PROFILE at call time. Re-export into env so deeper
+  // imports (bridge platform.ts, etc.) see it without arg threading. Same
+  // semantics as `OMA_PROFILE=staging oma <cmd>` — the flag is just
+  // shorthand. Slug validation happens in currentProfile() at first use.
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === "--profile" && i + 1 < args.length) {
+      process.env.OMA_PROFILE = args[i + 1];
+      args.splice(i, 2);
+      // Mirror into process.argv so commands that re-parse argv (bridge
+      // subcommands strip args[2..3] below) don't trip over the flag.
+      const argvIdx = process.argv.indexOf("--profile");
+      if (argvIdx !== -1) process.argv.splice(argvIdx, 2);
+      break;
+    }
+    const eq = args[i].match(/^--profile=(.+)$/);
+    if (eq) {
+      process.env.OMA_PROFILE = eq[1];
+      args.splice(i, 1);
+      const argvIdx = process.argv.findIndex((a) => a.startsWith("--profile="));
+      if (argvIdx !== -1) process.argv.splice(argvIdx, 1);
+      break;
+    }
+  }
+
+  // Validate the profile slug NOW so a typoed --profile or env var fails
+  // with the slug-format error message instead of cascading into a path
+  // not-found at first cred lookup. currentProfile() throws on invalid.
+  try { currentProfile(); }
+  catch (e) { console.error(`Error: ${(e as Error).message}`); process.exit(2); }
+
   // Bridge subcommands (oma bridge {setup,daemon,status,uninstall}) are
   // self-contained — they don't need the api-key config and have their own
   // argv parsing. Dispatch early to keep the main commands array unaware.
@@ -2216,12 +2265,21 @@ async function main() {
     process.argv.splice(2, 2); // strip "bridge" + subname so commands' parseArgs sees flags only
     switch (sub) {
       case "setup": {
+        // Default browser-origin to wherever serverUrl points so a single
+        // --server-url flips both the API endpoint AND the OAuth redirect.
+        // Otherwise --server-url=https://app.staging.openma.dev would open
+        // the OAuth dance against prod openma.dev and the resulting code
+        // would fail at exchange ("invalid code"). Two separate flags are
+        // still useful for split dev setups (web on one host, api on
+        // another) — keep --browser-origin as an explicit override.
+        const serverUrl = flag(args, "--server-url") ?? "https://openma.dev";
         const { runSetup } = await import("./bridge/commands/setup.js");
         await runSetup({
-          serverUrl: flag(args, "--server-url") ?? "https://openma.dev",
-          browserOrigin: flag(args, "--browser-origin") ?? "https://openma.dev",
+          serverUrl,
+          browserOrigin: flag(args, "--browser-origin") ?? serverUrl,
           noService: args.includes("--no-service"),
           force: args.includes("--force"),
+          yes: args.includes("--yes") || args.includes("-y"),
         });
         return;
       }
@@ -2240,13 +2298,23 @@ async function main() {
         await runUninstall();
         return;
       }
+      case "agents": {
+        const { runAgents } = await import("./bridge/commands/agents.js");
+        await runAgents(args.slice(2));
+        return;
+      }
       default:
         console.error(
           "oma bridge — pair a local ACP agent with OMA\n\n" +
-          "  oma bridge setup [--server-url=…] [--no-service] [--force]\n" +
-          "  oma bridge daemon\n" +
-          "  oma bridge status\n" +
-          "  oma bridge uninstall\n",
+          "  oma bridge setup [--server-url=…] [--no-service] [--force] [--yes]\n" +
+          "                                       Pair + install service + start daemon\n" +
+          "  oma bridge status                    Creds + service kind + probe server\n" +
+          "  oma bridge agents refresh [--yes]    Re-scan + offer-install wrappers + reload\n" +
+          "  oma bridge uninstall                 Stop service + remove creds\n" +
+          "  oma bridge daemon                    (internal — launched by service mgr / for debug)\n" +
+          "\n" +
+          "  Use --profile <name> (or OMA_PROFILE=<name>) to run multiple\n" +
+          "  daemons side-by-side (e.g. prod in launchd + staging foreground).\n",
         );
         process.exit(sub ? 1 : 0);
     }

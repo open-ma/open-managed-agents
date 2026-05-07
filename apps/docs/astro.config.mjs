@@ -52,6 +52,7 @@ export default defineConfig({
             { label: 'REST API', slug: 'build/api' },
             { label: 'CLI & SDK', slug: 'build/cli-sdk' },
             { label: 'Skills & Tools', slug: 'build/skills-and-tools' },
+            { label: 'Vault & MCP', slug: 'build/vault-and-mcp' },
             { label: 'Custom Integrations', slug: 'build/integrations' },
           ],
         },
@@ -74,7 +75,11 @@ export default defineConfig({
         },
         {
           label: 'Contribute',
-          items: [{ label: 'Contributing', slug: 'contribute' }],
+          items: [
+            { label: 'Contributing', slug: 'contribute' },
+            { label: 'State Machines', slug: 'contribute/state-machines' },
+            { label: 'Recovery & Idempotency', slug: 'contribute/recovery-and-idempotency' },
+          ],
         },
         {
           label: '↗ Console',

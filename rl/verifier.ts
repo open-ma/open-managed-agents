@@ -66,6 +66,57 @@ function checkSandboxExec(_trajectory: Trajectory, _check: VerifyCheck): number 
   return 0;
 }
 
+// --- Script verifier (run a verify_script in the sandbox via a follow-up turn) ---
+
+/**
+ * @deprecated Phase 2 (trajectory-v1) replaced this with the canonical
+ * `ScriptVerifier` from `@open-managed-agents/eval-core`, which executes
+ * `verify_script` directly in the sandbox via the `/exec` endpoint
+ * (deterministic, no model token cost, hard timeout). Kept exported only
+ * to avoid breaking external imports during the deprecation window;
+ * remove once no consumer imports it (Phase 4 cleanup).
+ *
+ * Run a verify_script in the agent's sandbox by sending a follow-up message,
+ * then parse the agent's reply for `EXIT_CODE=<n>`. Used for `RewardSpec.type
+ * === "script"` tasks (e.g. terminal-bench pytest tests).
+ *
+ * Returns -1 if the agent's reply doesn't contain a parseable EXIT_CODE.
+ */
+export async function runScriptVerifier(
+  sendAndWait: (sessionId: string, message: string, timeoutMs?: number) => Promise<unknown[]>,
+  sessionId: string,
+  verifyScript: string,
+  timeoutMs?: number,
+): Promise<{ exit_code: number; output: string }> {
+  const prompt =
+    "Run this exact bash script in the sandbox, then reply with EXACTLY one line at the end: " +
+    "`EXIT_CODE=<n>` where <n> is the numeric exit status of the script. " +
+    "Do not run anything else. Do not modify the script.\n\n" +
+    "```bash\n" +
+    verifyScript +
+    "\n```";
+
+  const events = await sendAndWait(sessionId, prompt, timeoutMs ?? 600_000);
+  let allText = "";
+  for (const e of events as Array<Record<string, unknown>>) {
+    if (e.type === "agent.message" && Array.isArray(e.content)) {
+      for (const block of e.content as Array<Record<string, unknown>>) {
+        if (block.type === "text" && typeof block.text === "string") {
+          allText += block.text + "\n";
+        }
+      }
+    } else if (e.type === "agent.tool_result" && typeof e.content === "string") {
+      allText += e.content + "\n";
+    }
+  }
+  const matches = [...allText.matchAll(/EXIT_CODE=(-?\d+)/g)];
+  const last = matches.length > 0 ? matches[matches.length - 1] : null;
+  return {
+    exit_code: last ? parseInt(last[1], 10) : -1,
+    output: allText.slice(-2000),
+  };
+}
+
 // --- Helpers ---
 
 function collectAllOutput(trajectory: Trajectory): string {
@@ -142,7 +193,13 @@ export function verify(trajectory: Trajectory, task: RLTask): RewardResult {
     Object.assign(raw, evaluateGroundTruth(trajectory, spec.ground_truth));
   }
 
-  // 3. Efficiency bonus
+  // 3. Script verifier — populated by rollout via metadata.verifier_result
+  if (spec.type === "script") {
+    const vr = trajectory.metadata.verifier_result;
+    raw.script_pass = vr && vr.exit_code === 0 ? 1.0 : 0.0;
+  }
+
+  // 4. Efficiency bonus
   raw.efficiency = computeEfficiency(trajectory, task);
 
   // Aggregate

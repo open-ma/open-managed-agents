@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { useApi } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
@@ -18,6 +18,7 @@ interface Skill {
 interface SkillFile {
   filename: string;
   content: string;
+  encoding?: "utf8" | "base64";
 }
 
 interface VersionSummary {
@@ -33,21 +34,26 @@ interface VersionDetail {
 
 /* ---------- constants ---------- */
 
-const SKILL_TEMPLATE = `---
-name: my-skill
-description: Brief description of what this skill does and when to use it.
----
+// Mirrors the default UPLOAD_MAX_BYTES on the server (apps/main/src/quotas.ts).
+// Self-hosters who raised the server limit will lose this client-side
+// pre-rejection but the server will still enforce; that's an acceptable
+// degradation for an unusual config.
+const MAX_UPLOAD_BYTES = 25 * 1024 * 1024;
 
-# My Custom Skill
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
 
-## Instructions
-
-[Step-by-step guidance for Claude to follow]
-
-## Examples
-
-[Concrete examples of using this skill]
-`;
+function isZipFile(file: File): boolean {
+  const name = file.name.toLowerCase();
+  return (
+    name.endsWith(".zip") ||
+    file.type === "application/zip" ||
+    file.type === "application/x-zip-compressed"
+  );
+}
 
 /* ---------- component ---------- */
 
@@ -61,9 +67,11 @@ export function SkillsList() {
   /* create dialog */
   const [showCreate, setShowCreate] = useState(false);
   const [createTitle, setCreateTitle] = useState("");
-  const [createSkillMd, setCreateSkillMd] = useState(SKILL_TEMPLATE);
-  const [createFiles, setCreateFiles] = useState<SkillFile[]>([]);
+  const [createZip, setCreateZip] = useState<File | null>(null);
+  const [createUploading, setCreateUploading] = useState(false);
+  const [createDragOver, setCreateDragOver] = useState(false);
   const [createError, setCreateError] = useState("");
+  const createInputRef = useRef<HTMLInputElement>(null);
 
   /* detail dialog */
   const [detail, setDetail] = useState<Skill | null>(null);
@@ -73,9 +81,11 @@ export function SkillsList() {
 
   /* new version sub-form inside detail */
   const [showNewVersion, setShowNewVersion] = useState(false);
-  const [nvSkillMd, setNvSkillMd] = useState("");
-  const [nvFiles, setNvFiles] = useState<SkillFile[]>([]);
+  const [nvZip, setNvZip] = useState<File | null>(null);
+  const [nvUploading, setNvUploading] = useState(false);
+  const [nvDragOver, setNvDragOver] = useState(false);
   const [nvError, setNvError] = useState("");
+  const nvInputRef = useRef<HTMLInputElement>(null);
 
   /* clawhub install */
   const [showClawHub, setShowClawHub] = useState(false);
@@ -103,27 +113,49 @@ export function SkillsList() {
 
   const resetCreate = () => {
     setCreateTitle("");
-    setCreateSkillMd(SKILL_TEMPLATE);
-    setCreateFiles([]);
+    setCreateZip(null);
     setCreateError("");
+    setCreateDragOver(false);
+    if (createInputRef.current) createInputRef.current.value = "";
+  };
+
+  // Validate file synchronously and set state. Returns true on success
+  // so callers can know whether to clear the surrounding drop-zone state.
+  const acceptCreateZip = (file: File): boolean => {
+    if (!isZipFile(file)) {
+      setCreateError(`"${file.name}" is not a .zip file`);
+      return false;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setCreateError(
+        `Zip is ${formatBytes(file.size)}, exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit`,
+      );
+      return false;
+    }
+    setCreateError("");
+    setCreateZip(file);
+    return true;
   };
 
   const doCreate = async () => {
+    if (!createZip) return;
     setCreateError("");
-    const files: SkillFile[] = [
-      { filename: "SKILL.md", content: createSkillMd },
-      ...createFiles,
-    ];
+    setCreateUploading(true);
     try {
-      await api("/v1/skills", {
-        method: "POST",
-        body: JSON.stringify({ display_title: createTitle, files }),
-      });
+      const fd = new FormData();
+      fd.append("file", createZip);
+      // Empty string here would override the server-side fallback to the
+      // SKILL.md frontmatter name; only send when the user actually typed
+      // something.
+      if (createTitle.trim()) fd.append("display_title", createTitle.trim());
+      await api("/v1/skills/upload", { method: "POST", body: fd });
       setShowCreate(false);
       resetCreate();
       load();
     } catch (e: any) {
-      setCreateError(e.message);
+      setCreateError(e?.message || "Upload failed");
+    } finally {
+      setCreateUploading(false);
     }
   };
 
@@ -134,6 +166,7 @@ export function SkillsList() {
     setDetailLoading(true);
     setShowNewVersion(false);
     setNvError("");
+    setNvZip(null);
     try {
       const [versionDetail, versionsRes] = await Promise.all([
         api<VersionDetail>(
@@ -155,38 +188,57 @@ export function SkillsList() {
     setDetailFiles([]);
     setDetailVersions([]);
     setShowNewVersion(false);
+    setNvZip(null);
+    setNvError("");
   };
 
   /* ---- new version ---- */
 
   const startNewVersion = () => {
-    /* pre-populate from current files */
-    const skillMdFile = detailFiles.find((f) => f.filename === "SKILL.md");
-    setNvSkillMd(skillMdFile?.content || SKILL_TEMPLATE);
-    setNvFiles(detailFiles.filter((f) => f.filename !== "SKILL.md"));
     setNvError("");
+    setNvZip(null);
+    setNvDragOver(false);
+    if (nvInputRef.current) nvInputRef.current.value = "";
     setShowNewVersion(true);
   };
 
-  const doNewVersion = async () => {
-    if (!detail) return;
+  const acceptNvZip = (file: File): boolean => {
+    if (!isZipFile(file)) {
+      setNvError(`"${file.name}" is not a .zip file`);
+      return false;
+    }
+    if (file.size > MAX_UPLOAD_BYTES) {
+      setNvError(
+        `Zip is ${formatBytes(file.size)}, exceeds the ${formatBytes(MAX_UPLOAD_BYTES)} upload limit`,
+      );
+      return false;
+    }
     setNvError("");
-    const files: SkillFile[] = [
-      { filename: "SKILL.md", content: nvSkillMd },
-      ...nvFiles,
-    ];
+    setNvZip(file);
+    return true;
+  };
+
+  const doNewVersion = async () => {
+    if (!detail || !nvZip) return;
+    setNvError("");
+    setNvUploading(true);
     try {
-      await api(`/v1/skills/${detail.id}/versions`, {
+      const fd = new FormData();
+      fd.append("file", nvZip);
+      await api(`/v1/skills/${detail.id}/versions/upload`, {
         method: "POST",
-        body: JSON.stringify({ files }),
+        body: fd,
       });
       setShowNewVersion(false);
+      setNvZip(null);
       /* refresh both the list and this detail */
       load();
       const refreshed = await api<Skill>(`/v1/skills/${detail.id}`);
       openDetail(refreshed);
     } catch (e: any) {
-      setNvError(e.message);
+      setNvError(e?.message || "Upload failed");
+    } finally {
+      setNvUploading(false);
     }
   };
 
@@ -338,8 +390,7 @@ export function SkillsList() {
             <div className="text-center py-12 text-fg-subtle border border-dashed border-border rounded-lg">
               <p className="text-sm mb-1">No custom skills yet</p>
               <p className="text-xs">
-                Create a skill with a SKILL.md file to give your agents domain
-                expertise.
+                Upload a skill folder as a .zip with SKILL.md at the root.
               </p>
             </div>
           ) : (
@@ -390,16 +441,18 @@ export function SkillsList() {
       <Modal
         open={showCreate}
         onClose={() => {
+          if (createUploading) return;
           setShowCreate(false);
           resetCreate();
         }}
-        title="New Custom Skill"
-        subtitle="Create a SKILL.md with YAML frontmatter and optional resource files."
-        maxWidth="max-w-2xl"
+        title="Upload Custom Skill"
+        subtitle="Upload an Anthropic-style skill folder packaged as a .zip."
+        maxWidth="max-w-xl"
         footer={
           <>
             <Button
               variant="ghost"
+              disabled={createUploading}
               onClick={() => {
                 setShowCreate(false);
                 resetCreate();
@@ -409,9 +462,11 @@ export function SkillsList() {
             </Button>
             <Button
               onClick={doCreate}
-              disabled={!createTitle || !createSkillMd.trim()}
+              disabled={!createZip || createUploading}
+              loading={createUploading}
+              loadingLabel="Uploading..."
             >
-              Create Skill
+              Upload
             </Button>
           </>
         }
@@ -423,95 +478,42 @@ export function SkillsList() {
             </div>
           )}
 
-          {/* Display Title */}
+          {/* Drop zone */}
+          <DropZone
+            file={createZip}
+            dragOver={createDragOver}
+            onDragOver={(over) => setCreateDragOver(over)}
+            onFile={(f) => acceptCreateZip(f)}
+            onClear={() => {
+              setCreateZip(null);
+              if (createInputRef.current) createInputRef.current.value = "";
+            }}
+            inputRef={createInputRef}
+            disabled={createUploading}
+          />
+
+          {/* Display Title (optional override) */}
           <div>
             <label className="text-sm text-fg-muted block mb-1">
-              Display Title
+              Display Title{" "}
+              <span className="text-fg-subtle">
+                (optional — falls back to SKILL.md <code>name</code>)
+              </span>
             </label>
             <input
               value={createTitle}
               onChange={(e) => setCreateTitle(e.target.value)}
               className={inputCls}
-              placeholder="My Custom Skill"
+              placeholder="Leave blank to use the skill's own name"
+              disabled={createUploading}
             />
           </div>
 
-          {/* SKILL.md */}
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">
-              SKILL.md{" "}
-              <span className="text-fg-subtle">
-                (YAML frontmatter with name and description)
-              </span>
-            </label>
-            <textarea
-              value={createSkillMd}
-              onChange={(e) => setCreateSkillMd(e.target.value)}
-              rows={14}
-              className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
-            />
-          </div>
-
-          {/* Additional files */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <label className="text-sm text-fg-muted">
-                Additional Files{" "}
-                <span className="text-fg-subtle">
-                  ({createFiles.length})
-                </span>
-              </label>
-              <button
-                onClick={() =>
-                  setCreateFiles([
-                    ...createFiles,
-                    { filename: "", content: "" },
-                  ])
-                }
-                className="text-xs text-fg-muted hover:text-fg transition-colors"
-              >
-                + Add file
-              </button>
-            </div>
-            {createFiles.map((f, i) => (
-              <div
-                key={i}
-                className="border border-border rounded-lg p-3 mb-2"
-              >
-                <div className="flex items-center gap-2 mb-2">
-                  <input
-                    value={f.filename}
-                    onChange={(e) => {
-                      const updated = [...createFiles];
-                      updated[i] = { ...updated[i], filename: e.target.value };
-                      setCreateFiles(updated);
-                    }}
-                    className={`${inputCls} flex-1`}
-                    placeholder="filename.txt"
-                  />
-                  <button
-                    onClick={() =>
-                      setCreateFiles(createFiles.filter((_, j) => j !== i))
-                    }
-                    className="px-2 py-2 text-fg-subtle hover:text-danger transition-colors text-lg leading-none"
-                  >
-                    ×
-                  </button>
-                </div>
-                <textarea
-                  value={f.content}
-                  onChange={(e) => {
-                    const updated = [...createFiles];
-                    updated[i] = { ...updated[i], content: e.target.value };
-                    setCreateFiles(updated);
-                  }}
-                  rows={4}
-                  className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
-                  placeholder="File content..."
-                />
-              </div>
-            ))}
-          </div>
+          <p className="text-xs text-fg-subtle">
+            The zip must contain <code>SKILL.md</code> at the root, or one
+            top-level folder containing it (the common case when you
+            <code> zip -r my-skill.zip my-skill</code>).
+          </p>
         </div>
       </Modal>
 
@@ -611,12 +613,23 @@ export function SkillsList() {
                       key={i}
                       className="border border-border rounded-lg overflow-hidden"
                     >
-                      <div className="bg-bg-surface px-3 py-1.5 border-b border-border text-xs font-mono text-fg-muted">
-                        {f.filename}
+                      <div className="bg-bg-surface px-3 py-1.5 border-b border-border text-xs font-mono text-fg-muted flex items-center justify-between">
+                        <span className="truncate">{f.filename}</span>
+                        {f.encoding === "base64" && (
+                          <span className="ml-2 text-[10px] uppercase tracking-wider text-fg-subtle">
+                            binary
+                          </span>
+                        )}
                       </div>
-                      <pre className="px-3 py-2 text-xs font-mono text-fg-muted whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
-                        {f.content}
-                      </pre>
+                      {f.encoding === "base64" ? (
+                        <p className="px-3 py-2 text-xs italic text-fg-subtle">
+                          Binary file — not previewed.
+                        </p>
+                      ) : (
+                        <pre className="px-3 py-2 text-xs font-mono text-fg-muted whitespace-pre-wrap max-h-60 overflow-y-auto leading-relaxed">
+                          {f.content}
+                        </pre>
+                      )}
                     </div>
                   ))}
                 </div>
@@ -627,98 +640,42 @@ export function SkillsList() {
             {showNewVersion && (
               <div className="border border-border-strong rounded-lg p-4 bg-bg-surface/50 space-y-3">
                 <h3 className="text-sm font-medium text-fg">
-                  Create New Version
+                  Upload New Version
                 </h3>
                 {nvError && (
                   <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">
                     {nvError}
                   </div>
                 )}
-                <div>
-                  <label className="text-xs text-fg-muted block mb-1">
-                    SKILL.md
-                  </label>
-                  <textarea
-                    value={nvSkillMd}
-                    onChange={(e) => setNvSkillMd(e.target.value)}
-                    rows={10}
-                    className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
-                  />
-                </div>
-                <div>
-                  <div className="flex items-center justify-between mb-2">
-                    <label className="text-xs text-fg-muted">
-                      Additional Files ({nvFiles.length})
-                    </label>
-                    <button
-                      onClick={() =>
-                        setNvFiles([
-                          ...nvFiles,
-                          { filename: "", content: "" },
-                        ])
-                      }
-                      className="text-xs text-fg-muted hover:text-fg transition-colors"
-                    >
-                      + Add file
-                    </button>
-                  </div>
-                  {nvFiles.map((f, i) => (
-                    <div
-                      key={i}
-                      className="border border-border rounded-lg p-3 mb-2 bg-bg"
-                    >
-                      <div className="flex items-center gap-2 mb-2">
-                        <input
-                          value={f.filename}
-                          onChange={(e) => {
-                            const updated = [...nvFiles];
-                            updated[i] = {
-                              ...updated[i],
-                              filename: e.target.value,
-                            };
-                            setNvFiles(updated);
-                          }}
-                          className={`${inputCls} flex-1`}
-                          placeholder="filename.txt"
-                        />
-                        <button
-                          onClick={() =>
-                            setNvFiles(
-                              nvFiles.filter((_, j) => j !== i)
-                            )
-                          }
-                          className="px-2 py-2 text-fg-subtle hover:text-danger transition-colors text-lg leading-none"
-                        >
-                          ×
-                        </button>
-                      </div>
-                      <textarea
-                        value={f.content}
-                        onChange={(e) => {
-                          const updated = [...nvFiles];
-                          updated[i] = {
-                            ...updated[i],
-                            content: e.target.value,
-                          };
-                          setNvFiles(updated);
-                        }}
-                        rows={4}
-                        className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
-                        placeholder="File content..."
-                      />
-                    </div>
-                  ))}
-                </div>
+                <DropZone
+                  file={nvZip}
+                  dragOver={nvDragOver}
+                  onDragOver={(over) => setNvDragOver(over)}
+                  onFile={(f) => acceptNvZip(f)}
+                  onClear={() => {
+                    setNvZip(null);
+                    if (nvInputRef.current) nvInputRef.current.value = "";
+                  }}
+                  inputRef={nvInputRef}
+                  disabled={nvUploading}
+                />
                 <div className="flex justify-end gap-2">
                   <Button
                     variant="ghost"
-                    onClick={() => setShowNewVersion(false)}
+                    disabled={nvUploading}
+                    onClick={() => {
+                      setShowNewVersion(false);
+                      setNvZip(null);
+                      setNvError("");
+                    }}
                   >
                     Cancel
                   </Button>
                   <Button
                     onClick={doNewVersion}
-                    disabled={!nvSkillMd.trim()}
+                    disabled={!nvZip || nvUploading}
+                    loading={nvUploading}
+                    loadingLabel="Uploading..."
                   >
                     Publish Version
                   </Button>
@@ -829,6 +786,101 @@ export function SkillsList() {
           )}
         </div>
       </Modal>
+    </div>
+  );
+}
+
+/* ---------- DropZone ---------- */
+
+interface DropZoneProps {
+  file: File | null;
+  dragOver: boolean;
+  onDragOver: (over: boolean) => void;
+  onFile: (file: File) => boolean;
+  onClear: () => void;
+  inputRef: React.RefObject<HTMLInputElement | null>;
+  disabled?: boolean;
+}
+
+function DropZone({
+  file,
+  dragOver,
+  onDragOver,
+  onFile,
+  onClear,
+  inputRef,
+  disabled,
+}: DropZoneProps) {
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault();
+    onDragOver(false);
+    if (disabled) return;
+    const f = e.dataTransfer.files?.[0];
+    if (f) onFile(f);
+  };
+
+  return (
+    <div
+      onDragOver={(e) => {
+        e.preventDefault();
+        if (!disabled) onDragOver(true);
+      }}
+      onDragLeave={(e) => {
+        e.preventDefault();
+        onDragOver(false);
+      }}
+      onDrop={handleDrop}
+      className={[
+        "border-2 border-dashed rounded-lg px-4 py-6 text-center transition-colors",
+        dragOver
+          ? "border-brand bg-brand/5"
+          : "border-border bg-bg-surface/30",
+        disabled ? "opacity-60 pointer-events-none" : "",
+      ].join(" ")}
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        accept=".zip,application/zip,application/x-zip-compressed"
+        className="hidden"
+        onChange={(e) => {
+          const f = e.target.files?.[0];
+          if (f) onFile(f);
+        }}
+      />
+      {file ? (
+        <div className="flex items-center justify-between gap-3">
+          <div className="min-w-0 text-left">
+            <div className="text-sm font-medium text-fg truncate">{file.name}</div>
+            <div className="text-xs text-fg-subtle">{formatBytes(file.size)}</div>
+          </div>
+          <div className="flex gap-2 shrink-0">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => inputRef.current?.click()}
+            >
+              Replace
+            </Button>
+            <Button variant="ghost" size="sm" onClick={onClear}>
+              Remove
+            </Button>
+          </div>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          <div className="text-sm text-fg-muted">
+            Drag &amp; drop a <code>.zip</code>, or
+          </div>
+          <Button
+            variant="ghost"
+            size="sm"
+            onClick={() => inputRef.current?.click()}
+          >
+            Choose file
+          </Button>
+        </div>
+      )}
     </div>
   );
 }

@@ -1,4 +1,11 @@
 import type { AgentConfig } from "@open-managed-agents/shared";
+import type { PageCursor } from "@open-managed-agents/shared";
+import {
+  cursorBinds,
+  cursorWhereSql,
+  fetchN,
+  trimPage,
+} from "@open-managed-agents/shared";
 import { AgentNotFoundError } from "../errors";
 import type {
   AgentRepo,
@@ -78,6 +85,26 @@ export class D1AgentRepo implements AgentRepo {
          ORDER BY created_at ASC`;
     const result = await this.db.prepare(sql).bind(tenantId).all<DbAgent>();
     return (result.results ?? []).map(toRow);
+  }
+
+  async listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: AgentRow[]; hasMore: boolean }> {
+    const archived = opts.includeArchived ? "" : "AND archived_at IS NULL";
+    const sql =
+      `SELECT id, tenant_id, config, version, created_at, updated_at, archived_at ` +
+      `FROM agents WHERE tenant_id = ? ${archived} ${cursorWhereSql(opts.after)} ` +
+      `ORDER BY created_at DESC, id DESC LIMIT ?`;
+    const result = await this.db
+      .prepare(sql)
+      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
+      .all<DbAgent>();
+    return trimPage((result.results ?? []).map(toRow), opts.limit);
   }
 
   async updateWithVersionSnapshot(

@@ -5,6 +5,7 @@
 // language. Pass plain data + return plain data.
 
 import type { VaultRow } from "./types";
+import type { PageCursor } from "@open-managed-agents/shared";
 
 export interface NewVaultInput {
   id: string;
@@ -34,6 +35,16 @@ export interface VaultRepo {
     tenantId: string,
     opts: { includeArchived: boolean },
   ): Promise<VaultRow[]>;
+
+  /** Cursor-paginated list. Order: created_at DESC, id DESC. */
+  listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: VaultRow[]; hasMore: boolean }>;
 
   update(
     tenantId: string,

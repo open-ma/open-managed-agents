@@ -127,6 +127,19 @@ export interface HarnessRuntime {
   reportUsage?: (input_tokens: number, output_tokens: number) => Promise<void>;
   pendingConfirmations?: string[];
   abortSignal?: AbortSignal;
+  /**
+   * Wrap a long async operation (e.g. model fetch + stream consumption) so
+   * the underlying Durable Object stays alive — refcounted keepAlive that
+   * actually prevents CF eviction during the await. Without this the
+   * 30s alarm-driven keepAlive heartbeat is the only thing reminding CF
+   * the DO is busy, which is too coarse: CF can evict between heartbeats
+   * if no request handler is on the stack and no fetch is pending in a
+   * way the runtime credits.
+   *
+   * Implementation: SessionDO injects `(fn) => this.keepAliveWhile(fn)`
+   * (cf-agents Agent.keepAliveWhile). Always returns whatever fn returns.
+   */
+  keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export interface HarnessContext {
@@ -186,12 +199,11 @@ export interface HarnessContext {
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** Register a background task for completion notification (CC-style task_notification). */
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
-    /** Service binding back to apps/main. Used by AcpProxyHarness to attach
-     *  to the RuntimeRoom DO via /v1/internal/runtime-attach-harness. */
-    MAIN?: Fetcher;
-    /** Shared header secret to call /v1/internal/* on main. Set on the agent
-     *  worker; same value as main's INTEGRATIONS_INTERNAL_SECRET. */
-    INTEGRATIONS_INTERNAL_SECRET?: string;
+    /** Cross-script DO binding to RuntimeRoom (declared on main worker but
+     *  bound here via wrangler.jsonc `script_name`). AcpProxyHarness uses
+     *  this to attach to the daemon's room without going through main as
+     *  an HTTP service. */
+    RUNTIME_ROOM?: DurableObjectNamespace;
   };
   runtime: HarnessRuntime;
 }
@@ -221,12 +233,34 @@ export interface SandboxExecutor {
   /** Register secrets injected only for commands matching a prefix (e.g. "git", "gh"). */
   registerCommandSecrets?(commandPrefix: string, secrets: Record<string, string>): void;
   /**
-   * Bind the outbound handler with this session's vault credentials so they
-   * get injected as Bearer headers on matching MCP/HTTP requests.
+   * Bind the outbound handler with this session's identifying context. The
+   * sandbox's outbound interceptor uses (tenantId, sessionId) to RPC into
+   * main on each outbound HTTPS call; main resolves the matching vault
+   * credential live and injects the Authorization header. The agent worker
+   * never holds plaintext credentials.
    */
-  setVaultCredentialsForOutbound?(
-    vault_credentials: Array<{ vault_id: string; credentials: unknown[] }>,
-  ): Promise<void>;
+  setOutboundContext?(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
+   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
+   * its onActivityExpired hook (sleepAfter teardown) records the final
+   * /workspace snapshot scoped to this session. See oma-sandbox.ts for
+   * the actual backup logic.
+   */
+  setBackupContext?(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
+   * Trigger an immediate /workspace snapshot via OmaSandbox. Used by the
+   * explicit-destroy path to capture state before sandbox.destroy() wipes
+   * the container; the sleepAfter teardown handles itself via
+   * onActivityExpired without needing this call.
+   */
+  snapshotWorkspaceNow?(): Promise<void>;
   readFile(path: string): Promise<string>;
   writeFile(path: string, content: string): Promise<string>;
   /**
@@ -265,7 +299,14 @@ export interface SandboxExecutor {
     id: string;
     dir: string;
     localBucket?: boolean;
-  }): Promise<boolean>;
+  }): Promise<{ ok: boolean; error?: string }>;
   /** Destroy the sandbox container — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
+  /**
+   * Tell the sandbox container "I'm still active". Resets the CF Container's
+   * sleepAfter inactivity timer so it doesn't auto-stop while we have
+   * long-running bg tasks waiting for results. Cheap (~RPC roundtrip).
+   * No-op if the implementation doesn't support it.
+   */
+  renewActivityTimeout?(): Promise<void>;
 }

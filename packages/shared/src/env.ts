@@ -77,6 +77,47 @@ export interface Env {
   // Service binding to apps/integrations for proxying install initiation
   // calls from the Console (single-origin, no CORS).
   INTEGRATIONS?: Fetcher;
+  // WorkerEntrypoint RPC binding from the agent worker to the main worker's
+  // McpProxyRpc class — see apps/main/src/index.ts. Cloud agents call
+  // `env.MAIN_MCP.mcpForward({tenantId, sessionId, serverName, ...})` so
+  // vault credential lookup + token injection happen in main where the
+  // secrets already live, never in the agent's DO. Optional because main
+  // worker doesn't have this binding (it's the target, not a caller).
+  //
+  // `outboundForward` is the sandbox-side equivalent: any HTTPS request
+  // the cloud agent's container makes is intercepted by oma-sandbox.ts
+  // and routed through here for vault-credential injection by hostname
+  // match. Same "credentials only ever live in main" property.
+  MAIN_MCP?: {
+    mcpForward(opts: {
+      tenantId: string;
+      sessionId: string;
+      serverName: string;
+      method: string;
+      headers: Record<string, string>;
+      body: string | null;
+    }): Promise<{ status: number; headers: Record<string, string>; body: string }>;
+    outboundForward(opts: {
+      tenantId: string;
+      sessionId: string;
+      url: string;
+      method: string;
+      headers: Record<string, string>;
+      body: ArrayBuffer | null;
+    }): Promise<{ status: number; headers: Record<string, string>; body: ArrayBuffer }>;
+    /**
+     * Lightweight credential lookup for the transparent outbound proxy.
+     * Returns the bearer token to inject for `hostname`, or null if no
+     * vault credential matches. Used by oma-sandbox.ts inject_vault_creds
+     * to keep body + response off the RPC wire (preserves HEAD,
+     * streaming, SigV4 signed headers, etc).
+     */
+    lookupOutboundCredential(opts: {
+      tenantId: string;
+      sessionId: string;
+      hostname: string;
+    }): Promise<{ type: "bearer"; token: string } | null>;
+  };
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;

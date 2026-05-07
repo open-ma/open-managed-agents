@@ -1,5 +1,6 @@
 import { generateText } from "ai";
 import type { LanguageModel } from "ai";
+import type { Score } from "@open-managed-agents/shared";
 import { extractTextFromContent, parseJudgeJson } from "@open-managed-agents/shared";
 
 export interface EvaluationResult {
@@ -98,3 +99,36 @@ function parseRubricVerdict(text: string): EvaluationResult | null {
 
 // Re-export the shared helpers for tests / other consumers
 export { extractTextFromContent, parseJudgeJson };
+
+/**
+ * Phase 2 of trajectory v1 unification: project an `EvaluationResult`
+ * (the supervisor loop's verdict shape) onto the canonical `Score`
+ * shape used by the Verifier framework. Verdict-driven control flow in
+ * session-do.ts continues to consume `EvaluationResult` directly; this
+ * helper lets call sites that need to *persist* the verdict as
+ * `Trajectory.reward.raw_rewards` produce a Verifier-shaped output
+ * without a second LLM call.
+ *
+ * Why not refactor the supervisor loop to call `verifierForSpec(...).judge`
+ * (the RewardModelVerifier) instead? Two reasons, both Phase 2 scope:
+ *   1. The supervisor loop already has a model handle (the agent's
+ *      configured aux model), prompts the LLM with its own format, and
+ *      drives "needs_revision" injection back into history. Routing it
+ *      through an HTTP reward model endpoint would require either
+ *      stubbing the endpoint to call back into this same model handle
+ *      (silly) or wiring an in-process Verifier shape that can take a
+ *      LanguageModel directly (out of scope — see Phase 4 backlog).
+ *   2. The verdict ↔ score translation is lossy in only one direction
+ *      (we lose the `feedback` string in raw_rewards). Persisting the
+ *      verdict via this helper preserves the feedback in `Score.reason`,
+ *      which Console can render verbatim.
+ */
+export function evaluationResultToScore(r: EvaluationResult): Score {
+  const pass = r.result === "satisfied";
+  return {
+    pass,
+    value: pass ? 1 : 0,
+    reason: r.feedback || (pass ? "satisfied" : "needs_revision"),
+    metadata: { criteria: { satisfied: pass ? 1 : 0 } },
+  };
+}

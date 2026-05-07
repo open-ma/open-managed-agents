@@ -26,7 +26,12 @@ function isTransientApiError(err: any, status?: number): boolean {
 async function api(path: string, init?: RequestInit): Promise<Response> {
   const url = `${API_URL}${path}`;
   const method = init?.method || "GET";
-  const timeoutMs = method === "POST" ? 120_000 : 30_000;
+  // POST mutates → wait long enough for slow start; GET is read-only +
+  // idempotent (events / status / trajectory), so a long timeout has no
+  // downside, and prod cold-cache GETs commonly take 30-60 s. Bumped from
+  // 30 s after pilot wall time was inflated by repeat 30s timeouts +
+  // exponential backoff on otherwise-healthy /events polls.
+  const timeoutMs = method === "POST" ? 120_000 : 90_000;
   let lastErr: any;
 
   for (let attempt = 0; attempt <= API_MAX_RETRIES; attempt++) {
@@ -368,6 +373,40 @@ export async function setupFiles(
 export interface CleanupHandle {
   agentIds: string[];
   sessionIds: string[];
+}
+
+/**
+ * Run a raw shell command in this session's sandbox via /v1/sessions/:id/exec.
+ * Bypasses the agent — used by RL rollout's verify_script flow so the model
+ * doesn't have to re-execute deterministic infra.
+ *
+ * Mirrors the eval-runner-side helper in apps/main/src/eval-runner.ts —
+ * keeps a single sandbox-exec call shape across both runners.
+ */
+export async function execInSandbox(
+  sessionId: string,
+  command: string,
+  timeoutMs: number = 600_000,
+): Promise<{ exit_code: number; output: string }> {
+  const url = `${API_URL}/v1/sessions/${sessionId}/exec`;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs + 5_000); // extra slack
+  try {
+    const res = await fetch(url, {
+      method: "POST",
+      headers,
+      body: JSON.stringify({ command, timeout_ms: timeoutMs }),
+      signal: controller.signal,
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      return { exit_code: -1, output: `HTTP ${res.status}: ${body.slice(0, 200)}` };
+    }
+    const data = (await res.json()) as { exit_code?: number; output?: string };
+    return { exit_code: data.exit_code ?? -1, output: data.output ?? "" };
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function cleanup(handle: CleanupHandle): Promise<void> {

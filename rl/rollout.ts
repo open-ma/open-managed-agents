@@ -1,11 +1,13 @@
 import type { RLTask, RLTaskSet, RolloutConfig, RolloutResult, Trajectory, TokenUsage } from "./types.js";
 import { eventsToTrajectory } from "./trajectory.js";
 import { computeReward, batchRewardStats } from "./reward.js";
+import { verifierForSpec, type VerifierContext } from "../packages/eval-core/src/index.js";
 import {
   createAgent,
   createSession,
   deleteAgent,
   deleteSession,
+  execInSandbox,
   sendAndWait,
   setupFiles,
   getOrCreateEnvironment,
@@ -16,6 +18,22 @@ const DEFAULT_TOOLS = [
 ];
 
 const DEFAULT_SYSTEM = "You are a helpful assistant. Complete tasks precisely and efficiently.";
+
+/**
+ * Build a VerifierContext for the given session that runs verify_scripts
+ * directly in the sandbox via /exec. Replaces the prior runScriptVerifier
+ * approach (which sent a follow-up message asking the model to run the
+ * script and emit `EXIT_CODE=N`) — that flow consumed model tokens, was
+ * non-deterministic (model could refuse / paraphrase), and had no
+ * timeout discipline. The Verifier framework's ScriptVerifier uses this
+ * ctx.runExec to talk to the sandbox directly.
+ */
+function buildVerifierContext(sessionId: string): VerifierContext {
+  return {
+    sessionId,
+    runExec: (cmd, opts) => execInSandbox(sessionId, cmd, opts?.timeoutMs ?? 600_000),
+  };
+}
 
 class SessionPool {
   private available: Array<{ sessionId: string; agentId: string }> = [];
@@ -89,6 +107,29 @@ async function executeTask(
       config.model,
       startTime,
     );
+
+    if (task.reward.type === "script" && task.reward.verify_script) {
+      try {
+        // Phase 2 unification: route through ScriptVerifier (single
+        // verify_script implementation across eval-runner + RL rollout).
+        // Pass an empty Trajectory placeholder — ScriptVerifier doesn't
+        // inspect it, only runs the script and grades by exit code.
+        const ctx = buildVerifierContext(handle.sessionId);
+        const verifier = verifierForSpec(
+          { type: "script", verify_script: task.reward.verify_script },
+          ctx,
+        );
+        const score = await verifier.check({} as never);
+        const meta = score.metadata as { exit_code?: number; output?: string } | undefined;
+        trajectory.metadata.verifier_result = {
+          exit_code: typeof meta?.exit_code === "number" ? meta.exit_code : score.pass ? 0 : -1,
+          output: typeof meta?.output === "string" ? meta.output : "",
+        };
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        trajectory.metadata.verifier_result = { exit_code: -1, output: `verifier_error: ${msg}` };
+      }
+    }
 
     const reward = await computeReward(trajectory, task);
     trajectory.reward = reward;

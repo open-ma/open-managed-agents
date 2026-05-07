@@ -1,4 +1,11 @@
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
+import type { PageCursor } from "@open-managed-agents/shared";
+import {
+  cursorBinds,
+  cursorWhereSql,
+  fetchN,
+  trimPage,
+} from "@open-managed-agents/shared";
 import { EnvironmentNotFoundError } from "../errors";
 import type {
   EnvironmentRepo,
@@ -79,6 +86,28 @@ export class D1EnvironmentRepo implements EnvironmentRepo {
          ORDER BY created_at ASC`;
     const result = await this.db.prepare(sql).bind(tenantId).all<DbEnvironment>();
     return (result.results ?? []).map(toRow);
+  }
+
+  async listPage(
+    tenantId: string,
+    opts: {
+      includeArchived: boolean;
+      limit: number;
+      after?: PageCursor;
+    },
+  ): Promise<{ items: EnvironmentRow[]; hasMore: boolean }> {
+    const archived = opts.includeArchived ? "" : "AND archived_at IS NULL";
+    const sql =
+      `SELECT id, tenant_id, name, description, status, sandbox_worker_name, ` +
+      `build_error, config, metadata, image_strategy, image_handle, ` +
+      `created_at, updated_at, archived_at FROM environments ` +
+      `WHERE tenant_id = ? ${archived} ${cursorWhereSql(opts.after)} ` +
+      `ORDER BY created_at DESC, id DESC LIMIT ?`;
+    const result = await this.db
+      .prepare(sql)
+      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
+      .all<DbEnvironment>();
+    return trimPage((result.results ?? []).map(toRow), opts.limit);
   }
 
   async update(

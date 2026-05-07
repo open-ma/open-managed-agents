@@ -1,7 +1,9 @@
 import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
+import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { ListPage } from "../components/ListPage";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 
 interface Vault { id: string; name: string; created_at: string; archived_at?: string; }
@@ -13,8 +15,6 @@ interface Credential {
 
 export function VaultsList() {
   const { api } = useApi();
-  const [vaults, setVaults] = useState<Vault[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showCreateVault, setShowCreateVault] = useState(false);
   const [vaultName, setVaultName] = useState("");
 
@@ -32,13 +32,14 @@ export function VaultsList() {
     display_name: "", token: "", command_prefixes: "", env_var: "",
   });
 
-  const load = async () => {
-    setLoading(true);
-    try { setVaults((await api<{ data: Vault[] }>("/v1/vaults?limit=100")).data); } catch {}
-    setLoading(false);
-  };
-
-  useEffect(() => { load(); }, []);
+  const {
+    items: vaults,
+    isLoading: loading,
+    isLoadingMore,
+    hasMore,
+    loadMore,
+    refresh: load,
+  } = useCursorList<Vault>("/v1/vaults", { limit: 50 });
 
   // Listen for OAuth popup completion
   const handleOAuthMessage = useCallback((event: MessageEvent) => {
@@ -47,6 +48,7 @@ export function VaultsList() {
       setShowAddCred(false);
       openVault(selectedVault);
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedVault]);
 
   useEffect(() => {
@@ -120,72 +122,100 @@ export function VaultsList() {
   const [vaultTab, setVaultTab] = useState<"all" | "active">("active");
   const displayedVaults = vaultTab === "active" ? vaults.filter((v) => !v.archived_at) : vaults;
 
+  const tabs = (
+    <div className="flex gap-1">
+      {(["all", "active"] as const).map((t) => (
+        <button
+          key={t}
+          onClick={() => setVaultTab(t)}
+          className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+            vaultTab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"
+          }`}
+        >
+          {t === "all" ? "All" : "Active"}
+        </button>
+      ))}
+    </div>
+  );
+
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-4 md:p-8 lg:p-10">
-      <div className="flex items-start justify-between mb-6 gap-3">
-        <div>
-          <h1 className="font-display text-lg md:text-xl font-semibold tracking-tight text-fg">Credential Vaults</h1>
-          <p className="text-fg-muted text-sm">Manage credentials for MCP servers and CLI tools.</p>
-        </div>
-        <Button onClick={() => setShowCreateVault(true)}>+ New vault</Button>
-      </div>
-
-      <div className="flex gap-1 mb-4">
-        {(["all", "active"] as const).map((t) => (
-          <button key={t} onClick={() => setVaultTab(t)}
-            className={`px-3 py-1.5 text-sm rounded-md transition-colors ${vaultTab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`}>
-            {t === "all" ? "All" : "Active"}
-          </button>
-        ))}
-      </div>
-
-      {loading ? <div className="text-fg-subtle text-sm py-8 text-center">Loading...</div> : displayedVaults.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle"><p className="text-lg mb-1">No vaults yet</p></div>
-      ) : (
-        <div className="border border-border rounded-lg overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead><tr className="bg-bg-surface text-fg-subtle text-xs uppercase tracking-wider">
-              <th className="text-left px-4 py-2.5">Name</th>
-              <th className="text-left px-4 py-2.5">ID</th>
-              <th className="text-left px-4 py-2.5">Created</th>
-            </tr></thead>
-            <tbody>{displayedVaults.map((v) => (
-              <tr key={v.id} onClick={() => openVault(v)} className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors">
-                <td className="px-4 py-3 font-medium text-fg">{v.name}</td>
-                <td className="px-4 py-3 font-mono text-xs text-fg-muted">{v.id}</td>
-                <td className="px-4 py-3 text-fg-muted">{new Date(v.created_at).toLocaleDateString()}</td>
-              </tr>
-            ))}</tbody>
-          </table>
-        </div>
-      )}
-
+    <ListPage<Vault>
+      title="Credential Vaults"
+      subtitle="Manage credentials for MCP servers and CLI tools."
+      createLabel="+ New vault"
+      onCreate={() => setShowCreateVault(true)}
+      filters={tabs}
+      data={displayedVaults}
+      loading={loading}
+      getRowKey={(v) => v.id}
+      onRowClick={openVault}
+      hasMore={hasMore}
+      onLoadMore={loadMore}
+      loadingMore={isLoadingMore}
+      emptyTitle="No vaults yet"
+      columns={[
+        { key: "name", label: "Name", className: "font-medium text-fg" },
+        { key: "id", label: "ID", className: "font-mono text-xs text-fg-muted" },
+        {
+          key: "created",
+          label: "Created",
+          className: "text-fg-muted",
+          render: (v) => new Date(v.created_at).toLocaleDateString(),
+        },
+      ]}
+    >
       {/* Create Vault */}
-      <Modal open={showCreateVault} onClose={() => setShowCreateVault(false)} title="New Vault"
-        footer={<><Button variant="ghost" onClick={() => setShowCreateVault(false)}>Cancel</Button><Button onClick={createVault} disabled={!vaultName}>Create</Button></>}>
+      <Modal
+        open={showCreateVault}
+        onClose={() => setShowCreateVault(false)}
+        title="New Vault"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setShowCreateVault(false)}>Cancel</Button>
+            <Button onClick={createVault} disabled={!vaultName}>Create</Button>
+          </>
+        }
+      >
         <div className="space-y-4">
           <div>
             <label className="text-sm text-fg-muted block mb-1">Name</label>
-            <input value={vaultName} onChange={(e) => setVaultName(e.target.value.slice(0, 30))} className={inputCls} placeholder="My Vault" />
+            <input
+              value={vaultName}
+              onChange={(e) => setVaultName(e.target.value.slice(0, 30))}
+              className={inputCls}
+              placeholder="My Vault"
+            />
           </div>
         </div>
       </Modal>
 
       {/* Vault Detail */}
-      <Modal open={!!selectedVault} onClose={() => setSelectedVault(null)} title={selectedVault?.name || ""} subtitle={selectedVault ? `ID: ${selectedVault.id}` : undefined} maxWidth="max-w-2xl"
-        footer={<div className="flex gap-2">
-          <Button variant="secondary" size="sm" onClick={() => setShowAddCred(true)}>+ Connect service</Button>
-          <Button variant="ghost" size="sm" onClick={() => setShowManualCred(true)}>+ Add secret</Button>
-          <div className="flex-1" />
-          <Button variant="ghost" onClick={() => setSelectedVault(null)}>Close</Button>
-        </div>}>
-
+      <Modal
+        open={!!selectedVault}
+        onClose={() => setSelectedVault(null)}
+        title={selectedVault?.name || ""}
+        subtitle={selectedVault ? `ID: ${selectedVault.id}` : undefined}
+        maxWidth="max-w-2xl"
+        footer={
+          <div className="flex gap-2">
+            <Button variant="secondary" size="sm" onClick={() => setShowAddCred(true)}>+ Connect service</Button>
+            <Button variant="ghost" size="sm" onClick={() => setShowManualCred(true)}>+ Add secret</Button>
+            <div className="flex-1" />
+            <Button variant="ghost" onClick={() => setSelectedVault(null)}>Close</Button>
+          </div>
+        }
+      >
         <div className="mb-3">
           <h3 className="text-xs font-medium text-fg-subtle uppercase tracking-wider">Credentials</h3>
         </div>
 
-        {credsLoading ? <div className="text-fg-subtle text-sm py-4 text-center">Loading...</div> :
-          credentials.length === 0 ? <div className="text-center py-8 text-fg-subtle text-sm">No credentials yet. Connect an MCP server or add a command secret.</div> : (
+        {credsLoading ? (
+          <div className="text-fg-subtle text-sm py-4 text-center">Loading...</div>
+        ) : credentials.length === 0 ? (
+          <div className="text-center py-8 text-fg-subtle text-sm">
+            No credentials yet. Connect an MCP server or add a command secret.
+          </div>
+        ) : (
           <div className="space-y-2">
             {credentials.map((c) => (
               <div key={c.id} className="flex items-center justify-between border border-border rounded-lg px-4 py-3">
@@ -213,8 +243,13 @@ export function VaultsList() {
       </Modal>
 
       {/* Connect MCP Server — Registry Search (Anthropic-style) */}
-      <Modal open={showAddCred && !!selectedVault} onClose={() => { setShowAddCred(false); setMcpSearch(""); }} title="Connect a service" maxWidth="max-w-lg"
-        footer={isCustomUrl ? <Button onClick={() => connectMcp({ name: mcpSearch, url: mcpSearch })} disabled={!!connecting}>Connect</Button> : undefined}>
+      <Modal
+        open={showAddCred && !!selectedVault}
+        onClose={() => { setShowAddCred(false); setMcpSearch(""); }}
+        title="Connect a service"
+        maxWidth="max-w-lg"
+        footer={isCustomUrl ? <Button onClick={() => connectMcp({ name: mcpSearch, url: mcpSearch })} disabled={!!connecting}>Connect</Button> : undefined}
+      >
         <div className="space-y-3">
           <input
             value={mcpSearch}
@@ -266,8 +301,17 @@ export function VaultsList() {
       </Modal>
 
       {/* Add Manual Secret (command_secret) */}
-      <Modal open={showManualCred && !!selectedVault} onClose={() => setShowManualCred(false)} title="Add Command Secret"
-        footer={<><Button variant="ghost" onClick={() => setShowManualCred(false)}>Cancel</Button><Button onClick={createManualCred} disabled={!manualForm.display_name || !manualForm.token}>Create</Button></>}>
+      <Modal
+        open={showManualCred && !!selectedVault}
+        onClose={() => setShowManualCred(false)}
+        title="Add Command Secret"
+        footer={
+          <>
+            <Button variant="ghost" onClick={() => setShowManualCred(false)}>Cancel</Button>
+            <Button onClick={createManualCred} disabled={!manualForm.display_name || !manualForm.token}>Create</Button>
+          </>
+        }
+      >
         <div className="space-y-3">
           <div>
             <label className="text-sm text-fg-muted block mb-1">Display Name</label>
@@ -287,6 +331,6 @@ export function VaultsList() {
           </div>
         </div>
       </Modal>
-    </div>
+    </ListPage>
   );
 }

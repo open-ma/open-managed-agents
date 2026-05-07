@@ -1,5 +1,5 @@
 import { Hono } from "hono";
-import type { Env } from "@open-managed-agents/shared";
+import type { Env, RewardSpec } from "@open-managed-agents/shared";
 import type { EvalRunStatus } from "@open-managed-agents/evals-store";
 import type { Services } from "@open-managed-agents/services";
 import { kvKey } from "../kv-helpers";
@@ -14,12 +14,35 @@ const app = new Hono<{
 export interface EvalTaskSpec {
   id: string;
   setup_files?: { path: string; content: string }[];
+  /**
+   * Bash run in the sandbox via /exec before the first message. Used to
+   * stage env state that doesn't fit `setup_files` (git clone at a
+   * specific commit, dataset download, system package install). Failure
+   * (exit != 0) marks the trial failed before the agent ever starts.
+   */
+  setup_script?: string;
   messages: string[]; // sequence of user message texts to send
   timeout_ms?: number; // per-message wait timeout
   // P0a — number of independent trials of this task to run.
   // Default 1. When > 1, server spawns N sessions per task and stores N
   // trajectory_ids; pass@k / pass^k computed by downstream scorer layer.
   trials?: number;
+  /**
+   * Phase 2: declarative reward / verification spec. Optional.
+   *   - undefined  → eval-runner falls back to "trial reached idle = pass"
+   *                 (the Phase 1 placeholder; reward.verifier_id =
+   *                 "eval-runner.trial-status.v1")
+   *   - { type: "script", verify_script } → ScriptVerifier runs the script
+   *                 in the sandbox via /exec and grades by exit code
+   *   - { type: "verifiable", scorer, opts } → wraps a named Scorer from
+   *                 packages/eval-core/src/scorers/scorers.ts
+   *   - { type: "composite", components: [...] } → weighted aggregate
+   *   - { type: "reward_model", endpoint } → external HTTP grader
+   *
+   * JSON wire shape matches RLTask.reward so the same task definitions
+   * work for both eval and RL. See packages/eval-core/src/verifier/types.ts.
+   */
+  reward?: RewardSpec;
 }
 
 export type { EvalRunStatus };
@@ -33,6 +56,21 @@ export interface EvalTrialResult {
   error?: string;
   started_at?: string;
   ended_at?: string;
+  /**
+   * How many times we've attempted to finalize the trajectory (build+store)
+   * after the session went idle. Bounded retry — eval-runner.ts gives up
+   * after 3 attempts and marks the trial failed with structured error.
+   * Field is absent until the first failure (treat as 0).
+   */
+  finalize_retry_count?: number;
+  /**
+   * Final reward for this trial in [0, 1]. Mirrored from
+   * `Trajectory.reward.final_reward` (eval-runner writes both at finalize
+   * time). Kept as a top-level field for Console back-compat — Phase 3 will
+   * switch the UI to read `trajectory.reward` and this can be dropped.
+   * v1-additive: absent on trials produced before reward wiring landed.
+   */
+  reward?: number;
 }
 
 export interface EvalTaskResult {
