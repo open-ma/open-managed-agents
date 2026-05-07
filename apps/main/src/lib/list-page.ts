@@ -50,22 +50,36 @@ export function parsePageQuery(c: Context): PageQuery {
   };
 }
 
-/** Map a service-layer page to the wire shape and emit JSON. Emits BOTH
- *  `next_page` (Anthropic SDK reads this from `body.next_page`, see its
- *  core/pagination.js) and `next_cursor` (legacy OMA Console / CLI key)
- *  carrying the same opaque token. Both are omitted (not nulled) when no
- *  more pages — keeps payloads tight and matches the Anthropic convention
- *  of treating absent and null pagination tokens equivalently. */
+/** Map a service-layer page to the wire shape and emit JSON. Emits, for
+ *  every list response:
+ *
+ *    - `data`       — array of the mapped items
+ *    - `next_page`  — opaque token (Anthropic SDK reads `body.next_page`,
+ *                     see its core/pagination.js) or `null` when no more
+ *                     pages. ALWAYS present — Anthropic OpenAPI marks it
+ *                     required for several namespaces (environments,
+ *                     skills, user_profiles), so emit even when null
+ *                     instead of omitting.
+ *    - `next_cursor`— same opaque token as `next_page`, kept for the
+ *                     legacy OMA Console / CLI clients that read this key
+ *                     (apps/console/src/lib/useCursorList.ts). Omitted
+ *                     when no more pages, mirroring the historical OMA
+ *                     contract.
+ *    - `has_more`   — boolean. Anthropic's BetaListSkillsResponse marks
+ *                     this required; harmless on namespaces that don't.
+ */
 export function jsonPage<TRow, TApi>(
   c: Context,
   page: { items: TRow[]; nextCursor?: string },
   mapFn: (row: TRow) => TApi,
 ): Response {
   const data = page.items.map(mapFn);
-  if (!page.nextCursor) return c.json({ data });
-  return c.json({
+  const hasMore = !!page.nextCursor;
+  const body: Record<string, unknown> = {
     data,
-    next_page: page.nextCursor,
-    next_cursor: page.nextCursor,
-  });
+    next_page: page.nextCursor ?? null,
+    has_more: hasMore,
+  };
+  if (hasMore) body.next_cursor = page.nextCursor;
+  return c.json(body);
 }
