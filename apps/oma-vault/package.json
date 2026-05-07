@@ -1,0 +1,26 @@
+{
+  "name": "@open-managed-agents/oma-vault",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "oma-vault": "./bin/oma-vault.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "better-sqlite3": "^11.5.0",
+    "mockttp": "4.3.1",
+    "postgres": "^3.4.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "tsx": "^4.19.0"
+  }
+}

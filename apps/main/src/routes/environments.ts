@@ -199,7 +199,7 @@ app.post("/:id/build-complete", async (c) => {
       }
     }
     // Legacy svcbind breadcrumb (write-only — no readers; kept for ops debugging).
-    await c.env.CONFIG_KV.put(kvKey(t, "svcbind", id), workerName);
+    await c.var.services.kv.put(kvKey(t, "svcbind", id), workerName);
   }
 
   const row = await c.var.services.environments.update({

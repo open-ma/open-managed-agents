@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/blob-store",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters/cf-r2": "./src/adapters/cf-r2.ts",
+    "./adapters/in-memory": "./src/adapters/in-memory.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*"
+  }
+}

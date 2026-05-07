@@ -17,4 +17,4 @@ export * from "./ports";
 export { CredentialService, stripSecrets } from "./service";
 export type { CredentialServiceDeps } from "./service";
 
-export { createCfCredentialService, D1CredentialRepo } from "./adapters";
+export { createCfCredentialService, createSqliteCredentialService, SqlCredentialRepo } from "./adapters";
