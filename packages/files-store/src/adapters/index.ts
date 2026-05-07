@@ -1,10 +1,11 @@
-// Cloudflare adapter wiring. Exports the D1 implementation of FileRepo
-// plus a `createCfFileService` factory that callers in apps/main and
-// apps/agent use to instantiate the service.
+// Adapter wiring. Both Cloudflare (D1) and Node (any SqlClient)
+// deployment factories live here behind a single SqlFileRepo class.
 
-export { D1FileRepo } from "./d1-file-repo";
+export { SqlFileRepo } from "./sql-file-repo";
 
-import { D1FileRepo } from "./d1-file-repo";
+import { SqlFileRepo } from "./sql-file-repo";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { Logger } from "../ports";
 import { FileService } from "../service";
 
@@ -13,7 +14,17 @@ export function createCfFileService(
   opts?: { logger?: Logger },
 ): FileService {
   return new FileService({
-    repo: new D1FileRepo(deps.db),
+    repo: new SqlFileRepo(new CfD1SqlClient(deps.db)),
+    logger: opts?.logger,
+  });
+}
+
+export function createSqliteFileService(
+  deps: { client: SqlClient },
+  opts?: { logger?: Logger },
+): FileService {
+  return new FileService({
+    repo: new SqlFileRepo(deps.client),
     logger: opts?.logger,
   });
 }

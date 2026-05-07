@@ -1,0 +1,92 @@
+# Self-host OMA — single-instance docker-compose for local trials and small
+# self-host deploys. Uses SQLite + local FS for storage; if you outgrow
+# this (multi-instance, real DB, S3 blob) swap in services for postgres /
+# minio and point the env vars accordingly (see docs/self-host.md).
+#
+# Quick start:
+#   1. Copy .env.example → .env (fill ANTHROPIC_API_KEY)
+#   2. docker compose -f docker-compose.yml up --build
+#   3. curl localhost:8787/health
+#
+# Persistence: ./data on the host is bind-mounted at /app/data in the
+# container, so kill -9 / docker stop don't lose sessions or workdirs.
+
+services:
+  oma-server:
+    build:
+      context: .
+      dockerfile: apps/main-node/Dockerfile
+    image: openma/main-node:dev
+    container_name: oma-server
+    ports:
+      - "${OMA_PORT:-8787}:8787"
+    env_file:
+      - path: ./.env
+        required: false
+    environment:
+      # Required for harness turns. Put it in .env or pass via shell env.
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      # Optional: when pointing at an Anthropic-compat proxy that needs
+      # /v1 in the base URL or custom headers.
+      ANTHROPIC_BASE_URL: ${ANTHROPIC_BASE_URL:-}
+      ANTHROPIC_CUSTOM_HEADERS: ${ANTHROPIC_CUSTOM_HEADERS:-}
+      # Storage paths inside the container — mapped to ./data on host.
+      # All absolute so they don't surprise-resolve relative to pnpm's
+      # cwd (which becomes /app/apps/main-node under `pnpm --filter ... start`).
+      DATABASE_PATH: /app/data/oma.db
+      AUTH_DATABASE_PATH: /app/data/auth.db
+      SANDBOX_WORKDIR: /app/data/sandboxes
+      MEMORY_BLOB_DIR: /app/data/memory-blobs
+      # Outbound credential injection via the oma-vault sidecar. When set,
+      # LocalSubprocessSandbox.setOutboundContext wires the subprocess env
+      # to route HTTPS traffic through oma-vault for header injection.
+      OMA_VAULT_PROXY_URL: http://oma-vault:14322
+      OMA_VAULT_CA_CERT: /app/data/oma-vault-ca/ca.crt
+      # Auth: better-auth sqlite-backed. AUTH_DISABLED=1 bypasses entirely
+      # (all requests become tenant_id="default") for local single-user
+      # demos. BETTER_AUTH_SECRET signs cookies; generate with
+      # `openssl rand -hex 32` and put in .env.
+      BETTER_AUTH_SECRET: ${BETTER_AUTH_SECRET:-}
+      AUTH_DISABLED: ${AUTH_DISABLED:-}
+      PUBLIC_BASE_URL: ${PUBLIC_BASE_URL:-}
+    volumes:
+      - ./data:/app/data
+    depends_on:
+      oma-vault:
+        condition: service_started
+    restart: unless-stopped
+    # Healthcheck queries /health every 30s. unhealthy after 3 misses
+    # (90s grace), at which point Docker / your orchestrator can decide
+    # to restart.
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://localhost:8787/health').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # Outbound credential injector — mockttp HTTPS MITM proxy. Reads vault
+  # credentials from the same sqlite db as oma-server (./data/oma.db) and
+  # injects matching Authorization headers when the sandbox makes outbound
+  # HTTPS requests. The agent never sees the credential value. CA cert is
+  # written to ./data/oma-vault-ca/ca.crt and trusted by the sandbox via
+  # OMA_VAULT_CA_CERT (NODE_EXTRA_CA_CERTS / SSL_CERT_FILE).
+  oma-vault:
+    build:
+      context: .
+      dockerfile: apps/oma-vault/Dockerfile
+    image: openma/oma-vault:dev
+    container_name: oma-vault
+    environment:
+      DATABASE_PATH: /app/data/oma.db
+      OMA_VAULT_CA_DIR: /app/data/oma-vault-ca
+      OMA_VAULT_PORT: "14322"
+      # Tenant scope. Default "*" matches active credentials across ALL
+      # tenants by hostname — fine for single-operator self-host (every
+      # vault belongs to "me"), unsafe for shared multi-tenant deploys
+      # where two tenants might both register the same host. Override
+      # with OMA_TENANT=tn_xxx in .env for multi-user prod.
+      OMA_TENANT: ${OMA_TENANT:-*}
+    volumes:
+      - ./data:/app/data
+    restart: unless-stopped

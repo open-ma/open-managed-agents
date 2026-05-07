@@ -143,9 +143,19 @@ export function resolveModel(
   if (baseURL) headers["X-Sub-Module"] = "managed-agents";
   if (customHeaders) Object.assign(headers, customHeaders);
 
+  // @ai-sdk/anthropic appends `/messages` directly to baseURL — no `/v1`
+  // segment is added. Real api.anthropic.com endpoints include `/v1` in the
+  // SDK default, so deployments pointing at proxies must too. Auto-append
+  // `/v1` if the user supplied a bare host so common env values work.
+  const normalizedBaseURL = baseURL
+    ? /\/v\d+(\/)?$/.test(baseURL)
+      ? baseURL.replace(/\/$/, "")
+      : `${baseURL.replace(/\/$/, "")}/v1`
+    : undefined;
+
   const anthropic = createAnthropic({
     apiKey,
-    baseURL: baseURL || undefined,
+    baseURL: normalizedBaseURL,
     headers: Object.keys(headers).length > 0 ? headers : undefined,
     // stripMaxTokensFetch composes observingFetch internally for non-Claude;
     // Claude path uses observingFetch directly so 429/rate-limit logging
