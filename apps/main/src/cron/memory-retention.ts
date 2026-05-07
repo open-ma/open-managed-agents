@@ -3,7 +3,8 @@ import {
   logError,
   type Env,
 } from "@open-managed-agents/shared";
-import { D1MemoryVersionRepo } from "@open-managed-agents/memory-store";
+import { SqlMemoryVersionRepo } from "@open-managed-agents/memory-store";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -33,7 +34,7 @@ export async function memoryRetentionTick(env: Env, sweepHourUtc = 3): Promise<v
     return;
   }
 
-  const repo = new D1MemoryVersionRepo(env.AUTH_DB);
+  const repo = new SqlMemoryVersionRepo(new CfD1SqlClient(env.AUTH_DB));
   const cutoffMs = Date.now() - RETENTION_MS;
   try {
     const removed = await repo.pruneOlderThan(cutoffMs);

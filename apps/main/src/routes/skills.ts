@@ -5,8 +5,10 @@ import { logWarn } from "@open-managed-agents/shared";
 import { unzipSync } from "fflate";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
 import { kvKey, kvPrefix, kvListAll } from "../kv-helpers";
+import type { Services } from "@open-managed-agents/services";
+import type { BlobStore } from "@open-managed-agents/blob-store";
 
-const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>();
+const app = new Hono<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>();
 
 // ---------------------------------------------------------------------------
 // Types
@@ -149,7 +151,7 @@ function inputToBytes(file: SkillFileInput): Uint8Array {
  * unbound.
  */
 async function writeFilesToR2(
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   version: string,
@@ -169,7 +171,7 @@ async function writeFilesToR2(
 }
 
 async function readFilesFromR2(
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   version: string,
@@ -179,8 +181,7 @@ async function readFilesFromR2(
   for (const entry of manifest) {
     const obj = await bucket.get(skillFileR2Key(tenantId, skillId, version, entry.filename));
     if (!obj) continue;
-    const buf = await obj.arrayBuffer();
-    const bytes = new Uint8Array(buf);
+    const bytes = await obj.bytes();
     const content = entry.encoding === "base64"
       ? bytesToBase64(bytes)
       : new TextDecoder("utf-8").decode(bytes);
@@ -190,7 +191,7 @@ async function readFilesFromR2(
 }
 
 async function deleteFilesFromR2(
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   version: string,
@@ -203,8 +204,8 @@ async function deleteFilesFromR2(
   );
 }
 
-function ensureBucket(c: { env: Env }): R2Bucket | null {
-  return c.env.FILES_BUCKET || null;
+function ensureBucket(c: { var: { services: Services } }): BlobStore | null {
+  return c.var.services.filesBlob;
 }
 
 /**
@@ -421,7 +422,7 @@ interface PersistArgs {
 
 async function persistNewSkill(
   env: Env,
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   args: PersistArgs,
 ): Promise<
@@ -481,7 +482,7 @@ async function persistNewSkill(
 
 async function persistNewVersion(
   env: Env,
-  bucket: R2Bucket,
+  bucket: BlobStore,
   tenantId: string,
   skillId: string,
   args: PersistArgs,
@@ -619,11 +620,11 @@ app.get("/", async (c) => {
   let customs: SkillMeta[] = [];
   if (!onlyBuiltin) {
     const t = c.get("tenant_id");
-    const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skill"));
+    const list = await kvListAll(c.var.services.kv, kvPrefix(t, "skill"));
     customs = (
       await Promise.all(
         list.map(async (k) => {
-          const data = await c.env.CONFIG_KV.get(k.name);
+          const data = await c.var.services.kv.get(k.name);
           if (!data) return null;
           try {
             return JSON.parse(data) as SkillMeta;
@@ -658,7 +659,7 @@ app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const builtin = BUILTIN_SKILLS.find((s) => s.id === id);
   if (builtin) return c.json(toApiSkill(builtin));
-  const data = await c.env.CONFIG_KV.get(kvKey(c.get("tenant_id"), "skill", id));
+  const data = await c.var.services.kv.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
   return c.json(toApiSkill(JSON.parse(data) as SkillMeta));
 });
@@ -673,15 +674,15 @@ app.delete("/:id", async (c) => {
     return c.json({ error: "Cannot delete built-in skills" }, 403);
   }
   const t = c.get("tenant_id");
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
+  const data = await c.var.services.kv.get(kvKey(t, "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
 
-  const versionKeys = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skillver", id));
+  const versionKeys = await kvListAll(c.var.services.kv, kvPrefix(t, "skillver", id));
 
   const bucket = ensureBucket(c);
   if (bucket) {
     for (const k of versionKeys) {
-      const verData = await c.env.CONFIG_KV.get(k.name);
+      const verData = await c.var.services.kv.get(k.name);
       if (!verData) continue;
       try {
         const v = JSON.parse(verData) as SkillVersion;
@@ -696,8 +697,8 @@ app.delete("/:id", async (c) => {
   }
 
   await Promise.all([
-    c.env.CONFIG_KV.delete(kvKey(t, "skill", id)),
-    ...versionKeys.map((k) => c.env.CONFIG_KV.delete(k.name)),
+    c.var.services.kv.delete(kvKey(t, "skill", id)),
+    ...versionKeys.map((k) => c.var.services.kv.delete(k.name)),
   ]);
 
   return c.json({ type: "skill_deleted", id });
@@ -790,15 +791,15 @@ app.post("/:id/versions/upload", async (c) => {
 app.get("/:id/versions", async (c) => {
   const id = c.req.param("id");
   const t = c.get("tenant_id");
-  const skillData = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
+  const skillData = await c.var.services.kv.get(kvKey(t, "skill", id));
   if (!skillData) return c.json({ error: "Skill not found" }, 404);
 
-  const list = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skillver", id));
+  const list = await kvListAll(c.var.services.kv, kvPrefix(t, "skillver", id));
 
   const versions = (
     await Promise.all(
       list.map(async (k) => {
-        const data = await c.env.CONFIG_KV.get(k.name);
+        const data = await c.var.services.kv.get(k.name);
         if (!data) return null;
         try {
           const v = JSON.parse(data) as SkillVersion;
@@ -836,7 +837,7 @@ app.get("/:id/versions/:version", async (c) => {
   const version = c.req.param("version");
   const t = c.get("tenant_id");
 
-  const data = await c.env.CONFIG_KV.get(kvKey(t, "skillver", id, version));
+  const data = await c.var.services.kv.get(kvKey(t, "skillver", id, version));
   if (!data) return c.json({ error: "Version not found" }, 404);
 
   const v = JSON.parse(data) as SkillVersion;
@@ -856,18 +857,18 @@ app.delete("/:id/versions/:version", async (c) => {
   const version = c.req.param("version");
   const t = c.get("tenant_id");
 
-  const skillRaw = await c.env.CONFIG_KV.get(kvKey(t, "skill", id));
+  const skillRaw = await c.var.services.kv.get(kvKey(t, "skill", id));
   if (!skillRaw) return c.json({ error: "Skill not found" }, 404);
 
   const key = kvKey(t, "skillver", id, version);
-  const data = await c.env.CONFIG_KV.get(key);
+  const data = await c.var.services.kv.get(key);
   if (!data) return c.json({ error: "Version not found" }, 404);
 
   const skill: SkillMeta = JSON.parse(skillRaw);
   const v = JSON.parse(data) as SkillVersion;
 
   if (skill.latest_version === version) {
-    const allVersions = await kvListAll(c.env.CONFIG_KV, kvPrefix(t, "skillver", id));
+    const allVersions = await kvListAll(c.var.services.kv, kvPrefix(t, "skillver", id));
     const remaining = allVersions
       .filter((k) => k.name !== key)
       .map((k) => k.name.split(":").pop()!)
@@ -880,13 +881,13 @@ app.delete("/:id/versions/:version", async (c) => {
       );
     }
     skill.latest_version = remaining[0];
-    await c.env.CONFIG_KV.put(kvKey(t, "skill", id), JSON.stringify(skill));
+    await c.var.services.kv.put(kvKey(t, "skill", id), JSON.stringify(skill));
   }
 
   const bucket = ensureBucket(c);
   if (bucket) await deleteFilesFromR2(bucket, t, id, version, v.files);
 
-  await c.env.CONFIG_KV.delete(key);
+  await c.var.services.kv.delete(key);
 
   return c.json({ type: "skill_version_deleted", id, version });
 });

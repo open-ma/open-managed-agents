@@ -6,4 +6,4 @@ export * from "./ports";
 export { VaultService } from "./service";
 export type { VaultServiceDeps } from "./service";
 
-export { createCfVaultService, D1VaultRepo } from "./adapters";
+export { createCfVaultService, createSqliteVaultService, SqlVaultRepo } from "./adapters";
