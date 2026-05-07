@@ -2305,6 +2305,7 @@ export class SessionDO extends DurableObject<Env> {
           tenantId: this.state.tenant_id,
           environmentId: this.state.environment_id,
           sessionId: this.state.session_id,
+          agentId: this.state.agent_id,
         });
       }
 

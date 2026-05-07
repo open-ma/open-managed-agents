@@ -427,17 +427,24 @@ export class CloudflareSandbox implements SandboxExecutor {
     tenantId: string;
     environmentId: string;
     sessionId: string;
+    agentId?: string;
   }): Promise<void> {
     if (!opts.tenantId || !opts.environmentId || !opts.sessionId) return;
     try {
       const sandbox = (await this.getSandbox()) as unknown as {
-        setBackupContext?: (ctx: { tenantId: string; environmentId: string; sessionId: string }) => Promise<void>;
+        setBackupContext?: (ctx: {
+          tenantId: string;
+          environmentId: string;
+          sessionId: string;
+          agentId?: string;
+        }) => Promise<void>;
       };
       if (typeof sandbox.setBackupContext !== "function") return;
       await sandbox.setBackupContext({
         tenantId: opts.tenantId,
         environmentId: opts.environmentId,
         sessionId: opts.sessionId,
+        agentId: opts.agentId,
       });
     } catch (err) {
       console.error(
