@@ -21,6 +21,7 @@ import tenantsRoutes from "./routes/tenants";
 import evalsRoutes from "./routes/evals";
 import costReportRoutes from "./routes/cost-report";
 import usageRoutes from "./routes/usage";
+import billingRoutes from "./routes/billing";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
@@ -133,6 +134,7 @@ app.route("/v1/tenants", tenantsRoutes);
 app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/usage", usageRoutes);
+app.route("/v1/billing", billingRoutes);
 app.route("/v1/integrations", integrationsRoutes);
 app.route("/v1/runtimes", runtimesRoutes);
 // MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a

@@ -162,6 +162,15 @@ export interface Env {
       endedAt: number;
     }): Promise<void>;
   };
+  /**
+   * Optional Fetcher binding to the same usage-meter implementation, but
+   * for HTTP-shaped requests (Console summary/checkout/etc UIs). main
+   * forwards /v1/billing/* requests to this Fetcher so the meter worker
+   * owns its public API surface — main just stamps the tenant header.
+   * Like USAGE_METER it's purely opt-in: self-host omits and the
+   * /v1/billing/* routes return 501.
+   */
+  USAGE_METER_HTTP?: Fetcher;
   // Used by integrations subsystem to sign tokens at rest. Gateway's value.
   MCP_SIGNING_KEY?: string;
   // Killswitch for per-tenant D1 routing. Unset / "true" / anything else =
