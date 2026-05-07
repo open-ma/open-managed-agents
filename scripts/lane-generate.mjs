@@ -171,6 +171,20 @@ const main = resolveStaging("apps/main/wrangler.jsonc");
 main.name = NAMES.main;
 delete main.routes;
 delete main.triggers; // no cron on lanes — would still hit shared staging data N×
+// CF Queues allow exactly ONE consumer per queue. The staging memory queue
+// (`managed-agents-memory-events-staging`) is shared across the whole CF
+// account: prod-staging worker, every lane, anyone with the same wrangler
+// config — they all want to register as consumer, only the first one wins.
+// Subsequent deploys fail with `code: 11004 — already has a consumer`.
+//
+// Lanes don't need queue consumption to test API surfaces (the consumer
+// only reflects R2 FUSE writes back into D1; live agent sessions are the
+// thing that exercises it). Strip consumers from every lane config so
+// whoever owns the queue (typically `managed-agents-staging` or the first
+// lane that grabbed it) keeps it. Re-enable per-lane only if that lane
+// specifically needs to test the memory event pipeline AND no other
+// consumer is registered.
+delete main.queues;
 main.vars = {
   ...(main.vars || {}),
   // Linear / GitHub / Slack OAuth callbacks land here; must be the lane's
