@@ -437,6 +437,37 @@ app.post("/", async (c) => {
   // Cloud agents must supply an explicit environment_id because the
   // picked sandbox lane materially affects the run.
   const agentIsLocalRuntime = !!agentRow.runtime_binding;
+
+  // Optional hosted billing gate. When the BILLING service binding is
+  // present (hosted deployments), check the tenant has positive wallet
+  // balance before letting a cloud sandbox session through. Self-host /
+  // OSS dev deployments leave BILLING unbound and skip this — the
+  // platform behaves identically without billing bookkeeping.
+  if (!agentIsLocalRuntime && c.env.BILLING) {
+    try {
+      const gate = await c.env.BILLING.canStartSandbox({
+        tenantId: t,
+        agentId: body.agent,
+      });
+      if (!gate.ok) {
+        return c.json(
+          {
+            error: gate.reason ?? "Insufficient balance",
+            balance_cents: gate.balance_cents ?? 0,
+          },
+          402,
+        );
+      }
+    } catch (err) {
+      // Fail open: a billing worker outage shouldn't block all new
+      // sessions. The follow-up usage_events write still records the
+      // session so the wallet can be reconciled out-of-band.
+      console.error(
+        `[sessions] BILLING.canStartSandbox failed: ${(err as Error)?.message ?? err}`,
+      );
+    }
+  }
+
   let resolvedEnvId = body.environment_id ?? wrappedEnvId;
   if (!resolvedEnvId) {
     if (!agentIsLocalRuntime) {

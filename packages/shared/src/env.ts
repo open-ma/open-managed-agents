@@ -127,6 +127,34 @@ export interface Env {
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;
+  /**
+   * Optional WorkerEntrypoint RPC binding to a hosted-only billing worker.
+   * When present (hosted deployments), main calls into it after writing a
+   * usage_events row so the wallet ledger debits in lockstep, and at
+   * sandbox start to gate the launch on a positive balance. When absent
+   * (self-host, OSS dev), all callers soft-skip — the platform works the
+   * same; there's just no wallet bookkeeping.
+   *
+   * The billing worker lives in the private openma-hosted repo; OSS
+   * never imports it. The binding is purely a duck-typed contract here.
+   */
+  BILLING?: {
+    /** Returns ok=true when the tenant can start a new cloud sandbox. */
+    canStartSandbox(opts: {
+      tenantId: string;
+      agentId?: string;
+    }): Promise<{ ok: boolean; balance_cents?: number; reason?: string }>;
+    /** Mirrors a usage_events row into the wallet ledger as a debit. */
+    recordUsage(opts: {
+      tenantId: string;
+      sessionId: string;
+      agentId?: string;
+      runtimeKind: "cloud" | "local";
+      sandboxActiveSeconds: number;
+      startedAt: number;
+      endedAt: number;
+    }): Promise<void>;
+  };
   // Used by integrations subsystem to sign tokens at rest. Gateway's value.
   MCP_SIGNING_KEY?: string;
   // Killswitch for per-tenant D1 routing. Unset / "true" / anything else =
