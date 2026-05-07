@@ -184,12 +184,14 @@ jobs:
 
       # Deploy order is constrained by a circular dependency: integrations
       # binds MAIN→main, main binds INTEGRATIONS→integrations and
-      # SANDBOX_sandbox_default→agent. Cloudflare rejects service bindings
-      # whose target worker doesn't yet exist, so we stage:
-      #   1. integrations (stubbed: services array stripped) — workers exist
-      #   2. agent (binds integrations, which now exists)
-      #   3. main (binds integrations + agent, both exist)
-      #   4. integrations re-deploy (now with MAIN binding to lane main)
+      # SANDBOX_sandbox_default→agent, agent binds INTEGRATIONS+MAIN.
+      # Cloudflare rejects service bindings whose target worker doesn't yet
+      # exist, so we stage:
+      #   1. integrations (stubbed: services array stripped) — script exists
+      #   2. agent        (stubbed: services array stripped) — script exists
+      #   3. main full    (binds integrations + agent, both exist now)
+      #   4. agent re-deploy full (binds integrations + main, both exist)
+      #   5. integrations re-deploy full (binds main, exists)
       # jq is preinstalled on ubuntu-latest.
       #
       # `workers` input opts into single-worker redeploy when the lane is
@@ -210,12 +212,31 @@ jobs:
             > "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
           npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
 
-      # Deploy main BEFORE agent — agent worker has a service binding to
-      # main's `McpProxyRpc` WorkerEntrypoint class. CF resolves bindings
-      # at request time; if agent goes live before main's entrypoint
-      # exists, every cloud-MCP call fails until main catches up.
-      # Rollback: agent first, then main. See deploy.yml for the same
-      # rationale and full ordering invariant.
+      # Same stub trick for agent: agent's full config binds INTEGRATIONS +
+      # MAIN, so on first-time bring-up neither target exists yet (main
+      # hasn't been deployed). Strip services first so the script exists;
+      # the full re-deploy below restores the bindings once main is live.
+      # Only runs on full bring-up (EFFECTIVE_WORKERS=all). Partial-deploy
+      # requests for other workers don't need this — and stubbing agent
+      # mid-life would temporarily break its bindings.
+      - name: Deploy agent worker (stub, no service bindings yet)
+        if: contains(env.EFFECTIVE_WORKERS, 'all')
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          cd apps/agent
+          jq 'del(.services)' "wrangler.lane-${{ inputs.lane_name }}.jsonc" \
+            > "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
+          npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
+
+      # Deploy main BEFORE the agent re-deploy — agent worker has a service
+      # binding to main's `McpProxyRpc` WorkerEntrypoint class. CF resolves
+      # WorkerEntrypoint class bindings at request time, but plain script
+      # service bindings (SANDBOX_sandbox_default → agent) must resolve at
+      # deploy time. The agent stub above creates the script so main can
+      # bind to it; the full agent re-deploy below restores agent's own
+      # MAIN binding once main exists.
       - name: Deploy main worker
         if: contains(env.EFFECTIVE_WORKERS, 'all') || contains(env.EFFECTIVE_WORKERS, 'main')
         env:
