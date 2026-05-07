@@ -19,7 +19,7 @@ import {
   DEFAULT_SLACK_BOT_SCOPES,
   DEFAULT_SLACK_USER_SCOPES,
 } from "@open-managed-agents/slack";
-import type { Container } from "@open-managed-agents/integrations-core";
+import type { LinearContainer } from "@open-managed-agents/linear";
 import { buildContainer, buildGitHubContainer, buildSlackContainer } from "./wire";
 import type { Env } from "./env";
 
@@ -35,7 +35,7 @@ export interface ProviderBundle {
  * built one for direct repo access. The github / slack containers are
  * always built fresh because they target different per-provider tables.
  */
-export function buildProviders(env: Env, linearContainer?: Container): ProviderBundle {
+export function buildProviders(env: Env, linearContainer?: LinearContainer): ProviderBundle {
   // Trim trailing slash so we can safely concatenate paths.
   const gatewayOrigin = env.GATEWAY_ORIGIN.replace(/\/+$/, "");
 

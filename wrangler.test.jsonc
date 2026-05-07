@@ -10,7 +10,8 @@
   ],
 
   "d1_databases": [
-    { "binding": "AUTH_DB", "database_name": "test-auth-db", "database_id": "test-auth-db-id", "migrations_dir": "apps/main/migrations" }
+    { "binding": "AUTH_DB", "database_name": "test-auth-db", "database_id": "test-auth-db-id", "migrations_dir": "apps/main/migrations" },
+    { "binding": "INTEGRATIONS_DB", "database_name": "test-integrations-db", "database_id": "test-integrations-db-id", "migrations_dir": "apps/main/migrations-integrations" }
   ],
 
   "r2_buckets": [

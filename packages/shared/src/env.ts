@@ -1,6 +1,12 @@
 export interface Env {
   CONFIG_KV: KVNamespace;
   AUTH_DB: D1Database;
+  /** Integration subsystem D1 (linear_* / github_* / slack_* tables).
+   *  Separate database from AUTH_DB to isolate webhook write traffic and
+   *  let the integration subsystem evolve schema independently.
+   *  Optional on workers that don't touch integration tables (sandbox /
+   *  agent workers). Required on apps/main and apps/integrations. */
+  INTEGRATIONS_DB?: D1Database;
   SEND_EMAIL?: SendEmail;
   // SESSION_DO and SANDBOX are only in sandbox workers
   SESSION_DO?: DurableObjectNamespace;

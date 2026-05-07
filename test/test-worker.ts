@@ -30,6 +30,9 @@ import schema0003 from "../apps/main/migrations/0003_tenant_shard.sql?raw";
 import schema0010 from "../apps/main/migrations/0010_memory_anthropic_alignment.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0011 from "../apps/main/migrations/0011_workspace_backups.sql?raw";
+// INTEGRATIONS_DB schema — separate D1 holding linear_*/github_*/slack_*.
+// @ts-expect-error vitest resolves SQL via ?raw
+import integrationsSchema from "../apps/main/migrations-integrations/0001_schema.sql?raw";
 
 const MIGRATIONS_RAW: string[] = [
   schema0001 as string,
@@ -39,32 +42,44 @@ const MIGRATIONS_RAW: string[] = [
   schema0011 as string,
 ];
 
+const INTEGRATIONS_MIGRATIONS_RAW: string[] = [
+  integrationsSchema as string,
+];
+
 let migrationsApplied = false;
-async function ensureMigrations(env: { AUTH_DB?: D1Database }): Promise<void> {
+async function ensureMigrations(env: {
+  AUTH_DB?: D1Database;
+  INTEGRATIONS_DB?: D1Database;
+}): Promise<void> {
   if (migrationsApplied || !env.AUTH_DB) return;
-  for (const sql of MIGRATIONS_RAW) {
-    // Strip line-comments so they don't break statement boundaries, then split
-    // on `;`. Run each statement individually via prepare().run() — D1.exec()
-    // splits on newlines and breaks multi-line CREATE TABLE.
+  await applyMigrations(env.AUTH_DB, MIGRATIONS_RAW, "auth");
+  if (env.INTEGRATIONS_DB) {
+    await applyMigrations(env.INTEGRATIONS_DB, INTEGRATIONS_MIGRATIONS_RAW, "integrations");
+  }
+  migrationsApplied = true;
+}
+
+async function applyMigrations(
+  db: D1Database,
+  files: string[],
+  label: string,
+): Promise<void> {
+  for (const sql of files) {
     const stripped = sql
       .split("\n")
       .filter((l) => !l.trim().startsWith("--"))
       .join("\n");
     for (const stmt of stripped.split(";").map((s) => s.trim()).filter(Boolean)) {
       try {
-        await env.AUTH_DB.prepare(stmt).run();
+        await db.prepare(stmt).run();
       } catch (e) {
-        // Some migration files contain ALTER TABLE DROP COLUMN that may fail
-        // on re-run after IF NOT EXISTS makes them no-ops elsewhere — tolerate
-        // benign errors but log to surface real schema issues during dev.
         const msg = e instanceof Error ? e.message : String(e);
         if (!/no such column|duplicate column|already exists/i.test(msg)) {
-          console.error(`[test-migrations] failed: ${msg}\n  SQL: ${stmt.slice(0, 80)}...`);
+          console.error(`[test-migrations:${label}] failed: ${msg}\n  SQL: ${stmt.slice(0, 80)}...`);
         }
       }
     }
   }
-  migrationsApplied = true;
 }
 
 export default {
