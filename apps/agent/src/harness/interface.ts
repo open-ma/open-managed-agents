@@ -281,6 +281,16 @@ export interface SandboxExecutor {
     readOnly: boolean;
   }): Promise<void>;
   /**
+   * Mount FILES_BUCKET at /mnt/session/outputs/ scoped to (tenantId, sessionId)
+   * via R2 prefix. Anything the agent writes here appears in real time via
+   * the caller-facing GET /v1/sessions/:id/outputs endpoint. AMA-aligned
+   * "magic dir" pattern — agent uses standard file tools, no extra tool.
+   */
+  mountSessionOutputs?(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
    * Snapshot /workspace into R2 via squashfs. Returns a serializable
    * handle; null on failure. Used by session-do.ts to checkpoint the
    * workspace at session destroy. See workspace-backups.ts for the D1
