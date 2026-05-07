@@ -47,8 +47,21 @@ async function request<T = unknown>(
     },
   });
   if (!res.ok) {
-    const body = (await res.json().catch(() => ({}))) as { error?: string; details?: string };
-    throw new Error(body.details || body.error || `HTTP ${res.status}`);
+    // Server may emit either the legacy `{error: "<str>", details?}` shape
+    // (older endpoints) or the Anthropic-compat envelope `{type:"error",
+    // error:{type, message}, request_id}`. Honor both so thrown errors
+    // carry a real message either way.
+    const body = (await res.json().catch(() => ({}))) as {
+      error?: string | { message?: string };
+      details?: string;
+    };
+    let msg: string;
+    if (body.details) msg = body.details;
+    else if (typeof body.error === "string") msg = body.error;
+    else if (body.error && typeof body.error === "object" && body.error.message)
+      msg = body.error.message;
+    else msg = `HTTP ${res.status}`;
+    throw new Error(msg);
   }
   return (await res.json()) as T;
 }
