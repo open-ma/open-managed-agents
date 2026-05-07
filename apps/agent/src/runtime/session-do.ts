@@ -42,6 +42,7 @@ import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
+import { ensureSetupApplied } from "./setup-on-warmup";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
@@ -1857,25 +1858,60 @@ export class SessionDO extends DurableObject<Env> {
       const envId = this.state.environment_id;
       const imagePathHandled = false;
 
-      // Install environment packages if configured. Skipped when the
-      // base_snapshot path above handled it (restored from snapshot or
-      // just lazy-prepared).
+      // Install environment packages if configured. Replaces the old
+      // "always re-install everything every cold start" loop with a
+      // marker-aware 3-path flow (warm/restored/fresh) — see
+      // ./setup-on-warmup.ts for the full design.
+      //
+      // Lang packages (pip/npm/cargo/go) install to /workspace/.<lang>/
+      // so they're captured by the workspace backup just restored above.
+      // On the next cold restart the "restored" path skips them and only
+      // re-runs apt (which can't be backed up via SDK whitelist).
       if (envId && !imagePathHandled) {
         const envConfig = await this.getEnvConfig(envId);
-        if (envConfig) {
-          const pkgs = envConfig.config?.packages;
-          if (pkgs) {
-            const cmds: string[] = [];
-            if (pkgs.apt?.length) cmds.push(`apt-get update -qq && apt-get install -y -qq ${pkgs.apt.join(" ")}`);
-            if (pkgs.pip?.length) cmds.push(`pip install -q ${pkgs.pip.join(" ")}`);
-            if (pkgs.npm?.length) cmds.push(`npm install -g ${pkgs.npm.join(" ")}`);
-            if (pkgs.cargo?.length) cmds.push(`cargo install ${pkgs.cargo.join(" ")}`);
-            if (pkgs.gem?.length) cmds.push(`gem install ${pkgs.gem.join(" ")}`);
-            if (pkgs.go?.length) cmds.push(`go install ${pkgs.go.join(" ")}`);
-            if (cmds.length > 0) {
-              await sandbox.exec(cmds.join(" && "), 120000);
-            }
+        const pkgs = envConfig?.config?.packages;
+        if (pkgs) {
+          const result = await ensureSetupApplied(
+            { exec: (cmd: string, timeout?: number) => sandbox.exec(cmd, timeout) },
+            pkgs,
+            (event) => {
+              // Best-effort: emit a console line per step so it shows up
+              // in CF tail. A future commit threads this into the session
+              // event_log so the frontend can render the AMA-style ticker
+              // inline in chat (see demo/env-prep README for the design).
+              if (event.kind === "step") {
+                console.log(`[setup-on-warmup] step=${event.step}${event.reason ? ` reason=${event.reason}` : ""}`);
+              } else {
+                console.log(`[setup-on-warmup] done path=${event.path} duration_ms=${event.durationMs}`);
+              }
+            },
+          );
+          if (result.error) {
+            console.error(`[setup-on-warmup] failed path=${result.path}: ${result.error}`);
+            // Don't throw — the agent can still try to run with whatever
+            // packages survived. Surfaced via tool exec failure if a
+            // missing dep is needed.
           }
+        }
+      }
+
+      // Mount FILES_BUCKET at /mnt/session/outputs/ so any file the agent
+      // writes there immediately appears via the caller-facing
+      // GET /v1/sessions/:id/outputs endpoint. Mirrors AMA's `/mnt/session
+      // /outputs/` magic dir contract — agent uses the standard `write` tool,
+      // platform takes care of persistence + listing. Best-effort: mount
+      // failure logs but doesn't block warmup; agent can still write to
+      // /workspace, just not callable-retrievable.
+      if (this.state.session_id && this.state.tenant_id && sandbox.mountSessionOutputs) {
+        try {
+          await sandbox.mountSessionOutputs({
+            tenantId: this.state.tenant_id,
+            sessionId: this.state.session_id,
+          });
+        } catch (err) {
+          console.warn(
+            `[session-do] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
+          );
         }
       }
 
