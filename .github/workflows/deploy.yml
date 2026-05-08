@@ -22,7 +22,10 @@ jobs:
           node-version: '22'
 
       - name: Install pnpm
-        run: npm install -g pnpm
+        # Pin to v10 — pnpm v11 renamed `onlyBuiltDependencies` →
+        # `allowBuilds` and unpinned `npm i -g pnpm` (which pulls latest)
+        # caused install to fail when v11 went stable. Lockfile is v10.
+        run: npm install -g pnpm@10
 
       - name: Install dependencies
         run: pnpm install

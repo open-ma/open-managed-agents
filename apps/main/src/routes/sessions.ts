@@ -11,7 +11,6 @@ import type { Services } from "@open-managed-agents/services";
 import { getCfServicesForTenant } from "@open-managed-agents/services";
 import { toFileRecord } from "@open-managed-agents/files-store";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
-import { addServiceBinding } from "@open-managed-agents/cf-billing";
 import {
   SessionArchivedError,
   SessionMemoryStoreMaxExceededError,
@@ -50,17 +49,22 @@ function toApiSession<T extends { tenant_id?: string }>(row: T): Omit<T, "tenant
 }
 
 /**
- * Resolve the sandbox worker service binding for a given environment.
+ * Resolve the sandbox worker fetcher for a given environment.
  *
- * If the per-env service binding is missing on the live worker (which
- * happens whenever the main worker has been re-deployed since the env
- * was created — `wrangler deploy` overwrites the bindings list with
- * the static set in wrangler.jsonc, dropping every dynamic
- * SANDBOX_sandbox_env_* added at build-complete time), this attempts a
- * "lazy heal": call CF API to re-add the binding, then return 503 +
- * Retry-After: 5 so the client retries against a fresh isolate that
- * sees the new binding. The current isolate cannot pick up the change
- * synchronously — only the next deploy/reload of the script does.
+ * Post-GitHub-build replacement: all sessions route to the single
+ * sandbox-default service binding. The legacy per-env worker model
+ * (sandbox-${envId} via dynamic SANDBOX_sandbox_env_* bindings + lazy-heal)
+ * was removed when setup-on-warmup landed — packages now install at
+ * session warmup inside the shared worker, not via per-env CI builds.
+ *
+ * Two paths:
+ *   - SANDBOX_sandbox_default service binding (production-like) — main
+ *     calls into the agent worker via service binding, agent's SessionDO
+ *     handles the request. This is what main wrangler.jsonc binds.
+ *   - SESSION_DO local binding (test/combined worker mode) — used when
+ *     main and agent are bundled into one worker (no service hop).
+ *
+ * Function signature kept so the 13 callsites below don't need to change.
  */
 async function getSandboxBinding(
   env: Env,
@@ -71,28 +75,13 @@ async function getSandboxBinding(
   const envRow = await services.environments.get({ tenantId, environmentId });
   if (!envRow) return { binding: null, error: "Environment not found", status: 404 };
 
-  const envConfig = toEnvironmentConfig(envRow);
-
-  if (envConfig.status === "building") {
-    return { binding: null, error: "Environment is still building", status: 503, retryAfterSeconds: 10 };
-  }
-  if (envConfig.status === "error") {
-    return { binding: null, error: `Environment build failed: ${envConfig.build_error || "unknown error"}`, status: 500 };
-  }
-  if (!envConfig.sandbox_worker_name) {
-    return { binding: null, error: "No sandbox worker configured for this environment", status: 500 };
+  // Production-like: main → service binding → sandbox-default agent worker.
+  const svcBinding = (env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
+  if (svcBinding) {
+    return { binding: svcBinding };
   }
 
-  // Binding name derived from worker name: "sandbox-default" → "SANDBOX_sandbox_default"
-  const bindingName = `SANDBOX_${envConfig.sandbox_worker_name.replace(/-/g, "_")}`;
-  const binding = (env as unknown as Record<string, unknown>)[bindingName] as Fetcher | undefined;
-
-  if (binding) {
-    return { binding };
-  }
-
-  // Fallback: if SessionDO is available locally (test/combined worker mode),
-  // create an inline fetcher that routes directly to the DO
+  // Combined-worker path: directly invoke SessionDO from this worker.
   if (env.SESSION_DO) {
     const localFetcher: Fetcher = {
       fetch: (input: RequestInfo | URL, init?: RequestInit) => {
@@ -103,6 +92,9 @@ async function getSandboxBinding(
         const [, sessionId, rest] = match;
         const doId = env.SESSION_DO!.idFromName(sessionId);
         const stub = env.SESSION_DO!.get(doId);
+        // Workaround for cloudflare/workerd#2240: explicitly seed the
+        // partyserver .name so internal getters don't throw during DO startup.
+        (stub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
         return stub.fetch(new Request(`http://internal/${rest}${url.search}`, {
           method: req.method,
           headers: req.headers,
@@ -114,35 +106,7 @@ async function getSandboxBinding(
     return { binding: localFetcher };
   }
 
-  // sandbox-default is a static binding in wrangler.jsonc — if it's missing
-  // there's no way to lazy-heal, the deploy is broken. Bail loudly.
-  if (envConfig.sandbox_worker_name === "sandbox-default") {
-    return { binding: null, error: `Static service binding ${bindingName} missing — main worker deploy is broken`, status: 500 };
-  }
-
-  // Per-env worker — try lazy heal via CF API. The current isolate can't
-  // see the new binding, but the next request will hit a fresh one.
-  const cfEnv = env as unknown as { CLOUDFLARE_API_TOKEN?: string; CLOUDFLARE_ACCOUNT_ID?: string };
-  if (cfEnv.CLOUDFLARE_API_TOKEN && cfEnv.CLOUDFLARE_ACCOUNT_ID) {
-    try {
-      await addServiceBinding(
-        cfEnv.CLOUDFLARE_ACCOUNT_ID, "managed-agents", cfEnv.CLOUDFLARE_API_TOKEN,
-        bindingName, envConfig.sandbox_worker_name,
-      );
-      return {
-        binding: null,
-        error: `Environment worker just registered with the gateway. Retry in 5 seconds.`,
-        status: 503,
-        retryAfterSeconds: 5,
-      };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      console.log(`[lazy-heal] addServiceBinding ${bindingName} failed: ${msg}`);
-      return { binding: null, error: `Service binding ${bindingName} missing and auto-heal failed: ${msg}`, status: 500 };
-    }
-  }
-
-  return { binding: null, error: `Service binding ${bindingName} not found and no CF API creds for auto-heal`, status: 500 };
+  return { binding: null, error: "Neither SANDBOX_sandbox_default service binding nor SESSION_DO DO binding present — main worker deploy is broken", status: 500 };
 }
 
 /**
@@ -202,11 +166,15 @@ function forwardToSandbox(
   body?: BodyInit | null,
 ): Promise<Response> {
   const url = `https://sandbox${path}`;
+  // When the caller overrides the method (e.g. POST→GET to read a file),
+  // honor it for the body decision too — otherwise we try to forward the
+  // (likely already-consumed) original POST body on what should be a GET.
+  const effectiveMethod = method || req.method;
   return binding.fetch(
     new Request(url, {
-      method: method || req.method,
+      method: effectiveMethod,
       headers: req.headers,
-      body: body !== undefined ? body : (req.method !== "GET" && req.method !== "HEAD" ? req.body : undefined),
+      body: body !== undefined ? body : (effectiveMethod !== "GET" && effectiveMethod !== "HEAD" ? req.body : undefined),
     }),
   );
 }
@@ -851,6 +819,48 @@ app.delete("/:id", async (c) => {
     tenantId: t,
     sessionId: id,
   });
+
+  // Cascade-delete the /mnt/session/outputs/ R2 prefix. These objects have
+  // no D1 file row (listed via R2 prefix scan, not promoted to file_id),
+  // so the files-store deleteBySession above doesn't catch them. Without
+  // this, every artefact the agent wrote to /mnt/session/outputs/ leaks
+  // forever — and worse, becomes unreachable too because the outputs
+  // route 404s once the session row is gone.
+  if (c.env.FILES_BUCKET) {
+    const prefix = SESSION_OUTPUTS_PREFIX(t, id);
+    let cursor: string | undefined;
+    let deleted = 0;
+    try {
+      do {
+        const list: R2Objects = await c.env.FILES_BUCKET.list({ prefix, cursor, limit: 1000 });
+        if (list.objects.length) {
+          await Promise.all(
+            list.objects.map((o: R2Object) =>
+              c.env.FILES_BUCKET!.delete(o.key).catch((err) => {
+                logWarn(
+                  { op: "session.delete.outputs_cleanup", session_id: id, tenant_id: t, r2_key: o.key, err },
+                  "outputs R2 delete failed",
+                );
+              }),
+            ),
+          );
+          deleted += list.objects.length;
+        }
+        cursor = list.truncated ? list.cursor : undefined;
+      } while (cursor);
+      if (deleted > 0) {
+        logWarn(
+          { op: "session.delete.outputs_cleanup", session_id: id, tenant_id: t, deleted },
+          `cleared ${deleted} session-outputs object(s)`,
+        );
+      }
+    } catch (err) {
+      logWarn(
+        { op: "session.delete.outputs_cleanup_list", session_id: id, tenant_id: t, err },
+        "outputs prefix list failed; some objects may leak",
+      );
+    }
+  }
 
   return c.json({ type: "session_deleted", id });
 });
@@ -1869,6 +1879,95 @@ function parseGitHubOrg(repoUrl: string): string | null {
     return null;
   }
 }
+
+// ---- Session outputs ----------------------------------------------------
+//
+// AMA-aligned `/mnt/session/outputs/` magic-dir contract:
+//
+//   1. SessionDO mounts FILES_BUCKET at /mnt/session/outputs/ during
+//      doWarmUpSandbox via sandbox.mountSessionOutputs().
+//   2. R2 prefix: t/<tenantId>/session-outputs/<sessionId>/
+//   3. Agent writes a file using the standard `write` tool — s3fs PUTs
+//      synchronously to R2 under the prefix.
+//   4. Caller lists via GET /v1/sessions/:id/outputs → R2 list_objects
+//   5. Caller downloads via GET /v1/sessions/:id/outputs/:filename → R2 get
+//
+// No D1 file row needed (different from POST /v1/sessions/:id/files which
+// promotes a /workspace path to a first-class file_id). The two surfaces
+// can coexist: /outputs/ for transparent agent artefacts, /files for
+// explicit "save this for later cross-session reference" promotion.
+
+const SESSION_OUTPUTS_PREFIX = (tenantId: string, sessionId: string) =>
+  `t/${tenantId}/session-outputs/${sessionId}/`;
+
+const OUTPUT_MIME_GUESS: Record<string, string> = {
+  pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", webp: "image/webp", txt: "text/plain", md: "text/markdown",
+  csv: "text/csv", json: "application/json", html: "text/html", htm: "text/html",
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
+  zip: "application/zip", tar: "application/x-tar", gz: "application/gzip",
+};
+
+function guessOutputMime(filename: string): string {
+  const ext = filename.toLowerCase().split(".").pop() || "";
+  return OUTPUT_MIME_GUESS[ext] || "application/octet-stream";
+}
+
+// GET /v1/sessions/:id/outputs — list files agent wrote to /mnt/session/outputs/.
+app.get("/:id/outputs", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const bucket = c.env.FILES_BUCKET;
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  const prefix = SESSION_OUTPUTS_PREFIX(t, id);
+  const list = await bucket.list({ prefix, limit: 1000 });
+
+  const data = list.objects.map((o: R2Object) => {
+    const filename = o.key.slice(prefix.length);
+    return {
+      filename,
+      size_bytes: o.size,
+      uploaded_at: o.uploaded.toISOString(),
+      media_type: o.httpMetadata?.contentType || guessOutputMime(filename),
+    };
+  });
+  return c.json({ data, has_more: list.truncated });
+});
+
+// GET /v1/sessions/:id/outputs/:filename — stream raw bytes.
+app.get("/:id/outputs/:filename", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const filename = c.req.param("filename");
+  // Reject path traversal — filenames come from R2 directly (so they CAN'T
+  // contain ".." in our prefix), but the URL param is user-controlled.
+  if (filename.includes("..") || filename.includes("/")) {
+    return c.json({ error: "Invalid filename" }, 400);
+  }
+
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const bucket = c.env.FILES_BUCKET;
+  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  const r2Key = `${SESSION_OUTPUTS_PREFIX(t, id)}${filename}`;
+  const obj = await bucket.get(r2Key);
+  if (!obj) return c.json({ error: "Output file not found" }, 404);
+
+  return new Response(obj.body, {
+    headers: {
+      "Content-Type": obj.httpMetadata?.contentType || guessOutputMime(filename),
+      "Content-Length": String(obj.size),
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    },
+  });
+});
 
 export default app;
 

@@ -51,12 +51,6 @@
       "allowAny": [
         "zod"
       ]
-    },
-    "onlyBuiltDependencies": [
-      "@anthropic-ai/tokenizer",
-      "better-sqlite3",
-      "esbuild",
-      "workerd"
-    ]
+    }
   }
 }
