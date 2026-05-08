@@ -90,10 +90,18 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
     opts: {
       limit: number;
       after?: import("@open-managed-agents/shared").PageCursor;
+      q?: string;
     },
   ): Promise<{ items: ModelCardRow[]; hasMore: boolean }> {
+    const qLower = opts.q?.toLowerCase();
     let rows = Array.from(this.byId.values())
       .filter((c) => c.tenant_id === tenantId)
+      .filter((c) =>
+        qLower
+          ? (c.model_id ?? "").toLowerCase().includes(qLower) ||
+            (c.model ?? "").toLowerCase().includes(qLower)
+          : true,
+      )
       .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
     if (opts.after) {
       const { createdAt: t, id } = opts.after;

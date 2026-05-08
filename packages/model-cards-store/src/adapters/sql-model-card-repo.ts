@@ -1,6 +1,7 @@
 import {
   cursorBinds,
   cursorWhereSql,
+  escapeLikePattern,
   fetchN,
   trimPage,
   type PageCursor,
@@ -108,18 +109,28 @@ export class SqlModelCardRepo implements ModelCardRepo {
     opts: {
       limit: number;
       after?: PageCursor;
+      q?: string;
     },
   ): Promise<{ items: ModelCardRow[]; hasMore: boolean }> {
+    // Match either the user-facing handle (model_id) OR the wire-level
+    // model string — users sometimes search for the underlying provider
+    // name (e.g. "claude-sonnet") rather than their own handle.
+    const qClause = opts.q
+      ? `AND (model_id LIKE ? ESCAPE '\\' OR model LIKE ? ESCAPE '\\')`
+      : "";
     const sql =
       `SELECT id, tenant_id, model_id, provider, model, base_url, ` +
       `custom_headers, api_key_preview, is_default, ` +
       `created_at, updated_at, archived_at FROM model_cards ` +
-      `WHERE tenant_id = ? ${cursorWhereSql(opts.after)} ` +
+      `WHERE tenant_id = ? ${qClause} ${cursorWhereSql(opts.after)} ` +
       `ORDER BY created_at DESC, id DESC LIMIT ?`;
-    const result = await this.db
-      .prepare(sql)
-      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
-      .all<DbModelCard>();
+    const binds: unknown[] = [tenantId];
+    if (opts.q) {
+      const pattern = `%${escapeLikePattern(opts.q)}%`;
+      binds.push(pattern, pattern);
+    }
+    binds.push(...cursorBinds(opts.after), fetchN(opts.limit));
+    const result = await this.db.prepare(sql).bind(...binds).all<DbModelCard>();
     return trimPage((result.results ?? []).map(toRow), opts.limit);
   }
 
