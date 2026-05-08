@@ -3637,6 +3637,22 @@ export class SessionDO extends DurableObject<Env> {
     );
     history.append(event);
     this.broadcastEvent(event);
+
+    // Mirror the terminus on D1 so list/get queries reflect it without
+    // needing a sandbox-worker round-trip. Fire-and-forget — the DO-local
+    // state above is the source of truth for the same-process gate; the
+    // D1 write is for cross-process readers (Console list, cost reports,
+    // recovery scans). Failure here is logged, not propagated.
+    const sessionId = this.state.session_id;
+    if (sessionId) {
+      this.runtimeAdapter
+        .terminate(sessionId, reason)
+        .catch((err) => {
+          console.warn(
+            `[session_do] terminate writeback to D1 failed: ${(err as Error).message ?? err}`,
+          );
+        });
+    }
   }
 
   setState(next: SessionState): void {

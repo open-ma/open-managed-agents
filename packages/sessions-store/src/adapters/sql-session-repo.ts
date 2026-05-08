@@ -83,7 +83,7 @@ export class SqlSessionRepo implements SessionRepo {
       .prepare(
         `SELECT id, tenant_id, agent_id, environment_id, title, status,
                 vault_ids, agent_snapshot, environment_snapshot, metadata,
-                created_at, updated_at, archived_at
+                created_at, updated_at, archived_at, terminated_at
          FROM sessions
          WHERE id = ? AND tenant_id = ?`,
       )
@@ -97,7 +97,7 @@ export class SqlSessionRepo implements SessionRepo {
       .prepare(
         `SELECT id, tenant_id, agent_id, environment_id, title, status,
                 vault_ids, agent_snapshot, environment_snapshot, metadata,
-                created_at, updated_at, archived_at
+                created_at, updated_at, archived_at, terminated_at
          FROM sessions
          WHERE id = ?`,
       )
@@ -120,7 +120,7 @@ export class SqlSessionRepo implements SessionRepo {
     binds.push(opts.limit);
     const sql = `SELECT id, tenant_id, agent_id, environment_id, title, status,
                         vault_ids, agent_snapshot, environment_snapshot, metadata,
-                        created_at, updated_at, archived_at
+                        created_at, updated_at, archived_at, terminated_at
                  FROM sessions
                  WHERE ${where.join(" AND ")}
                  ORDER BY created_at ${order}
@@ -155,7 +155,7 @@ export class SqlSessionRepo implements SessionRepo {
     binds.push(fetchN(opts.limit));
     const sql = `SELECT id, tenant_id, agent_id, environment_id, title, status,
                         vault_ids, agent_snapshot, environment_snapshot, metadata,
-                        created_at, updated_at, archived_at
+                        created_at, updated_at, archived_at, terminated_at
                  FROM sessions
                  WHERE ${where.join(" AND ")}
                  ORDER BY created_at DESC, id DESC
@@ -392,6 +392,7 @@ interface DbSession {
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
+  terminated_at: number | null;
 }
 
 interface DbResource {
@@ -424,6 +425,7 @@ function toSessionRow(r: DbSession): SessionRow {
     created_at: msToIso(r.created_at),
     updated_at: r.updated_at !== null ? msToIso(r.updated_at) : null,
     archived_at: r.archived_at !== null ? msToIso(r.archived_at) : null,
+    terminated_at: r.terminated_at !== null ? msToIso(r.terminated_at) : null,
   };
 }
 

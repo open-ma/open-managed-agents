@@ -36,6 +36,7 @@ interface InMemSession {
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
+  terminated_at: number | null;
 }
 
 interface InMemResource {
@@ -68,6 +69,7 @@ export class InMemorySessionRepo implements SessionRepo {
       created_at: session.createdAt,
       updated_at: null,
       archived_at: null,
+      terminated_at: null,
     };
     this.sessions.set(session.id, row);
 
@@ -339,6 +341,7 @@ function toSessionRow(s: InMemSession): SessionRow {
     created_at: msToIso(s.created_at),
     updated_at: s.updated_at !== null ? msToIso(s.updated_at) : null,
     archived_at: s.archived_at !== null ? msToIso(s.archived_at) : null,
+    terminated_at: s.terminated_at !== null ? msToIso(s.terminated_at) : null,
   };
 }
 

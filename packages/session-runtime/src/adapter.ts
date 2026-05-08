@@ -80,6 +80,22 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
     this.onTurnEnded?.(sessionId, turnId);
   }
 
+  async terminate(sessionId: string, _reason: string): Promise<void> {
+    const now = Date.now();
+    // Idempotent: second call is a no-op because the WHERE filter only
+    // matches rows that aren't already terminated. Also clears any
+    // in-flight turn marker so listOrphanTurns doesn't see a ghost row.
+    await this.sql
+      .prepare(
+        `UPDATE sessions
+            SET status='terminated', terminated_at=?, turn_id=NULL,
+                turn_started_at=NULL, updated_at=?
+          WHERE id=? AND terminated_at IS NULL`,
+      )
+      .bind(now, now, sessionId)
+      .run();
+  }
+
   async listOrphanTurns(sessionId: string): Promise<OrphanTurn[]> {
     const r = await this.sql
       .prepare(
