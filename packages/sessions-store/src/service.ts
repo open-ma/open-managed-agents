@@ -377,6 +377,32 @@ export class SessionService {
     await this.repo.deleteResource(opts.sessionId, opts.resourceId);
   }
 
+  /** Replace the resource JSON column with the caller's body. AMA's
+   *  POST /v1/sessions/:id/resources/:resource_id replaces the entire
+   *  SessionResource shape; we re-stamp `id` / `session_id` / `created_at`
+   *  on the caller's payload so identity stays stable. Sandbox-side
+   *  remount (e.g. mount_path / access changes) is the caller's job —
+   *  this method only persists. */
+  async updateResource(opts: {
+    tenantId: string;
+    sessionId: string;
+    resourceId: string;
+    resource: SessionResource;
+  }): Promise<SessionResourceRow> {
+    await this.requireSession(opts);
+    const existing = await this.repo.getResource(opts.sessionId, opts.resourceId);
+    if (!existing) throw new SessionResourceNotFoundError();
+    const stamped = {
+      ...opts.resource,
+      id: opts.resourceId,
+      session_id: opts.sessionId,
+      // Preserve the original created_at — AMA's update doesn't move
+      // the creation timestamp.
+      created_at: existing.resource.created_at ?? existing.created_at,
+    } as SessionResource;
+    return this.repo.updateResource(opts.sessionId, opts.resourceId, stamped);
+  }
+
   /** Indexed COUNT for sessions.ts:853 quota check (called before a memory_store add). */
   async countActiveResources(opts: {
     sessionId: string;

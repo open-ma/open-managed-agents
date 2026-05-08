@@ -63,6 +63,8 @@ import schema0013 from "../apps/main/migrations/0013_cursor_pagination_indexes.s
 import schema0014 from "../apps/main/migrations/0014_session_turn_id.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0015 from "../apps/main/migrations/0015_model_card_handle_rename.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0016 from "../apps/main/migrations/0016_session_terminated_at.sql?raw";
 // INTEGRATIONS_DB schema — separate D1 holding linear_*/github_*/slack_*.
 // @ts-expect-error vitest resolves SQL via ?raw
 import integrationsSchema from "../apps/main/migrations-integrations/0001_schema.sql?raw";
@@ -85,6 +87,7 @@ const MIGRATIONS_RAW: string[] = [
   schema0013 as string,
   schema0014 as string,
   schema0015 as string,
+  schema0016 as string,
 ];
 
 const INTEGRATIONS_MIGRATIONS_RAW: string[] = [

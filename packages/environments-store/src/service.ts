@@ -224,18 +224,13 @@ export class EnvironmentService {
  */
 export function toEnvironmentConfig(row: EnvironmentRow): EnvironmentConfig {
   const env: EnvironmentConfig = {
+    type: "environment",
     id: row.id,
     name: row.name,
     config: row.config,
-    status: row.status,
     created_at: row.created_at,
   };
   if (row.description !== null) env.description = row.description;
-  if (row.sandbox_worker_name !== null) {
-    env.sandbox_worker_name = row.sandbox_worker_name;
-  }
-  if (row.build_error !== null) env.build_error = row.build_error;
-  if (row.image_strategy !== null) env.image_strategy = row.image_strategy;
   if (row.metadata !== null) env.metadata = row.metadata;
   if (row.updated_at !== null) env.updated_at = row.updated_at;
   if (row.archived_at !== null) env.archived_at = row.archived_at;

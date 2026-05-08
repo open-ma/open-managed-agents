@@ -10,6 +10,98 @@ const app = new Hono<{
   Variables: { tenant_id: string; services: Services };
 }>();
 
+// ─── Session-outputs synthesis ──────────────────────────────────────
+//
+// Files the agent writes to /mnt/session/outputs/ inside the sandbox land
+// in R2 under `t/<tenant>/session-outputs/<session>/<filename>` with no
+// D1 row (the mount is bytes-only, see sessions.ts:1985 SESSION_OUTPUTS_PREFIX).
+// To make these reachable through the standard AMA Files API, we synthesize
+// file rows on the fly:
+//
+//   - LIST /v1/files?scope_id=<sessionId> includes both real D1-backed
+//     files AND R2 objects under the session-outputs prefix.
+//   - GET /v1/files/:id and /content recognize ids matching `out:<sessionId>:
+//     <base64url(filename)>` and read R2 directly with no D1 round-trip.
+//
+// Wire id format is opaque to the SDK; format is stable and self-describing
+// so we never need a backing index. base64url encoding so filenames with
+// special chars (spaces, slashes — though slashes shouldn't reach here)
+// don't break URL routing.
+
+const SESSION_OUTPUTS_PREFIX = (tenantId: string, sessionId: string) =>
+  `t/${tenantId}/session-outputs/${sessionId}/`;
+
+function encodeOutputId(sessionId: string, filename: string): string {
+  // base64url; strip padding so the id stays URL-friendly
+  const b64 = btoa(filename).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return `out:${sessionId}:${b64}`;
+}
+
+function decodeOutputId(
+  id: string,
+): { sessionId: string; filename: string } | null {
+  if (!id.startsWith("out:")) return null;
+  const rest = id.slice(4);
+  const sep = rest.indexOf(":");
+  if (sep < 0) return null;
+  const sessionId = rest.slice(0, sep);
+  const b64 = rest.slice(sep + 1);
+  try {
+    const padded = b64.replace(/-/g, "+").replace(/_/g, "/")
+      + "===".slice((b64.length + 3) % 4);
+    return { sessionId, filename: atob(padded) };
+  } catch {
+    return null;
+  }
+}
+
+const OUTPUT_MIME_GUESS: Record<string, string> = {
+  pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
+  gif: "image/gif", webp: "image/webp", txt: "text/plain", md: "text/markdown",
+  csv: "text/csv", json: "application/json", html: "text/html", htm: "text/html",
+  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
+  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
+  zip: "application/zip", tar: "application/x-tar", gz: "application/gzip",
+};
+
+function guessOutputMime(filename: string): string {
+  const ext = filename.toLowerCase().split(".").pop() || "";
+  return OUTPUT_MIME_GUESS[ext] || "application/octet-stream";
+}
+
+interface ApiFileRecord {
+  id: string;
+  type: "file";
+  filename: string;
+  media_type: string;
+  size_bytes: number;
+  created_at: string;
+  scope?: { type: "session"; id: string };
+  downloadable?: boolean;
+}
+
+async function listSessionOutputAsFiles(
+  bucket: R2Bucket,
+  tenantId: string,
+  sessionId: string,
+): Promise<ApiFileRecord[]> {
+  const prefix = SESSION_OUTPUTS_PREFIX(tenantId, sessionId);
+  const list = await bucket.list({ prefix, limit: 1000 });
+  return list.objects.map((o: R2Object) => {
+    const filename = o.key.slice(prefix.length);
+    return {
+      id: encodeOutputId(sessionId, filename),
+      type: "file" as const,
+      filename,
+      media_type: o.httpMetadata?.contentType || guessOutputMime(filename),
+      size_bytes: o.size,
+      created_at: o.uploaded.toISOString(),
+      scope: { type: "session" as const, id: sessionId },
+      downloadable: true,
+    };
+  });
+}
+
 // POST /v1/files — upload file (multipart form or JSON body)
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
@@ -118,10 +210,28 @@ app.get("/", async (c) => {
   });
 
   const slice = rows.slice(0, requested);
-  const data = slice.map(toFileRecord);
+  const data: ApiFileRecord[] = slice.map(toFileRecord) as ApiFileRecord[];
+  let hasMore = rows.length > requested;
+
+  // When the caller scopes to a session, also list the R2 session-outputs
+  // prefix and fold those in as synthesized rows. Pagination here is
+  // best-effort: we don't honor before_id/after_id across the synthesized
+  // set (they'd need a unified cursor scheme over D1 + R2). For typical
+  // usage — list session artifacts after the agent finishes — this returns
+  // everything in one page.
+  if (scopeId && c.env.FILES_BUCKET) {
+    const synthesized = await listSessionOutputAsFiles(
+      c.env.FILES_BUCKET,
+      t,
+      scopeId,
+    );
+    data.push(...synthesized);
+    if (synthesized.length >= 1000) hasMore = true;
+  }
+
   return c.json({
     data,
-    has_more: rows.length > requested,
+    has_more: hasMore,
     first_id: data[0]?.id,
     last_id: data[data.length - 1]?.id,
   });
@@ -129,9 +239,34 @@ app.get("/", async (c) => {
 
 // GET /v1/files/:id — get file metadata
 app.get("/:id", async (c) => {
+  const id = c.req.param("id");
+  const t = c.get("tenant_id");
+
+  // Synthesized session-output id: derive metadata from R2 directly,
+  // no D1 round-trip needed.
+  const decoded = decodeOutputId(id);
+  if (decoded) {
+    const bucket = c.env.FILES_BUCKET;
+    if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+    const r2Key = `${SESSION_OUTPUTS_PREFIX(t, decoded.sessionId)}${decoded.filename}`;
+    const head = await bucket.head(r2Key);
+    if (!head) return c.json({ error: "File not found" }, 404);
+    const record: ApiFileRecord = {
+      id,
+      type: "file",
+      filename: decoded.filename,
+      media_type: head.httpMetadata?.contentType || guessOutputMime(decoded.filename),
+      size_bytes: head.size,
+      created_at: head.uploaded.toISOString(),
+      scope: { type: "session", id: decoded.sessionId },
+      downloadable: true,
+    };
+    return c.json(record);
+  }
+
   const row = await c.var.services.files.get({
-    tenantId: c.get("tenant_id"),
-    fileId: c.req.param("id"),
+    tenantId: t,
+    fileId: id,
   });
   if (!row) return c.json({ error: "File not found" }, 404);
   return c.json(toFileRecord(row));
@@ -141,12 +276,28 @@ app.get("/:id", async (c) => {
 // Gated by `downloadable` flag, mirroring Anthropic's split: user-uploaded
 // files are opaque, model/sandbox-emitted artefacts are downloadable.
 app.get("/:id/content", async (c) => {
+  const id = c.req.param("id");
+  const t = c.get("tenant_id");
+  const r2 = c.env.FILES_BUCKET;
   const bucket = c.var.services.filesBlob;
-  if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+  if (!r2 || !bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+
+  // Synthesized session-output id: stream R2 directly.
+  const decoded = decodeOutputId(id);
+  if (decoded) {
+    const r2Key = `${SESSION_OUTPUTS_PREFIX(t, decoded.sessionId)}${decoded.filename}`;
+    const obj = await r2.get(r2Key);
+    if (!obj) return c.json({ error: "File content not found" }, 404);
+    return new Response(obj.body, {
+      headers: {
+        "Content-Type": obj.httpMetadata?.contentType || guessOutputMime(decoded.filename),
+      },
+    });
+  }
 
   const row = await c.var.services.files.get({
-    tenantId: c.get("tenant_id"),
-    fileId: c.req.param("id"),
+    tenantId: t,
+    fileId: id,
   });
   if (!row) return c.json({ error: "File not found" }, 404);
   if (!row.downloadable) {

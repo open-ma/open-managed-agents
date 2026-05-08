@@ -5,10 +5,16 @@ import { GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
-  system?: string; harness?: string; version: number; description?: string;
-  tools?: unknown[]; callable_agents?: unknown[]; mcp_servers?: unknown[];
+  system?: string; version: number; description?: string;
+  tools?: unknown[]; mcp_servers?: unknown[];
+  multiagent?: { type: "coordinator"; agents: Array<{type:"agent"; id:string; version:number}> } | null;
   skills?: unknown[]; created_at: string; updated_at?: string; archived_at?: string;
-  runtime_binding?: { runtime_id: string; acp_agent_id: string };
+  _oma?: {
+    aux_model?: { id: string; speed?: string };
+    harness?: string;
+    runtime_binding?: { runtime_id: string; acp_agent_id: string };
+    appendable_prompts?: string[];
+  };
 }
 
 /** Shared publication shape across Linear / GitHub / Slack — they all
@@ -83,14 +89,14 @@ export function AgentDetail() {
       <div className="grid grid-cols-[140px_1fr] gap-x-4 gap-y-2 max-w-2xl text-sm">
         <span className="text-fg-muted">ID</span><span className="font-mono text-xs">{agent.id}</span>
         <span className="text-fg-muted">Model</span><span>{modelStr(agent.model)}</span>
-        <span className="text-fg-muted">Harness</span><span>{agent.harness || "default"}</span>
-        {agent.runtime_binding && (
+        <span className="text-fg-muted">Harness</span><span>{agent._oma?.harness || "default"}</span>
+        {agent._oma?.runtime_binding && (
           <>
             <span className="text-fg-muted">Local Runtime</span>
             <span className="text-xs">
-              <span className="font-mono">{agent.runtime_binding.runtime_id.slice(0, 8)}…</span>
+              <span className="font-mono">{agent._oma.runtime_binding.runtime_id.slice(0, 8)}…</span>
               <span className="text-fg-subtle"> · ACP agent: </span>
-              <span className="font-mono">{agent.runtime_binding.acp_agent_id}</span>
+              <span className="font-mono">{agent._oma.runtime_binding.acp_agent_id}</span>
             </span>
           </>
         )}

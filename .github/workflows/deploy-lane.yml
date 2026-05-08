@@ -127,14 +127,69 @@ jobs:
           npx wrangler d1 migrations apply openma-auth-staging --remote \
             --config "wrangler.lane-${{ inputs.lane_name }}.jsonc"
 
+      # Detect first-time lane bring-up. If the operator passed e.g.
+      # `workers=main` but the lane's agent / integrations workers don't
+      # exist yet, the partial deploy will fail at "Deploy main worker"
+      # with `Service binding 'SANDBOX_sandbox_default' references Worker
+      # '...-lane-<name>' which was not found` — main can't bind a service
+      # that doesn't exist. The `workers` input is documented as a fast-path
+      # for **already-up** lanes; this step makes that requirement
+      # auto-detected instead of a footgun. Any missing dependency forces
+      # the effective workers set to `all` so the subsequent steps run the
+      # full circular-binding bring-up dance.
+      - name: Detect effective workers (force `all` on first-time lane)
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          LANE='${{ inputs.lane_name }}'
+          REQUESTED='${{ inputs.workers }}'
+          MAIN_NAME="managed-agents-lane-$LANE"
+          AGENT_NAME="sandbox-default-lane-$LANE"
+          INT_NAME="managed-agents-integrations-lane-$LANE"
+
+          worker_exists() {
+            local name="$1"
+            local code
+            code=$(curl -sS -o /dev/null -w '%{http_code}' \
+              -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+              "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$name")
+            [ "$code" = "200" ]
+          }
+
+          main_up=$(worker_exists "$MAIN_NAME"        && echo y || echo n)
+          agent_up=$(worker_exists "$AGENT_NAME"      && echo y || echo n)
+          int_up=$(worker_exists "$INT_NAME"          && echo y || echo n)
+
+          echo "lane workers — main:$main_up agent:$agent_up int:$int_up   requested:$REQUESTED"
+
+          # Any partial-deploy request whose dependencies are missing must
+          # fall back to a full bring-up. The full set is also forced when
+          # the requested set is literally `all`.
+          force_all=false
+          if [[ "$REQUESTED" == *all* ]]; then force_all=true; fi
+          if [[ "$REQUESTED" == *main* ]] && { [ "$agent_up" = n ] || [ "$int_up" = n ]; }; then force_all=true; fi
+          if [[ "$REQUESTED" == *agent* ]] && { [ "$main_up" = n ] || [ "$int_up" = n ]; }; then force_all=true; fi
+          if [[ "$REQUESTED" == *integrations* ]] && { [ "$main_up" = n ] || [ "$agent_up" = n ]; }; then force_all=true; fi
+
+          if [ "$force_all" = true ]; then
+            echo "→ effective workers: all (first-time bring-up or full deploy requested)"
+            echo "EFFECTIVE_WORKERS=all" >> "$GITHUB_ENV"
+          else
+            echo "→ effective workers: $REQUESTED (lane is already up)"
+            echo "EFFECTIVE_WORKERS=$REQUESTED" >> "$GITHUB_ENV"
+          fi
+
       # Deploy order is constrained by a circular dependency: integrations
       # binds MAIN→main, main binds INTEGRATIONS→integrations and
-      # SANDBOX_sandbox_default→agent. Cloudflare rejects service bindings
-      # whose target worker doesn't yet exist, so we stage:
-      #   1. integrations (stubbed: services array stripped) — workers exist
-      #   2. agent (binds integrations, which now exists)
-      #   3. main (binds integrations + agent, both exist)
-      #   4. integrations re-deploy (now with MAIN binding to lane main)
+      # SANDBOX_sandbox_default→agent, agent binds INTEGRATIONS+MAIN.
+      # Cloudflare rejects service bindings whose target worker doesn't yet
+      # exist, so we stage:
+      #   1. integrations (stubbed: services array stripped) — script exists
+      #   2. agent        (stubbed: services array stripped) — script exists
+      #   3. main full    (binds integrations + agent, both exist now)
+      #   4. agent re-deploy full (binds integrations + main, both exist)
+      #   5. integrations re-deploy full (binds main, exists)
       # jq is preinstalled on ubuntu-latest.
       #
       # `workers` input opts into single-worker redeploy when the lane is
@@ -142,8 +197,10 @@ jobs:
       # circular-binding dance — wrangler updates the script in place and the
       # bindings are already live from the prior full deploy. Pass e.g.
       # `workers=agent` to redeploy only the agent worker (~30s vs ~5min).
+      # The "Detect effective workers" step above auto-promotes a partial
+      # request to `all` when its dependencies are missing.
       - name: Deploy integrations worker (stub, no service bindings yet)
-        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'integrations')
+        if: contains(env.EFFECTIVE_WORKERS, 'all') || contains(env.EFFECTIVE_WORKERS, 'integrations')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -166,7 +223,7 @@ jobs:
       # then re-deploy main with the full config. CF rejects service
       # bindings to non-existent workers at deploy time (code 10143).
       - name: Deploy main worker (stub, no service bindings yet)
-        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'main')
+        if: contains(env.EFFECTIVE_WORKERS, 'all') || contains(env.EFFECTIVE_WORKERS, 'main')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -177,7 +234,7 @@ jobs:
           npx wrangler deploy --config "wrangler.lane-${{ inputs.lane_name }}.stub.jsonc"
 
       - name: Deploy agent worker
-        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'agent')
+        if: contains(env.EFFECTIVE_WORKERS, 'all') || contains(env.EFFECTIVE_WORKERS, 'agent')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -186,7 +243,7 @@ jobs:
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       - name: Re-deploy main worker (full config, agent binding live)
-        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'main')
+        if: contains(env.EFFECTIVE_WORKERS, 'all') || contains(env.EFFECTIVE_WORKERS, 'main')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -195,7 +252,7 @@ jobs:
           npx wrangler deploy --config wrangler.lane-${{ inputs.lane_name }}.jsonc
 
       - name: Re-deploy integrations worker (full config, MAIN binding live)
-        if: contains(inputs.workers, 'all') || contains(inputs.workers, 'integrations')
+        if: contains(env.EFFECTIVE_WORKERS, 'all') || contains(env.EFFECTIVE_WORKERS, 'integrations')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
@@ -207,7 +264,7 @@ jobs:
       # silently — operators can `wrangler secret put` per worker post-hoc for
       # anything not in repo secrets.
       - name: Set worker secrets
-        if: contains(inputs.workers, 'all')
+        if: contains(env.EFFECTIVE_WORKERS, 'all')
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}

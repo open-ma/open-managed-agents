@@ -10,9 +10,16 @@ import { KNOWN_ACP_AGENTS, resolveKnownAgent } from "@open-managed-agents/acp-ru
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
-  system?: string; harness?: string; version: number;
+  system?: string; version: number;
   created_at: string; updated_at?: string; archived_at?: string;
-  description?: string; skills?: unknown[]; mcp_servers?: unknown[]; callable_agents?: unknown[];
+  description?: string; skills?: unknown[]; mcp_servers?: unknown[];
+  multiagent?: { type: "coordinator"; agents: Array<{type:"agent"; id:string; version:number}> } | null;
+  _oma?: {
+    aux_model?: { id: string; speed?: string };
+    harness?: string;
+    runtime_binding?: { runtime_id: string; acp_agent_id: string };
+    appendable_prompts?: string[];
+  };
 }
 
 interface McpEntry { name: string; type: string; url: string }
@@ -113,8 +120,8 @@ export function AgentsList() {
 
   // Pre-select default model card when entering the form step. (tenant_id,
   // model_id) is UNIQUE in DB, so picking a card uniquely determines the
-  // model. Skip if user/paste already set model_card_id or model. Re-runs
-  // when modelCards arrives if the dialog opened before the aux fetch.
+  // model. Skip if user/paste already set model. Re-runs when modelCards
+  // arrives if the dialog opened before the aux fetch.
   useEffect(() => {
     if (createStep !== "form") return;
     if (form.modelCardId || form.model) return;
@@ -139,21 +146,24 @@ export function AgentsList() {
         description: form.description || undefined,
         tools: [{ type: "agent_toolset_20260401" }],
       };
-      if (form.modelCardId) payload.model_card_id = form.modelCardId;
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
-      if (form.callableAgents.length) payload.callable_agents = form.callableAgents;
+      if (form.callableAgents.length) {
+        payload.multiagent = { type: "coordinator", agents: form.callableAgents };
+      }
       // Local-runtime agent: opt into acp-proxy harness when both runtimeId
       // and acpAgentId are set. Partial config silently falls back to the
       // default cloud loop — same semantics as the CLI flag pair.
       if (form.runtimeId && form.acpAgentId) {
-        payload.harness = "acp-proxy";
-        payload.runtime_binding = {
-          runtime_id: form.runtimeId,
-          acp_agent_id: form.acpAgentId,
-          ...(form.localSkillBlocklist.length > 0
-            ? { local_skill_blocklist: form.localSkillBlocklist }
-            : {}),
+        payload._oma = {
+          harness: "acp-proxy",
+          runtime_binding: {
+            runtime_id: form.runtimeId,
+            acp_agent_id: form.acpAgentId,
+            ...(form.localSkillBlocklist.length > 0
+              ? { local_skill_blocklist: form.localSkillBlocklist }
+              : {}),
+          },
         };
       }
 
@@ -235,7 +245,9 @@ export function AgentsList() {
     config.tools = [{ type: "agent_toolset_20260401" }];
     if (form.mcpServers.length) config.mcp_servers = form.mcpServers;
     if (form.skills.length) config.skills = form.skills;
-    if (form.callableAgents.length) config.callable_agents = form.callableAgents;
+    if (form.callableAgents.length) {
+      config.multiagent = { type: "coordinator", agents: form.callableAgents };
+    }
     return config;
   };
 
@@ -263,7 +275,9 @@ export function AgentsList() {
           description: String(parsed.description || ""),
           mcpServers: Array.isArray(parsed.mcp_servers) ? parsed.mcp_servers as McpEntry[] : [],
           skills: Array.isArray(parsed.skills) ? parsed.skills as SkillEntry[] : [],
-          callableAgents: Array.isArray(parsed.callable_agents) ? parsed.callable_agents as CallableEntry[] : [],
+          callableAgents: Array.isArray(parsed.multiagent?.agents)
+            ? parsed.multiagent.agents as CallableEntry[]
+            : [],
           runtimeId: rb?.runtime_id ?? "",
           acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
           localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist) ? rb.local_skill_blocklist : [],

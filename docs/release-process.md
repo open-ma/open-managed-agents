@@ -4,7 +4,12 @@ OMA uses [changesets](https://github.com/changesets/changesets) to manage
 versioning and publishing for the public npm packages:
 
 - `@openma/cli` (`packages/cli`)
-- `@openma/sdk` (`packages/sdk`)
+
+`@openma/sdk` is **deprecated**: the openma API is wire-compatible with
+Anthropic's Managed Agents API, so the recommended client is now
+`@anthropic-ai/sdk` pointed at `baseURL: 'https://openma.dev'`. The package
+remains in `packages/sdk` for reference; no new versions will be published.
+See `packages/sdk/README.md` for the migration note.
 
 All `@open-managed-agents/*` internal packages are private and never
 published — changesets is configured to skip them entirely.
@@ -97,8 +102,7 @@ checks).
 `release.yml` publishes via npm's OIDC trusted publisher. Each public
 package needs the workflow registered on npmjs.com:
 
-1. Go to https://www.npmjs.com/package/@openma/cli/access (and the same
-   for `@openma/sdk`)
+1. Go to https://www.npmjs.com/package/@openma/cli/access
 2. Trusted Publishers → Add publisher → GitHub Actions
 3. Owner: `open-ma`, repo: `open-managed-agents`
 4. Workflow filename: `release.yml`

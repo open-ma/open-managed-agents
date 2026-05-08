@@ -31,6 +31,13 @@ export interface MemoryStoreRepo {
   insert(input: NewMemoryStoreInput): Promise<MemoryStoreRow>;
   get(tenantId: string, storeId: string): Promise<MemoryStoreRow | null>;
   list(tenantId: string, opts: { includeArchived: boolean }): Promise<MemoryStoreRow[]>;
+  /** Mutable subset — only `name` and `description` are user-editable.
+   *  `updated_at` is bumped automatically; pass `null` to clear description. */
+  update(
+    tenantId: string,
+    storeId: string,
+    fields: { name?: string; description?: string | null; updatedAt: number },
+  ): Promise<MemoryStoreRow>;
   archive(tenantId: string, storeId: string, archivedAt: number): Promise<MemoryStoreRow>;
   /** Cascades to memories + memory_versions in the adapter (no FK; explicit cleanup). */
   delete(tenantId: string, storeId: string): Promise<void>;

@@ -28,10 +28,12 @@ async function getSandboxBinding(env: Env, environmentId: string, tenantId: stri
   const services = await getServices(env, tenantId);
   const envRow = await services.environments.get({ tenantId, environmentId });
   if (!envRow) return null;
-  const envConfig = toEnvironmentConfig(envRow);
-  if (envConfig.status !== "ready" && envConfig.status !== undefined) return null;
-  if (!envConfig.sandbox_worker_name) return null;
-  const bindingName = `SANDBOX_${envConfig.sandbox_worker_name.replace(/-/g, "_")}`;
+  // Read sandbox plumbing directly from the row — these are internal
+  // implementation details no longer surfaced on the wire (env is
+  // stateless from the SDK's POV after the setup-on-warmup migration).
+  if (envRow.status !== "ready") return null;
+  if (!envRow.sandbox_worker_name) return null;
+  const bindingName = `SANDBOX_${envRow.sandbox_worker_name.replace(/-/g, "_")}`;
   const binding = (env as unknown as Record<string, unknown>)[bindingName] as Fetcher | undefined;
   if (binding) return binding;
 
