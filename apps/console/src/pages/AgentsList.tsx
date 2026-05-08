@@ -111,6 +111,21 @@ export function AgentsList() {
 
   useEffect(() => { loadAux(); }, []);
 
+  // Pre-select default model card when entering the form step. (tenant_id,
+  // model_id) is UNIQUE in DB, so picking a card uniquely determines the
+  // model. Skip if user/paste already set model_card_id or model. Re-runs
+  // when modelCards arrives if the dialog opened before the aux fetch.
+  useEffect(() => {
+    if (createStep !== "form") return;
+    if (form.modelCardId || form.model) return;
+    if (modelCards.length === 0) return;
+    const def = modelCards.find((mc) => mc.is_default) ?? modelCards[0];
+    setForm((f) => ({ ...f, modelCardId: def.id, model: def.model_id }));
+    // Intentionally not depending on form.* — guards above prevent the
+    // re-trigger loop and we only want to hydrate on step entry / cards arrival.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [createStep, modelCards.length]);
+
   // Keep refresh hook reachable for create / archive callbacks.
   void refreshAgents;
 
@@ -296,6 +311,14 @@ export function AgentsList() {
   const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
   const tabCls = (t: string) => `px-3 py-1.5 text-sm rounded-md transition-colors ${tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`;
 
+  // Resolve which card the Model dropdown should highlight: explicit pick
+  // wins, otherwise derive from model_id (paste path / pre-select effect).
+  // Empty string when nothing matches (e.g. paste mode with an unknown model).
+  const selectedCardId =
+    form.modelCardId ||
+    modelCards.find((mc) => mc.model_id === form.model)?.id ||
+    "";
+
   const [search, setSearch] = useState("");
 
   const displayed = agents.filter((a) => {
@@ -467,60 +490,44 @@ export function AgentsList() {
                     <label className="text-sm text-fg-muted block mb-1">Name *</label>
                     <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="Coding Assistant" />
                   </div>
-                  {/* Model + Model Card section. Cloud agents need the
-                      dropdown + a backing model_card to make API calls;
-                      local-runtime agents (form.runtimeId set) skip the
-                      whole thing because the ACP child running on the
-                      user's daemon brings its own LLM credentials —
-                      OMA's model_id and model_card never enter the
-                      picture. We show a one-line hint instead so it's
-                      clear this isn't a bug. */}
+                  {/* Model picker. (tenant_id, model_id) is UNIQUE in DB, so
+                      one card == one model_id == one credentials set; the
+                      old dual Model + Model Card dropdowns were redundant.
+                      Local-runtime agents (form.runtimeId set) skip this
+                      block — the ACP child brings its own LLM credentials.
+                      Default card is pre-selected via the useEffect above. */}
                   {!form.runtimeId && (
-                    <>
+                    modelCards.length === 0 ? (
+                      <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
+                        No model cards configured. Cloud agents need at least one card to provide LLM credentials.{" "}
+                        <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
+                      </p>
+                    ) : (
                       <div>
                         <label className="text-sm text-fg-muted block mb-1">Model</label>
                         <select
-                          value={form.model}
-                          onChange={(e) => setForm({ ...form, model: e.target.value, modelCardId: "" })}
+                          value={selectedCardId}
+                          onChange={(e) => {
+                            const cardId = e.target.value;
+                            const card = modelCards.find((mc) => mc.id === cardId);
+                            setForm({ ...form, modelCardId: cardId, model: card?.model_id ?? "" });
+                          }}
                           className={inputCls}
-                          disabled={modelCards.length === 0}
                         >
-                          {modelCards.length === 0 && <option value="">— add a model card first —</option>}
-                          {Array.from(new Set(modelCards.map(mc => mc.model_id))).map(modelId => (
-                            <option key={modelId} value={modelId}>{modelId}</option>
+                          {/* Paste-mode: form.model came from YAML/JSON but doesn't
+                              match any card. Surface the mismatch instead of silently
+                              showing the first card as if it were chosen. */}
+                          {!selectedCardId && form.model && (
+                            <option value="">⚠ {form.model} — no matching card, pick one</option>
+                          )}
+                          {modelCards.map((mc) => (
+                            <option key={mc.id} value={mc.id}>
+                              {mc.is_default ? "★ " : ""}{mc.model_id}{mc.model !== mc.model_id ? ` (${mc.model})` : ""}
+                            </option>
                           ))}
                         </select>
                       </div>
-                      {modelCards.length > 0 && (
-                        <div>
-                          <label className="text-sm text-fg-muted block mb-1">Model Card</label>
-                          <select
-                            value={form.modelCardId}
-                            onChange={(e) => {
-                              const cardId = e.target.value;
-                              setForm({ ...form, modelCardId: cardId });
-                              if (cardId) {
-                                const card = modelCards.find(mc => mc.id === cardId);
-                                if (card) setForm(f => ({ ...f, modelCardId: cardId, model: card.model_id }));
-                              }
-                            }}
-                            className={inputCls}
-                          >
-                            <option value="">Auto-detect by model ID</option>
-                            {modelCards.map(mc => (
-                              <option key={mc.id} value={mc.id}>{mc.name} ({mc.model_id}) — ****{mc.api_key_preview}</option>
-                            ))}
-                          </select>
-                          <p className="text-xs text-fg-subtle mt-1">Select which API credentials to use for this agent.</p>
-                        </div>
-                      )}
-                      {modelCards.length === 0 && (
-                        <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-                          No model cards configured. Cloud agents need at least one card to provide LLM credentials.{" "}
-                          <a href="/model-cards" className="underline hover:text-fg-muted">Add one</a>.
-                        </p>
-                      )}
-                    </>
+                    )
                   )}
                   {form.runtimeId && (
                     <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">

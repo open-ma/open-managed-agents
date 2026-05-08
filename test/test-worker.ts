@@ -61,6 +61,8 @@ import schema0012 from "../apps/main/migrations/0012_slack_per_channel.sql?raw";
 import schema0013 from "../apps/main/migrations/0013_cursor_pagination_indexes.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0014 from "../apps/main/migrations/0014_session_turn_id.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import schema0015 from "../apps/main/migrations/0015_model_card_handle_rename.sql?raw";
 
 const MIGRATIONS_RAW: string[] = [
   schema0001 as string,
@@ -79,6 +81,7 @@ const MIGRATIONS_RAW: string[] = [
   schema0012 as string,
   schema0013 as string,
   schema0014 as string,
+  schema0015 as string,
 ];
 
 let migrationsApplied = false;

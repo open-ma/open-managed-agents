@@ -2,9 +2,11 @@
 
 export interface ModelCard {
   id: string;
-  name: string;
+  /** Tenant-unique handle. Agents reference cards via `agent.model = card.model_id`. */
+  model_id: string;
+  /** LLM string sent to the provider on each turn (e.g. "claude-sonnet-4-6"). */
+  model: string;
   provider: string;             // API compat: "ant" | "oai" | "ant-compatible" | "oai-compatible"
-  model_id: string;        // e.g. "claude-sonnet-4-6", "gpt-4o", "deepseek-chat"
   api_key_preview?: string; // last 4 chars only, for display
   base_url?: string;        // custom base URL (compatible providers)
   custom_headers?: Record<string, string>; // custom HTTP headers (compatible providers)

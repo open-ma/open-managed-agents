@@ -16,8 +16,12 @@ const PROVIDERS = [
 const OFFICIAL_PROVIDERS = new Set(["ant", "oai"]);
 
 const INITIAL_FORM = {
-  name: "", provider: "ant",
-  model_id: "", api_key: "", base_url: "", is_default: false,
+  provider: "ant",
+  model_id: "",
+  model: "",
+  api_key: "",
+  base_url: "",
+  is_default: false,
   custom_headers: [{ key: "", value: "" }] as Array<{ key: string; value: string }>,
 };
 
@@ -62,14 +66,21 @@ export function ModelCardsList() {
 
   const save = async () => {
     setError("");
-    if (!form.name || !form.model_id || (!editingId && !form.api_key)) {
-      setError("Name, Model ID, and API Key are required.");
+    if (!form.model_id || (!editingId && !form.api_key)) {
+      setError("Model ID and API Key are required.");
       return;
     }
     try {
       const payload: Record<string, unknown> = {
-        name: form.name, provider: form.provider, model_id: form.model_id,
-        api_key: form.api_key, is_default: form.is_default,
+        provider: form.provider,
+        model_id: form.model_id,
+        // model defaults to model_id when blank — common case is "the handle
+        // IS the LLM string". Users only fill `model` when they want a
+        // distinct wire-level value (e.g. handle "claude-prod" → wire
+        // "claude-sonnet-4-6").
+        model: form.model || form.model_id,
+        api_key: form.api_key,
+        is_default: form.is_default,
       };
       if (form.base_url) payload.base_url = form.base_url;
       // Serialize custom headers from array to object
@@ -98,8 +109,12 @@ export function ModelCardsList() {
       : [{ key: "", value: "" }];
     if (hdrs.length === 0) hdrs.push({ key: "", value: "" });
     setForm({
-      name: card.name, provider: card.provider, model_id: card.model_id,
-      api_key: "", base_url: card.base_url || "", is_default: card.is_default || false,
+      provider: card.provider,
+      model_id: card.model_id,
+      model: card.model,
+      api_key: "",
+      base_url: card.base_url || "",
+      is_default: card.is_default || false,
       custom_headers: hdrs,
     });
     setEditingId(card.id); setShowCreate(true); setError("");
@@ -140,11 +155,11 @@ export function ModelCardsList() {
       }
       columns={[
         {
-          key: "name",
-          label: "Name",
+          key: "model_id",
+          label: "Model ID",
           render: (c) => (
             <>
-              <div className="font-medium text-fg">{c.name}</div>
+              <div className="font-medium text-fg">{c.model_id}</div>
               <div className="text-xs text-fg-subtle font-mono">{c.id}</div>
             </>
           ),
@@ -159,10 +174,12 @@ export function ModelCardsList() {
           ),
         },
         {
-          key: "model_id",
-          label: "Model ID",
+          key: "model",
+          label: "Wire Model",
           className: "text-fg-muted font-mono text-xs",
-          render: (c) => c.model_id,
+          render: (c) => c.model === c.model_id
+            ? <span className="text-fg-subtle">(same)</span>
+            : c.model,
         },
         {
           key: "api_key",
@@ -195,12 +212,16 @@ export function ModelCardsList() {
       ]}
     >
       <Modal open={showCreate} onClose={closeDialog} title={editingId ? "Edit Model Card" : "New Model Card"}
-        footer={<><Button variant="ghost" onClick={closeDialog}>Cancel</Button><Button onClick={save} disabled={!form.name || !form.model_id || (!editingId && !form.api_key)}>{editingId ? "Save" : "Create"}</Button></>}>
+        footer={<><Button variant="ghost" onClick={closeDialog}>Cancel</Button><Button onClick={save} disabled={!form.model_id || (!editingId && !form.api_key)}>{editingId ? "Save" : "Create"}</Button></>}>
         <form autoComplete="off" onSubmit={(e) => e.preventDefault()} className="space-y-3">
           {error && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{error}</div>}
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Name *</label>
-            <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} className={inputCls} placeholder="My API Key" autoComplete="off" />
+            <label className="text-sm text-fg-muted block mb-1">
+              Model ID *
+              <span className="ml-1 text-xs text-fg-subtle">(tenant-unique handle agents reference)</span>
+            </label>
+            <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
+              placeholder="claude-prod, claude-sonnet-4-6, bedrock-sonnet, ..." autoComplete="off" />
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">API Format *</label>
@@ -209,7 +230,7 @@ export function ModelCardsList() {
                 <button
                   key={p.value}
                   type="button"
-                  onClick={() => { setForm({ ...form, provider: p.value, model_id: "", base_url: "" }); setAvailableModels([]); }}
+                  onClick={() => { setForm({ ...form, provider: p.value, model: "", base_url: "" }); setAvailableModels([]); }}
                   className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
                     form.provider === p.value
                       ? "border-brand bg-brand-subtle text-fg"
@@ -233,23 +254,26 @@ export function ModelCardsList() {
             )}
           </div>
           <div className="relative">
-            <label className="text-sm text-fg-muted block mb-1">Model ID *</label>
-            <input value={form.model_id}
-              onChange={(e) => { setForm({ ...form, model_id: e.target.value }); setShowModelSuggestions(true); }}
+            <label className="text-sm text-fg-muted block mb-1">
+              Wire Model
+              <span className="ml-1 text-xs text-fg-subtle">(sent to provider; defaults to Model ID)</span>
+            </label>
+            <input value={form.model}
+              onChange={(e) => { setForm({ ...form, model: e.target.value }); setShowModelSuggestions(true); }}
               onFocus={() => setShowModelSuggestions(true)}
               onBlur={() => setTimeout(() => setShowModelSuggestions(false), 150)}
               className={inputCls}
-              placeholder={OFFICIAL_PROVIDERS.has(form.provider)
+              placeholder={form.model_id || (OFFICIAL_PROVIDERS.has(form.provider)
                 ? (form.provider === "ant" ? "claude-sonnet-4-6" : "gpt-4o")
-                : "e.g. deepseek-chat, llama-3.1-70b, ..."}
-              autoComplete="off" name="model-id-field" />
+                : "e.g. deepseek-chat, llama-3.1-70b, ...")}
+              autoComplete="off" name="model-field" />
             {showModelSuggestions && availableModels.length > 0 && (
               <div className="absolute z-10 w-full mt-1 bg-bg border border-border rounded-md shadow-lg py-1 max-h-48 overflow-y-auto">
                 {availableModels
-                  .filter((m) => !form.model_id || m.id.includes(form.model_id) || m.name.toLowerCase().includes(form.model_id.toLowerCase()))
+                  .filter((m) => !form.model || m.id.includes(form.model) || m.name.toLowerCase().includes(form.model.toLowerCase()))
                   .map((m) => (
                     <button key={m.id} type="button"
-                      onMouseDown={() => { setForm({ ...form, model_id: m.id }); setShowModelSuggestions(false); }}
+                      onMouseDown={() => { setForm({ ...form, model: m.id }); setShowModelSuggestions(false); }}
                       className="w-full text-left px-3 py-1.5 text-sm hover:bg-bg-surface">
                       <span className="text-fg">{m.name !== m.id ? m.name : m.id}</span>
                       {m.name !== m.id && <span className="text-fg-subtle text-xs ml-2">{m.id}</span>}

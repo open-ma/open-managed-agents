@@ -69,9 +69,13 @@ export class ModelCardService {
 
   async create(opts: {
     tenantId: string;
+    /** Tenant-unique handle. UNIQUE(tenant_id, model_id) enforced in DB. */
     modelId: string;
     provider: string;
-    displayName: string;
+    /** Wire-level LLM model string sent to provider. Defaults to modelId
+     *  when omitted (so a new card with `model_id: "claude-sonnet-4-6"`
+     *  needs no extra config to do the obvious thing). */
+    model?: string;
     apiKey: string;
     baseUrl?: string | null;
     customHeaders?: Record<string, string> | null;
@@ -84,7 +88,7 @@ export class ModelCardService {
       tenantId: opts.tenantId,
       modelId: opts.modelId,
       provider: opts.provider,
-      displayName: opts.displayName,
+      model: opts.model ?? opts.modelId,
       baseUrl: opts.baseUrl ?? null,
       customHeaders: opts.customHeaders ?? null,
       apiKeyCipher,
@@ -97,9 +101,11 @@ export class ModelCardService {
   async update(opts: {
     tenantId: string;
     cardId: string;
-    displayName?: string;
     provider?: string;
+    /** Rename the handle. UNIQUE(tenant_id, model_id) still enforced. */
     modelId?: string;
+    /** Change the wire-level LLM string sent to the provider. */
+    model?: string;
     /** Pass `null` to clear the override and fall back to the provider default. */
     baseUrl?: string | null;
     /** Pass `null` to clear. Pass an object to replace. */
@@ -111,9 +117,9 @@ export class ModelCardService {
   }): Promise<ModelCardRow> {
     await this.requireCard(opts);
     const update: ModelCardUpdateFields = { updatedAt: this.clock.nowMs() };
-    if (opts.displayName !== undefined) update.displayName = opts.displayName;
     if (opts.provider !== undefined) update.provider = opts.provider;
     if (opts.modelId !== undefined) update.modelId = opts.modelId;
+    if (opts.model !== undefined) update.model = opts.model;
     if (opts.baseUrl !== undefined) update.baseUrl = opts.baseUrl;
     if (opts.customHeaders !== undefined) update.customHeaders = opts.customHeaders;
     if (opts.isDefault !== undefined) update.isDefault = opts.isDefault;
