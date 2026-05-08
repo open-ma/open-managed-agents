@@ -1,0 +1,25 @@
+{
+  "name": "@open-managed-agents/web",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "astro dev",
+    "build": "astro build",
+    "preview": "astro preview",
+    "deploy": "astro build && wrangler deploy",
+    "typecheck": "astro check"
+  },
+  "dependencies": {
+    "@astrojs/check": "^0.10.0",
+    "@astrojs/rss": "^4.0.10",
+    "@astrojs/sitemap": "^3.4.1",
+    "@tailwindcss/vite": "^4.1.0",
+    "astro": "^5.13.0",
+    "tailwindcss": "^4.1.0",
+    "typescript": "^5.8.0"
+  },
+  "devDependencies": {
+    "wrangler": "^4.83.0"
+  }
+}
