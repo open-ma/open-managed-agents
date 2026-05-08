@@ -77,6 +77,16 @@ export interface SandboxExecutor {
     readOnly: boolean;
   }): Promise<void>;
   /**
+   * Mount FILES_BUCKET at /mnt/session/outputs/ scoped to (tenantId, sessionId)
+   * via R2 prefix. Anything the agent writes here appears in real time via
+   * the caller-facing GET /v1/sessions/:id/outputs endpoint. AMA-aligned
+   * "magic dir" pattern — agent uses standard file tools, no extra tool.
+   */
+  mountSessionOutputs?(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void>;
+  /**
    * Snapshot /workspace into durable storage. Returns a serializable
    * handle; null on failure. CF: squashfs → R2. Node: tar → S3 (when wired).
    */
