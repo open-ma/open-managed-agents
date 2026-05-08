@@ -55,7 +55,17 @@ function reposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response })
   if (typeof k !== "string" || !k) {
     return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
   }
-  return { repos: buildCfRepos({ db: c.env.AUTH_DB, controlPlaneDb: c.env.AUTH_DB, MCP_SIGNING_KEY: k }), err: null };
+  if (!c.env.INTEGRATIONS_DB) {
+    return { repos: null, err: c.json({ error: "INTEGRATIONS_DB binding missing" }, 503) as Response };
+  }
+  return {
+    repos: buildCfRepos({
+      integrationsDb: c.env.INTEGRATIONS_DB,
+      controlPlaneDb: c.env.AUTH_DB,
+      MCP_SIGNING_KEY: k,
+    }),
+    err: null,
+  };
 }
 
 /**

@@ -7,8 +7,7 @@ import { webhookRateLimitMiddleware, shouldDropForTenantRateLimit } from "../../
 //   POST /github/webhook/app/:appOmaId
 //
 // Always returns 200 — GitHub retries any non-2xx, including for events we
-// chose not to act on. Drops are logged in linear_webhook_events (which holds
-// rows from all providers; the table just hasn't been renamed yet).
+// chose not to act on. Drops are logged in github_webhook_events.
 
 const app = new Hono<{ Bindings: Env }>();
 

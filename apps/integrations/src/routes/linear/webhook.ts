@@ -8,7 +8,8 @@ import { webhookRateLimitMiddleware, shouldDropForTenantRateLimit } from "../../
 //   POST /linear/webhook/app/:appId       — A1 per-publication App
 //
 // Always returns 200 — Linear retries any non-2xx, including for events we
-// chose not to act on. Drops are logged in linear_webhook_events.
+// chose not to act on. Drops are logged in linear_events (the merged
+// dedup + audit + queue table).
 
 const app = new Hono<{ Bindings: Env }>();
 
