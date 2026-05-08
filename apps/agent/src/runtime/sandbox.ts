@@ -194,6 +194,68 @@ export class CloudflareSandbox implements SandboxExecutor {
   }
 
   /**
+   * Mount FILES_BUCKET at /mnt/session/outputs/ scoped to (tenant, session)
+   * via R2 prefix. Mirrors AMA's `/mnt/session/outputs/` magic dir — agent
+   * writes here using the standard `write` tool, files appear in the
+   * caller-visible session outputs listing in real time (s3fs PUT each
+   * write).
+   *
+   * R2 key scheme: t/<tenant>/session-outputs/<session>/<filename>
+   * Caller list:    GET /v1/sessions/:id/outputs   (R2 list_objects by prefix)
+   * Caller fetch:   GET /v1/sessions/:id/outputs/:filename
+   *
+   * Best-effort: any failure logs and proceeds (the agent can still
+   * write to /workspace as a fallback, just not callable-retrievable).
+   */
+  async mountSessionOutputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (!this.env.FILES_BUCKET) {
+      console.warn(
+        "[sandbox] mountSessionOutputs: FILES_BUCKET binding missing — skipping",
+      );
+      return;
+    }
+    const sandbox = await this.getSandbox();
+    const mountPath = `/mnt/session/outputs`;
+    const prefix = `/t/${opts.tenantId}/session-outputs/${opts.sessionId}/`;
+    const fuse = this.fuseR2ConfigOrNull();
+    const bucketName = "managed-agents-files";
+
+    try {
+      if (fuse) {
+        await sandbox.mountBucket(bucketName, mountPath, {
+          endpoint: fuse.endpoint,
+          provider: "r2",
+          credentials: fuse.credentials,
+          prefix,
+          readOnly: false,
+        });
+      } else {
+        // Dev fallback. Writes won't reach R2 in real CF without keys —
+        // log loudly so the operator sees the misconfig.
+        console.warn(
+          "[sandbox] mountSessionOutputs: R2 FUSE creds missing — falling " +
+          "back to localBucket. Agent writes to /mnt/session/outputs/ will " +
+          "NOT persist to R2; this is dev-only behavior.",
+        );
+        await sandbox.mountBucket("FILES_BUCKET", mountPath, {
+          localBucket: true,
+          prefix,
+          readOnly: false,
+        });
+      }
+    } catch (err) {
+      console.error(
+        `[sandbox] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
+      );
+      // Don't throw — agent can fall back to /workspace, just not
+      // callable-retrievable via the outputs endpoints.
+    }
+  }
+
+  /**
    * Returns the R2 S3 credentials block if all three FUSE env vars are
    * present, else null (dev fallback). Centralized so memory + workspace
    * share the same gating.
