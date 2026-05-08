@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import { SecretInput, TextInput } from "../../components/Input";
+import { Combobox } from "../../components/Combobox";
 
 const api = new IntegrationsApi();
 
@@ -116,34 +117,36 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
         <form onSubmit={handleSubmit} className="space-y-5" autoComplete="off">
           <div>
             <label className="block text-[13px] font-medium text-fg mb-1.5">Agent</label>
-            <select
-              className="w-full px-3 py-2 rounded-md border border-border bg-bg text-[14px]"
+            <Combobox<{ id: string; name: string }>
               value={agentId}
-              onChange={(e) => setAgentId(e.target.value)}
-            >
-              <option value="">— pick an agent —</option>
-              {agents.map((a) => (
-                <option key={a.id} value={a.id}>
-                  {a.name} ({a.id})
-                </option>
-              ))}
-            </select>
+              onValueChange={(v) => setAgentId(v)}
+              endpoint="/v1/agents"
+              getValue={(a) => a.id}
+              getLabel={(a) => (
+                <span>
+                  {a.name} <span className="text-fg-subtle text-[12px]">({a.id})</span>
+                </span>
+              )}
+              getTextLabel={(a) => `${a.name} (${a.id})`}
+              placeholder="— pick an agent —"
+            />
           </div>
 
           <div>
             <label className="block text-[13px] font-medium text-fg mb-1.5">Environment</label>
-            <select
-              className="w-full px-3 py-2 rounded-md border border-border bg-bg text-[14px]"
+            <Combobox<{ id: string; name: string }>
               value={envId}
-              onChange={(e) => setEnvId(e.target.value)}
-            >
-              <option value="">— pick an environment —</option>
-              {envs.map((e) => (
-                <option key={e.id} value={e.id}>
-                  {e.name} ({e.id})
-                </option>
-              ))}
-            </select>
+              onValueChange={(v) => setEnvId(v)}
+              endpoint="/v1/environments"
+              getValue={(e) => e.id}
+              getLabel={(e) => (
+                <span>
+                  {e.name} <span className="text-fg-subtle text-[12px]">({e.id})</span>
+                </span>
+              )}
+              getTextLabel={(e) => `${e.name} (${e.id})`}
+              placeholder="— pick an environment —"
+            />
           </div>
 
           <div>
