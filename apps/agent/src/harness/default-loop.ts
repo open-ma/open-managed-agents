@@ -579,7 +579,18 @@ export class DefaultHarness implements HarnessInterface {
         // shape of the success-path end so consumers can treat is_error as
         // the success/fail discriminator.
         if (!stepStartId) return;
-        const message = error instanceof Error ? error.message : String(error);
+        let message = error instanceof Error ? error.message : String(error);
+        // AI SDK's APICallError exposes the upstream HTTP status + raw response
+        // body, but `error.message` is only the HTTP statusText (e.g. "Bad
+        // Request"). Surface the body too so consumers (oma sessions logs /
+        // console) can see the provider's actual diagnostic without having to
+        // tail wrangler — most 4xx debugging starts and ends here.
+        if (error && typeof error === "object" && "responseBody" in error) {
+          const e = error as { statusCode?: number; responseBody?: string };
+          if (e.statusCode || e.responseBody) {
+            message = `${message} [${e.statusCode ?? "?"}] ${e.responseBody ?? ""}`;
+          }
+        }
         runtime.broadcast({
           type: "span.model_request_end",
           model: modelId,
