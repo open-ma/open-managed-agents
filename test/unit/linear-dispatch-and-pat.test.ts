@@ -404,15 +404,16 @@ describe("LinearProvider — async webhook flow (persist + ack + drain)", () => 
     expect(out.reason).toContain("queued");
     // No sessions.create called synchronously
     expect(c.sessions.created).toHaveLength(0);
-    // Pending_events row written
-    const queued = await c.pendingEvents.listUnprocessed(10);
+    // linear_events row enqueued (payload_json set, processed_at NULL)
+    const queued = await c.webhookEvents.listUnprocessed(10);
     expect(queued).toHaveLength(1);
     expect(queued[0].eventKind).toBe("issueAssignedToYou");
-    expect(queued[0].issueId).toBe("iss_777");
+    expect(queued[0].deliveryId).toBe("del_async_1");
   });
 
   it("drainPendingEvents processes queued event → sessions.create → marks processed", async () => {
-    // Pre-seed a queued event without going through handleWebhook
+    // Pre-seed a queued event by going through the merged-table path:
+    // first record dedup row, then promote to actionable.
     const fakeNormalized = {
       kind: "issueAssignedToYou",
       workspaceId: "ws_acme",
@@ -428,17 +429,12 @@ describe("LinearProvider — async webhook flow (persist + ack + drain)", () => 
       deliveryId: "del_x",
       eventType: "AppUserNotification",
     };
-    await c.pendingEvents.insert(
-      {
-        tenantId: "tnt_acme",
-        publicationId: pubId,
-        eventKind: "issueAssignedToYou",
-        issueId: "iss_999",
-        issueIdentifier: "ENG-999",
-        workspaceId: "ws_acme",
-        payload: JSON.stringify(fakeNormalized),
-      },
-      1000,
+    await c.webhookEvents.recordIfNew("del_x", "tnt_acme", instId, "AppUserNotification", 1000);
+    await c.webhookEvents.markActionable(
+      "del_x",
+      "issueAssignedToYou",
+      pubId,
+      JSON.stringify(fakeNormalized),
     );
 
     const summary = await provider.drainPendingEvents(2000, 10);
@@ -452,8 +448,8 @@ describe("LinearProvider — async webhook flow (persist + ack + drain)", () => 
     // hosted Linear MCP attached
     expect(created.mcpServers).toEqual([{ name: "linear", url: "https://mcp.linear.app/mcp" }]);
 
-    // Row marked processed
-    const remaining = await c.pendingEvents.listUnprocessed(10);
+    // Row marked processed (no longer in unprocessed list)
+    const remaining = await c.webhookEvents.listUnprocessed(10);
     expect(remaining).toHaveLength(0);
   });
 });

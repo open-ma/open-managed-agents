@@ -204,10 +204,11 @@ describe("LinearProvider — handleWebhook (dedicated)", () => {
     });
     expect(out2).toEqual({ handled: false, reason: "duplicate_delivery" });
 
-    // Async architecture: handleWebhook persists to pending_events; sessions.create
-    // is invoked by drainPendingEvents in the cron tick, not here. Assert dedup
-    // worked at the queue level (one row enqueued, second delivery dropped).
-    const queued = await c.pendingEvents.listUnprocessed(10);
+    // Async architecture: handleWebhook promotes to actionable in linear_events;
+    // sessions.create is invoked by drainPendingEvents in the cron tick, not
+    // here. Assert dedup worked at the queue level (one row enqueued, second
+    // delivery dropped).
+    const queued = await c.webhookEvents.listUnprocessed(10);
     expect(queued).toHaveLength(1);
   });
 

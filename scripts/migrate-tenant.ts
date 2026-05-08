@@ -53,6 +53,9 @@ import { argv, env, exit } from "node:process";
 // linked through other rows (e.g. session_resources via session_id) are
 // included here too — anything filterable by tenant_id directly OR via a
 // well-defined JOIN belongs in this list.
+// Tables in AUTH_DB that carry tenant_id directly. Integration tables
+// (linear_*/github_*/slack_*) used to live here but moved to INTEGRATIONS_DB
+// in the integration subsystem split. This script only touches AUTH_DB.
 const TENANT_TABLES_BY_TENANT_ID = [
   "agents",
   "agent_versions",
@@ -64,16 +67,6 @@ const TENANT_TABLES_BY_TENANT_ID = [
   "model_cards",
   "sessions",
   "vaults",
-  "linear_apps",
-  "linear_installations",
-  "linear_publications",
-  "linear_webhook_events",
-  "linear_setup_links",
-  "linear_issue_sessions",
-  "linear_authored_comments",
-  "github_apps",
-  "github_installations",
-  "github_publications",
 ] as const;
 
 // Tables that don't have tenant_id directly but cascade from a tenant table.
