@@ -273,6 +273,8 @@ export class AgentService {
     limit?: number;
     /** Opaque cursor returned by a prior call. Undefined = first page. */
     cursor?: string;
+    /** Substring filter passed through to the repo. */
+    q?: string;
   }): Promise<{ items: AgentRow[]; nextCursor?: string }> {
     return paginateVia({
       cursor: opts.cursor,
@@ -282,8 +284,20 @@ export class AgentService {
           includeArchived: opts.includeArchived ?? true,
           limit,
           after,
+          q: opts.q,
         }),
       extractCursor: (r) => ({ createdAt: isoToMs(r.created_at), id: r.id }),
+    });
+  }
+
+  /** Cheap COUNT for /v1/stats. Default counts only non-archived rows
+   *  (matches what the dashboard headline numbers represent). */
+  async count(opts: {
+    tenantId: string;
+    includeArchived?: boolean;
+  }): Promise<number> {
+    return this.repo.count(opts.tenantId, {
+      includeArchived: opts.includeArchived ?? false,
     });
   }
 

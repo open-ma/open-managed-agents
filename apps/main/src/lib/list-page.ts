@@ -4,13 +4,17 @@
 // the service.listPage call shape.
 //
 // Wire contract (dual — accepts both Anthropic and legacy OMA forms):
-//   GET /v1/<resource>?limit=N&page=<opaque>&include_archived=true   ← Anthropic SDK
-//   GET /v1/<resource>?limit=N&cursor=<opaque>&include_archived=true ← legacy
+//   GET /v1/<resource>?limit=N&page=<opaque>&include_archived=true&q=<substring>   ← Anthropic SDK
+//   GET /v1/<resource>?limit=N&cursor=<opaque>&include_archived=true&q=<substring> ← legacy OMA
 //
 //   200 { data: T[], next_page?: string, next_cursor?: string }
 //        ── both keys carry the same opaque value; emit both so OMA SDK /
 //        Console (read next_cursor) and @anthropic-ai/sdk (reads next_page,
 //        per its core/pagination.js) both iterate correctly.
+//
+// `?q=<substring>` is OMA-only (Anthropic doesn't have it). Powers the
+// Combobox typeahead in the Console; backend translates to LIKE in the
+// store layer.
 //
 // Each route handler collapses to:
 //
@@ -29,12 +33,20 @@ export interface PageQuery {
   limit?: number;
   cursor?: string;
   includeArchived?: boolean;
+  /** Optional substring filter — matched case-insensitively against each
+   *  resource's user-facing name (and `model_id` for model_cards). Used by
+   *  the Combobox typeahead in the Console; absence = unfiltered list. */
+  q?: string;
 }
 
-/** Parse `?limit=N&{cursor|page}=...&include_archived=true` from the request.
- *  Service layer clamps limit; we just shuttle the raw value through.
- *  Accepts both `cursor` (legacy OMA) and `page` (Anthropic SDK) — they carry
- *  the same opaque token, so whichever the caller sends maps to `cursor`. */
+/** Parse `?limit=N&{cursor|page}=...&include_archived=true&q=...` from the
+ *  request. Service layer clamps limit; we just shuttle the raw value
+ *  through.
+ *
+ *  Accepts both `cursor` (legacy OMA) and `page` (Anthropic SDK) — they
+ *  carry the same opaque token, so whichever the caller sends maps to
+ *  `cursor`. `q` is trimmed and dropped when blank so handlers don't
+ *  need a length guard at every callsite. */
 export function parsePageQuery(c: Context): PageQuery {
   const limitParam = c.req.query("limit");
   // Anthropic SDK sends `?page=`; legacy OMA callers send `?cursor=`. Honor
@@ -43,10 +55,13 @@ export function parsePageQuery(c: Context): PageQuery {
   const cursor = c.req.query("cursor") || c.req.query("page") || undefined;
   const includeArchived = c.req.query("include_archived") === "true";
   const limit = limitParam ? parseInt(limitParam, 10) : undefined;
+  const qRaw = c.req.query("q");
+  const q = qRaw && qRaw.trim() ? qRaw.trim() : undefined;
   return {
     limit: limit !== undefined && !isNaN(limit) ? limit : undefined,
     cursor,
     includeArchived,
+    q,
   };
 }
 

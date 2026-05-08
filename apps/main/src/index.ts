@@ -23,6 +23,7 @@ import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
+import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
@@ -133,6 +134,7 @@ app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/integrations", integrationsRoutes);
 app.route("/v1/runtimes", runtimesRoutes);
+app.route("/v1/stats", statsRoutes);
 // MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a
 // path-prefix skip) — auth is the Bearer oma_* the ACP child sends.
 app.route("/v1/mcp-proxy", mcpProxyRoutes);

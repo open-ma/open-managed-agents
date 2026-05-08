@@ -296,6 +296,16 @@ export class SessionService {
     return this.repo.hasActiveByEnvironment(opts.tenantId, opts.environmentId);
   }
 
+  /** Cheap COUNT for /v1/stats. Default counts only non-archived rows. */
+  async count(opts: {
+    tenantId: string;
+    includeArchived?: boolean;
+  }): Promise<number> {
+    return this.repo.count(opts.tenantId, {
+      includeArchived: opts.includeArchived ?? false,
+    });
+  }
+
   // ============================================================
   // Resource ops
   // ============================================================

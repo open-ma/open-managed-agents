@@ -171,12 +171,13 @@ export class ModelCardService {
     tenantId: string;
     limit?: number;
     cursor?: string;
+    q?: string;
   }): Promise<{ items: ModelCardRow[]; nextCursor?: string }> {
     return paginateVia({
       cursor: opts.cursor,
       limit: opts.limit,
       fetch: (after, limit) =>
-        this.repo.listPage(opts.tenantId, { limit, after }),
+        this.repo.listPage(opts.tenantId, { limit, after, q: opts.q }),
       extractCursor: (r) => ({
         createdAt: new Date(r.created_at).getTime(),
         id: r.id,

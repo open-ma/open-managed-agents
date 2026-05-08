@@ -69,8 +69,14 @@ export interface EnvironmentRepo {
       includeArchived: boolean;
       limit: number;
       after?: PageCursor;
+      /** Case-insensitive substring filter against environment name.
+       *  Trimmed blank → unfiltered. Used by Combobox typeahead. */
+      q?: string;
     },
   ): Promise<{ items: EnvironmentRow[]; hasMore: boolean }>;
+
+  /** Cheap COUNT(*) for /v1/stats. Index `idx_environments_tenant` covers it. */
+  count(tenantId: string, opts: { includeArchived: boolean }): Promise<number>;
 
   update(
     tenantId: string,

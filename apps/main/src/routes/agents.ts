@@ -8,6 +8,7 @@ import {
   AgentVersionNotFoundError,
 } from "@open-managed-agents/agents-store";
 import { jsonPage, parsePageQuery } from "../lib/list-page";
+import { validateAgentLimits } from "../lib/limits";
 
 const app = new Hono<{
   Bindings: Env;
@@ -209,6 +210,12 @@ app.post("/", async (c) => {
     return c.json({ error: "model is required for cloud agents" }, 400);
   }
 
+  // Field-size caps (Anthropic-aligned). See lib/limits.ts.
+  const limitCheck = validateAgentLimits(body);
+  if (!limitCheck.ok) {
+    return c.json({ error: limitCheck.error }, 400);
+  }
+
   // Validate model has a configured model card. Skipped for local-runtime
   // agents: their loop runs in the user's `oma bridge daemon` ACP child,
   // which brings its own LLM credentials and ignores OMA's model_card.
@@ -329,6 +336,14 @@ const updateAgent = async (c: any) => {
     runtime_binding: raw._oma?.runtime_binding,
     appendable_prompts: raw._oma?.appendable_prompts,
   };
+
+  // Field-size caps (Anthropic-aligned). See lib/limits.ts. Only the
+  // fields supplied in this PATCH are checked — `undefined` means
+  // "preserve existing", which already passed limits at create time.
+  const limitCheck = validateAgentLimits(body);
+  if (!limitCheck.ok) {
+    return c.json({ error: limitCheck.error }, 400);
+  }
 
   // Effective runtime_binding after the patch — explicit null means the
   // caller is detaching the binding (= becoming a cloud agent), so model
