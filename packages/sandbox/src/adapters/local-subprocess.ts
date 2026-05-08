@@ -38,6 +38,16 @@ export interface LocalSubprocessSandboxOptions {
    * MEMORY_BUCKET).
    */
   memoryRoot?: string;
+  /**
+   * Absolute path to the directory backing per-session output deliveries
+   * (the `/mnt/session/outputs/` magic dir). Required to support
+   * mountSessionOutputs — when set, mountSessionOutputs symlinks
+   * <workdir>/.mnt/session/outputs → <outputsRoot>/<tenantId>/<sessionId>/.
+   * main-node's GET /v1/sessions/:id/outputs reads from the same root.
+   * When omitted, mountSessionOutputs is a hard error (matches CF
+   * behaviour without FILES_BUCKET).
+   */
+  outputsRoot?: string;
 }
 
 interface MemoryMount {
@@ -50,6 +60,15 @@ interface MemoryMount {
   mountRel: string;
 }
 
+interface OutputsMount {
+  tenantId: string;
+  sessionId: string;
+  /** Real path the symlink targets — `<outputsRoot>/<tenantId>/<sessionId>/`. */
+  targetDir: string;
+  /** Workdir-relative mount path — `.mnt/session/outputs`. */
+  mountRel: string;
+}
+
 export class LocalSubprocessSandbox implements SandboxExecutor {
   private workdir: string;
   private defaultTimeoutMs: number;
@@ -57,13 +76,16 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
   private commandSecrets: Array<{ prefix: string; secrets: Record<string, string> }> = [];
   private processes = new Map<string, BackgroundProcess>();
   private mounts = new Map<string, MemoryMount>();
+  private outputsMount: OutputsMount | null = null;
   private memoryRoot: string | null;
+  private outputsRoot: string | null;
   private logger: NonNullable<LocalSubprocessSandboxOptions["logger"]>;
 
   constructor(opts: LocalSubprocessSandboxOptions) {
     this.workdir = resolve(opts.workdir);
     this.defaultTimeoutMs = opts.defaultTimeoutMs ?? 120_000;
     this.memoryRoot = opts.memoryRoot ? resolve(opts.memoryRoot) : null;
+    this.outputsRoot = opts.outputsRoot ? resolve(opts.outputsRoot) : null;
     this.logger = opts.logger ?? {
       warn: (msg, ctx) => console.warn(`[local-sandbox] ${msg}`, ctx ?? ""),
       log: (msg) => console.log(`[local-sandbox] ${msg}`),
@@ -244,6 +266,45 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     });
   }
 
+  async mountSessionOutputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (!this.outputsRoot) {
+      throw new Error(
+        `LocalSubprocessSandbox.mountSessionOutputs: outputsRoot not configured — ` +
+        `pass it to the constructor or skip outputs mounts`,
+      );
+    }
+    const targetDir = join(this.outputsRoot, opts.tenantId, opts.sessionId);
+    mkdirSync(targetDir, { recursive: true });
+
+    const mountParent = join(this.workdir, ".mnt", "session");
+    mkdirSync(mountParent, { recursive: true });
+
+    const symlinkPath = join(mountParent, "outputs");
+    try {
+      rmSync(symlinkPath, { recursive: true, force: true });
+    } catch { /* best-effort */ }
+    try {
+      symlinkSync(targetDir, symlinkPath, "dir");
+    } catch (err) {
+      throw new Error(
+        `mountSessionOutputs: symlink ${symlinkPath} → ${targetDir} failed: ` +
+        (err as Error).message,
+      );
+    }
+
+    this.outputsMount = {
+      tenantId: opts.tenantId,
+      sessionId: opts.sessionId,
+      targetDir,
+      mountRel: join(".mnt", "session", "outputs"),
+    };
+
+    await this.setEnvVars({ OMA_OUTPUTS_DIR: symlinkPath });
+  }
+
   async readFile(path: string): Promise<string> {
     return fs.readFile(this.resolvePath(path), "utf8");
   }
@@ -291,6 +352,10 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
       normalised = ".mnt/memory/" + normalised.slice("/mnt/memory/".length);
     } else if (normalised === "/mnt/memory") {
       normalised = ".mnt/memory";
+    } else if (normalised.startsWith("/mnt/session/outputs/")) {
+      normalised = ".mnt/session/outputs/" + normalised.slice("/mnt/session/outputs/".length);
+    } else if (normalised === "/mnt/session/outputs") {
+      normalised = ".mnt/session/outputs";
     } else if (normalised.startsWith("/workspace/")) normalised = normalised.slice("/workspace/".length);
     else if (normalised === "/workspace") normalised = "";
     else if (normalised.startsWith("/")) normalised = normalised.slice(1);
