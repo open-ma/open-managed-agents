@@ -25,11 +25,17 @@
 export interface ModelCardRow {
   id: string;
   tenant_id: string;
-  /** External-facing model identifier (e.g. "claude-sonnet-4-6", "gpt-4o"). */
+  /** Tenant-unique user-facing handle (e.g. "claude-prod", "bedrock-sonnet").
+   *  Agents reference cards via `agent.model = card.model_id`. UNIQUE per
+   *  tenant — same string can't pin two different credentials. */
   model_id: string;
+  /** Actual LLM model string sent to the provider's API on each turn
+   *  (e.g. "claude-sonnet-4-6", "gpt-4o"). No uniqueness constraint —
+   *  multiple cards may serve the same underlying LLM with different keys
+   *  / base_urls / providers. */
+  model: string;
   /** Provider tag — controls how the agent worker shapes outbound requests. */
   provider: string;
-  display_name: string;
   /** Optional override for the upstream API base URL. NULL = use provider default. */
   base_url: string | null;
   /** Optional extra HTTP headers (used by *-compatible providers). NULL when unset. */

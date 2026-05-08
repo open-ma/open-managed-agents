@@ -57,9 +57,16 @@ function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
 }
 
 /**
- * Validate that a model_card_id exists, or that the model string
- * matches at least one configured model card (by model_id).
- * If no model cards exist at all, skip validation (env-key fallback).
+ * Validate the agent's model reference. After the handle rename, agent.model
+ * is a string that should equal some card's model_id (the tenant-unique
+ * handle). The DB enforces UNIQUE(tenant_id, model_id) so the lookup returns
+ * at most one row.
+ *
+ * If model_card_id is also pinned, that's the explicit override path —
+ * verify the id exists and let the runtime use that card's wire-level
+ * `model` field for the API call.
+ *
+ * Skips validation entirely when no cards exist (env-var fallback path).
  */
 async function validateModel(
   services: Services,
@@ -73,20 +80,20 @@ async function validateModel(
   // No model cards configured — skip validation (uses env fallback)
   if (active.length === 0) return { valid: true };
 
-  // If explicit model_card_id, verify it exists
+  // Explicit pin: card id must exist.
   if (modelCardId) {
     const found = active.find((c) => c.id === modelCardId);
     if (!found) return { valid: false, error: `Model card "${modelCardId}" not found` };
     return { valid: true };
   }
 
-  // Otherwise, check if the model_id matches any card
+  // Implicit lookup: agent.model must match some card's model_id handle.
   const modelId = typeof model === "string" ? model : model.id;
   const match = active.find((c) => c.model_id === modelId);
   if (!match) {
     return {
       valid: false,
-      error: `No model card configured for model "${modelId}". Create a model card first or use a configured model.`,
+      error: `No model card with model_id "${modelId}". Create a card with that handle, or set agent.model to an existing card's model_id.`,
     };
   }
   return { valid: true };

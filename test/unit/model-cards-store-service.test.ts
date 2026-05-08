@@ -33,7 +33,6 @@ describe("ModelCardService — create + read", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "Anthropic Sonnet",
       apiKey: "sk-ant-supersecret-1234",
     });
     expect(card.id).toMatch(/^mdl-/);
@@ -46,7 +45,8 @@ describe("ModelCardService — create + read", () => {
     expect(card.custom_headers).toBeNull();
 
     const got = await service.get({ tenantId: TENANT, cardId: card.id });
-    expect(got?.display_name).toBe("Anthropic Sonnet");
+    // model defaults to model_id when not explicitly set on create.
+    expect(got?.model).toBe("claude-sonnet-4-6");
   });
 
   it("isolates cards by tenant", async () => {
@@ -55,7 +55,6 @@ describe("ModelCardService — create + read", () => {
       tenantId: "tn_a",
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "A",
       apiKey: "sk-A-1234",
     });
     expect((await service.list({ tenantId: "tn_a" })).length).toBe(1);
@@ -75,7 +74,6 @@ describe("ModelCardService — create + read", () => {
       tenantId: TENANT,
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "OpenAI",
       apiKey: "sk-oai-abcdef-LAST",
     });
     // api_key is not on the row — neither cleartext nor cipher
@@ -94,7 +92,6 @@ describe("ModelCardService — UNIQUE(tenant_id, model_id)", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "first",
       apiKey: "sk-ant-1111",
     });
     await expect(() =>
@@ -102,7 +99,6 @@ describe("ModelCardService — UNIQUE(tenant_id, model_id)", () => {
         tenantId: TENANT,
         modelId: "claude-sonnet-4-6",
         provider: "ant",
-        displayName: "second",
         apiKey: "sk-ant-2222",
       }),
     ).rejects.toBeInstanceOf(ModelCardDuplicateModelIdError);
@@ -114,14 +110,12 @@ describe("ModelCardService — UNIQUE(tenant_id, model_id)", () => {
       tenantId: "tn_a",
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "A",
       apiKey: "sk-A-1111",
     });
     const b = await service.create({
       tenantId: "tn_b",
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "B",
       apiKey: "sk-B-2222",
     });
     expect(b.tenant_id).toBe("tn_b");
@@ -133,14 +127,12 @@ describe("ModelCardService — UNIQUE(tenant_id, model_id)", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "Sonnet",
       apiKey: "sk-1111",
     });
     const b = await service.create({
       tenantId: TENANT,
       modelId: "claude-haiku-4-6",
       provider: "ant",
-      displayName: "Haiku",
       apiKey: "sk-2222",
     });
     await expect(() =>
@@ -163,7 +155,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "Default",
       apiKey: "sk-ant-1111",
       makeDefault: true,
     });
@@ -179,7 +170,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "A",
       apiKey: "sk-A-1111",
       makeDefault: true,
     });
@@ -188,7 +178,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "B",
       apiKey: "sk-B-2222",
     });
     clock.set(3000);
@@ -212,7 +201,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "A",
       apiKey: "sk-A-1111",
       makeDefault: true,
     });
@@ -220,7 +208,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "B",
       apiKey: "sk-B-2222",
       makeDefault: true,
     });
@@ -237,7 +224,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "A",
       apiKey: "sk-A-1111",
       makeDefault: true,
     });
@@ -245,7 +231,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "B",
       apiKey: "sk-B-2222",
     });
     const updated = await service.update({
@@ -269,7 +254,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "A",
       apiKey: "sk-A",
       makeDefault: true,
     });
@@ -277,7 +261,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "B",
       apiKey: "sk-B",
       makeDefault: true,           // demotes a
     });
@@ -285,7 +268,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-haiku-4-6",
       provider: "ant",
-      displayName: "C",
       apiKey: "sk-C",
     });
     await service.setDefault({ tenantId: TENANT, cardId: c.id }); // demotes b
@@ -325,7 +307,6 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "A",
       apiKey: "sk-A-1111",
     });
     expect(await service.getDefault({ tenantId: TENANT })).toBeNull();
@@ -333,26 +314,25 @@ describe("ModelCardService — partial UNIQUE: default semantics", () => {
 });
 
 describe("ModelCardService — update", () => {
-  it("updates display_name + api_key + base_url + custom_headers", async () => {
+  it("updates model + api_key + base_url + custom_headers", async () => {
     const clock = new ManualClock(1000);
     const { service } = createInMemoryModelCardService({ clock });
     const card = await service.create({
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "old",
       apiKey: "sk-ant-OLD0",
     });
     clock.set(2000);
     const updated = await service.update({
       tenantId: TENANT,
       cardId: card.id,
-      displayName: "new",
+      model: "claude-opus-4-7",
       apiKey: "sk-ant-NEW9",
       baseUrl: "https://my-proxy.example.com/v1",
       customHeaders: { "X-Custom": "value" },
     });
-    expect(updated.display_name).toBe("new");
+    expect(updated.model).toBe("claude-opus-4-7");
     expect(updated.api_key_preview).toBe("NEW9");
     expect(updated.base_url).toBe("https://my-proxy.example.com/v1");
     expect(updated.custom_headers).toEqual({ "X-Custom": "value" });
@@ -369,7 +349,6 @@ describe("ModelCardService — update", () => {
       tenantId: TENANT,
       modelId: "deepseek-chat",
       provider: "oai-compatible",
-      displayName: "DeepSeek",
       apiKey: "sk-ds-1111",
       baseUrl: "https://api.deepseek.com/v1",
       customHeaders: { "X-Tag": "live" },
@@ -390,7 +369,6 @@ describe("ModelCardService — update", () => {
       service.update({
         tenantId: TENANT,
         cardId: "missing",
-        displayName: "x",
       }),
     ).rejects.toBeInstanceOf(ModelCardNotFoundError);
   });
@@ -403,7 +381,6 @@ describe("ModelCardService — delete", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "x",
       apiKey: "sk-ant-1111",
     });
     await service.delete({ tenantId: TENANT, cardId: card.id });
@@ -418,7 +395,6 @@ describe("ModelCardService — delete", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "Default",
       apiKey: "sk-ant-1111",
       makeDefault: true,
     });
@@ -443,7 +419,6 @@ describe("ModelCardService — listing + lookups", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "first",
       apiKey: "sk-1111",
     });
     clock.set(2000);
@@ -451,7 +426,6 @@ describe("ModelCardService — listing + lookups", () => {
       tenantId: TENANT,
       modelId: "gpt-4o",
       provider: "oai",
-      displayName: "second",
       apiKey: "sk-2222",
     });
     clock.set(3000);
@@ -459,11 +433,10 @@ describe("ModelCardService — listing + lookups", () => {
       tenantId: TENANT,
       modelId: "claude-haiku-4-6",
       provider: "ant",
-      displayName: "third",
       apiKey: "sk-3333",
     });
     const all = await service.list({ tenantId: TENANT });
-    expect(all.map((c) => c.display_name)).toEqual(["first", "second", "third"]);
+    expect(all.map((c) => c.model_id)).toEqual(["claude-sonnet-4-6", "gpt-4o", "claude-haiku-4-6"]);
   });
 
   it("findByModelId returns the matching card or null", async () => {
@@ -472,7 +445,6 @@ describe("ModelCardService — listing + lookups", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "Sonnet",
       apiKey: "sk-1111",
     });
     expect(
@@ -504,7 +476,6 @@ describe("ModelCardService — api_key crypto boundary", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "x",
       apiKey: "sk-ant-supersecret-PLAIN",
     });
     const key = await service.getApiKey({
@@ -522,7 +493,6 @@ describe("ModelCardService — api_key crypto boundary", () => {
       tenantId: TENANT,
       modelId: "claude-sonnet-4-6",
       provider: "ant",
-      displayName: "x",
       apiKey: "sk-ant-VISIBLE",
     });
     const cipher = await repo.getApiKeyCipher(TENANT, card.id);
