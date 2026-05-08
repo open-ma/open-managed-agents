@@ -323,15 +323,13 @@ app.post("/", async (c) => {
 
   // Local-runtime agents (acp-proxy harness) don't use the sandbox container
   // — their loop is forwarded to the user's daemon via the RuntimeRoom DO.
-  // We still need an environment_id to satisfy the sessions schema (NOT
-  // NULL) and the SessionDO routing, but the user shouldn't have to think
-  // about it: pick the tenant's first environment as a benign default.
-  // Cloud agents continue to require an explicit environment_id because
-  // the picked sandbox lane materially affects the run.
-  //
-  // Long-term: make sessions.environment_id nullable so local-runtime
-  // sessions can store NULL — out of scope for this PR (D1 migration +
-  // sessions-store API + multiple downstream consumers).
+  // We still need an environment_id because Anthropic's Managed Agents API
+  // requires it on every session (BetaManagedAgentsSession.environment_id
+  // is `string`, not nullable), so we keep the schema aligned and pick
+  // the tenant's first environment as a benign default for local-runtime
+  // sessions where the value never gets used by the sandbox layer.
+  // Cloud agents must supply an explicit environment_id because the
+  // picked sandbox lane materially affects the run.
   const agentIsLocalRuntime = !!agentRow.runtime_binding;
   let resolvedEnvId = body.environment_id ?? wrappedEnvId;
   if (!resolvedEnvId) {
