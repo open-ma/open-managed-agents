@@ -12,6 +12,7 @@ import { AgentDetail } from "./pages/AgentDetail";
 import { SessionsList } from "./pages/SessionsList";
 import { SessionDetail } from "./pages/SessionDetail";
 import { EnvironmentsList } from "./pages/EnvironmentsList";
+import { EnvironmentDetail } from "./pages/EnvironmentDetail";
 import { VaultsList } from "./pages/VaultsList";
 import { SkillsList } from "./pages/SkillsList";
 import { MemoryStoresList } from "./pages/MemoryStoresList";
@@ -58,6 +59,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="evals" element={<EvalRunsList />} />
             <Route path="evals/:id" element={<EvalRunDetail />} />
             <Route path="environments" element={<EnvironmentsList />} />
+            <Route path="environments/:id" element={<EnvironmentDetail />} />
             <Route path="skills" element={<SkillsList />} />
             <Route path="vaults" element={<VaultsList />} />
             <Route path="memory" element={<MemoryStoresList />} />

@@ -7,3 +7,13 @@ packages:
   - 'apps/console'
   - 'apps/integrations'
   - 'apps/docs'
+
+# pnpm v10 reads onlyBuiltDependencies from this file (not root package.json).
+# Without this allowlist pnpm v10 hard-fails install with ERR_PNPM_IGNORED_BUILDS.
+onlyBuiltDependencies:
+  - '@anthropic-ai/tokenizer'
+  - better-sqlite3
+  - esbuild
+  - protobufjs
+  - sharp
+  - workerd
