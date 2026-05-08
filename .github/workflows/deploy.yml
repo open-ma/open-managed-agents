@@ -22,10 +22,12 @@ jobs:
           node-version: '22'
 
       - name: Install pnpm
-        # Pin to v10 — pnpm v11 renamed `onlyBuiltDependencies` →
-        # `allowBuilds` and unpinned `npm i -g pnpm` (which pulls latest)
-        # caused install to fail when v11 went stable. Lockfile is v10.
-        run: npm install -g pnpm@10
+        # corepack reads `packageManager` from package.json — single
+        # source of truth across local + every CI workflow. Replaces
+        # the version-drift footgun of `npm install -g pnpm` (latest)
+        # which broke when v11 went stable and renamed the build
+        # allowlist field (`onlyBuiltDependencies` → `allowBuilds`).
+        run: corepack enable
 
       - name: Install dependencies
         run: pnpm install

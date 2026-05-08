@@ -8,12 +8,20 @@ packages:
   - 'apps/integrations'
   - 'apps/docs'
 
-# pnpm v10 reads onlyBuiltDependencies from this file (not root package.json).
-# Without this allowlist pnpm v10 hard-fails install with ERR_PNPM_IGNORED_BUILDS.
-onlyBuiltDependencies:
-  - '@anthropic-ai/tokenizer'
-  - better-sqlite3
-  - esbuild
-  - protobufjs
-  - sharp
-  - workerd
+# pnpm v11 reads ALL pnpm config from this file — `pnpm` block in
+# package.json is no longer honored. Keep peerDependencyRules + the
+# build allowlist here.
+peerDependencyRules:
+  allowAny:
+    - zod
+
+# v11 renamed `onlyBuiltDependencies` (array) → `allowBuilds` (map).
+# Without these entries pnpm v11 hard-fails install (strictDepBuilds=true
+# by default) with ERR_PNPM_IGNORED_BUILDS.
+allowBuilds:
+  '@anthropic-ai/tokenizer': true
+  better-sqlite3: true
+  esbuild: true
+  protobufjs: true
+  sharp: true
+  workerd: true
