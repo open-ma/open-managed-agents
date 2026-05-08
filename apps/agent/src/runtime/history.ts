@@ -436,7 +436,7 @@ function stampEvent(event: SessionEvent): SessionEvent {
 }
 
 /**
- * SqliteHistory now composes the CFless `CfDoEventLog` adapter from
+ * SqliteHistory now composes the self-host `CfDoEventLog` adapter from
  * @open-managed-agents/event-log/cf-do — kept the class name for back-
  * compat with existing call sites in SessionDO. To swap backends
  * (Postgres / in-memory / etc.) construct an `InMemoryHistory` or a

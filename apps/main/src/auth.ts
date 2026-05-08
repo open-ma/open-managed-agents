@@ -1,6 +1,7 @@
 import { createMiddleware } from "hono/factory";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn, logError } from "@open-managed-agents/shared";
+import { CfKvStore } from "@open-managed-agents/kv-store";
 
 async function sha256(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -32,9 +33,11 @@ export const authMiddleware = createMiddleware<{
       c.set("tenant_id", "default");
       return next();
     }
-    // Lookup hashed API key in KV
+    // Lookup hashed API key in KV. authMiddleware runs before servicesMiddleware,
+    // so c.var.services isn't populated yet — construct the kv adapter inline.
     const hash = await sha256(apiKey);
-    const keyData = await c.env.CONFIG_KV.get(`apikey:${hash}`);
+    const kv = new CfKvStore(c.env.CONFIG_KV);
+    const keyData = await kv.get(`apikey:${hash}`);
     if (!keyData) {
       return c.json({ error: "Invalid API key" }, 401);
     }

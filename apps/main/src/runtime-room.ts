@@ -24,6 +24,16 @@
  *   "session_state:<sid>"  — JSON of last terminal state (ready/error/disposed)
  *                            so a harness that opens its WS *after* daemon
  *                            already replied still gets the message.
+ *   "acp_session:<sid>"    — the ACP-side session id last advertised by the
+ *                            daemon for this oma session_id. Survives daemon
+ *                            restarts (no session.disposed = the user still
+ *                            owns the session). Injected as `resume.acp_session_id`
+ *                            on every session.start the harness sends, so the
+ *                            new daemon's `session/load` recovers conversation
+ *                            history instead of spawning a fresh session that
+ *                            "forgets everything." Cleared on session.disposed.
+ *                            See drain() in cli/src/bridge/lib/session-manager.ts
+ *                            for the daemon-side recovery counterpart.
  *
  * Auth: assumed enforced before fetch() reaches the DO. The /agents/runtime/
  * _attach upgrade route validates the runtime bearer token and forwards as
@@ -125,6 +135,12 @@ export class RuntimeRoom extends DurableObject<Env> {
     return `session_state:${sid}`;
   }
 
+  /** Storage key for the daemon-reported acp_session_id of an oma session.
+   *  Persists across daemon restarts; cleared on session.disposed. */
+  private acpSessionKey(sid: string): string {
+    return `acp_session:${sid}`;
+  }
+
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     let parsed: { type?: string; [k: string]: unknown };
     try {
@@ -144,7 +160,7 @@ export class RuntimeRoom extends DurableObject<Env> {
     } else {
       const sid = tags.map(sessionFromTag).find((s): s is string => !!s);
       if (!sid) return;
-      this.onHarnessMessage(sid, parsed);
+      await this.onHarnessMessage(sid, parsed);
     }
   }
 
@@ -209,8 +225,23 @@ export class RuntimeRoom extends DurableObject<Env> {
       if (parsed.type === "session.ready" || parsed.type === "session.error") {
         await this.ctx.storage.put(this.sessionStateKey(sid), parsed);
       }
+      // Persist the acp_session_id whenever the daemon advertises one — both
+      // first-time session.ready (after session/new) and re-attach session.ready
+      // (after session/load on a recovered session). The next session.start
+      // for this sid will inject this as resume.acp_session_id, which is how
+      // we survive daemon restarts without losing conversation history (the
+      // ACP child's persisted state is in its cwd; session/load tells it
+      // which conversation to reopen). See onHarnessMessage below.
+      if (parsed.type === "session.ready") {
+        const acpSid = parsed.acp_session_id;
+        if (typeof acpSid === "string" && acpSid.length > 0) {
+          await this.ctx.storage.put(this.acpSessionKey(sid), acpSid);
+        }
+      }
       if (parsed.type === "session.disposed") {
         await this.ctx.storage.delete(this.sessionStateKey(sid));
+        // User explicitly killed this session — recovery no longer wanted.
+        await this.ctx.storage.delete(this.acpSessionKey(sid));
       }
       this.broadcastToHarness(sid, parsed);
       return;
@@ -219,7 +250,7 @@ export class RuntimeRoom extends DurableObject<Env> {
     log({ op: "runtime_room.unhandled_daemon_msg", type: parsed.type }, "unhandled daemon message");
   }
 
-  private onHarnessMessage(sid: string, parsed: { type?: string; [k: string]: unknown }): void {
+  private async onHarnessMessage(sid: string, parsed: { type?: string; [k: string]: unknown }): Promise<void> {
     // Harness side speaks the canonical clash protocol verbatim — daemon
     // doesn't need a translation step.
     //   { type: "session.start", agent_id, cwd?, resume? }   → forwards as-is
@@ -235,7 +266,25 @@ export class RuntimeRoom extends DurableObject<Env> {
       });
       return;
     }
-    const out = { ...parsed, session_id: sid };
+    const out: { [k: string]: unknown } = { ...parsed, session_id: sid };
+    // session.start carries an optional `resume.acp_session_id`. Today no
+    // harness builds that — the cloud-side AcpProxyHarness sends bare
+    // session.start. We inject it here from DO storage so daemon restarts
+    // (npm upgrade, machine reboot, manual setup re-run) don't appear as
+    // "agent forgot the conversation" to the user. The daemon already
+    // honors `resume.acp_session_id` via ACP `session/load` (see
+    // packages/acp-runtime/src/session.ts:108). Skipped when the harness
+    // already supplied a resume payload — never overwrite caller intent.
+    if (parsed.type === "session.start") {
+      const existing = (parsed.resume as { acp_session_id?: string } | undefined)?.acp_session_id;
+      if (!existing) {
+        const acpSid = await this.ctx.storage.get<string>(this.acpSessionKey(sid));
+        if (acpSid) {
+          out.resume = { acp_session_id: acpSid };
+          log({ op: "runtime_room.inject_resume", session_id: sid, acp_session_id: acpSid }, "injected resume.acp_session_id for recovery");
+        }
+      }
+    }
     try {
       daemon.send(JSON.stringify(out));
     } catch (e) {

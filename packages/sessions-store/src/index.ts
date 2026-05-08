@@ -18,4 +18,4 @@ export * from "./ports";
 export { SessionService } from "./service";
 export type { SessionServiceDeps, NewResourceInput } from "./service";
 
-export { createCfSessionService, D1SessionRepo } from "./adapters";
+export { createCfSessionService, createSqliteSessionService, SqlSessionRepo } from "./adapters";

@@ -6,17 +6,21 @@
  * or `launchctl list` parsing). Status is "do you have a creds file" +
  * "does the server still know about you" — for "is the daemon process
  * actually running" the user can check `launchctl list | grep oma`
- * (macOS) or look at the logs.
+ * (macOS), `systemctl --user status dev.openma.bridge` (Linux),
+ * `schtasks /query /tn dev.openma.bridge` (Windows), or look at the logs.
  */
 
 import { readCreds } from "../lib/config.js";
-import { paths } from "../lib/platform.js";
+import { paths, currentProfile } from "../lib/platform.js";
+import { detectServiceKind } from "../lib/service-manager.js";
 import { printBanner, log, c, sym } from "../lib/style.js";
 import { PKG_VERSION } from "../lib/version.js";
 import { probeRuntimeToken } from "../lib/probe.js";
 
 export async function runStatus(): Promise<void> {
-  printBanner("status", PKG_VERSION);
+  const profile = currentProfile();
+  const profileTag = profile ? `  [profile=${profile}]` : "";
+  printBanner(`status${profileTag}`, PKG_VERSION);
   const p = paths();
   const creds = await readCreds();
 
@@ -26,6 +30,7 @@ export async function runStatus(): Promise<void> {
     process.exit(1);
   }
 
+  const kind = detectServiceKind();
   const row = (k: string, v: string) =>
     process.stderr.write(`  ${c.dim(k.padEnd(11))} ${v}\n`);
   row("server",     creds.serverUrl);
@@ -34,7 +39,7 @@ export async function runStatus(): Promise<void> {
   row("registered", new Date(creds.createdAt * 1000).toISOString());
   row("creds file", c.dim(p.credsFile));
   row("log file",   c.dim(p.logFile));
-  if (p.serviceFile) row("service",    c.dim(p.serviceFile));
+  row("service",    c.dim(`${kind}${p.serviceFile ? ` → ${p.serviceFile}` : ""}`));
 
   process.stderr.write("\n");
   log.step("probing server");

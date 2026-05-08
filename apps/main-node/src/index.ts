@@ -1,0 +1,1298 @@
+/**
+ * apps/main-node — self-host Node entry for the Open Managed Agents API.
+ *
+ * Phase B-resume milestone: persistent sessions + event log + SSE with
+ * Last-Event-ID resume + crash recovery on restart. Proves the storage
+ * abstraction supports `kill -9 <node-pid>` and the client picks up
+ * exactly where it left off — the key property the original SessionDO
+ * implementation gave us via DO durability.
+ *
+ *   pnpm --filter @open-managed-agents/main-node start
+ *
+ *   # 1. Create a session
+ *   SID=$(curl -s -X POST localhost:8787/v1/sessions \
+ *     -H 'content-type: application/json' -d '{}' | jq -r .id)
+ *
+ *   # 2. Open an SSE stream
+ *   curl -N localhost:8787/v1/sessions/$SID/events/stream &
+ *
+ *   # 3. Inject an event from another shell
+ *   curl -X POST localhost:8787/v1/sessions/$SID/_test_emit \
+ *     -H 'content-type: application/json' -d '{"text":"hello"}'
+ *
+ *   # 4. kill -9 the node process. SSE drops.
+ *   # 5. Restart node.
+ *   # 6. Reconnect SSE — pass the last seen seq to resume:
+ *   curl -N -H 'Last-Event-ID: 0' localhost:8787/v1/sessions/$SID/events/stream
+ *   # → replays everything from seq 1 onward + listens for new events
+ *
+ * What's NOT here yet:
+ *   - Real harness loop (no LLM call, no tool execution) — `_test_emit`
+ *     is the placeholder for what a Phase D NodeSessionRuntime would do
+ *     when a turn produces an agent.message
+ *   - Auth: every request still treated as tenant_id="default"
+ *   - Sandbox / E2B / sub-agents / vault / memory / files
+ */
+
+import { serve } from "@hono/node-server";
+import { serveStatic } from "@hono/node-server/serve-static";
+import { Hono } from "hono";
+import {
+  createBetterSqlite3SqlClient,
+  createPostgresSqlClient,
+  type SqlClient,
+} from "@open-managed-agents/sql-client";
+import {
+  AgentNotFoundError,
+  AgentVersionMismatchError,
+  createSqliteAgentService,
+  type AgentService,
+} from "@open-managed-agents/agents-store";
+import {
+  createSqliteMemoryStoreService,
+  SqlMemoryRepo,
+  type MemoryStoreService,
+} from "@open-managed-agents/memory-store";
+import { LocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
+import {
+  createSqliteVaultService,
+  type VaultService,
+} from "@open-managed-agents/vaults-store";
+import {
+  createSqliteCredentialService,
+  stripSecrets,
+  type CredentialService,
+} from "@open-managed-agents/credentials-store";
+import { SqlEventLog, ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
+import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
+import { generateEventId } from "@open-managed-agents/shared";
+import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
+import { buildTools } from "@open-managed-agents/agent/harness/tools";
+import { resolveModel } from "@open-managed-agents/agent/harness/provider";
+import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
+import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
+import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
+import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
+import { mkdirSync } from "node:fs";
+import { dirname, join, relative } from "node:path";
+import { nanoid } from "nanoid";
+import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
+import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
+import { SessionRegistry } from "./registry.js";
+import { createAuth } from "./auth/config.js";
+import { createAuthMiddleware } from "./auth/middleware.js";
+import { ensureTenantSchema } from "./auth/tenants.js";
+
+// Single ToMarkdownProvider instance — turndown is heavy enough that
+// instantiating per turn would be wasteful. Lazy-loads on first use.
+const toMarkdownProvider = nodeToMarkdown();
+
+// ─── Bootstrap ───────────────────────────────────────────────────────────
+
+// Backend selection. DATABASE_URL takes precedence (postgres:// or
+// postgresql:// scheme); otherwise we fall back to better-sqlite3 with the
+// DATABASE_PATH env var (or ./data/oma.db). Both backends speak the same
+// SqlClient port — every store package + the event log work identically on
+// both.
+const dbUrl = process.env.DATABASE_URL ?? "";
+const usePostgres = dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://");
+
+let sql: SqlClient;
+let backendDescription: string;
+if (usePostgres) {
+  sql = await createPostgresSqlClient(dbUrl);
+  // Don't print the dsn — it usually carries the password.
+  const u = new URL(dbUrl);
+  backendDescription = `postgres ${u.hostname}:${u.port || 5432}${u.pathname}`;
+} else {
+  const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
+  mkdirSync(dirname(dbPath), { recursive: true });
+  sql = await createBetterSqlite3SqlClient(dbPath);
+  backendDescription = `sqlite ${dbPath}`;
+}
+
+// Apply schemas. Idempotent. self-host deploys eventually replace this with a
+// proper migrations runner.
+await sql.exec(`
+  CREATE TABLE IF NOT EXISTS "agents" (
+    "id"           TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"    TEXT NOT NULL,
+    "config"       TEXT NOT NULL,
+    "version"   BIGINT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
+  );
+  CREATE INDEX IF NOT EXISTS "idx_agents_tenant"
+    ON "agents" ("tenant_id", "archived_at");
+
+  CREATE TABLE IF NOT EXISTS "agent_versions" (
+    "agent_id"    TEXT NOT NULL,
+    "tenant_id"   TEXT NOT NULL,
+    "version"   BIGINT NOT NULL,
+    "snapshot"    TEXT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    PRIMARY KEY ("agent_id", "version")
+  );
+
+  CREATE TABLE IF NOT EXISTS "sessions" (
+    "id"              TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"       TEXT NOT NULL,
+    "agent_id"        TEXT,
+    "status"          TEXT NOT NULL,
+    "title"           TEXT,
+    -- turn_id + turn_started_at: unified-runtime turn marker. Set on
+    -- beginTurn(), cleared on endTurn(). orphan detection scans
+    -- WHERE status='running'. Mirrors apps/main/migrations/0014.
+    "turn_id"         TEXT,
+    "turn_started_at" BIGINT,
+    "created_at"      BIGINT NOT NULL,
+    "updated_at"      BIGINT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS "idx_sessions_status"
+    ON "sessions" ("status", "tenant_id");
+
+  CREATE TABLE IF NOT EXISTS "memory_stores" (
+    "id"           TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"    TEXT NOT NULL,
+    "name"         TEXT NOT NULL,
+    "description"  TEXT,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
+  );
+  CREATE INDEX IF NOT EXISTS "idx_memory_stores_tenant"
+    ON "memory_stores" ("tenant_id", "archived_at");
+
+  CREATE TABLE IF NOT EXISTS "memories" (
+    "id"               TEXT PRIMARY KEY NOT NULL,
+    "store_id"         TEXT NOT NULL,
+    "path"             TEXT NOT NULL,
+    "content_sha256"   TEXT NOT NULL,
+    "etag"             TEXT NOT NULL,
+    "size_bytes"   BIGINT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT NOT NULL
+  );
+  CREATE UNIQUE INDEX IF NOT EXISTS "idx_memories_store_path"
+    ON "memories" ("store_id", "path");
+
+  CREATE TABLE IF NOT EXISTS "memory_versions" (
+    "id"               TEXT PRIMARY KEY NOT NULL,
+    "memory_id"        TEXT NOT NULL,
+    "store_id"         TEXT NOT NULL,
+    "operation"        TEXT NOT NULL,
+    "path"             TEXT NOT NULL,
+    "content"          TEXT NOT NULL,
+    "content_sha256"   TEXT NOT NULL,
+    "size_bytes"   BIGINT NOT NULL,
+    "actor_type"       TEXT NOT NULL,
+    "actor_id"         TEXT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "redacted"         INTEGER NOT NULL DEFAULT 0
+  );
+  CREATE INDEX IF NOT EXISTS "idx_memory_versions_store"
+    ON "memory_versions" ("store_id", "created_at" DESC);
+  CREATE INDEX IF NOT EXISTS "idx_memory_versions_memory"
+    ON "memory_versions" ("memory_id", "created_at" DESC);
+
+  CREATE TABLE IF NOT EXISTS "vaults" (
+    "id"          TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"   TEXT NOT NULL,
+    "name"        TEXT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
+  );
+  CREATE INDEX IF NOT EXISTS "idx_vaults_tenant"
+    ON "vaults" ("tenant_id", "archived_at");
+
+  CREATE TABLE IF NOT EXISTS "credentials" (
+    "id"             TEXT PRIMARY KEY NOT NULL,
+    "tenant_id"      TEXT NOT NULL,
+    "vault_id"       TEXT NOT NULL,
+    "display_name"   TEXT NOT NULL,
+    "auth_type"      TEXT NOT NULL,
+    "mcp_server_url" TEXT,
+    "provider"       TEXT,
+    "auth"           TEXT NOT NULL,
+    "created_at"   BIGINT NOT NULL,
+    "updated_at"   BIGINT,
+    "archived_at"  BIGINT
+  );
+  CREATE INDEX IF NOT EXISTS "idx_credentials_vault"
+    ON "credentials" ("tenant_id", "vault_id", "archived_at");
+  CREATE UNIQUE INDEX IF NOT EXISTS "idx_credentials_mcp_url_active"
+    ON "credentials" ("tenant_id", "vault_id", "mcp_server_url")
+    WHERE "mcp_server_url" IS NOT NULL AND "archived_at" IS NULL;
+
+  -- session ↔ memory_store binding. The CF version stores these in
+  -- session_resources with type="memory_store"; here we keep a thinner
+  -- table since session_resources isn't wired in this build yet.
+  CREATE TABLE IF NOT EXISTS "session_memory_stores" (
+    "session_id" TEXT NOT NULL,
+    "store_id"   TEXT NOT NULL,
+    "access"     TEXT NOT NULL DEFAULT 'read_write',
+    "created_at"   BIGINT NOT NULL,
+    PRIMARY KEY ("session_id", "store_id")
+  );
+`);
+await ensureEventLogSchema(sql);
+await ensureTenantSchema(sql);
+
+// ── In-place migrations for upgrades ──────────────────────────────────
+//
+// CREATE TABLE IF NOT EXISTS leaves an existing-but-older `sessions`
+// table alone, so a self-host upgrading from a pre-Phase 1 image
+// won't get the new turn_id columns automatically. Apply ALTER TABLE
+// idempotently here. SQLite has no ADD COLUMN IF NOT EXISTS — wrap
+// in try/catch and tolerate "duplicate column" / "column ... already
+// exists" (PG) errors.
+async function addColumnIfMissing(table: string, column: string, type: string) {
+  try {
+    await sql.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}" ${type}`);
+  } catch (err) {
+    const msg = (err as Error).message ?? "";
+    if (!/duplicate column name|already exists/i.test(msg)) throw err;
+  }
+}
+await addColumnIfMissing("sessions", "turn_id", "TEXT");
+await addColumnIfMissing(
+  "sessions",
+  "turn_started_at",
+  usePostgres ? "BIGINT" : "BIGINT",
+);
+
+// ─── Auth ───────────────────────────────────────────────────────────────
+//
+// better-auth on a separate sqlite file. PG-backed auth is a future-work
+// item (the kysely-adapter detection wants `pg.Pool` not `postgres.js`'s
+// Sql); for now main store can be PG while auth stays sqlite — the auth
+// file is small (<1k rows in practice) and the cost is one extra backup
+// target. AUTH_DISABLED=1 escapes back to tenant_id="default" for demos
+// that don't want to set up a user first.
+
+const authDisabled = process.env.AUTH_DISABLED === "1";
+const authDbPath = process.env.AUTH_DATABASE_PATH ?? "./data/auth.db";
+let auth: ReturnType<typeof createAuth> | null = null;
+if (!authDisabled) {
+  // better-auth's kysely-adapter detects better-sqlite3 via `aggregate in db`.
+  // Lazy-import the driver so AUTH_DISABLED=1 paths don't pull it in.
+  mkdirSync(dirname(authDbPath), { recursive: true });
+  const BetterSqlite3 = (await import("better-sqlite3")).default;
+  const authDb = new BetterSqlite3(authDbPath);
+
+  // Bootstrap better-auth's schema. Mirrors what `npx @better-auth/cli
+  // generate` produces for sqlite + emailAndPassword + additionalFields
+  // (tenantId, role). Idempotent — IF NOT EXISTS on every table.
+  authDb.exec(`
+    CREATE TABLE IF NOT EXISTS "user" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "email" TEXT NOT NULL UNIQUE,
+      "emailVerified" INTEGER NOT NULL DEFAULT 0,
+      "name" TEXT NOT NULL,
+      "image" TEXT,
+      "tenantId" TEXT,
+      "role" TEXT,
+      "createdAt" INTEGER NOT NULL,
+      "updatedAt" INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS "session" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+      "token" TEXT NOT NULL UNIQUE,
+      "expiresAt" INTEGER NOT NULL,
+      "ipAddress" TEXT,
+      "userAgent" TEXT,
+      "createdAt" INTEGER NOT NULL,
+      "updatedAt" INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS "account" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
+      "accountId" TEXT NOT NULL,
+      "providerId" TEXT NOT NULL,
+      "accessToken" TEXT,
+      "refreshToken" TEXT,
+      "idToken" TEXT,
+      "accessTokenExpiresAt" INTEGER,
+      "refreshTokenExpiresAt" INTEGER,
+      "scope" TEXT,
+      "password" TEXT,
+      "createdAt" INTEGER NOT NULL,
+      "updatedAt" INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS "verification" (
+      "id" TEXT PRIMARY KEY NOT NULL,
+      "identifier" TEXT NOT NULL,
+      "value" TEXT NOT NULL,
+      "expiresAt" INTEGER NOT NULL,
+      "createdAt" INTEGER,
+      "updatedAt" INTEGER
+    );
+  `);
+
+  auth = createAuth({
+    authDb,
+    mainSql: sql,
+    secret: process.env.BETTER_AUTH_SECRET,
+    baseURL: process.env.PUBLIC_BASE_URL,
+    google:
+      process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+        ? {
+            clientId: process.env.GOOGLE_CLIENT_ID,
+            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
+          }
+        : undefined,
+  });
+}
+
+const agentsService: AgentService = createSqliteAgentService({ client: sql });
+
+// Memory store: SQLite for index/audit + local filesystem for content blobs.
+// Production self-host can swap LocalFsBlobStore for an S3-compatible adapter
+// (Tigris / MinIO / etc.) — same BlobStore port.
+const memoryBlobs = new LocalFsBlobStore({
+  baseDir: process.env.MEMORY_BLOB_DIR ?? "./data/memory-blobs",
+});
+const memoryService: MemoryStoreService = createSqliteMemoryStoreService({
+  client: sql,
+  blobs: memoryBlobs,
+});
+
+// Bridge agent fs writes (LocalSubprocessSandbox writes through symlinked
+// /mnt/memory/<storeName>/) → SQL memories index. Plays the same role as
+// the CF R2 event → Queue → memory-events consumer pipeline. Uses the
+// same memoryRepo.upsertFromEvent / deleteFromEvent entry points.
+const memoryWatcher = startMemoryBlobWatcher({
+  memoryRoot: memoryBlobs.baseDir,
+  memoryRepo: new SqlMemoryRepo(sql),
+});
+
+// Vaults: per-tenant credential containers. Created via REST, consumed by
+// the oma-vault sidecar (apps/oma-vault) which reads the same sqlite file.
+const vaultService: VaultService = createSqliteVaultService({ client: sql });
+const credentialService: CredentialService = createSqliteCredentialService({ client: sql });
+
+const hub = new InProcessEventStreamHub();
+
+// ─── Crash-recovery scan ─────────────────────────────────────────────────
+//
+// Mirrors what SessionDO does inside ensureSchema(): on cold start, find
+// orphan in-flight state from before the last process death and reconcile.
+// Two categories:
+//   - sessions with status='running': the process that owned them is gone;
+//     append a session.error event so SSE clients learn what happened, then
+//     flip status to 'idle'.
+//   - streams with status='streaming': finalize as 'interrupted' so the
+//     events log stays consistent (mirrors recovery.ts on the CF side).
+
+// Orphan-session recovery now lives in SessionRegistry.bootstrap()
+// (constructed below, after buildSandbox / buildTools / etc are
+// defined). It calls SessionStateMachine.onWake on every session whose
+// row was left status='running' by a prior process — same code path
+// that CF SessionDO will run on alarm() in Phase 3, sourced from
+// @open-managed-agents/session-runtime.
+
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+function newEventLog(sessionId: string): SqlEventLog {
+  // stamp closure mirrors SessionDO's inline stamp: fill id + processed_at
+  // on every appended event so SSE consumers can dedupe and order safely.
+  return new SqlEventLog(sql, sessionId, (e) => {
+    const ev = e as SessionEvent & { id?: string; processed_at?: string };
+    if (!ev.id) ev.id = `sevt_${generateEventId()}`;
+    if (!ev.processed_at) ev.processed_at = new Date().toISOString();
+  });
+}
+
+// ─── HTTP ────────────────────────────────────────────────────────────────
+
+const app = new Hono<{
+  Variables: { tenant_id: string; user_id?: string };
+}>();
+
+app.get("/health", (c) =>
+  c.json({
+    status: "ok",
+    runtime: "node",
+    pid: process.pid,
+    uptime_s: Math.round(process.uptime()),
+    auth: authDisabled ? "disabled" : "better-auth",
+    backends: {
+      agents: usePostgres ? "postgres" : "sqlite",
+      events: usePostgres ? "postgres" : "sqlite",
+      hub: "in-process",
+      db: backendDescription,
+    },
+  }),
+);
+
+// /auth-info — public endpoint the console hits on every page load to
+// decide which auth providers to render. Mirrors apps/main/src/index.ts.
+app.get("/auth-info", (c) =>
+  c.json({
+    providers: authDisabled
+      ? []
+      : [
+          "email",
+          // Only advertise email-otp when the operator opted into a real
+          // verification gate. Default self-host (no SMTP) skips OTP so
+          // Console takes the user straight from sign-up → app, avoiding
+          // a verify screen with no way to receive the code.
+          ...(process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1"
+            ? ["email-otp"]
+            : []),
+          ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+            ? ["google"]
+            : []),
+        ],
+    // Turnstile not wired on the self-host side. Console renders without
+    // captcha when this is null.
+    turnstile_site_key: null,
+  }),
+);
+
+// Mount better-auth's request handler. Catches /auth/sign-up/email,
+// /auth/sign-in/email, /auth/sign-out, /auth/get-session, etc.
+// Auth-disabled mode exposes nothing here — any request to /auth/* will
+// 404, which is the correct signal: there's no auth to interact with.
+// Path matches apps/main (CF) so the same console build can hit either.
+if (auth) {
+  app.on(["GET", "POST"], "/auth/*", (c) => auth!.handler(c.req.raw));
+}
+
+// Auth gate for the data-plane routes.
+const authMw = createAuthMiddleware({
+  auth: auth ?? ({} as ReturnType<typeof createAuth>),
+  mainSql: sql,
+  disabled: authDisabled,
+});
+
+const v1 = new Hono<{
+  Variables: { tenant_id: string; user_id?: string };
+}>();
+v1.use("*", authMw);
+
+// ── Agents (Phase B2 — unchanged) ────────────────────────────────────────
+
+v1.post("/agents", async (c) => {
+  const body = await c.req.json<{
+    name: string;
+    model: string | { id: string; speed?: "standard" | "fast" };
+    system?: string;
+    tools?: AgentConfig["tools"];
+    description?: string;
+  }>();
+  if (!body.name) return c.json({ error: "name is required" }, 400);
+  if (!body.model) return c.json({ error: "model is required" }, 400);
+  const row = await agentsService.create({
+    tenantId: c.var.tenant_id,
+    input: {
+      name: body.name,
+      model: body.model,
+      system: body.system,
+      tools: body.tools,
+      description: body.description,
+    },
+  });
+  return c.json(toApiAgent(row), 201);
+});
+
+v1.get("/agents", async (c) => {
+  const rows = await agentsService.list({ tenantId: c.var.tenant_id });
+  return c.json({ data: rows.map(toApiAgent) });
+});
+
+v1.get("/agents/:id", async (c) => {
+  const row = await agentsService.get({ tenantId: c.var.tenant_id, agentId: c.req.param("id") });
+  if (!row) return c.json({ error: "Agent not found" }, 404);
+  return c.json(toApiAgent(row));
+});
+
+v1.put("/agents/:id", async (c) => {
+  const body = await c.req.json<{
+    name?: string;
+    system?: string | null;
+    description?: string | null;
+    version?: number;
+  }>();
+  try {
+    const row = await agentsService.update({
+      tenantId: c.var.tenant_id,
+      agentId: c.req.param("id"),
+      expectedVersion: body.version,
+      input: { name: body.name, system: body.system, description: body.description },
+    });
+    return c.json(toApiAgent(row));
+  } catch (err) {
+    if (err instanceof AgentVersionMismatchError) {
+      return c.json({ error: "Version mismatch" }, 409);
+    }
+    if (err instanceof AgentNotFoundError) {
+      return c.json({ error: "Agent not found" }, 404);
+    }
+    throw err;
+  }
+});
+
+// ── Sessions (Phase B-resume) ────────────────────────────────────────────
+
+v1.post("/sessions", async (c) => {
+  const body = await c.req
+    .json<{ agent_id?: string; title?: string }>()
+    .catch(() => ({}) as { agent_id?: string; title?: string });
+  // Validate agent if provided. Sessions without an agent only support
+  // _test_emit injection — they can't run a harness loop.
+  if (body.agent_id) {
+    const agent = await agentsService.get({ tenantId: c.var.tenant_id, agentId: body.agent_id });
+    if (!agent) return c.json({ error: "Agent not found" }, 404);
+  }
+  const id = `sess_${nanoid(20)}`;
+  const now = Date.now();
+  await sql
+    .prepare(
+      `INSERT INTO sessions (id, tenant_id, agent_id, status, title, created_at, updated_at)
+       VALUES (?, ?, ?, 'idle', ?, ?, ?)`,
+    )
+    .bind(id, c.var.tenant_id, body.agent_id ?? null, body.title ?? null, now, now)
+    .run();
+  return c.json({ id, agent_id: body.agent_id ?? null, status: "idle", title: body.title ?? null }, 201);
+});
+
+// List sessions for the current tenant. Console renders this on the
+// Sessions page; agent-specific filtering via ?agent_id=... matches the
+// CF route's query params.
+v1.get("/sessions", async (c) => {
+  const agentFilter = c.req.query("agent_id");
+  const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
+  const where = agentFilter
+    ? `WHERE tenant_id = ? AND agent_id = ?`
+    : `WHERE tenant_id = ?`;
+  const binds = agentFilter ? [c.var.tenant_id, agentFilter] : [c.var.tenant_id];
+  const rows = await sql
+    .prepare(
+      `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
+       ${where} ORDER BY created_at DESC LIMIT ?`,
+    )
+    .bind(...binds, limit)
+    .all<{
+      id: string;
+      agent_id: string | null;
+      status: string;
+      title: string | null;
+      created_at: number;
+      updated_at: number;
+    }>();
+  return c.json({ data: rows.results ?? [] });
+});
+
+v1.get("/sessions/:id", async (c) => {
+  const row = await sql
+    .prepare(
+      `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
+       WHERE tenant_id = ? AND id = ?`,
+    )
+    .bind(c.var.tenant_id, c.req.param("id"))
+    .first<{
+      id: string;
+      agent_id: string | null;
+      status: string;
+      title: string | null;
+      created_at: number;
+      updated_at: number;
+    }>();
+  if (!row) return c.json({ error: "Session not found" }, 404);
+  return c.json(row);
+});
+
+// POST /v1/sessions/:id/events — append events to the log and (if a
+// user.message is among them and the session is bound to an agent) drive
+// one harness turn. Mirrors apps/main's /v1/sessions/:id/events route +
+// SessionDO's onUserMessage path, condensed onto the Node side.
+v1.post("/sessions/:id/events", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id, agent_id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first<{ id: string; agent_id: string | null }>();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const body = await c.req.json<{ events: SessionEvent[] }>();
+  if (!Array.isArray(body.events)) return c.json({ error: "events array required" }, 400);
+
+  const log = newEventLog(sid);
+  for (const ev of body.events) await log.appendAsync(ev);
+  // Re-read so we can deliver hub publishes with their assigned seq.
+  const stored = await log.getEventsAsync();
+  const newOnes = stored.slice(-body.events.length);
+  for (const ev of newOnes) hub.publish(sid, ev);
+
+  // If any of the new events is a user.message and the session has an
+  // agent bound, kick a harness turn through the registry. Fire-and-forget
+  // — the SSE client gets streamed agent.message_chunk events as the LLM
+  // runs.
+  const hasUserMessage = body.events.some((e) => e.type === "user.message");
+  if (hasUserMessage && session.agent_id) {
+    const userMessage = body.events.find(
+      (e) => e.type === "user.message",
+    ) as UserMessageEvent;
+    const agentId = session.agent_id;
+    void sessionRegistry
+      .getOrCreate(sid, c.var.tenant_id)
+      .then((entry) => entry.machine.runHarnessTurn(agentId, userMessage))
+      .catch((err) => {
+        console.error("[main-node] harness turn failed", err);
+        // Surface as session.error so SSE clients learn the turn died.
+        void log.appendAsync({
+          type: "session.error",
+          error: "harness_turn_failed",
+          message: err instanceof Error ? err.message : String(err),
+        } as unknown as SessionEvent);
+      });
+  }
+
+  return c.json({ accepted: body.events.length, harness_triggered: hasUserMessage && !!session.agent_id }, 202);
+});
+
+/**
+ * Pick a sandbox backend per env. Defaults to LocalSubprocessSandbox for
+ * trusted-dev usage; remote/isolated backends opt in via SANDBOX_PROVIDER.
+ *
+ * Dependency-inverted: this function knows ONLY a name → import-path
+ * map. Each adapter exports a `sandboxFactory: SandboxFactory` (defined
+ * in `packages/sandbox/src/ports.ts`) that reads its own env vars
+ * (DAYTONA_API_KEY, BOXRUN_URL, etc.) inside its own file. Adding a 7th
+ * sandbox = create the file + register a name here. main-node never
+ * grows an `if` chain.
+ */
+const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
+  subprocess: "@open-managed-agents/sandbox/adapters/local-subprocess",
+  litebox: "@open-managed-agents/sandbox/adapters/litebox",
+  boxlite: "@open-managed-agents/sandbox/adapters/litebox",
+  boxrun: "@open-managed-agents/sandbox/adapters/boxrun",
+  daytona: "@open-managed-agents/sandbox/adapters/daytona",
+  e2b: "@open-managed-agents/sandbox/adapters/e2b",
+};
+
+async function buildSandbox(
+  sessionId: string,
+  workdir: string,
+): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
+  const provider = (process.env.SANDBOX_PROVIDER ?? "subprocess").toLowerCase();
+  const path = SANDBOX_PROVIDER_PATHS[provider];
+  if (!path) {
+    throw new Error(
+      `SANDBOX_PROVIDER=${provider} not recognized; valid values: ${Object.keys(
+        SANDBOX_PROVIDER_PATHS,
+      ).join(", ")}`,
+    );
+  }
+  // Dynamic import so deps the operator hasn't installed (e.g.
+  // @daytonaio/sdk in a litebox-only deploy) don't crash startup.
+  const mod = (await import(path)) as {
+    sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
+  };
+  return mod.sandboxFactory(
+    {
+      sessionId,
+      workdir,
+      // Memory blob root — adapters that mount via host-fs (LocalSubprocess)
+      // read this; remote ones (Daytona/E2B) ignore it and use s3fs.
+      memoryRoot: memoryBlobs.baseDir,
+    },
+    process.env,
+  );
+}
+
+/**
+ * SessionRegistry — single source of session lifecycle, shared by the
+ * /v1/sessions/:id/events route, the bootstrap recovery sweep, and any
+ * future reconciliation callers. The registry holds the per-process
+ * deps in its closure and lazily builds a SessionStateMachine per
+ * active session.
+ *
+ * What used to live as the inline `runHarnessTurn` function below is
+ * now SessionStateMachine.runHarnessTurn (in the @open-managed-agents/
+ * session-runtime package). Same body, different home.
+ */
+const sessionRegistry = new SessionRegistry({
+  sql,
+  hub,
+  agentsService,
+  memoryService,
+  newEventLog,
+  buildSandbox,
+  sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
+  buildMemoryMounter: (sessionId, tenantId) => async ({ sandbox }) => {
+    const memoryBindings = await sql
+      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
+      .bind(sessionId)
+      .all<{ store_id: string; access: string }>();
+    for (const binding of memoryBindings.results ?? []) {
+      const store = await memoryService.getStore({ tenantId, storeId: binding.store_id });
+      if (!store) continue;
+      if (!sandbox.mountMemoryStore) continue;
+      await sandbox.mountMemoryStore({
+        storeName: store.name,
+        storeId: binding.store_id,
+        readOnly: binding.access === "read_only",
+      });
+    }
+  },
+  buildModel: (agent) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    return resolveModel(
+      agent.model,
+      apiKey,
+      process.env.ANTHROPIC_BASE_URL,
+      undefined,
+      parseCustomHeaders(process.env.ANTHROPIC_CUSTOM_HEADERS),
+    );
+  },
+  buildTools: async (agent, sandbox) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    return buildTools(agent, sandbox, {
+      ANTHROPIC_API_KEY: apiKey,
+      ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+      // toMarkdown wired via @open-managed-agents/markdown's Node adapter.
+      toMarkdown: toMarkdownProvider,
+    });
+  },
+  buildHarness: () => {
+    // Wrap DefaultHarness to satisfy the machine's looser ctx type;
+    // we hand it a HarnessContext we built ourselves in
+    // buildHarnessContext, so the cast is safe.
+    const h = new DefaultHarness();
+    return { run: (ctx: unknown) => h.run(ctx as HarnessContext) };
+  },
+  buildHarnessContext: async (input) => {
+    const apiKey = process.env.ANTHROPIC_API_KEY;
+    if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
+    const runtime = new NodeHarnessRuntime({
+      sessionId: input.sessionId,
+      log: input.eventLog,
+      hub,
+      sandbox: input.sandbox,
+    });
+    // Read the event log into the runtime's SqlHistoryStore cache so
+    // default-loop's eventsToMessages projection sees the conversation
+    // context BEFORE harness.run reads from it.
+    await runtime.refreshHistory();
+    const ctx: HarnessContext = {
+      agent: input.agent,
+      userMessage: input.userMessage,
+      session_id: input.sessionId,
+      tools: input.tools as HarnessContext["tools"],
+      model: input.model,
+      systemPrompt: input.agent.system ?? "",
+      env: {
+        ANTHROPIC_API_KEY: apiKey,
+        ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
+      },
+      runtime,
+    };
+    return ctx;
+  },
+});
+
+// Bootstrap orphan recovery: replaces the inline restoreInterruptedSessions
+// pre-loop with the unified machine.onWake path. Anything left status='running'
+// from a prior process gets reconciled (placeholder events injected,
+// status flipped to 'idle') the same way CF will after Phase 3.
+await sessionRegistry.bootstrap();
+
+// POST /v1/sessions/:id/_test_emit — manual event injector. Stand-in for
+// what a real harness loop does when an LLM produces an agent.message.
+// Lets the PoC demo crash-recovery without wiring a full agent loop.
+v1.post("/sessions/:id/_test_emit", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const body = await c.req
+    .json<{ text?: string }>()
+    .catch(() => ({}) as { text?: string });
+  const ev: SessionEvent = {
+    type: "agent.message",
+    content: [{ type: "text", text: body.text ?? `tick at ${new Date().toISOString()}` }],
+  } as unknown as SessionEvent;
+  const log = newEventLog(sid);
+  await log.appendAsync(ev);
+  const stored = await log.getEventsAsync();
+  const last = stored[stored.length - 1];
+  hub.publish(sid, last);
+  return c.json({ emitted: last }, 202);
+});
+
+// GET /v1/sessions/:id/events/stream — SSE with crash-recovery via
+// Last-Event-ID. The browser's EventSource API auto-reconnects with the
+// last received id; curl can pass `-H 'Last-Event-ID: <seq>'` to resume.
+v1.get("/sessions/:id/events/stream", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const lastSeen = parseLastEventId(c.req.header("Last-Event-ID"));
+  const log = newEventLog(sid);
+
+  // Replay history from after the client's last seen event. EventSource
+  // will pick this up as a normal stream.
+  const history = await log.getEventsAsync(lastSeen);
+
+  let writer: EventWriter | null = null;
+  let off: (() => void) | null = null;
+
+  const stream = new ReadableStream<Uint8Array>({
+    start(controller) {
+      const enc = new TextEncoder();
+      writer = {
+        closed: false,
+        write(ev) {
+          const seq = (ev as { seq?: number }).seq;
+          const id = seq !== undefined ? `id: ${seq}\n` : "";
+          try {
+            controller.enqueue(enc.encode(`${id}data: ${JSON.stringify(ev)}\n\n`));
+          } catch {
+            this.closed = true;
+          }
+        },
+        close() {
+          if (this.closed) return;
+          this.closed = true;
+          try {
+            controller.close();
+          } catch {
+            // already closed
+          }
+        },
+      };
+
+      // Send the SSE retry hint so EventSource reconnects fast (default
+      // browser is 3s; we lower to 1s for snappier recovery in the demo).
+      controller.enqueue(enc.encode("retry: 1000\n\n"));
+
+      // Replay first, then subscribe so live events that landed during
+      // replay also reach the client.
+      for (const ev of history) writer.write(ev);
+
+      off = hub.attach(sid, writer);
+    },
+    cancel() {
+      // Client disconnected.
+      off?.();
+      writer?.close();
+    },
+  });
+
+  // Some Hono+Node combos drop the cancel signal silently if the request
+  // is aborted mid-flight; piggyback on the abort signal too.
+  c.req.raw.signal.addEventListener("abort", () => {
+    off?.();
+    writer?.close();
+  });
+
+  return new Response(stream, {
+    headers: {
+      "content-type": "text/event-stream",
+      "cache-control": "no-cache, no-transform",
+      "x-accel-buffering": "no",
+    },
+  });
+});
+
+// ── Memory stores (Phase B-memory) ───────────────────────────────────────
+//
+// REST API for the Anthropic-aligned managed memory contract. Inside the
+// sandbox, agents access memory stores as filesystem mounts at
+// `/mnt/memory/<store_name>/` using the standard file tools — no bespoke
+// memory_* tools. The Node-side LocalSubprocessSandbox doesn't support
+// real FUSE mounts so the agent path is currently REST-only; mount support
+// lands when the sandbox grows it (E2B already supports it via s3fs).
+
+v1.post("/memory_stores", async (c) => {
+  const body = await c.req.json<{ name: string; description?: string }>();
+  if (!body.name) return c.json({ error: "name is required" }, 400);
+  const row = await memoryService.createStore({
+    tenantId: c.var.tenant_id,
+    name: body.name,
+    description: body.description,
+  });
+  return c.json(row, 201);
+});
+
+v1.get("/memory_stores", async (c) => {
+  const rows = await memoryService.listStores({
+    tenantId: c.var.tenant_id,
+    includeArchived: c.req.query("include_archived") === "true",
+  });
+  return c.json({ data: rows });
+});
+
+v1.get("/memory_stores/:id", async (c) => {
+  const row = await memoryService.getStore({
+    tenantId: c.var.tenant_id,
+    storeId: c.req.param("id"),
+  });
+  if (!row) return c.json({ error: "Memory store not found" }, 404);
+  return c.json(row);
+});
+
+v1.post("/memory_stores/:id/memories", async (c) => {
+  const body = await c.req.json<{
+    path: string;
+    content: string;
+    precondition?: { type: "content_sha256"; content_sha256: string } | { type: "not_exists" };
+  }>();
+  if (!body.path || body.content === undefined) {
+    return c.json({ error: "path and content are required" }, 400);
+  }
+  try {
+    const row = await memoryService.writeByPath({
+      tenantId: c.var.tenant_id,
+      storeId: c.req.param("id"),
+      path: body.path,
+      content: body.content,
+      precondition: body.precondition,
+      actor: { type: "user", id: c.var.user_id ?? c.var.tenant_id },
+    });
+    return c.json(row, 201);
+  } catch (err) {
+    return c.json({ error: (err as Error).message }, 400);
+  }
+});
+
+v1.get("/memory_stores/:id/memories", async (c) => {
+  const rows = await memoryService.listMemories({
+    tenantId: c.var.tenant_id,
+    storeId: c.req.param("id"),
+    pathPrefix: c.req.query("path_prefix") ?? undefined,
+  });
+  return c.json({ data: rows });
+});
+
+v1.get("/memory_stores/:id/memories/:mid", async (c) => {
+  const row = await memoryService.readById({
+    tenantId: c.var.tenant_id,
+    storeId: c.req.param("id"),
+    memoryId: c.req.param("mid"),
+  });
+  if (!row) return c.json({ error: "Memory not found" }, 404);
+  return c.json(row);
+});
+
+// ── Session ↔ memory_store bindings ───────────────────────────────────────
+//
+// On CF the binding lives in session_resources(type="memory_store"); here we
+// keep a thin session_memory_stores table — same row shape (session_id,
+// store_id, access). When the harness runs we look these up and call
+// sandbox.mountMemoryStore for each, which symlinks /mnt/memory/<storeName>
+// into the BlobStore's on-disk dir. The agent reads/writes through normal
+// file tools.
+
+v1.post("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const body = await c.req.json<{ store_id: string; access?: string }>();
+  if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
+  const store = await memoryService.getStore({ tenantId: c.var.tenant_id, storeId: body.store_id });
+  if (!store) return c.json({ error: "Memory store not found" }, 404);
+  const access = body.access === "read_only" ? "read_only" : "read_write";
+  await sql
+    .prepare(
+      `INSERT INTO session_memory_stores (session_id, store_id, access, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id, store_id) DO UPDATE SET access = excluded.access`,
+    )
+    .bind(sid, body.store_id, access, Date.now())
+    .run();
+  return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
+});
+
+v1.get("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  const rows = await sql
+    .prepare(`SELECT store_id, access, created_at FROM session_memory_stores WHERE session_id = ?`)
+    .bind(sid)
+    .all<{ store_id: string; access: string; created_at: number }>();
+  return c.json({ data: rows.results ?? [] });
+});
+
+// ── Vaults + credentials (Phase B-vault) ──────────────────────────────────
+//
+// REST CRUD for vaults and credentials. The actual credential injection
+// happens in apps/oma-vault (separate process) which reads the same sqlite
+// db. apps/oma-vault sits in front of the agent's outbound HTTPS traffic
+// as a MITM proxy, matches the destination URL against active credentials,
+// and rewrites the Authorization header. Sandboxes run with HTTPS_PROXY +
+// NODE_EXTRA_CA_CERTS pointing at it — the agent never sees secrets.
+
+v1.post("/vaults", async (c) => {
+  const body = await c.req.json<{ name: string }>();
+  if (!body.name) return c.json({ error: "name is required" }, 400);
+  const row = await vaultService.create({
+    tenantId: c.var.tenant_id,
+    name: body.name,
+  });
+  return c.json(row, 201);
+});
+
+v1.get("/vaults", async (c) => {
+  const rows = await vaultService.list({
+    tenantId: c.var.tenant_id,
+    includeArchived: c.req.query("include_archived") === "true",
+  });
+  return c.json({ data: rows });
+});
+
+v1.get("/vaults/:id", async (c) => {
+  const row = await vaultService.get({
+    tenantId: c.var.tenant_id,
+    vaultId: c.req.param("id"),
+  });
+  if (!row) return c.json({ error: "Vault not found" }, 404);
+  return c.json(row);
+});
+
+v1.post("/vaults/:id/credentials", async (c) => {
+  const body = await c.req.json<{
+    display_name: string;
+    auth: import("@open-managed-agents/shared").CredentialAuth;
+  }>();
+  if (!body.display_name || !body.auth) {
+    return c.json({ error: "display_name and auth are required" }, 400);
+  }
+  const row = await credentialService.create({
+    tenantId: c.var.tenant_id,
+    vaultId: c.req.param("id"),
+    displayName: body.display_name,
+    auth: body.auth,
+  });
+  // Always strip secret fields before returning over the wire.
+  return c.json(stripSecrets(row), 201);
+});
+
+v1.get("/vaults/:id/credentials", async (c) => {
+  const rows = await credentialService.list({
+    tenantId: c.var.tenant_id,
+    vaultId: c.req.param("id"),
+    includeArchived: c.req.query("include_archived") === "true",
+  });
+  return c.json({ data: rows.map(stripSecrets) });
+});
+
+// ── /v1/me — current user + tenant + memberships ─────────────────────────
+//
+// Console hits this on bootstrap to (a) decide whether to render the
+// sidebar, (b) populate the workspace switcher when the user has > 1
+// membership. Mirrors apps/main/src/routes/me.ts at the data shape level.
+
+v1.get("/me", async (c) => {
+  if (authDisabled) {
+    return c.json({
+      user: { id: "default", email: "default@local", name: "Default User", role: "owner" },
+      tenant: { id: "default", name: "Default" },
+      tenants: [{ id: "default", name: "Default", role: "owner" }],
+    });
+  }
+  const userId = c.var.user_id;
+  const tenantId = c.var.tenant_id;
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
+  // user row lives in the auth db (separate sqlite); no need to fetch
+  // again — we have what we need from the session.
+  const tenantRow = await sql
+    .prepare(`SELECT id, name FROM "tenant" WHERE id = ?`)
+    .bind(tenantId)
+    .first<{ id: string; name: string }>();
+  const memberRows = await sql
+    .prepare(
+      `SELECT t.id AS id, t.name AS name, m.role AS role
+         FROM "membership" m
+         JOIN "tenant" t ON t.id = m.tenant_id
+        WHERE m.user_id = ?
+        ORDER BY m.created_at ASC, t.id ASC`,
+    )
+    .bind(userId)
+    .all<{ id: string; name: string; role: string }>();
+  return c.json({
+    user: { id: userId, email: "", name: "", role: "owner" },
+    tenant: tenantRow ?? { id: tenantId, name: "" },
+    tenants: memberRows.results ?? [],
+  });
+});
+
+v1.get("/me/tenants", async (c) => {
+  if (authDisabled) {
+    return c.json({ data: [{ id: "default", name: "Default", role: "owner" }] });
+  }
+  const userId = c.var.user_id;
+  if (!userId) return c.json({ error: "Unauthorized" }, 401);
+  const rows = await sql
+    .prepare(
+      `SELECT t.id AS id, t.name AS name, m.role AS role, m.created_at
+         FROM "membership" m
+         JOIN "tenant" t ON t.id = m.tenant_id
+        WHERE m.user_id = ?
+        ORDER BY m.created_at ASC, t.id ASC`,
+    )
+    .bind(userId)
+    .all<{ id: string; name: string; role: string; created_at: number }>();
+  return c.json({ data: rows.results ?? [] });
+});
+
+// ── Stubs for routes the console hits but main-node doesn't implement ────
+//
+// Console bootstrap pings several endpoints (integrations, skills, model
+// cards, runtimes, environments, api keys). Without these the dashboard
+// throws on first render. We return empty arrays / 404s so the UI degrades
+// gracefully — the user sees an empty integrations list rather than a
+// crash. Real implementations land in follow-up work.
+
+v1.get("/environments", (c) => c.json({ data: [] }));
+v1.get("/api_keys", (c) => c.json({ data: [] }));
+v1.get("/me/cli-tokens", (c) => c.json({ data: [] }));
+v1.get("/runtimes", (c) => c.json({ data: [] }));
+v1.get("/skills", (c) => c.json({ data: [] }));
+v1.get("/model_cards", (c) => c.json({ data: [] }));
+v1.get("/models/list", (c) =>
+  c.json({
+    data: [
+      { id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5", speeds: ["standard", "fast"] },
+      { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", speeds: ["standard"] },
+      { id: "claude-opus-4-7", display_name: "Claude Opus 4.7", speeds: ["standard"] },
+    ],
+  }),
+);
+
+// Integrations not implemented in main-node — return shape compatible
+// "not connected" responses so the integrations page renders an empty
+// state instead of an error.
+v1.get("/integrations/github/installations", (c) => c.json({ data: [] }));
+v1.get("/integrations/github/credentials", (c) => c.json({ data: [] }));
+v1.get("/integrations/linear/installations", (c) => c.json({ data: [] }));
+v1.get("/integrations/linear/credentials", (c) => c.json({ data: [] }));
+v1.get("/integrations/slack/installations", (c) => c.json({ data: [] }));
+v1.get("/integrations/slack/credentials", (c) => c.json({ data: [] }));
+
+app.route("/v1", v1);
+
+// ── Console UI ─────────────────────────────────────────────────────────
+//
+// When CONSOLE_DIR is set (and points at an apps/console build output),
+// serve the SPA from there. Two passes:
+//
+//   1. serveStatic at "*" picks up real asset files (/assets/index.js,
+//      /favicon.ico, etc).
+//   2. SPA fallback at "*" returns index.html for anything else — so
+//      client-side routes like /agents/abc render the app shell, then the
+//      client router takes over.
+//
+// API and auth paths are mounted earlier in the chain, so they win the
+// route match before serveStatic gets a look. /auth-info, /auth/*, /v1/*
+// are untouched.
+//
+// self-host deployments that don't ship the console (e.g. SDK-only) just
+// leave CONSOLE_DIR unset; the SPA fallback short-circuits and the
+// normal 404 handler runs.
+//
+// CF prod has the equivalent via the ASSETS binding (apps/main wrangler
+// `assets.directory: ../console/dist` + `not_found_handling: SPA`).
+// Same UX, different mechanism.
+const consoleDir = process.env.CONSOLE_DIR;
+if (consoleDir) {
+  // serveStatic uses fs.statSync against `${root}/${path}`; root is
+  // resolved relative to process.cwd(). main-node's cwd inside docker
+  // is /app/apps/main-node — passing the absolute /app/apps/console/dist
+  // wouldn't work since serveStatic strips leading `/` from root. We
+  // pass it relative-to-cwd by computing here.
+  const cwd = process.cwd();
+  const rootRel = consoleDir.startsWith("/")
+    ? relative(cwd, consoleDir)
+    : consoleDir;
+  app.use(
+    "/*",
+    serveStatic({
+      root: rootRel,
+      // SPA fallback — serveStatic returns null on miss; our explicit
+      // get("*") below catches and returns index.html for the SPA shell.
+    }),
+  );
+  app.get("/*", serveStatic({ root: rootRel, path: "index.html" }));
+  console.log(`[main-node] console UI served from ${consoleDir} (cwd-rel: ${rootRel})`);
+}
+
+app.notFound((c) => c.json({ error: "not found" }, 404));
+app.onError((err, c) => {
+  console.error("[main-node] unhandled", err);
+  return c.json({ error: "internal_error", message: err.message }, 500);
+});
+
+// ─── Helpers ─────────────────────────────────────────────────────────────
+
+function parseLastEventId(raw: string | undefined): number | undefined {
+  if (!raw) return undefined;
+  const n = Number.parseInt(raw, 10);
+  return Number.isFinite(n) && n >= 0 ? n : undefined;
+}
+
+/** Parse `Header-Name: value, Header-2: value2` into a Record. Best-effort —
+ *  malformed entries silently dropped. Used to thread custom headers
+ *  (X-Sub-Module etc.) into the model API call when ANTHROPIC_BASE_URL
+ *  points at a proxy that requires them. */
+function parseCustomHeaders(raw: string | undefined): Record<string, string> | undefined {
+  if (!raw) return undefined;
+  const out: Record<string, string> = {};
+  for (const part of raw.split(",")) {
+    const [name, ...rest] = part.split(":");
+    if (!name || rest.length === 0) continue;
+    out[name.trim()] = rest.join(":").trim();
+  }
+  return Object.keys(out).length > 0 ? out : undefined;
+}
+
+function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
+  const { tenant_id: _t, ...agent } = row;
+  const model =
+    !agent.model || typeof agent.model === "string"
+      ? { id: agent.model || "", speed: "standard" as const }
+      : { id: agent.model.id, speed: agent.model.speed || ("standard" as const) };
+  return {
+    type: "agent" as const,
+    ...agent,
+    model,
+    system: agent.system || null,
+    description: agent.description || null,
+  };
+}
+
+// ─── Listen ──────────────────────────────────────────────────────────────
+
+const port = Number(process.env.PORT ?? 8787);
+const host = process.env.HOST ?? "0.0.0.0";
+
+serve({ fetch: app.fetch, port, hostname: host }, (info) => {
+  console.log(`[main-node] listening on http://${info.address}:${info.port}`);
+  console.log(`[main-node] db: ${backendDescription}`);
+});
+
+const shutdown = async (signal: string) => {
+  console.log(`[main-node] received ${signal}, shutting down`);
+  try {
+    await memoryWatcher.stop();
+  } catch (err) {
+    console.warn("[main-node] memory watcher stop failed:", err);
+  }
+  process.exit(0);
+};
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));

@@ -39,7 +39,7 @@ CREATE TABLE IF NOT EXISTS "slack_installations" (
   "app_id"                TEXT,                 -- FK slack_apps.id
   "access_token_cipher"   TEXT NOT NULL,        -- xoxb- bot token
   "user_token_cipher"     TEXT,                 -- xoxp- user token (mcp.slack.com)
-  "scopes"                TEXT NOT NULL,        -- JSON array; entries prefixed bot:/user:
+  "scopes"                TEXT NOT NULL,        -- JSON array (entries prefixed bot:/user:)
   "bot_user_id"           TEXT NOT NULL,
   "vault_id"              TEXT,                 -- vault holding xoxp- (mcp.slack.com binding)
   "bot_vault_id"          TEXT,                 -- vault holding xoxb- (slack.com/api binding)
