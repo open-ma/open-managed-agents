@@ -82,6 +82,23 @@ export class InMemoryStoreRepo implements MemoryStoreRepo {
     return updated;
   }
 
+  async update(
+    tenantId: string,
+    storeId: string,
+    fields: { name?: string; description?: string | null; updatedAt: number },
+  ): Promise<MemoryStoreRow> {
+    const row = await this.get(tenantId, storeId);
+    if (!row) throw new Error("store not found");
+    const updated: MemoryStoreRow = {
+      ...row,
+      ...(fields.name !== undefined ? { name: fields.name } : {}),
+      ...(fields.description !== undefined ? { description: fields.description } : {}),
+      updated_at: msToIso(fields.updatedAt),
+    };
+    this.stores.set(storeId, updated);
+    return updated;
+  }
+
   async delete(tenantId: string, storeId: string): Promise<void> {
     if (this.stores.get(storeId)?.tenant_id === tenantId) {
       this.stores.delete(storeId);

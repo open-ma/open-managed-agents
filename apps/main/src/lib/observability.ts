@@ -104,12 +104,33 @@ export function globalErrorHandler(err: Error, c: Context<{ Bindings: Env }>) {
   // sandbox/RPC failures, etc.) outweighs the leak risk for our internal-
   // only API surface. Keep the message bounded to avoid stack-overflow-y
   // payloads from runaway exceptions.
+  //
+  // Wire shape mirrors Anthropic's error envelope so @anthropic-ai/sdk
+  // callers see the same `{type:"error", error:{type,message}, request_id}`
+  // shape they get from claude.ai. errorEnvelopeMiddleware does not run on
+  // onError-produced responses (Hono routes them outside the middleware
+  // chain), so the envelope is constructed inline here.
+  const requestId =
+    c.req.header("cf-ray") ??
+    (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function"
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random()}`
+    )
+      .replace(/-/g, "")
+      .slice(0, 32);
+  const message = (fields.error_message ?? "Internal server error").slice(0, 1000);
   return c.json(
     {
-      error: "Internal server error",
+      type: "error" as const,
+      error: {
+        type: "api_error",
+        message,
+      },
+      request_id: requestId,
+      // OMA-only diagnostic fields — Anthropic SDK ignores them, our own
+      // ops dashboards / curl-by-hand sessions still find them useful.
       route,
       error_name: fields.error_name,
-      error_message: (fields.error_message ?? "").slice(0, 1000),
     },
     500,
   );

@@ -7,7 +7,8 @@ import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
 
 interface Session {
-  id: string; title?: string; agent_id: string; environment_id: string;
+  id: string; title?: string | null; agent: { id: string; version: number };
+  environment_id: string;
   status?: string; created_at: string; archived_at?: string;
   metadata?: Record<string, unknown>;
 }
@@ -304,7 +305,7 @@ export function SessionsList() {
           key: "agent",
           label: "Agent",
           className: "text-fg-muted font-mono text-xs",
-          render: (s) => s.agent_id,
+          render: (s) => s.agent.id,
         },
         {
           key: "created",

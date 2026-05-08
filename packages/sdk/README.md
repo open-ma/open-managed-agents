@@ -1,5 +1,44 @@
 # @openma/sdk
 
+> ## ⚠️ Deprecated — use `@anthropic-ai/sdk` instead
+>
+> This package is no longer the recommended way to call the openma platform.
+> The openma API is **wire-compatible with Anthropic's Managed Agents API**, so
+> you can use the official Anthropic SDK directly:
+>
+> ```bash
+> npm i @anthropic-ai/sdk
+> ```
+>
+> ```ts
+> import Anthropic from "@anthropic-ai/sdk";
+>
+> const client = new Anthropic({
+>   baseURL: "https://openma.dev",
+>   apiKey: process.env.OMA_API_KEY!,
+> });
+>
+> const env = await client.beta.environments.create({
+>   name: "my-env",
+>   config: {
+>     type: "cloud",
+>     networking: { type: "unrestricted" },
+>     packages: { type: "packages" },
+>   },
+> });
+> ```
+>
+> The same SDK works against Anthropic's hosted API and any other compatible
+> server — moving between providers is a `baseURL` change. OMA-specific
+> endpoints (tenants, OAuth, evals, cost reports, …) live under `/v1/oma/*` and
+> can be invoked via `client._client.post('/v1/oma/...', ...)`.
+>
+> No new versions of `@openma/sdk` will be published. The source remains in the
+> repo for reference. Existing users continue to work; please migrate at your
+> convenience.
+
+---
+
 Official TypeScript SDK for the [openma](https://openma.dev) managed agents platform — typed REST + SSE streaming, runs anywhere `fetch` exists (Node ≥ 20, Bun, Deno, browsers, Cloudflare Workers).
 
 ## Install

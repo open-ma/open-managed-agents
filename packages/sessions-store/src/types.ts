@@ -42,6 +42,9 @@ export interface SessionRow {
   created_at: string;
   updated_at: string | null;
   archived_at: string | null;
+  /** Set when SessionDO drives the session to AMA's terminated terminus
+   *  (POST /events returns 409 going forward). null means not terminated. */
+  terminated_at: string | null;
 }
 
 export interface SessionResourceRow {

@@ -96,6 +96,25 @@ app.get("/:id", async (c) => {
   return c.json(toApiStore(store));
 });
 
+// POST/PUT /v1/memory_stores/:id — update memory store. Anthropic uses
+// POST per their REST conventions; PUT accepted as a body-replace alias
+// (matches our agents / sessions update routes).
+app.on(["PUT", "POST"], "/:id", async (c) => {
+  const t = c.get("tenant_id");
+  const body = await c.req.json<{ name?: string; description?: string | null }>();
+  try {
+    const store = await c.var.services.memory.updateStore({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      name: body.name,
+      description: body.description,
+    });
+    return c.json(toApiStore(store));
+  } catch (err) {
+    return handle(err);
+  }
+});
+
 app.post("/:id/archive", async (c) => {
   const t = c.get("tenant_id");
   try {
@@ -297,6 +316,7 @@ app.post("/:id/memory_versions/:ver_id/redact", async (c) => {
 /** Shape returned to clients — Anthropic-aligned. */
 function toApiStore(s: import("@open-managed-agents/memory-store").MemoryStoreRow) {
   return {
+    type: "memory_store" as const,
     id: s.id,
     name: s.name,
     description: s.description ?? undefined,

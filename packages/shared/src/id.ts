@@ -22,3 +22,19 @@ export const generateEvalRunId = () => `evrun-${nanoid()}`;
 // events can name which outcome they pertain to (sessions can chain
 // outcomes sequentially; same session, different outcome ids).
 export const generateOutcomeId = () => `outc_${nanoid()}`;
+
+/**
+ * Sentinel environment_id for sessions whose agent runs on a user-registered
+ * local ACP runtime (oma bridge daemon). Anthropic's Managed Agents API
+ * requires environment_id on every session (BetaManagedAgentsSession.
+ * environment_id: string), and OMA's local-runtime sessions never touch a
+ * sandbox container — the loop is forwarded to the daemon via RuntimeRoom.
+ *
+ * The sentinel value is recognized by getSandboxBinding (apps/main/src/
+ * routes/sessions.ts) and short-circuits to sessionDoFallbackFetcher
+ * without an environments-store lookup. Self-explanatory in DB / dashboards.
+ *
+ * Stable string so existing rows survive across deploys; do not change
+ * without a backfill plan for sessions that already point at this id.
+ */
+export const LOCAL_RUNTIME_ENV_ID = "env-local-runtime";

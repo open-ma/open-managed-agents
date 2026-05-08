@@ -62,6 +62,7 @@ function handleError(err: unknown): Response {
 /** Strip server-internal fields from a vault row before returning to API. */
 function toApiVault(v: { id: string; name: string; created_at: string; updated_at: string | null; archived_at: string | null }) {
   return {
+    type: "vault" as const,
     id: v.id,
     name: v.name,
     created_at: v.created_at,
@@ -118,6 +119,29 @@ app.get("/:id", async (c) => {
   const vault = await c.var.services.vaults.get({ tenantId: t, vaultId: id });
   if (!vault) return c.json({ error: "Vault not found" }, 404);
   return c.json(toApiVault(vault));
+});
+
+// POST/PUT /v1/vaults/:id — update vault. Anthropic SDK uses POST; PUT accepted
+// for compat. Body: { display_name?, metadata? } — `display_name` maps to our
+// `name`; metadata not yet plumbed through the store, currently ignored.
+app.on(["PUT", "POST"], "/:id", async (c) => {
+  const t = c.get("tenant_id");
+  const id = c.req.param("id");
+  const body = await c.req.json<{
+    display_name?: string;
+    name?: string;
+    metadata?: Record<string, string | null>;
+  }>();
+  try {
+    const vault = await c.var.services.vaults.update({
+      tenantId: t,
+      vaultId: id,
+      name: body.display_name ?? body.name,
+    });
+    return c.json(toApiVault(vault));
+  } catch (err) {
+    return handleError(err);
+  }
 });
 
 // POST /v1/vaults/:id/archive — archive vault (cascades to credentials)
@@ -221,6 +245,44 @@ app.post("/:id/credentials/:cred_id", async (c) => {
     return handleError(err);
   }
 });
+
+// GET /v1/vaults/:id/credentials/:cred_id — single credential read.
+// Anthropic SDK calls this via `client.beta.vaults.credentials.retrieve(...)`.
+// Returns the credential WITHOUT secret material (stripSecrets), same contract
+// as the other credential endpoints in this file.
+app.get("/:id/credentials/:cred_id", async (c) => {
+  const t = c.get("tenant_id");
+  try {
+    const cred = await c.var.services.credentials.get({
+      tenantId: t,
+      vaultId: c.req.param("id"),
+      credentialId: c.req.param("cred_id"),
+    });
+    if (!cred) return c.json({ error: "Credential not found" }, 404);
+    return c.json(toApiCred(stripSecrets(cred)));
+  } catch (err) {
+    return handleError(err);
+  }
+});
+
+// POST /v1/vaults/:id/credentials/:cred_id/mcp_oauth_validate — verify the
+// stored OAuth credential against the MCP server it points at. Anthropic's
+// flow runs a probe handshake to check token freshness + scope. We don't
+// implement live OAuth refresh on the server side yet (cred refresh happens
+// inside the integrations worker on-demand at session init), so return 501.
+// Follow-up: wire integrations worker's MCP probe RPC + return its result.
+app.post("/:id/credentials/:cred_id/mcp_oauth_validate", (c) =>
+  c.json(
+    {
+      error: {
+        type: "not_implemented",
+        message: "MCP OAuth credential validation not yet implemented on this server",
+      },
+      type: "error",
+    },
+    501,
+  ),
+);
 
 // POST /v1/vaults/:id/credentials/:cred_id/archive — archive credential
 app.post("/:id/credentials/:cred_id/archive", async (c) => {

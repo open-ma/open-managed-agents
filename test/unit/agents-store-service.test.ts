@@ -71,7 +71,7 @@ describe("AgentService — create + read", () => {
     expect(got?.tenant_id).toBe(TENANT);
   });
 
-  it("create persists optional fields verbatim (mcp_servers, skills, callable_agents, metadata, model_card_id)", async () => {
+  it("create persists optional fields verbatim (mcp_servers, skills, callable_agents, metadata, aux_model)", async () => {
     const { service } = createInMemoryAgentService();
     const a = await service.create({
       tenantId: TENANT,
@@ -82,9 +82,7 @@ describe("AgentService — create + read", () => {
         skills: [{ skill_id: "code", type: "skill" }],
         callable_agents: [{ type: "agent", id: "agent-other" }],
         metadata: { tag: "demo", priority: 1 },
-        model_card_id: "mdl-x",
         aux_model: "claude-haiku-4-5",
-        aux_model_card_id: "mdl-y",
         appendable_prompts: ["prompt-a"],
       },
     });
@@ -93,9 +91,7 @@ describe("AgentService — create + read", () => {
     expect(a.skills).toEqual([{ skill_id: "code", type: "skill" }]);
     expect(a.callable_agents).toEqual([{ type: "agent", id: "agent-other" }]);
     expect(a.metadata).toEqual({ tag: "demo", priority: 1 });
-    expect(a.model_card_id).toBe("mdl-x");
     expect(a.aux_model).toBe("claude-haiku-4-5");
-    expect(a.aux_model_card_id).toBe("mdl-y");
     expect(a.appendable_prompts).toEqual(["prompt-a"]);
   });
 });
