@@ -2400,20 +2400,26 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Resolve credentials for a model identifier (with optional explicit card).
+   * Resolve credentials and the wire-level model string for an agent's
+   * `model` value (which is a card.model_id handle, not the LLM API model).
    *
    * Lookup order:
-   *   1. Explicit `cardId` → KV `modelcard:<id>` + `modelcard:<id>:key`
-   *   2. Card whose `model_id` matches the requested model
+   *   1. Explicit `cardId` → `services.modelCards.get`
+   *   2. Card whose `model_id` (handle) matches the requested handle
    *   3. Env-var fallback (ANTHROPIC_API_KEY + ANTHROPIC_BASE_URL)
    *
-   * Used for both the agent's primary model and aux_model resolution
-   * (web_fetch summarization, future tool internals).
+   * Returns:
+   *   - `model` — the LLM string to send to the provider. card.model when a
+   *     card is found; otherwise the input handle (env-only path assumes
+   *     the user wrote a real LLM model name in agent.model).
+   *   - `apiKey`, `baseURL`, `apiCompat`, `customHeaders`, `cardId` — same
+   *     as before, source-of-truth depends on whether a card was matched.
    */
   private async resolveModelCardCredentials(
-    modelId: string,
+    handle: string,
     cardId?: string,
   ): Promise<{
+    model: string;
     apiKey: string;
     baseURL?: string;
     apiCompat: ApiCompat;
@@ -2425,6 +2431,7 @@ export class SessionDO extends DurableObject<Env> {
     let provider: string | undefined;
     let customHeaders: Record<string, string> | undefined;
     let resolvedCardId: string | undefined;
+    let wireModel = handle;
 
     if (this.env.AUTH_DB) {
       try {
@@ -2432,16 +2439,17 @@ export class SessionDO extends DurableObject<Env> {
         const tenantId = this.state.tenant_id;
         let card = cardId
           ? await services.modelCards.get({ tenantId, cardId })
-          : await services.modelCards.findByModelId({ tenantId, modelId });
+          : await services.modelCards.findByModelId({ tenantId, modelId: handle });
         if (card && !card.archived_at) {
           const key = await services.modelCards.getApiKey({ tenantId, cardId: card.id });
           if (key) {
             apiKey = key;
             provider = card.provider;
+            wireModel = card.model;
             if (card.base_url) baseURL = card.base_url;
             if (card.custom_headers) customHeaders = card.custom_headers;
             resolvedCardId = card.id;
-            console.log(`[model-card] resolved from D1: id=${card.id} model_id=${card.model_id} baseURL=${card.base_url ?? "(default)"} provider=${card.provider}`);
+            console.log(`[model-card] resolved from D1: id=${card.id} model_id=${card.model_id} model=${card.model} baseURL=${card.base_url ?? "(default)"} provider=${card.provider}`);
           }
         }
       } catch (err) {
@@ -2456,7 +2464,7 @@ export class SessionDO extends DurableObject<Env> {
       apiCompat = provider as ApiCompat;
     }
 
-    return { apiKey, baseURL, apiCompat, customHeaders, cardId: resolvedCardId };
+    return { model: wireModel, apiKey, baseURL, apiCompat, customHeaders, cardId: resolvedCardId };
   }
 
   /**
@@ -2470,10 +2478,10 @@ export class SessionDO extends DurableObject<Env> {
     modelInfo: { model_card_id?: string; model_id: string };
   } | null> {
     if (!agent.aux_model) return null;
-    const modelId = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
-    const creds = await this.resolveModelCardCredentials(modelId, agent.aux_model_card_id);
-    const model = resolveModel(modelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
-    return { model, modelInfo: { model_card_id: creds.cardId, model_id: modelId } };
+    const handle = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
+    const creds = await this.resolveModelCardCredentials(handle, agent.aux_model_card_id);
+    const model = resolveModel(creds.model, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
+    return { model, modelInfo: { model_card_id: creds.cardId, model_id: handle } };
   }
 
   /**
@@ -3056,11 +3064,12 @@ export class SessionDO extends DurableObject<Env> {
       memoryStoreService = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
     }
 
-    // Resolve model — look up model card credentials, fall back to env vars
-    const modelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
-    const effectiveModelId = modelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
-    const creds = await this.resolveModelCardCredentials(effectiveModelId, agent.model_card_id);
-    const model = resolveModel(effectiveModelId, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
+    // Resolve model — `agent.model` is a card.model_id handle. The card
+    // contains the wire-level LLM string we actually send to the provider.
+    const handle = typeof agent.model === "string" ? agent.model : agent.model?.id;
+    const effectiveHandle = handle || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6";
+    const creds = await this.resolveModelCardCredentials(effectiveHandle, agent.model_card_id);
+    const model = resolveModel(creds.model, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
 
     // Build system prompt: agent.system + platform guidance (auth + loop-stop).
     // Skill / memory_store / appendable_prompt content is NOT appended here —
