@@ -58,9 +58,8 @@ jobs:
           fetch-depth: 0  # full history so changelog diffs work
 
       - name: Setup pnpm
+        # No version pin — reads `packageManager` from root package.json.
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -101,9 +100,8 @@ jobs:
           fetch-depth: 0
 
       - name: Setup pnpm
+        # No version pin — reads `packageManager` from root package.json.
         uses: pnpm/action-setup@v4
-        with:
-          version: 9
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
