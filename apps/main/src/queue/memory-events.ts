@@ -8,11 +8,12 @@ import {
 } from "@open-managed-agents/shared";
 import {
   CfR2BlobStore,
-  D1MemoryRepo,
+  SqlMemoryRepo,
   parseR2Key,
   sha256Hex,
   type Actor,
 } from "@open-managed-agents/memory-store";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 
 /**
  * Cloudflare Queue consumer for R2 Event Notifications on MEMORY_BUCKET.
@@ -61,7 +62,7 @@ export async function handleMemoryEvents(
   }
 
   const blobs = new CfR2BlobStore(env.MEMORY_BUCKET);
-  const memoryRepo = new D1MemoryRepo(env.AUTH_DB);
+  const memoryRepo = new SqlMemoryRepo(new CfD1SqlClient(env.AUTH_DB));
   const now = Date.now();
 
   for (const message of batch.messages) {
@@ -87,7 +88,7 @@ async function processOne(
   event: R2EventMessage,
   ctx: {
     blobs: CfR2BlobStore;
-    memoryRepo: D1MemoryRepo;
+    memoryRepo: SqlMemoryRepo;
     nowMs: number;
   },
 ): Promise<void> {

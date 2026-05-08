@@ -32,7 +32,7 @@ CREATE TABLE IF NOT EXISTS "shard_pool" (
   "binding_name"  TEXT PRIMARY KEY NOT NULL,
   "status"        TEXT NOT NULL DEFAULT 'open',  -- 'open' | 'draining' | 'full' | 'archived'
   "tenant_count"  INTEGER NOT NULL DEFAULT 0,
-  "size_bytes"    INTEGER,                       -- last observed; NULL = unknown
+  "size_bytes"    INTEGER,                       -- last observed (NULL = unknown)
   "observed_at"   INTEGER,                       -- ms epoch of last observation
   "notes"         TEXT
 );

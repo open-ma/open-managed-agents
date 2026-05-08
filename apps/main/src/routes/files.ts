@@ -10,10 +10,6 @@ const app = new Hono<{
   Variables: { tenant_id: string; services: Services };
 }>();
 
-function ensureBucket(c: { env: Env }): R2Bucket | null {
-  return c.env.FILES_BUCKET || null;
-}
-
 // POST /v1/files — upload file (multipart form or JSON body)
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
@@ -24,7 +20,7 @@ app.post("/", async (c) => {
   const freqCheck = await checkUploadFreq(c.env, t);
   if (freqCheck) return freqCheck;
 
-  const bucket = ensureBucket(c);
+  const bucket = c.var.services.filesBlob;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   let filename: string;
@@ -145,7 +141,7 @@ app.get("/:id", async (c) => {
 // Gated by `downloadable` flag, mirroring Anthropic's split: user-uploaded
 // files are opaque, model/sandbox-emitted artefacts are downloadable.
 app.get("/:id/content", async (c) => {
-  const bucket = ensureBucket(c);
+  const bucket = c.var.services.filesBlob;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
   const row = await c.var.services.files.get({
@@ -167,7 +163,7 @@ app.get("/:id/content", async (c) => {
 
 // DELETE /v1/files/:id — delete metadata + R2 object
 app.delete("/:id", async (c) => {
-  const bucket = ensureBucket(c);
+  const bucket = c.var.services.filesBlob;
   try {
     const deleted = await c.var.services.files.delete({
       tenantId: c.get("tenant_id"),

@@ -11,13 +11,21 @@ import {
   type PartialStream,
 } from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn, generateEventId } from "@open-managed-agents/shared";
+import { logWarn, log, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
+  CfDoEventLog,
   ensureSchema as ensureEventLogSchema,
 } from "@open-managed-agents/event-log/cf-do";
-import type { StreamRepo } from "@open-managed-agents/event-log";
+import type { EventLogRepo, StreamRepo } from "@open-managed-agents/event-log";
 import { recoverInterruptedState as runRecovery } from "./recovery";
+import {
+  RuntimeAdapterImpl,
+  type RuntimeAdapter,
+} from "@open-managed-agents/session-runtime";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { buildCfTenantDbProvider } from "@open-managed-agents/services";
+import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -28,7 +36,6 @@ import type {
   UserToolConfirmationEvent,
   UserCustomToolResultEvent,
   UserDefineOutcomeEvent,
-  OutcomeEvaluationEvent,
   AgentMessageEvent,
   AgentToolUseEvent,
 } from "@open-managed-agents/shared";
@@ -37,7 +44,13 @@ import { resolveHarness } from "../harness/registry";
 import { resolveModel } from "../harness/provider";
 import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
-import { evaluateOutcome } from "../harness/outcome-evaluator";
+import { generateText } from "ai";
+import { extractTextFromContent } from "@open-managed-agents/shared";
+import {
+  runOutcomeSupervisor,
+  type ActiveOutcomeState,
+  type OutcomeEvaluationRecord,
+} from "./outcome-supervisor";
 import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
@@ -112,6 +125,17 @@ interface PendingToolCall {
  * Persistent session state managed by Agent's setState/state system.
  * Automatically persisted to SQLite and broadcast to WebSocket clients.
  */
+/**
+ * `ActiveOutcomeState` (one slot — only one outcome supported at a time,
+ * per AMA spec) and `OutcomeEvaluationRecord` (the aggregate row written
+ * to `state.outcome_evaluations[]` on every terminal verdict) are
+ * defined in outcome-supervisor.ts so the supervisor unit-test fixture
+ * has a single source of truth. Re-exported here as the local aliases
+ * the SessionState below uses.
+ */
+type ActiveOutcome = ActiveOutcomeState;
+type PersistedOutcomeEvaluation = OutcomeEvaluationRecord;
+
 interface SessionState {
   agent_id: string;
   environment_id: string;
@@ -121,9 +145,11 @@ interface SessionState {
   /**
    * Stored only as a back-compat read for sessions written before status
    * became derived. New code MUST NOT write to this field. The runtime
-   * status comes from `deriveStatus()`, which queries `cf_agents_runs`
-   * for fiber existence + `terminated_at` for the destroy gate. See
-   * docs/contribute/recovery-and-idempotency.mdx for the rationale.
+   * status comes from `deriveStatus()`, which checks the in-memory
+   * inflight-turn hint counter (mirrored from D1's `sessions.turn_id`
+   * via the RuntimeAdapter callbacks) + `terminated_at` for the destroy
+   * gate. See docs/contribute/recovery-and-idempotency.mdx for the
+   * rationale.
    */
   status?: "idle" | "running" | "terminated";
   /** ms timestamp when /destroy ran. Replaces the persistent `terminated`
@@ -134,8 +160,15 @@ interface SessionState {
   output_tokens: number;
   vault_ids: string[];
   pending_tool_calls: PendingToolCall[];
-  outcome: { description: string; rubric?: string; max_iterations?: number } | null;
+  outcome: ActiveOutcome | null;
   outcome_iteration: number;
+  /**
+   * Phase 4: AMA-aligned aggregate of every terminal `span.outcome_evaluation_end`
+   * for this session. Returned as-is by GET /v1/sessions/:id under
+   * `outcome_evaluations`. Sequential outcomes (each kicked off by a fresh
+   * `user.define_outcome`) append here in iteration order.
+   */
+  outcome_evaluations?: PersistedOutcomeEvaluation[];
   /**
    * Tenant config snapshots provided at /init by main worker. Used by
    * getAgentConfig/getEnvConfig/getVaultCredentials so SessionDO doesn't
@@ -194,10 +227,14 @@ const MAX_PENDING_WAKEUPS = 20;
 // ── Constants inherited from cf-agents v0.11.2 schema ──────────────────
 //
 // We replaced `extends Agent` with `extends DurableObject` and reimplemented
-// the small surface SessionDO actually used (state, schedule+alarm, runFiber,
-// keepAlive). The cf_agents_* table NAMES are kept verbatim so existing prod
-// DOs migrate transparently — sessions in flight at deploy time keep their
-// SQL rows readable by the new code path. See _ensureCfAgentsSchema() below.
+// the small surface SessionDO actually used (state, schedule+alarm). Phase 3
+// (this codebase) further dropped the runFiber/keepAlive primitives in favor
+// of the unified RuntimeAdapter (begin/end on the shared `sessions` table).
+// The cf_agents_state + cf_agents_schedules table NAMES are kept verbatim
+// so existing prod DOs migrate transparently — schedule rows in flight at
+// deploy time keep their SQL rows readable by the new code path. The
+// cf_agents_runs table was dropped in Phase 4; orphan markers now live on
+// `sessions.turn_id`. See _ensureCfAgentsSchema() below.
 const STATE_ROW_ID = "cf_state_row_id";
 const KEEP_ALIVE_INTERVAL_MS = 30_000;
 const HUNG_SCHEDULE_TIMEOUT_SECONDS = 30;
@@ -206,9 +243,26 @@ export class SessionDO extends DurableObject<Env> {
   // ── cf-agents-replacement state (see _ensureCfAgentsSchema below) ─────
   private _state: SessionState | undefined;
   private _initialized = false;
-  private _keepAliveRefs = 0;
-  private _runFiberActiveFibers = new Set<string>();
-  private _runFiberRecoveryInProgress = false;
+  // Lazy-built runtime adapter (the unified one Node also uses). Built
+  // on first turn so we can read this.state.tenant_id, which isn't set
+  // until /init writes the row. _runtimeAdapter is the cached adapter
+  // instance scoped to this DO's session.
+  private _runtimeAdapter: RuntimeAdapter | null = null;
+
+  /**
+   * In-memory mirror of "is there a turn currently running in this DO?"
+   * Maintained via the RuntimeAdapter's onTurnInFlight / onTurnEnded
+   * callbacks (wired in the lazy `runtimeAdapter` getter below). Used
+   * by deriveStatus() — the unified marker on D1's `sessions.turn_id`
+   * is the source of truth, but reading it requires an async D1
+   * round-trip and deriveStatus is called sync from the API layer.
+   *
+   * Lost on eviction; re-seeded on next alarm() via _checkOrphanTurns
+   * (which reads the D1 row authoritatively). Worst case: a stale
+   * "idle" between cold-start and the first alarm — alarm fires
+   * immediately on cold-start with an in-flight turn.
+   */
+  private _inflightTurnHints = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -655,13 +709,16 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Called by the agents library when a runFiber row in cf_agents_runs
-   * survives DO restart (i.e. the fiber was interrupted by eviction). For
-   * us, fibers are named "turn:{seq}" — one per drain iteration. Recovery
-   * strategy: emit a status_rescheduled marker so observers can see a
-   * recovery happened, reset stale state.status, then re-drain. The
-   * unprocessed user.message at seq is still pending (we never emitted
-   * status_idle for it) so drain re-runs the harness, and generateText
+   * Called by _checkOrphanTurns when an orphan turn (sessions row marked
+   * status='running' with a turn_id we don't own) is detected at alarm
+   * wake or cold-start. Historically this was wired into the cf-agents
+   * runFiber/onFiberRecovered hook; Phase 3 unified the trigger via the
+   * RuntimeAdapter, so the entry shape is identical to what the old
+   * fiber API produced — { id, name, snapshot:null }. Recovery itself
+   * works the same way: emit a session.status_rescheduled marker so
+   * observers see what happened, reset stale state.status, and re-drain.
+   * The unprocessed user.message at seq is still pending (we never
+   * emitted status_idle for it) so drain re-runs the harness; generateText
    * sees prior tool_use/tool_result rows in history and continues from
    * roughly where it left off (at-least-once semantics — a tool may be
    * re-decided once, but no tool effect is lost since each result is in
@@ -669,11 +726,11 @@ export class SessionDO extends DurableObject<Env> {
    */
   async onFiberRecovered(ctx: { id: string; name: string; snapshot: unknown }): Promise<void> {
     if (!ctx.name.startsWith("turn:")) {
-      console.warn(`[fiber-recover] unknown fiber: ${ctx.name}`);
+      console.warn(`[orphan-recover] unknown turn name: ${ctx.name}`);
       return;
     }
     console.warn(
-      `[fiber-recover] turn fiber ${ctx.name} (id=${ctx.id}) interrupted; routing through recoverAgentTurn`,
+      `[orphan-recover] turn ${ctx.name} (id=${ctx.id}) interrupted; routing through recoverAgentTurn`,
     );
     this.ensureSchema();
 
@@ -724,7 +781,7 @@ export class SessionDO extends DurableObject<Env> {
       async (rctx) => {
         const reschedEvent: SessionEvent = {
           type: "session.status_rescheduled",
-          reason: `Recovered after DO eviction (fiber ${ctx.name}, recovery ${rctx.recoveryCount}/5)`,
+          reason: `Recovered after DO eviction (turn ${ctx.name}, recovery ${rctx.recoveryCount}/5)`,
         };
         history.append(reschedEvent);
         this.broadcastEvent(reschedEvent);
@@ -842,10 +899,13 @@ export class SessionDO extends DurableObject<Env> {
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
-        // Run the turn through the two-primitive runtime: keepAliveWhile
-        // outermost (DO stays alive for full turn lifetime), runFiber
-        // inside (so onFiberRecovered can detect orphan after eviction),
-        // backup/persist synchronously at end (no waitUntil race).
+        // Run the turn through the unified runtime: adapter.beginTurn /
+        // endTurn write the marker on `sessions.turn_id`, hintTurnInFlight
+        // wires CF's setAlarm-30s keep-alive, backup/persist runs
+        // synchronously at end (no waitUntil race). Same shape Node's
+        // SessionStateMachine uses; the body here stays in SessionDO
+        // because DO has CF-only features (DO state push, schedule API,
+        // sandbox warmup, sub-agents) the machine doesn't speak.
         await runAgentTurn(
           this.turnRuntimeAdapter(),
           turnName,
@@ -860,6 +920,11 @@ export class SessionDO extends DurableObject<Env> {
                 type: "agent.tool_result",
                 tool_use_id: customResult.custom_tool_use_id,
                 content: customResult.content.map(b => b.type === "text" ? b.text : "").join(""),
+                // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+                // matching agent.custom_tool_use's EventBase.id IS the
+                // custom_tool_use_id (AgentCustomToolUseEvent.id overrides
+                // EventBase.id with `id: string`).
+                parent_event_id: customResult.custom_tool_use_id,
               };
               history.append(toolResultEvent);
               this.broadcastEvent(toolResultEvent);
@@ -891,22 +956,104 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Build the small adapter that turn-runtime needs from this DO. We
-   * bind keepAliveWhile + runFiber to `this` and expose ctx.storage as
-   * a plain object so turn-runtime doesn't need to access protected
-   * members of cf-agents Agent.
+   * Build the adapter turn-runtime needs from this DO. Returns a
+   * RuntimeAdapter (the unified adapter Node also uses) wrapped in the
+   * thin TurnRuntimeAgent shape that pins it to this DO's sessionId
+   * and exposes ctx.storage for the recovery counter.
+   *
+   * The RuntimeAdapter's `hintTurnInFlight` callback is wired here to
+   * setAlarm(now+30s) — this is CF's keep-alive: the alarm rearms
+   * itself in alarm() so the DO doesn't get evicted while a turn is
+   * in flight. Cheap; setAlarm cost is one storage write.
    */
   private turnRuntimeAdapter(): TurnRuntimeAgent {
     return {
-      keepAliveWhile: <T,>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
-      runFiber: <T,>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>) =>
-        this.runFiber(name, fn),
+      adapter: this.runtimeAdapter,
+      sessionId: this.state.session_id,
       storage: {
         get: <T = unknown,>(key: string) => this.ctx.storage.get<T>(key),
         put: <T = unknown,>(key: string, value: T) => this.ctx.storage.put(key, value),
         delete: (key: string) => this.ctx.storage.delete(key).then(() => undefined),
       },
     };
+  }
+
+  /**
+   * Lazily-built unified RuntimeAdapter for this session. Reused across
+   * turns. The adapter holds:
+   *   - sql: per-tenant D1 (resolved via buildCfTenantDbProvider) for
+   *     beginTurn/endTurn/listOrphanTurns against the unified `sessions`
+   *     table.
+   *   - eventLog/streams: this DO's CfDoEventLog/CfDoStreamRepo (per-DO
+   *     storage SQL — fast, transactional with the rest of DO state).
+   *   - hintTurnInFlight: setAlarm(now+30s). The alarm() handler
+   *     rearms itself while a turn is still in flight (sessions row
+   *     status='running'), so an LLM streaming call lasting > 30s
+   *     keeps the DO warm.
+   */
+  private get runtimeAdapter(): RuntimeAdapter {
+    if (this._runtimeAdapter) return this._runtimeAdapter;
+    if (!this._state) {
+      throw new Error("runtimeAdapter accessed before state loaded");
+    }
+    const tenantId = this._state.tenant_id;
+    // Lazy-resolve the per-tenant D1 binding. buildCfTenantDbProvider
+    // returns the AUTH_DB shard the routing table maps this tenant to.
+    // We construct the SqlClient eagerly and cache the adapter — the
+    // tenant doesn't change for the lifetime of a SessionDO instance.
+    const provider = buildCfTenantDbProvider(this.env);
+    // provider.resolve is async; we synchronously construct using a
+    // wrapper SqlClient that resolves on first call. Simpler: just hold
+    // a Promise-backed SqlClient. Even simpler: assume the synchronous
+    // path (env.AUTH_DB) since most deploys are single-shard. Fall back
+    // to async resolve via a thin wrapper when sharded.
+    const db = (this.env as unknown as { AUTH_DB?: D1Database }).AUTH_DB;
+    if (!db) {
+      throw new Error(
+        "runtimeAdapter: env.AUTH_DB binding missing — required for unified sessions table writes",
+      );
+    }
+    const sql = new CfD1SqlClient(db);
+    if (!this.streams) this.ensureSchema();
+    const eventLog: EventLogRepo = new CfDoEventLog(
+      this.ctx.storage.sql,
+      (e) => {
+        const ev = e as SessionEvent & { id?: string; processed_at?: string };
+        if (!ev.id) ev.id = `sevt_${generateEventId()}`;
+        if (!ev.processed_at) ev.processed_at = new Date().toISOString();
+      },
+      this.env.MEMORY_BUCKET ?? null,
+      `t/${tenantId}/sessions/${this._state.session_id}/events/`,
+    );
+    const streams = this.streams!;
+    this._runtimeAdapter = new RuntimeAdapterImpl({
+      sql,
+      eventLog,
+      streams,
+      // No sandbox at adapter level — turn-runtime doesn't use it; the
+      // legacy sandbox getter (this.getOrCreateSandbox()) stays as-is
+      // for the harness path which constructs its own ctx.
+      onTurnInFlight: () => {
+        // Fire-and-forget setAlarm. CF's alarm queue de-dupes, so back-
+        // to-back calls are fine. The alarm() handler re-arms while a
+        // turn is still in flight (status='running' in sessions table).
+        void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
+        // In-memory mirror so deriveStatus() (sync, called from many
+        // places) can answer "running" without an async D1 round-trip.
+        // The unified marker on D1's sessions.turn_id is the source of
+        // truth; this is just a local cache. _checkOrphanTurns rebuilds
+        // it on cold start.
+        this._inflightTurnHints += 1;
+      },
+      onTurnEnded: () => {
+        if (this._inflightTurnHints > 0) this._inflightTurnHints -= 1;
+      },
+    });
+    // Provider call only used if sharding is in play; today the lazy
+    // env.AUTH_DB path covers the single-shard default. Keep the
+    // import live so future per-tenant shards plug in here.
+    void provider;
+    return this._runtimeAdapter;
   }
 
   /**
@@ -1141,10 +1288,13 @@ export class SessionDO extends DurableObject<Env> {
         // Fire-and-forget the drain. ctx.waitUntil is a no-op inside DO classes
         // (Workers Context API is stateless-only — see CF docs), so don't try
         // to use it. The DO is kept alive instead by:
-        //   (a) the cf-agents keepAlive() heartbeat (30s alarm) registered
-        //       by runFiber inside drainEventQueue, AND
-        //   (b) keepAliveWhile() wrapping the long model fetch in
-        //       harness/default-loop.ts so streaming holds the DO active.
+        //   (a) the unified RuntimeAdapter's hintTurnInFlight callback —
+        //       wired in this DO's constructor to setAlarm(now+30s). The
+        //       alarm() handler rearms itself while a turn is still in
+        //       flight (sessions row status='running'), AND
+        //   (b) the keepAliveWhile no-op the harness still receives in
+        //       its HarnessRuntime — purely a stub today; the alarm-
+        //       rearm path covers what it used to defend.
         // The 5s recoverEventQueue schedule above is the safety-net
         // re-trigger if this background promise dies before drain runs.
         console.log("[post /event] user.message appended, firing drainEventQueue");
@@ -1191,9 +1341,47 @@ export class SessionDO extends DurableObject<Env> {
 
       if (body.type === "user.define_outcome") {
         const e = body as UserDefineOutcomeEvent;
-        this.setState({ ...this.state, outcome: { description: e.description, rubric: e.rubric, max_iterations: e.max_iterations }, outcome_iteration: 1 });
-        history.append(e);
-        this.broadcastEvent(e);
+        // AMA-spec: validate at-least-one-of(rubric|verifier). Reject the
+        // event before persisting so callers get a clean 400 instead of a
+        // silently degraded supervisor loop.
+        const hasRubric =
+          typeof e.rubric === "string"
+            ? e.rubric.trim().length > 0
+            : !!e.rubric && (
+                (e.rubric.type === "text" && !!e.rubric.content) ||
+                (e.rubric.type === "file" && !!e.rubric.file_id)
+              );
+        if (!hasRubric && !e.verifier) {
+          return new Response(
+            "user.define_outcome requires at least one of `rubric` or `verifier`",
+            { status: 400 },
+          );
+        }
+        // Mint outcome_id server-side (AMA-style `outc_…` prefix). Honour
+        // a client-supplied id only when it's already prefixed (used by
+        // tests / replays); otherwise mint fresh.
+        const outcome_id =
+          e.outcome_id && e.outcome_id.startsWith("outc_")
+            ? e.outcome_id
+            : generateOutcomeId();
+        const echoed: UserDefineOutcomeEvent = { ...e, outcome_id };
+        // Sequential outcomes: any prior `state.outcome` is dropped (it
+        // either already terminated and was nulled by the supervisor, or
+        // we're explicitly replacing it). Existing `outcome_evaluations`
+        // history stays intact.
+        this.setState({
+          ...this.state,
+          outcome: {
+            outcome_id,
+            description: echoed.description,
+            rubric: echoed.rubric,
+            verifier: echoed.verifier,
+            max_iterations: echoed.max_iterations,
+          },
+          outcome_iteration: 0,
+        });
+        history.append(echoed);
+        this.broadcastEvent(echoed);
         return new Response(null, { status: 202 });
       }
 
@@ -1465,19 +1653,46 @@ export class SessionDO extends DurableObject<Env> {
       return Response.json({ data: threadEvents });
     }
 
-    // GET /full-status — session status with usage and outcome evaluations
+    // GET /full-status — session status with usage and outcome evaluations.
+    //
+    // Phase 4 / AMA alignment: outcome_evaluations is now sourced from
+    // `state.outcome_evaluations` (written by the supervisor loop on every
+    // terminal `span.outcome_evaluation_end`). Falls back to scanning the
+    // event log for legacy spellings (`session.outcome_evaluated`,
+    // `outcome.evaluation_end`, `span.outcome_evaluation_end`) so sessions
+    // written before this change still surface their verdicts.
     if (request.method === "GET" && url.pathname === "/full-status") {
       const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      const allEvents = history.getEvents();
 
-      // Collect outcome evaluations
-      const outcomeEvaluations = allEvents
-        .filter((e) => e.type === "session.outcome_evaluated")
-        .map((e: any) => ({
-          result: e.result,
-          iteration: e.iteration,
-          feedback: e.feedback,
-        }));
+      const stateEvaluations = this.state.outcome_evaluations ?? [];
+      let outcomeEvaluations: PersistedOutcomeEvaluation[] = stateEvaluations;
+      if (outcomeEvaluations.length === 0) {
+        // Back-compat scan. Only runs for sessions whose supervisor never
+        // wrote into state.outcome_evaluations[] (pre-Phase-4 emit
+        // sites). Cheap because the event scan is local to this DO.
+        const allEvents = history.getEvents();
+        outcomeEvaluations = allEvents
+          .filter(
+            (e) =>
+              e.type === "session.outcome_evaluated" ||
+              e.type === "outcome.evaluation_end" ||
+              e.type === "span.outcome_evaluation_end",
+          )
+          .map((e: SessionEvent) => {
+            const ev = e as Partial<PersistedOutcomeEvaluation> & {
+              feedback?: string;
+            };
+            return {
+              outcome_id: ev.outcome_id ?? "",
+              result: (ev.result ?? "needs_revision") as PersistedOutcomeEvaluation["result"],
+              iteration: typeof ev.iteration === "number" ? ev.iteration : 0,
+              explanation: ev.explanation ?? ev.feedback,
+              feedback: ev.feedback ?? ev.explanation,
+              usage: ev.usage,
+              processed_at: (e as { processed_at?: string }).processed_at,
+            };
+          });
+      }
 
       return Response.json({
         status: this.deriveStatus(),
@@ -1824,12 +2039,22 @@ export class SessionDO extends DurableObject<Env> {
                 );
               }
             } else {
-              try {
-                this.persistAndBroadcastEvent({
-                  type: "session.warning",
-                  message: `workspace_restore_skipped reason=no-backup-for-session`,
-                } as unknown as SessionEvent);
-              } catch {}
+              // No backup found — fresh session, expected case. Log
+              // for ops/debugging only; don't emit as session.warning
+              // because a "warning" event leaks into the trajectory
+              // and confuses operators reading session timelines (it's
+              // not actually a problem). Failed restore (above) and
+              // successful restore (above) are different — those ARE
+              // worth a session event.
+              log(
+                {
+                  op: "session_do.warmup.no_backup",
+                  session_id: this.state.session_id,
+                  tenant_id: this.state.tenant_id,
+                  environment_id: this.state.environment_id,
+                },
+                "no workspace backup found for this session — starting fresh",
+              );
             }
           }
         } catch (err) {
@@ -2268,7 +2493,7 @@ export class SessionDO extends DurableObject<Env> {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-          AI: this.env.AI,
+          toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
           environmentConfig,
           mcpBinding: this.env.MAIN_MCP,
           tenantId: this.state.tenant_id,
@@ -2297,6 +2522,9 @@ export class SessionDO extends DurableObject<Env> {
               type: "agent.tool_result",
               tool_use_id: pending.toolCallId,
               content: resultStr,
+              // v1-additive (docs/trajectory-v1-spec.md "Causality"):
+              // matching agent.tool_use's EventBase.id IS pending.toolCallId.
+              parent_event_id: pending.toolCallId,
             };
             history.append(toolResultEvent);
             this.broadcastEvent(toolResultEvent);
@@ -2305,6 +2533,7 @@ export class SessionDO extends DurableObject<Env> {
               type: "agent.tool_result",
               tool_use_id: pending.toolCallId,
               content: `Error: ${e instanceof Error ? e.message : String(e)}`,
+              parent_event_id: pending.toolCallId,
             };
             history.append(toolResultEvent);
             this.broadcastEvent(toolResultEvent);
@@ -2318,6 +2547,9 @@ export class SessionDO extends DurableObject<Env> {
         type: "agent.tool_result",
         tool_use_id: confirmation.tool_use_id,
         content: `Denied: ${denyMsg}`,
+        // v1-additive: matching agent.tool_use's EventBase.id IS the
+        // tool_use_id the confirmation references.
+        parent_event_id: confirmation.tool_use_id,
       };
       history.append(toolResultEvent);
       this.broadcastEvent(toolResultEvent);
@@ -2590,7 +2822,7 @@ export class SessionDO extends DurableObject<Env> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      AI: this.env.AI,
+      toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
       sessionId: this.state.session_id,
@@ -2645,7 +2877,7 @@ export class SessionDO extends DurableObject<Env> {
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
-        keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
+        keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
@@ -2770,7 +3002,7 @@ export class SessionDO extends DurableObject<Env> {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
-      AI: this.env.AI,
+      toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
       environmentConfig,
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
@@ -3019,7 +3251,7 @@ export class SessionDO extends DurableObject<Env> {
         },
         pendingConfirmations: [],
         abortSignal: effectiveAbortSignal,
-        keepAliveWhile: <T>(fn: () => Promise<T>) => this.keepAliveWhile(fn),
+        keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
@@ -3075,85 +3307,111 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Outcome self-evaluation loop (properly loops until satisfied or max iterations)
+      // Outcome self-evaluation loop. Phase 4 / AMA-aligned: delegated
+      // to the standalone supervisor module which builds a Verifier
+      // (verifierForSpec for the OMA-superset rule-based path,
+      // LlmJudgeVerifier for the AMA-default LLM-judge path), runs it
+      // against a Trajectory built from the current event log, maps the
+      // Score onto the AMA 5-result enum, emits
+      // span.outcome_evaluation_{start,ongoing,end}, and persists each
+      // terminal verdict to state.outcome_evaluations[]. The loop
+      // re-injects the verifier's `reason` as a user.message + re-runs
+      // the harness on `needs_revision`.
       const outcome = this.state.outcome;
       if (outcome) {
-        let iteration = this.state.outcome_iteration || 1;
-        const maxIterations = Math.min(outcome.max_iterations || 3, 20);
-        const outcomeModelId = typeof agent.model === "string" ? agent.model : agent.model?.id;
-        const model = resolveModel(outcomeModelId || ctx.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", ctx.env.ANTHROPIC_API_KEY, ctx.env.ANTHROPIC_BASE_URL);
-
-        while (iteration <= maxIterations) {
-          // Collect agent output from recent events
-          const recentEvents = history.getEvents();
-          const agentOutput = recentEvents
-            .filter((e: SessionEvent) => e.type === "agent.message")
-            .map((e: SessionEvent) => {
-              const msg = e as AgentMessageEvent;
-              return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
-            })
-            .join("\n");
-
-          // Span: outcome evaluation start
-          this.broadcastEvent({ type: "span.outcome_evaluation_start", iteration });
-
-          const ongoingEvent: SessionEvent = {
-            type: "span.outcome_evaluation_ongoing",
-            iteration,
-          };
-          history.append(ongoingEvent);
-          this.broadcastEvent(ongoingEvent);
-
-          const evalResult = await evaluateOutcome(model, outcome, agentOutput);
-
-          if (evalResult.result === "satisfied") {
-            const evalEvent: OutcomeEvaluationEvent = {
-              type: "outcome.evaluation_end",
-              result: "satisfied",
-              iteration,
-              feedback: evalResult.feedback,
-            };
-            history.append(evalEvent);
-            this.broadcastEvent(evalEvent);
-            this.setState({ ...this.state, outcome: null });
-            break;
-          }
-
-          if (iteration >= maxIterations) {
-            const evalEvent: OutcomeEvaluationEvent = {
-              type: "outcome.evaluation_end",
-              result: "max_iterations_reached",
-              iteration,
-            };
-            history.append(evalEvent);
-            this.broadcastEvent(evalEvent);
-            this.setState({ ...this.state, outcome: null });
-            break;
-          }
-
-          // Needs revision — inject feedback and re-run
-          const evalEvent: OutcomeEvaluationEvent = {
-            type: "outcome.evaluation_end",
-            result: "needs_revision",
-            iteration,
-            feedback: evalResult.feedback,
-          };
-          history.append(evalEvent);
-          this.broadcastEvent(evalEvent);
-
-          iteration += 1;
-          this.setState({ ...this.state, outcome_iteration: iteration });
-
-          const feedbackMsg: UserMessageEvent = {
-            type: "user.message",
-            content: [{
-              type: "text",
-              text: `[Outcome Evaluation - Iteration ${iteration - 1}] Needs revision:\n${evalResult.feedback}\n\nPlease address the feedback and try again.`,
-            }],
-          };
-          history.append(feedbackMsg);
-          this.broadcastEvent(feedbackMsg);
-          await harness.run({ ...ctx, userMessage: feedbackMsg });
+        const outcomeModelId =
+          typeof agent.model === "string" ? agent.model : agent.model?.id;
+        const judgeModel = resolveModel(
+          outcomeModelId ||
+            ctx.env.ANTHROPIC_MODEL ||
+            "claude-sonnet-4-6",
+          ctx.env.ANTHROPIC_API_KEY,
+          ctx.env.ANTHROPIC_BASE_URL,
+        );
+        try {
+          await runOutcomeSupervisor({
+            outcome,
+            initialIteration: this.state.outcome_iteration ?? 0,
+            tenantId: this.state.tenant_id,
+            filesBucket: this.env.FILES_BUCKET ?? null,
+            abortSignal: effectiveAbortSignal,
+            judgeModelId: outcomeModelId,
+            getEvents: () => history.getEvents(),
+            appendAndBroadcast: (event) => {
+              history.append(event);
+              this.broadcastEvent(event);
+            },
+            broadcastOnly: (event) => this.broadcastEvent(event),
+            persistState: (delta) => {
+              const next = { ...this.state };
+              if ("outcome" in delta) next.outcome = delta.outcome ?? null;
+              if (typeof delta.outcome_iteration === "number") {
+                next.outcome_iteration = delta.outcome_iteration;
+              }
+              if (delta.outcome_evaluations) {
+                next.outcome_evaluations = delta.outcome_evaluations;
+              }
+              this.setState(next);
+            },
+            readEvaluations: () => this.state.outcome_evaluations ?? [],
+            makeVerifierContext: () => ({
+              sessionId: this.state.session_id,
+              runExec: async (cmd, opts) => {
+                const sb = this.getOrCreateSandbox();
+                const raw = await sb.exec(cmd, opts?.timeoutMs ?? 600_000);
+                // sandbox.exec returns "exit=N\n<merged-output>"
+                const m = raw.match(/^exit=(-?\d+)\n([\s\S]*)$/);
+                return m
+                  ? { exit_code: parseInt(m[1], 10), output: m[2] }
+                  : { exit_code: -1, output: raw };
+              },
+            }),
+            makeJudgeFn: () => async (prompt, signal) => {
+              const result = await generateText({
+                model: judgeModel,
+                system: prompt.system,
+                messages: [{ role: "user", content: prompt.user }],
+                maxOutputTokens: 800,
+                abortSignal: signal,
+              });
+              const text =
+                result.text ||
+                extractTextFromContent(
+                  (result as unknown as { content?: unknown }).content,
+                );
+              const u = (result as unknown as {
+                usage?: {
+                  inputTokens?: number;
+                  outputTokens?: number;
+                  cachedInputTokens?: number;
+                  cacheReadInputTokens?: number;
+                  cacheCreationInputTokens?: number;
+                };
+              }).usage;
+              const usage = u
+                ? {
+                    input_tokens: u.inputTokens ?? 0,
+                    output_tokens: u.outputTokens ?? 0,
+                    cache_creation_input_tokens:
+                      u.cacheCreationInputTokens ?? u.cachedInputTokens,
+                    cache_read_input_tokens: u.cacheReadInputTokens,
+                  }
+                : undefined;
+              return { text, usage };
+            },
+            runHarnessTurn: async (msg) => {
+              await harness.run({ ...ctx, userMessage: msg });
+            },
+          });
+        } catch (err) {
+          // Supervisor itself blew up (e.g. a persistState callback
+          // threw). Surface as a session warning — the supervisor's own
+          // failure path already handled verifier-internal errors and
+          // emitted a `failed` end span.
+          logWarn(
+            { op: "outcome.supervisor", session_id: this.state.session_id, err },
+            "outcome supervisor crashed",
+          );
         }
       }
 
@@ -3266,10 +3524,13 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   // ═══════════════════════════════════════════════════════════════════════
-  // cf-agents replacement primitives (state, schedule, alarm, runFiber,
-  // keepAlive). Schema + algorithms inherited from cf-agents v0.11.2 so
-  // existing prod DOs migrate transparently — all SQL row layouts and
-  // callback-name conventions match what cf-agents wrote.
+  // cf-agents replacement primitives (state, schedule, alarm). Schema +
+  // algorithms inherited from cf-agents v0.11.2 so existing prod DOs
+  // migrate transparently — SQL row layouts and callback-name conventions
+  // match what cf-agents wrote. Phase 3 dropped runFiber/keepAlive in
+  // favor of the unified RuntimeAdapter (begin/end on the shared
+  // `sessions` table); orphan-turn detection in alarm() now reads
+  // sessions.turn_id, not cf_agents_runs.
   // ═══════════════════════════════════════════════════════════════════════
 
   // ── State (cf_agents_state, single row) ────────────────────────────────
@@ -3304,10 +3565,12 @@ export class SessionDO extends DurableObject<Env> {
     if (this._state?.terminated_at != null || this._state?.status === "terminated") {
       return "terminated";
     }
-    const hasFiber = this.ctx.storage.sql
-      .exec("SELECT 1 FROM cf_agents_runs LIMIT 1")
-      .toArray().length > 0;
-    return hasFiber ? "running" : "idle";
+    // cf_agents_runs was dropped in Phase 4; the unified-runtime marker
+    // for "is there an in-flight turn" lives on D1's `sessions.turn_id`,
+    // which is async. _inflightTurnHints is the sync local mirror set
+    // by the RuntimeAdapter callbacks (onTurnInFlight / onTurnEnded).
+    // _checkOrphanTurns rebuilds it on cold-start by reading D1.
+    return this._inflightTurnHints > 0 ? "running" : "idle";
   }
 
   setState(next: SessionState): void {
@@ -3345,7 +3608,7 @@ export class SessionDO extends DurableObject<Env> {
     );
   }
 
-  // ── Schema bootstrap (cf_agents_state / cf_agents_schedules / cf_agents_runs) ──
+  // ── Schema bootstrap (cf_agents_state / cf_agents_schedules) ──
 
   private _ensureCfAgentsSchema(): void {
     // Idempotent. Schema lifted verbatim from cf-agents v0.11.2 so existing
@@ -3375,14 +3638,18 @@ export class SessionDO extends DurableObject<Env> {
         retry_options TEXT
       )
     `);
-    sql.exec(`
-      CREATE TABLE IF NOT EXISTS cf_agents_runs (
-        id TEXT PRIMARY KEY NOT NULL,
-        name TEXT NOT NULL,
-        snapshot TEXT,
-        created_at INTEGER NOT NULL
-      )
-    `);
+    // cf_agents_runs is gone. Phase 3 stopped writing it; Phase 4 (this
+    // commit) drops the table entirely on every cold-start, idempotent
+    // because DROP TABLE IF EXISTS. Old prod DOs that booted the
+    // previous code still had it; first cold-start under this code path
+    // sweeps it. Any in-flight rows from before the deploy are
+    // recovered via _checkOrphanTurns which now reads `sessions.turn_id`
+    // (populated by the unified RuntimeAdapter.beginTurn). For sessions
+    // that started under the old fiber path AND were mid-turn at deploy
+    // time, the turn_id column is null — those sessions just silently
+    // flip to "user must resend" which is the same UX as the old
+    // 5-recovery cap exhausting.
+    sql.exec(`DROP TABLE IF EXISTS cf_agents_runs`);
     // Stale-row cleanup: the alarm-based stall detector was removed in the
     // Gap 10 simplification, but live prod DOs still have its interval
     // schedule rows. Each alarm tick now logs "callback not found" and
@@ -3548,8 +3815,10 @@ export class SessionDO extends DurableObject<Env> {
 
   /**
    * Pick the soonest alarm time across (a) ready due schedules, (b) hung
-   * interval reset, (c) keepAlive heartbeat (when refs > 0). Algorithm
-   * verbatim from cf-agents v0.11.2 _scheduleNextAlarm.
+   * interval reset. Phase 3 dropped the keepAlive refcount branch — keep-
+   * alive now flows through hintTurnInFlight (sets a 30s alarm at
+   * beginTurn) plus the alarm() handler's rearm-while-inflight check.
+   * Schedule logic itself is verbatim from cf-agents v0.11.2.
    */
   private async _scheduleNextAlarm(): Promise<void> {
     const nowMs = Date.now();
@@ -3572,10 +3841,11 @@ export class SessionDO extends DurableObject<Env> {
       const recoveryMs = (recoveringRows[0].execution_started_at + HUNG_SCHEDULE_TIMEOUT_SECONDS) * 1000;
       nextMs = nextMs === null ? recoveryMs : Math.min(nextMs, recoveryMs);
     }
-    if (this._keepAliveRefs > 0) {
-      const keepAliveMs = nowMs + KEEP_ALIVE_INTERVAL_MS;
-      nextMs = nextMs === null ? keepAliveMs : Math.min(nextMs, keepAliveMs);
-    }
+    // Keep-alive (was: _keepAliveRefs branch) now flows through
+    // hintTurnInFlight → setAlarm at beginTurn, plus the alarm() handler's
+    // own rearm-while-inflight check after _checkOrphanTurns. So
+    // _scheduleNextAlarm only schedules data-driven wakeups (cron / one-
+    // shot wakeups / hung interval recovery). Cleaner separation.
     if (nextMs !== null) {
       await this.ctx.storage.setAlarm(nextMs);
     } else {
@@ -3664,8 +3934,20 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // Housekeeping: orphan-fiber recovery
-    await this._checkRunFibers();
+    // Orphan-turn recovery: was _checkRunFibers (cf_agents_runs scan).
+    // Now reads sessions WHERE status='running' via the unified adapter
+    // and runs the same recovery.ts logic Node does. Same call site
+    // (alarm-triggered), same effect.
+    await this._checkOrphanTurns();
+
+    // Keep-alive rearm: while a turn is in flight (this DO's
+    // sessions row marked status='running'), reschedule the alarm 30s
+    // out so the DO doesn't get evicted before the LLM call returns.
+    // The status flip back to 'idle' in adapter.endTurn naturally stops
+    // the rearm loop.
+    if (await this._hasInflightTurn()) {
+      await this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
+    }
 
     // Container keepalive: while there's at least one background_tasks row,
     // ping the sandbox container to reset its sleepAfter timer. Means
@@ -3688,89 +3970,50 @@ export class SessionDO extends DurableObject<Env> {
     await this._scheduleNextAlarm();
   }
 
-  // ── Fiber API (cf_agents_runs, orphan recovery) ────────────────────────
+  // ── Orphan-turn detection (replaces cf_agents_runs / runFiber API) ────
 
   /**
-   * Run an async function as a "durable fiber". The DO row is registered in
-   * cf_agents_runs at start, deleted on completion. If the DO is evicted
-   * mid-execution, the row remains and is detected as an orphan by
-   * `_checkRunFibers` on the next alarm wake — which then dispatches
-   * `onFiberRecovered` (overridden by SessionDO).
+   * Scan the unified `sessions` table for rows marked status='running'
+   * with a turn_id we don't recognise as our own active turn. For each,
+   * call onFiberRecovered (which routes to recoverAgentTurn) so the
+   * partial state gets reconciled and the next user.message starts
+   * from clean events.
    *
-   * Skip the cf-agents `stash`/AsyncLocalStorage mechanism entirely —
-   * turn-runtime.ts has its own snapshot/recovery model in Primitive 2.
+   * Replaces the old _checkRunFibers (cf_agents_runs scan). The unified
+   * adapter writes turn_id on beginTurn() and clears it on endTurn();
+   * leftover rows after a process death are exactly the orphan set.
    */
-  async runFiber<T>(name: string, fn: (ctx: { id: string; snapshot: unknown }) => Promise<T>): Promise<T> {
-    const id = nanoid();
-    this.ctx.storage.sql.exec(
-      `INSERT INTO cf_agents_runs (id, name, snapshot, created_at) VALUES (?, ?, NULL, ?)`,
-      id, name, Date.now(),
-    );
-    this._runFiberActiveFibers.add(id);
-    const dispose = await this.keepAlive();
-    try {
-      return await fn({ id, snapshot: null });
-    } finally {
-      this._runFiberActiveFibers.delete(id);
-      this.ctx.storage.sql.exec(`DELETE FROM cf_agents_runs WHERE id = ?`, id);
-      dispose();
-    }
-  }
-
-  private async _checkRunFibers(): Promise<void> {
-    if (this._runFiberRecoveryInProgress) return;
-    this._runFiberRecoveryInProgress = true;
-    try {
-      const rows = this.ctx.storage.sql
-        .exec<{ id: string; name: string; snapshot: string | null }>(
-          `SELECT id, name, snapshot FROM cf_agents_runs`,
-        )
-        .toArray();
-      for (const row of rows) {
-        if (this._runFiberActiveFibers.has(row.id)) continue;
-        let snapshot: unknown = null;
-        if (row.snapshot) try { snapshot = JSON.parse(row.snapshot); }
-        catch { console.warn(`[fiber] corrupted snapshot for ${row.id}, treating as null`); }
-        try {
-          await this.onFiberRecovered({ id: row.id, name: row.name, snapshot });
-        } catch (err) {
-          console.error(`[fiber] recovery failed for "${row.name}" (${row.id}):`, err);
-        }
-        this.ctx.storage.sql.exec(`DELETE FROM cf_agents_runs WHERE id = ?`, row.id);
+  private async _checkOrphanTurns(): Promise<void> {
+    if (!this._state) return;
+    const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    for (const o of orphans) {
+      // The recovery path is identical to the legacy onFiberRecovered
+      // entry — routes through recoverAgentTurn (which reads event log
+      // + streams). We pass a minimal context shape so the existing
+      // recovery code keeps working.
+      try {
+        await this.onFiberRecovered({
+          id: o.turn_id,
+          name: `turn:${o.turn_id}`,
+          snapshot: null,
+        });
+      } catch (err) {
+        console.error(`[orphan-recovery] failed for turn ${o.turn_id}:`, err);
       }
-    } finally {
-      this._runFiberRecoveryInProgress = false;
+      // Mark the orphan turn idle. recoverAgentTurn doesn't do this
+      // (it ran before the unified table existed).
+      await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
     }
   }
-
-  // ── KeepAlive API (refcount + alarm) ──────────────────────────────────
 
   /**
-   * Increment keepAlive refcount and ensure the next alarm fires within
-   * KEEP_ALIVE_INTERVAL_MS. Returns a dispose function — call it (or use
-   * keepAliveWhile) to decrement the refcount when work is done.
-   *
-   * No actual heartbeat schedule row is written; the alarm itself does the
-   * keepalive work because `_scheduleNextAlarm` checks `_keepAliveRefs > 0`
-   * and re-arms within the interval. Same approach as cf-agents 0.11.2.
+   * Has this DO got a turn currently in flight? Used by alarm() to
+   * decide whether to rearm itself for keep-alive.
    */
-  async keepAlive(): Promise<() => void> {
-    this._keepAliveRefs++;
-    if (this._keepAliveRefs === 1) {
-      await this._scheduleNextAlarm();
-    }
-    let disposed = false;
-    return () => {
-      if (disposed) return;
-      disposed = true;
-      this._keepAliveRefs = Math.max(0, this._keepAliveRefs - 1);
-    };
-  }
-
-  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
-    const dispose = await this.keepAlive();
-    try { return await fn(); }
-    finally { dispose(); }
+  private async _hasInflightTurn(): Promise<boolean> {
+    if (!this._state) return false;
+    const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    return orphans.length > 0;
   }
 }
 

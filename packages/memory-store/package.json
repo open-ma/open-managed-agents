@@ -5,9 +5,11 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./adapters/local-fs-blob": "./src/adapters/local-fs-blob.ts",
     "./test-fakes": "./src/test-fakes.ts"
   },
   "dependencies": {
-    "@open-managed-agents/shared": "workspace:*"
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*"
   }
 }

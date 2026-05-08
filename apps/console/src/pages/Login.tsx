@@ -79,11 +79,20 @@ export function Login() {
     }
   }, [isAuthenticated, isLoading]);
 
+  // Whether the backend gates sign-up behind an email-OTP verification.
+  // /auth-info advertises "email-otp" iff AUTH_REQUIRE_EMAIL_VERIFY=1 on
+  // the server. When absent (default self-host), the sign-up flow does
+  // NOT route through verify-signup — sign-up succeeds → session cookie
+  // → straight to /. Avoids stranding the user on a verify screen with
+  // no way to receive the code.
+  const [emailVerifyRequired, setEmailVerifyRequired] = useState(false);
+
   useEffect(() => {
     fetch("/auth-info")
       .then((r) => r.json())
       .then((data: { providers: string[]; turnstile_site_key?: string | null }) => {
         if (data.providers?.includes("google")) setGoogleEnabled(true);
+        if (data.providers?.includes("email-otp")) setEmailVerifyRequired(true);
         setTurnstileSiteKey(data.turnstile_site_key ?? null);
       })
       .catch(() => {});
@@ -174,7 +183,19 @@ export function Login() {
         });
         if (error) throw new Error(error.message);
         clearOtp();
-        setMode("verify-signup");
+        if (emailVerifyRequired) {
+          // OTP gate enabled — show verify screen, OTP delivered via
+          // operator's sendVerificationOTP wiring.
+          setMode("verify-signup");
+        } else {
+          // Default self-host (no SMTP) — better-auth already created a
+          // session cookie at sign-up. Either we already see it via
+          // useAuth (the redirect effect at the top fires), or the
+          // session writes briefly raced; explicit signIn.email is the
+          // belt-and-braces path that always lands the cookie.
+          await authClient.signIn.email({ email, password });
+          onLoginSuccess(() => nav(nextUrl, { replace: true }));
+        }
       } else if (mode === "login") {
         const { error } = await authClient.signIn.email({
           email,

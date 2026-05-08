@@ -31,9 +31,9 @@ interface Runtime {
 }
 
 /** Local Runtimes — user-registered laptops/VMs running `oma bridge daemon`.
- *  Each runtime can host ACP-compatible agents (Claude Code, Codex, etc.).
- *  An OMA agent with `harness: "acp-proxy"` and `runtime_binding` set delegates
- *  its loop to one of these. */
+ *  Each runtime can host ACP-compatible agents. An OMA agent with
+ *  `harness: "acp-proxy"` and `runtime_binding` set delegates its loop
+ *  to one of these. */
 export function RuntimesList() {
   const { api } = useApi();
   const [runtimes, setRuntimes] = useState<Runtime[]>([]);
@@ -67,7 +67,17 @@ export function RuntimesList() {
   return (
     <ListPage<Runtime>
       title="Local Runtimes"
-      subtitle="Your own laptops or servers, registered with OMA. Bind an agent to a runtime to run its turns on your hardware using a local ACP agent (Claude Code today; more coming) instead of OMA's cloud."
+      subtitle={
+        <>
+          Your own laptops or servers, registered with OMA. Bind an agent to a runtime to run its turns
+          on your hardware via a local ACP child. OMA promotes <strong>Claude Code</strong>,
+          <strong> Codex</strong>, <strong>OpenClaw</strong>, and <strong>Hermes</strong> as featured;
+          the daemon also detects 30+ other agents from the
+          <a href="https://agentclientprotocol.com/get-started/registry" target="_blank" rel="noreferrer" className="underline hover:text-fg ml-1">
+            official ACP Registry
+          </a>.
+        </>
+      }
       createLabel="+ Connect machine"
       onCreate={() => setShowInstructions(true)}
       data={runtimes}
@@ -190,10 +200,35 @@ export function RuntimesList() {
           <p className="text-fg-muted text-xs">
             Setup opens this browser for OAuth, writes credentials to{" "}
             <code className="bg-bg-surface px-1 rounded">~/.oma/bridge/</code>, and (on macOS) installs a launchd job
-            that keeps the daemon running across reboots. If you have{" "}
-            <code className="bg-bg-surface px-1 rounded">claude</code> installed, setup will also install the ACP wrapper
-            (<code className="bg-bg-surface px-1 rounded">@agentclientprotocol/claude-agent-acp</code>) for you. The runtime appears
-            here as <span className="text-success">online</span> within a few seconds of the daemon attaching.
+            that keeps the daemon running across reboots. The daemon scans your <code className="bg-bg-surface px-1 rounded">$PATH</code> for
+            ACP-compatible agents and reports them here.
+          </p>
+          <div>
+            <p className="text-fg-muted text-xs mb-1.5">
+              <strong>★ Featured agents</strong> — OMA's recommended set:
+            </p>
+            <ul className="text-xs text-fg-muted space-y-1 ml-4 list-disc font-mono">
+              <li><span className="text-fg">claude-acp</span> · <code className="bg-bg-surface px-1 rounded">npx -y @agentclientprotocol/claude-agent-acp</code> (auto-installed if <code className="bg-bg-surface px-1 rounded">claude</code> is on PATH)</li>
+              <li><span className="text-fg">codex-acp</span> · download from <a href="https://github.com/zed-industries/codex-acp/releases" target="_blank" rel="noreferrer" className="underline">zed-industries/codex-acp releases</a></li>
+              <li><span className="text-fg">openclaw</span> · <code className="bg-bg-surface px-1 rounded">npm i -g openclaw</code> (uses <code className="bg-bg-surface px-1 rounded">openclaw acp</code> bridge)</li>
+              <li><span className="text-fg">hermes</span> · <code className="bg-bg-surface px-1 rounded">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</code></li>
+            </ul>
+          </div>
+          <div>
+            <p className="text-fg-muted text-xs mb-1.5">
+              Setup auto-installs an ACP wrapper when an upstream binary is on <code className="bg-bg-surface px-1 rounded">$PATH</code>:
+            </p>
+            <ul className="text-xs text-fg-muted space-y-1 ml-4 list-disc">
+              <li><code className="bg-bg-surface px-1 rounded">claude</code> → installs <code className="bg-bg-surface px-1 rounded">@agentclientprotocol/claude-agent-acp</code></li>
+              <li><code className="bg-bg-surface px-1 rounded">codex</code> → installs <code className="bg-bg-surface px-1 rounded">@normahq/codex-acp-bridge</code> (drives codex over ACP)</li>
+              <li><code className="bg-bg-surface px-1 rounded">gemini</code> missing → installs <code className="bg-bg-surface px-1 rounded">@google/gemini-cli</code> (ships ACP natively)</li>
+            </ul>
+          </div>
+          <p className="text-fg-muted text-xs">
+            30+ other agents (gemini, opencode, cline, cursor, kimi, qwen-code, …) come from the
+            <a href="https://agentclientprotocol.com/get-started/registry" target="_blank" rel="noreferrer" className="underline hover:text-fg ml-1">
+              official ACP Registry
+            </a> — daemon fetches the manifest at startup and any installed binary becomes selectable.
           </p>
         </div>
       </Modal>
