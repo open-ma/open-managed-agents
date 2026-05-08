@@ -20,8 +20,8 @@ import type {
   DispatchRule,
   DispatchRulePatch,
   DispatchRuleRepo,
-  PendingEvent,
-  PendingEventRepo,
+  LinearActionableEvent,
+  LinearEventStore,
   GitHubAppCredentials,
   GitHubAppRepo,
   HmacVerifier,
@@ -40,7 +40,6 @@ import type {
   NewDispatchRule,
   NewGitHubAppCredentials,
   NewInstallation,
-  NewPendingEvent,
   NewPublication,
   NewSetupLink,
   Persona,
@@ -58,7 +57,6 @@ import type {
   SetupLinkRepo,
   TenantResolver,
   VaultManager,
-  WebhookEventStore,
   WorkspaceId,
 } from "./index";
 
@@ -538,8 +536,13 @@ interface WebhookEventRow {
   error: string | null;
 }
 
-export class InMemoryWebhookEventStore implements WebhookEventStore {
-  readonly rows = new Map<string, WebhookEventRow>();
+export class InMemoryWebhookEventStore implements LinearEventStore {
+  readonly rows = new Map<string, WebhookEventRow & {
+    eventKind: string | null;
+    payloadJson: string | null;
+    processedAt: number | null;
+    processedSessionId: string | null;
+  }>();
 
   async recordIfNew(
     deliveryId: string,
@@ -558,6 +561,10 @@ export class InMemoryWebhookEventStore implements WebhookEventStore {
       sessionId: null,
       publicationId: null,
       error: null,
+      eventKind: null,
+      payloadJson: null,
+      processedAt: null,
+      processedSessionId: null,
     });
     return true;
   }
@@ -576,6 +583,93 @@ export class InMemoryWebhookEventStore implements WebhookEventStore {
     const row = this.rows.get(deliveryId);
     if (row) this.rows.set(deliveryId, { ...row, error });
   }
+
+  // ─── LinearEventStore extras (merged-table queue role) ─────────
+
+  async markActionable(
+    deliveryId: string,
+    eventKind: string,
+    publicationId: string,
+    payloadJson: string,
+  ): Promise<void> {
+    const row = this.rows.get(deliveryId);
+    if (row) {
+      this.rows.set(deliveryId, { ...row, eventKind, publicationId, payloadJson });
+    }
+  }
+
+  async listUnprocessed(limit: number): Promise<readonly LinearActionableEvent[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.payloadJson !== null && r.processedAt === null)
+      .sort((a, b) => a.receivedAt - b.receivedAt)
+      .slice(0, limit)
+      .map(toActionableFake);
+  }
+
+  async markProcessed(
+    deliveryId: string,
+    sessionId: string,
+    processedAtMs: number,
+  ): Promise<void> {
+    const row = this.rows.get(deliveryId);
+    if (row) {
+      this.rows.set(deliveryId, {
+        ...row,
+        processedAt: processedAtMs,
+        processedSessionId: sessionId,
+      });
+    }
+  }
+
+  async markFailed(
+    deliveryId: string,
+    errorMessage: string,
+    processedAtMs: number,
+  ): Promise<void> {
+    const row = this.rows.get(deliveryId);
+    if (row) {
+      this.rows.set(deliveryId, {
+        ...row,
+        processedAt: processedAtMs,
+        error: errorMessage.slice(0, 2000),
+      });
+    }
+  }
+
+  async listByPublication(
+    publicationId: string,
+    limit: number,
+  ): Promise<readonly LinearActionableEvent[]> {
+    return [...this.rows.values()]
+      .filter((r) => r.publicationId === publicationId && r.payloadJson !== null)
+      .sort((a, b) => b.receivedAt - a.receivedAt)
+      .slice(0, limit)
+      .map(toActionableFake);
+  }
+}
+
+function toActionableFake(row: {
+  deliveryId: string;
+  tenantId: string;
+  publicationId: string | null;
+  eventKind: string | null;
+  payloadJson: string | null;
+  receivedAt: number;
+  processedAt: number | null;
+  processedSessionId: string | null;
+  error: string | null;
+}): LinearActionableEvent {
+  return {
+    deliveryId: row.deliveryId,
+    tenantId: row.tenantId,
+    publicationId: row.publicationId ?? "",
+    eventKind: row.eventKind ?? "unknown",
+    payload: row.payloadJson ?? "",
+    receivedAt: row.receivedAt,
+    processedAt: row.processedAt,
+    processedSessionId: row.processedSessionId,
+    errorMessage: row.error,
+  };
 }
 
 export class InMemorySessionScopeRepo implements SessionScopeRepo {
@@ -749,7 +843,6 @@ export interface FakeContainer {
   sessionScopes: InMemorySessionScopeRepo;
   setupLinks: InMemorySetupLinkRepo;
   dispatchRules: InMemoryDispatchRuleRepo;
-  pendingEvents: InMemoryPendingEventRepo;
 }
 
 export function buildFakeContainer(): FakeContainer {
@@ -773,7 +866,6 @@ export function buildFakeContainer(): FakeContainer {
     sessionScopes: new InMemorySessionScopeRepo(),
     setupLinks: new InMemorySetupLinkRepo(),
     dispatchRules: new InMemoryDispatchRuleRepo(clock),
-    pendingEvents: new InMemoryPendingEventRepo(),
   };
 }
 
@@ -847,56 +939,6 @@ export class InMemoryDispatchRuleRepo implements DispatchRuleRepo {
   }
 }
 
-export class InMemoryPendingEventRepo implements PendingEventRepo {
-  private rows: PendingEvent[] = [];
-  private seq = 0;
-
-  async insert(input: NewPendingEvent, nowMs: number): Promise<PendingEvent> {
-    const row: PendingEvent = {
-      id: `pe_${++this.seq}`,
-      tenantId: input.tenantId,
-      publicationId: input.publicationId,
-      eventKind: input.eventKind,
-      issueId: input.issueId,
-      issueIdentifier: input.issueIdentifier,
-      workspaceId: input.workspaceId,
-      payload: input.payload,
-      receivedAt: nowMs,
-      processedAt: null,
-      processedSessionId: null,
-      errorMessage: null,
-    };
-    this.rows.push(row);
-    return row;
-  }
-
-  async listUnprocessed(limit: number): Promise<readonly PendingEvent[]> {
-    return this.rows
-      .filter((r) => r.processedAt === null)
-      .sort((a, b) => a.receivedAt - b.receivedAt)
-      .slice(0, limit);
-  }
-
-  async delete(id: string): Promise<void> {
-    const idx = this.rows.findIndex((r) => r.id === id);
-    if (idx >= 0) this.rows.splice(idx, 1);
-  }
-
-  async markFailed(id: string, errorMessage: string, processedAtMs: number): Promise<void> {
-    const idx = this.rows.findIndex((r) => r.id === id);
-    if (idx >= 0) {
-      this.rows[idx] = {
-        ...this.rows[idx]!,
-        processedAt: processedAtMs,
-        errorMessage: errorMessage.slice(0, 2000),
-      };
-    }
-  }
-
-  async listByPublication(publicationId: string, limit: number): Promise<readonly PendingEvent[]> {
-    return this.rows
-      .filter((r) => r.publicationId === publicationId)
-      .sort((a, b) => b.receivedAt - a.receivedAt)
-      .slice(0, limit);
-  }
-}
+// Removed InMemoryPendingEventRepo — the merged `linear_events` table folds
+// the queue role into LinearEventStore, so InMemoryWebhookEventStore now
+// implements the queue methods directly (markActionable/listUnprocessed/etc).
