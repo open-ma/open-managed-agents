@@ -1,6 +1,11 @@
 ---
 import Base from "../../layouts/Base.astro";
 import { getCollection, render } from "astro:content";
+import {
+  blogPostSchema,
+  breadcrumbSchema,
+  readingTimeMinutes,
+} from "../../lib/seo";
 
 export async function getStaticPaths() {
   const posts = await getCollection("blog");
@@ -16,28 +21,72 @@ const { Content } = await render(post);
 function formatDate(d: Date) {
   return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
 }
+
+const minutes = readingTimeMinutes(post.body ?? "");
+const slug = post.id;
+
+// Per-page structured data:
+//   - BlogPosting: tells Google this is an article (rich result eligible).
+//   - BreadcrumbList: powers the breadcrumb trail in search results.
+const schemas = [
+  blogPostSchema({
+    title: post.data.title,
+    description: post.data.description,
+    slug,
+    publishedAt: post.data.publishedAt,
+    updatedAt: post.data.updatedAt,
+    author: post.data.author,
+    tags: post.data.tags,
+  }),
+  breadcrumbSchema([
+    { name: "Home", path: "/" },
+    { name: "Blog", path: "/blog" },
+    { name: post.data.title, path: `/blog/${slug}/` },
+  ]),
+];
 ---
 
 <Base
   title={post.data.title}
   description={post.data.description}
-  canonical={`/blog/${post.id}`}
+  canonical={`/blog/${slug}`}
   ogType="article"
   publishedAt={post.data.publishedAt}
+  updatedAt={post.data.updatedAt}
+  schemas={schemas}
+  keywords={post.data.tags.join(", ")}
 >
   <article class="max-w-3xl mx-auto px-4 py-12">
+    <!-- Breadcrumb (visible — supports the JSON-LD above) -->
+    <nav aria-label="Breadcrumb" class="text-xs text-[var(--color-fg-subtle)] mb-6">
+      <ol class="flex gap-2">
+        <li><a href="/" class="hover:underline">Home</a></li>
+        <li aria-hidden="true">/</li>
+        <li><a href="/blog" class="hover:underline">Blog</a></li>
+        <li aria-hidden="true">/</li>
+        <li class="text-[var(--color-fg-muted)] truncate max-w-[12em]" title={post.data.title}>
+          {post.data.title}
+        </li>
+      </ol>
+    </nav>
+
     <header class="mb-10">
       <div class="text-xs text-[var(--color-fg-subtle)] uppercase tracking-wider mb-2">
-        {formatDate(post.data.publishedAt)}
+        <time datetime={post.data.publishedAt.toISOString()}>
+          {formatDate(post.data.publishedAt)}
+        </time>
         {post.data.author && <> · {post.data.author}</>}
+        <span class="ml-2">· {minutes} min read</span>
         {post.data.updatedAt && (
-          <span class="ml-2">(updated {formatDate(post.data.updatedAt)})</span>
+          <span class="ml-2">
+            (updated <time datetime={post.data.updatedAt.toISOString()}>{formatDate(post.data.updatedAt)}</time>)
+          </span>
         )}
       </div>
       <h1 class="font-display text-4xl font-bold tracking-tight mb-3">{post.data.title}</h1>
       <p class="text-lg text-[var(--color-fg-muted)]">{post.data.description}</p>
       {post.data.tags.length > 0 && (
-        <div class="mt-4 flex gap-2 flex-wrap">
+        <div class="mt-4 flex gap-2 flex-wrap" aria-label="Tags">
           {post.data.tags.map((t) => (
             <span class="inline-block px-2 py-0.5 text-xs rounded bg-[var(--color-bg-surface)] text-[var(--color-fg-muted)]">
               {t}
@@ -51,8 +100,9 @@ function formatDate(d: Date) {
       <Content />
     </div>
 
-    <footer class="mt-16 pt-8 border-t border-[var(--color-border)] text-sm text-[var(--color-fg-muted)]">
-      <a href="/blog">← All posts</a>
+    <footer class="mt-16 pt-8 border-t border-[var(--color-border)] text-sm text-[var(--color-fg-muted)] flex flex-wrap gap-x-6 gap-y-2 justify-between">
+      <a href="/blog" class="hover:underline">← All posts</a>
+      <a href="/blog/rss.xml" class="hover:underline">Subscribe via RSS</a>
     </footer>
   </article>
 </Base>
