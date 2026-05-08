@@ -28,8 +28,6 @@ import type {
   WorkspaceId,
   InstallKind,
   NewDispatchRule,
-  NewPendingEvent,
-  PendingEvent,
   SessionId,
   PublicationMode,
   AgentId,
@@ -197,6 +195,89 @@ export interface WebhookEventStore {
   attachError(deliveryId: string, error: string): Promise<void>;
 }
 
+/**
+ * One row of the linear_events drain queue. Same shape as the legacy
+ * PendingEvent (kept verbatim so the drain code path didn't have to change
+ * domain types when we collapsed the two tables).
+ *
+ * Drain order: oldest receivedAt first, capped per tick.
+ */
+export interface LinearActionableEvent {
+  /** Linear's webhook delivery id — same as the row's primary key. Used by
+   *  drain to call markProcessed/markFailed against the right row. */
+  deliveryId: string;
+  tenantId: string;
+  publicationId: string;
+  eventKind: string;
+  /** Serialized NormalizedWebhookEvent. JSON.parse to consume. */
+  payload: string;
+  receivedAt: number;
+  processedAt: number | null;
+  processedSessionId: string | null;
+  errorMessage: string | null;
+}
+
+/**
+ * Linear-specific extension of WebhookEventStore. The merged `linear_events`
+ * table replaces both `linear_webhook_events` and `linear_pending_events`,
+ * so this port carries the queue methods that used to live on PendingEventRepo.
+ *
+ * Lifecycle of one row:
+ *   recordIfNew (skeleton, dedup)
+ *     → either attachError (drop, audit only) — invisible to drain
+ *     → or markActionable (sets payload_json + event_kind + publication_id)
+ *         → drain: listUnprocessed → dispatch → markProcessed | markFailed
+ */
+export interface LinearEventStore extends WebhookEventStore {
+  /**
+   * Promote a deduped event into the drain queue. After this call, the row
+   * is selected by listUnprocessed until markProcessed/markFailed is called.
+   *
+   * `payloadJson` is the serialized NormalizedWebhookEvent. Drain code
+   * JSON.parses it; LinearProvider.dispatchEvent consumes the parsed shape.
+   */
+  markActionable(
+    deliveryId: string,
+    eventKind: string,
+    publicationId: string,
+    payloadJson: string,
+  ): Promise<void>;
+
+  /**
+   * Drain hot path. Selects rows where `payload_json IS NOT NULL AND
+   * processed_at IS NULL`, oldest first. Partial index keeps the scan cheap
+   * regardless of how many processed/dropped rows accumulate.
+   */
+  listUnprocessed(limit: number): Promise<readonly LinearActionableEvent[]>;
+
+  /**
+   * Successful drain → mark processed with the spawned session id. Does NOT
+   * delete: rows are GC'd by the 7-day retention sweep so that ops can
+   * inspect "what fired and when" via listByPublication.
+   */
+  markProcessed(
+    deliveryId: string,
+    sessionId: string,
+    processedAtMs: number,
+  ): Promise<void>;
+
+  /**
+   * Failed drain → mark processed with error_message. Same GC story as
+   * markProcessed.
+   */
+  markFailed(
+    deliveryId: string,
+    errorMessage: string,
+    processedAtMs: number,
+  ): Promise<void>;
+
+  /** Ops introspection. Returns actionable events for one publication. */
+  listByPublication(
+    publicationId: string,
+    limit: number,
+  ): Promise<readonly LinearActionableEvent[]>;
+}
+
 export interface SessionScopeRepo {
   getByScope(publicationId: string, scopeKey: string): Promise<SessionScope | null>;
   /**
@@ -290,23 +371,8 @@ export interface DispatchRuleRepo {
 }
 
 /**
- * Queue of webhook-triggered events awaiting async dispatch. Webhook
- * handler persists rows here; the cron sweep drains them on each tick.
+ * REMOVED: PendingEventRepo. The merged `linear_events` table folds the
+ * queue role into LinearEventStore (see above). Drain methods —
+ * markActionable / listUnprocessed / markProcessed / markFailed /
+ * listByPublication — moved there verbatim.
  */
-export interface PendingEventRepo {
-  insert(input: NewPendingEvent, nowMs: number): Promise<PendingEvent>;
-  /**
-   * Fetch up to `limit` unprocessed events, oldest first. Drain caller
-   * is responsible for calling delete (success) or markFailed (failure)
-   * per row.
-   */
-  listUnprocessed(limit: number): Promise<ReadonlyArray<PendingEvent>>;
-  /** Successful drain → delete the row outright (Linear is the system of
-   *  record; the dispatched user.message lives in the OMA session event log
-   *  from here on). Keeping processed rows would just bloat the table. */
-  delete(id: string): Promise<void>;
-  /** Failed drain → keep the row with error_message for ops audit. */
-  markFailed(id: string, errorMessage: string, processedAtMs: number): Promise<void>;
-  /** Ops introspection. */
-  listByPublication(publicationId: string, limit: number): Promise<ReadonlyArray<PendingEvent>>;
-}

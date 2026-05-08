@@ -5,8 +5,14 @@
 // `c.env`.
 
 export interface Env {
-  // Shared with apps/main — same database, additional tables for integrations.
+  // Control-plane DB — user / tenant / vault / session metadata. Shared
+  // with apps/main.
   AUTH_DB: D1Database;
+
+  // Integration subsystem DB — linear_* / github_* / slack_* tables.
+  // Separate D1 database from AUTH_DB. Schema in
+  // apps/main/migrations-integrations/.
+  INTEGRATIONS_DB: D1Database;
 
   // Service binding to the main worker for session creation / resume.
   MAIN: Fetcher;

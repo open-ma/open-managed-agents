@@ -32,6 +32,7 @@ import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
 import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
 import { memoryRetentionTick } from "./cron/memory-retention";
+import { webhookEventsRetentionTick } from "./cron/webhook-events-retention";
 import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { globalErrorHandler, requestMetricsMiddleware } from "./lib/observability";
 import { errorEnvelopeMiddleware } from "./lib/error-envelope";
@@ -233,6 +234,9 @@ export default {
     // The cron trigger is `* * * * *` (every minute); the tick gates by hour
     // + minute internally so we only do work once per day.
     ctx.waitUntil(memoryRetentionTick(env));
+    // Webhook events retention — daily at 04:00 UTC (offset from 03:00
+    // memory sweep so the two don't collide on D1 budget).
+    ctx.waitUntil(webhookEventsRetentionTick(env));
     // base_snapshot env-prep tick: REMOVED. Was a cron-driven poll over
     // building envs feeding the (also-removed) prep-tick endpoint. The
     // base_snapshot lazy-install path that came after it was reverted
