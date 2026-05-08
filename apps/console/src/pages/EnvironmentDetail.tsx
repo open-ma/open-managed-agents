@@ -212,16 +212,12 @@ export function EnvironmentDetail() {
             <span className="text-fg-subtle" aria-hidden="true">
               <GlobeIcon />
             </span>
-            {env.status && env.status !== "ready" && (
-              <StatusChip status={env.status} />
-            )}
+            {/* Status chip + build_error banner removed — env is stateless
+                post setup-on-warmup migration; status is always "ready"
+                (and the field is no longer surfaced on the wire). Package
+                install errors surface on the first session that uses the
+                env, not at env-creation time. */}
           </div>
-
-          {env.build_error && (
-            <div className="bg-danger-subtle border border-danger/30 rounded-md px-3 py-2 text-xs text-danger">
-              <span className="font-medium">Build error:</span> {env.build_error}
-            </div>
-          )}
 
           <div>
             <label className="block text-[13px] font-medium text-fg mb-1.5">
@@ -535,23 +531,6 @@ function IconButton({
     >
       {children}
     </button>
-  );
-}
-
-function StatusChip({ status }: { status: "building" | "error" | "ready" | string }) {
-  const tone =
-    status === "error"
-      ? "bg-danger-subtle text-danger"
-      : status === "building"
-        ? "bg-info-subtle text-info"
-        : "bg-bg-surface text-fg-muted";
-  return (
-    <span className={`text-[11px] px-2 py-0.5 rounded font-medium ${tone}`}>
-      {status === "building" && (
-        <span className="inline-block w-1.5 h-1.5 rounded-full bg-info animate-pulse mr-1.5 align-middle" />
-      )}
-      {status[0].toUpperCase() + status.slice(1)}
-    </span>
   );
 }
 
