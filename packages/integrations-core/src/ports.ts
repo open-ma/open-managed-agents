@@ -15,7 +15,6 @@ import type {
   GitHubAppRepo,
   InstallationRepo,
   IssueSessionRepo,
-  PendingEventRepo,
   PublicationRepo,
   SessionScopeRepo,
   SetupLinkRepo,
@@ -267,13 +266,14 @@ export interface Container {
   apps: AppRepo;
   /** GitHub-App credential storage. Populated when the github provider is wired. */
   githubApps: GitHubAppRepo;
+  /** Webhook dedup + audit. For Linear, the wire layer narrows this to
+   *  `LinearEventStore` (extends WebhookEventStore with the merged-table
+   *  drain queue methods); GitHub/Slack use the base interface. */
   webhookEvents: WebhookEventStore;
   /** Per-issue session reuse (Linear/GitHub). */
   issueSessions: IssueSessionRepo;
   /** Cron autopilot rules — Linear only for now. */
   dispatchRules: DispatchRuleRepo;
-  /** Async webhook event queue — drained by cron. */
-  pendingEvents: PendingEventRepo;
   /** Per-thread / per-channel session reuse (Slack). */
   sessionScopes: SessionScopeRepo;
   setupLinks: SetupLinkRepo;

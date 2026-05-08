@@ -14,6 +14,7 @@ import type {
   IntegrationProvider,
   InstallComplete,
   InstallStep,
+  LinearEventStore,
   McpScope,
   McpToolDescriptor,
   McpToolResult,
@@ -36,8 +37,12 @@ import {
 } from "./oauth/protocol";
 import { parseWebhook, type NormalizedWebhookEvent, type RawWebhookEnvelope } from "./webhook/parse";
 
-/** Subset of Container the LinearProvider depends on. */
-export interface LinearContainer extends Container {}
+/** Subset of Container the LinearProvider depends on. Narrows
+ *  `webhookEvents` to LinearEventStore — Linear's webhook table is the
+ *  merged `linear_events` table that also holds the async drain queue. */
+export interface LinearContainer extends Container {
+  webhookEvents: LinearEventStore;
+}
 
 const OAUTH_STATE_TTL_SECONDS = 30 * 60; // 30 min — covers slow OAuth UX
 const PROVIDER_ID: ProviderId = "linear";
@@ -645,17 +650,14 @@ export class LinearProvider implements IntegrationProvider {
       }
     }
 
-    const persisted = await this.container.pendingEvents.insert(
-      {
-        tenantId: publication.tenantId,
-        publicationId: publication.id,
-        eventKind: event.kind ?? "unknown",
-        issueId: event.issueId,
-        issueIdentifier: event.issueIdentifier,
-        workspaceId: event.workspaceId || null,
-        payload: JSON.stringify(event),
-      },
-      this.container.clock.nowMs(),
+    // Promote the deduped row from "audit-only" into the drain queue by
+    // setting payload + event_kind + publication_id. Drain picks it up on
+    // the next cron tick.
+    await this.container.webhookEvents.markActionable(
+      req.deliveryId,
+      event.kind ?? "unknown",
+      publication.id,
+      JSON.stringify(event),
     );
 
     return {
@@ -663,7 +665,9 @@ export class LinearProvider implements IntegrationProvider {
       reason: `${routingReason}_queued`,
       publicationId: publication.id,
       // No sessionId yet — created by the drain. Caller logs this as null.
-      sessionId: persisted.id,
+      // We surface deliveryId so that ops can grep linear_events for the
+      // queue row.
+      sessionId: req.deliveryId,
       tenantId: installation.tenantId,
     };
   }
@@ -1138,26 +1142,32 @@ export class LinearProvider implements IntegrationProvider {
   // ─── Cron sweep + queue drain ─────────────────────────────────
 
   /**
-   * Drain the pending_events queue. Each event is parsed back into a
+   * Drain the linear_events queue (rows where payload_json IS NOT NULL AND
+   * processed_at IS NULL). Each event is parsed back into a
    * NormalizedWebhookEvent and processed via dispatchEvent. Per-event
    * failures are caught so one bad row doesn't poison the whole tick.
    *
    * `limit` caps work per tick to share cron CPU with runDispatchSweep.
+   *
+   * Successful + failed rows both get processed_at set (markProcessed /
+   * markFailed); they then sit in the table until the 7-day retention
+   * sweep GCs them. Operators can grep linear_events by delivery_id for
+   * historical debug.
    */
   async drainPendingEvents(nowMs: number, limit = 25): Promise<{
     drainedEvents: number;
     succeeded: number;
     failed: number;
   }> {
-    const rows = await this.container.pendingEvents.listUnprocessed(limit);
+    const rows = await this.container.webhookEvents.listUnprocessed(limit);
     let succeeded = 0;
     let failed = 0;
     for (const row of rows) {
       try {
         const publication = await this.container.publications.get(row.publicationId);
         if (!publication || publication.status !== "live") {
-          await this.container.pendingEvents.markFailed(
-            row.id,
+          await this.container.webhookEvents.markFailed(
+            row.deliveryId,
             "publication not found or not live",
             nowMs,
           );
@@ -1165,21 +1175,26 @@ export class LinearProvider implements IntegrationProvider {
           continue;
         }
         const event = JSON.parse(row.payload) as NormalizedWebhookEvent;
-        await this.dispatchEvent(publication, event);
-        // Linear stays the source of truth for issue state. Once dispatched
-        // (the user.message is in the OMA session event log) we have no
-        // reason to keep this row around. Drop it.
-        await this.container.pendingEvents.delete(row.id);
+        const sessionId = await this.dispatchEvent(publication, event);
+        // Linear stays the source of truth for issue state. Mark the row
+        // processed with the spawned session id; 7-day retention sweep GCs
+        // it later. Keeping it lets ops grep linear_events by delivery_id
+        // for "what happened to this webhook" debugging.
+        await this.container.webhookEvents.markProcessed(
+          row.deliveryId,
+          sessionId,
+          nowMs,
+        );
         succeeded++;
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         try {
-          await this.container.pendingEvents.markFailed(row.id, msg, nowMs);
+          await this.container.webhookEvents.markFailed(row.deliveryId, msg, nowMs);
         } catch {
           // best-effort
         }
         failed++;
-        console.warn(`[linear-drain] event=${row.id} kind=${row.eventKind} err=${msg}`);
+        console.warn(`[linear-drain] delivery=${row.deliveryId} kind=${row.eventKind} err=${msg}`);
       }
     }
     return { drainedEvents: rows.length, succeeded, failed };
