@@ -293,16 +293,42 @@ export function SessionDetail() {
 
     // Load history. The /events endpoint wraps each event as { seq, type, ts,
     // data }; promote seq + ts onto the inner event so timeline has them.
-    api<{ data: Array<{ seq?: number; type: string; ts?: string; data: Event }> }>(`/v1/sessions/${id}/events?limit=1000&order=asc`)
-      .then((res) => {
-        for (const e of res.data) {
-          const inner = e.data || (e as unknown as Event);
-          if (e.ts && !inner.ts) inner.ts = e.ts;
-          if (e.seq !== undefined && inner.seq === undefined) inner.seq = e.seq;
-          addEvent(inner);
+    // Paginate ASC from seq 0 in pages of 200 — long sessions stream older
+    // events progressively rather than blocking the UI on a single 1000-row
+    // payload (the legacy `limit=1000` would also silently truncate at the
+    // hard ceiling for ultra-long histories). Each page is added as it
+    // arrives, so the timeline starts populating after the first roundtrip.
+    void (async () => {
+      let afterSeq = 0;
+      const pageLimit = 200;
+      // Bound the loop so a malformed `next_page` never spins forever.
+      // Even at 200/page this covers 100k events, well past anything the
+      // sandbox SQL store retains in practice.
+      for (let i = 0; i < 500; i++) {
+        try {
+          const res = await api<{
+            data: Array<{ seq?: number; type: string; ts?: string; data: Event }>;
+            has_more?: boolean;
+            next_page?: string | null;
+          }>(`/v1/sessions/${id}/events?limit=${pageLimit}&order=asc&after_seq=${afterSeq}`);
+          for (const e of res.data) {
+            const inner = e.data || (e as unknown as Event);
+            if (e.ts && !inner.ts) inner.ts = e.ts;
+            if (e.seq !== undefined && inner.seq === undefined) inner.seq = e.seq;
+            addEvent(inner);
+          }
+          if (!res.has_more || !res.next_page) break;
+          // next_page is "seq_<n>" per session-do.ts:1568.
+          const m = /^seq_(\d+)$/.exec(res.next_page);
+          if (!m) break;
+          const nextAfter = parseInt(m[1], 10);
+          if (!Number.isFinite(nextAfter) || nextAfter <= afterSeq) break;
+          afterSeq = nextAfter;
+        } catch {
+          break;
         }
-      })
-      .catch(() => {});
+      }
+    })();
 
     // Connect SSE
     const abort = new AbortController();

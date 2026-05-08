@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
 import { Button } from "../components/Button";
+import { Select, SelectOption } from "../components/Select";
 import { useToast } from "../components/Toast";
 
 // =================================================================
@@ -240,19 +241,20 @@ export function EnvironmentDetail() {
         >
           <div className="space-y-4">
             <Field label="Type">
-              <select
-                value={networking.type}
-                onChange={(e) =>
-                  setNetworking({
-                    ...networking,
-                    type: e.target.value as NetworkingConfig["type"],
-                  })
-                }
-                className="border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors w-48"
-              >
-                <option value="unrestricted">Unrestricted</option>
-                <option value="limited">Limited</option>
-              </select>
+              <div className="w-48">
+                <Select
+                  value={networking.type}
+                  onValueChange={(v) =>
+                    setNetworking({
+                      ...networking,
+                      type: v as NetworkingConfig["type"],
+                    })
+                  }
+                >
+                  <SelectOption value="unrestricted">Unrestricted</SelectOption>
+                  <SelectOption value="limited">Limited</SelectOption>
+                </Select>
+              </div>
             </Field>
 
             <Toggle
@@ -310,21 +312,22 @@ export function EnvironmentDetail() {
             <div className="space-y-2">
               {packageRows.map((row, i) => (
                 <div key={i} className="flex items-center gap-2">
-                  <select
-                    value={row.manager}
-                    onChange={(e) =>
-                      setPackageRows((rows) =>
-                        rows.map((r, j) =>
-                          j === i ? { ...r, manager: e.target.value as Manager } : r,
-                        ),
-                      )
-                    }
-                    className="border border-border rounded-md px-2.5 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors w-24 shrink-0"
-                  >
-                    {MANAGERS.map((m) => (
-                      <option key={m} value={m}>{m}</option>
-                    ))}
-                  </select>
+                  <div className="w-24 shrink-0">
+                    <Select
+                      value={row.manager}
+                      onValueChange={(v) =>
+                        setPackageRows((rows) =>
+                          rows.map((r, j) =>
+                            j === i ? { ...r, manager: v as Manager } : r,
+                          ),
+                        )
+                      }
+                    >
+                      {MANAGERS.map((m) => (
+                        <SelectOption key={m} value={m}>{m}</SelectOption>
+                      ))}
+                    </Select>
+                  </div>
                   <input
                     value={row.packages}
                     onChange={(e) =>

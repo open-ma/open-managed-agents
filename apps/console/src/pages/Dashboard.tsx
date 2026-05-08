@@ -10,8 +10,8 @@ interface Stats {
   environments: number;
   vaults: number;
   skills: number;
-  modelCards: number;
-  apiKeys: number;
+  model_cards: number;
+  api_keys: number;
 }
 
 interface RecentSession {
@@ -35,24 +35,14 @@ export function Dashboard() {
   useEffect(() => {
     (async () => {
       try {
-        const [agents, sessions, envs, vaults, skills, cards, keys] = await Promise.all([
-          api<{ data: unknown[] }>("/v1/agents?limit=1000").catch(() => ({ data: [] })),
+        // Headline cards: one /v1/stats roundtrip (server-side COUNT(*)
+        // per resource, all on covering tenant indexes). Recent sessions
+        // panel needs row data so it stays a list call, capped at 5.
+        const [stats, sessions] = await Promise.all([
+          api<Stats>("/v1/stats").catch(() => null),
           api<{ data: RecentSession[] }>("/v1/sessions?limit=5").catch(() => ({ data: [] })),
-          api<{ data: unknown[] }>("/v1/environments").catch(() => ({ data: [] })),
-          api<{ data: unknown[] }>("/v1/vaults").catch(() => ({ data: [] })),
-          api<{ data: unknown[] }>("/v1/skills?source=custom").catch(() => ({ data: [] })),
-          api<{ data: unknown[] }>("/v1/model_cards").catch(() => ({ data: [] })),
-          api<{ data: unknown[] }>("/v1/api_keys").catch(() => ({ data: [] })),
         ]);
-        setStats({
-          agents: agents.data.length,
-          sessions: sessions.data.length,
-          environments: envs.data.length,
-          vaults: vaults.data.length,
-          skills: skills.data.length,
-          modelCards: cards.data.length,
-          apiKeys: keys.data.length,
-        });
+        if (stats) setStats(stats);
         setRecentSessions(sessions.data.slice(0, 5));
       } catch {}
       setLoading(false);
@@ -87,7 +77,7 @@ export function Dashboard() {
     { label: "Environments", value: stats?.environments, to: "/environments" },
     { label: "Vaults", value: stats?.vaults, to: "/vaults" },
     { label: "Skills", value: stats?.skills, to: "/skills" },
-    { label: "Model Cards", value: stats?.modelCards, to: "/model-cards" },
+    { label: "Model Cards", value: stats?.model_cards, to: "/model-cards" },
   ];
 
   const statusCls = (s: string) => {

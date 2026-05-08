@@ -26,6 +26,7 @@ import {
   EnvironmentNotFoundError,
 } from "@open-managed-agents/environments-store";
 import { jsonPage, parsePageQuery } from "../lib/list-page";
+import { validateEnvironmentLimits } from "../lib/limits";
 
 const app = new Hono<{
   Bindings: Env;
@@ -43,6 +44,13 @@ app.post("/", async (c) => {
 
   if (!body.name) {
     return c.json({ error: "name is required" }, 400);
+  }
+
+  // Field-size caps (Anthropic-aligned for shared fields; OMA-specific
+  // for config.dockerfile / config.packages). See lib/limits.ts.
+  const limitCheck = validateEnvironmentLimits(body);
+  if (!limitCheck.ok) {
+    return c.json({ error: limitCheck.error }, 400);
   }
 
   const row = await c.var.services.environments.create({
@@ -92,6 +100,13 @@ app.on(["PUT", "POST"], "/:id", async (c) => {
     config?: EnvironmentConfig["config"];
     metadata?: Record<string, unknown>;
   };
+
+  // Field-size caps (Anthropic-aligned for shared fields; OMA-specific
+  // for config.dockerfile / config.packages). See lib/limits.ts.
+  const limitCheck = validateEnvironmentLimits(body);
+  if (!limitCheck.ok) {
+    return c.json({ error: limitCheck.error }, 400);
+  }
 
   const patch: Parameters<typeof c.var.services.environments.update>[0] = {
     tenantId: t,

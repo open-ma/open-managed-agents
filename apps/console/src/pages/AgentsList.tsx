@@ -3,6 +3,8 @@ import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { ListPage } from "../components/ListPage";
+import { Select, SelectOption, SelectGroup, SelectGroupLabel } from "../components/Select";
+import { Combobox } from "../components/Combobox";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
@@ -519,27 +521,32 @@ export function AgentsList() {
                     ) : (
                       <div>
                         <label className="text-sm text-fg-muted block mb-1">Model</label>
-                        <select
+                        <Combobox<ModelCard>
                           value={selectedCardId}
-                          onChange={(e) => {
-                            const cardId = e.target.value;
-                            const card = modelCards.find((mc) => mc.id === cardId);
-                            setForm({ ...form, modelCardId: cardId, model: card?.model_id ?? "" });
+                          onValueChange={(v, item) => {
+                            setForm({ ...form, modelCardId: v, model: item?.model_id ?? v });
                           }}
-                          className={inputCls}
-                        >
-                          {/* Paste-mode: form.model came from YAML/JSON but doesn't
-                              match any card. Surface the mismatch instead of silently
-                              showing the first card as if it were chosen. */}
-                          {!selectedCardId && form.model && (
-                            <option value="">⚠ {form.model} — no matching card, pick one</option>
+                          endpoint="/v1/model_cards"
+                          getValue={(mc) => mc.id}
+                          getLabel={(mc) => (
+                            <span>
+                              {mc.is_default ? "★ " : ""}{mc.model_id}
+                              {mc.model !== mc.model_id && (
+                                <span className="text-fg-subtle text-[12px]"> ({mc.model})</span>
+                              )}
+                            </span>
                           )}
-                          {modelCards.map((mc) => (
-                            <option key={mc.id} value={mc.id}>
-                              {mc.is_default ? "★ " : ""}{mc.model_id}{mc.model !== mc.model_id ? ` (${mc.model})` : ""}
-                            </option>
-                          ))}
-                        </select>
+                          getTextLabel={(mc) =>
+                            `${mc.is_default ? "★ " : ""}${mc.model_id}${
+                              mc.model !== mc.model_id ? ` (${mc.model})` : ""
+                            }`
+                          }
+                          placeholder={
+                            !selectedCardId && form.model
+                              ? `⚠ ${form.model} — no matching card, pick one`
+                              : "Select a model card..."
+                          }
+                        />
                       </div>
                     )
                   )}
@@ -572,10 +579,10 @@ export function AgentsList() {
                       </p>
                     ) : (
                       <>
-                        <select
-                          value={form.runtimeId}
-                          onChange={(e) => {
-                            const rid = e.target.value;
+                        <Select
+                          value={form.runtimeId || "__cloud__"}
+                          onValueChange={(v) => {
+                            const rid = v === "__cloud__" ? "" : v;
                             // Auto-pick the first detected ACP agent on the
                             // chosen runtime — user doesn't have to know what
                             // strings the daemon's manifest emits. Falls back
@@ -588,15 +595,15 @@ export function AgentsList() {
                               acpAgentId: rid && first ? first : form.acpAgentId,
                             });
                           }}
-                          className={inputCls}
+                          placeholder="— Cloud (run on OMA) —"
                         >
-                          <option value="">— Cloud (run on OMA) —</option>
+                          <SelectOption value="__cloud__">— Cloud (run on OMA) —</SelectOption>
                           {runtimes.map((r) => (
-                            <option key={r.id} value={r.id} disabled={r.status !== "online"}>
+                            <SelectOption key={r.id} value={r.id} disabled={r.status !== "online"}>
                               {r.hostname} ({r.status}{r.status === "online" && r.agents.length ? ` · ${r.agents.length} agents` : ""})
-                            </option>
+                            </SelectOption>
                           ))}
-                        </select>
+                        </Select>
                         {form.runtimeId && (
                           <div className="mt-2">
                             <label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</label>
@@ -617,26 +624,27 @@ export function AgentsList() {
                               const otherDetected = detectedAgents.filter((a) => !featuredIds.has(a.id));
                               return (
                                 <>
-                                  <select
+                                  <Select
                                     value={form.acpAgentId}
-                                    onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
-                                    className={inputCls}
+                                    onValueChange={(v) => setForm({ ...form, acpAgentId: v, localSkillBlocklist: [] })}
                                   >
                                     {featuredDetected.length > 0 && (
-                                      <optgroup label="★ Featured">
+                                      <SelectGroup>
+                                        <SelectGroupLabel>★ Featured</SelectGroupLabel>
                                         {featuredDetected.map((a) => (
-                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                          <SelectOption key={a.id} value={a.id}>{a.id}</SelectOption>
                                         ))}
-                                      </optgroup>
+                                      </SelectGroup>
                                     )}
                                     {otherDetected.length > 0 && (
-                                      <optgroup label="Other detected on this runtime">
+                                      <SelectGroup>
+                                        <SelectGroupLabel>Other detected on this runtime</SelectGroupLabel>
                                         {otherDetected.map((a) => (
-                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                          <SelectOption key={a.id} value={a.id}>{a.id}</SelectOption>
                                         ))}
-                                      </optgroup>
+                                      </SelectGroup>
                                     )}
-                                  </select>
+                                  </Select>
                                 </>
                               );
                             })()}
@@ -790,10 +798,10 @@ export function AgentsList() {
                         </div>
                         <div className="w-24">
                           <label className="text-xs text-fg-muted block mb-0.5">Type</label>
-                          <select value={mcp.type} onChange={(e) => updateMcp(i, "type", e.target.value)} className={inputCls}>
-                            <option>sse</option>
-                            <option>stdio</option>
-                          </select>
+                          <Select value={mcp.type} onValueChange={(v) => updateMcp(i, "type", v)}>
+                            <SelectOption value="sse">sse</SelectOption>
+                            <SelectOption value="stdio">stdio</SelectOption>
+                          </Select>
                         </div>
                         <button onClick={() => removeMcp(i)} className="self-end px-2 py-2 text-fg-subtle hover:text-danger transition-colors">×</button>
                       </div>
@@ -833,12 +841,20 @@ export function AgentsList() {
 
                   <div>
                     <label className="text-xs text-fg-muted block mb-1">Add agent</label>
-                    <select onChange={(e) => { if (e.target.value) addCallable(e.target.value); e.target.value = ""; }} className={inputCls}>
-                      <option value="">Select an agent...</option>
-                      {allAgents
-                        .filter(a => !form.callableAgents.find(c => c.id === a.id))
-                        .map(a => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
-                    </select>
+                    <Combobox<Agent>
+                      value=""
+                      onValueChange={(v) => { if (v) addCallable(v); }}
+                      endpoint="/v1/agents"
+                      getValue={(a) => a.id}
+                      getLabel={(a) => (
+                        <span>
+                          {a.name} <span className="text-fg-subtle text-[12px]">({a.id})</span>
+                        </span>
+                      )}
+                      getTextLabel={(a) => `${a.name} (${a.id})`}
+                      placeholder="Select an agent..."
+                      excludeIds={form.callableAgents.map((c) => c.id)}
+                    />
                   </div>
 
                   {form.callableAgents.length === 0 && allAgents.length === 0 && (

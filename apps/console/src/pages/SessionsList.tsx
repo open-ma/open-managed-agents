@@ -4,6 +4,8 @@ import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { Select, SelectOption } from "../components/Select";
+import { Combobox } from "../components/Combobox";
 import { ListPage } from "../components/ListPage";
 
 interface Session {
@@ -79,6 +81,14 @@ export function SessionsList() {
     // don't run a sandbox container so there's nothing to pick.
     runtime_binding?: { runtime_id: string; acp_agent_id: string };
   }>>([]);
+  // Set by the agent Combobox when the user picks an agent. Carries the
+  // full row so we can read `runtime_binding` without keeping every agent
+  // preloaded in `agents[]`.
+  const [selectedAgentDetail, setSelectedAgentDetail] = useState<{
+    id: string;
+    name: string;
+    runtime_binding?: { runtime_id: string; acp_agent_id: string };
+  } | null>(null);
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [, setAuxLoading] = useState(true);
@@ -143,7 +153,11 @@ export function SessionsList() {
   // Computed: which agent is selected, and is it bound to a local runtime?
   // The Environment picker, the Create-button enable condition, and the
   // request body all key off this single source of truth.
-  const selectedAgent = agents.find((a) => a.id === form.agent);
+  // `selectedAgentDetail` is set by the Combobox onValueChange when the
+  // user picks an agent (gives us the full row including runtime_binding).
+  // Falls back to `agents.find` for the legacy preload path while it lasts.
+  const selectedAgent =
+    selectedAgentDetail ?? agents.find((a) => a.id === form.agent);
   const isLocalRuntime = !!selectedAgent?.runtime_binding;
 
   const create = async () => {
@@ -234,16 +248,34 @@ export function SessionsList() {
   // Currently unused after refresh-on-create kicks off via refreshSessions.
   void refreshSessions;
 
-  const agentFilter = agents.length > 0 ? (
-    <select
-      value={filterAgent}
-      onChange={(e) => setFilterAgent(e.target.value)}
-      className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg focus:border-brand focus:outline-none transition-colors"
-    >
-      <option value="">Agent: All</option>
-      {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-    </select>
-  ) : null;
+  // Agent filter — Combobox over /v1/agents with server-side q + infinite
+  // scroll. Empty `filterAgent` = unfiltered. Always render (Combobox
+  // self-loads); a small × inside the trigger clears the filter.
+  const agentFilter = (
+    <div className="inline-flex items-center gap-1">
+      <div className="w-56">
+        <Combobox<{ id: string; name: string }>
+          value={filterAgent}
+          onValueChange={(v) => setFilterAgent(v)}
+          endpoint="/v1/agents"
+          getValue={(a) => a.id}
+          getLabel={(a) => a.name}
+          getTextLabel={(a) => a.name}
+          placeholder="Agent: All"
+        />
+      </div>
+      {filterAgent && (
+        <button
+          type="button"
+          onClick={() => setFilterAgent("")}
+          aria-label="Clear agent filter"
+          className="text-fg-subtle hover:text-fg text-xs px-1.5 py-1 rounded hover:bg-bg-surface transition-colors"
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
 
   return (
     <ListPage<Session>
@@ -333,10 +365,26 @@ export function SessionsList() {
               <label className="text-sm text-fg-muted">Agent</label>
               <a href="/agents" className="text-xs text-brand hover:underline">Manage agents →</a>
             </div>
-            <select value={form.agent} onChange={(e) => setForm({ ...form, agent: e.target.value })} className={inputCls}>
-              <option value="">Select agent...</option>
-              {agents.map((a) => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
-            </select>
+            <Combobox<{
+              id: string;
+              name: string;
+              runtime_binding?: { runtime_id: string; acp_agent_id: string };
+            }>
+              value={form.agent}
+              onValueChange={(v, item) => {
+                setForm({ ...form, agent: v });
+                if (item) setSelectedAgentDetail(item);
+              }}
+              endpoint="/v1/agents"
+              getValue={(a) => a.id}
+              getLabel={(a) => (
+                <span>
+                  {a.name} <span className="text-fg-subtle text-[12px]">({a.id})</span>
+                </span>
+              )}
+              getTextLabel={(a) => `${a.name} (${a.id})`}
+              placeholder="Select agent..."
+            />
           </div>
           {/* Environment picker is for cloud sandbox lanes — local-runtime
               agents (acp-proxy harness) run on the user's daemon and
@@ -349,10 +397,19 @@ export function SessionsList() {
                 <label className="text-sm text-fg-muted">Environment</label>
                 <a href="/environments" className="text-xs text-brand hover:underline">Manage environments →</a>
               </div>
-              <select value={form.environment_id} onChange={(e) => setForm({ ...form, environment_id: e.target.value })} className={inputCls}>
-                <option value="">Select environment...</option>
-                {envs.map((e) => <option key={e.id} value={e.id}>{e.name} ({e.id})</option>)}
-              </select>
+              <Combobox<{ id: string; name: string }>
+                value={form.environment_id}
+                onValueChange={(v) => setForm({ ...form, environment_id: v })}
+                endpoint="/v1/environments"
+                getValue={(e) => e.id}
+                getLabel={(e) => (
+                  <span>
+                    {e.name} <span className="text-fg-subtle text-[12px]">({e.id})</span>
+                  </span>
+                )}
+                getTextLabel={(e) => `${e.name} (${e.id})`}
+                placeholder="Select environment..."
+              />
             </div>
           )}
           {isLocalRuntime && (
