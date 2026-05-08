@@ -28,22 +28,59 @@ function formatAgent(agent: AgentConfig) {
     ? { id: agent.model || "", speed: "standard" as const }
     : { id: agent.model.id, speed: agent.model.speed || "standard" as const };
 
+  // Group OMA-only fields under `_oma:` so the AMA-shape envelope stays
+  // strictly Anthropic-compatible. AMA SDK consumers ignore _oma; OMA
+  // consumers (Console, oma CLI) read it for the platform extensions.
+  const oma: Record<string, unknown> = {};
+  if (agent.aux_model) {
+    oma.aux_model = typeof agent.aux_model === "string"
+      ? { id: agent.aux_model, speed: "standard" as const }
+      : { id: agent.aux_model.id, speed: agent.aux_model.speed || "standard" as const };
+  }
+  if (agent.harness) oma.harness = agent.harness;
+  if (agent.runtime_binding) oma.runtime_binding = agent.runtime_binding;
+  if (agent.appendable_prompts && agent.appendable_prompts.length > 0) {
+    oma.appendable_prompts = agent.appendable_prompts;
+  }
+
+  // AMA shape: `multiagent: {type:"coordinator", agents:[...]} | null`.
+  // Resolved roster — entries always carry a concrete `version`. We default
+  // to 1 when the stored entry lacks one (older rows pre-versioning).
+  const callable = agent.callable_agents ?? [];
+  const multiagent = callable.length > 0
+    ? {
+        type: "coordinator" as const,
+        agents: callable.map((c) => ({
+          type: "agent" as const,
+          id: c.id,
+          version: c.version ?? 1,
+        })),
+      }
+    : null;
+
+  // Strip OMA-only + internal-shape keys from the spread so they only
+  // surface under their wire-canonical names (_oma / multiagent).
+  const {
+    aux_model: _aux,
+    harness: _harness,
+    runtime_binding: _rb,
+    appendable_prompts: _ap,
+    callable_agents: _ca,
+    ...rest
+  } = agent;
+
   return {
     type: "agent" as const,
-    ...agent,
+    ...rest,
     model,
     system: agent.system || null,
     description: agent.description || null,
     skills: agent.skills || [],
     mcp_servers: agent.mcp_servers || [],
-    callable_agents: agent.callable_agents || [],
-    aux_model: agent.aux_model
-      ? (typeof agent.aux_model === "string"
-          ? { id: agent.aux_model, speed: "standard" as const }
-          : { id: agent.aux_model.id, speed: agent.aux_model.speed || "standard" as const })
-      : null,
+    multiagent,
     metadata: agent.metadata || {},
     archived_at: agent.archived_at || null,
+    ...(Object.keys(oma).length > 0 ? { _oma: oma } : {}),
   };
 }
 
@@ -83,22 +120,82 @@ async function validateModel(
   return { valid: true };
 }
 
+/** AMA-shape multiagent input → internal `callable_agents` array.
+ *
+ *  Roster entries accept three forms (per AMA `MultiagentRosterEntryParams`):
+ *    - bare string: agent id, version defaults to 1
+ *    - `{type:"agent", id, version?}`: explicit ref
+ *    - `{type:"self"}`: 501 for now — needs the parent agent's id which we
+ *      don't have at create time without an extra round-trip
+ *
+ *  Returns `{ list, error }`. `error` non-null means the request should be
+ *  rejected with 422; `list` is the normalized internal shape. */
+function multiagentToCallableAgents(
+  multiagent: unknown,
+): { list: AgentConfig["callable_agents"]; error?: string } {
+  if (multiagent === null || multiagent === undefined) return { list: undefined };
+  if (typeof multiagent !== "object") return { list: [], error: "multiagent must be an object" };
+  const m = multiagent as { type?: string; agents?: unknown };
+  if (m.type !== "coordinator") {
+    return { list: [], error: `multiagent.type must be "coordinator"` };
+  }
+  if (!Array.isArray(m.agents)) {
+    return { list: [], error: "multiagent.agents must be an array" };
+  }
+  const out: NonNullable<AgentConfig["callable_agents"]> = [];
+  for (const entry of m.agents) {
+    if (typeof entry === "string") {
+      out.push({ type: "agent", id: entry, version: 1 });
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const e = entry as { type?: string; id?: string; version?: number };
+      if (e.type === "self") {
+        return { list: [], error: `multiagent.agents: {"type":"self"} is not yet supported` };
+      }
+      if (e.type === "agent" && typeof e.id === "string") {
+        out.push({ type: "agent", id: e.id, version: typeof e.version === "number" ? e.version : 1 });
+        continue;
+      }
+    }
+    return { list: [], error: `multiagent.agents: invalid roster entry ${JSON.stringify(entry)}` };
+  }
+  return { list: out };
+}
+
 // POST /v1/agents — create agent
 app.post("/", async (c) => {
-  const body = await c.req.json<{
+  const raw = await c.req.json<{
     name: string;
     model: string | { id: string; speed?: "standard" | "fast" };
     system?: string;
     tools?: AgentConfig["tools"];
-    harness?: string;
     description?: string;
     mcp_servers?: AgentConfig["mcp_servers"];
     skills?: AgentConfig["skills"];
-    callable_agents?: AgentConfig["callable_agents"];
+    multiagent?: { type: "coordinator"; agents: unknown[] } | null;
     metadata?: Record<string, unknown>;
-    aux_model?: string | { id: string; speed?: "standard" | "fast" };
-    runtime_binding?: AgentConfig["runtime_binding"];
+    _oma?: {
+      aux_model?: string | { id: string; speed?: "standard" | "fast" };
+      harness?: string;
+      runtime_binding?: AgentConfig["runtime_binding"];
+      appendable_prompts?: string[];
+    };
   }>();
+
+  const ma = multiagentToCallableAgents(raw.multiagent);
+  if (ma.error) return c.json({ error: ma.error }, 422);
+
+  // Lift `_oma:` extensions and normalized multiagent onto a flat `body`
+  // for the rest of this handler — keeps validate / store paths uniform.
+  const body = {
+    ...raw,
+    callable_agents: ma.list,
+    aux_model: raw._oma?.aux_model,
+    harness: raw._oma?.harness,
+    runtime_binding: raw._oma?.runtime_binding,
+    appendable_prompts: raw._oma?.appendable_prompts,
+  };
 
   // `model` is required for cloud agents (it picks which model_card the
   // SessionDO loop talks to) but meaningless for local-runtime agents
@@ -154,6 +251,7 @@ app.post("/", async (c) => {
       callable_agents: body.callable_agents,
       metadata: body.metadata,
       aux_model: body.aux_model,
+      appendable_prompts: body.appendable_prompts,
       runtime_binding: body.runtime_binding,
     },
   });
@@ -191,20 +289,45 @@ const updateAgent = async (c: any) => {
   const existing = await c.var.services.agents.get({ tenantId: t, agentId: id });
   if (!existing) return c.json({ error: "Agent not found" }, 404);
 
-  const body = await c.req.json() as {
+  const raw = await c.req.json() as {
     name?: string;
     model?: string | { id: string; speed?: "standard" | "fast" };
     system?: string | null;
     tools?: AgentConfig["tools"];
-    harness?: string;
     description?: string | null;
     mcp_servers?: AgentConfig["mcp_servers"] | null;
     skills?: AgentConfig["skills"] | null;
-    callable_agents?: AgentConfig["callable_agents"] | null;
-    aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
+    multiagent?: { type: "coordinator"; agents: unknown[] } | null;
     metadata?: Record<string, unknown>;
     version?: number;
-    runtime_binding?: AgentConfig["runtime_binding"] | null;
+    _oma?: {
+      aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
+      harness?: string;
+      runtime_binding?: AgentConfig["runtime_binding"] | null;
+      appendable_prompts?: string[] | null;
+    };
+  };
+
+  // null on update = clear (drops the roster). undefined = leave alone.
+  let callableAgents: AgentConfig["callable_agents"] | null | undefined;
+  if (raw.multiagent === null) {
+    callableAgents = null;
+  } else if (raw.multiagent !== undefined) {
+    const ma = multiagentToCallableAgents(raw.multiagent);
+    if (ma.error) return c.json({ error: ma.error }, 422);
+    callableAgents = ma.list;
+  }
+
+  // Lift `_oma:` extensions and normalized multiagent onto a flat `body`
+  // for the rest of this handler — keeps validate / store paths uniform
+  // with the POST handler.
+  const body = {
+    ...raw,
+    callable_agents: callableAgents,
+    aux_model: raw._oma?.aux_model,
+    harness: raw._oma?.harness,
+    runtime_binding: raw._oma?.runtime_binding,
+    appendable_prompts: raw._oma?.appendable_prompts,
   };
 
   // Effective runtime_binding after the patch — explicit null means the
@@ -256,6 +379,7 @@ const updateAgent = async (c: any) => {
         callable_agents: body.callable_agents,
         metadata: body.metadata,
         aux_model: body.aux_model,
+        appendable_prompts: body.appendable_prompts,
         runtime_binding: body.runtime_binding,
       },
     });
