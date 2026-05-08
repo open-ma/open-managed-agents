@@ -20,11 +20,11 @@ export { D1GitHubAppRepo } from "./d1/github-app-repo";
 // GitHub adapters — parallel to Linear's, separate github_* tables.
 export { D1GitHubInstallationRepo } from "./d1/github/installation-repo";
 export { D1GitHubPublicationRepo } from "./d1/github/publication-repo";
-export { D1WebhookEventStore } from "./d1/webhook-event-store";
+export { D1GitHubWebhookEventStore } from "./d1/github/webhook-event-store";
+export { D1LinearEventStore } from "./d1/linear-event-store";
 export { D1IssueSessionRepo } from "./d1/issue-session-repo";
 export { D1SetupLinkRepo } from "./d1/setup-link-repo";
 export { D1DispatchRuleRepo } from "./d1/dispatch-rule-repo";
-export { D1PendingEventRepo } from "./d1/pending-event-repo";
 export { D1TenantResolver } from "./d1/tenant-resolver";
 // Slack adapters — parallel to Linear's, separate slack_* tables.
 export { D1SlackAppRepo } from "./d1/slack/app-repo";
