@@ -167,10 +167,10 @@ describe("Agent CRUD", () => {
     const res = await api("/v1/agents", {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ name: "Custom", model: "claude-sonnet-4-6", harness: "coding" }),
+      body: JSON.stringify({ name: "Custom", model: "claude-sonnet-4-6", _oma: { harness: "coding" } }),
     });
     const agent = (await res.json()) as any;
-    expect(agent.harness).toBe("coding");
+    expect(agent._oma.harness).toBe("coding");
   });
 
   it("stores selective tool config", async () => {
@@ -305,7 +305,7 @@ describe("Session CRUD", () => {
     const statusRes = await getDoStatus(session.id);
     const status = (await statusRes.json()) as any;
     expect(status.status).toBe("idle");
-    expect(status.agent_id).toBe(session.agent_id);
+    expect(status.agent_id).toBe(session.agent.id);
   });
 
   it("rejects session with nonexistent agent", async () => {
@@ -351,7 +351,7 @@ describe("Session CRUD", () => {
     expect(getRes.status).toBe(200);
     const body = (await getRes.json()) as any;
     expect(body.agent).toBeDefined();
-    expect(body.agent.id).toBe(session.agent_id);
+    expect(body.agent.id).toBe(session.agent.id);
     expect(body.agent.model).toBeTruthy();
     // agent_snapshot should not leak in response
     expect(body.agent_snapshot).toBeUndefined();
@@ -381,7 +381,8 @@ describe("Event posting", () => {
     });
     expect(res.status).toBe(400);
     const body = (await res.json()) as any;
-    expect(body.error).toContain("Unsupported");
+    // Canonical Anthropic envelope: error object, not bare string.
+    expect(body.error?.message ?? body.error).toContain("Unsupported");
   });
 
   it("rejects empty events array", async () => {

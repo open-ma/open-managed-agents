@@ -29,13 +29,23 @@ interface SkillFileEntry {
 }
 
 interface SkillMeta {
+  /** Always `"skill"` on the wire — Anthropic SDK uses this discriminator
+   *  (BetaSkill schema requires it). Optional in storage so legacy KV rows
+   *  without the field still parse. */
+  type?: "skill";
   id: string;
   display_title: string;
   name: string;
   description: string;
-  source: "custom" | "builtin";
+  /** "custom" for user-defined skills, "anthropic" for the built-in catalog.
+   *  Anthropic SDK uses these enum values. Older OMA storage used `"builtin"`;
+   *  toApiSkill() normalizes both forms on output. */
+  source: "custom" | "anthropic" | "builtin";
   latest_version: string;
   created_at: string;
+  /** When this skill was last modified. Defaults to created_at if absent —
+   *  built-in catalog rows never change so the default is correct. */
+  updated_at?: string;
 }
 
 interface SkillVersion {
@@ -43,6 +53,20 @@ interface SkillVersion {
   /** Manifest of files. Bytes live in R2 at skillFileKey(t, id, ver, filename). */
   files: SkillFileEntry[];
   created_at: string;
+}
+
+/** Project a stored SkillMeta onto the wire shape — guarantees `type:"skill"`,
+ *  `updated_at`, and the canonical `source` enum (`anthropic|custom`).
+ *  Anthropic SDK's BetaSkill schema requires `type` and treats `"builtin"`
+ *  as an unrecognized enum value. Apply at every response site. */
+function toApiSkill(s: SkillMeta): SkillMeta {
+  const source = s.source === "builtin" ? "anthropic" : s.source;
+  return {
+    type: "skill",
+    ...s,
+    source,
+    updated_at: s.updated_at ?? s.created_at,
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -520,7 +544,7 @@ app.post("/", async (c) => {
   const body = await c.req.json<PersistArgs>();
   const result = await persistNewSkill(c.env, bucket, t, body);
   if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
-  return c.json({ ...result.skill, files: result.files }, 201);
+  return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -580,7 +604,7 @@ app.post("/upload", async (c) => {
     display_title: displayTitle,
   });
   if (!result.ok) return c.json({ error: result.error }, result.status as 400 | 500);
-  return c.json({ ...result.skill, files: result.files }, 201);
+  return c.json({ ...toApiSkill(result.skill), files: result.files }, 201);
 });
 
 // ---------------------------------------------------------------------------
@@ -588,9 +612,13 @@ app.post("/upload", async (c) => {
 // ---------------------------------------------------------------------------
 
 app.get("/", async (c) => {
-  const source = c.req.query("source");
+  // Anthropic SDK + Console use `source=anthropic`; legacy callers may pass
+  // `source=builtin`. Treat both as the built-in filter; `source=custom` keeps
+  // its meaning. Anything else returns the union (built-in + tenant custom).
+  const sourceParam = c.req.query("source");
+  const onlyBuiltin = sourceParam === "builtin" || sourceParam === "anthropic";
   let customs: SkillMeta[] = [];
-  if (source !== "builtin") {
+  if (!onlyBuiltin) {
     const t = c.get("tenant_id");
     const list = await kvListAll(c.var.services.kv, kvPrefix(t, "skill"));
     customs = (
@@ -611,8 +639,16 @@ app.get("/", async (c) => {
       )
     ).filter((s): s is SkillMeta => s !== null);
   }
-  const builtins = source === "custom" ? [] : BUILTIN_SKILLS;
-  return c.json({ data: [...builtins, ...customs] });
+  const builtins = sourceParam === "custom" ? [] : BUILTIN_SKILLS;
+  // Skills LIST returns all builtins + all tenant customs in one shot — no
+  // pagination today. Emit the Anthropic-required `has_more` + `next_page`
+  // fields explicitly: BetaListSkillsResponse marks both required even when
+  // there's only one page.
+  return c.json({
+    data: [...builtins, ...customs].map(toApiSkill),
+    has_more: false,
+    next_page: null,
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -622,10 +658,10 @@ app.get("/", async (c) => {
 app.get("/:id", async (c) => {
   const id = c.req.param("id");
   const builtin = BUILTIN_SKILLS.find((s) => s.id === id);
-  if (builtin) return c.json(builtin);
+  if (builtin) return c.json(toApiSkill(builtin));
   const data = await c.var.services.kv.get(kvKey(c.get("tenant_id"), "skill", id));
   if (!data) return c.json({ error: "Skill not found" }, 404);
-  return c.json(JSON.parse(data) as SkillMeta);
+  return c.json(toApiSkill(JSON.parse(data) as SkillMeta));
 });
 
 // ---------------------------------------------------------------------------

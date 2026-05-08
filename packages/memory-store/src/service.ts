@@ -123,6 +123,27 @@ export class MemoryStoreService {
     return this.storeRepo.list(opts.tenantId, { includeArchived: !!opts.includeArchived });
   }
 
+  /**
+   * Update mutable fields on a store. Only `name` and `description` are
+   * editable today; `id`, `tenant_id`, `created_at`, `archived_at` stay
+   * immutable. `description: null` clears the field. `name` validation
+   * mirrors createStore.
+   */
+  async updateStore(opts: {
+    tenantId: string;
+    storeId: string;
+    name?: string;
+    description?: string | null;
+  }): Promise<MemoryStoreRow> {
+    await this.requireStore(opts);
+    if (opts.name !== undefined) assertValidStoreName(opts.name);
+    return this.storeRepo.update(opts.tenantId, opts.storeId, {
+      name: opts.name,
+      description: opts.description,
+      updatedAt: this.clock.nowMs(),
+    });
+  }
+
   async archiveStore(opts: { tenantId: string; storeId: string }): Promise<MemoryStoreRow> {
     await this.requireStore(opts);
     return this.storeRepo.archive(opts.tenantId, opts.storeId, this.clock.nowMs());

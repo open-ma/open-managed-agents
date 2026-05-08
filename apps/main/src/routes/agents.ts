@@ -28,24 +28,59 @@ function formatAgent(agent: AgentConfig) {
     ? { id: agent.model || "", speed: "standard" as const }
     : { id: agent.model.id, speed: agent.model.speed || "standard" as const };
 
+  // Group OMA-only fields under `_oma:` so the AMA-shape envelope stays
+  // strictly Anthropic-compatible. AMA SDK consumers ignore _oma; OMA
+  // consumers (Console, oma CLI) read it for the platform extensions.
+  const oma: Record<string, unknown> = {};
+  if (agent.aux_model) {
+    oma.aux_model = typeof agent.aux_model === "string"
+      ? { id: agent.aux_model, speed: "standard" as const }
+      : { id: agent.aux_model.id, speed: agent.aux_model.speed || "standard" as const };
+  }
+  if (agent.harness) oma.harness = agent.harness;
+  if (agent.runtime_binding) oma.runtime_binding = agent.runtime_binding;
+  if (agent.appendable_prompts && agent.appendable_prompts.length > 0) {
+    oma.appendable_prompts = agent.appendable_prompts;
+  }
+
+  // AMA shape: `multiagent: {type:"coordinator", agents:[...]} | null`.
+  // Resolved roster — entries always carry a concrete `version`. We default
+  // to 1 when the stored entry lacks one (older rows pre-versioning).
+  const callable = agent.callable_agents ?? [];
+  const multiagent = callable.length > 0
+    ? {
+        type: "coordinator" as const,
+        agents: callable.map((c) => ({
+          type: "agent" as const,
+          id: c.id,
+          version: c.version ?? 1,
+        })),
+      }
+    : null;
+
+  // Strip OMA-only + internal-shape keys from the spread so they only
+  // surface under their wire-canonical names (_oma / multiagent).
+  const {
+    aux_model: _aux,
+    harness: _harness,
+    runtime_binding: _rb,
+    appendable_prompts: _ap,
+    callable_agents: _ca,
+    ...rest
+  } = agent;
+
   return {
     type: "agent" as const,
-    ...agent,
+    ...rest,
     model,
     system: agent.system || null,
     description: agent.description || null,
     skills: agent.skills || [],
     mcp_servers: agent.mcp_servers || [],
-    callable_agents: agent.callable_agents || [],
-    model_card_id: agent.model_card_id || null,
-    aux_model: agent.aux_model
-      ? (typeof agent.aux_model === "string"
-          ? { id: agent.aux_model, speed: "standard" as const }
-          : { id: agent.aux_model.id, speed: agent.aux_model.speed || "standard" as const })
-      : null,
-    aux_model_card_id: agent.aux_model_card_id || null,
+    multiagent,
     metadata: agent.metadata || {},
     archived_at: agent.archived_at || null,
+    ...(Object.keys(oma).length > 0 ? { _oma: oma } : {}),
   };
 }
 
@@ -57,14 +92,9 @@ function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
 }
 
 /**
- * Validate the agent's model reference. After the handle rename, agent.model
- * is a string that should equal some card's model_id (the tenant-unique
- * handle). The DB enforces UNIQUE(tenant_id, model_id) so the lookup returns
- * at most one row.
- *
- * If model_card_id is also pinned, that's the explicit override path —
- * verify the id exists and let the runtime use that card's wire-level
- * `model` field for the API call.
+ * Validate the agent's model reference. `agent.model` must equal some
+ * card's `model_id` (the tenant-unique handle); the DB enforces
+ * UNIQUE(tenant_id, model_id) so the lookup returns at most one row.
  *
  * Skips validation entirely when no cards exist (env-var fallback path).
  */
@@ -72,7 +102,6 @@ async function validateModel(
   services: Services,
   tenantId: string,
   model: string | { id: string; speed?: string },
-  modelCardId?: string,
 ): Promise<{ valid: boolean; error?: string }> {
   const cards = await services.modelCards.list({ tenantId });
   const active = cards.filter((c) => c.archived_at === null);
@@ -80,14 +109,6 @@ async function validateModel(
   // No model cards configured — skip validation (uses env fallback)
   if (active.length === 0) return { valid: true };
 
-  // Explicit pin: card id must exist.
-  if (modelCardId) {
-    const found = active.find((c) => c.id === modelCardId);
-    if (!found) return { valid: false, error: `Model card "${modelCardId}" not found` };
-    return { valid: true };
-  }
-
-  // Implicit lookup: agent.model must match some card's model_id handle.
   const modelId = typeof model === "string" ? model : model.id;
   const match = active.find((c) => c.model_id === modelId);
   if (!match) {
@@ -99,24 +120,82 @@ async function validateModel(
   return { valid: true };
 }
 
+/** AMA-shape multiagent input → internal `callable_agents` array.
+ *
+ *  Roster entries accept three forms (per AMA `MultiagentRosterEntryParams`):
+ *    - bare string: agent id, version defaults to 1
+ *    - `{type:"agent", id, version?}`: explicit ref
+ *    - `{type:"self"}`: 501 for now — needs the parent agent's id which we
+ *      don't have at create time without an extra round-trip
+ *
+ *  Returns `{ list, error }`. `error` non-null means the request should be
+ *  rejected with 422; `list` is the normalized internal shape. */
+function multiagentToCallableAgents(
+  multiagent: unknown,
+): { list: AgentConfig["callable_agents"]; error?: string } {
+  if (multiagent === null || multiagent === undefined) return { list: undefined };
+  if (typeof multiagent !== "object") return { list: [], error: "multiagent must be an object" };
+  const m = multiagent as { type?: string; agents?: unknown };
+  if (m.type !== "coordinator") {
+    return { list: [], error: `multiagent.type must be "coordinator"` };
+  }
+  if (!Array.isArray(m.agents)) {
+    return { list: [], error: "multiagent.agents must be an array" };
+  }
+  const out: NonNullable<AgentConfig["callable_agents"]> = [];
+  for (const entry of m.agents) {
+    if (typeof entry === "string") {
+      out.push({ type: "agent", id: entry, version: 1 });
+      continue;
+    }
+    if (entry && typeof entry === "object") {
+      const e = entry as { type?: string; id?: string; version?: number };
+      if (e.type === "self") {
+        return { list: [], error: `multiagent.agents: {"type":"self"} is not yet supported` };
+      }
+      if (e.type === "agent" && typeof e.id === "string") {
+        out.push({ type: "agent", id: e.id, version: typeof e.version === "number" ? e.version : 1 });
+        continue;
+      }
+    }
+    return { list: [], error: `multiagent.agents: invalid roster entry ${JSON.stringify(entry)}` };
+  }
+  return { list: out };
+}
+
 // POST /v1/agents — create agent
 app.post("/", async (c) => {
-  const body = await c.req.json<{
+  const raw = await c.req.json<{
     name: string;
     model: string | { id: string; speed?: "standard" | "fast" };
     system?: string;
     tools?: AgentConfig["tools"];
-    harness?: string;
     description?: string;
     mcp_servers?: AgentConfig["mcp_servers"];
     skills?: AgentConfig["skills"];
-    callable_agents?: AgentConfig["callable_agents"];
+    multiagent?: { type: "coordinator"; agents: unknown[] } | null;
     metadata?: Record<string, unknown>;
-    model_card_id?: string;
-    aux_model?: string | { id: string; speed?: "standard" | "fast" };
-    aux_model_card_id?: string;
-    runtime_binding?: AgentConfig["runtime_binding"];
+    _oma?: {
+      aux_model?: string | { id: string; speed?: "standard" | "fast" };
+      harness?: string;
+      runtime_binding?: AgentConfig["runtime_binding"];
+      appendable_prompts?: string[];
+    };
   }>();
+
+  const ma = multiagentToCallableAgents(raw.multiagent);
+  if (ma.error) return c.json({ error: ma.error }, 422);
+
+  // Lift `_oma:` extensions and normalized multiagent onto a flat `body`
+  // for the rest of this handler — keeps validate / store paths uniform.
+  const body = {
+    ...raw,
+    callable_agents: ma.list,
+    aux_model: raw._oma?.aux_model,
+    harness: raw._oma?.harness,
+    runtime_binding: raw._oma?.runtime_binding,
+    appendable_prompts: raw._oma?.appendable_prompts,
+  };
 
   // `model` is required for cloud agents (it picks which model_card the
   // SessionDO loop talks to) but meaningless for local-runtime agents
@@ -138,16 +217,16 @@ app.post("/", async (c) => {
   const tenantId = c.get("tenant_id");
   const isLocalRuntime = !!body.runtime_binding;
   if (!isLocalRuntime) {
-    const modelCheck = await validateModel(c.var.services, tenantId, body.model, body.model_card_id);
+    const modelCheck = await validateModel(c.var.services, tenantId, body.model);
     if (!modelCheck.valid) {
       return c.json({ error: modelCheck.error }, 400);
     }
 
     // Validate aux_model when provided. Same skip rule applies — aux_model
     // is meaningless for ACP children that don't expose a sub-model knob.
-    if (body.aux_model !== undefined || body.aux_model_card_id !== undefined) {
+    if (body.aux_model !== undefined) {
       const auxModel = body.aux_model ?? body.model;
-      const auxCheck = await validateModel(c.var.services, tenantId, auxModel, body.aux_model_card_id);
+      const auxCheck = await validateModel(c.var.services, tenantId, auxModel);
       if (!auxCheck.valid) {
         return c.json({ error: `aux_model: ${auxCheck.error}` }, 400);
       }
@@ -171,9 +250,8 @@ app.post("/", async (c) => {
       skills: body.skills,
       callable_agents: body.callable_agents,
       metadata: body.metadata,
-      model_card_id: body.model_card_id,
       aux_model: body.aux_model,
-      aux_model_card_id: body.aux_model_card_id,
+      appendable_prompts: body.appendable_prompts,
       runtime_binding: body.runtime_binding,
     },
   });
@@ -211,22 +289,45 @@ const updateAgent = async (c: any) => {
   const existing = await c.var.services.agents.get({ tenantId: t, agentId: id });
   if (!existing) return c.json({ error: "Agent not found" }, 404);
 
-  const body = await c.req.json() as {
+  const raw = await c.req.json() as {
     name?: string;
     model?: string | { id: string; speed?: "standard" | "fast" };
     system?: string | null;
     tools?: AgentConfig["tools"];
-    harness?: string;
     description?: string | null;
     mcp_servers?: AgentConfig["mcp_servers"] | null;
     skills?: AgentConfig["skills"] | null;
-    callable_agents?: AgentConfig["callable_agents"] | null;
-    model_card_id?: string | null;
-    aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
-    aux_model_card_id?: string | null;
+    multiagent?: { type: "coordinator"; agents: unknown[] } | null;
     metadata?: Record<string, unknown>;
     version?: number;
-    runtime_binding?: AgentConfig["runtime_binding"] | null;
+    _oma?: {
+      aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
+      harness?: string;
+      runtime_binding?: AgentConfig["runtime_binding"] | null;
+      appendable_prompts?: string[] | null;
+    };
+  };
+
+  // null on update = clear (drops the roster). undefined = leave alone.
+  let callableAgents: AgentConfig["callable_agents"] | null | undefined;
+  if (raw.multiagent === null) {
+    callableAgents = null;
+  } else if (raw.multiagent !== undefined) {
+    const ma = multiagentToCallableAgents(raw.multiagent);
+    if (ma.error) return c.json({ error: ma.error }, 422);
+    callableAgents = ma.list;
+  }
+
+  // Lift `_oma:` extensions and normalized multiagent onto a flat `body`
+  // for the rest of this handler — keeps validate / store paths uniform
+  // with the POST handler.
+  const body = {
+    ...raw,
+    callable_agents: callableAgents,
+    aux_model: raw._oma?.aux_model,
+    harness: raw._oma?.harness,
+    runtime_binding: raw._oma?.runtime_binding,
+    appendable_prompts: raw._oma?.appendable_prompts,
   };
 
   // Effective runtime_binding after the patch — explicit null means the
@@ -238,27 +339,23 @@ const updateAgent = async (c: any) => {
     : (body.runtime_binding ?? existing.runtime_binding);
   const isLocalRuntime = !!effectiveBinding;
 
-  // Validate model if model or model_card_id is being changed. Skipped
-  // for local-runtime agents — see POST handler for the rationale.
-  if (!isLocalRuntime && (body.model !== undefined || body.model_card_id !== undefined)) {
+  // Validate model if it is being changed. Skipped for local-runtime
+  // agents — see POST handler for the rationale.
+  if (!isLocalRuntime && body.model !== undefined) {
     const effectiveModel = body.model ?? existing.model;
-    const effectiveCardId = body.model_card_id === null ? undefined : (body.model_card_id ?? existing.model_card_id);
-    const modelCheck = await validateModel(c.var.services, t, effectiveModel, effectiveCardId);
+    const modelCheck = await validateModel(c.var.services, t, effectiveModel);
     if (!modelCheck.valid) {
       return c.json({ error: modelCheck.error }, 400);
     }
   }
 
   // Validate aux_model if changing. Same skip rule.
-  if (!isLocalRuntime && (body.aux_model !== undefined || body.aux_model_card_id !== undefined)) {
+  if (!isLocalRuntime && body.aux_model !== undefined) {
     const effectiveAux = body.aux_model === null
       ? undefined
       : (body.aux_model ?? existing.aux_model);
-    const effectiveAuxCard = body.aux_model_card_id === null
-      ? undefined
-      : (body.aux_model_card_id ?? existing.aux_model_card_id);
     if (effectiveAux !== undefined) {
-      const auxCheck = await validateModel(c.var.services, t, effectiveAux, effectiveAuxCard);
+      const auxCheck = await validateModel(c.var.services, t, effectiveAux);
       if (!auxCheck.valid) {
         return c.json({ error: `aux_model: ${auxCheck.error}` }, 400);
       }
@@ -281,9 +378,8 @@ const updateAgent = async (c: any) => {
         skills: body.skills,
         callable_agents: body.callable_agents,
         metadata: body.metadata,
-        model_card_id: body.model_card_id,
         aux_model: body.aux_model,
-        aux_model_card_id: body.aux_model_card_id,
+        appendable_prompts: body.appendable_prompts,
         runtime_binding: body.runtime_binding,
       },
     });

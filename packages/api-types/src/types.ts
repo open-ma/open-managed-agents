@@ -68,7 +68,6 @@ export interface AgentConfig {
   }>;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
-  model_card_id?: string;
   /**
    * Optional auxiliary model used by tools for in-process LLM work
    * (e.g. web_fetch summarization). Same shape as `model`.
@@ -76,8 +75,6 @@ export interface AgentConfig {
    * returning raw content. Set this to opt into compressed tool results.
    */
   aux_model?: string | { id: string; speed?: "standard" | "fast" };
-  /** Companion to aux_model — explicit model card binding when needed. */
-  aux_model_card_id?: string;
   harness?: string;
   /**
    * When set, agent runs on a user-registered local ACP runtime instead of
@@ -115,6 +112,10 @@ export interface AgentConfig {
 // --- Environment ---
 
 export interface EnvironmentConfig {
+  /** Always `"environment"` on the wire — Anthropic SDK uses this discriminator
+   *  to recognize the resource type. Optional so existing internal callers that
+   *  construct EnvironmentConfig literals without the field still compile. */
+  type?: "environment";
   id: string;
   name: string;
   description?: string;
@@ -141,27 +142,6 @@ export interface EnvironmentConfig {
      *  harness runtime hooks intact). */
     dockerfile?: string;
   };
-  status?: "building" | "ready" | "error";
-  build_error?: string;
-  sandbox_worker_name?: string;
-  /** How this env's sandbox image is produced.
-   *
-   *  - `base_snapshot` (default for new envs): packages installed once
-   *    into a CF Sandbox snapshot, restored on every session boot. All
-   *    envs share the `sandbox-default` worker. Fast cold-create
-   *    (~30-60s once, then 1-2s per session). REJECTS apt packages —
-   *    they install system-wide and can't snapshot under /home.
-   *
-   *  - `dockerfile` (opt-in): per-env GitHub Actions build of a
-   *    Dockerfile (always FROM openma/sandbox-base) that gets deployed
-   *    as its own `sandbox-<env_id>` worker. Use when you need apt
-   *    packages, custom binaries, or full image control. Slower
-   *    create (~90s CI) but no per-session install.
-   *
-   *  Omitted = legacy (pre-migration) — readers should treat as
-   *  `dockerfile` for back-compat.
-   */
-  image_strategy?: "base_snapshot" | "dockerfile";
   metadata?: Record<string, unknown>;
   created_at: string;
   updated_at?: string;
@@ -170,9 +150,13 @@ export interface EnvironmentConfig {
 
 // --- Session ---
 
-export type SessionStatus = "idle" | "running" | "rescheduled" | "terminated";
+export type SessionStatus = "idle" | "running" | "rescheduling" | "terminated";
 
 export interface SessionMeta {
+  /** Always `"session"` on the wire — Anthropic SDK uses this discriminator
+   *  to recognize the resource type. Optional so existing internal callers
+   *  that build SessionMeta literals without the field still compile. */
+  type?: "session";
   id: string;
   agent_id: string;
   environment_id: string;
@@ -745,9 +729,7 @@ export interface SpanOutcomeEvaluationEndEvent extends EventBase {
 // (cost dashboards, trajectory viewers) attribute aux usage separately.
 export interface AuxModelCallEvent extends EventBase {
   type: "aux.model_call";
-  /** Model card the aux call resolved through (if one was matched). */
-  model_card_id?: string;
-  /** Resolved model identifier (e.g. "claude-sonnet-4-6"). */
+  /** Resolved model identifier (the agent's `aux_model.id` handle). */
   model_id: string;
   /** What the aux model was used for. Extensible — first user is "web_summarize". */
   task: "web_summarize" | string;

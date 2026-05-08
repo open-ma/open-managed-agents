@@ -144,6 +144,16 @@ export interface SessionRepo {
 
   deleteResource(sessionId: string, resourceId: string): Promise<void>;
 
+  /** Replace the resource JSON column. The resource id and session id stay
+   *  immutable; the rest of the SessionResource payload is overwritten with
+   *  what the caller passes. AMA models PATCH /resources/:id as a body
+   *  replacement on the SessionResource shape. */
+  updateResource(
+    sessionId: string,
+    resourceId: string,
+    resource: SessionResource,
+  ): Promise<SessionResourceRow>;
+
   /** Wipe every resource for a session — used by /destroy paths and tests. */
   deleteAllResourcesForSession(sessionId: string): Promise<void>;
 }

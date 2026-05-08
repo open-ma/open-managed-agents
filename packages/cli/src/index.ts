@@ -760,7 +760,7 @@ const commands: Cmd[] = [
   {
     group: "Agents", match: ["agents", "create"],
     usage: "oma agents create <name> [--model <id>]", desc: "Create agent",
-    http: "POST   /v1/agents {name, model, system, tools, skills?, mcp_servers?, callable_agents?, runtime_binding?}",
+    http: "POST   /v1/agents {name, model, system, tools, skills?, mcp_servers?, multiagent?, _oma?:{runtime_binding,harness,...}}",
     async run(config, args) {
       const name = flag(args, "--name") || args.find(a => !a.startsWith("--"));
       const model = flag(args, "--model") || "claude-sonnet-4-6";
@@ -776,8 +776,10 @@ const commands: Cmd[] = [
         name, model, system, tools: [{ type: "agent_toolset_20260401" }],
       };
       if (useAcpProxy) {
-        body.harness = "acp-proxy";
-        body.runtime_binding = { runtime_id: runtimeId, acp_agent_id: acpAgentId };
+        body._oma = {
+          harness: "acp-proxy",
+          runtime_binding: { runtime_id: runtimeId, acp_agent_id: acpAgentId },
+        };
       }
       const agent = await apiFetch<{ id: string; name: string }>(config, "/v1/agents", { method: "POST", body: JSON.stringify(body) });
       console.log(`Agent created: ${agent.name} (${agent.id})${useAcpProxy ? `  [acp-proxy → ${acpAgentId} on ${runtimeId.slice(0, 8)}…]` : ""}`);

@@ -355,7 +355,7 @@ export async function buildTools(
     auxModel?: LanguageModel;
     /** Identifier metadata for the aux model — written into aux.model_call
      *  trajectory events so cost dashboards can attribute usage. */
-    auxModelInfo?: { model_card_id?: string; model_id: string };
+    auxModelInfo?: { model_id: string };
     /** Emit a SessionEvent into the trajectory stream. Used to record
      *  aux.model_call events from inside tool execution. */
     broadcastEvent?: (event: SessionEvent) => void;
@@ -878,7 +878,6 @@ export async function buildTools(
               type: "aux.model_call",
               id: `sevt-${nanoid(12)}`,
               processed_at: new Date().toISOString(),
-              model_card_id: env.auxModelInfo.model_card_id,
               model_id: env.auxModelInfo.model_id,
               task: "web_summarize",
               duration_ms: Date.now() - t0,
@@ -903,7 +902,6 @@ export async function buildTools(
               type: "aux.model_call",
               id: `sevt-${nanoid(12)}`,
               processed_at: new Date().toISOString(),
-              model_card_id: env.auxModelInfo.model_card_id,
               model_id: env.auxModelInfo.model_id,
               task: "web_summarize",
               duration_ms: Date.now() - t0,
