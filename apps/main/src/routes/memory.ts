@@ -96,22 +96,24 @@ app.get("/:id", async (c) => {
   return c.json(toApiStore(store));
 });
 
-// POST/PUT /v1/memory_stores/:id — update memory store. Stub: service layer
-// doesn't have updateStore yet (only create / get / list / archive / delete).
-// Returns 501 so Anthropic SDK callers see a non-404 with a real reason.
-// Follow-up: add memory-store/service.ts:updateStore + adapter implementations.
-app.on(["PUT", "POST"], "/:id", (c) =>
-  c.json(
-    {
-      error: {
-        type: "not_implemented",
-        message: "memory_store update not yet implemented on this server",
-      },
-      type: "error",
-    },
-    501,
-  ),
-);
+// POST/PUT /v1/memory_stores/:id — update memory store. Anthropic uses
+// POST per their REST conventions; PUT accepted as a body-replace alias
+// (matches our agents / sessions update routes).
+app.on(["PUT", "POST"], "/:id", async (c) => {
+  const t = c.get("tenant_id");
+  const body = await c.req.json<{ name?: string; description?: string | null }>();
+  try {
+    const store = await c.var.services.memory.updateStore({
+      tenantId: t,
+      storeId: c.req.param("id"),
+      name: body.name,
+      description: body.description,
+    });
+    return c.json(toApiStore(store));
+  } catch (err) {
+    return handle(err);
+  }
+});
 
 app.post("/:id/archive", async (c) => {
   const t = c.get("tenant_id");
