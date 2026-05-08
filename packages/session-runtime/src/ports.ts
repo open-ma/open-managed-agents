@@ -76,6 +76,18 @@ export interface RuntimeAdapter {
   ): Promise<void>;
 
   /**
+   * Drive the session to AMA's `terminated` terminus on D1. Atomic UPDATE
+   * sets status='terminated' + terminated_at=now. Idempotent — a second
+   * call is a no-op (filters out rows already terminated).
+   *
+   * Distinct from endTurn(_, _, 'destroyed'): destroyed is per-turn cleanup
+   * (worker no-op when the DO is recycled); terminated is the persistent
+   * "session is done, refuse new events" terminus that survives DO restarts.
+   * Reasons currently emitted: "session_deleted", "billing".
+   */
+  terminate(sessionId: string, reason: string): Promise<void>;
+
+  /**
    * Find sessions with status='running' that don't match the caller's
    * known active turn id. Caller is the SessionStateMachine; it filters
    * out its own in-progress turn before treating each row as an orphan
