@@ -8,7 +8,7 @@ import { Tabs, TabItem, Aside, LinkCard } from '@astrojs/starlight/components';
 openma is callable via two routes:
 
 - **`@openma/cli`** — a Node CLI for scripting against the API.
-- **`@anthropic-ai/sdk`** — the official Anthropic TypeScript SDK, pointed at openma's `baseURL`. The openma API is wire-compatible with Anthropic's Managed Agents API, so the same SDK works against both.
+- **Anthropic's official SDKs** — TypeScript ([`@anthropic-ai/sdk`](https://www.npmjs.com/package/@anthropic-ai/sdk)), Python ([`anthropic`](https://pypi.org/project/anthropic/)), and Go ([`anthropic-sdk-go`](https://pkg.go.dev/github.com/anthropics/anthropic-sdk-go)) — pointed at openma's `baseURL`. The openma API is wire-compatible with Anthropic's Managed Agents API, so the same SDKs work against both.
 
 The CLI lives in this repo (`packages/cli`).
 
@@ -81,57 +81,126 @@ Run `oma --help` or `oma <command> --help` for the full surface.
 
 ## SDK
 
-The openma API is **wire-compatible with [Anthropic's Managed Agents API](https://docs.anthropic.com/)**, so the recommended client is the official `@anthropic-ai/sdk` pointed at our `baseURL`. One SDK, two providers — moving between them is a config line.
+The openma API is **wire-compatible with [Anthropic's Managed Agents API](https://docs.anthropic.com/)**, so the recommended client is one of Anthropic's official SDKs pointed at our `baseURL`. One SDK, two providers — moving between them is a config line.
 
 <Aside type="caution" title="@openma/sdk is deprecated">
-  The standalone `@openma/sdk` package is no longer maintained. Existing installs keep working, but new projects should use `@anthropic-ai/sdk` as shown below.
+  The standalone `@openma/sdk` package is no longer maintained. Existing installs keep working, but new projects should use the official Anthropic SDKs as shown below.
 </Aside>
 
 ### Install
 
-<Tabs syncKey="pkg-mgr">
-  <TabItem label="npm">
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
     ```bash
     npm i @anthropic-ai/sdk
+    # or: pnpm add @anthropic-ai/sdk
+    # or: bun add @anthropic-ai/sdk
     ```
   </TabItem>
-  <TabItem label="pnpm">
+  <TabItem label="Python">
     ```bash
-    pnpm add @anthropic-ai/sdk
+    pip install anthropic
+    # or: uv add anthropic
+    # or: poetry add anthropic
     ```
   </TabItem>
-  <TabItem label="bun">
+  <TabItem label="Go">
     ```bash
-    bun add @anthropic-ai/sdk
+    go get github.com/anthropics/anthropic-sdk-go
     ```
   </TabItem>
 </Tabs>
 
 ### Quick start
 
-```ts
-import Anthropic from "@anthropic-ai/sdk";
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import Anthropic from "@anthropic-ai/sdk";
 
-const client = new Anthropic({
-  baseURL: "https://openma.dev",
-  apiKey: process.env.OMA_API_KEY!,
-});
+    const client = new Anthropic({
+      baseURL: "https://openma.dev",
+      apiKey: process.env.OMA_API_KEY!,
+    });
 
-// Create an environment.
-const env = await client.beta.environments.create({
-  name: "my-env",
-  config: {
-    type: "cloud",
-    networking: { type: "unrestricted" },
-    packages: { type: "packages", pip: ["pandas"] },
-  },
-});
+    // Create an environment.
+    const env = await client.beta.environments.create({
+      name: "my-env",
+      config: {
+        type: "cloud",
+        networking: { type: "unrestricted" },
+        packages: { type: "packages", pip: ["pandas"] },
+      },
+    });
 
-// List sessions.
-for await (const sess of client.beta.sessions.list({ limit: 10 })) {
-  console.log(sess.id, sess.title);
-}
-```
+    // List sessions.
+    for await (const sess of client.beta.sessions.list({ limit: 10 })) {
+      console.log(sess.id, sess.title);
+    }
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import os
+    from anthropic import Anthropic
+
+    client = Anthropic(
+        base_url="https://openma.dev",
+        api_key=os.environ["OMA_API_KEY"],
+    )
+
+    # Create an environment.
+    env = client.beta.environments.create(
+        name="my-env",
+        config={
+            "type": "cloud",
+            "networking": {"type": "unrestricted"},
+            "packages": {"type": "packages", "pip": ["pandas"]},
+        },
+    )
+
+    # List sessions.
+    for sess in client.beta.sessions.list(limit=10):
+        print(sess.id, sess.title)
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    import (
+        "context"
+        "fmt"
+        "os"
+
+        "github.com/anthropics/anthropic-sdk-go"
+        "github.com/anthropics/anthropic-sdk-go/option"
+    )
+
+    client := anthropic.NewClient(
+        option.WithBaseURL("https://openma.dev"),
+        option.WithAPIKey(os.Getenv("OMA_API_KEY")),
+    )
+
+    // Create an environment.
+    env, _ := client.Beta.Environments.New(
+        context.Background(),
+        anthropic.BetaEnvironmentNewParams{
+            Name: anthropic.F("my-env"),
+            // config: see SDK docs for the typed param shape
+        },
+    )
+
+    // List sessions.
+    iter := client.Beta.Sessions.ListAutoPaging(
+        context.Background(),
+        anthropic.BetaSessionListParams{Limit: anthropic.F(int64(10))},
+    )
+    for iter.Next() {
+        sess := iter.Current()
+        fmt.Println(sess.ID, sess.Title)
+    }
+    ```
+  </TabItem>
+</Tabs>
 
 ### Resources covered
 
@@ -157,6 +226,90 @@ const usage = await client._client.get("/v1/oma/cost_report");
 ```
 
 Or use plain `fetch` — every OMA endpoint is JSON, no extra runtime needed.
+
+### OMA-only extensions
+
+A small set of OMA-specific agent fields (auxiliary model, harness selector, sandbox runtime binding) are passed through under an `_oma:` body field on agent create / update calls. The server reads them; the upstream Anthropic backend would ignore them. They are optional — agents that omit `_oma` behave exactly like a vanilla Anthropic Managed Agents call.
+
+| Field | Purpose |
+|---|---|
+| `aux_model` | Auxiliary model used for tool-internal LLM work (e.g. `web_fetch` summarization). When unset, tools fall back to returning raw content. |
+| `harness` | Selects the agent loop harness implementation. Reserved for OMA-managed runtimes. |
+| `runtime_binding` | Selects which sandbox runtime services the agent's sessions. Reserved for OMA-managed runtimes. |
+
+The Stainless-generated SDKs in every language pass unknown body fields through unchanged — there is no separate `@openma/sdk` to install. Use the SDK's standard escape hatch:
+
+<Tabs syncKey="lang">
+  <TabItem label="TypeScript">
+    ```ts
+    import Anthropic from "@anthropic-ai/sdk";
+
+    const client = new Anthropic({
+      baseURL: "https://openma.dev",
+      apiKey: process.env.OMA_API_KEY!,
+    });
+
+    const agent = await client.beta.agents.create({
+      name: "researcher",
+      model: { id: "claude-opus-4-7" },
+      _oma: { aux_model: { id: "claude-haiku-4-5" } },
+    } as any); // SDK is strict-typed; extras pass through at runtime
+
+    // Response: cast to read the field back.
+    console.log((agent as any)._oma?.aux_model?.id);
+    ```
+  </TabItem>
+  <TabItem label="Python">
+    ```python
+    import os
+    from anthropic import Anthropic
+
+    client = Anthropic(
+        base_url="https://openma.dev",
+        api_key=os.environ["OMA_API_KEY"],
+    )
+
+    agent = client.beta.agents.create(
+        name="researcher",
+        model={"id": "claude-opus-4-7"},
+        extra_body={"_oma": {"aux_model": {"id": "claude-haiku-4-5"}}},
+    )
+
+    # Pydantic preserves unknown response fields under model_extra.
+    print(agent.model_extra.get("_oma"))
+    ```
+  </TabItem>
+  <TabItem label="Go">
+    ```go
+    import (
+        "context"
+        "os"
+
+        "github.com/anthropics/anthropic-sdk-go"
+        "github.com/anthropics/anthropic-sdk-go/option"
+    )
+
+    client := anthropic.NewClient(
+        option.WithBaseURL("https://openma.dev"),
+        option.WithAPIKey(os.Getenv("OMA_API_KEY")),
+    )
+
+    agent, _ := client.Beta.Agents.New(
+        context.Background(),
+        anthropic.BetaAgentNewParams{
+            Name: anthropic.F("researcher"),
+            Model: anthropic.F(anthropic.BetaModelConfigParam{
+                ID: anthropic.F("claude-opus-4-7"),
+            }),
+        },
+        option.WithJSONSet("_oma", map[string]any{
+            "aux_model": map[string]string{"id": "claude-haiku-4-5"},
+        }),
+    )
+    // Response: agent.JSON.ExtraFields["_oma"].Raw()
+    ```
+  </TabItem>
+</Tabs>
 
 ### Errors
 
