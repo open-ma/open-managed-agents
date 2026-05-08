@@ -1,0 +1,58 @@
+---
+import Base from "../../layouts/Base.astro";
+import { getCollection, render } from "astro:content";
+
+export async function getStaticPaths() {
+  const posts = await getCollection("blog");
+  return posts.map((post) => ({
+    params: { slug: post.id },
+    props: { post },
+  }));
+}
+
+const { post } = Astro.props;
+const { Content } = await render(post);
+
+function formatDate(d: Date) {
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "long", day: "numeric" });
+}
+---
+
+<Base
+  title={post.data.title}
+  description={post.data.description}
+  canonical={`/blog/${post.id}`}
+  ogType="article"
+  publishedAt={post.data.publishedAt}
+>
+  <article class="max-w-3xl mx-auto px-4 py-12">
+    <header class="mb-10">
+      <div class="text-xs text-[var(--color-fg-subtle)] uppercase tracking-wider mb-2">
+        {formatDate(post.data.publishedAt)}
+        {post.data.author && <> · {post.data.author}</>}
+        {post.data.updatedAt && (
+          <span class="ml-2">(updated {formatDate(post.data.updatedAt)})</span>
+        )}
+      </div>
+      <h1 class="font-display text-4xl font-bold tracking-tight mb-3">{post.data.title}</h1>
+      <p class="text-lg text-[var(--color-fg-muted)]">{post.data.description}</p>
+      {post.data.tags.length > 0 && (
+        <div class="mt-4 flex gap-2 flex-wrap">
+          {post.data.tags.map((t) => (
+            <span class="inline-block px-2 py-0.5 text-xs rounded bg-[var(--color-bg-surface)] text-[var(--color-fg-muted)]">
+              {t}
+            </span>
+          ))}
+        </div>
+      )}
+    </header>
+
+    <div class="prose">
+      <Content />
+    </div>
+
+    <footer class="mt-16 pt-8 border-t border-[var(--color-border)] text-sm text-[var(--color-fg-muted)]">
+      <a href="/blog">← All posts</a>
+    </footer>
+  </article>
+</Base>

@@ -1,0 +1,32 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "openma-web",
+  "compatibility_date": "2025-04-01",
+
+  // Pure-static deploy — Astro outputs to ./dist.
+  "assets": {
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  },
+
+  // www.openma.dev so the marketing site doesn't collide with
+  // openma.dev (currently the Console SPA on the main worker).
+  // If/when we want the marketing site at the apex, swap apex to
+  // openma-web and move Console to app.openma.dev.
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "www.openma.dev", "custom_domain": true }
+  ],
+
+  "observability": { "enabled": true },
+
+  "env": {
+    "staging": {
+      "name": "openma-web-staging",
+      "routes": [
+        { "pattern": "www.staging.openma.dev", "custom_domain": true }
+      ],
+      "observability": { "enabled": true }
+    }
+  }
+}
