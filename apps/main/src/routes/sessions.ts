@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
+import type { UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
 import { generateFileId, buildTrajectory, fileR2Key, generateEventId, LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
 import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { rateLimitSessionCreate } from "../rate-limit";
@@ -18,6 +18,7 @@ import {
   SessionResourceMaxExceededError,
   SessionResourceNotFoundError,
   type NewResourceInput,
+  type SessionRow,
 } from "@open-managed-agents/sessions-store";
 import { jsonPage, parsePageQuery } from "../lib/list-page";
 
@@ -39,13 +40,89 @@ function mapSessionError(c: Context, err: unknown): Response {
   throw err;
 }
 
+/**
+ * Map AgentConfig snapshot → AMA-shape SessionAgent. Drops fields that
+ * BetaManagedAgentsSessionAgent doesn't expose (archived_at, created_at,
+ * updated_at, metadata, tenant_id) and the OMA-only top-level fields
+ * (aux_model, harness, runtime_binding, appendable_prompts, callable_agents)
+ * that surface elsewhere on the wire (under `_oma:` and `multiagent`).
+ *
+ * `version` defaults to 1 for legacy snapshots that pre-date the version
+ * column.
+ */
+function snapshotToSessionAgent(
+  agentId: string,
+  snapshot: AgentConfig | null,
+): Record<string, unknown> {
+  if (!snapshot) {
+    // No frozen snapshot — older session, mid-migration row, or test
+    // fake. Return the minimum AMA-shape stub.
+    return { type: "agent", id: agentId, version: 1 };
+  }
+  const {
+    aux_model: _aux,
+    harness: _h,
+    runtime_binding: _rb,
+    appendable_prompts: _ap,
+    callable_agents,
+    archived_at: _ar,
+    created_at: _ca,
+    updated_at: _ua,
+    metadata: _md,
+    ...rest
+  } = snapshot;
+  // Inline the multiagent transform (keeps sessions wire shape independent
+  // of the agents.ts shaper while reusing the same AMA convention).
+  const multiagent = (callable_agents ?? []).length > 0
+    ? {
+        type: "coordinator" as const,
+        agents: (callable_agents ?? []).map((c) => ({
+          type: "agent" as const,
+          id: c.id,
+          version: c.version ?? 1,
+        })),
+      }
+    : null;
+  return {
+    type: "agent",
+    ...rest,
+    id: agentId,
+    version: snapshot.version ?? 1,
+    multiagent,
+  };
+}
+
 /** Strip server-internal fields from a session row before returning to API.
- *  Legacy SessionMeta did not expose tenant_id; keep that contract.
- *  Adds `type: "session"` discriminator so @anthropic-ai/sdk callers see the
- *  same shape claude.ai returns (existing OMA SDK callers ignore the field). */
-function toApiSession<T extends { tenant_id?: string }>(row: T): Omit<T, "tenant_id"> & { type: "session" } {
-  const { tenant_id: _t, ...rest } = row;
-  return { type: "session" as const, ...rest } as Omit<T, "tenant_id"> & { type: "session" };
+ *  Emits AMA-aligned BetaManagedAgentsSession shape:
+ *    - nested `agent: SessionAgent` (frozen snapshot, top-level agent_id dropped)
+ *    - vault_ids defaults to `[]` (never null on the wire)
+ *    - title null when stored value is empty
+ *    - terminated_at preserved (OMA extension; AMA SDKs ignore unknowns)
+ *  Live-only fields (`stats`, `usage`, `outcome_evaluations`, `resources`)
+ *  are added by the GET handler when sandbox data is available; this
+ *  shaper emits empty defaults so the field is always present on the wire. */
+function toApiSession(row: SessionRow & { tenant_id?: string }): Record<string, unknown> {
+  const {
+    tenant_id: _t,
+    agent_id,
+    agent_snapshot,
+    environment_snapshot: _es,
+    title,
+    vault_ids,
+    metadata,
+    ...rest
+  } = row;
+  return {
+    ...rest,
+    type: "session" as const,
+    title: title === "" ? null : title,
+    agent: snapshotToSessionAgent(agent_id, agent_snapshot ?? null),
+    vault_ids: vault_ids ?? [],
+    metadata: metadata ?? {},
+    resources: [] as unknown[],
+    outcome_evaluations: [] as unknown[],
+    stats: {},
+  };
 }
 
 /**
@@ -618,17 +695,9 @@ app.post("/", async (c) => {
     }
   }
 
-  // Surface a Session-shaped response (legacy SessionMeta + frozen snapshots).
-  const responseSession: SessionMeta = {
-    id: session.id,
-    agent_id: session.agent_id,
-    environment_id: session.environment_id,
-    title: session.title,
-    status: session.status,
-    vault_ids: session.vault_ids ?? undefined,
-    created_at: session.created_at,
-  };
-  const response: Record<string, unknown> = { ...responseSession };
+  // AMA-shape response — toApiSession defaults `resources: []`; overlay
+  // any resources we just created so the create response shows them.
+  const response: Record<string, unknown> = { ...toApiSession(session) };
   if (createdResources.length > 0) {
     response.resources = createdResources.map((r) => r.resource);
   }
@@ -698,11 +767,6 @@ app.get("/:id", async (c) => {
         "sandbox unreachable; falling back to stored status",
       );
     }
-  }
-
-  if (session.agent_snapshot) {
-    response.agent = session.agent_snapshot;
-    delete response.agent_snapshot;
   }
 
   return c.json(response);
