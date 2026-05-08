@@ -254,8 +254,11 @@ app.post("/", async (c) => {
   const daily = await checkDailySessionCap(c.env, c.var.services.kv, t);
   if (daily) return daily;
   const body = await c.req.json<{
-    agent: string;
+    /** Bare id (legacy) OR AMA-shape `{id, version?}` ref. */
+    agent: string | { id: string; version?: number };
     environment_id?: string;
+    /** AMA-shape wrapper for environment ref — alias for environment_id. */
+    environment?: string | { id: string };
     title?: string;
     vault_ids?: string[];
     resources?: Array<{
@@ -276,7 +279,17 @@ app.post("/", async (c) => {
     }>;
   }>();
 
-  if (!body.agent) {
+  // Normalize AMA-wrapped agent / environment refs to bare ids. AMA SDK
+  // sends `agent: {type:"agent", id, version?}` and `environment: {id}`;
+  // existing CLI / Console pass bare strings + `environment_id`. Accept all.
+  const agentId = typeof body.agent === "string"
+    ? body.agent
+    : body.agent?.id;
+  const wrappedEnvId = typeof body.environment === "string"
+    ? body.environment
+    : body.environment?.id;
+
+  if (!agentId) {
     return c.json({ error: "agent is required" }, 400);
   }
 
@@ -305,7 +318,7 @@ app.post("/", async (c) => {
   }
 
   // Verify agent exists
-  const agentRow = await c.var.services.agents.get({ tenantId: t, agentId: body.agent });
+  const agentRow = await c.var.services.agents.get({ tenantId: t, agentId });
   if (!agentRow) return c.json({ error: "Agent not found" }, 404);
 
   // Local-runtime agents (acp-proxy harness) don't use the sandbox container
@@ -320,7 +333,7 @@ app.post("/", async (c) => {
   // sessions can store NULL — out of scope for this PR (D1 migration +
   // sessions-store API + multiple downstream consumers).
   const agentIsLocalRuntime = !!agentRow.runtime_binding;
-  let resolvedEnvId = body.environment_id;
+  let resolvedEnvId = body.environment_id ?? wrappedEnvId;
   if (!resolvedEnvId) {
     if (!agentIsLocalRuntime) {
       return c.json({ error: "environment_id is required for cloud agents" }, 400);
@@ -398,7 +411,7 @@ app.post("/", async (c) => {
     c.env,
     c.var.services,
     t,
-    body.agent,
+    agentId,
     vaultIds,
   );
 
@@ -445,7 +458,7 @@ app.post("/", async (c) => {
   try {
     const result = await c.var.services.sessions.create({
       tenantId: t,
-      agentId: body.agent,
+      agentId,
       environmentId: resolvedEnvId,
       title: body.title || "",
       vaultIds,
@@ -487,7 +500,7 @@ app.post("/", async (c) => {
     c.req.raw,
     "PUT",
     JSON.stringify({
-      agent_id: body.agent,
+      agent_id: agentId,
       environment_id: resolvedEnvId,
       title: body.title || "",
       session_id: sessionId,
