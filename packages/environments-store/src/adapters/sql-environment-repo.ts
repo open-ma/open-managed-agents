@@ -3,6 +3,7 @@ import type { PageCursor } from "@open-managed-agents/shared";
 import {
   cursorBinds,
   cursorWhereSql,
+  escapeLikePattern,
   fetchN,
   trimPage,
 } from "@open-managed-agents/shared";
@@ -95,20 +96,33 @@ export class SqlEnvironmentRepo implements EnvironmentRepo {
       includeArchived: boolean;
       limit: number;
       after?: PageCursor;
+      q?: string;
     },
   ): Promise<{ items: EnvironmentRow[]; hasMore: boolean }> {
     const archived = opts.includeArchived ? "" : "AND archived_at IS NULL";
+    const qClause = opts.q ? `AND name LIKE ? ESCAPE '\\'` : "";
     const sql =
       `SELECT id, tenant_id, name, description, status, sandbox_worker_name, ` +
       `build_error, config, metadata, image_strategy, image_handle, ` +
       `created_at, updated_at, archived_at FROM environments ` +
-      `WHERE tenant_id = ? ${archived} ${cursorWhereSql(opts.after)} ` +
+      `WHERE tenant_id = ? ${archived} ${qClause} ${cursorWhereSql(opts.after)} ` +
       `ORDER BY created_at DESC, id DESC LIMIT ?`;
-    const result = await this.db
-      .prepare(sql)
-      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
-      .all<DbEnvironment>();
+    const binds: unknown[] = [tenantId];
+    if (opts.q) binds.push(`%${escapeLikePattern(opts.q)}%`);
+    binds.push(...cursorBinds(opts.after), fetchN(opts.limit));
+    const result = await this.db.prepare(sql).bind(...binds).all<DbEnvironment>();
     return trimPage((result.results ?? []).map(toRow), opts.limit);
+  }
+
+  async count(
+    tenantId: string,
+    opts: { includeArchived: boolean },
+  ): Promise<number> {
+    const sql = opts.includeArchived
+      ? `SELECT COUNT(*) AS c FROM environments WHERE tenant_id = ?`
+      : `SELECT COUNT(*) AS c FROM environments WHERE tenant_id = ? AND archived_at IS NULL`;
+    const row = await this.db.prepare(sql).bind(tenantId).first<{ c: number }>();
+    return row?.c ?? 0;
   }
 
   async update(

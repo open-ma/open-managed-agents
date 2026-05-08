@@ -108,6 +108,9 @@ export interface SessionRepo {
   /** Returns true if any non-archived session in the tenant references this environment. */
   hasActiveByEnvironment(tenantId: string, environmentId: string): Promise<boolean>;
 
+  /** Cheap COUNT(*) for /v1/stats. Index `idx_sessions_tenant_created` covers it. */
+  count(tenantId: string, opts: { includeArchived: boolean }): Promise<number>;
+
   update(
     tenantId: string,
     sessionId: string,

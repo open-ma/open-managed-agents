@@ -66,8 +66,18 @@ export interface AgentRepo {
       limit: number;
       /** Decoded cursor: skip rows up to and including (created_at, id). */
       after?: PageCursor;
+      /** Case-insensitive substring filter against agent name. Trimmed
+       *  blank → unfiltered. Used by Combobox typeahead. */
+      q?: string;
     },
   ): Promise<{ items: AgentRow[]; hasMore: boolean }>;
+
+  /**
+   * Cheap COUNT(*) for the same row set as `list`. Used by /v1/stats
+   * (Dashboard) to avoid pulling rows just to call `.length`. Index
+   * `idx_agents_tenant (tenant_id, archived_at)` covers it.
+   */
+  count(tenantId: string, opts: { includeArchived: boolean }): Promise<number>;
 
   /**
    * Atomic update: write the prior snapshot to agent_versions AND replace the

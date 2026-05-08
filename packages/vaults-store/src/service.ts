@@ -74,6 +74,7 @@ export class VaultService {
     includeArchived?: boolean;
     limit?: number;
     cursor?: string;
+    q?: string;
   }): Promise<{ items: VaultRow[]; nextCursor?: string }> {
     return paginateVia({
       cursor: opts.cursor,
@@ -83,11 +84,22 @@ export class VaultService {
           includeArchived: opts.includeArchived ?? false,
           limit,
           after,
+          q: opts.q,
         }),
       extractCursor: (r) => ({
         createdAt: new Date(r.created_at).getTime(),
         id: r.id,
       }),
+    });
+  }
+
+  /** Cheap COUNT for /v1/stats. Default counts only non-archived rows. */
+  async count(opts: {
+    tenantId: string;
+    includeArchived?: boolean;
+  }): Promise<number> {
+    return this.repo.count(opts.tenantId, {
+      includeArchived: opts.includeArchived ?? false,
     });
   }
 
