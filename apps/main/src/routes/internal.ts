@@ -125,14 +125,15 @@ app.post("/sessions", async (c) => {
     environmentId: body.environmentId,
   });
   if (!envRow) return c.json({ error: "environment not found in tenant" }, 404);
-  const envConfig = toEnvironmentConfig(envRow);
 
   // Resolve the sandbox binding for this environment. Same naming convention
   // as the public sessions route: SANDBOX_<sanitized worker name>.
-  if (!envConfig.sandbox_worker_name) {
+  // Read directly from the row — sandbox_worker_name is a server-internal
+  // detail, not surfaced on the wire.
+  if (!envRow.sandbox_worker_name) {
     return c.json({ error: "environment has no sandbox worker" }, 500);
   }
-  const bindingName = `SANDBOX_${envConfig.sandbox_worker_name.replace(/-/g, "_")}`;
+  const bindingName = `SANDBOX_${envRow.sandbox_worker_name.replace(/-/g, "_")}`;
   const binding = (c.env as unknown as Record<string, unknown>)[bindingName] as
     | Fetcher
     | undefined;
@@ -172,7 +173,7 @@ app.post("/sessions", async (c) => {
     title: "",
     vaultIds,
     agentSnapshot,
-    environmentSnapshot: envConfig,
+    environmentSnapshot: toEnvironmentConfig(envRow),
     metadata: Object.keys(initialMetadata).length === 0 ? undefined : initialMetadata,
   });
   const sessionId = createdSession.id;
@@ -274,7 +275,7 @@ app.post("/sessions", async (c) => {
       tenant_id: tenantId,
       vault_ids: vaultIds,
       agent_snapshot: agentSnapshot,
-      environment_snapshot: envConfig,
+      environment_snapshot: toEnvironmentConfig(envRow),
       vault_credentials: vaultCredentials,
       // Generic event hooks. Per-provider consumers live behind these URLs;
       // SessionDO POSTs every broadcast to each one. Provider-specific
@@ -354,8 +355,7 @@ app.post("/sessions/:id/events", async (c) => {
     environmentId: session.environment_id,
   });
   if (!envRow2) return c.json({ error: "environment missing" }, 500);
-  const envConfig = toEnvironmentConfig(envRow2);
-  const bindingName = `SANDBOX_${(envConfig.sandbox_worker_name ?? "").replace(/-/g, "_")}`;
+  const bindingName = `SANDBOX_${(envRow2.sandbox_worker_name ?? "").replace(/-/g, "_")}`;
   const binding = (c.env as unknown as Record<string, unknown>)[bindingName] as
     | Fetcher
     | undefined;
