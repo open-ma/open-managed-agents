@@ -70,6 +70,31 @@ export class SqlMemoryStoreRepo implements MemoryStoreRepo {
     return row;
   }
 
+  async update(
+    tenantId: string,
+    storeId: string,
+    fields: { name?: string; description?: string | null; updatedAt: number },
+  ): Promise<MemoryStoreRow> {
+    const sets: string[] = ["updated_at = ?"];
+    const binds: unknown[] = [fields.updatedAt];
+    if (fields.name !== undefined) {
+      sets.push("name = ?");
+      binds.push(fields.name);
+    }
+    if (fields.description !== undefined) {
+      sets.push("description = ?");
+      binds.push(fields.description);
+    }
+    binds.push(storeId, tenantId);
+    await this.db
+      .prepare(`UPDATE memory_stores SET ${sets.join(", ")} WHERE id = ? AND tenant_id = ?`)
+      .bind(...binds)
+      .run();
+    const row = await this.get(tenantId, storeId);
+    if (!row) throw new Error(`memory_stores ${storeId} vanished after update`);
+    return row;
+  }
+
   async delete(tenantId: string, storeId: string): Promise<void> {
     // App-layer cascade: explicitly drop memory_versions + memories before the
     // store row. Done in one D1.batch so the three DELETEs run atomically —
