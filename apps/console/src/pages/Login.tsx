@@ -58,23 +58,23 @@ export function Login() {
   })();
 
   // Auto-redirect when an already-authenticated user lands on /login (e.g.
-  // a stale tab, or someone hitting /login?next=... with an existing
-  // session). Each mode handler below ALSO calls nav(nextUrl) on success;
-  // this effect only fires when `isAuthenticated` was already true at
-  // mount or flips true via session refresh independent of a handler.
+  // a stale tab, a successful auth handler whose explicit nav silently
+  // dropped, or someone hitting /login?next=... with an existing session).
+  // Each mode handler below ALSO calls nav(nextUrl) on success; this
+  // effect catches anything that fell through.
   //
-  // Subtlety: we don't call onLoginSuccess() here because that resets
+  // Subtlety: we DON'T call onLoginSuccess() here because that resets
   // active tenant — fine when the user just signed in (membership may
   // have changed) but unwanted when they're just being bounced through
-  // /login with an existing session. We also wait for !isLoading so we
-  // don't fire while Better Auth's useSession is still pending its first
-  // result and isAuthenticated reads spuriously false. The bug this
-  // guards against: signup OTP verify completed → session updates →
-  // isAuthenticated flips true → effect previously called onLoginSuccess
-  // which reset tenant THEN nav'd, racing the handler's own nav and
-  // sometimes landing on / instead of /connect-runtime.
+  // /login with an existing session. Tenant reset is the handlers' job;
+  // this effect is just a safety net to make sure an authenticated user
+  // never gets stranded on the login form.
+  //
+  // We also wait for !isLoading so we don't fire while Better Auth's
+  // useSession is still pending its first result (isAuthenticated reads
+  // spuriously false during that window).
   useEffect(() => {
-    if (!isLoading && isAuthenticated && nextUrl !== "/") {
+    if (!isLoading && isAuthenticated) {
       nav(nextUrl, { replace: true });
     }
   }, [isAuthenticated, isLoading]);
@@ -240,9 +240,14 @@ export function Login() {
         onLoginSuccess(() => nav(nextUrl, { replace: true }));
       } else if (mode === "verify-login") {
         const signInOtp = authClient.signIn.emailOtp as any;
-        const { data, error } = await signInOtp({ email, otp });
+        const { error } = await signInOtp({ email, otp });
         if (error) throw new Error(error.message);
-        if (data) onLoginSuccess(() => nav(nextUrl, { replace: true }));
+        // No `if (data)` guard — better-auth's client wrapper sometimes
+        // returns a falsy `data` even on a successful sign-in (server
+        // sets the session cookie either way). Treating absence-of-error
+        // as success matches every other handler in this file and keeps
+        // the user from getting stranded on the verify form.
+        onLoginSuccess(() => nav(nextUrl, { replace: true }));
       } else if (mode === "forgot") {
         const { error } = await authClient.emailOtp.sendVerificationOtp({
           email,
