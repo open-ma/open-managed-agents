@@ -147,7 +147,6 @@ describe("model cards", () => {
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({
-        name: "Test Anthropic",
         provider: "ant",
         model_id: "claude-sonnet-4-6",
         api_key: "sk-ant-test-1234567890",
@@ -155,7 +154,9 @@ describe("model cards", () => {
     });
     expect(res.status).toBe(201);
     const body = await res.json();
-    expect(body.name).toBe("Test Anthropic");
+    expect(body.model_id).toBe("claude-sonnet-4-6");
+    // model defaults to model_id when not specified
+    expect(body.model).toBe("claude-sonnet-4-6");
     expect(body.provider).toBe("ant");
     expect(body.api_key_preview).toBe("7890");
     // Full key should NOT be in response
@@ -168,7 +169,6 @@ describe("model cards", () => {
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({
-        name: "Test Compatible",
         provider: "oai-compatible",
         model_id: "deepseek-chat",
         api_key: "sk-test-deepseek",
@@ -195,11 +195,11 @@ describe("model cards", () => {
     const res = await api(`/v1/model_cards/${cardId}`, {
       method: "POST",
       headers: HEADERS,
-      body: JSON.stringify({ name: "Updated Anthropic", is_default: true }),
+      body: JSON.stringify({ model: "claude-opus-4-7", is_default: true }),
     });
     expect(res.status).toBe(200);
     const body = await res.json();
-    expect(body.name).toBe("Updated Anthropic");
+    expect(body.model).toBe("claude-opus-4-7");
     expect(body.is_default).toBe(true);
   });
 
