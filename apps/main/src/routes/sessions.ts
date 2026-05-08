@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { SessionMeta, UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
-import { generateFileId, buildTrajectory, fileR2Key, generateEventId } from "@open-managed-agents/shared";
+import { generateFileId, buildTrajectory, fileR2Key, generateEventId, LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
 import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { rateLimitSessionCreate } from "../rate-limit";
 import { checkDailySessionCap } from "../quotas";
@@ -71,6 +71,22 @@ async function getSandboxBinding(
   environmentId: string,
   tenantId: string,
 ): Promise<{ binding: Fetcher | null; error?: string; status?: 404 | 500 | 503; retryAfterSeconds?: number }> {
+  // Local-runtime sentinel — these sessions never touch a sandbox container;
+  // route layer needs a fetcher only to forward /sessions/:id/* into the
+  // SessionDO. Skip the env_row lookup entirely (no real env exists for
+  // this id by design).
+  if (environmentId === LOCAL_RUNTIME_ENV_ID) {
+    const fallback = sessionDoFallbackFetcher(env);
+    if (!fallback) {
+      return {
+        binding: null,
+        error: "SESSION_DO binding missing — local-runtime session can't route",
+        status: 500,
+      };
+    }
+    return { binding: fallback };
+  }
+
   const services = await getCfServicesForTenant(env, tenantId);
   const envRow = await services.environments.get({ tenantId, environmentId });
   if (!envRow) return { binding: null, error: "Environment not found", status: 404 };
@@ -325,9 +341,11 @@ app.post("/", async (c) => {
   // — their loop is forwarded to the user's daemon via the RuntimeRoom DO.
   // We still need an environment_id because Anthropic's Managed Agents API
   // requires it on every session (BetaManagedAgentsSession.environment_id
-  // is `string`, not nullable), so we keep the schema aligned and pick
-  // the tenant's first environment as a benign default for local-runtime
-  // sessions where the value never gets used by the sandbox layer.
+  // is `string`, not nullable). Use the LOCAL_RUNTIME_ENV_ID sentinel so
+  // (a) we don't depend on the tenant having ≥1 environment, and (b) the
+  // value is self-explanatory in DB / dashboards. getSandboxBinding
+  // recognizes the sentinel and short-circuits to sessionDoFallbackFetcher
+  // without attempting an environments-store lookup.
   // Cloud agents must supply an explicit environment_id because the
   // picked sandbox lane materially affects the run.
   const agentIsLocalRuntime = !!agentRow.runtime_binding;
@@ -336,15 +354,7 @@ app.post("/", async (c) => {
     if (!agentIsLocalRuntime) {
       return c.json({ error: "environment_id is required for cloud agents" }, 400);
     }
-    const envs = await c.var.services.environments.list({ tenantId: t });
-    const fallback = envs.find((e) => !e.archived_at) ?? envs[0];
-    if (!fallback) {
-      return c.json(
-        { error: "No environment configured. Create at least one environment before starting a local-runtime session." },
-        400,
-      );
-    }
-    resolvedEnvId = fallback.id;
+    resolvedEnvId = LOCAL_RUNTIME_ENV_ID;
   }
 
   // Resolve sandbox worker binding. Local-runtime sessions still go
