@@ -191,6 +191,17 @@ export class SqlSessionRepo implements SessionRepo {
     return !!row;
   }
 
+  async count(
+    tenantId: string,
+    opts: { includeArchived: boolean },
+  ): Promise<number> {
+    const sql = opts.includeArchived
+      ? `SELECT COUNT(*) AS c FROM sessions WHERE tenant_id = ?`
+      : `SELECT COUNT(*) AS c FROM sessions WHERE tenant_id = ? AND archived_at IS NULL`;
+    const row = await this.db.prepare(sql).bind(tenantId).first<{ c: number }>();
+    return row?.c ?? 0;
+  }
+
   async update(
     tenantId: string,
     sessionId: string,

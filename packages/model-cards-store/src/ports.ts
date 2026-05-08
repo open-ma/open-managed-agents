@@ -78,6 +78,8 @@ export interface ModelCardRepo {
     opts: {
       limit: number;
       after?: PageCursor;
+      /** Case-insensitive substring; matched against `model_id` OR `model`. */
+      q?: string;
     },
   ): Promise<{ items: ModelCardRow[]; hasMore: boolean }>;
 
