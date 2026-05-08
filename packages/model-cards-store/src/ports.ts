@@ -20,9 +20,12 @@ import type { PageCursor } from "@open-managed-agents/shared";
 export interface NewModelCardInput {
   id: string;
   tenantId: string;
+  /** Tenant-unique handle. UNIQUE(tenant_id, model_id) enforced in DB. */
   modelId: string;
   provider: string;
-  displayName: string;
+  /** LLM string sent to the provider API. Defaults to modelId when callers
+   *  haven't customized — see ModelCardService.create. */
+  model: string;
   baseUrl: string | null;
   customHeaders: Record<string, string> | null;
   apiKeyCipher: string;
@@ -37,9 +40,10 @@ export interface NewModelCardInput {
 }
 
 export interface ModelCardUpdateFields {
-  displayName?: string;
   provider?: string;
   modelId?: string;
+  /** Update the wire-level LLM string. */
+  model?: string;
   baseUrl?: string | null;
   customHeaders?: Record<string, string> | null;
   /** New ciphertext when the api_key is rotated. Pair with `apiKeyPreview`. */
