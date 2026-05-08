@@ -420,14 +420,16 @@ describe("Session creation with resources", () => {
     expect(content).toBe("initial content");
   });
 
-  it("session creation without resources does not include resources field", async () => {
+  it("session creation without resources returns empty resources array", async () => {
     const res = await post("/v1/sessions", {
       agent: agentId,
       environment_id: envId,
       title: "No Resources",
     });
     const session = (await res.json()) as any;
-    expect(session.resources).toBeUndefined();
+    // AMA shape always includes `resources: []`; create response defaults
+    // to empty when the request body had no resources.
+    expect(session.resources).toEqual([]);
   });
 
   it("resources listing shows resources created at session creation", async () => {
@@ -453,8 +455,9 @@ describe("Session creation with resources", () => {
     });
     expect(res.status).toBe(201);
     const session = (await res.json()) as any;
-    // No resources should be created since the file doesn't exist
-    expect(session.resources).toBeUndefined();
+    // No resources should be created since the file doesn't exist —
+    // wire shape still includes the empty array per AMA convention.
+    expect(session.resources).toEqual([]);
   });
 
   it("creates session with memory_store resources", async () => {
