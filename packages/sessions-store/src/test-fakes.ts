@@ -267,6 +267,24 @@ export class InMemorySessionRepo implements SessionRepo {
     this.resources.delete(resourceId);
   }
 
+  async updateResource(
+    sessionId: string,
+    resourceId: string,
+    resource: SessionResource,
+  ): Promise<SessionResourceRow> {
+    const row = this.resources.get(resourceId);
+    if (!row || row.session_id !== sessionId) {
+      throw new Error("session_resources row not found");
+    }
+    const updated: InMemResource = {
+      ...row,
+      type: resource.type,
+      resource,
+    };
+    this.resources.set(resourceId, updated);
+    return toResourceRow(updated);
+  }
+
   async deleteAllResourcesForSession(sessionId: string): Promise<void> {
     for (const [id, r] of this.resources.entries()) {
       if (r.session_id === sessionId) this.resources.delete(id);

@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import type { UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent } from "@open-managed-agents/shared";
+import type { UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent, SessionResource } from "@open-managed-agents/shared";
 import { generateFileId, buildTrajectory, fileR2Key, generateEventId, LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
 import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { rateLimitSessionCreate } from "../rate-limit";
@@ -98,9 +98,11 @@ function snapshotToSessionAgent(
  *    - vault_ids defaults to `[]` (never null on the wire)
  *    - title null when stored value is empty
  *    - terminated_at preserved (OMA extension; AMA SDKs ignore unknowns)
- *  Live-only fields (`stats`, `usage`, `outcome_evaluations`, `resources`)
- *  are added by the GET handler when sandbox data is available; this
- *  shaper emits empty defaults so the field is always present on the wire. */
+ *    - usage / stats defaults present so AMA SDKs always see the field
+ *  Live-only fields (`usage` token counts, `outcome_evaluations`,
+ *  `resources`, `stats.active_seconds`) are overlaid by the GET handler
+ *  when sandbox data is available; this shaper emits structurally
+ *  complete defaults so the shape is always present on the wire. */
 function toApiSession(row: SessionRow & { tenant_id?: string }): Record<string, unknown> {
   const {
     tenant_id: _t,
@@ -112,6 +114,14 @@ function toApiSession(row: SessionRow & { tenant_id?: string }): Record<string, 
     metadata,
     ...rest
   } = row;
+  const createdMs = Date.parse(row.created_at);
+  const terminatedMs = row.terminated_at ? Date.parse(row.terminated_at) : null;
+  // duration_seconds = wall-clock since create. Frozen at terminated_at
+  // for terminated sessions (matches AMA's "frozen at the final update").
+  const refMs = terminatedMs ?? Date.now();
+  const durationSeconds = Number.isFinite(createdMs)
+    ? Math.max(0, Math.round((refMs - createdMs) / 1000))
+    : undefined;
   return {
     ...rest,
     type: "session" as const,
@@ -121,7 +131,8 @@ function toApiSession(row: SessionRow & { tenant_id?: string }): Record<string, 
     metadata: metadata ?? {},
     resources: [] as unknown[],
     outcome_evaluations: [] as unknown[],
-    stats: {},
+    usage: {} as Record<string, unknown>,
+    stats: durationSeconds !== undefined ? { duration_seconds: durationSeconds } : {},
   };
 }
 
@@ -756,7 +767,7 @@ app.get("/:id", async (c) => {
       };
       response.status = fullStatus.status;
       response.usage = fullStatus.usage;
-      if (fullStatus.outcome_evaluations?.length) {
+      if (fullStatus.outcome_evaluations) {
         response.outcome_evaluations = fullStatus.outcome_evaluations;
       }
     } catch (err) {
@@ -1586,24 +1597,30 @@ app.get("/:id/resources/:resource_id", async (c) => {
   }
 });
 
-// POST /v1/sessions/:id/resources/:resource_id — update resource. Anthropic
-// SDK calls this via `client.beta.sessions.resources.update(...)`. The
-// sessions-store service doesn't yet expose updateResource (only get / list /
-// delete), so this returns 501 with a typed envelope rather than a 404 the
-// SDK couldn't classify. Follow-up: add SessionsStore.updateResource +
-// adapter (D1 in-place patch on the resource JSON column).
-app.post("/:id/resources/:resource_id", (c) =>
-  c.json(
-    {
-      error: {
-        type: "not_implemented",
-        message: "session resource update not yet implemented on this server",
-      },
-      type: "error",
-    },
-    501,
-  ),
-);
+// POST /v1/sessions/:id/resources/:resource_id — update resource
+// (`client.beta.sessions.resources.update(...)`). Body is a full
+// SessionResource shape; identity (id / session_id / created_at) is
+// re-stamped server-side so the wire payload only needs the mutable
+// fields. Sandbox-side remount (mount_path / access changes) is NOT
+// triggered by this endpoint — callers wanting a re-mount should
+// detach + re-attach the resource via DELETE + POST.
+app.post("/:id/resources/:resource_id", async (c) => {
+  try {
+    const body = await c.req.json<SessionResource>();
+    if (!body || typeof body !== "object" || !body.type) {
+      return c.json({ error: "resource body with `type` field is required" }, 400);
+    }
+    const row = await c.var.services.sessions.updateResource({
+      tenantId: c.get("tenant_id"),
+      sessionId: c.req.param("id"),
+      resourceId: c.req.param("resource_id"),
+      resource: body,
+    });
+    return c.json(row.resource);
+  } catch (err) {
+    return mapSessionError(c, err);
+  }
+});
 
 // GET /v1/sessions/:id/threads/:thread_id — single thread metadata. Threads
 // live in the sandbox worker (DO state); the agent worker only exposes

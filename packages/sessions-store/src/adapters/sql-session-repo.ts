@@ -358,6 +358,22 @@ export class SqlSessionRepo implements SessionRepo {
       .run();
   }
 
+  async updateResource(
+    sessionId: string,
+    resourceId: string,
+    resource: SessionResource,
+  ): Promise<SessionResourceRow> {
+    await this.db
+      .prepare(
+        `UPDATE session_resources SET config = ? WHERE id = ? AND session_id = ?`,
+      )
+      .bind(JSON.stringify(resource), resourceId, sessionId)
+      .run();
+    const row = await this.getResource(sessionId, resourceId);
+    if (!row) throw new Error(`session_resources ${resourceId} vanished after update`);
+    return row;
+  }
+
   async deleteAllResourcesForSession(sessionId: string): Promise<void> {
     await this.db
       .prepare(`DELETE FROM session_resources WHERE session_id = ?`)
