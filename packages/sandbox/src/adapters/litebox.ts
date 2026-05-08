@@ -161,6 +161,31 @@ export class LiteBoxSandbox implements SandboxExecutor {
     this.volumes.push({ hostPath, guestPath, readOnly: opts.readOnly });
   }
 
+  async mountSessionOutputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    if (this.boxPromise) {
+      throw new Error(
+        "LiteBoxSandbox.mountSessionOutputs: box already created — mounts must " +
+        "be configured before the first exec/readFile/writeFile call",
+      );
+    }
+    const outputsRoot = process.env.FILES_BLOB_DIR
+      ? resolve(process.env.FILES_BLOB_DIR)
+      : null;
+    if (!outputsRoot) {
+      throw new Error(
+        "LiteBoxSandbox.mountSessionOutputs: FILES_BLOB_DIR env var not set — " +
+        "set it to the host directory backing per-session output deliveries " +
+        "(main-node's GET /v1/sessions/:id/outputs reads from the same dir)",
+      );
+    }
+    const hostPath = join(outputsRoot, opts.tenantId, opts.sessionId);
+    mkdirSync(hostPath, { recursive: true });
+    this.volumes.push({ hostPath, guestPath: "/mnt/session/outputs", readOnly: false });
+  }
+
   async readFile(path: string): Promise<string> {
     const box = await this.ensureBox();
     const tmp = join(this.tmpRoot, `read-${randomBytes(6).toString("hex")}`);
