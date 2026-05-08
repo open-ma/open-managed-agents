@@ -5,13 +5,38 @@ import sitemap from "@astrojs/sitemap";
 
 // https://astro.build/config
 export default defineConfig({
-  site: "https://openma.dev",
-  integrations: [sitemap()],
+  site: "https://www.openma.dev",
+  trailingSlash: "always",
+  integrations: [
+    sitemap({
+      // Per-route priority + changefreq hints. Google ignores priority
+      // mostly but Bing + smaller crawlers use them.
+      serialize(item) {
+        const url = new URL(item.url);
+        if (url.pathname === "/") {
+          item.priority = 1.0;
+          item.changefreq = "weekly";
+        } else if (url.pathname === "/blog/") {
+          item.priority = 0.9;
+          item.changefreq = "weekly";
+        } else if (url.pathname.startsWith("/blog/")) {
+          item.priority = 0.7;
+          item.changefreq = "monthly";
+        } else {
+          item.priority = 0.5;
+        }
+        return item;
+      },
+      // RSS already covers the blog discovery channel; sitemap covers
+      // the rest of the site.
+      filter: (page) => !page.endsWith("/rss.xml"),
+    }),
+  ],
   vite: {
     plugins: [tailwindcss()],
   },
   output: "static",
   build: {
-    format: "directory", // /blog/foo/index.html — clean URLs
+    format: "directory",
   },
 });
