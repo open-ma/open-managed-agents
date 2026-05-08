@@ -64,17 +64,24 @@ function composeSystem(taskPrompt: string): string {
 }
 
 /**
- * MCP server config for MiniMax Token Plan MCP — gives non-vision models
- * (MiniMax-M2-highspeed) the ability to read images via the understand_image
- * tool. Spawned in-sandbox via uv. Caller must provide MINIMAX_API_KEY +
- * MINIMAX_API_HOST via env vars at runner-startup.
+ * MCP server config that gives non-vision judge models the ability to read
+ * images via an `understand_image` tool. Spawned in-sandbox via uv. Caller
+ * must provide both env vars at runner-startup; both are required (no
+ * default endpoint — this codebase doesn't presume a vendor).
+ *
+ *   MINIMAX_API_KEY   bearer for the upstream image-understanding service
+ *   MINIMAX_API_HOST  https URL of the service (vendor-specific)
+ *
+ * The `minimax-coding-plan-mcp` python package wraps the upstream call
+ * and exposes the MCP. Different vendor → swap the package + env names
+ * here without touching the rest of the GAIA suite.
  */
 function buildMiniMaxMcpServer() {
   const apiKey = process.env.MINIMAX_API_KEY || process.env.OMA_MINIMAX_API_KEY;
-  const apiHost = process.env.MINIMAX_API_HOST || "https://api.example.com";
-  if (!apiKey) {
+  const apiHost = process.env.MINIMAX_API_HOST;
+  if (!apiKey || !apiHost) {
     console.warn(
-      "[gaia] MINIMAX_API_KEY not set — multimodal GAIA tasks will fail to call understand_image.",
+      "[gaia] MINIMAX_API_KEY / MINIMAX_API_HOST not set — multimodal GAIA tasks will fail to call understand_image.",
     );
   }
   return {
@@ -93,7 +100,7 @@ function buildMiniMaxMcpServer() {
       ],
       env: {
         MINIMAX_API_KEY: apiKey || "",
-        MINIMAX_API_HOST: apiHost,
+        MINIMAX_API_HOST: apiHost || "",
       },
       port: 8765,
       sse_path: "/mcp",

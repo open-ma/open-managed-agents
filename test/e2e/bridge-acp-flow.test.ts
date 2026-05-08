@@ -48,7 +48,9 @@ function pathExists(p: string): boolean {
 
 // ─── config ──────────────────────────────────────────────────────────────
 
-const WORKTREE = "$HOME/oos-proj/open-managed-agents/.claude/worktrees/acp-agents-expand";
+// Local-machine paths — set OMA_WORKTREE to your repo root (or a worktree).
+// The test exits early in CI; it's a manual local-driver script.
+const WORKTREE = process.env.OMA_WORKTREE ?? process.cwd();
 const CLI_BIN = join(WORKTREE, "packages/cli/dist/index.js");
 
 // Profile-aware paths: when OMA_PROFILE=staging is set, target the
@@ -65,7 +67,8 @@ const CREDS = join(BRIDGE_ROOT, "credentials.json");
 const DAEMON_LOG = join(BRIDGE_ROOT, "logs", "bridge.log");
 const SESSIONS_ROOT = join(BRIDGE_ROOT, "sessions");
 const PLIST = join(homedir(), "Library/LaunchAgents", `dev.openma.bridge${LABEL_SUFFIX}.plist`);
-const NPM_BIN_DIR = "$HOME/.nvm/versions/node/v24.14.0/bin";
+// Local node bin dir for spawning oma cli; defaults to PATH lookup.
+const NPM_BIN_DIR = process.env.OMA_NPM_BIN_DIR ?? "";
 
 let RUNTIME_ID = "";
 let ENV_ID = "";

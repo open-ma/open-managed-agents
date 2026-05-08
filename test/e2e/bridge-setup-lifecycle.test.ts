@@ -56,7 +56,9 @@ const skipMsg = SKIP ? "OMA_E2E_BRIDGE not set; skipping (see file header)" : un
 // Pin the worktree CLI so we test the code under test, not whatever
 // `oma` happens to be on PATH. Same mental model the user adopts when
 // they run via the `oma-dev` shim.
-const WORKTREE = "$HOME/oos-proj/open-managed-agents/.claude/worktrees/acp-agents-expand";
+// Local-machine path — set OMA_WORKTREE to your repo root (or a worktree)
+// before running this manual e2e. Defaults to cwd.
+const WORKTREE = process.env.OMA_WORKTREE ?? process.cwd();
 const CLI = join(WORKTREE, "packages/cli/dist/index.js");
 // Dedicated profile so this test never touches the user's real prod /
 // staging daemon. paths() will route to ~/.oma/bridge-e2e-test/.

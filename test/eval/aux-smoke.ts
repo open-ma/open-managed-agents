@@ -7,10 +7,14 @@ async function main() {
   // Big page that Jina handles cleanly
   const targetUrl = "https://en.wikipedia.org/wiki/Mercedes_Sosa";
 
+  // Set OMA_SMOKE_MODEL to a model id registered in your tenant's
+  // /v1/model_cards (e.g. "claude-haiku-4-5", "MiniMax-M2-highspeed", etc).
+  const SMOKE_MODEL = process.env.OMA_SMOKE_MODEL ?? "claude-haiku-4-5";
+
   const agentId = await createAgent({
     name: `aux-smoke-${Date.now()}`,
-    model: "MiniMax-M2-highspeed",
-    aux_model: "MiniMax-M2-highspeed",
+    model: SMOKE_MODEL,
+    aux_model: SMOKE_MODEL,
     system: `Your job: call web_fetch with the URL the user provides, then state in one sentence what the page is about. Do nothing else. Use ONLY web_fetch.`,
     tools: [{ type: "agent_toolset_20260401", default_config: { enabled: false }, configs: [{ name: "web_fetch", enabled: true }, { name: "read", enabled: true }] }],
   });

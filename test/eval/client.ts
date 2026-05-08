@@ -419,16 +419,29 @@ export async function cleanup(handle: CleanupHandle): Promise<void> {
 }
 
 // ---- Eval Judge (Layer 2) — independent LLM judgment, NOT platform outcome ----
+//
+// Bring your own judge endpoint. Any Anthropic-compatible /messages API works
+// (Anthropic direct, OpenRouter w/ anthropic mapping, MiniMax, etc).
+//
+//   OMA_JUDGE_API_URL   required, e.g. https://api.anthropic.com/v1
+//   OMA_JUDGE_API_KEY   bearer token for the above (falls back to OMA_API_KEY)
+//   OMA_JUDGE_MODEL     model id, e.g. "claude-haiku-4-5"
 
-const JUDGE_API_URL = process.env.OMA_JUDGE_API_URL || "https://api.example.com/anthropic/v1";
+const JUDGE_API_URL = process.env.OMA_JUDGE_API_URL ?? "";
 const JUDGE_API_KEY = process.env.OMA_JUDGE_API_KEY || process.env.OMA_API_KEY || "";
-const JUDGE_MODEL = process.env.OMA_JUDGE_MODEL || "MiniMax-M2.7";
+const JUDGE_MODEL = process.env.OMA_JUDGE_MODEL ?? "";
 const JUDGE_MAX_RETRIES = 10;
 const JUDGE_BASE_DELAY = 2000;
 const JUDGE_TIMEOUT_MS = 60_000;
 
 /** Wrapped fetch + parse with retry. Returns null only after all attempts exhausted. */
 async function callJudgeWithRetry(prompt: string): Promise<string | null> {
+  if (!JUDGE_API_URL || !JUDGE_API_KEY || !JUDGE_MODEL) {
+    console.warn(
+      "[judge] OMA_JUDGE_API_URL / OMA_JUDGE_API_KEY / OMA_JUDGE_MODEL not all set — skipping LLM judge.",
+    );
+    return null;
+  }
   let lastErr = "";
   for (let attempt = 0; attempt <= JUDGE_MAX_RETRIES; attempt++) {
     const controller = new AbortController();
