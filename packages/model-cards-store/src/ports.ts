@@ -83,8 +83,8 @@ export interface ModelCardRepo {
 
   /**
    * Find an active card by (tenant_id, model_id). Used by the agent worker's
-   * model resolver to derive credentials when no explicit `model_card_id` is
-   * pinned on the agent. Returns the card whose `model_id` exactly matches.
+   * model resolver to derive credentials from `agent.model`. Returns the
+   * card whose `model_id` exactly matches.
    */
   findByModelId(tenantId: string, modelId: string): Promise<ModelCardRow | null>;
 

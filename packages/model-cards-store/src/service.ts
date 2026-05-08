@@ -185,10 +185,9 @@ export class ModelCardService {
   }
 
   /**
-   * Used by the agent worker when no explicit model_card_id is pinned on the
-   * agent. Returns the first card whose `model_id` exactly matches. Replaces
-   * the per-tenant CONFIG_KV.list + JSON.parse loop in
-   * session-do.ts:1141-1163.
+   * Used by the agent worker to resolve `agent.model` to a card. Returns the
+   * card whose `model_id` exactly matches. Replaces the per-tenant
+   * CONFIG_KV.list + JSON.parse loop in session-do.ts:1141-1163.
    */
   async findByModelId(opts: {
     tenantId: string;

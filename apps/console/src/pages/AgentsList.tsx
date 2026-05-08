@@ -113,8 +113,8 @@ export function AgentsList() {
 
   // Pre-select default model card when entering the form step. (tenant_id,
   // model_id) is UNIQUE in DB, so picking a card uniquely determines the
-  // model. Skip if user/paste already set model_card_id or model. Re-runs
-  // when modelCards arrives if the dialog opened before the aux fetch.
+  // model. Skip if user/paste already set model. Re-runs when modelCards
+  // arrives if the dialog opened before the aux fetch.
   useEffect(() => {
     if (createStep !== "form") return;
     if (form.modelCardId || form.model) return;
@@ -139,7 +139,6 @@ export function AgentsList() {
         description: form.description || undefined,
         tools: [{ type: "agent_toolset_20260401" }],
       };
-      if (form.modelCardId) payload.model_card_id = form.modelCardId;
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
       if (form.callableAgents.length) payload.callable_agents = form.callableAgents;

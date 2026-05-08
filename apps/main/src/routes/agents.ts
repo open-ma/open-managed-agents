@@ -37,13 +37,11 @@ function formatAgent(agent: AgentConfig) {
     skills: agent.skills || [],
     mcp_servers: agent.mcp_servers || [],
     callable_agents: agent.callable_agents || [],
-    model_card_id: agent.model_card_id || null,
     aux_model: agent.aux_model
       ? (typeof agent.aux_model === "string"
           ? { id: agent.aux_model, speed: "standard" as const }
           : { id: agent.aux_model.id, speed: agent.aux_model.speed || "standard" as const })
       : null,
-    aux_model_card_id: agent.aux_model_card_id || null,
     metadata: agent.metadata || {},
     archived_at: agent.archived_at || null,
   };
@@ -57,14 +55,9 @@ function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
 }
 
 /**
- * Validate the agent's model reference. After the handle rename, agent.model
- * is a string that should equal some card's model_id (the tenant-unique
- * handle). The DB enforces UNIQUE(tenant_id, model_id) so the lookup returns
- * at most one row.
- *
- * If model_card_id is also pinned, that's the explicit override path —
- * verify the id exists and let the runtime use that card's wire-level
- * `model` field for the API call.
+ * Validate the agent's model reference. `agent.model` must equal some
+ * card's `model_id` (the tenant-unique handle); the DB enforces
+ * UNIQUE(tenant_id, model_id) so the lookup returns at most one row.
  *
  * Skips validation entirely when no cards exist (env-var fallback path).
  */
@@ -72,7 +65,6 @@ async function validateModel(
   services: Services,
   tenantId: string,
   model: string | { id: string; speed?: string },
-  modelCardId?: string,
 ): Promise<{ valid: boolean; error?: string }> {
   const cards = await services.modelCards.list({ tenantId });
   const active = cards.filter((c) => c.archived_at === null);
@@ -80,14 +72,6 @@ async function validateModel(
   // No model cards configured — skip validation (uses env fallback)
   if (active.length === 0) return { valid: true };
 
-  // Explicit pin: card id must exist.
-  if (modelCardId) {
-    const found = active.find((c) => c.id === modelCardId);
-    if (!found) return { valid: false, error: `Model card "${modelCardId}" not found` };
-    return { valid: true };
-  }
-
-  // Implicit lookup: agent.model must match some card's model_id handle.
   const modelId = typeof model === "string" ? model : model.id;
   const match = active.find((c) => c.model_id === modelId);
   if (!match) {
@@ -112,9 +96,7 @@ app.post("/", async (c) => {
     skills?: AgentConfig["skills"];
     callable_agents?: AgentConfig["callable_agents"];
     metadata?: Record<string, unknown>;
-    model_card_id?: string;
     aux_model?: string | { id: string; speed?: "standard" | "fast" };
-    aux_model_card_id?: string;
     runtime_binding?: AgentConfig["runtime_binding"];
   }>();
 
@@ -138,16 +120,16 @@ app.post("/", async (c) => {
   const tenantId = c.get("tenant_id");
   const isLocalRuntime = !!body.runtime_binding;
   if (!isLocalRuntime) {
-    const modelCheck = await validateModel(c.var.services, tenantId, body.model, body.model_card_id);
+    const modelCheck = await validateModel(c.var.services, tenantId, body.model);
     if (!modelCheck.valid) {
       return c.json({ error: modelCheck.error }, 400);
     }
 
     // Validate aux_model when provided. Same skip rule applies — aux_model
     // is meaningless for ACP children that don't expose a sub-model knob.
-    if (body.aux_model !== undefined || body.aux_model_card_id !== undefined) {
+    if (body.aux_model !== undefined) {
       const auxModel = body.aux_model ?? body.model;
-      const auxCheck = await validateModel(c.var.services, tenantId, auxModel, body.aux_model_card_id);
+      const auxCheck = await validateModel(c.var.services, tenantId, auxModel);
       if (!auxCheck.valid) {
         return c.json({ error: `aux_model: ${auxCheck.error}` }, 400);
       }
@@ -171,9 +153,7 @@ app.post("/", async (c) => {
       skills: body.skills,
       callable_agents: body.callable_agents,
       metadata: body.metadata,
-      model_card_id: body.model_card_id,
       aux_model: body.aux_model,
-      aux_model_card_id: body.aux_model_card_id,
       runtime_binding: body.runtime_binding,
     },
   });
@@ -221,9 +201,7 @@ const updateAgent = async (c: any) => {
     mcp_servers?: AgentConfig["mcp_servers"] | null;
     skills?: AgentConfig["skills"] | null;
     callable_agents?: AgentConfig["callable_agents"] | null;
-    model_card_id?: string | null;
     aux_model?: string | { id: string; speed?: "standard" | "fast" } | null;
-    aux_model_card_id?: string | null;
     metadata?: Record<string, unknown>;
     version?: number;
     runtime_binding?: AgentConfig["runtime_binding"] | null;
@@ -238,27 +216,23 @@ const updateAgent = async (c: any) => {
     : (body.runtime_binding ?? existing.runtime_binding);
   const isLocalRuntime = !!effectiveBinding;
 
-  // Validate model if model or model_card_id is being changed. Skipped
-  // for local-runtime agents — see POST handler for the rationale.
-  if (!isLocalRuntime && (body.model !== undefined || body.model_card_id !== undefined)) {
+  // Validate model if it is being changed. Skipped for local-runtime
+  // agents — see POST handler for the rationale.
+  if (!isLocalRuntime && body.model !== undefined) {
     const effectiveModel = body.model ?? existing.model;
-    const effectiveCardId = body.model_card_id === null ? undefined : (body.model_card_id ?? existing.model_card_id);
-    const modelCheck = await validateModel(c.var.services, t, effectiveModel, effectiveCardId);
+    const modelCheck = await validateModel(c.var.services, t, effectiveModel);
     if (!modelCheck.valid) {
       return c.json({ error: modelCheck.error }, 400);
     }
   }
 
   // Validate aux_model if changing. Same skip rule.
-  if (!isLocalRuntime && (body.aux_model !== undefined || body.aux_model_card_id !== undefined)) {
+  if (!isLocalRuntime && body.aux_model !== undefined) {
     const effectiveAux = body.aux_model === null
       ? undefined
       : (body.aux_model ?? existing.aux_model);
-    const effectiveAuxCard = body.aux_model_card_id === null
-      ? undefined
-      : (body.aux_model_card_id ?? existing.aux_model_card_id);
     if (effectiveAux !== undefined) {
-      const auxCheck = await validateModel(c.var.services, t, effectiveAux, effectiveAuxCard);
+      const auxCheck = await validateModel(c.var.services, t, effectiveAux);
       if (!auxCheck.valid) {
         return c.json({ error: `aux_model: ${auxCheck.error}` }, 400);
       }
@@ -281,9 +255,7 @@ const updateAgent = async (c: any) => {
         skills: body.skills,
         callable_agents: body.callable_agents,
         metadata: body.metadata,
-        model_card_id: body.model_card_id,
         aux_model: body.aux_model,
-        aux_model_card_id: body.aux_model_card_id,
         runtime_binding: body.runtime_binding,
       },
     });

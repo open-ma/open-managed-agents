@@ -35,9 +35,7 @@ export interface NewAgentInput {
   skills?: AgentConfig["skills"];
   callable_agents?: AgentConfig["callable_agents"];
   metadata?: Record<string, unknown>;
-  model_card_id?: string;
   aux_model?: AgentConfig["aux_model"];
-  aux_model_card_id?: string;
   appendable_prompts?: string[];
   runtime_binding?: AgentConfig["runtime_binding"];
 }
@@ -57,9 +55,7 @@ export interface UpdateAgentInput {
   callable_agents?: AgentConfig["callable_agents"] | null;
   /** Per-key merge — pass `{ key: "" }` or `{ key: null }` to drop a key. */
   metadata?: Record<string, unknown>;
-  model_card_id?: string | null;
   aux_model?: AgentConfig["aux_model"] | null;
-  aux_model_card_id?: string | null;
   appendable_prompts?: string[] | null;
   runtime_binding?: AgentConfig["runtime_binding"] | null;
 }
@@ -79,9 +75,7 @@ const UPDATABLE_FIELDS = [
   "mcp_servers",
   "skills",
   "callable_agents",
-  "model_card_id",
   "aux_model",
-  "aux_model_card_id",
   "metadata",
   "appendable_prompts",
   "runtime_binding",
@@ -147,9 +141,7 @@ export class AgentService {
       skills: opts.input.skills,
       callable_agents: opts.input.callable_agents,
       metadata: opts.input.metadata,
-      model_card_id: opts.input.model_card_id,
       aux_model: opts.input.aux_model,
-      aux_model_card_id: opts.input.aux_model_card_id,
       appendable_prompts: opts.input.appendable_prompts,
       runtime_binding: opts.input.runtime_binding,
       version: 1,

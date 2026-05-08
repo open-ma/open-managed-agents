@@ -68,7 +68,6 @@ export interface AgentConfig {
   }>;
   skills?: Array<{ skill_id: string; type: string; version?: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version?: number }>;
-  model_card_id?: string;
   /**
    * Optional auxiliary model used by tools for in-process LLM work
    * (e.g. web_fetch summarization). Same shape as `model`.
@@ -76,8 +75,6 @@ export interface AgentConfig {
    * returning raw content. Set this to opt into compressed tool results.
    */
   aux_model?: string | { id: string; speed?: "standard" | "fast" };
-  /** Companion to aux_model — explicit model card binding when needed. */
-  aux_model_card_id?: string;
   harness?: string;
   /**
    * When set, agent runs on a user-registered local ACP runtime instead of
@@ -732,9 +729,7 @@ export interface SpanOutcomeEvaluationEndEvent extends EventBase {
 // (cost dashboards, trajectory viewers) attribute aux usage separately.
 export interface AuxModelCallEvent extends EventBase {
   type: "aux.model_call";
-  /** Model card the aux call resolved through (if one was matched). */
-  model_card_id?: string;
-  /** Resolved model identifier (e.g. "claude-sonnet-4-6"). */
+  /** Resolved model identifier (the agent's `aux_model.id` handle). */
   model_id: string;
   /** What the aux model was used for. Extensible — first user is "web_summarize". */
   task: "web_summarize" | string;
