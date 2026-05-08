@@ -24,7 +24,7 @@ interface InMemModelCard {
   tenant_id: string;
   model_id: string;
   provider: string;
-  display_name: string;
+  model: string;
   base_url: string | null;
   custom_headers: Record<string, string> | null;
   api_key_cipher: string;
@@ -58,7 +58,7 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
       tenant_id: input.tenantId,
       model_id: input.modelId,
       provider: input.provider,
-      display_name: input.displayName,
+      model: input.model,
       base_url: input.baseUrl,
       custom_headers: input.customHeaders,
       api_key_cipher: input.apiKeyCipher,
@@ -163,9 +163,9 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
       // is_default not in the patch — nothing to enforce.
     }
 
-    if (update.displayName !== undefined) row.display_name = update.displayName;
     if (update.provider !== undefined) row.provider = update.provider;
     if (update.modelId !== undefined) row.model_id = update.modelId;
+    if (update.model !== undefined) row.model = update.model;
     if (update.baseUrl !== undefined) row.base_url = update.baseUrl;
     if (update.customHeaders !== undefined) row.custom_headers = update.customHeaders;
     if (update.apiKeyCipher !== undefined) row.api_key_cipher = update.apiKeyCipher;
@@ -310,8 +310,8 @@ function toRow(c: InMemModelCard): ModelCardRow {
     id: c.id,
     tenant_id: c.tenant_id,
     model_id: c.model_id,
+    model: c.model,
     provider: c.provider,
-    display_name: c.display_name,
     base_url: c.base_url,
     custom_headers: c.custom_headers,
     api_key_preview: c.api_key_preview,

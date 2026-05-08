@@ -14,17 +14,16 @@ const app = new Hono<{
 }>();
 
 /**
- * Adapt a `ModelCardRow` to the legacy API shape that Console + CLI consume.
- * Differences vs. the row: `display_name` becomes `name`, optional fields are
- * surfaced as `undefined` (not `null`), and the row's internal `tenant_id` is
- * never exposed.
+ * Adapt a `ModelCardRow` to the public API shape. Drops the row's internal
+ * `tenant_id` and converts NULL → undefined for optional fields. Field names
+ * are 1:1 with the row otherwise.
  */
 function toApiShape(card: ModelCardRow) {
   return {
     id: card.id,
-    name: card.display_name,
-    provider: card.provider,
     model_id: card.model_id,
+    model: card.model,
+    provider: card.provider,
     api_key_preview: card.api_key_preview,
     base_url: card.base_url ?? undefined,
     custom_headers: card.custom_headers ?? undefined,
@@ -39,24 +38,26 @@ function toApiShape(card: ModelCardRow) {
 app.post("/", async (c) => {
   const t = c.get("tenant_id");
   const body = await c.req.json<{
-    name: string;
-    provider: string;
+    /** User-facing handle, UNIQUE per tenant. */
     model_id: string;
+    /** LLM string sent to provider. Defaults to model_id when omitted. */
+    model?: string;
+    provider: string;
     api_key: string;
     base_url?: string;
     custom_headers?: Record<string, string>;
     is_default?: boolean;
   }>();
 
-  if (!body.name || !body.provider || !body.model_id || !body.api_key) {
-    return c.json({ error: "name, provider, model_id, and api_key are required" }, 400);
+  if (!body.model_id || !body.provider || !body.api_key) {
+    return c.json({ error: "model_id, provider, and api_key are required" }, 400);
   }
   try {
     const card = await c.var.services.modelCards.create({
       tenantId: t,
       modelId: body.model_id,
       provider: body.provider,
-      displayName: body.name,
+      model: body.model,
       apiKey: body.api_key,
       baseUrl: body.base_url ?? null,
       customHeaders: body.custom_headers ?? null,
@@ -99,9 +100,9 @@ app.post("/:id", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
   const body = await c.req.json<{
-    name?: string;
-    provider?: string;
     model_id?: string;
+    model?: string;
+    provider?: string;
     api_key?: string;
     base_url?: string | null;
     custom_headers?: Record<string, string> | null;
@@ -111,12 +112,10 @@ app.post("/:id", async (c) => {
     const updated = await c.var.services.modelCards.update({
       tenantId: t,
       cardId: id,
-      displayName: body.name,
-      provider: body.provider,
       modelId: body.model_id,
-      // Legacy route accepted `body.base_url || undefined` — translating
-      // empty string to "no change". Match for backward compat: explicitly
-      // set falsy → null (clear), undefined → leave alone.
+      model: body.model,
+      provider: body.provider,
+      // Empty string from the form means "clear"; undefined means "leave alone".
       baseUrl: body.base_url === undefined
         ? undefined
         : (body.base_url || null),

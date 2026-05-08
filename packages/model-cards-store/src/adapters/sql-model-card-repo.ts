@@ -39,7 +39,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
     const insertStmt = this.db
       .prepare(
         `INSERT INTO model_cards
-           (id, tenant_id, model_id, provider, display_name, base_url,
+           (id, tenant_id, model_id, provider, model, base_url,
             custom_headers, api_key_cipher, api_key_preview, is_default,
             created_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -49,7 +49,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
         input.tenantId,
         input.modelId,
         input.provider,
-        input.displayName,
+        input.model,
         input.baseUrl,
         input.customHeaders !== null ? JSON.stringify(input.customHeaders) : null,
         input.apiKeyCipher,
@@ -77,7 +77,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
   async get(tenantId: string, cardId: string): Promise<ModelCardRow | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, tenant_id, model_id, provider, display_name, base_url,
+        `SELECT id, tenant_id, model_id, provider, model, base_url,
                 custom_headers, api_key_preview, is_default,
                 created_at, updated_at, archived_at
          FROM model_cards
@@ -91,7 +91,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
   async list(tenantId: string): Promise<ModelCardRow[]> {
     const result = await this.db
       .prepare(
-        `SELECT id, tenant_id, model_id, provider, display_name, base_url,
+        `SELECT id, tenant_id, model_id, provider, model, base_url,
                 custom_headers, api_key_preview, is_default,
                 created_at, updated_at, archived_at
          FROM model_cards
@@ -111,7 +111,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
     },
   ): Promise<{ items: ModelCardRow[]; hasMore: boolean }> {
     const sql =
-      `SELECT id, tenant_id, model_id, provider, display_name, base_url, ` +
+      `SELECT id, tenant_id, model_id, provider, model, base_url, ` +
       `custom_headers, api_key_preview, is_default, ` +
       `created_at, updated_at, archived_at FROM model_cards ` +
       `WHERE tenant_id = ? ${cursorWhereSql(opts.after)} ` +
@@ -129,7 +129,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
   ): Promise<ModelCardRow | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, tenant_id, model_id, provider, display_name, base_url,
+        `SELECT id, tenant_id, model_id, provider, model, base_url,
                 custom_headers, api_key_preview, is_default,
                 created_at, updated_at, archived_at
          FROM model_cards
@@ -144,7 +144,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
   async getDefault(tenantId: string): Promise<ModelCardRow | null> {
     const row = await this.db
       .prepare(
-        `SELECT id, tenant_id, model_id, provider, display_name, base_url,
+        `SELECT id, tenant_id, model_id, provider, model, base_url,
                 custom_headers, api_key_preview, is_default,
                 created_at, updated_at, archived_at
          FROM model_cards
@@ -163,10 +163,6 @@ export class SqlModelCardRepo implements ModelCardRepo {
   ): Promise<ModelCardRow> {
     const sets: string[] = [];
     const binds: unknown[] = [];
-    if (update.displayName !== undefined) {
-      sets.push("display_name = ?");
-      binds.push(update.displayName);
-    }
     if (update.provider !== undefined) {
       sets.push("provider = ?");
       binds.push(update.provider);
@@ -174,6 +170,10 @@ export class SqlModelCardRepo implements ModelCardRepo {
     if (update.modelId !== undefined) {
       sets.push("model_id = ?");
       binds.push(update.modelId);
+    }
+    if (update.model !== undefined) {
+      sets.push("model = ?");
+      binds.push(update.model);
     }
     if (update.baseUrl !== undefined) {
       sets.push("base_url = ?");
@@ -306,7 +306,7 @@ interface DbModelCard {
   tenant_id: string;
   model_id: string;
   provider: string;
-  display_name: string;
+  model: string;
   base_url: string | null;
   custom_headers: string | null; // JSON
   api_key_preview: string;
@@ -321,8 +321,8 @@ function toRow(r: DbModelCard): ModelCardRow {
     id: r.id,
     tenant_id: r.tenant_id,
     model_id: r.model_id,
+    model: r.model,
     provider: r.provider,
-    display_name: r.display_name,
     base_url: r.base_url,
     custom_headers:
       r.custom_headers !== null
