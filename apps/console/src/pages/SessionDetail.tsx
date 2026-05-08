@@ -240,8 +240,7 @@ export function SessionDetail() {
 
     // Load session info
     api<{
-      title?: string;
-      agent_id?: string;
+      title?: string | null;
       environment_id?: string;
       vault_ids?: string[];
       created_at?: string;
@@ -250,7 +249,7 @@ export function SessionDetail() {
     }>(`/v1/sessions/${id}`)
       .then((s) => {
         setTitle(s.title || id);
-        setAgentId(s.agent_id || "");
+        setAgentId(s.agent?.id || "");
         setSessionMeta({
           environmentId: s.environment_id,
           vaultIds: s.vault_ids,
