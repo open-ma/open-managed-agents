@@ -1,0 +1,46 @@
+{
+  "name": "@open-managed-agents/main-node",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "main": "src/index.ts",
+  "bin": {
+    "oma-server": "./bin/oma-server.js"
+  },
+  "scripts": {
+    "dev": "tsx watch src/index.ts",
+    "start": "tsx src/index.ts",
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@boxlite-ai/boxlite": "^0.9.3",
+    "@hono/node-server": "^1.13.0",
+    "@open-managed-agents/agent": "workspace:*",
+    "@open-managed-agents/agents-store": "workspace:*",
+    "@open-managed-agents/blob-store": "workspace:*",
+    "@open-managed-agents/credentials-store": "workspace:*",
+    "@open-managed-agents/event-log": "workspace:*",
+    "@open-managed-agents/kv-store": "workspace:*",
+    "@open-managed-agents/markdown": "workspace:*",
+    "@open-managed-agents/memory-store": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/session-runtime": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "@open-managed-agents/vaults-store": "workspace:*",
+    "ai": "^6.0.158",
+    "better-auth": "^1.6.3",
+    "better-sqlite3": "^11.5.0",
+    "chokidar": "^4.0.0",
+    "hono": "^4.7.0",
+    "nanoid": "^5.1.0",
+    "turndown": "^7.2.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "^7.6.13",
+    "@types/turndown": "^5.0.5",
+    "tsx": "^4.19.0",
+    "vitest": "^4.1.3"
+  }
+}

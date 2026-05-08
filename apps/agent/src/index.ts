@@ -42,9 +42,6 @@ app.all("/sessions/:id/*", async (c) => {
   const sessionId = c.req.param("id");
   const doId = c.env.SESSION_DO!.idFromName(sessionId);
   const doStub = c.env.SESSION_DO!.get(doId);
-  // Workaround for cloudflare/workerd#2240: explicitly seed the partyserver
-  // .name so internal getters don't throw during DO startup.
-  (doStub as unknown as { setName?: (n: string) => void }).setName?.(sessionId);
 
   const url = new URL(c.req.url);
   const subPath = url.pathname.replace(`/sessions/${sessionId}`, "") || "/";

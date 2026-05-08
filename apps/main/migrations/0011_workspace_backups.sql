@@ -18,8 +18,8 @@ CREATE TABLE IF NOT EXISTS workspace_backups (
   -- Serialized DirectoryBackup handle (CF SDK type). JSON: { id, dir, localBucket? }.
   backup_handle   TEXT    NOT NULL,
   -- Mirrors the TTL passed to createBackup. R2 lifecycle rule on
-  -- managed-agents-backups deletes the squashfs after this; the row should
-  -- be garbage-collected around the same time (cron in apps/main).
+  -- managed-agents-backups deletes the squashfs after this — the row
+  -- should be garbage-collected around the same time (cron in apps/main).
   created_at      INTEGER NOT NULL,
   expires_at      INTEGER NOT NULL,
   -- For provenance / debugging — which session created this snapshot.

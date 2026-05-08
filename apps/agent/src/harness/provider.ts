@@ -13,17 +13,26 @@ export type ApiCompat = "ant" | "ant-compatible" | "oai" | "oai-compatible";
 
 const KNOWN_CLAUDE_PREFIX = "claude-";
 
+// Cap for non-Claude models on the Anthropic-compat path. The SDK hard-codes
+// max_tokens=4096 for unknown models, which truncates extended thinking
+// (MiniMax-M2 thinking alone exceeds that). Earlier code deleted the field
+// entirely, but the Anthropic spec marks it required — DeepSeek's strict
+// (Rust serde) implementation rejects with `missing field max_tokens` and a
+// generic 400 that surfaces as `Bad Request` upstream. Setting a high value
+// satisfies the spec and gives every provider room for thinking + tool_use.
+const NON_CLAUDE_MAX_TOKENS = 32768;
+
 /**
- * Fetch wrapper that strips max_tokens from request body.
- * @ai-sdk/anthropic defaults to max_tokens=4096 for models not in its
- * internal capabilities map. Removing it lets the provider API decide.
+ * Fetch wrapper that overrides @ai-sdk/anthropic's hard-coded max_tokens=4096
+ * with NON_CLAUDE_MAX_TOKENS for non-Claude models on the Anthropic-compat
+ * path.
  */
-async function stripMaxTokensFetch(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+async function setMaxTokensFetch(url: RequestInfo | URL, init?: RequestInit): Promise<Response> {
   const finalInit = (() => {
     if (init?.body && typeof init.body === "string") {
       try {
         const body = JSON.parse(init.body);
-        delete body.max_tokens;
+        body.max_tokens = NON_CLAUDE_MAX_TOKENS;
         return { ...init, body: JSON.stringify(body) };
       } catch {
         return init;
@@ -76,7 +85,7 @@ async function observingFetch(url: RequestInfo | URL, init?: RequestInit): Promi
     res.headers.get("x-ratelimit-reset-requests") ??
     res.headers.get("x-ratelimit-reset-tokens") ??
     res.headers.get("x-ratelimit-reset");
-  const interesting = status === 429 || status >= 500 || retryAfter || (limitRemaining && parseInt(limitRemaining, 10) < 5);
+  const interesting = status >= 400 || retryAfter || (limitRemaining && parseInt(limitRemaining, 10) < 5);
   if (interesting) {
     let bodyPreview = "";
     if (status >= 400) {
@@ -143,14 +152,24 @@ export function resolveModel(
   if (baseURL) headers["X-Sub-Module"] = "managed-agents";
   if (customHeaders) Object.assign(headers, customHeaders);
 
+  // @ai-sdk/anthropic appends `/messages` directly to baseURL — no `/v1`
+  // segment is added. Real api.anthropic.com endpoints include `/v1` in the
+  // SDK default, so deployments pointing at proxies must too. Auto-append
+  // `/v1` if the user supplied a bare host so common env values work.
+  const normalizedBaseURL = baseURL
+    ? /\/v\d+(\/)?$/.test(baseURL)
+      ? baseURL.replace(/\/$/, "")
+      : `${baseURL.replace(/\/$/, "")}/v1`
+    : undefined;
+
   const anthropic = createAnthropic({
     apiKey,
-    baseURL: baseURL || undefined,
+    baseURL: normalizedBaseURL,
     headers: Object.keys(headers).length > 0 ? headers : undefined,
-    // stripMaxTokensFetch composes observingFetch internally for non-Claude;
+    // setMaxTokensFetch composes observingFetch internally for non-Claude;
     // Claude path uses observingFetch directly so 429/rate-limit logging
     // applies regardless of which provider/model we're talking to.
-    fetch: isKnownClaude ? observingFetch : stripMaxTokensFetch,
+    fetch: isKnownClaude ? observingFetch : setMaxTokensFetch,
   });
 
   return anthropic(modelId);

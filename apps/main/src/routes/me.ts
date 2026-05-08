@@ -9,11 +9,12 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import type { Services } from "@open-managed-agents/services";
 import { listMemberships, hasMembership } from "../auth-config";
 
 const app = new Hono<{
   Bindings: Env;
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: { tenant_id: string; user_id?: string; services: Services };
 }>();
 
 interface UserRow {
@@ -146,7 +147,7 @@ app.post("/cli-tokens", async (c) => {
 
   // Same KV layout as POST /v1/api_keys so the auth middleware looks them
   // up identically and the API Keys page lists CLI tokens alongside others.
-  await c.env.CONFIG_KV.put(
+  await c.var.services.kv.put(
     `apikey:${hash}`,
     JSON.stringify({
       id,
@@ -158,11 +159,11 @@ app.post("/cli-tokens", async (c) => {
     }),
   );
   const indexKey = `t:${requested}:apikeys`;
-  const existingIndex = await c.env.CONFIG_KV.get(indexKey);
+  const existingIndex = await c.var.services.kv.get(indexKey);
   type Meta = { id: string; name: string; prefix: string; hash: string; created_at: string };
   const index: Meta[] = existingIndex ? (JSON.parse(existingIndex) as Meta[]) : [];
   index.push({ id, name, prefix: rawKey.slice(0, 8), hash, created_at: now });
-  await c.env.CONFIG_KV.put(indexKey, JSON.stringify(index));
+  await c.var.services.kv.put(indexKey, JSON.stringify(index));
 
   return c.json(
     {

@@ -22,7 +22,12 @@ jobs:
           node-version: '22'
 
       - name: Install pnpm
-        run: npm install -g pnpm
+        # corepack reads `packageManager` from package.json — single
+        # source of truth across local + every CI workflow. Replaces
+        # the version-drift footgun of `npm install -g pnpm` (latest)
+        # which broke when v11 went stable and renamed the build
+        # allowlist field (`onlyBuiltDependencies` → `allowBuilds`).
+        run: corepack enable
 
       - name: Install dependencies
         run: pnpm install

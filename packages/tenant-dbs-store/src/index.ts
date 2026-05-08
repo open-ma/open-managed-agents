@@ -18,8 +18,10 @@
 export * from "./ports";
 export * from "./service";
 export {
-  D1TenantShardDirectoryRepo,
-  D1ShardPoolRepo,
+  SqlTenantShardDirectoryRepo,
+  SqlShardPoolRepo,
   createCfTenantShardDirectoryService,
   createCfShardPoolService,
+  createSqliteTenantShardDirectoryService,
+  createSqliteShardPoolService,
 } from "./adapters";
