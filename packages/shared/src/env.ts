@@ -1,6 +1,20 @@
 export interface Env {
   CONFIG_KV: KVNamespace;
+  /** @deprecated Pre-shard binding. Equivalent to AUTH_DB_00 (the original
+   *  openma-auth database) for back-compat during the shard rollout. New
+   *  code MUST use `getShardForTenant(env, tenantId)` from
+   *  @open-managed-agents/sql-client to route to the correct shard. */
   AUTH_DB: D1Database;
+  /** Tenant→shard routing table. Holds tenant_shard + shard_pool tables.
+   *  Every per-tenant query reads this first (cached in SHARD_CACHE_KV
+   *  with 1hr TTL). See packages/sql-client/src/shard.ts. */
+  ROUTER_DB?: D1Database;
+  /** Tenant data shard 0 — the original openma-auth, holds all
+   *  pre-shard tenants. */
+  AUTH_DB_00?: D1Database;
+  AUTH_DB_01?: D1Database;
+  AUTH_DB_02?: D1Database;
+  AUTH_DB_03?: D1Database;
   /** Integration subsystem D1 (linear_* / github_* / slack_* tables).
    *  Separate database from AUTH_DB to isolate webhook write traffic and
    *  let the integration subsystem evolve schema independently.
