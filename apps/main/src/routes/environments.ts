@@ -1,75 +1,36 @@
+// Environments routes — post-GitHub-build replacement.
+//
+// The legacy `dockerfile` build path (GitHub Actions → per-env worker →
+// /build-complete callback) was removed once setup-on-warmup landed
+// (apps/agent/src/runtime/setup-on-warmup.ts). Now env create writes a
+// D1 row and returns immediately — packages are installed at the FIRST
+// session warmup by the SessionDO, not at env-create time.
+//
+// Removed:
+//   - triggerBuild() + GitHub workflow_dispatch
+//   - /build-complete callback
+//   - image_strategy / pickStrategy
+//   - per-env sandbox_worker_name + service-binding plumbing
+//
+// What stayed:
+//   - Standard CRUD (GET / POST / PUT / archive)
+//   - Networking + packages config in EnvironmentConfig
+//   - Tenant scoping
+
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { EnvironmentConfig } from "@open-managed-agents/shared";
-import { addServiceBinding, envIdToBindingName } from "@open-managed-agents/cf-billing";
 import type { Services } from "@open-managed-agents/services";
 import {
   toEnvironmentConfig,
   EnvironmentNotFoundError,
 } from "@open-managed-agents/environments-store";
-import { kvKey } from "../kv-helpers";
 import { jsonPage, parsePageQuery } from "../lib/list-page";
 
 const app = new Hono<{
   Bindings: Env;
   Variables: { tenant_id: string; services: Services };
 }>();
-
-/** Resolve which image strategy a request asks for. New envs default
- *  to `dockerfile` — packages get baked into a per-env worker image
- *  via GitHub Actions CI (slower env create, fast session boot). The
- *  `base_snapshot` mode (lazy install at first session) was reverted
- *  because @cloudflare/sandbox wraps each `sandbox.exec` in
- *  blockConcurrencyWhile, which CF cancels at ~10-15s — not enough
- *  to finish a non-trivial pip install. Existing envs without the
- *  field read `null` and are treated as `dockerfile` (they already
- *  have per-env workers deployed).
- */
-type ImageStrategy = "base_snapshot" | "dockerfile";
-function pickStrategy(requested?: string | null, existing?: string | null): ImageStrategy {
-  if (requested === "base_snapshot" || requested === "dockerfile") return requested;
-  if (existing === "base_snapshot" || existing === "dockerfile") return existing;
-  return "dockerfile";
-}
-
-/**
- * Trigger sandbox worker build via GitHub Actions (legacy / dockerfile mode).
- * Dispatches deploy-sandbox.yml with callback_url. CI calls back to
- * /build-complete when done.
- */
-async function triggerBuild(env: Env, envConfig: EnvironmentConfig, requestUrl: string): Promise<void> {
-  if (!env.GITHUB_TOKEN || !env.GITHUB_REPO) return;
-
-  const url = new URL(requestUrl);
-  const callbackUrl = `${url.protocol}//${url.host}/v1/environments/${envConfig.id}/build-complete`;
-
-  const [owner, repo] = env.GITHUB_REPO.split("/");
-  const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repo}/actions/workflows/deploy-sandbox.yml/dispatches`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${env.GITHUB_TOKEN}`,
-        Accept: "application/vnd.github.v3+json",
-        "Content-Type": "application/json",
-        "User-Agent": "open-managed-agents",
-      },
-      body: JSON.stringify({
-        ref: "main",
-        inputs: {
-          env_id: envConfig.id,
-          packages_json: JSON.stringify(envConfig.config.packages || {}),
-          callback_url: callbackUrl,
-        },
-      }),
-    }
-  );
-
-  if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`GitHub dispatch failed (${res.status}): ${text}`);
-  }
-}
 
 // POST /v1/environments — create environment
 app.post("/", async (c) => {
@@ -78,140 +39,24 @@ app.post("/", async (c) => {
     name: string;
     description?: string;
     config: EnvironmentConfig["config"];
-    image_strategy?: "base_snapshot" | "dockerfile";
   };
 
   if (!body.name) {
     return c.json({ error: "name is required" }, 400);
   }
 
-  const strategy = pickStrategy(body.image_strategy);
-
-  // Both strategies start in "building" until CI build completes (no
-  // lazy/fast path right now — the prior base_snapshot lazy install
-  // was reverted, see pickStrategy comment).
-  const initialStatus = "building";
-  const initialWorker: string | null = null;
-
-  const initialRow = await c.var.services.environments.create({
+  const row = await c.var.services.environments.create({
     tenantId: t,
     name: body.name,
     description: body.description,
     config: body.config || { type: "cloud" },
-    status: initialStatus,
-    sandboxWorkerName: initialWorker,
-    imageStrategy: strategy,
+    // Setup-on-warmup means env is immediately usable — no async build.
+    status: "ready",
+    sandboxWorkerName: "sandbox-default",
+    imageStrategy: null,
   });
-
-  let row = initialRow;
-  if (strategy === "dockerfile") {
-    // Dispatch CI build. status stays "building" until /build-complete
-    // callback flips it.
-    const canBuild = !!(c.env.GITHUB_TOKEN && c.env.GITHUB_REPO);
-    if (!canBuild) {
-      row = await c.var.services.environments.update({
-        tenantId: t,
-        environmentId: row.id,
-        status: "ready",
-        sandboxWorkerName: "sandbox-default",
-      });
-    } else {
-      try {
-        await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
-      } catch (e) {
-        console.log(`[env] triggerBuild failed: ${e instanceof Error ? e.message : String(e)}`);
-        row = await c.var.services.environments.update({
-          tenantId: t,
-          environmentId: row.id,
-          status: "error",
-          buildError: e instanceof Error ? e.message : String(e),
-        });
-      }
-    }
-  }
 
   return c.json(toEnvironmentConfig(row), 201);
-});
-
-// GET /v1/environments/:id/__debug — pull the prep sandbox's filesystem
-// + log + process snapshot. Gated by INTERNAL_TOKEN — same secret the
-// build-complete callback uses. For ops use only.
-app.get("/:id/__debug", async (c) => {
-  const internalToken = (c.env as unknown as { INTERNAL_TOKEN?: string }).INTERNAL_TOKEN;
-  const provided = c.req.header("x-internal-token");
-  if (!internalToken || !provided || provided !== internalToken) {
-    return c.json({ error: "Forbidden" }, 403);
-  }
-  const id = c.req.param("id");
-  const binding = (c.env as unknown as Record<string, unknown>)["SANDBOX_sandbox_default"] as Fetcher | undefined;
-  if (!binding) return c.json({ error: "no SANDBOX_sandbox_default binding" }, 500);
-  const res = await binding.fetch(`https://internal/__internal/prep-debug/${id}`, {
-    method: "GET",
-    headers: { "x-internal-token": internalToken },
-  });
-  return new Response(res.body, { status: res.status, headers: res.headers });
-});
-
-// POST /v1/environments/:id/build-complete — callback from GitHub Actions
-app.post("/:id/build-complete", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
-
-  const existing = await c.var.services.environments.get({
-    tenantId: t,
-    environmentId: id,
-  });
-  if (!existing) return c.json({ error: "Environment not found" }, 404);
-
-  // Two callback shapes accepted (one path, two callers):
-  //   - Legacy dockerfile build (deploy-sandbox.yml): {status, sandbox_worker_name?, error?}
-  //   - base_snapshot prepare    (agent worker):       PrepareResult-shaped — {status, handle?, sandbox_worker_name?, error?}
-  // Both come in here. We unify by reading whichever fields landed.
-  //
-  // The base_snapshot path also carries x-internal-token for auth; the
-  // legacy path is gated by the same x-api-key as everything else (via
-  // authMiddleware). Either is sufficient for now; long-term we should
-  // require the internal token for both.
-  const body = (await c.req.json()) as {
-    status: "ready" | "error" | "building";
-    sandbox_worker_name?: string;
-    error?: string;
-    handle?: Record<string, unknown>;
-  };
-
-  let workerName: string | null | undefined = undefined;
-  if (body.status === "ready") {
-    workerName = body.sandbox_worker_name || `sandbox-${id}`;
-
-    // Only call the dockerfile-mode service-binding plumbing for envs
-    // that actually went through that path (per-env worker name). For
-    // base_snapshot envs, sandbox-default is already bound — no add needed.
-    const isPerEnvWorker = workerName !== "sandbox-default";
-    if (isPerEnvWorker && c.env.CLOUDFLARE_API_TOKEN && c.env.CLOUDFLARE_ACCOUNT_ID) {
-      try {
-        const bindingName = envIdToBindingName(id);
-        await addServiceBinding(
-          c.env.CLOUDFLARE_ACCOUNT_ID, "managed-agents", c.env.CLOUDFLARE_API_TOKEN,
-          bindingName, workerName,
-        );
-      } catch (err) {
-        console.log(`[env] addServiceBinding failed: ${err instanceof Error ? err.message : String(err)}`);
-      }
-    }
-    // Legacy svcbind breadcrumb (write-only — no readers; kept for ops debugging).
-    await c.var.services.kv.put(kvKey(t, "svcbind", id), workerName);
-  }
-
-  const row = await c.var.services.environments.update({
-    tenantId: t,
-    environmentId: id,
-    status: body.status === "building" ? "building" : body.status,
-    buildError: body.error ?? null,
-    ...(workerName !== undefined ? { sandboxWorkerName: workerName } : {}),
-    ...(body.handle !== undefined ? { imageHandle: body.handle } : {}),
-  });
-  console.log(`[env] build-complete for ${id}: status=${body.status} worker=${row.sandbox_worker_name} handle=${body.handle ? "set" : "unset"}`);
-  return c.json(toEnvironmentConfig(row));
 });
 
 // GET /v1/environments — list environments (cursor-paginated)
@@ -232,7 +77,7 @@ app.get("/:id", async (c) => {
   return c.json(toEnvironmentConfig(row));
 });
 
-// PUT /v1/environments/:id — update environment (re-prepares image if config changed)
+// PUT /v1/environments/:id — update environment
 app.put("/:id", async (c) => {
   const t = c.get("tenant_id");
   const id = c.req.param("id");
@@ -243,7 +88,7 @@ app.put("/:id", async (c) => {
     name?: string;
     description?: string;
     config?: EnvironmentConfig["config"];
-    image_strategy?: "base_snapshot" | "dockerfile";
+    metadata?: Record<string, unknown>;
   };
 
   const patch: Parameters<typeof c.var.services.environments.update>[0] = {
@@ -252,43 +97,14 @@ app.put("/:id", async (c) => {
   };
   if (body.name !== undefined) patch.name = body.name;
   if (body.description !== undefined) patch.description = body.description;
+  if (body.config !== undefined) patch.config = body.config;
+  if (body.metadata !== undefined) patch.metadata = body.metadata;
 
-  let configChanged = false;
-  if (body.config !== undefined) {
-    const oldConfig = JSON.stringify(existing.config);
-    if (JSON.stringify(body.config) !== oldConfig) configChanged = true;
-    patch.config = body.config;
-  }
-
-  // Strategy switch is a re-prepare too — different code path = new image.
-  const strategyChanged = body.image_strategy !== undefined && body.image_strategy !== existing.image_strategy;
-  const strategy = pickStrategy(body.image_strategy, existing.image_strategy);
-  if (strategyChanged) patch.imageStrategy = strategy;
-
-  if (configChanged || strategyChanged) {
-    // Both strategies need a re-build now (base_snapshot's lazy path is gone).
-    // CI build flips status on /build-complete callback.
-    patch.buildError = null;
-    patch.imageHandle = null;
-    patch.status = "building";
-    patch.sandboxWorkerName = null;
-  }
-
-  let row = await c.var.services.environments.update(patch);
-
-  if (configChanged || strategyChanged) {
-    try {
-      await triggerBuild(c.env, toEnvironmentConfig(row), c.req.url);
-    } catch (e) {
-      row = await c.var.services.environments.update({
-        tenantId: t,
-        environmentId: id,
-        status: "error",
-        buildError: e instanceof Error ? e.message : String(e),
-      });
-    }
-  }
-
+  // No re-build trigger — packages take effect at the next session
+  // warmup via setup-on-warmup's hash-mismatch detection (the marker
+  // hash bakes in the new packages list, so ensureSetupApplied falls
+  // through to the fresh path automatically).
+  const row = await c.var.services.environments.update(patch);
   return c.json(toEnvironmentConfig(row));
 });
 
@@ -308,37 +124,6 @@ app.post("/:id/archive", async (c) => {
     }
     throw err;
   }
-});
-
-// DELETE /v1/environments/:id
-app.delete("/:id", async (c) => {
-  const t = c.get("tenant_id");
-  const id = c.req.param("id");
-  const existing = await c.var.services.environments.get({ tenantId: t, environmentId: id });
-  if (!existing) return c.json({ error: "Environment not found" }, 404);
-
-  // Refuse if any active session in the tenant references this environment.
-  const hasActiveSessions = await c.var.services.sessions.hasActiveByEnvironment({
-    tenantId: t,
-    environmentId: id,
-  });
-  if (hasActiveSessions) {
-    return c.json({ error: "Cannot delete environment referenced by active sessions" }, 409);
-  }
-
-  // Refuse if any pending/running eval run still targets this environment.
-  const hasActiveEvals = await c.var.services.evals.hasActiveByEnvironment({
-    tenantId: t,
-    environmentId: id,
-  });
-  if (hasActiveEvals) {
-    return c.json({
-      error: "Cannot delete environment referenced by active eval runs",
-    }, 409);
-  }
-
-  await c.var.services.environments.delete({ tenantId: t, environmentId: id });
-  return c.json({ type: "environment_deleted", id });
 });
 
 export default app;

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { Link } from "react-router";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
@@ -70,7 +71,16 @@ export function EnvironmentsList() {
           className: "font-mono text-xs text-fg-muted truncate max-w-[180px]",
           render: (e) => <span title={e.id}>{e.id}</span>,
         },
-        { key: "name", label: "Name", className: "font-medium text-fg" },
+        {
+          key: "name",
+          label: "Name",
+          className: "font-medium",
+          render: (e) => (
+            <Link to={`/environments/${e.id}`} className="text-brand hover:underline">
+              {e.name}
+            </Link>
+          ),
+        },
         {
           key: "type",
           label: "Type",
