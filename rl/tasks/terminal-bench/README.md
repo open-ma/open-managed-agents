@@ -50,7 +50,7 @@ npx tsx rl/tasks/terminal-bench/convert.ts \
 ```bash
 export OMA_API_URL=https://openma.dev
 export OMA_API_KEY=$(python3 -c "import json; d=json.load(open('$HOME/.config/oma/credentials.json')); print(d['tenants'][d['active_tenant_id']]['token'])")
-export RL_MODEL=MiniMax-M2          # confirm against /v1/model_cards in your tenant
+export RL_MODEL=<your-model-id>     # confirm against /v1/model_cards in your tenant
 export RL_CONCURRENCY=1
 export RL_TIMEOUT_MS=1800000        # 30 min/task
 export RL_MAX_TURNS=50
@@ -101,7 +101,7 @@ jq -r 'select(.metadata.verifier_result.exit_code != 0) | "\n=== \(.task_id) ===
 - **Verifier turn is LLM-mediated**: the agent reports `EXIT_CODE=<n>`, parsed from its reply. If the model doesn't follow the format, exit code = -1 (treated as fail). Future improvement: bypass via direct sandbox exec endpoint (none exists yet on `apps/main`).
 - **Setup files not used**: our 5 pilot tasks are self-contained instructions; for tasks that rely on Dockerfile `COPY` / `RUN` to set up state, the converter would need extending.
 - **`/app/` workdir**: TB tasks expect `/app/`. OMA sandbox does not pre-create it; agent is told to `mkdir -p /app` in the message.
-- **Costs**: with MiniMax-M2 ~ $0.5-3/task, 5-task run ≈ $5-15.
+- **Costs**: model-dependent; rough order of magnitude $0.5-3/task for cheap models, 5-task run ≈ $5-15.
 
 ## Future expansion
 

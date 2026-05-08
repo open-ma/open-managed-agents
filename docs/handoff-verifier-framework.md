@@ -13,7 +13,7 @@ We spent this session on three things:
 - **Async POST /events** — `this.drainEventQueue()` fire-and-forget in DO, POST returns 202 immediately. Verified with `wrangler tail` logs.
 - **Sandbox image** — `openma/sandbox-base:latest` on Docker Hub, based on `cloudflare/sandbox:0.8.11` + Python 3.12 (uv), Node 20, Go 1.22, Rust. Build pipeline: `.github/workflows/build-sandbox-image.yml`
 - **Eval runner** — T2.1 (auth bypass fix, medium) PASS with Layer 1 (deterministic). `OMA_API_URL=... OMA_API_KEY=... npx tsx test/eval/runner.ts --task T2.1-auth-bypass-fix`
-- **Model card** — `mdl-i8qlcoilr1868fu5` (MiniMax-M2.7, base_url: `https://api.example.com/anthropic/v1`)
+- **Model card** — `mdl-<your-judge-id>` registered with an Anthropic-compatible `/messages` endpoint of your choice (Anthropic, OpenRouter, MiniMax, etc.)
 - **CI callback** — GitHub secret `API_KEY` fixed, sandbox deploy callback works
 
 ### What's incomplete
@@ -107,7 +107,7 @@ Do NOT change code based on guesses.
 
 - API: `https://openma.dev`
 - API Key: in `.dev.vars`
-- Model card: `mdl-i8qlcoilr1868fu5` (MiniMax-M2.7)
+- Model card: `mdl-<your-judge-id>` (judge model of your choice)
 - Environment: `env-qisw0fmtm88nqwyk` (eval-env, sandbox-default)
 - Docker Hub: `openma/sandbox-base:latest` (user: openma, token in GitHub secrets)
-- Anthropic proxy: `https://api.example.com/anthropic/v1` (key in `.dev.vars`)
+- Judge endpoint: any Anthropic-compatible `/messages` URL (set `OMA_JUDGE_API_URL` in `.dev.vars`)

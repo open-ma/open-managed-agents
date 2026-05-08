@@ -17,27 +17,33 @@ import {
   getOrCreateEnvironment,
 } from "./client.js";
 
+// MCP smoke test against an external image-understanding MCP. Requires
+// the same two env vars as gaia.ts buildMiniMaxMcpServer — see that
+// file for the swap-vendor story. Both required, no default endpoint.
 const MINIMAX_KEY = process.env.MINIMAX_API_KEY;
-if (!MINIMAX_KEY) {
+const MINIMAX_HOST = process.env.MINIMAX_API_HOST;
+if (!MINIMAX_KEY || !MINIMAX_HOST) {
   throw new Error(
-    "MINIMAX_API_KEY env var required. Either export it from .dev.vars " +
-      "(ANTHROPIC_API_KEY there is the same MiniMax key), or pull from " +
-      "the MiniMax model card via /v1/model_cards/{id}/key.",
+    "MINIMAX_API_KEY + MINIMAX_API_HOST env vars required for the MCP smoke test.",
   );
 }
-const MINIMAX_HOST = process.env.MINIMAX_API_HOST || "https://api.example.com";
 
 async function main() {
   const apiUrl = process.env.OMA_API_URL!;
   const apiKey = process.env.OMA_API_KEY!;
   if (!apiUrl || !apiKey) throw new Error("OMA_API_URL + OMA_API_KEY required");
 
-  console.log("Creating agent (MiniMax-M2-highspeed + MiniMax MCP, browser disabled)...");
+  // Set OMA_SMOKE_MODEL to the model id registered in your tenant.
+  const SMOKE_MODEL = process.env.OMA_SMOKE_MODEL ?? "";
+  if (!SMOKE_MODEL) {
+    throw new Error("OMA_SMOKE_MODEL env var required");
+  }
+  console.log(`Creating agent (${SMOKE_MODEL} + image-understanding MCP, browser disabled)...`);
   const agentId = await createAgent({
     name: `mcp-stdio-smoke-${Date.now()}`,
-    model: "MiniMax-M2-highspeed",
+    model: SMOKE_MODEL,
     system:
-      "You are an assistant with access to a MiniMax MCP server. " +
+      "You are an assistant with access to an image-understanding MCP server. " +
       "When asked about an image, ALWAYS use mcp_minimax_tp_call with " +
       "tool_name='understand_image'. Do not use any other tool to look at images. " +
       "Be concise.",

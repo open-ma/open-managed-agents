@@ -1,7 +1,6 @@
 -- 0014_session_turn_id.sql
 --
--- Phase 1 of the unified-runtime refactor (see plan in
--- $HOME/.claude/plans/nifty-prancing-flamingo.md).
+-- Phase 1 of the unified-runtime refactor.
 --
 -- Goal: replace the cf_agents_runs marker row mechanism with a unified
 -- turn_id + turn_started_at on the sessions row. After this migration, both
