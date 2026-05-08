@@ -932,20 +932,20 @@ const commands: Cmd[] = [
     usage: "oma models list", desc: "List model cards",
     http: "GET    /v1/model_cards",
     async run(config) {
-      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; provider: string; model_id: string; api_key_preview: string; is_default: boolean }> }>(config, "/v1/model_cards");
+      const { data } = await apiFetch<{ data: Array<{ id: string; model_id: string; model: string; provider: string; api_key_preview: string; is_default: boolean }> }>(config, "/v1/model_cards");
       if (!data.length) { console.log("No model cards. Create one with: oma models create"); return; }
-      table([["NAME", "PROVIDER", "MODEL", "KEY", "DEFAULT"], ...data.map(c => [c.name, c.provider, c.model_id, `****${c.api_key_preview || ""}`, c.is_default ? "yes" : ""])]);
+      table([["MODEL_ID", "PROVIDER", "WIRE MODEL", "KEY", "DEFAULT"], ...data.map(c => [c.model_id, c.provider, c.model === c.model_id ? "(same)" : c.model, `****${c.api_key_preview || ""}`, c.is_default ? "yes" : ""])]);
     },
   },
   {
     group: "Model Cards", match: ["models", "create"],
-    usage: "oma models create --name <n> --model-id <id> --api-key <key> [--provider <p>]", desc: "Create model card",
-    http: "POST   /v1/model_cards {name, provider, model_id, api_key, base_url?, is_default?}",
+    usage: "oma models create --model-id <id> --api-key <key> [--model <wire>] [--provider <p>]", desc: "Create model card",
+    http: "POST   /v1/model_cards {model_id, provider, model?, api_key, base_url?, is_default?}",
     async run(config, args) {
-      const name = flag(args, "--name"); const provider = flag(args, "--provider") || "ant"; const modelId = flag(args, "--model-id"); const apiKey = flag(args, "--api-key"); const baseUrl = flag(args, "--base-url");
-      if (!name || !modelId || !apiKey) { console.error("Usage: oma models create --name <name> --model-id <id> --api-key <key> [--provider ant|oai|ant-compatible|oai-compatible] [--base-url <url>]"); process.exit(1); }
-      const card = await apiFetch<{ id: string; name: string }>(config, "/v1/model_cards", { method: "POST", body: JSON.stringify({ name, provider, model_id: modelId, api_key: apiKey, base_url: baseUrl }) });
-      console.log(`Model card created: ${card.name} (${card.id})`);
+      const modelId = flag(args, "--model-id"); const provider = flag(args, "--provider") || "ant"; const model = flag(args, "--model"); const apiKey = flag(args, "--api-key"); const baseUrl = flag(args, "--base-url");
+      if (!modelId || !apiKey) { console.error("Usage: oma models create --model-id <id> --api-key <key> [--model <wire>] [--provider ant|oai|ant-compatible|oai-compatible] [--base-url <url>]"); process.exit(1); }
+      const card = await apiFetch<{ id: string; model_id: string }>(config, "/v1/model_cards", { method: "POST", body: JSON.stringify({ model_id: modelId, provider, model, api_key: apiKey, base_url: baseUrl }) });
+      console.log(`Model card created: ${card.model_id} (${card.id})`);
     },
   },
 
