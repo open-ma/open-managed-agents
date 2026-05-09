@@ -24,6 +24,7 @@
 
 import { Sandbox } from "@cloudflare/sandbox";
 import type { Env } from "@open-managed-agents/shared";
+import { buildCfTenantDbProvider } from "@open-managed-agents/services";
 import { recordBackup } from "./runtime/workspace-backups";
 
 const BACKUP_TTL_SEC = 7 * 24 * 3600;
@@ -209,7 +210,12 @@ export class OmaSandbox extends Sandbox {
       });
       const elapsedMs = Date.now() - startMs;
       if (!backup) return;
-      await recordBackup(env.AUTH_DB, {
+      // Route to the tenant's shard — workspace_backups is per-tenant data.
+      // The CF tenant-DB provider is the wiring boundary; resolve once and
+      // pass the resolved DB into the (port-shaped) recordBackup function.
+      const provider = buildCfTenantDbProvider(env);
+      const backupDb = await provider.resolve(ctx.tenantId);
+      await recordBackup(backupDb, {
         tenantId: ctx.tenantId,
         environmentId: ctx.environmentId,
         handle: { id: backup.id, dir: backup.dir, localBucket: backup.localBucket },

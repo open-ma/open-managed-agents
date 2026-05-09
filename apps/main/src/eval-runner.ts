@@ -16,7 +16,7 @@ import type { Env, AgentConfig, EnvironmentConfig, StoredEvent, Trajectory, Rewa
 import { buildTrajectory, verifierForSpec, NoRunVerifier } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
-import { buildCfServices, getCfServicesForTenant, type Services } from "@open-managed-agents/services";
+import { buildCfServices, forEachShardServices, getCfServicesForTenant, type Services } from "@open-managed-agents/services";
 import type { EvalRunRow, EvalRunStatus } from "@open-managed-agents/evals-store";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { kvKey } from "./kv-helpers";
@@ -810,27 +810,32 @@ async function advanceRun(env: Env, run: EvalRunRecord): Promise<void> {
 // ---------- Public entry point (called by scheduled handler) ----------
 
 export async function tickEvalRuns(env: Env): Promise<{ advanced: number; total: number }> {
-  // Cross-tenant scan: list every active eval run across all tenants. Phase 1
-  // default returns the shared AUTH_DB so this still works against the
-  // legacy single DB. Phase 4 will need a control-plane index over tenants
-  // since per-tenant DBs make cross-tenant SELECTs impossible from one binding.
-  const services = buildCfServices(env, env.AUTH_DB);
-  const activeRows = await services.evals.listActive();
+  // Cross-shard scan: list active eval runs on every shard via the
+  // services-level fan-out abstraction (no CF binding names in app code).
+  // Each row is then advanced via getCfServicesForTenant inside advanceRun
+  // (line 78), which resolves the per-tenant DB from the row's tenant_id.
   let advanced = 0;
-  for (const row of activeRows) {
-    const run = rowToRecord(row);
-    try {
-      await advanceRun(env, run);
-      advanced++;
-    } catch (err: unknown) {
-      // Mark the whole run failed if advance throws unrecoverably.
-      run.status = "failed";
-      run.error = err instanceof Error ? err.message : String(err);
-      run.ended_at = new Date().toISOString();
-      await saveRun(env, run);
+  let total = 0;
+  const perShard = await forEachShardServices(env, async (services) => {
+    const activeRows = await services.evals.listActive();
+    return activeRows;
+  });
+  for (const activeRows of perShard) {
+    total += activeRows.length;
+    for (const row of activeRows) {
+      const run = rowToRecord(row);
+      try {
+        await advanceRun(env, run);
+        advanced++;
+      } catch (err: unknown) {
+        run.status = "failed";
+        run.error = err instanceof Error ? err.message : String(err);
+        run.ended_at = new Date().toISOString();
+        await saveRun(env, run);
+      }
     }
   }
-  return { advanced, total: activeRows.length };
+  return { advanced, total };
 }
 
 // `loadRun` and `EvalTaskSpec` re-export shape — kept unused locally now that

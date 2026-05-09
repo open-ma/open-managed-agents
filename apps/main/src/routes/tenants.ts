@@ -11,6 +11,10 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
+import {
+  createCfShardPoolService,
+  createCfTenantShardDirectoryService,
+} from "@open-managed-agents/tenant-dbs-store";
 
 const app = new Hono<{
   Bindings: Env;
@@ -52,6 +56,17 @@ app.post("/", async (c) => {
     .bind(userId, tenantId, now);
 
   await c.env.AUTH_DB.batch([insertTenant, insertMembership]);
+
+  // Shard assignment — same flow as ensureTenant (auth-config.ts).
+  // Must land BEFORE the user makes their next authenticated request,
+  // otherwise tenantDbMiddleware caches AUTH_DB fallback for the isolate.
+  const controlPlaneDb = c.env.ROUTER_DB ?? c.env.AUTH_DB;
+  const shardPool = createCfShardPoolService({ controlPlaneDb });
+  const tenantShardDirectory = createCfTenantShardDirectoryService({ controlPlaneDb });
+  const pick = await shardPool.pickShardForNewTenant();
+  const bindingName = pick?.bindingName ?? "AUTH_DB_00";
+  await tenantShardDirectory.assign({ tenantId, bindingName });
+  await shardPool.incrementTenantCount(bindingName);
 
   return c.json(
     {
