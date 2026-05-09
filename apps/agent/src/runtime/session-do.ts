@@ -263,6 +263,35 @@ export class SessionDO extends DurableObject<Env> {
    */
   private _inflightTurnHints = 0;
 
+  /**
+   * Synchronous re-entry guard for drainEventQueue, keyed by
+   * session_thread_id. Single-isolate JS single-thread makes Set add/has
+   * a true mutex within the same thread. Cross-thread drains run
+   * concurrently — drainEventQueue('sthr_primary') and
+   * drainEventQueue('sthr_xyz') don't block each other; that's the
+   * whole point of per-thread parallelism.
+   *
+   * Why a counter alone isn't enough: _inflightTurnHints is only
+   * incremented inside onTurnInFlight, which runs after several awaits
+   * (runAgentTurn → adapter.beginTurn). Two concurrent callers within
+   * the same thread (POST handler's fire-and-forget drain + the 5s
+   * recoverEventQueue alarm tail) both pass the status check before
+   * either increments hints, then both pick the same pending user
+   * event and run the LLM twice for the same turn (observed on
+   * sess-88mm28kjaihxlca3, 2026-05-09: turn:9 ran twice in parallel).
+   */
+  private _draining = new Set<string>();
+
+  /**
+   * Per-thread abort controllers — replaces single
+   * `currentAbortController`. Set by processUserMessage / sub-agent
+   * runs at turn start, cleared at turn end. user.interrupt with
+   * `session_thread_id` uses this to abort exactly that thread's
+   * in-flight turn without affecting siblings (AMA spec semantics).
+   * /destroy iterates the map to abort everything.
+   */
+  private _threadAbortControllers = new Map<string, AbortController>();
+
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this._ensureCfAgentsSchema();
@@ -395,7 +424,6 @@ export class SessionDO extends DurableObject<Env> {
    */
   private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
-  private currentAbortController: AbortController | null = null;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -522,10 +550,30 @@ export class SessionDO extends DurableObject<Env> {
    * Scheduled recovery callback: called by Agent's schedule system
    * 5 seconds after an event is received. If the primary waitUntil
    * path already drained the queue, this is a no-op.
+   *
+   * Drains every thread that has pending events. Cheap — the partial
+   * pending-index makes "list distinct thread_ids with pending rows"
+   * an O(log n) scan, and per-thread mutex (_draining set) means a
+   * thread that's already draining returns immediately.
    */
   async recoverEventQueue(): Promise<void> {
     this.ensureSchema();
-    await this.drainEventQueue();
+    const cursor = this.ctx.storage.sql.exec(
+      `SELECT DISTINCT session_thread_id FROM events
+         WHERE processed_at IS NULL AND cancelled_at IS NULL
+           AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
+    );
+    const threadIds: string[] = [];
+    for (const row of cursor) {
+      threadIds.push((row.session_thread_id as string) ?? "sthr_primary");
+    }
+    if (threadIds.length === 0) {
+      // Nothing pending anywhere; defensive primary drain (cheap, returns
+      // immediately when the partial index is empty).
+      await this.drainEventQueue("sthr_primary");
+      return;
+    }
+    await Promise.all(threadIds.map((t) => this.drainEventQueue(t)));
   }
 
   /**
@@ -851,50 +899,60 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Drain the event queue: check the events table for unprocessed user
-   * events and run the harness for each one.
+   * Drain the event queue for one thread: pull pending user events
+   * (processed_at IS NULL AND cancelled_at IS NULL) in seq order and
+   * run the harness for each. Loops until the thread's queue is empty.
    *
-   * The events table IS the queue — no separate pending flag needed.
-   * After the harness completes a turn, we check again for new events
-   * that arrived during execution, looping until the queue is drained.
+   * Per-thread mutex via _draining set: two callers for the same
+   * thread early-return; cross-thread drains run in parallel.
    *
-   * Concurrency guard: if status is already "running", skip — another
-   * drainEventQueue is already active.
+   * Pending boundary: each row's `processed_at` column is the
+   * authoritative "this event has been ingested" marker. On successful
+   * (or failed) turn completion we UPDATE events SET processed_at=now
+   * for the row. Old behavior (lastIdleSeq window) lost any user.message
+   * appended between turn start and turn-end status_idle (5 messages
+   * sent during a long-running turn would all be skipped).
    */
-  private async drainEventQueue(): Promise<void> {
-    // Concurrency guard — only one drain loop at a time. Status is derived
-    // from cf_agents_runs presence, so eviction in the setState→runFiber
-    // window can't strand the session at "running": the next caller derives
-    // "idle" automatically once the orphan fiber row is cleaned up.
-    const currentStatus = this.deriveStatus();
-    if (currentStatus === "running" || currentStatus === "terminated") {
-      return;
-    }
+  private async drainEventQueue(threadId: string = "sthr_primary"): Promise<void> {
+    // Sync re-entry mutex per thread — two callers for the same thread
+    // can't both reach the SQL pending lookup before either marks a
+    // row as processed.
+    if (this._draining.has(threadId)) return;
+    if (this.deriveStatus() === "terminated") return;
+    this._draining.add(threadId);
 
+    try {
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
     while (true) {
-      const lastIdleSeq = Math.max(
-        this.getLastEventSeq("session.status_idle"),
-        this.getLastEventSeq("session.error"),
+      // Partial-index lookup — see ensureSchema's idx_events_pending.
+      // Returns the lowest-seq pending user event for this thread, or
+      // nothing (loop exits).
+      const cursor = this.ctx.storage.sql.exec(
+        `SELECT seq, data FROM events
+           WHERE session_thread_id = ?
+             AND processed_at IS NULL AND cancelled_at IS NULL
+             AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')
+           ORDER BY seq ASC LIMIT 1`,
+        threadId,
       );
-      const pendingUserEvent = this.getFirstEventAfter(lastIdleSeq, [
-        "user.message",
-        "user.tool_confirmation",
-        "user.custom_tool_result",
-      ]);
+      let pendingUserEvent: { seq: number; data: string } | null = null;
+      for (const row of cursor) {
+        pendingUserEvent = { seq: row.seq as number, data: row.data as string };
+      }
 
       if (!pendingUserEvent) {
         break;
       }
 
-      // No setState({status:"running"}) — runFiber's INSERT into
-      // cf_agents_runs is the single source of truth for "in flight."
       // Fresh per-turn dedup window for agent.message broadcasts. See
       // broadcastedMessageIds field doc for the recovery-replay context.
       this.broadcastedMessageIds.clear();
 
       const turnName = `turn:${pendingUserEvent.seq}`;
+      // Capture seq for the finally below — must mark processed even
+      // on error / interrupt so the row doesn't loop forever.
+      const pendingSeq = pendingUserEvent.seq;
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
@@ -962,10 +1020,29 @@ export class SessionDO extends DurableObject<Env> {
         ) {
           this.terminate("billing");
         }
+        // Mark the row processed even on error — without this, a turn
+        // that throws would loop forever (next iteration finds the same
+        // pending row again). "Processed" here means "the queue moved
+        // past it", not "succeeded".
+        this.ctx.storage.sql.exec(
+          `UPDATE events SET processed_at = ? WHERE seq = ?`,
+          Date.now(), pendingSeq,
+        );
         // Status auto-derives from sessions.turn_id once the
         // RuntimeAdapter.endTurn callback fires. No setState needed.
         break; // Stop draining on error — let the client decide what to do
       }
+      // Successful turn — mark row processed so the next loop iteration
+      // moves past it. Done outside the try block so a SQL error here
+      // (extremely unlikely — DO SQLite is local) doesn't get caught
+      // and turned into a session.error event.
+      this.ctx.storage.sql.exec(
+        `UPDATE events SET processed_at = ? WHERE seq = ?`,
+        Date.now(), pendingSeq,
+      );
+    }
+    } finally {
+      this._draining.delete(threadId);
     }
   }
 
@@ -1161,6 +1238,11 @@ export class SessionDO extends DurableObject<Env> {
       // worker never holds plaintext credentials. See file-level comment
       // on apps/agent/src/oma-sandbox.ts for the full rationale.
 
+      // Seed the primary thread row in DO SQLite. Done after setState so
+      // _ensurePrimaryThread can read agent_id / agent_snapshot from
+      // this.state. Idempotent (INSERT OR IGNORE) — safe across re-init.
+      this._ensurePrimaryThread();
+
       // Pre-flight events from main worker (e.g. credential refresh warnings).
       // Append in order so the console renders them as the first items in the
       // session timeline. Use persistAndBroadcastEvent so each event also
@@ -1186,11 +1268,11 @@ export class SessionDO extends DurableObject<Env> {
 
     // DELETE /destroy — tear down sandbox and clean up
     if (request.method === "DELETE" && url.pathname === "/destroy") {
-      // Abort any running harness
-      if (this.currentAbortController) {
-        this.currentAbortController.abort();
-        this.currentAbortController = null;
+      // Abort every in-flight thread (primary + any sub-agents).
+      for (const ctrl of this._threadAbortControllers.values()) {
+        ctrl.abort();
       }
+      this._threadAbortControllers.clear();
       // Snapshot /workspace BEFORE we destroy the container — once destroy()
       // runs the container is gone and we can't read its filesystem.
       // CF's "persist across sessions" pattern (changelog 2026-02-23):
@@ -1302,8 +1384,12 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       if (body.type === "user.message") {
-        history.append(body);
-        this.broadcastEvent(body);
+        const um = body as UserMessageEvent;
+        const umThread =
+          (um as unknown as { session_thread_id?: string })
+            .session_thread_id ?? "sthr_primary";
+        history.append(um);
+        this.broadcastEvent(um);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
@@ -1319,19 +1405,45 @@ export class SessionDO extends DurableObject<Env> {
         //       rearm path covers what it used to defend.
         // The 5s recoverEventQueue schedule above is the safety-net
         // re-trigger if this background promise dies before drain runs.
-        console.log("[post /event] user.message appended, firing drainEventQueue");
-        this.drainEventQueue();
+        console.log(`[post /event] user.message appended (thread=${umThread}), firing drainEventQueue`);
+        this.drainEventQueue(umThread);
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.interrupt") {
-        // Abort the running harness
-        if (this.currentAbortController) {
-          this.currentAbortController.abort();
-          this.currentAbortController = null;
+        // AMA-spec semantics for user.interrupt:
+        //   1. Abort the in-flight turn for the target thread (only that
+        //      thread — siblings keep running). If no session_thread_id
+        //      is set, defaults to primary.
+        //   2. Flush queued user.* events for that thread (mark
+        //      cancelled_at). AMA's BetaManagedAgentsRetryStatusExhausted
+        //      doc says "queued inputs are flushed and the session
+        //      returns to idle"; user.interrupt mirrors that semantic.
+        //      eventsToMessages skips cancelled events so they never
+        //      reach the LLM context.
+        //   3. Append the user.interrupt event itself + idle marker.
+        const targetThread =
+          (body as unknown as { session_thread_id?: string })
+            .session_thread_id ?? "sthr_primary";
+        const ctrl = this._threadAbortControllers.get(targetThread);
+        if (ctrl) {
+          ctrl.abort();
+          this._threadAbortControllers.delete(targetThread);
         }
-        // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
-        const idleEvent: SessionEvent = { type: "session.status_idle" };
+        const cancelTs = Date.now();
+        this.ctx.storage.sql.exec(
+          `UPDATE events SET cancelled_at = ?
+             WHERE session_thread_id = ?
+               AND processed_at IS NULL AND cancelled_at IS NULL
+               AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
+          cancelTs, targetThread,
+        );
+        // Status auto-derives via the abort propagating through runtime
+        // adapter.endTurn.
+        const idleEvent: SessionEvent = {
+          type: "session.status_idle",
+          ...(targetThread !== "sthr_primary" ? { session_thread_id: targetThread } : {}),
+        };
         history.append(body as UserInterruptEvent);
         history.append(idleEvent);
         this.broadcastEvent(idleEvent);
@@ -1339,25 +1451,32 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       if (body.type === "user.tool_confirmation") {
-        history.append(body as UserToolConfirmationEvent);
+        const tc = body as UserToolConfirmationEvent;
+        const tcThread =
+          (tc as unknown as { session_thread_id?: string }).session_thread_id ??
+          "sthr_primary";
+        history.append(tc);
         this.broadcastEvent(body);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
         console.log("[post /event] tool_confirmation appended, firing drainEventQueue (no await)");
-        this.drainEventQueue();
+        this.drainEventQueue(tcThread);
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.custom_tool_result") {
         const customResult = body as UserCustomToolResultEvent;
+        const ctrThread =
+          (customResult as unknown as { session_thread_id?: string })
+            .session_thread_id ?? "sthr_primary";
         history.append(customResult);
         this.broadcastEvent(customResult);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
         console.log("[post /event] custom_tool_result appended, firing drainEventQueue (no await)");
-        this.drainEventQueue();
+        this.drainEventQueue(ctrThread);
         return new Response(null, { status: 202 });
       }
 
@@ -2796,8 +2915,11 @@ export class SessionDO extends DurableObject<Env> {
     parentHistory: HistoryStore,
     sandbox: SandboxExecutor,
   ): Promise<string> {
-    // Generate a unique thread ID
-    const threadId = `thread_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    // Generate a unique thread ID. Prefix `sthr_` matches AMA spec
+    // (BetaManagedAgentsSessionThread.id is `sthr_*`); previous prefix
+    // was `thread_*` and pre-existing live sessions may still hold those
+    // in their in-memory Map — both work but new threads land on `sthr_`.
+    const threadId = `sthr_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 
     // Fetch sub-agent config. Uses getAgentConfig so the parent agent's
     // snapshot is consulted when the sub-agent id matches the session's
@@ -2810,8 +2932,18 @@ export class SessionDO extends DurableObject<Env> {
       return `Sub-agent error: agent "${agentId}" not found`;
     }
 
-    // Store thread
+    // In-memory map (hot path config lookup) + persistent threads row
+    // (Phase 1 — survives DO eviction, lets HTTP CRUD see this thread).
+    // INSERT OR IGNORE for safety against rare ID collision.
     this.threads.set(threadId, { agentId, agentConfig: subAgent });
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
+       VALUES (?, ?, ?, 'sthr_primary', ?)`,
+      threadId,
+      agentId,
+      subAgent.name,
+      Date.now(),
+    );
 
     // Emit thread_created
     const threadCreatedEvent: SessionEvent = {
@@ -3230,9 +3362,13 @@ export class SessionDO extends DurableObject<Env> {
     // Create an abort controller for this execution. Stall detection now
     // lives inside default-loop.ts (in-closure setTimeout next to the
     // streamText call) so we no longer compose with a DO-instance
-    // controller here.
+    // controller here. Registered under the thread id so user.interrupt
+    // with `session_thread_id` aborts only the matching turn.
     const abortController = new AbortController();
-    this.currentAbortController = abortController;
+    const turnThreadId =
+      (userMessage as unknown as { session_thread_id?: string })
+        .session_thread_id ?? "sthr_primary";
+    this._threadAbortControllers.set(turnThreadId, abortController);
     const effectiveAbortSignal = abortController.signal;
 
     // --- Harness receives a fully-prepared context ---
@@ -3525,11 +3661,16 @@ export class SessionDO extends DurableObject<Env> {
       // The sandbox is still alive (container persists independently).
       // Client can send a new user.message to retry.
     } finally {
-      this.currentAbortController = null;
-      // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
-      // Workspace backup is fired by OmaSandbox.onActivityExpired when the
-      // container's sleepAfter elapses (see oma-sandbox.ts) — exactly one
-      // snapshot per quiet period. Explicit /destroy snapshots eagerly via
+      // Only delete if it's still ours — a sub-agent run within the same
+      // thread may have temporarily replaced it. Same-thread re-entry is
+      // mutex'd by _draining so this is theoretical safety only.
+      if (this._threadAbortControllers.get(turnThreadId) === abortController) {
+        this._threadAbortControllers.delete(turnThreadId);
+      }
+      // Status auto-derives — Workspace backup is fired by
+      // OmaSandbox.onActivityExpired when the container's sleepAfter
+      // elapses (see oma-sandbox.ts) — exactly one snapshot per quiet
+      // period. Explicit /destroy snapshots eagerly via
       // sandbox.snapshotWorkspaceNow(). Per-turn backup is intentionally off.
     }
   }
@@ -3625,10 +3766,10 @@ export class SessionDO extends DurableObject<Env> {
   private terminate(reason: string): void {
     if (this._state?.terminated_at != null) return;
     this.setState({ ...this.state, terminated_at: Date.now() });
-    if (this.currentAbortController) {
-      this.currentAbortController.abort();
-      this.currentAbortController = null;
+    for (const ctrl of this._threadAbortControllers.values()) {
+      ctrl.abort();
     }
+    this._threadAbortControllers.clear();
     const event: SessionEvent = {
       type: "session.status_terminated",
       reason,
@@ -3741,6 +3882,45 @@ export class SessionDO extends DurableObject<Env> {
     // force-resets the row, then re-fires — pure noise that masks real
     // errors in observability. One-shot delete clears it.
     sql.exec(`DELETE FROM cf_agents_schedules WHERE callback = '_oma_stallCheckHeartbeat'`);
+
+    // Per-session thread directory (AMA `session_thread`-shaped). Lives
+    // here in DO SQLite — same atomicity domain as `events`, no need for
+    // D1 round-trip on the hot path. Spec note: AMA SDK exposes
+    // `BetaManagedAgentsSessionThread` with `id` (sthr_*), `agent_name`,
+    // `parent_thread_id` (NULL = primary), and `archived_at`. We mirror
+    // those fields plus `agent_id` for our internal config lookup.
+    //
+    // Primary thread row (`sthr_primary`) is seeded lazily on first
+    // turn — see _ensurePrimaryThread() — because at constructor time
+    // the agent_id isn't known yet (set on /init).
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS threads (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        agent_name TEXT,
+        parent_thread_id TEXT,
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER
+      )
+    `);
+    sql.exec(`CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id, created_at)`);
+  }
+
+  /**
+   * Idempotent primary-thread seed. Called on first turn (lazy because
+   * agent_id isn't known until /init). Subsequent calls no-op via
+   * INSERT OR IGNORE.
+   */
+  private _ensurePrimaryThread(): void {
+    const agentId = this.state.agent_id;
+    if (!agentId) return; // pre-init; nothing to seed against
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
+       VALUES ('sthr_primary', ?, ?, NULL, ?)`,
+      agentId,
+      this.state.agent_snapshot?.name ?? null,
+      Date.now(),
+    );
   }
 
   // ── Schedule API (mirrors cf-agents) ──────────────────────────────────
