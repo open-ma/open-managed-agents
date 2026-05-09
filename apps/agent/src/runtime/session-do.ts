@@ -3153,6 +3153,16 @@ export class SessionDO extends DurableObject<Env> {
     const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
     const subModel = resolveModel(subModelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
 
+    // Per-thread abort controller. Registered in _threadAbortControllers
+    // so a `user.interrupt` with this thread's session_thread_id (handled
+    // by the POST /event branch above) aborts exactly this sub-agent's
+    // in-flight turn without touching siblings or the primary thread.
+    // Cleared in finally with the same identity guard processUserMessage
+    // uses — so a re-entrant runSubAgent on the same threadId (rare; nested
+    // delegate) doesn't drop the inner controller's slot.
+    const abortController = new AbortController();
+    this._threadAbortControllers.set(threadId, abortController);
+
     // Build sub-agent context: own history, shared sandbox, parent event log
     const subCtx: HarnessContext = {
       agent: subAgent,
@@ -3183,22 +3193,32 @@ export class SessionDO extends DurableObject<Env> {
         reportUsage: async (input_tokens: number, output_tokens: number) => {
           this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
         },
+        abortSignal: abortController.signal,
         keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
-    // Run the sub-agent harness
-    await harness.run(subCtx);
+    let responseText = "";
+    try {
+      // Run the sub-agent harness
+      await harness.run(subCtx);
 
-    // Collect sub-agent response text from its history
-    const subEvents = subHistory.getEvents();
-    const responseText = subEvents
-      .filter((e: SessionEvent) => e.type === "agent.message")
-      .map((e: SessionEvent) => {
-        const msg = e as AgentMessageEvent;
-        return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
-      })
-      .join("\n");
+      // Collect sub-agent response text from its history
+      const subEvents = subHistory.getEvents();
+      responseText = subEvents
+        .filter((e: SessionEvent) => e.type === "agent.message")
+        .map((e: SessionEvent) => {
+          const msg = e as AgentMessageEvent;
+          return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
+        })
+        .join("\n");
+    } finally {
+      // Identity-guarded delete: a nested runSubAgent on the same threadId
+      // would have replaced our slot — don't stomp on its controller.
+      if (this._threadAbortControllers.get(threadId) === abortController) {
+        this._threadAbortControllers.delete(threadId);
+      }
+    }
 
     // Emit thread_idle
     const threadIdleEvent: SessionEvent = { type: "session.thread_idle", session_thread_id: threadId };
