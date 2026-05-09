@@ -264,6 +264,44 @@ describe("eventsToMessages — ignored event types", () => {
     expect(messages[0].role).toBe("user");
   });
 
+  // user.interrupt flushes queued user.* by setting cancelled_at_ms on
+  // the row. Adapter (CfDoEventLog/InMemoryEventLog) attaches that to
+  // the parsed event. eventsToMessages must skip those so the LLM
+  // never sees inputs the user explicitly cancelled.
+  it("cancelled user.message excluded from context", () => {
+    const events: SessionEvent[] = [
+      { type: "user.message", content: [{ type: "text", text: "first" }] },
+      // Three queued messages flushed by user.interrupt:
+      { type: "user.message", content: [{ type: "text", text: "queued #2" }], cancelled_at_ms: 100 } as SessionEvent,
+      { type: "user.message", content: [{ type: "text", text: "queued #3" }], cancelled_at_ms: 100 } as SessionEvent,
+      { type: "user.message", content: [{ type: "text", text: "queued #4" }], cancelled_at_ms: 100 } as SessionEvent,
+      { type: "user.interrupt" } as SessionEvent,
+      { type: "user.message", content: [{ type: "text", text: "after interrupt" }] },
+    ];
+    const messages = eventsToMessages(events);
+    expect(messages).toHaveLength(2);
+    const t0 = (messages[0].content as Array<{ type: string; text: string }>)[0].text;
+    const t1 = (messages[1].content as Array<{ type: string; text: string }>)[0].text;
+    expect(t0).toBe("first");
+    expect(t1).toBe("after interrupt");
+  });
+
+  it("cancelled tool_confirmation also skipped", () => {
+    const events: SessionEvent[] = [
+      { type: "user.message", content: [{ type: "text", text: "go" }] },
+      // Cancellation is type-agnostic; any pending user.* with
+      // cancelled_at_ms should be skipped. tool_confirmation hits the
+      // default switch case anyway, but the early-return guard runs
+      // before the switch — exercise that path explicitly.
+      { type: "user.tool_confirmation", tool_use_id: "tc_x", result: "allow", cancelled_at_ms: 200 } as SessionEvent,
+      { type: "agent.message", id: "m_1", content: [{ type: "text", text: "ok" }] } as AgentMessageEvent,
+    ];
+    const messages = eventsToMessages(events);
+    expect(messages).toHaveLength(2);
+    expect(messages[0].role).toBe("user");
+    expect(messages[1].role).toBe("assistant");
+  });
+
   it("user.tool_confirmation ignored", () => {
     const events: SessionEvent[] = [
       {
