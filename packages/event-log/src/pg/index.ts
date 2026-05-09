@@ -5,15 +5,22 @@
 // Schema notes (suggested):
 //
 //   CREATE TABLE session_events (
-//     session_id TEXT NOT NULL,
-//     seq        INTEGER NOT NULL,             -- per-session counter
-//     type       TEXT NOT NULL,
-//     data       JSONB NOT NULL,
-//     ts         BIGINT NOT NULL,              -- unix ms
+//     session_id        TEXT NOT NULL,
+//     seq               INTEGER NOT NULL,             -- per-session counter
+//     type              TEXT NOT NULL,
+//     data              JSONB NOT NULL,
+//     ts                BIGINT NOT NULL,              -- unix ms
+//     processed_at      BIGINT,                       -- NULL = pending user.* event
+//     cancelled_at      BIGINT,                       -- set by user.interrupt flush
+//     session_thread_id TEXT,                         -- 'sthr_primary' or 'sthr_*'
 //     PRIMARY KEY (session_id, seq)
 //   );
 //   CREATE INDEX idx_session_events_type
 //     ON session_events (session_id, type, seq DESC);
+//   CREATE INDEX idx_session_events_pending
+//     ON session_events (session_id, session_thread_id, seq)
+//     WHERE processed_at IS NULL AND cancelled_at IS NULL
+//       AND type IN ('user.message', 'user.tool_confirmation', 'user.custom_tool_result');
 //
 //   -- seq via per-session subquery on insert; OK race for OMA's single-
 //   -- threaded SessionDO equivalent. Acceptable conflict semantics:
