@@ -20,9 +20,18 @@
 -- for tenants on shards 1-3. Putting the index here means the lookup
 -- doesn't depend on the data plane being up.
 --
--- Pre-existing data backfilled in this migration. The fallback path in
--- the consumer treats "missing row" as "store on AUTH_DB_00" so legacy
--- stores keep working even if the backfill was incomplete.
+-- Empty by default: the consumer treats "missing row" as "store on
+-- AUTH_DB_00" (legacy fallback), so pre-shard stores keep working
+-- even without backfill. Operators with existing memory_stores at the
+-- time of shard rollout should backfill via:
+--
+--   wrangler d1 execute ROUTER_DB --remote --command \
+--     "INSERT INTO memory_store_tenant (store_id, tenant_id, created_at)
+--      SELECT id, tenant_id, COALESCE(created_at*1000, strftime('%s','now')*1000)
+--        FROM memory_stores"
+--
+-- (run from apps/main, before traffic for new tenants on non-shard-0
+-- shards starts creating memory_stores).
 
 CREATE TABLE IF NOT EXISTS "memory_store_tenant" (
   "store_id"     TEXT PRIMARY KEY NOT NULL,
@@ -32,9 +41,3 @@ CREATE TABLE IF NOT EXISTS "memory_store_tenant" (
 
 CREATE INDEX IF NOT EXISTS "idx_memory_store_tenant_tenant"
   ON "memory_store_tenant" ("tenant_id");
-
--- Backfill the 2 stores that exist in prod AUTH_DB today (both on
--- shard 0). Idempotent — INSERT OR IGNORE no-ops on re-run.
-INSERT OR IGNORE INTO "memory_store_tenant" (store_id, tenant_id, created_at) VALUES
-  ('memstore-ee98ketcngv07s5u', 'tn_be94edac426540e2', 1777380732000),
-  ('memstore-j11haxmw66aklmln', 'tn_d258dc516aac47c6', 1777021557000);

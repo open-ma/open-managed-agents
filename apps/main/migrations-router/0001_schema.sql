@@ -39,11 +39,21 @@ CREATE TABLE IF NOT EXISTS "shard_pool" (
 CREATE INDEX IF NOT EXISTS "idx_shard_pool_status"
   ON "shard_pool" ("status", "tenant_count");
 
--- Seed the 4 initial shards. AUTH_DB_00 is the original openma-auth
--- (where all current data lives); _01..03 are net-new empty shards.
+-- Seed only the mandatory baseline shard. AUTH_DB_00 is the same
+-- database_id as the legacy AUTH_DB binding — the "default shard"
+-- every deploy must have. Adding more shards is operations:
+--
+--   1. wrangler d1 create openma-auth-shard-NN
+--   2. add { binding: "AUTH_DB_NN", database_id: "..." } to wrangler.jsonc
+--   3. wrangler d1 execute ROUTER_DB --remote --command \
+--        "INSERT INTO shard_pool (binding_name, status) VALUES ('AUTH_DB_NN','open')"
+--   4. deploy
+--
+-- Coupling shard count to a migration would force every operator
+-- (including OSS self-hosters) to either accept this exact 4-shard
+-- topology or hand-edit migration files. Runtime INSERT keeps it
+-- config-driven.
+--
 -- Idempotent — INSERT OR IGNORE no-ops on re-run.
-INSERT OR IGNORE INTO "shard_pool" ("binding_name", "status", "notes") VALUES
-  ('AUTH_DB_00', 'open', 'original openma-auth — pre-shard data'),
-  ('AUTH_DB_01', 'open', NULL),
-  ('AUTH_DB_02', 'open', NULL),
-  ('AUTH_DB_03', 'open', NULL);
+INSERT OR IGNORE INTO "shard_pool" ("binding_name", "status", "notes")
+VALUES ('AUTH_DB_00', 'open', 'baseline shard — alias of legacy AUTH_DB');
