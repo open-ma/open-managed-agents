@@ -1348,6 +1348,34 @@ export class SessionDO extends DurableObject<Env> {
       const mountFileIds = raw._mount_file_ids;
       delete (raw as { _mount_file_ids?: string[] })._mount_file_ids;
       const body = raw as SessionEvent;
+      // Reject events targeting an archived thread before any side effects
+      // (history.append, broadcastEvent, drainEventQueue). Primary thread
+      // can't be archived (handler at /threads/:tid/archive enforces 400),
+      // so 'sthr_primary' is always allowed without a SQL lookup.
+      const targetThreadId =
+        (body as unknown as { session_thread_id?: string }).session_thread_id ??
+        "sthr_primary";
+      if (targetThreadId !== "sthr_primary") {
+        let archived = false;
+        for (const row of this.ctx.storage.sql.exec(
+          `SELECT archived_at FROM threads WHERE id = ? LIMIT 1`,
+          targetThreadId,
+        )) {
+          archived = row.archived_at != null;
+        }
+        if (archived) {
+          return new Response(
+            JSON.stringify({
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: `Thread ${targetThreadId} is archived and cannot receive new events`,
+              },
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
       const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
       // Auto-mount referenced files into the sandbox FS so agent's bash/read
@@ -1774,24 +1802,184 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // GET /threads — list all threads in this session
+    // GET /threads — list session threads (AMA shape).
+    //
+    // Reads from the `threads` SQL table (DO storage), not the in-memory
+    // Map — that one only holds sub-agent threads spawned in the current
+    // isolate; the SQL table survives DO eviction and includes the
+    // primary thread (seeded on /init).
+    //
+    // Query params:
+    //   ?include_archived=true  → include archived rows (default off)
+    //
+    // Response shape mirrors BetaManagedAgentsSessionThread minimally:
+    // id / agent_id / agent_name / parent_thread_id / created_at /
+    // archived_at / status. stats + usage land in Phase 3.
     if (request.method === "GET" && url.pathname === "/threads") {
-      const threadList = Array.from(this.threads.entries()).map(([id, t]) => ({
-        session_thread_id: id,
-        agent_id: t.agentId,
-        agent_name: t.agentConfig.name,
-      }));
-      return Response.json({ data: threadList });
+      const includeArchived = url.searchParams.get("include_archived") === "true";
+      const cursor = includeArchived
+        ? this.ctx.storage.sql.exec(
+            `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+               FROM threads ORDER BY created_at`,
+          )
+        : this.ctx.storage.sql.exec(
+            `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+               FROM threads WHERE archived_at IS NULL ORDER BY created_at`,
+          );
+      const data = [] as Array<Record<string, unknown>>;
+      for (const row of cursor) {
+        data.push({
+          id: row.id,
+          type: "session_thread",
+          session_id: this.state.session_id,
+          agent_id: row.agent_id,
+          agent_name: row.agent_name,
+          parent_thread_id: row.parent_thread_id,
+          status: row.archived_at != null ? "archived" : "active",
+          created_at: new Date(row.created_at as number).toISOString(),
+          archived_at: row.archived_at != null
+            ? new Date(row.archived_at as number).toISOString()
+            : null,
+          updated_at: new Date(row.created_at as number).toISOString(),
+          stats: null,
+          usage: null,
+        });
+      }
+      return Response.json({ data });
     }
 
-    // GET /threads/:thread_id/events — events for a specific thread
+    // GET /threads/:thread_id — single thread metadata.
+    const threadGetMatch = url.pathname.match(/^\/threads\/([^/]+)$/);
+    if (request.method === "GET" && threadGetMatch) {
+      const threadId = threadGetMatch[1];
+      let row: Record<string, unknown> | undefined;
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+           FROM threads WHERE id = ? LIMIT 1`,
+        threadId,
+      )) {
+        row = r;
+      }
+      if (!row) {
+        return Response.json(
+          { error: { type: "not_found", message: `thread ${threadId} not found` } },
+          { status: 404 },
+        );
+      }
+      return Response.json({
+        id: row.id,
+        type: "session_thread",
+        session_id: this.state.session_id,
+        agent_id: row.agent_id,
+        agent_name: row.agent_name,
+        parent_thread_id: row.parent_thread_id,
+        status: row.archived_at != null ? "archived" : "active",
+        created_at: new Date(row.created_at as number).toISOString(),
+        archived_at: row.archived_at != null
+          ? new Date(row.archived_at as number).toISOString()
+          : null,
+        updated_at: new Date(row.created_at as number).toISOString(),
+        stats: null,
+        usage: null,
+      });
+    }
+
+    // POST /threads/:thread_id/archive — soft-delete (status flips to
+    // archived; subsequent POST /event for this thread should 409).
+    // Idempotent — re-archive returns the existing archived_at.
+    const threadArchiveMatch = url.pathname.match(/^\/threads\/([^/]+)\/archive$/);
+    if (request.method === "POST" && threadArchiveMatch) {
+      const threadId = threadArchiveMatch[1];
+      // Refuse archiving the primary thread — the session itself is the
+      // primary thread's lifecycle, not the thread row's.
+      if (threadId === "sthr_primary") {
+        return Response.json(
+          { error: { type: "invalid_request", message: "cannot archive the primary thread" } },
+          { status: 400 },
+        );
+      }
+      let exists = false;
+      for (const _ of this.ctx.storage.sql.exec(
+        `SELECT 1 FROM threads WHERE id = ? LIMIT 1`,
+        threadId,
+      )) {
+        exists = true;
+      }
+      if (!exists) {
+        return Response.json(
+          { error: { type: "not_found", message: `thread ${threadId} not found` } },
+          { status: 404 },
+        );
+      }
+      // Set archived_at only if not already set — preserves the original
+      // archive timestamp on idempotent re-archive.
+      this.ctx.storage.sql.exec(
+        `UPDATE threads SET archived_at = ? WHERE id = ? AND archived_at IS NULL`,
+        Date.now(), threadId,
+      );
+      // Drop the in-memory config map entry — future agent calls referencing
+      // this thread should fail loudly rather than silently spawn against an
+      // archived row.
+      this.threads.delete(threadId);
+      // Echo the (now archived) thread back so the caller can read the
+      // archived_at timestamp without an extra GET.
+      let row: Record<string, unknown> | undefined;
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+           FROM threads WHERE id = ? LIMIT 1`,
+        threadId,
+      )) {
+        row = r;
+      }
+      return Response.json({
+        id: row!.id,
+        type: "session_thread",
+        session_id: this.state.session_id,
+        agent_id: row!.agent_id,
+        agent_name: row!.agent_name,
+        parent_thread_id: row!.parent_thread_id,
+        status: "archived",
+        created_at: new Date(row!.created_at as number).toISOString(),
+        archived_at: new Date(row!.archived_at as number).toISOString(),
+        updated_at: new Date(row!.archived_at as number).toISOString(),
+        stats: null,
+        usage: null,
+      });
+    }
+
+    // GET /threads/:thread_id/events — paginated event list scoped to
+    // one thread. Filter happens at the SQL level via the
+    // session_thread_id column populated by CfDoEventLog.append.
     const threadEventsMatch = url.pathname.match(/^\/threads\/([^/]+)\/events$/);
     if (request.method === "GET" && threadEventsMatch) {
       const threadId = threadEventsMatch[1];
-      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      const allEvents = history.getEvents();
-      const threadEvents = allEvents.filter((e: any) => e.thread_id === threadId);
-      return Response.json({ data: threadEvents });
+      const limit = Math.min(
+        parseInt(url.searchParams.get("limit") ?? "200", 10) || 200,
+        1000,
+      );
+      const afterSeq = parseInt(url.searchParams.get("after_seq") ?? "0", 10) || 0;
+      const order = url.searchParams.get("order") === "desc" ? "DESC" : "ASC";
+      const cursor = this.ctx.storage.sql.exec(
+        `SELECT seq, type, data, ts, processed_at, cancelled_at, session_thread_id
+           FROM events
+           WHERE session_thread_id = ? AND seq > ?
+           ORDER BY seq ${order} LIMIT ?`,
+        threadId, afterSeq, limit,
+      );
+      const data = [] as Array<Record<string, unknown>>;
+      for (const row of cursor) {
+        const ev = JSON.parse(row.data as string);
+        if (row.processed_at != null) ev.processed_at_ms = row.processed_at;
+        if (row.cancelled_at != null) ev.cancelled_at_ms = row.cancelled_at;
+        if (row.session_thread_id != null) ev.session_thread_id = row.session_thread_id;
+        data.push({
+          seq: row.seq,
+          type: row.type,
+          ts: row.ts,
+          data: ev,
+        });
+      }
+      return Response.json({ data });
     }
 
     // GET /full-status — session status with usage and outcome evaluations.

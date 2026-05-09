@@ -1117,7 +1117,20 @@ app.post("/:id/files", async (c) => {
 });
 
 // SSE stream
-async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>, id: string) {
+async function handleSSEStream(
+  c: Context<{ Bindings: Env; Variables: { tenant_id: string; services: Services } }>,
+  id: string,
+  /**
+   * Optional thread scope. When set, the bridge parses each incoming
+   * event payload and only forwards rows whose `session_thread_id`
+   * matches (or, for primary, where the field is absent — old payloads
+   * predate the thread tag and conventionally belong to primary).
+   * Wire-level filter — keeps the SessionDO broadcast generic while
+   * giving thread-scoped consumers what AMA's
+   * `client.beta.sessions.threads.events.stream` promises.
+   */
+  threadFilterId?: string,
+) {
   const t = c.get("tenant_id");
   const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
   if (!session) return c.json({ error: "Session not found" }, 404);
@@ -1147,6 +1160,21 @@ async function handleSSEStream(c: Context<{ Bindings: Env; Variables: { tenant_i
   const stream = new ReadableStream({
     start(controller) {
       ws.addEventListener("message", (event: MessageEvent) => {
+        if (threadFilterId) {
+          // Best-effort filter: parse, check session_thread_id, forward
+          // only matches. JSON-parse errors fall through (forward as-is)
+          // — heartbeats / chunk frames may not be JSON and we don't
+          // want to drop them silently.
+          try {
+            const payload = JSON.parse(event.data as string) as {
+              session_thread_id?: string;
+            };
+            const tid = payload.session_thread_id ?? "sthr_primary";
+            if (tid !== threadFilterId) return;
+          } catch {
+            // Non-JSON frame — forward unconditionally.
+          }
+        }
         controller.enqueue(encoder.encode(`data: ${event.data}\n\n`));
       });
       ws.addEventListener("close", () => {
@@ -1499,11 +1527,20 @@ app.get("/:id/threads/:thread_id/events", async (c) => {
   return c.json(await res.json());
 });
 
-// GET /v1/sessions/:id/threads/:thread_id/stream — SSE stream for thread
-app.get("/:id/threads/:thread_id/stream", async (c) => {
-  // Same as session SSE but filtered by thread_id — for now, use full session stream
-  return handleSSEStream(c, c.req.param("id"));
-});
+// GET /v1/sessions/:id/threads/:thread_id/stream — SSE stream scoped
+// to one thread. Bridge filters by session_thread_id; primary thread
+// also receives untagged legacy frames (treated as sthr_primary).
+app.get("/:id/threads/:thread_id/stream", async (c) =>
+  handleSSEStream(c, c.req.param("id"), c.req.param("thread_id")),
+);
+
+// AMA SDK uses /events/stream under the threads namespace too —
+// `client.beta.sessions.threads.events.stream(...)` hits
+// /v1/sessions/:sid/threads/:tid/events/stream. Same bridge, same
+// filter — alias for the path above so both SDK calling shapes work.
+app.get("/:id/threads/:thread_id/events/stream", async (c) =>
+  handleSSEStream(c, c.req.param("id"), c.req.param("thread_id")),
+);
 
 // ============================================================
 // Session Resources (KV only — stays in main worker)
@@ -1622,40 +1659,57 @@ app.post("/:id/resources/:resource_id", async (c) => {
   }
 });
 
-// GET /v1/sessions/:id/threads/:thread_id — single thread metadata. Threads
-// live in the sandbox worker (DO state); the agent worker only exposes
-// /threads (list) + /threads/:tid/events (event log) — not a per-thread
-// metadata endpoint. Returning 501 keeps the route catalog complete for
-// SDK callers without faking a payload. Follow-up: add the metadata
-// endpoint to apps/agent/src/runtime/session-do.ts and forward here.
-app.get("/:id/threads/:thread_id", (c) =>
-  c.json(
-    {
-      error: {
-        type: "not_implemented",
-        message: "thread metadata endpoint not yet implemented on this server",
-      },
-      type: "error",
-    },
-    501,
-  ),
-);
+// GET /v1/sessions/:id/threads/:thread_id — single thread metadata.
+// Threads live in the SessionDO's `threads` SQL table (DO storage).
+// Forwarded as-is; sandbox returns 404 if the thread doesn't exist.
+app.get("/:id/threads/:thread_id", async (c) => {
+  const id = c.req.param("id");
+  const threadId = c.req.param("thread_id");
+  const session = await c.var.services.sessions.get({
+    tenantId: c.get("tenant_id"),
+    sessionId: id,
+  });
+  if (!session) return c.json({ error: "Session not found" }, 404);
 
-// POST /v1/sessions/:id/threads/:thread_id/archive — archive a thread.
-// Same story as the thread metadata endpoint above — sandbox worker has no
-// concept of archived threads yet. Follow-up alongside the get.
-app.post("/:id/threads/:thread_id/archive", (c) =>
-  c.json(
-    {
-      error: {
-        type: "not_implemented",
-        message: "thread archive endpoint not yet implemented on this server",
-      },
-      type: "error",
-    },
-    501,
-  ),
-);
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
+
+  const res = await forwardToSandbox(binding, `/sessions/${id}/threads/${threadId}`, c.req.raw, "GET");
+  // Pass through status — sandbox returns 404 for missing thread; we
+  // mirror it on the wire so SDK callers get the right error envelope.
+  const body = await res.text();
+  return new Response(body, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
+});
+
+// POST /v1/sessions/:id/threads/:thread_id/archive — soft-archive a
+// thread. Idempotent. Sandbox enforces:
+//   - 400 on attempt to archive 'sthr_primary'
+//   - 404 if the thread doesn't exist
+// Subsequent POST /events targeting an archived thread returns 409.
+app.post("/:id/threads/:thread_id/archive", async (c) => {
+  const id = c.req.param("id");
+  const threadId = c.req.param("thread_id");
+  const session = await c.var.services.sessions.get({
+    tenantId: c.get("tenant_id"),
+    sessionId: id,
+  });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, c.get("tenant_id"));
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
+
+  const res = await forwardToSandbox(binding, `/sessions/${id}/threads/${threadId}/archive`, c.req.raw, "POST");
+  const body = await res.text();
+  return new Response(body, {
+    status: res.status,
+    headers: { "content-type": res.headers.get("content-type") ?? "application/json" },
+  });
+});
 
 app.delete("/:id/resources/:resource_id", async (c) => {
   const sessionId = c.req.param("id");
