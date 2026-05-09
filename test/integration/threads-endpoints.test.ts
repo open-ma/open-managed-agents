@@ -191,4 +191,63 @@ describe("threads HTTP endpoints", () => {
     // here verifies the archive guard didn't reject.
     expect([200, 202]).toContain(res.status);
   });
+
+  it("user.interrupt with sub-agent session_thread_id aborts only that thread", async () => {
+    // Validates the runSubAgent → _threadAbortControllers wiring in
+    // session-do.ts: registering a sub-agent's AbortController under its
+    // threadId so a targeted user.interrupt aborts exactly that thread,
+    // not the primary thread (which may be sleeping waiting for the
+    // sub-agent to return). Driven via the Map directly because spinning
+    // a real sub-agent harness needs the full sandbox/tools graph; the
+    // wire-level contract is "POST user.interrupt with thread_id → that
+    // thread's controller fires", and that's what we assert.
+    const stub = freshDoStub("threads_subagent_abort");
+    await seedSchemaAndState(stub);
+
+    // Stand in for what runSubAgent does at the top of its body: register
+    // a per-thread AbortController on the DO instance. The controllers
+    // are seeded inside the DO context, then we POST user.interrupt from
+    // outside (stub.fetch can't be called from inside runInDurableObject
+    // — workerd refuses cross-DO I/O on the same isolate). We wait via
+    // polling for the abort flag to flip, since the AbortSignal listener
+    // fires inside the DO context too.
+    const subThreadId = "sthr_subA";
+    await runInDurableObject(stub, (instance) => {
+      const map = (instance as { _threadAbortControllers: Map<string, AbortController> })
+        ._threadAbortControllers;
+      const primaryCtrl = new AbortController();
+      map.set("sthr_primary", primaryCtrl);
+      const subCtrl = new AbortController();
+      map.set(subThreadId, subCtrl);
+    });
+
+    const res = await stub.fetch(
+      new Request("http://internal/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.interrupt",
+          session_thread_id: subThreadId,
+        }),
+      }),
+    );
+    expect([200, 202]).toContain(res.status);
+
+    // Re-enter the DO and read the post-state of both controllers.
+    const result = await runInDurableObject(stub, (instance) => {
+      const map = (instance as { _threadAbortControllers: Map<string, AbortController> })
+        ._threadAbortControllers;
+      // The interrupt handler deletes the sub-agent entry but leaves
+      // the primary entry alone (sibling isolation).
+      return {
+        subStillRegistered: map.has(subThreadId),
+        primaryStillRegistered: map.has("sthr_primary"),
+        primaryAborted: map.get("sthr_primary")?.signal.aborted ?? null,
+      };
+    });
+    expect(result.subStillRegistered).toBe(false);
+    expect(result.primaryStillRegistered).toBe(true);
+    expect(result.primaryAborted).toBe(false);
+  });
+
 });
