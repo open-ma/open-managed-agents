@@ -3161,12 +3161,19 @@ export class SessionDO extends DurableObject<Env> {
    * Run a sub-agent within the same session. Creates an isolated thread
    * with its own message history but shares the same sandbox. Events are
    * tagged with thread_id and written to the parent event log.
+   *
+   * `parentThreadId` records which thread spawned this one — primary
+   * for top-level call_agent_*, or a sub-agent's own threadId when one
+   * sub-agent recursively delegates. Stored in the threads SQL row and
+   * broadcast on session.thread_created so consumers can build the
+   * full tree (Console renders nested when depth > 1).
    */
   private async runSubAgent(
     agentId: string,
     message: string,
     parentHistory: HistoryStore,
     sandbox: SandboxExecutor,
+    parentThreadId: string = "sthr_primary",
   ): Promise<string> {
     // Generate a unique thread ID. Prefix `sthr_` matches AMA spec
     // (BetaManagedAgentsSessionThread.id is `sthr_*`); previous prefix
@@ -3191,25 +3198,24 @@ export class SessionDO extends DurableObject<Env> {
     this.threads.set(threadId, { agentId, agentConfig: subAgent });
     this.ctx.storage.sql.exec(
       `INSERT OR IGNORE INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
-       VALUES (?, ?, ?, 'sthr_primary', ?)`,
+       VALUES (?, ?, ?, ?, ?)`,
       threadId,
       agentId,
       subAgent.name,
+      parentThreadId,
       Date.now(),
     );
 
     // Emit thread_created. Includes parent_thread_id so Console (and any
     // other SSE consumers) can build a tree without a follow-up GET
     // /threads round-trip. Mirrors the threads table column written
-    // above. Nested delegateToAgent calls still set parent=sthr_primary
-    // — proper lineage threading is a future change; the wire field is
-    // here now so the read path is forward-compatible.
+    // above.
     const threadCreatedEvent: SessionEvent = {
       type: "session.thread_created",
       session_thread_id: threadId,
       agent_id: agentId,
       agent_name: subAgent.name,
-      parent_thread_id: "sthr_primary",
+      parent_thread_id: parentThreadId,
     } as SessionEvent;
     parentHistory.append(threadCreatedEvent);
     this.broadcastEvent(threadCreatedEvent);
@@ -3259,7 +3265,9 @@ export class SessionDO extends DurableObject<Env> {
       // tools.schedule / cancel_schedule / list_schedules don't get
       // registered into subTools at all.
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
-        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
+        // Nested delegate: this sub-agent's threadId becomes the new
+        // child's parent. Lineage chain matches what Console renders.
+        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
       },
     });
     const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
@@ -3288,7 +3296,9 @@ export class SessionDO extends DurableObject<Env> {
         ANTHROPIC_MODEL: this.env.ANTHROPIC_MODEL,
         TAVILY_API_KEY: this.env.TAVILY_API_KEY,
         delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
-          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
+          // Nested delegate inside the env block; see runtime block
+          // above for the same lineage rule.
+          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
         },
       },
       runtime: {
@@ -3353,6 +3363,14 @@ export class SessionDO extends DurableObject<Env> {
     retryCount: number = 0,
     skipAppend: boolean = false
   ): Promise<void> {
+    // Resolved up front so closures built below (delegateToAgent in
+    // env / runtime blocks) can capture it. Defaults to primary —
+    // POST /event handler reads the same field for thread-scoped
+    // routing, so a user.message tagged sthr_X lands on this turn.
+    const turnThreadId =
+      (userMessage as unknown as { session_thread_id?: string })
+        .session_thread_id ?? "sthr_primary";
+
     const agentId = this.state.agent_id;
     if (!agentId) return;
 
@@ -3454,7 +3472,10 @@ export class SessionDO extends DurableObject<Env> {
       cancelWakeup: (id) => this.cancelWakeup(id),
       listWakeups: () => this.listWakeups(),
       delegateToAgent: async (agentId: string, message: string) => {
-        return this.runSubAgent(agentId, message, history, sandbox);
+        // turnThreadId is captured from the enclosing processUserMessage
+        // scope (declared at the top of the function) — closure evals
+        // lazily at harness.run time, so TDZ isn't a concern.
+        return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
       },
       watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
         this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -3644,10 +3665,13 @@ export class SessionDO extends DurableObject<Env> {
     // streamText call) so we no longer compose with a DO-instance
     // controller here. Registered under the thread id so user.interrupt
     // with `session_thread_id` aborts only the matching turn.
+    //
+    // Note: `turnThreadId` is also captured by the `delegateToAgent`
+    // closures above (in env / runtime blocks) so a sub-agent spawned
+    // from this turn records `parent_thread_id = turnThreadId` instead
+    // of always 'sthr_primary'. Closures eval lazily at harness.run
+    // time — TDZ for the const above is not a problem.
     const abortController = new AbortController();
-    const turnThreadId =
-      (userMessage as unknown as { session_thread_id?: string })
-        .session_thread_id ?? "sthr_primary";
     this._threadAbortControllers.set(turnThreadId, abortController);
     const effectiveAbortSignal = abortController.signal;
 
@@ -3675,7 +3699,7 @@ export class SessionDO extends DurableObject<Env> {
         // — non-acp harnesses don't read it.
         RUNTIME_ROOM: this.env.RUNTIME_ROOM,
         delegateToAgent: async (agentId: string, message: string) => {
-          return this.runSubAgent(agentId, message, history, sandbox);
+          return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
         },
         watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
           this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
