@@ -18,16 +18,3 @@ export type {
 // only things that touch them).
 export { createBetterSqlite3SqlClient } from "./adapters/better-sqlite3";
 export { createPostgresSqlClient } from "./adapters/postgres";
-
-// Tenant→shard routing for horizontally-sharded AUTH_DB. CF type
-// dependency (D1Database, KVNamespace) is fine here — Workers
-// consumers are the primary callers; Node consumers don't shard.
-export {
-  SHARD_BINDING_NAMES,
-  ShardLookupError,
-  getShardForTenant,
-  resolveBindingName,
-  assignShardOnSignup,
-  queryAllShards,
-} from "./shard";
-export type { ShardBindingName, ShardBindings } from "./shard";
