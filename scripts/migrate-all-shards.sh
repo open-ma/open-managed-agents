@@ -16,37 +16,41 @@
 # Pre-req: cwd = repo root, apps/main installed (wrangler available).
 set -euo pipefail
 
+LOCAL_FLAG=""
 REMOTE_FLAG="--remote"
 if [ "${1:-}" = "--local" ]; then
   REMOTE_FLAG=""
+  LOCAL_FLAG="--local"
 fi
 
 cd "$(dirname "$0")/.."
 cd apps/main
 
+run_apply() {
+  local binding="$1"
+  echo ""
+  echo "─── $binding ────────────────────────────────"
+  if [ -n "$LOCAL_FLAG" ]; then
+    npx wrangler d1 migrations apply "$binding" --local --persist-to ../../.wrangler/state \
+      || echo "  (continuing — check error above)"
+  else
+    npx wrangler d1 migrations apply "$binding" --remote \
+      || echo "  (continuing — check error above)"
+  fi
+}
+
 # Router DB: the routing tables themselves. Migrations live in
 # migrations-router/.
-echo "─── ROUTER_DB (openma-router) ────────────────────────────"
-npx wrangler d1 migrations apply ROUTER_DB $REMOTE_FLAG \
-  --persist-to ../../.wrangler/state \
-  || echo "  (continuing — check error above)"
+run_apply ROUTER_DB
 
 # Per-shard AUTH_DB. Same migrations dir (migrations/) for all shards;
 # wrangler picks up migrations-dir from the wrangler.json binding config.
 for SHARD in AUTH_DB_00 AUTH_DB_01 AUTH_DB_02 AUTH_DB_03; do
-  echo ""
-  echo "─── $SHARD ────────────────────────────────"
-  npx wrangler d1 migrations apply "$SHARD" $REMOTE_FLAG \
-    --persist-to ../../.wrangler/state \
-    || echo "  (continuing — check error above)"
+  run_apply "$SHARD"
 done
 
 # Integrations DB (single, not sharded yet).
-echo ""
-echo "─── INTEGRATIONS_DB ────────────────────────"
-npx wrangler d1 migrations apply INTEGRATIONS_DB $REMOTE_FLAG \
-  --persist-to ../../.wrangler/state \
-  || echo "  (continuing — check error above)"
+run_apply INTEGRATIONS_DB
 
 echo ""
 echo "✓ migrations applied across all shards"
