@@ -20,8 +20,11 @@ export * from "./service";
 export {
   SqlTenantShardDirectoryRepo,
   SqlShardPoolRepo,
+  SqlMemoryStoreTenantIndexRepo,
   createCfTenantShardDirectoryService,
   createCfShardPoolService,
+  createCfMemoryStoreTenantIndexService,
   createSqliteTenantShardDirectoryService,
   createSqliteShardPoolService,
+  createSqliteMemoryStoreTenantIndexService,
 } from "./adapters";

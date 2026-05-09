@@ -86,8 +86,10 @@ import {
 import {
   TenantShardDirectoryService,
   ShardPoolService,
+  MemoryStoreTenantIndexService,
   createCfTenantShardDirectoryService,
   createCfShardPoolService,
+  createCfMemoryStoreTenantIndexService,
 } from "@open-managed-agents/tenant-dbs-store";
 import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
 import { type KvStore, CfKvStore } from "@open-managed-agents/kv-store";
@@ -121,6 +123,11 @@ export interface Services {
   /** Control-plane: per-shard status / capacity / tenant count. Used for
    *  shard selection at sign-up + capacity monitoring. */
   shardPool: ShardPoolService;
+  /** Control-plane: memory_store_id → tenant_id index. Populated on
+   *  store creation, consumed by the R2 memory-events queue consumer to
+   *  resolve the per-tenant shard from an R2 storage key (which carries
+   *  no tenant_id). */
+  memoryStoreTenantIndex: MemoryStoreTenantIndexService;
   /**
    * File-bytes blob store (R2 FILES_BUCKET in CF, local-FS / S3 in Node).
    * Null when the underlying storage isn't configured — routes that need it
@@ -254,6 +261,9 @@ export function buildServices(env: Env, db: D1Database): Services {
       controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
     }),
     shardPool: createCfShardPoolService({
+      controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+    }),
+    memoryStoreTenantIndex: createCfMemoryStoreTenantIndexService({
       controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
     }),
     // File blob storage. CF: R2 binding; self-host: S3 / local-FS adapter.
