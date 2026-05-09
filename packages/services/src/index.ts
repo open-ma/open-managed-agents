@@ -323,6 +323,42 @@ export async function getCfServicesForTenant(
   return buildCfServices(env, db);
 }
 
+/**
+ * Cross-shard fan-out for non-Hono entry points (cron sweeps, admin scans,
+ * eval-runner). Iterates every shard registered in shard_pool, builds the
+ * Services container against each shard's DB, and runs `fn` per shard in
+ * parallel. Returns the array of fn results.
+ *
+ * Why this lives in services and not in app code: callers should depend on
+ * the abstract "for every shard, here's a Services" contract — not on the
+ * CF-specific list of binding names. Adding shards = INSERT shard_pool +
+ * add wrangler binding; no code change in cron / eval-runner / etc.
+ *
+ * Bindings declared in shard_pool but not present on this worker are
+ * skipped with a logged warning rather than throwing — useful when a
+ * worker (e.g. apps/agent) is intentionally bound to a subset.
+ */
+export async function forEachShardServices<T>(
+  env: Env,
+  fn: (services: Services, shardName: string) => Promise<T>,
+): Promise<T[]> {
+  const controlPlaneDb = env.ROUTER_DB ?? env.AUTH_DB;
+  const pool = createCfShardPoolService({ controlPlaneDb });
+  const shards = await pool.listAll();
+  const envBindings = env as unknown as Record<string, D1Database | undefined>;
+  return Promise.all(
+    shards.map(async (shard) => {
+      const db = envBindings[shard.bindingName];
+      if (!db) {
+        // Soft-skip: useful when apps/agent etc. binds a subset.
+        // The CF entry that owns the cron must bind every shard.
+        return undefined as T;
+      }
+      return fn(buildCfServices(env, db), shard.bindingName);
+    }),
+  ).then((results) => results.filter((x) => x !== undefined) as T[]);
+}
+
 // Future:
 //
 // export function buildNodeServices(opts: { pg: pg.Pool; ... }): Services {

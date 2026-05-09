@@ -607,6 +607,23 @@ export class MemoryStoreService {
       throw new MemoryContentTooLargeError(MEMORY_CONTENT_MAX_BYTES);
     }
   }
+
+  // ============================================================
+  // Maintenance
+  // ============================================================
+
+  /**
+   * Prune memory_versions rows older than `cutoffMs`, except always keep
+   * the most recent version per memory_id (Anthropic spec). Returns the
+   * count of rows deleted, or -1 if the underlying repo can't report it.
+   *
+   * Cross-tenant: does NOT take a tenantId — runs over the entire shard.
+   * Callers needing cross-shard fan-out use forEachShardServices in the
+   * services package.
+   */
+  async pruneVersionsOlderThan(cutoffMs: number): Promise<number> {
+    return this.versionRepo.pruneOlderThan(cutoffMs);
+  }
 }
 
 // ============================================================
