@@ -3,6 +3,10 @@ import { drizzle } from "drizzle-orm/d1";
 import { drizzleAdapter } from "better-auth/adapters/drizzle";
 import { emailOTP } from "better-auth/plugins";
 import type { Env } from "@open-managed-agents/shared";
+import {
+  createCfShardPoolService,
+  createCfTenantShardDirectoryService,
+} from "@open-managed-agents/tenant-dbs-store";
 import * as schema from "./db/schema";
 
 function sendEmail(
@@ -111,7 +115,7 @@ export function createAuth(env: Env) {
         create: {
           after: async (user) => {
             try {
-              await ensureTenant(env.AUTH_DB, user.id, user.name, user.email);
+              await ensureTenant(env, user.id, user.name, user.email);
             } catch (err) {
               // Don't block sign-up on tenant creation — auth.ts has a self-heal
               // path that will retry on first authenticated request. Log so the
@@ -196,15 +200,26 @@ export async function hasMembership(
  *   - apps/main/src/auth.ts cookie path (self-heal for legacy users whose
  *     sign-up predated this hook, or whose hook-time INSERT failed silently)
  *
- * Also writes a `membership` row so multi-tenant code paths see the new
- * tenant immediately. user.tenantId stays in sync for legacy callers.
+ * Writes:
+ *   - `tenant`     row in env.AUTH_DB (global control plane, not sharded)
+ *   - `tenant_shard` row in env.ROUTER_DB (assigns this tenant to a shard
+ *      via least-loaded placement)
+ *   - `user.tenantId` UPDATE in env.AUTH_DB
+ *   - `membership` row in env.AUTH_DB
+ *
+ * Shard assignment MUST land before the user's first authenticated request,
+ * otherwise tenantDbMiddleware finds no tenant_shard row and falls back to
+ * AUTH_DB defaultBinding. The fallback is then cached for the isolate's
+ * lifetime — wrong-shard reads/writes follow until worker restart. Doing
+ * the assign here (synchronously inside the signup path) closes that race.
  */
 export async function ensureTenant(
-  db: D1Database,
+  env: Env,
   userId: string,
   userName: string | null | undefined,
   userEmail: string | null | undefined,
 ): Promise<string> {
+  const db = env.AUTH_DB;
   const existing = await getTenantId(db, userId);
   if (existing) return existing;
 
@@ -224,6 +239,20 @@ export async function ensureTenant(
     .prepare("INSERT INTO tenant (id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)")
     .bind(tenantId, tenantName, now, now)
     .run();
+
+  // Shard assignment. ROUTER_DB falls back to AUTH_DB if not bound (legacy
+  // deployments still serving the 0003 migration's tables). pickShardForNewTenant
+  // returns the open shard with lowest tenant_count; null when no shards open
+  // → fall back to AUTH_DB_00 (= shard 0, the original openma-auth) so the
+  // signup never blocks on shard-pool exhaustion.
+  const controlPlaneDb = env.ROUTER_DB ?? env.AUTH_DB;
+  const shardPool = createCfShardPoolService({ controlPlaneDb });
+  const tenantShardDirectory = createCfTenantShardDirectoryService({ controlPlaneDb });
+  const pick = await shardPool.pickShardForNewTenant();
+  const bindingName = pick?.bindingName ?? "AUTH_DB_00";
+  await tenantShardDirectory.assign({ tenantId, bindingName });
+  await shardPool.incrementTenantCount(bindingName);
+
   await db
     .prepare("UPDATE user SET tenantId = ?, role = ? WHERE id = ? AND tenantId IS NULL")
     .bind(tenantId, "owner", userId)

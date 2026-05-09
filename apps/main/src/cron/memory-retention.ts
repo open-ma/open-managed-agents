@@ -3,8 +3,7 @@ import {
   logError,
   type Env,
 } from "@open-managed-agents/shared";
-import { SqlMemoryVersionRepo } from "@open-managed-agents/memory-store";
-import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { forEachShardServices } from "@open-managed-agents/services";
 
 const RETENTION_MS = 30 * 24 * 60 * 60 * 1000; // 30 days
 
@@ -26,26 +25,39 @@ export async function memoryRetentionTick(env: Env, sweepHourUtc = 3): Promise<v
   // single execution per day. Pin to the first minute of the hour.
   if (now.getUTCMinutes() !== 0) return;
 
-  if (!env.AUTH_DB) {
-    logError(
-      { op: "cron.memory_retention" },
-      "AUTH_DB binding missing — skipping memory retention sweep",
-    );
-    return;
-  }
-
-  const repo = new SqlMemoryVersionRepo(new CfD1SqlClient(env.AUTH_DB));
+  // Cross-shard fan-out via the services-level abstraction. Knows nothing
+  // about CF binding names or D1Database — adding shards is INSERT
+  // shard_pool + new wrangler binding, no code change here.
   const cutoffMs = Date.now() - RETENTION_MS;
+  let totalRemoved = 0;
   try {
-    const removed = await repo.pruneOlderThan(cutoffMs);
+    const perShard = await forEachShardServices(env, async (services, shardName) => {
+      try {
+        const removed = await services.memory.pruneVersionsOlderThan(cutoffMs);
+        log(
+          { op: "cron.memory_retention.shard", shard: shardName, removed, cutoff_ms: cutoffMs },
+          `pruned ${removed === -1 ? "(unknown count)" : removed} on ${shardName}`,
+        );
+        return removed;
+      } catch (err) {
+        logError(
+          { op: "cron.memory_retention.shard", shard: shardName, err },
+          `memory retention sweep failed on ${shardName}`,
+        );
+        return 0;
+      }
+    });
+    for (const r of perShard) {
+      if (r > 0) totalRemoved += r;
+    }
     log(
-      { op: "cron.memory_retention", removed, cutoff_ms: cutoffMs },
-      `pruned ${removed === -1 ? "(unknown count)" : removed} old memory versions`,
+      { op: "cron.memory_retention", total_removed: totalRemoved, cutoff_ms: cutoffMs },
+      `memory retention sweep complete: ${totalRemoved} rows pruned across all shards`,
     );
   } catch (err) {
     logError(
       { op: "cron.memory_retention", err },
-      "memory retention sweep failed",
+      "memory retention fan-out failed",
     );
   }
 }

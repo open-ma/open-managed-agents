@@ -35,8 +35,17 @@
   // D1 binding for memory store metadata (memory_stores / memories /
   // memory_versions tables) — agent's memory tools use the same shared
   // MemoryStoreService as the main worker, which requires direct D1 access.
+  // D1 layout — same shard set as apps/main. The agent worker's memory
+  // tools query AUTH_DB via the shared MemoryStoreService, so it needs
+  // to resolve the per-tenant shard. AUTH_DB legacy alias stays during
+  // call-site migration.
   "d1_databases": [
-    { "binding": "AUTH_DB", "database_name": "openma-auth", "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" }
+    { "binding": "AUTH_DB",     "database_name": "openma-auth",          "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" },
+    { "binding": "ROUTER_DB",   "database_name": "openma-router",        "database_id": "6ddad512-7976-4912-8003-7746ba1e4cb6" },
+    { "binding": "AUTH_DB_00",  "database_name": "openma-auth",          "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" },
+    { "binding": "AUTH_DB_01",  "database_name": "openma-auth-shard-01", "database_id": "37a3138c-8d1e-4258-8a0d-e0da511b0175" },
+    { "binding": "AUTH_DB_02",  "database_name": "openma-auth-shard-02", "database_id": "254c56dc-2a99-4266-87ae-9ff46355eb75" },
+    { "binding": "AUTH_DB_03",  "database_name": "openma-auth-shard-03", "database_id": "a4f72551-7ce7-4da3-a33e-f4abb00bb86f" }
   ],
 
   // Service bindings:

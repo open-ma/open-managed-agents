@@ -76,6 +76,23 @@ app.post("/", async (c) => {
       name: body.name,
       description: body.description,
     });
+
+    // Index store_id → tenant_id in ROUTER_DB so the memory queue
+    // consumer (apps/main/src/queue/memory-events.ts) can route R2
+    // events to the right shard. R2 events carry only the storage key
+    // (`<store_id>/<path>`) — no tenant_id — so without this index the
+    // consumer would write the memories UPSERT to the wrong shard.
+    // Falls back to AUTH_DB when ROUTER_DB binding is absent.
+    const controlPlaneDb = c.env.ROUTER_DB ?? c.env.AUTH_DB;
+    await controlPlaneDb
+      .prepare(
+        `INSERT OR IGNORE INTO memory_store_tenant
+           (store_id, tenant_id, created_at)
+         VALUES (?, ?, ?)`,
+      )
+      .bind(store.id, t, Date.now())
+      .run();
+
     return c.json(toApiStore(store), 201);
   } catch (err) {
     return handle(err);
