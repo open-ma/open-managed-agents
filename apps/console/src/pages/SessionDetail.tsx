@@ -68,6 +68,15 @@ export function SessionDetail() {
    *  if the fetch failed (404 = trajectory not built yet, 5xx = sandbox
    *  flaky); both keep the trigger from re-firing every render. */
   const [trajectory, setTrajectory] = useState<Trajectory | "loading" | "error" | undefined>(undefined);
+  /** Sub-agent threads in this session. Primary is implicit at index 0
+   *  (label "Main"). Empty when the session has only the primary thread,
+   *  in which case the selector UI is hidden entirely. Refreshed on
+   *  `session.thread_created` events arriving over SSE. */
+  const [threads, setThreads] = useState<Array<{ id: string; agent_name?: string }>>([]);
+  /** Currently-active thread id. Defaults to 'sthr_primary'. Filters
+   *  the events array at render time. SSE-driven new threads don't
+   *  auto-switch — the operator stays on whatever they're watching. */
+  const [activeThreadId, setActiveThreadId] = useState<string>("sthr_primary");
   const [showTrajectory, setShowTrajectory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenKeys = useRef(new Set<string>());
@@ -214,6 +223,19 @@ export function SessionDetail() {
 
     if (ev.type === "session.status_running") setStatus("running");
     if (ev.type === "session.status_idle") setStatus("idle");
+    // Live-update the thread selector when a sub-agent spawns. We don't
+    // auto-switch the operator's view — they stay on whatever they're
+    // watching; the new tab just appears alongside.
+    if (ev.type === "session.thread_created") {
+      const tc = ev as { session_thread_id?: string; agent_name?: string };
+      if (tc.session_thread_id && tc.session_thread_id !== "sthr_primary") {
+        setThreads((prev) =>
+          prev.some((t) => t.id === tc.session_thread_id)
+            ? prev
+            : [...prev, { id: tc.session_thread_id!, agent_name: tc.agent_name }],
+        );
+      }
+    }
     // Don't return — Timeline's bucketIntoTurns uses these as the close
     // boundary of a turn. Conversation view's EventBubble switch silently
     // skips unknown types so leaving them in `events` is harmless there.
@@ -347,6 +369,17 @@ export function SessionDetail() {
       .then((t) => setTrajectory(t))
       .catch(() => setTrajectory("error"));
 
+    // Threads list (primary + sub-agent). Primary is always present
+    // (seeded by SessionDO on /init). Filter to non-primary so the
+    // selector only renders when there's something to switch between
+    // — single-thread sessions get zero UI clutter.
+    api<{ data: Array<{ id: string; agent_name?: string }> }>(`/v1/sessions/${id}/threads`)
+      .then((res) => {
+        const subThreads = (res.data ?? []).filter((t) => t.id !== "sthr_primary");
+        setThreads(subThreads);
+      })
+      .catch(() => setThreads([]));
+
     return () => { abort.abort(); };
   }, [id]);
 
@@ -425,6 +458,28 @@ export function SessionDetail() {
           {sessionMeta.createdAt && <RelativeTimeBadge iso={sessionMeta.createdAt} />}
         </div>
       </div>
+
+      {/* Thread selector — only when sub-agent threads exist. Primary
+          is implicit at index 0 ("Main"); sub-agent tabs appear as new
+          threads spawn (live-updated by session.thread_created handler).
+          Selecting a thread filters both Conversation and Timeline views. */}
+      {threads.length > 0 && (
+        <div className="px-8 border-b border-border flex items-center gap-1 shrink-0 overflow-x-auto">
+          <ThreadTab
+            label="Main"
+            active={activeThreadId === "sthr_primary"}
+            onClick={() => setActiveThreadId("sthr_primary")}
+          />
+          {threads.map((t) => (
+            <ThreadTab
+              key={t.id}
+              label={t.agent_name ?? t.id.slice(0, 12)}
+              active={activeThreadId === t.id}
+              onClick={() => setActiveThreadId(t.id)}
+            />
+          ))}
+        </div>
+      )}
 
       {/* View tabs */}
       <div className="px-8 border-b border-border flex items-center gap-1 shrink-0">
@@ -505,15 +560,24 @@ export function SessionDetail() {
         </div>
       )}
 
+      {/* Filter by selected thread. Untagged events (legacy + spans
+          that haven't been thread-stamped yet) are treated as primary —
+          matches the bridge filter in handleSSEStream. */}
+      {(() => null)()}
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 flex flex-col min-w-0">
       {view === "chat" ? (
         <>
           {/* Events */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
-            {events.map((e, i) => (
-              <EventBubble key={i} event={e} />
-            ))}
+            {events
+              .filter((e) => {
+                const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
+                return tid === activeThreadId;
+              })
+              .map((e, i) => (
+                <EventBubble key={i} event={e} />
+              ))}
             {/* In-flight thinking streams. Render before message/tool
                 streams so the visual order roughly matches what the
                 LLM produced (Anthropic emits reasoning before text/tool). */}
@@ -562,7 +626,12 @@ export function SessionDetail() {
           </div>
         </>
       ) : (
-        <TimelineView events={events} />
+        <TimelineView
+          events={events.filter((e) => {
+            const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
+            return tid === activeThreadId;
+          })}
+        />
       )}
         </div>
         {resourcePanel && (
@@ -703,6 +772,24 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
       className={`px-3 py-2.5 text-sm border-b-2 transition-colors ${
         active
           ? "border-brand text-fg font-medium"
+          : "border-transparent text-fg-subtle hover:text-fg-muted"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/** Tighter visual than ViewTab — sub-agent tabs typically need to fit
+ *  more than the 2-3 view options. Smaller padding + horizontal scroll
+ *  in the parent keeps long sub-agent rosters readable. */
+function ThreadTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`px-3 py-1.5 text-xs whitespace-nowrap border-b-2 transition-colors ${
+        active
+          ? "border-info text-fg font-medium"
           : "border-transparent text-fg-subtle hover:text-fg-muted"
       }`}
     >
@@ -898,6 +985,16 @@ function ToolInputStreamingBubble({ name, partial }: { name?: string; partial: s
 function EventBubble({ event }: { event: Event }) {
   const [toolOpen, setToolOpen] = useState(false);
 
+  // AMA pending lifecycle (set by event-log adapter from row.processed_at /
+  // row.cancelled_at). Pending = drainEventQueue hasn't picked the event
+  // up yet; cancelled = user.interrupt flushed the queued message before
+  // it ran. Cancelled events stay in the log for audit but the LLM never
+  // sees them (eventsToMessages skips); show them with strikethrough so
+  // operators know the user retracted them.
+  const meta = event as { processed_at_ms?: number | null; cancelled_at_ms?: number | null };
+  const isPending = meta.processed_at_ms == null && meta.cancelled_at_ms == null;
+  const isCancelled = meta.cancelled_at_ms != null;
+
   switch (event.type) {
     case "user.message": {
       // Wakeups synthesized by the schedule tool's onScheduledWakeup callback
@@ -932,13 +1029,25 @@ function EventBubble({ event }: { event: Event }) {
         );
       }
 
+      // Pending: drainEventQueue hasn't picked it up yet. Render with
+      // muted bg + hourglass label. Cancelled: render strikethrough +
+      // muted bg with a "retracted" label so the audit trail is visible
+      // without competing with live messages for attention.
+      const labelText = isCancelled ? "Retracted" : isPending ? "Pending…" : "You";
+      const bubbleClass = isCancelled
+        ? "bg-bg-muted text-fg-subtle rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed line-through opacity-70"
+        : isPending
+        ? "bg-bg-surface border border-border-strong text-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed"
+        : "bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed";
       return (
         <div className="flex justify-end">
           <div className="max-w-lg">
-            <div className="text-xs text-fg-subtle text-right mb-1">You</div>
-            <div className="bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
-              {text}
+            <div className="text-xs text-fg-subtle text-right mb-1 flex items-center justify-end gap-1">
+              {isPending && <span aria-hidden>⏳</span>}
+              {isCancelled && <span aria-hidden>✗</span>}
+              <span>{labelText}</span>
             </div>
+            <div className={bubbleClass}>{text}</div>
           </div>
         </div>
       );
