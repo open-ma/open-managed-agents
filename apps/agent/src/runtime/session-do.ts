@@ -24,7 +24,6 @@ import {
   type RuntimeAdapter,
 } from "@open-managed-agents/session-runtime";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
-import { buildCfTenantDbProvider } from "@open-managed-agents/services";
 import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import type {
   AgentConfig,
@@ -53,7 +52,7 @@ import {
 } from "./outcome-supervisor";
 import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
-import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
+import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { ensureSetupApplied } from "./setup-on-warmup";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
@@ -2026,8 +2025,12 @@ export class SessionDO extends DurableObject<Env> {
               "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
             );
           } else {
+            // Route to the tenant's shard — workspace_backups is per-tenant
+            // data, so the row lives wherever this tenant was sharded.
+            const provider = buildCfTenantDbProvider(this.env);
+            const backupDb = await provider.resolve(this.state.tenant_id);
             const handle = await findWorkspaceBackup(
-              this.env.AUTH_DB,
+              backupDb,
               this.state.tenant_id,
               this.state.environment_id,
               this.state.session_id ?? "unknown",
