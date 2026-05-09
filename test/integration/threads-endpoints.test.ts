@@ -192,6 +192,70 @@ describe("threads HTTP endpoints", () => {
     expect([200, 202]).toContain(res.status);
   });
 
+  it("POST /usage credits per-thread; GET /threads surfaces separate usage rows", async () => {
+    // Two ingest hits to /usage with different session_thread_id values
+    // should land in separate buckets on state.thread_usage and surface
+    // as the AMA `usage` field on each thread row. Session-wide
+    // input_tokens/output_tokens stay in sync (sum across threads).
+    const stub = freshDoStub("threads_usage");
+    await seedSchemaAndState(stub);
+
+    const r1 = await stub.fetch(
+      new Request("http://internal/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          input_tokens: 100,
+          output_tokens: 50,
+          cache_read_input_tokens: 30,
+          session_thread_id: "sthr_primary",
+        }),
+      }),
+    );
+    expect(r1.status).toBe(200);
+
+    const r2 = await stub.fetch(
+      new Request("http://internal/usage", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          input_tokens: 200,
+          output_tokens: 75,
+          cache_creation_input_tokens: 40,
+          session_thread_id: "sthr_subA",
+        }),
+      }),
+    );
+    expect(r2.status).toBe(200);
+    // Session-wide echo sums across threads.
+    const r2Body = (await r2.json()) as { input_tokens: number; output_tokens: number };
+    expect(r2Body.input_tokens).toBe(300);
+    expect(r2Body.output_tokens).toBe(125);
+
+    const list = await stub.fetch(new Request("http://internal/threads"));
+    const body = (await list.json()) as {
+      data: Array<{
+        id: string;
+        usage: null | {
+          input_tokens?: number;
+          output_tokens?: number;
+          cache_read_input_tokens?: number;
+          cache_creation_input_tokens?: number;
+        };
+      }>;
+    };
+    const primary = body.data.find((t) => t.id === "sthr_primary")!;
+    const subA = body.data.find((t) => t.id === "sthr_subA")!;
+    expect(primary.usage).not.toBeNull();
+    expect(primary.usage!.input_tokens).toBe(100);
+    expect(primary.usage!.output_tokens).toBe(50);
+    expect(primary.usage!.cache_read_input_tokens).toBe(30);
+    expect(subA.usage).not.toBeNull();
+    expect(subA.usage!.input_tokens).toBe(200);
+    expect(subA.usage!.output_tokens).toBe(75);
+    expect(subA.usage!.cache_creation_input_tokens).toBe(40);
+  });
+
   it("user.interrupt with sub-agent session_thread_id aborts only that thread", async () => {
     // Validates the runSubAgent → _threadAbortControllers wiring in
     // session-do.ts: registering a sub-agent's AbortController under its

@@ -155,8 +155,32 @@ interface SessionState {
    *  status — the only state value that needed to survive in storage; the
    *  rest are derivable from cf_agents_runs row presence. */
   terminated_at: number | null;
+  /**
+   * Session-wide token totals. Kept in sync with the per-thread breakdown
+   * in `thread_usage` so existing reads (POST /usage echo, /full-status)
+   * keep working without a refactor at every call site. New code should
+   * prefer `thread_usage` for per-thread granularity (AMA SessionThread
+   * .usage shape).
+   */
   input_tokens: number;
   output_tokens: number;
+  /**
+   * Per-thread cumulative usage. Keyed by session_thread_id
+   * ("sthr_primary" or sub-agent "sthr_*"). Mirrors the AMA
+   * BetaManagedAgentsSessionThreadUsage shape minus the cache_creation
+   * sub-breakdown by lifetime (we only have one bucket today).
+   * Optional: pre-thread-usage sessions read as `undefined` and the
+   * serializer falls back to null; new sessions populate it.
+   */
+  thread_usage?: Record<
+    string,
+    {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+    }
+  >;
   vault_ids: string[];
   pending_tool_calls: PendingToolCall[];
   outcome: ActiveOutcome | null;
@@ -1738,20 +1762,30 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
-    // POST /usage — increment token usage counters
+    // POST /usage — increment token usage counters. Now thread-aware:
+    // body may carry session_thread_id (defaults to sthr_primary) and
+    // optional cache_creation_input_tokens / cache_read_input_tokens for
+    // the per-thread breakdown that GET /threads/:id surfaces. The
+    // session-wide echo (input_tokens / output_tokens) stays unchanged
+    // for back-compat with existing /full-status consumers.
     if (request.method === "POST" && url.pathname === "/usage") {
       const body = (await request.json()) as {
-        input_tokens: number;
-        output_tokens: number;
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        session_thread_id?: string;
       };
-
-      const newInput = this.state.input_tokens + (body.input_tokens || 0);
-      const newOutput = this.state.output_tokens + (body.output_tokens || 0);
-      this.setState({ ...this.state, input_tokens: newInput, output_tokens: newOutput });
-
+      const threadId = body.session_thread_id ?? "sthr_primary";
+      this.creditUsageToThread(threadId, {
+        input_tokens: body.input_tokens ?? 0,
+        output_tokens: body.output_tokens ?? 0,
+        cache_creation_input_tokens: body.cache_creation_input_tokens,
+        cache_read_input_tokens: body.cache_read_input_tokens,
+      });
       return Response.json({
-        input_tokens: newInput,
-        output_tokens: newOutput,
+        input_tokens: this.state.input_tokens,
+        output_tokens: this.state.output_tokens,
       });
     }
 
@@ -2614,6 +2648,78 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
+   * Inspect an outbound event for a `span.model_request_end` carrying
+   * `model_usage` and credit cache tokens to the given thread. Input /
+   * output token totals already arrive via reportUsage at the end of the
+   * turn (default-loop step 10), so this only handles the cache-bucket
+   * deltas reportUsage doesn't carry. Idempotent across primary +
+   * sub-agent broadcast paths because each model_request_end event is
+   * emitted exactly once per LLM step.
+   */
+  private maybeCreditCacheTokens(threadId: string, event: SessionEvent): void {
+    if (event.type !== "span.model_request_end") return;
+    const usage = (event as unknown as {
+      model_usage?: {
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      };
+    }).model_usage;
+    if (!usage) return;
+    const cc = usage.cache_creation_input_tokens || 0;
+    const cr = usage.cache_read_input_tokens || 0;
+    if (cc === 0 && cr === 0) return;
+    this.creditUsageToThread(threadId, {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: cc,
+      cache_read_input_tokens: cr,
+    });
+  }
+
+  /**
+   * Credit token usage to a specific thread AND keep the session-wide
+   * `state.input_tokens` / `state.output_tokens` in sync. Cache token
+   * fields are tracked per-thread only — the session-wide totals just
+   * cover input/output (their existing meaning).
+   *
+   * Called from the `reportUsage` closures wired into HarnessRuntime
+   * for both the primary turn and sub-agent turns; threadId is the
+   * session_thread_id the closure was bound to ("sthr_primary" or a
+   * sub-agent "sthr_*").
+   */
+  private creditUsageToThread(
+    threadId: string,
+    delta: {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    },
+  ): void {
+    const existing = this.state.thread_usage ?? {};
+    const prior = existing[threadId] ?? {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    };
+    const next = {
+      input_tokens: prior.input_tokens + (delta.input_tokens || 0),
+      output_tokens: prior.output_tokens + (delta.output_tokens || 0),
+      cache_creation_input_tokens:
+        prior.cache_creation_input_tokens + (delta.cache_creation_input_tokens || 0),
+      cache_read_input_tokens:
+        prior.cache_read_input_tokens + (delta.cache_read_input_tokens || 0),
+    };
+    this.setState({
+      ...this.state,
+      input_tokens: (this.state.input_tokens ?? 0) + (delta.input_tokens || 0),
+      output_tokens: (this.state.output_tokens ?? 0) + (delta.output_tokens || 0),
+      thread_usage: { ...existing, [threadId]: next },
+    });
+  }
+
+  /**
    * Persist a SessionEvent to the events table AND broadcast to WS subscribers.
    * Used by tools (e.g. web_fetch's aux summarize step) that need to emit
    * trajectory events from outside the harness loop. Inside the harness loop,
@@ -3188,10 +3294,11 @@ export class SessionDO extends DurableObject<Env> {
           parentHistory.append(taggedEvent);
           this.broadcastEvent(taggedEvent);
           this.fanOutToHooks(taggedEvent);
+          this.maybeCreditCacheTokens(threadId, taggedEvent);
         },
         ...this.buildStreamRuntimeMethods(threadId),
         reportUsage: async (input_tokens: number, output_tokens: number) => {
-          this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
+          this.creditUsageToThread(threadId, { input_tokens, output_tokens });
         },
         abortSignal: abortController.signal,
         keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
@@ -3575,10 +3682,11 @@ export class SessionDO extends DurableObject<Env> {
           history.append(event);
           this.broadcastEvent(event);
           this.fanOutToHooks(event);
+          this.maybeCreditCacheTokens(turnThreadId, event);
         },
         ...this.buildStreamRuntimeMethods(),
         reportUsage: async (input_tokens: number, output_tokens: number) => {
-          this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
+          this.creditUsageToThread(turnThreadId, { input_tokens, output_tokens });
         },
         pendingConfirmations: [],
         abortSignal: effectiveAbortSignal,
@@ -4084,8 +4192,11 @@ export class SessionDO extends DurableObject<Env> {
    *   threads (which spawn already running) and computed for primary.
    * stats.active_seconds: not yet computed — would need
    *   per-thread span.model_call_start/end accounting.
-   * usage: null today; tokens are session-wide on `state.input_tokens
-   *   / output_tokens`, not per-thread.
+   * usage: read from state.thread_usage[id] (per-thread token counters,
+   *   credited from reportUsage + span.model_request_end cache fields).
+   *   Returns null for legacy sessions that pre-date the per-thread
+   *   bucket — the AMA SDK accepts null and treats it as "no usage
+   *   recorded yet."
    */
   private _serializeThreadRow(row: Record<string, unknown>): Record<string, unknown> {
     const id = row.id as string;
@@ -4117,6 +4228,21 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     const updatedTs = archivedAt ?? createdAt;
+    const threadUsage = this.state.thread_usage?.[id];
+    const usage = threadUsage
+      ? {
+          input_tokens: threadUsage.input_tokens,
+          output_tokens: threadUsage.output_tokens,
+          cache_read_input_tokens: threadUsage.cache_read_input_tokens,
+          // AMA spec exposes cache_creation as a sub-shape with per-lifetime
+          // breakdown — we only have a single bucket so far, so emit it as
+          // the unbucketed total under `cache_creation_input_tokens` for
+          // back-compat with simpler readers; the AMA SDK accepts the extra
+          // field. (Add the nested cache_creation shape when we get TTL data
+          // from the provider.)
+          cache_creation_input_tokens: threadUsage.cache_creation_input_tokens,
+        }
+      : null;
     return {
       id,
       type: "session_thread",
@@ -4133,7 +4259,7 @@ export class SessionDO extends DurableObject<Env> {
         active_seconds: null,
         time_to_first_run_seconds: timeToFirstRunSeconds,
       },
-      usage: null,
+      usage,
     };
   }
 
