@@ -15,6 +15,7 @@ import {
 } from "@open-managed-agents/memory-store";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 import { buildCfTenantDbProvider } from "@open-managed-agents/services";
+import { createCfMemoryStoreTenantIndexService } from "@open-managed-agents/tenant-dbs-store";
 
 /**
  * Cloudflare Queue consumer for R2 Event Notifications on MEMORY_BUCKET.
@@ -62,9 +63,14 @@ export async function handleMemoryEvents(
     return;
   }
 
+  // Composition root for the CF queue handler. Build the runtime-agnostic
+  // services this handler needs from CF env bindings here; pass services
+  // (ports) into the per-message processing path.
   const blobs = new CfR2BlobStore(env.MEMORY_BUCKET);
   const provider = buildCfTenantDbProvider(env);
-  const controlPlaneDb = env.ROUTER_DB ?? env.AUTH_DB;
+  const tenantIndex = createCfMemoryStoreTenantIndexService({
+    controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+  });
   // Per-batch cache of store_id → SqlMemoryRepo. The repo wraps the
   // resolved per-tenant shard's SqlClient. Avoids one ROUTER_DB lookup
   // per message when a batch has many events for the same store
@@ -73,11 +79,22 @@ export async function handleMemoryEvents(
   const resolveRepo = async (storeId: string): Promise<SqlMemoryRepo> => {
     const cached = repoCache.get(storeId);
     if (cached) return cached;
-    const tenantId = await lookupTenantForStore(controlPlaneDb, storeId);
+    let tenantId: string | null = null;
+    try {
+      tenantId = await tenantIndex.lookup(storeId);
+    } catch (err) {
+      // Index lookup itself failed (control-plane DB down). Don't crash
+      // the batch — fall back to AUTH_DB. Worst case: a few writes land
+      // on the wrong shard until the control-plane recovers.
+      logWarn(
+        { op: "queue.memory_events.lookup_failed", store_id: storeId, err },
+        "memory_store_tenant lookup failed; falling back to AUTH_DB",
+      );
+    }
     if (!tenantId) {
-      // Legacy / pre-shard fallback: store_id has no entry in
-      // memory_store_tenant. All such stores live on AUTH_DB_00 (= AUTH_DB)
-      // since they were created before this index existed. Wrap and cache.
+      // Legacy / pre-shard fallback: store_id has no entry in the index.
+      // All such stores live on AUTH_DB_00 (= AUTH_DB) since they were
+      // created before this index existed. Wrap and cache.
       const fallback = new SqlMemoryRepo(new CfD1SqlClient(env.AUTH_DB));
       repoCache.set(storeId, fallback);
       return fallback;
@@ -105,34 +122,6 @@ export async function handleMemoryEvents(
       );
       message.retry();
     }
-  }
-}
-
-/**
- * Look up which tenant owns a memory store. Reads from ROUTER_DB.memory_store_tenant
- * (populated synchronously at memory store creation in routes/memory.ts).
- * Returns null for stores that pre-date the index — caller falls back
- * to AUTH_DB.
- */
-async function lookupTenantForStore(
-  controlPlaneDb: D1Database,
-  storeId: string,
-): Promise<string | null> {
-  try {
-    const row = await controlPlaneDb
-      .prepare("SELECT tenant_id FROM memory_store_tenant WHERE store_id = ?")
-      .bind(storeId)
-      .first<{ tenant_id: string }>();
-    return row?.tenant_id ?? null;
-  } catch (err) {
-    // ROUTER_DB unreachable or table missing (legacy deploy). Fall back —
-    // the caller treats null as "use AUTH_DB". Don't throw, that would
-    // retry the whole batch indefinitely.
-    logWarn(
-      { op: "queue.memory_events.lookup_failed", store_id: storeId, err },
-      "memory_store_tenant lookup failed; falling back to AUTH_DB",
-    );
-    return null;
   }
 }
 
