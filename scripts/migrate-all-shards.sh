@@ -10,18 +10,23 @@
 # d1_migrations and skips anything already done.
 #
 # Usage:
-#   scripts/migrate-all-shards.sh            # remote (prod)
-#   scripts/migrate-all-shards.sh --local    # local dev
+#   scripts/migrate-all-shards.sh                # remote prod
+#   scripts/migrate-all-shards.sh --staging      # remote staging (env.staging block)
+#   scripts/migrate-all-shards.sh --local        # local dev
 #
 # Pre-req: cwd = repo root, apps/main installed (wrangler available).
 set -euo pipefail
 
 LOCAL_FLAG=""
 REMOTE_FLAG="--remote"
-if [ "${1:-}" = "--local" ]; then
-  REMOTE_FLAG=""
-  LOCAL_FLAG="--local"
-fi
+ENV_FLAG=""
+for arg in "$@"; do
+  case "$arg" in
+    --local) REMOTE_FLAG=""; LOCAL_FLAG="--local" ;;
+    --staging) ENV_FLAG="--env staging" ;;
+    --env=*) ENV_FLAG="--env ${arg#--env=}" ;;
+  esac
+done
 
 cd "$(dirname "$0")/.."
 cd apps/main
@@ -29,12 +34,12 @@ cd apps/main
 run_apply() {
   local binding="$1"
   echo ""
-  echo "─── $binding ────────────────────────────────"
+  echo "─── $binding ${ENV_FLAG:+($ENV_FLAG)} ────────────────────────"
   if [ -n "$LOCAL_FLAG" ]; then
-    npx wrangler d1 migrations apply "$binding" --local --persist-to ../../.wrangler/state \
+    npx wrangler d1 migrations apply "$binding" --local --persist-to ../../.wrangler/state $ENV_FLAG \
       || echo "  (continuing — check error above)"
   else
-    npx wrangler d1 migrations apply "$binding" --remote \
+    npx wrangler d1 migrations apply "$binding" --remote $ENV_FLAG \
       || echo "  (continuing — check error above)"
   fi
 }
