@@ -6,30 +6,57 @@
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type { EventLogRepo, StreamRepo, StreamRow } from "../ports";
 
+interface MemRow {
+  seq: number;
+  type: string;
+  data: string;
+  processed_at: number | null;
+  cancelled_at: number | null;
+  session_thread_id: string;
+}
+
 export class InMemoryEventLog implements EventLogRepo {
-  private events: Array<{ seq: number; type: string; data: string }> = [];
+  // Exposed as readonly to tests + the in-memory thread storage path; do
+  // not mutate from outside the repo.
+  readonly _rows: MemRow[] = [];
   private nextSeq = 1;
 
   constructor(private stamp: (e: SessionEvent) => void) {}
 
   append(event: SessionEvent): void {
     this.stamp(event);
-    this.events.push({
+    const isPending =
+      event.type === "user.message" ||
+      event.type === "user.tool_confirmation" ||
+      event.type === "user.custom_tool_result";
+    const threadId =
+      (event as unknown as { session_thread_id?: string }).session_thread_id ??
+      "sthr_primary";
+    this._rows.push({
       seq: this.nextSeq++,
       type: event.type,
       data: JSON.stringify(event),
+      processed_at: isPending ? null : Date.now(),
+      cancelled_at: null,
+      session_thread_id: threadId,
     });
   }
 
   getEvents(afterSeq?: number): SessionEvent[] {
     const filtered =
-      afterSeq !== undefined ? this.events.filter((e) => e.seq > afterSeq) : this.events;
-    return filtered.map((e) => JSON.parse(e.data) as SessionEvent);
+      afterSeq !== undefined ? this._rows.filter((e) => e.seq > afterSeq) : this._rows;
+    return filtered.map((r) => {
+      const ev = JSON.parse(r.data) as SessionEvent & Record<string, unknown>;
+      if (r.processed_at !== null) ev.processed_at_ms = r.processed_at;
+      if (r.cancelled_at !== null) ev.cancelled_at_ms = r.cancelled_at;
+      ev.session_thread_id = r.session_thread_id;
+      return ev as SessionEvent;
+    });
   }
 
   getLastEventSeq(type: string): number {
-    for (let i = this.events.length - 1; i >= 0; i--) {
-      if (this.events[i].type === type) return this.events[i].seq;
+    for (let i = this._rows.length - 1; i >= 0; i--) {
+      if (this._rows[i].type === type) return this._rows[i].seq;
     }
     return -1;
   }
@@ -39,7 +66,7 @@ export class InMemoryEventLog implements EventLogRepo {
     types: string[],
   ): { seq: number; data: string } | null {
     const set = new Set(types);
-    for (const e of this.events) {
+    for (const e of this._rows) {
       if (e.seq > afterSeq && set.has(e.type)) {
         return { seq: e.seq, data: e.data };
       }

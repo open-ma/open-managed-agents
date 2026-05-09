@@ -38,10 +38,37 @@ export class CfDoEventLog implements EventLogRepo {
   append(event: SessionEvent): void {
     this.stamp(event);
     const fullData = JSON.stringify(event);
+    // Pending bookkeeping for AMA-shaped event lifecycle.
+    //   user.* : drainEventQueue picks these up and stamps processed_at
+    //            when the turn ingests them. Until then they stay pending
+    //            (NULL processed_at). user.interrupt itself is processed
+    //            inline by the POST handler — no drain step — so we stamp
+    //            it immediately too, otherwise the partial index would
+    //            see "pending interrupt" forever.
+    //   else   : agent.* / session.* / span.* are written-then-done; no
+    //            "process" step, stamp processed_at = ts at write time so
+    //            the partial pending-index doesn't see them.
+    const isPending =
+      event.type === "user.message" ||
+      event.type === "user.tool_confirmation" ||
+      event.type === "user.custom_tool_result";
+    const processedAt = isPending ? null : Date.now();
+    // session_thread_id lives on the wire (per AMA spec, EventBase optionally
+    // carries it). Default to primary so legacy emitters that don't set it
+    // still land in the primary thread's queue.
+    const threadId =
+      (event as unknown as { session_thread_id?: string }).session_thread_id ??
+      "sthr_primary";
 
     if (fullData.length <= SPILL_THRESHOLD_BYTES || !this.r2) {
       // Small enough OR no R2 binding (in-memory tests, non-CF deploys).
-      this.sql.exec("INSERT INTO events (type, data) VALUES (?, ?)", event.type, fullData);
+      this.sql.exec(
+        "INSERT INTO events (type, data, processed_at, session_thread_id) VALUES (?, ?, ?, ?)",
+        event.type,
+        fullData,
+        processedAt,
+        threadId,
+      );
       return;
     }
 
@@ -54,12 +81,14 @@ export class CfDoEventLog implements EventLogRepo {
     // intact (no silent corruption).
     const r2Key = `${this.r2KeyPrefix}/events/${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
     this.sql.exec(
-      "INSERT INTO events (type, data) VALUES (?, ?)",
+      "INSERT INTO events (type, data, processed_at, session_thread_id) VALUES (?, ?, ?, ?)",
       event.type,
       JSON.stringify({
         type: event.type,
         _spilled: { r2_key: r2Key, original_bytes: fullData.length },
       }),
+      processedAt,
+      threadId,
     );
     void this.r2.put(r2Key, fullData).catch((err) => {
       const msg = err instanceof Error ? err.message : String(err);
@@ -106,13 +135,32 @@ export class CfDoEventLog implements EventLogRepo {
     const cursor =
       afterSeq !== undefined
         ? this.sql.exec(
-            "SELECT seq, type, data, ts FROM events WHERE seq > ? ORDER BY seq",
+            "SELECT seq, type, data, ts, processed_at, cancelled_at, session_thread_id FROM events WHERE seq > ? ORDER BY seq",
             afterSeq,
           )
-        : this.sql.exec("SELECT seq, type, data, ts FROM events ORDER BY seq");
+        : this.sql.exec(
+            "SELECT seq, type, data, ts, processed_at, cancelled_at, session_thread_id FROM events ORDER BY seq",
+          );
     const out: SessionEvent[] = [];
     for (const row of cursor) {
-      out.push(JSON.parse(row.data as string) as SessionEvent);
+      const ev = JSON.parse(row.data as string) as SessionEvent &
+        Record<string, unknown>;
+      // Stash row-level pending bookkeeping back onto the parsed event so
+      // the projection layer (eventsToMessages) can skip cancelled events
+      // and the SDK/UI can surface pending state. JSON inside `data` is
+      // the wire payload from the original `append()`; these three fields
+      // are the row's authoritative state, which the wire payload may not
+      // reflect (cancelled_at is set post-write by user.interrupt).
+      if (row.processed_at !== null && row.processed_at !== undefined) {
+        ev.processed_at_ms = row.processed_at as number;
+      }
+      if (row.cancelled_at !== null && row.cancelled_at !== undefined) {
+        ev.cancelled_at_ms = row.cancelled_at as number;
+      }
+      if (row.session_thread_id != null) {
+        ev.session_thread_id = row.session_thread_id as string;
+      }
+      out.push(ev as SessionEvent);
     }
     return out;
   }
@@ -243,11 +291,53 @@ export function ensureSchema(sql: SqlStorage): void {
       seq INTEGER PRIMARY KEY AUTOINCREMENT,
       type TEXT NOT NULL,
       data TEXT NOT NULL,
-      ts INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER))
+      ts INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
+      -- Per-event pending bookkeeping. Added 2026-05.
+      -- processed_at:      NULL = pending (drainEventQueue picks up)
+      --                    integer ms = ingested by a turn (or auto-stamped
+      --                    for non-user events that have no "process" step)
+      -- cancelled_at:      NULL or integer ms = flushed by user.interrupt
+      -- session_thread_id: 'sthr_primary' for the main thread; 'sthr_*'
+      --                    for sub-agent threads spawned via runSubAgent
+      processed_at INTEGER,
+      cancelled_at INTEGER,
+      session_thread_id TEXT
     )
   `);
+  // Idempotent ALTER for DOs that have the v1 schema (no new columns).
+  // PRAGMA table_info returns one row per column; we add what's missing.
+  // SQLite's ALTER TABLE ADD COLUMN is O(1) — just metadata, no rewrite.
+  const cols = new Set<string>();
+  for (const row of sql.exec(`PRAGMA table_info(events)`)) {
+    cols.add(row.name as string);
+  }
+  if (!cols.has("processed_at")) {
+    sql.exec(`ALTER TABLE events ADD COLUMN processed_at INTEGER`);
+    // Pre-existing rows: treat as "already processed" so the new
+    // drainEventQueue partial-index query doesn't pick them up and
+    // re-run the LLM on every legacy user.message in the log.
+    sql.exec(`UPDATE events SET processed_at = ts WHERE processed_at IS NULL`);
+  }
+  if (!cols.has("cancelled_at")) {
+    sql.exec(`ALTER TABLE events ADD COLUMN cancelled_at INTEGER`);
+  }
+  if (!cols.has("session_thread_id")) {
+    sql.exec(`ALTER TABLE events ADD COLUMN session_thread_id TEXT`);
+    // Backfill: legacy events all belong to the primary thread.
+    sql.exec(`UPDATE events SET session_thread_id = 'sthr_primary' WHERE session_thread_id IS NULL`);
+  }
   sql.exec(`
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, seq)
+  `);
+  // Hot path: drainEventQueue's "next pending user.* event for this thread".
+  // Partial index — only user.* rows where processed_at IS NULL — keeps
+  // the index tiny (typically 0-5 rows) and lets the lookup hit O(log n)
+  // even on sessions with thousands of historical events.
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS idx_events_pending
+      ON events(session_thread_id, seq)
+      WHERE processed_at IS NULL AND cancelled_at IS NULL
+        AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')
   `);
   sql.exec(`
     CREATE TABLE IF NOT EXISTS streams (
