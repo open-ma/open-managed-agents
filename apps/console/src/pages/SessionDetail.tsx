@@ -71,8 +71,12 @@ export function SessionDetail() {
   /** Sub-agent threads in this session. Primary is implicit at index 0
    *  (label "Main"). Empty when the session has only the primary thread,
    *  in which case the selector UI is hidden entirely. Refreshed on
-   *  `session.thread_created` events arriving over SSE. */
-  const [threads, setThreads] = useState<Array<{ id: string; agent_name?: string }>>([]);
+   *  `session.thread_created` events arriving over SSE.
+   *  parent_thread_id powers the tree view (coordinator → worker → sub-
+   *  worker); missing parents fall back to the primary root. */
+  const [threads, setThreads] = useState<
+    Array<{ id: string; agent_name?: string; parent_thread_id?: string | null }>
+  >([]);
   /** Currently-active thread id. Defaults to 'sthr_primary'. Filters
    *  the events array at render time. SSE-driven new threads don't
    *  auto-switch — the operator stays on whatever they're watching. */
@@ -227,12 +231,26 @@ export function SessionDetail() {
     // auto-switch the operator's view — they stay on whatever they're
     // watching; the new tab just appears alongside.
     if (ev.type === "session.thread_created") {
-      const tc = ev as { session_thread_id?: string; agent_name?: string };
+      const tc = ev as {
+        session_thread_id?: string;
+        agent_name?: string;
+        parent_thread_id?: string | null;
+      };
       if (tc.session_thread_id && tc.session_thread_id !== "sthr_primary") {
         setThreads((prev) =>
           prev.some((t) => t.id === tc.session_thread_id)
             ? prev
-            : [...prev, { id: tc.session_thread_id!, agent_name: tc.agent_name }],
+            : [
+                ...prev,
+                {
+                  id: tc.session_thread_id!,
+                  agent_name: tc.agent_name,
+                  // SessionDO emits thread_created with parent_thread_id;
+                  // older sessions (pre-Phase 1) may not — fall back to
+                  // primary so the tree stays well-formed.
+                  parent_thread_id: tc.parent_thread_id ?? "sthr_primary",
+                },
+              ],
         );
       }
     }
@@ -373,7 +391,9 @@ export function SessionDetail() {
     // (seeded by SessionDO on /init). Filter to non-primary so the
     // selector only renders when there's something to switch between
     // — single-thread sessions get zero UI clutter.
-    api<{ data: Array<{ id: string; agent_name?: string }> }>(`/v1/sessions/${id}/threads`)
+    api<{
+      data: Array<{ id: string; agent_name?: string; parent_thread_id?: string | null }>;
+    }>(`/v1/sessions/${id}/threads`)
       .then((res) => {
         const subThreads = (res.data ?? []).filter((t) => t.id !== "sthr_primary");
         setThreads(subThreads);
@@ -462,23 +482,16 @@ export function SessionDetail() {
       {/* Thread selector — only when sub-agent threads exist. Primary
           is implicit at index 0 ("Main"); sub-agent tabs appear as new
           threads spawn (live-updated by session.thread_created handler).
-          Selecting a thread filters both Conversation and Timeline views. */}
+          Selecting a thread filters both Conversation and Timeline views.
+          Renders as a depth-indented tree when sub-agents themselves
+          spawn sub-workers — flat horizontal row for the common case
+          (single layer of workers under primary). */}
       {threads.length > 0 && (
-        <div className="px-8 border-b border-border flex items-center gap-1 shrink-0 overflow-x-auto">
-          <ThreadTab
-            label="Main"
-            active={activeThreadId === "sthr_primary"}
-            onClick={() => setActiveThreadId("sthr_primary")}
-          />
-          {threads.map((t) => (
-            <ThreadTab
-              key={t.id}
-              label={t.agent_name ?? t.id.slice(0, 12)}
-              active={activeThreadId === t.id}
-              onClick={() => setActiveThreadId(t.id)}
-            />
-          ))}
-        </div>
+        <ThreadTree
+          threads={threads}
+          activeThreadId={activeThreadId}
+          onSelect={setActiveThreadId}
+        />
       )}
 
       {/* View tabs */}
@@ -783,18 +796,99 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
 /** Tighter visual than ViewTab — sub-agent tabs typically need to fit
  *  more than the 2-3 view options. Smaller padding + horizontal scroll
  *  in the parent keeps long sub-agent rosters readable. */
-function ThreadTab({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+function ThreadTab({
+  label,
+  active,
+  onClick,
+  depth = 0,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  depth?: number;
+}) {
   return (
     <button
       onClick={onClick}
-      className={`px-3 py-1.5 text-xs whitespace-nowrap border-b-2 transition-colors ${
+      className={`py-1.5 text-xs whitespace-nowrap border-b-2 transition-colors flex items-center gap-1 ${
         active
           ? "border-info text-fg font-medium"
           : "border-transparent text-fg-subtle hover:text-fg-muted"
       }`}
+      style={{ paddingLeft: `${0.75 + depth * 0.75}rem`, paddingRight: "0.75rem" }}
     >
-      {label}
+      {/* Tree branch glyph for depth>0 — visual cue that this thread
+          was spawned by another (rather than being a sibling of Main).
+          Plain text (not a unicode-only flair) so it survives in both
+          dark and light themes without needing a separate icon. */}
+      {depth > 0 && <span className="text-fg-subtle">└</span>}
+      <span>{label}</span>
     </button>
+  );
+}
+
+/**
+ * Depth-indented thread tree. Root = sthr_primary (rendered as "Main");
+ * children indented by parent_thread_id. DFS pre-order so the tree
+ * reads top-to-bottom like a stack trace: parents above their children.
+ *
+ * Orphans (parent_thread_id pointing at a thread we don't know about
+ * — possible mid-spawn race or stale snapshot) get re-parented to
+ * sthr_primary so they stay visible instead of being hidden in a
+ * dangling subtree.
+ */
+function ThreadTree({
+  threads,
+  activeThreadId,
+  onSelect,
+}: {
+  threads: Array<{ id: string; agent_name?: string; parent_thread_id?: string | null }>;
+  activeThreadId: string;
+  onSelect: (id: string) => void;
+}) {
+  const knownIds = new Set<string>(["sthr_primary", ...threads.map((t) => t.id)]);
+  const childrenOf = new Map<string, typeof threads>();
+  for (const t of threads) {
+    const parent =
+      t.parent_thread_id && knownIds.has(t.parent_thread_id)
+        ? t.parent_thread_id
+        : "sthr_primary";
+    const arr = childrenOf.get(parent) ?? [];
+    arr.push(t);
+    childrenOf.set(parent, arr);
+  }
+  const flat: Array<{ id: string; label: string; depth: number }> = [
+    { id: "sthr_primary", label: "Main", depth: 0 },
+  ];
+  const walk = (parentId: string, depth: number) => {
+    const kids = childrenOf.get(parentId) ?? [];
+    for (const k of kids) {
+      flat.push({ id: k.id, label: k.agent_name ?? k.id.slice(0, 12), depth });
+      walk(k.id, depth + 1);
+    }
+  };
+  walk("sthr_primary", 1);
+  const maxDepth = flat.reduce((m, n) => Math.max(m, n.depth), 0);
+  // When the tree is shallow (one layer of workers under Main), keep
+  // the original horizontal row for zero visual change vs Phase 3.
+  // Deeper trees switch to a vertical stacked layout so the indentation
+  // is actually readable.
+  const isFlat = maxDepth <= 1;
+  const containerClass = isFlat
+    ? "px-8 border-b border-border flex items-center gap-1 shrink-0 overflow-x-auto"
+    : "px-8 py-1 border-b border-border flex flex-col items-stretch gap-0 shrink-0 overflow-y-auto max-h-40";
+  return (
+    <div className={containerClass}>
+      {flat.map((n) => (
+        <ThreadTab
+          key={n.id}
+          label={n.label}
+          depth={isFlat ? 0 : n.depth}
+          active={activeThreadId === n.id}
+          onClick={() => onSelect(n.id)}
+        />
+      ))}
+    </div>
   );
 }
 
