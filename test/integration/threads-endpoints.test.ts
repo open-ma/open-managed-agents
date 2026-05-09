@@ -192,6 +192,57 @@ describe("threads HTTP endpoints", () => {
     expect([200, 202]).toContain(res.status);
   });
 
+  it("stats.active_seconds sums paired span.model_request_start/end durations per thread", async () => {
+    // Seed a handful of model-request span pairs across two threads with
+    // known durations and assert _serializeThreadRow returns the expected
+    // active_seconds. Pairs join via start_id ↔ model_request_start_id;
+    // ts is the SQL `ts` column (seconds). One unpaired start (still
+    // in-flight) verifies it doesn't break the sum.
+    const stub = freshDoStub("threads_active_seconds");
+    await seedSchemaAndState(stub);
+
+    await runInDurableObject(stub, (_inst, state) => {
+      // Helper: insert with explicit ts so durations are deterministic.
+      const ins = (
+        threadId: string,
+        type: "span.model_request_start" | "span.model_request_end",
+        ts: number,
+        payload: Record<string, unknown>,
+      ) => {
+        state.storage.sql.exec(
+          `INSERT INTO events (type, data, ts, processed_at, session_thread_id)
+           VALUES (?, ?, ?, ?, ?)`,
+          type,
+          JSON.stringify({ type, ...payload }),
+          ts,
+          ts,
+          threadId,
+        );
+      };
+      // Primary: two paired calls (3s + 5s = 8s) plus one in-flight start.
+      ins("sthr_primary", "span.model_request_start", 1000, { id: "p1", model: "m" });
+      ins("sthr_primary", "span.model_request_end", 1003, { model_request_start_id: "p1", model: "m" });
+      ins("sthr_primary", "span.model_request_start", 1010, { id: "p2", model: "m" });
+      ins("sthr_primary", "span.model_request_end", 1015, { model_request_start_id: "p2", model: "m" });
+      ins("sthr_primary", "span.model_request_start", 1020, { id: "p3-inflight", model: "m" });
+      // Sub-agent A: one paired call (2s).
+      ins("sthr_subA", "span.model_request_start", 2000, { id: "a1", model: "m" });
+      ins("sthr_subA", "span.model_request_end", 2002, { model_request_start_id: "a1", model: "m" });
+    });
+
+    const list = await stub.fetch(new Request("http://internal/threads"));
+    const body = (await list.json()) as {
+      data: Array<{ id: string; stats: { active_seconds: number | null } }>;
+    };
+    const primary = body.data.find((t) => t.id === "sthr_primary")!;
+    const subA = body.data.find((t) => t.id === "sthr_subA")!;
+    const subB = body.data.find((t) => t.id === "sthr_subB")!;
+    expect(primary.stats.active_seconds).toBe(8);
+    expect(subA.stats.active_seconds).toBe(2);
+    // No spans seeded for subB → 0, not null.
+    expect(subB.stats.active_seconds).toBe(0);
+  });
+
   it("POST /usage credits per-thread; GET /threads surfaces separate usage rows", async () => {
     // Two ingest hits to /usage with different session_thread_id values
     // should land in separate buckets on state.thread_usage and surface

@@ -4190,8 +4190,10 @@ export class SessionDO extends DurableObject<Env> {
    * stats.elapsed_seconds: now - created_at, frozen at archived_at.
    * stats.time_to_first_run_seconds: per AMA spec, 0 for child
    *   threads (which spawn already running) and computed for primary.
-   * stats.active_seconds: not yet computed — would need
-   *   per-thread span.model_call_start/end accounting.
+   * stats.active_seconds: SUM(end_ts - start_ts) over paired
+   *   span.model_request_start / span.model_request_end events scoped
+   *   to this thread. Whole-second resolution (events.ts is in
+   *   seconds). In-flight pairs are skipped.
    * usage: read from state.thread_usage[id] (per-thread token counters,
    *   credited from reportUsage + span.model_request_end cache fields).
    *   Returns null for legacy sessions that pre-date the per-thread
@@ -4227,6 +4229,50 @@ export class SessionDO extends DurableObject<Env> {
         : null;
     }
 
+    // active_seconds: SUM(end_ts - start_ts) over paired
+    // span.model_request_start / span.model_request_end events for this
+    // thread. Pairs join on the start event's `id` ↔ end event's
+    // `model_request_start_id` (set by default-loop's onStepFinish/onError/
+    // onAbort). The SQL `ts` column is in seconds, so we get whole-second
+    // resolution which is fine for a "time spent in the model" stat.
+    //
+    // Sub-agent spans get session_thread_id stamped at write time by the
+    // tagged runtime.broadcast closure in runSubAgent; primary spans
+    // default to 'sthr_primary' via the cf-do INSERT default. Unpaired
+    // starts (turn still in flight) and unpaired ends (recovery edge
+    // cases) are skipped.
+    let activeSeconds = 0;
+    {
+      const starts = new Map<string, number>();
+      // One pass: bucket starts by id, on end events accumulate the diff.
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT type, data, ts FROM events
+           WHERE session_thread_id = ?
+             AND (type = 'span.model_request_start' OR type = 'span.model_request_end')
+           ORDER BY seq ASC`,
+        id,
+      )) {
+        const ts = r.ts as number;
+        let payload: Record<string, unknown> | null = null;
+        try {
+          payload = JSON.parse(r.data as string) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (r.type === "span.model_request_start") {
+          const sid = payload?.id as string | undefined;
+          if (sid) starts.set(sid, ts);
+        } else {
+          const sid = payload?.model_request_start_id as string | undefined;
+          if (!sid) continue;
+          const startTs = starts.get(sid);
+          if (startTs == null) continue;
+          starts.delete(sid);
+          activeSeconds += Math.max(0, ts - startTs);
+        }
+      }
+    }
+
     const updatedTs = archivedAt ?? createdAt;
     const threadUsage = this.state.thread_usage?.[id];
     const usage = threadUsage
@@ -4256,7 +4302,7 @@ export class SessionDO extends DurableObject<Env> {
       updated_at: new Date(updatedTs).toISOString(),
       stats: {
         elapsed_seconds: elapsedSeconds,
-        active_seconds: null,
+        active_seconds: activeSeconds,
         time_to_first_run_seconds: timeToFirstRunSeconds,
       },
       usage,
