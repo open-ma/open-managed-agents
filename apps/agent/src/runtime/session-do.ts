@@ -1814,7 +1814,9 @@ export class SessionDO extends DurableObject<Env> {
     //
     // Response shape mirrors BetaManagedAgentsSessionThread minimally:
     // id / agent_id / agent_name / parent_thread_id / created_at /
-    // archived_at / status. stats + usage land in Phase 3.
+    // archived_at / status / stats. usage stays null until per-thread
+    // token accounting lands (today tokens are session-wide on
+    // state.input_tokens / state.output_tokens — no thread breakdown).
     if (request.method === "GET" && url.pathname === "/threads") {
       const includeArchived = url.searchParams.get("include_archived") === "true";
       const cursor = includeArchived
@@ -1828,22 +1830,7 @@ export class SessionDO extends DurableObject<Env> {
           );
       const data = [] as Array<Record<string, unknown>>;
       for (const row of cursor) {
-        data.push({
-          id: row.id,
-          type: "session_thread",
-          session_id: this.state.session_id,
-          agent_id: row.agent_id,
-          agent_name: row.agent_name,
-          parent_thread_id: row.parent_thread_id,
-          status: row.archived_at != null ? "archived" : "active",
-          created_at: new Date(row.created_at as number).toISOString(),
-          archived_at: row.archived_at != null
-            ? new Date(row.archived_at as number).toISOString()
-            : null,
-          updated_at: new Date(row.created_at as number).toISOString(),
-          stats: null,
-          usage: null,
-        });
+        data.push(this._serializeThreadRow(row));
       }
       return Response.json({ data });
     }
@@ -1866,22 +1853,7 @@ export class SessionDO extends DurableObject<Env> {
           { status: 404 },
         );
       }
-      return Response.json({
-        id: row.id,
-        type: "session_thread",
-        session_id: this.state.session_id,
-        agent_id: row.agent_id,
-        agent_name: row.agent_name,
-        parent_thread_id: row.parent_thread_id,
-        status: row.archived_at != null ? "archived" : "active",
-        created_at: new Date(row.created_at as number).toISOString(),
-        archived_at: row.archived_at != null
-          ? new Date(row.archived_at as number).toISOString()
-          : null,
-        updated_at: new Date(row.created_at as number).toISOString(),
-        stats: null,
-        usage: null,
-      });
+      return Response.json(this._serializeThreadRow(row));
     }
 
     // POST /threads/:thread_id/archive — soft-delete (status flips to
@@ -1931,20 +1903,7 @@ export class SessionDO extends DurableObject<Env> {
       )) {
         row = r;
       }
-      return Response.json({
-        id: row!.id,
-        type: "session_thread",
-        session_id: this.state.session_id,
-        agent_id: row!.agent_id,
-        agent_name: row!.agent_name,
-        parent_thread_id: row!.parent_thread_id,
-        status: "archived",
-        created_at: new Date(row!.created_at as number).toISOString(),
-        archived_at: new Date(row!.archived_at as number).toISOString(),
-        updated_at: new Date(row!.archived_at as number).toISOString(),
-        stats: null,
-        usage: null,
-      });
+      return Response.json(this._serializeThreadRow(row!));
     }
 
     // GET /threads/:thread_id/events — paginated event list scoped to
@@ -4092,6 +4051,70 @@ export class SessionDO extends DurableObject<Env> {
       )
     `);
     sql.exec(`CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id, created_at)`);
+  }
+
+  /**
+   * Serialize a `threads` row into the AMA wire shape, including
+   * stats computed at read-time from the events table. Single source
+   * of truth for the /threads list, /threads/:tid get, and the
+   * archive echo response — keeps shape drift impossible.
+   *
+   * stats.elapsed_seconds: now - created_at, frozen at archived_at.
+   * stats.time_to_first_run_seconds: per AMA spec, 0 for child
+   *   threads (which spawn already running) and computed for primary.
+   * stats.active_seconds: not yet computed — would need
+   *   per-thread span.model_call_start/end accounting.
+   * usage: null today; tokens are session-wide on `state.input_tokens
+   *   / output_tokens`, not per-thread.
+   */
+  private _serializeThreadRow(row: Record<string, unknown>): Record<string, unknown> {
+    const id = row.id as string;
+    const createdAt = row.created_at as number;
+    const archivedAt = row.archived_at as number | null | undefined;
+    const isPrimary = id === "sthr_primary";
+
+    const endTs = archivedAt ?? Date.now();
+    const elapsedSeconds = Math.max(0, Math.round((endTs - createdAt) / 1000));
+
+    let timeToFirstRunSeconds: number | null = 0;
+    if (isPrimary) {
+      // First user.message in the primary thread — processed_at is the
+      // ingestion time. Falls back to ts when processed_at is null
+      // (e.g. queued but never drained — rare but possible if the user
+      // archives before any turn runs).
+      let firstAt: number | null = null;
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT processed_at, ts FROM events
+           WHERE session_thread_id = ? AND type = 'user.message'
+           ORDER BY seq ASC LIMIT 1`,
+        id,
+      )) {
+        firstAt = (r.processed_at as number | null) ?? (r.ts as number);
+      }
+      timeToFirstRunSeconds = firstAt != null
+        ? Math.max(0, Math.round((firstAt - createdAt) / 1000))
+        : null;
+    }
+
+    const updatedTs = archivedAt ?? createdAt;
+    return {
+      id,
+      type: "session_thread",
+      session_id: this.state.session_id,
+      agent_id: row.agent_id,
+      agent_name: row.agent_name,
+      parent_thread_id: row.parent_thread_id,
+      status: archivedAt != null ? "archived" : "active",
+      created_at: new Date(createdAt).toISOString(),
+      archived_at: archivedAt != null ? new Date(archivedAt).toISOString() : null,
+      updated_at: new Date(updatedTs).toISOString(),
+      stats: {
+        elapsed_seconds: elapsedSeconds,
+        active_seconds: null,
+        time_to_first_run_seconds: timeToFirstRunSeconds,
+      },
+      usage: null,
+    };
   }
 
   /**
