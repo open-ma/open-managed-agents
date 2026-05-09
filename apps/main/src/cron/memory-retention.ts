@@ -34,18 +34,37 @@ export async function memoryRetentionTick(env: Env, sweepHourUtc = 3): Promise<v
     return;
   }
 
-  const repo = new SqlMemoryVersionRepo(new CfD1SqlClient(env.AUTH_DB));
+  // Cross-shard fan-out: prune memory_versions on every shard, not just
+  // AUTH_DB_00. AUTH_DB binding stays in the iteration list as the
+  // legacy alias for shard 0 — same database_id, but listed explicitly
+  // so the loop is exhaustive even if older deploys don't have AUTH_DB_00.
+  const shards: Array<[string, D1Database | undefined]> = [
+    ["AUTH_DB_00", env.AUTH_DB_00 ?? env.AUTH_DB],
+    ["AUTH_DB_01", env.AUTH_DB_01],
+    ["AUTH_DB_02", env.AUTH_DB_02],
+    ["AUTH_DB_03", env.AUTH_DB_03],
+  ];
   const cutoffMs = Date.now() - RETENTION_MS;
-  try {
-    const removed = await repo.pruneOlderThan(cutoffMs);
-    log(
-      { op: "cron.memory_retention", removed, cutoff_ms: cutoffMs },
-      `pruned ${removed === -1 ? "(unknown count)" : removed} old memory versions`,
-    );
-  } catch (err) {
-    logError(
-      { op: "cron.memory_retention", err },
-      "memory retention sweep failed",
-    );
+  let totalRemoved = 0;
+  for (const [name, db] of shards) {
+    if (!db) continue;
+    const repo = new SqlMemoryVersionRepo(new CfD1SqlClient(db));
+    try {
+      const removed = await repo.pruneOlderThan(cutoffMs);
+      if (removed > 0) totalRemoved += removed;
+      log(
+        { op: "cron.memory_retention.shard", shard: name, removed, cutoff_ms: cutoffMs },
+        `pruned ${removed === -1 ? "(unknown count)" : removed} on ${name}`,
+      );
+    } catch (err) {
+      logError(
+        { op: "cron.memory_retention.shard", shard: name, err },
+        `memory retention sweep failed on ${name}`,
+      );
+    }
   }
+  log(
+    { op: "cron.memory_retention", total_removed: totalRemoved, cutoff_ms: cutoffMs },
+    `memory retention sweep complete: ${totalRemoved} rows pruned across all shards`,
+  );
 }
