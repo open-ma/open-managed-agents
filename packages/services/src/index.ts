@@ -247,9 +247,15 @@ export function buildServices(env: Env, db: D1Database): Services {
     }),
     outboundSnapshots: createCfOutboundSnapshotService(env),
     sessionSecrets: createCfSessionSecretService(env),
-    // Control-plane services: always query env.AUTH_DB, never the per-tenant db.
-    tenantShardDirectory: createCfTenantShardDirectoryService({ controlPlaneDb: env.AUTH_DB }),
-    shardPool: createCfShardPoolService({ controlPlaneDb: env.AUTH_DB }),
+    // Control-plane services: always query env.ROUTER_DB (not the per-tenant
+    // db). Falls back to env.AUTH_DB during the rollout grace period when
+    // ROUTER_DB binding may not yet be present in older deployments.
+    tenantShardDirectory: createCfTenantShardDirectoryService({
+      controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+    }),
+    shardPool: createCfShardPoolService({
+      controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+    }),
     // File blob storage. CF: R2 binding; self-host: S3 / local-FS adapter.
     filesBlob: blobStoreFromR2(env.FILES_BUCKET),
     // Generic KV. CF: CONFIG_KV binding; self-host: SQL-table-backed adapter.
@@ -287,9 +293,15 @@ export function buildCfTenantDbProvider(env: Env): TenantDbProvider {
   if (disabled) {
     return new CfSharedAuthDbProvider(env.AUTH_DB);
   }
+  // controlPlaneDb = env.ROUTER_DB → routing tables live on the dedicated
+  //                                    router DB (no SPOF on shard 0).
+  // defaultBinding = env.AUTH_DB    → unmapped tenants fall back to shard 0.
+  // ROUTER_DB binding is optional in older deployments — fall back to
+  // env.AUTH_DB for the routing reads too in that case (legacy 0003
+  // migration left the routing tables in AUTH_DB).
   return new MetaTableTenantDbProvider(
     env as unknown as Record<string, unknown>,
-    env.AUTH_DB,
+    env.ROUTER_DB ?? env.AUTH_DB,
     env.AUTH_DB,
   );
 }
