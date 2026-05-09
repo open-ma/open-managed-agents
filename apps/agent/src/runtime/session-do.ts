@@ -3198,13 +3198,19 @@ export class SessionDO extends DurableObject<Env> {
       Date.now(),
     );
 
-    // Emit thread_created
+    // Emit thread_created. Includes parent_thread_id so Console (and any
+    // other SSE consumers) can build a tree without a follow-up GET
+    // /threads round-trip. Mirrors the threads table column written
+    // above. Nested delegateToAgent calls still set parent=sthr_primary
+    // — proper lineage threading is a future change; the wire field is
+    // here now so the read path is forward-compatible.
     const threadCreatedEvent: SessionEvent = {
       type: "session.thread_created",
       session_thread_id: threadId,
       agent_id: agentId,
       agent_name: subAgent.name,
-    };
+      parent_thread_id: "sthr_primary",
+    } as SessionEvent;
     parentHistory.append(threadCreatedEvent);
     this.broadcastEvent(threadCreatedEvent);
 
