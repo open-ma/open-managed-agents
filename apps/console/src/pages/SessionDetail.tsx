@@ -227,6 +227,14 @@ export function SessionDetail() {
 
     if (ev.type === "session.status_running") setStatus("running");
     if (ev.type === "session.status_idle") setStatus("idle");
+    // Defense-in-depth: terminal events should also collapse the
+    // "Running" pill even if the server forgot to emit a paired
+    // status_idle (historical bug class — see processUserMessage's
+    // catch-all idle emit). Both are end-of-turn signals: error means
+    // the turn died non-recoverably, rescheduled means it gave up
+    // after retry exhaustion. Either way the user can re-send.
+    if (ev.type === "session.error") setStatus("idle");
+    if (ev.type === "session.status_rescheduled") setStatus("idle");
     // Live-update the thread selector when a sub-agent spawns. We don't
     // auto-switch the operator's view — they stay on whatever they're
     // watching; the new tab just appears alongside.
