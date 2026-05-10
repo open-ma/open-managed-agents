@@ -622,7 +622,27 @@ export class DefaultHarness implements HarnessInterface {
       // streamText returns a StreamTextResult; consumeStream forces the
       // pipeline to drain so onChunk + onStepFinish fully fire before
       // we read final fields.
-      await r.consumeStream();
+      try {
+        await r.consumeStream();
+      } catch (err) {
+        // Mid-stream abort (user.interrupt, abort signal trip). The
+        // streams table has chunks accumulated so far; if we don't
+        // finalize + persist as agent.message here, the partial text
+        // sits at status='streaming' until cold-start recovery picks
+        // it up. broadcastStreamEnd("aborted") does both: finalizes
+        // the row AND appends agent.message with the partial (see
+        // session-do.ts:broadcastStreamEnd) so the next turn's LLM
+        // context includes what the model said before the cut.
+        //
+        // Re-throw so drainEventQueue's TurnAborted handling still
+        // runs (status_idle, queue flush already happened in the
+        // POST /event handler).
+        if (currentMessageId) {
+          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
+          currentMessageId = null;
+        }
+        throw err;
+      }
       const finishReason = await r.finishReason;
       const finalText = await r.text;
       const toolCalls = await r.toolCalls;

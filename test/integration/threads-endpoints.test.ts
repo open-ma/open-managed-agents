@@ -365,4 +365,125 @@ describe("threads HTTP endpoints", () => {
     expect(result.primaryAborted).toBe(false);
   });
 
+  // ─── Stream end "aborted" persists partial agent.message ────────────
+  // Mid-stream interrupts (user.interrupt, abort signal trips, MCP
+  // timeouts) used to leave streams rows stuck at status='streaming'
+  // and never write the partial as agent.message. Next turn's LLM
+  // context was missing what the model had said before the cut.
+  // broadcastStreamEnd("aborted") now finalizes the row AND appends
+  // the partial as a canonical agent.message — same shape as cold-start
+  // recoverInterruptedState, just done eagerly.
+  it("broadcastStreamEnd('aborted') persists partial chunks as agent.message", async () => {
+    const stub = freshDoStub("stream_abort_persist");
+    await seedSchemaAndState(stub);
+
+    const partialMessageId = "msg_abort_test";
+    await runInDurableObject(stub, async (instance, state) => {
+      // Manually drive the stream lifecycle the way default-loop does:
+      // start → append chunks → end(aborted).
+      const helpers = (instance as {
+        buildStreamRuntimeMethods: (threadId?: string) => {
+          broadcastStreamStart: (id: string) => Promise<void>;
+          broadcastChunk: (id: string, delta: string) => Promise<void>;
+          broadcastStreamEnd: (
+            id: string,
+            status: "completed" | "aborted",
+            err?: string,
+          ) => Promise<void>;
+        };
+      }).buildStreamRuntimeMethods("sthr_primary");
+      await helpers.broadcastStreamStart(partialMessageId);
+      await helpers.broadcastChunk(partialMessageId, "Hello ");
+      await helpers.broadcastChunk(partialMessageId, "wor");
+      // The interrupt path — should now also persist agent.message.
+      await helpers.broadcastStreamEnd(partialMessageId, "aborted", "interrupted_mid_stream");
+
+      // Read back: events table should have the partial text as a
+      // canonical agent.message; streams row finalized as 'aborted'.
+      const events: Array<{ type: string; data: string }> = [];
+      for (const row of state.storage.sql.exec(
+        `SELECT type, data FROM events ORDER BY seq`,
+      )) {
+        events.push({ type: row.type as string, data: row.data as string });
+      }
+      const agentMsg = events.find(
+        (e) => e.type === "agent.message" && e.data.includes(partialMessageId),
+      );
+      expect(agentMsg, "agent.message with partial should land").toBeDefined();
+      const parsed = JSON.parse(agentMsg!.data) as {
+        content: Array<{ type: string; text: string }>;
+        session_thread_id?: string;
+      };
+      expect(parsed.content[0].text).toBe("Hello wor");
+      expect(parsed.session_thread_id).toBe("sthr_primary");
+    });
+  });
+
+  it("broadcastStreamEnd('aborted') with zero chunks emits placeholder", async () => {
+    const stub = freshDoStub("stream_abort_empty");
+    await seedSchemaAndState(stub);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      const helpers = (instance as {
+        buildStreamRuntimeMethods: (threadId?: string) => {
+          broadcastStreamStart: (id: string) => Promise<void>;
+          broadcastStreamEnd: (
+            id: string,
+            status: "completed" | "aborted",
+          ) => Promise<void>;
+        };
+      }).buildStreamRuntimeMethods();
+      const id = "msg_zero_chunks";
+      await helpers.broadcastStreamStart(id);
+      // No chunks accumulated — abort right away (model never streamed).
+      await helpers.broadcastStreamEnd(id, "aborted");
+
+      let agentMsgData: string | null = null;
+      for (const row of state.storage.sql.exec(
+        `SELECT data FROM events WHERE type = 'agent.message' ORDER BY seq DESC LIMIT 1`,
+      )) {
+        agentMsgData = row.data as string;
+      }
+      expect(agentMsgData).not.toBeNull();
+      const parsed = JSON.parse(agentMsgData!) as {
+        content: Array<{ type: string; text: string }>;
+      };
+      // Placeholder mirrors recovery.ts's "(interrupted by maintenance restart)".
+      expect(parsed.content[0].text).toContain("interrupted");
+    });
+  });
+
+  it("broadcastStreamEnd('completed') does NOT inject placeholder agent.message", async () => {
+    // Successful stream-end is the harness's job to follow up with
+    // the canonical agent.message via the normal step-finish path.
+    // Eager-injecting here would double-write.
+    const stub = freshDoStub("stream_complete_noinject");
+    await seedSchemaAndState(stub);
+
+    await runInDurableObject(stub, async (instance, state) => {
+      const helpers = (instance as {
+        buildStreamRuntimeMethods: (threadId?: string) => {
+          broadcastStreamStart: (id: string) => Promise<void>;
+          broadcastChunk: (id: string, delta: string) => Promise<void>;
+          broadcastStreamEnd: (
+            id: string,
+            status: "completed" | "aborted",
+          ) => Promise<void>;
+        };
+      }).buildStreamRuntimeMethods();
+      const id = "msg_complete";
+      await helpers.broadcastStreamStart(id);
+      await helpers.broadcastChunk(id, "complete text");
+      await helpers.broadcastStreamEnd(id, "completed");
+
+      let count = 0;
+      for (const _ of state.storage.sql.exec(
+        `SELECT 1 FROM events WHERE type = 'agent.message'`,
+      )) {
+        count += 1;
+      }
+      expect(count).toBe(0);
+    });
+  });
+
 });

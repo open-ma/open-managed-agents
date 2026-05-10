@@ -509,6 +509,37 @@ export class SessionDO extends DurableObject<Env> {
       },
       broadcastStreamEnd: async (messageId: string, status, errorText?: string) => {
         if (!this.streams) this.ensureSchema();
+        // Aborted streams need their partial text persisted as a
+        // canonical agent.message before we lose access to the
+        // streams row. Without this, mid-stream aborts (user.interrupt,
+        // model timeout, MCP cancel) leave the streams row stuck at
+        // status='streaming' until cold-start recovery — meanwhile
+        // eventsToMessages doesn't see the partial text and the next
+        // turn's LLM context is missing what the model just said.
+        //
+        // Mirrors recovery.ts:69-78. Same dedup + placeholder fallback.
+        // Done before finalize so a concurrent reader never observes
+        // a stream that's both finalized AND missing from history.
+        if (status === "aborted" && !this.broadcastedMessageIds.has(messageId)) {
+          const row = await this.streams!.get(messageId);
+          const partial = row?.chunks?.join("") ?? "";
+          const partialEvent = tag({
+            type: "agent.message",
+            id: messageId,
+            content: [{ type: "text", text: partial || "(interrupted before any tokens streamed)" }],
+          } as unknown as SessionEvent);
+          // Append directly to the events table — broadcastEvent's
+          // dedup hits the broadcastedMessageIds set, but the persist
+          // path is what matters most (Console replay, LLM context).
+          const history = new SqliteHistory(
+            this.ctx.storage.sql,
+            this.env.FILES_BUCKET ?? null,
+            `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+          );
+          history.append(partialEvent);
+          this.broadcastedMessageIds.add(messageId);
+          fire(partialEvent);
+        }
         await this.streams!.finalize(messageId, status, errorText);
         fire(tag({
           type: "agent.message_stream_end",
@@ -1025,10 +1056,23 @@ export class SessionDO extends DurableObject<Env> {
         if (err instanceof TurnAborted) {
           console.warn(`[drain] turn ${turnName} aborted: ${err.cause.kind}`);
         }
-        const errorMsg = this.describeError(err);
-        const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
-        history.append(errorEvent);
-        this.broadcastEvent(errorEvent);
+        // User-initiated interrupt is not a session.error — the
+        // POST /event handler for user.interrupt has already
+        // appended `user.interrupt` + `session.status_idle`, and
+        // the harness's stream-end fixup persisted any partial
+        // agent.message. Writing session.error here would just
+        // pollute the timeline with a misleading "error" frame.
+        // Other TurnAborted causes (model_error 402/403, MCP
+        // timeout, manual destroy) still surface as session.error
+        // since the user didn't trigger them.
+        const isUserInterrupt =
+          err instanceof TurnAborted && err.cause.kind === "user_aborted";
+        if (!isUserInterrupt) {
+          const errorMsg = this.describeError(err);
+          const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
+          history.append(errorEvent);
+          this.broadcastEvent(errorEvent);
+        }
 
         // AMA RetryStatusTerminal: certain model errors are unrecoverable
         // and must transition the session to `terminated` state. Today we
