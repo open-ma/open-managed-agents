@@ -77,6 +77,10 @@ const INITIAL_FORM = {
   toolDefaultEnabled: true,
   toolDefaultPermission: "always_allow" as "always_allow" | "always_ask",
   toolOverrides: {} as Record<string, ToolOverride>,
+  // Opt-in to the built-in `general_subagent` tool. Server-side this
+  // flag drives both the tool registration (apps/agent/src/harness/
+  // tools.ts) and runSubAgent's reserved-id branch (session-do.ts).
+  enableGeneralSubagent: false,
 };
 
 export function AgentsList() {
@@ -208,6 +212,9 @@ export function AgentsList() {
       if (form.callableAgents.length) {
         payload.multiagent = { type: "coordinator", agents: form.callableAgents };
       }
+      if (form.enableGeneralSubagent) {
+        payload.enable_general_subagent = true;
+      }
       // Local-runtime agent: opt into acp-proxy harness when both runtimeId
       // and acpAgentId are set. Partial config silently falls back to the
       // default cloud loop — same semantics as the CLI flag pair.
@@ -305,6 +312,9 @@ export function AgentsList() {
     if (form.callableAgents.length) {
       config.multiagent = { type: "coordinator", agents: form.callableAgents };
     }
+    if (form.enableGeneralSubagent) {
+      config.enable_general_subagent = true;
+    }
     return config;
   };
 
@@ -367,6 +377,7 @@ export function AgentsList() {
           toolDefaultEnabled: dc.enabled ?? true,
           toolDefaultPermission: dc.permission_policy?.type === "always_ask" ? "always_ask" : "always_allow",
           toolOverrides: overrides,
+          enableGeneralSubagent: parsed.enable_general_subagent === true,
         });
       } catch { /* keep current form if parse fails */ }
     } else {
@@ -1012,9 +1023,35 @@ export function AgentsList() {
 
               {/* Multi-agent tab */}
               {createMode === "form" && tab === "agents" && (
-                <div className="space-y-3">
-                  <label className="text-sm font-medium text-fg block">Callable Agents</label>
-                  <p className="text-xs text-fg-subtle mb-2">Select agents that this agent can delegate tasks to.</p>
+                <div className="space-y-5">
+                  {/* Built-in general sub-agent — opt-in. Doesn't require
+                      managing a dedicated callable_agents entry; spawns a
+                      generic delegate that inherits this agent's model +
+                      sandbox. Useful for one-off task delegation. */}
+                  <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
+                    <label className="flex items-start gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.enableGeneralSubagent}
+                        onChange={(e) => setForm({ ...form, enableGeneralSubagent: e.target.checked })}
+                        className="accent-brand mt-0.5"
+                      />
+                      <div>
+                        <div className="font-medium text-fg">Enable general sub-agent</div>
+                        <p className="text-xs text-fg-subtle mt-0.5">
+                          Exposes a built-in <span className="font-mono">general_subagent(task)</span> tool.
+                          Spawns a generic sub-agent thread (reserved id <span className="font-mono">general</span>)
+                          inheriting this agent's model + sandbox, with a safe built-in tool subset
+                          (bash/read/write/edit/grep/glob). No roster setup needed.
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium text-fg block">Callable Agents</label>
+                    <p className="text-xs text-fg-subtle mb-2">Specific agents this agent can delegate to via <span className="font-mono">call_agent_&lt;id&gt;</span> tools.</p>
+                  </div>
 
                   {form.callableAgents.map((ca, i) => {
                     const agentInfo = allAgents.find(a => a.id === ca.id);

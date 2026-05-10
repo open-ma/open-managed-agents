@@ -1204,6 +1204,43 @@ export async function buildTools(
     }
   }
 
+  // Built-in general sub-agent tool — opt-in via
+  // agentConfig.enable_general_subagent. Reserved id "general" routes
+  // to a synthesized config in runSubAgent (apps/agent/src/runtime/
+  // session-do.ts), so the user doesn't need to pre-create + add a
+  // sub-agent to the callable_agents roster. Inherits this agent's
+  // model + sandbox; runs with a generic system prompt and a safe
+  // built-in toolset (no schedule, no further delegate, no MCP).
+  if (agentConfig.enable_general_subagent && env?.delegateToAgent) {
+    tools.general_subagent = tool({
+      description:
+        "Delegate a focused, well-scoped sub-task to a fresh general sub-agent. " +
+        "The sub-agent runs in an isolated thread with its own conversation history " +
+        "and returns a single text response when done. Use for: research, code " +
+        "exploration, file scanning, batch operations — anything you want a clean " +
+        "context for. The sub-agent shares this agent's sandbox + model but cannot " +
+        "delegate further or use MCP tools.",
+      inputSchema: z.object({
+        task: z
+          .string()
+          .describe(
+            "The task description for the sub-agent. Be specific about what to " +
+              "produce — the sub-agent gets only this string and returns text.",
+          ),
+      }),
+      execute: safe(async ({ task }) => {
+        if (!env?.delegateToAgent) {
+          return "general sub-agent unavailable: no thread executor configured";
+        }
+        try {
+          return await env.delegateToAgent("general", task);
+        } catch (e) {
+          return `general sub-agent error: ${e instanceof Error ? e.message : String(e)}`;
+        }
+      }),
+    });
+  }
+
   // Strip execute from always_ask tools so AI SDK returns them as pending calls
   // requiring user confirmation before execution
   for (const [name, t] of Object.entries(tools)) {
