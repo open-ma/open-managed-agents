@@ -40,6 +40,7 @@ import {
   IntegrationsSlackWorkspace,
   IntegrationsSlackPublishPage,
 } from "./pages/IntegrationsSlack";
+import { consolePlugins } from "./plugins/registry";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -98,6 +99,14 @@ createRoot(document.getElementById("root")!).render(
               path="integrations/slack/installations/:id"
               element={<IntegrationsSlackWorkspace />}
             />
+            {/* Plugin-contributed routes (hosted-only extensions). Default
+                empty in OSS — hosted deploy overlay replaces
+                plugins/registry.ts to inject billing / etc. */}
+            {consolePlugins.flatMap((p) =>
+              (p.routes ?? []).map((r) => (
+                <Route key={`${p.id}:${r.path}`} path={r.path} element={r.element} />
+              )),
+            )}
             <Route path="*" element={<Navigate to="/agents" replace />} />
           </Route>
         </Routes>
