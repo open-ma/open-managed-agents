@@ -437,6 +437,36 @@ app.post("/", async (c) => {
   // Cloud agents must supply an explicit environment_id because the
   // picked sandbox lane materially affects the run.
   const agentIsLocalRuntime = !!agentRow.runtime_binding;
+
+  // Optional usage-meter gate. When the USAGE_METER service binding is
+  // present, ask it whether this tenant may launch a cloud sandbox
+  // (typical implementations: wallet balance check, rate-limit, abuse
+  // gate). Self-host / OSS dev deployments leave the binding unbound
+  // and skip this — the platform behaves identically.
+  type UsageMeterRpc = {
+    canStartSandbox(o: { tenantId: string; agentId?: string }): Promise<{
+      ok: boolean; reason?: string; balance_cents?: number;
+    }>;
+  };
+  const meter = (c.env as unknown as { USAGE_METER?: UsageMeterRpc }).USAGE_METER;
+  if (!agentIsLocalRuntime && meter) {
+    try {
+      const agentIdStr = typeof body.agent === "string" ? body.agent : body.agent?.id;
+      const gate = await meter.canStartSandbox({ tenantId: t, agentId: agentIdStr });
+      if (!gate.ok) {
+        return c.json(
+          { error: gate.reason ?? "Sandbox launch refused by usage meter", balance_cents: gate.balance_cents ?? 0 },
+          402,
+        );
+      }
+    } catch (err) {
+      // Fail open: a meter outage shouldn't block new sessions. The
+      // follow-up usage_events write still records the session so the
+      // meter can reconcile out-of-band on next sweep.
+      console.error(`[sessions] USAGE_METER.canStartSandbox failed: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
   let resolvedEnvId = body.environment_id ?? wrappedEnvId;
   if (!resolvedEnvId) {
     if (!agentIsLocalRuntime) {
