@@ -1256,11 +1256,14 @@ export class SessionDO extends DurableObject<Env> {
       // invisible to the rearm logic and got their parent DO evicted
       // mid-flight.
       keepAliveWhile: async <T>(fn: () => Promise<T>): Promise<T> => {
+        // Generate id first (cheap; can't throw). The Set.add and
+        // setAlarm both go inside try so a synchronous throw at
+        // either site still hits finally and clears the ref —
+        // belt-and-braces (neither call should throw in practice
+        // but the leak would be silent if either ever did).
         const id = ++this._keepAliveSeq;
-        this._activeKeepAlive.add(id);
         try {
-          // Set the heartbeat alarm at start so CF immediately treats
-          // the DO as having scheduled work.
+          this._activeKeepAlive.add(id);
           void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
           return await fn();
         } finally {
@@ -1317,10 +1320,17 @@ export class SessionDO extends DurableObject<Env> {
     // mid-stream — the alarm path catches the same condition but only
     // after the first alarm tick fires, which can be many seconds after
     // the user's first request lands.
+    //
+    // Guard semantics: the boolean is set BEFORE the async flush so two
+    // concurrent first-fetches don't both fire the flush. On flush
+    // failure the guard resets to false so a subsequent fetch retries —
+    // a permanently-sticky guard would leave the recovery primitive
+    // dead after a transient error.
     if (!this._coldStartFlushDone) {
       this._coldStartFlushDone = true;
       void this._finalizeStaleTurns().catch((err) => {
         console.warn(`[cold-start-flush] failed:`, err);
+        this._coldStartFlushDone = false;
       });
     }
     try {
@@ -5003,26 +5013,32 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     // 2. Force-end stale sessions rows. Skip turns currently held in
-    //    _activeTurnIds (live work in this incarnation). endTurn is
-    //    the contract — emit the events on a best-effort basis but
-    //    don't let an event-log glitch leave the row stuck.
+    //    _activeTurnIds (live work in this incarnation). Order matters:
+    //    endTurn FIRST (the contract), events only on success. The
+    //    earlier shape (rescheduled → endTurn → idle) emitted a
+    //    rescheduled event even when endTurn threw, leaving Console
+    //    showing "rescheduled" with no resolution and the row still
+    //    'running'. Atomic-from-Console's-perspective: events appear
+    //    iff the row actually flipped.
     const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
     let ended = 0;
     for (const o of orphans) {
       if (this._activeTurnIds.has(o.turn_id)) continue;
+      try {
+        await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
+      } catch (err) {
+        console.warn(`[finalize-stale] endTurn failed for ${o.turn_id}:`, err);
+        continue; // skip event emission — row is still in old state
+      }
+      ended++;
       const reschedEvent = {
         type: "session.status_rescheduled",
         reason: "DO eviction or restart — stream lost; re-send to continue.",
       } as unknown as SessionEvent;
       const idleEvent = { type: "session.status_idle" } as unknown as SessionEvent;
+      // Events are best-effort post-cleanup; row is the source of truth.
       try { await this.runtimeAdapter.eventLog.append(reschedEvent); } catch {}
       try { this.broadcastEvent(reschedEvent); } catch {}
-      try {
-        await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
-        ended++;
-      } catch (err) {
-        console.warn(`[finalize-stale] endTurn failed for ${o.turn_id}:`, err);
-      }
       try { await this.runtimeAdapter.eventLog.append(idleEvent); } catch {}
       try { this.broadcastEvent(idleEvent); } catch {}
     }
