@@ -420,7 +420,11 @@ describe("SessionDO recovery — DO-level", () => {
     )
       .bind(
         "turn_evicted",
-        Date.now() - 30_000,
+        // Old enough to clear _checkOrphanTurns' 90s grace period
+        // (added 2026-05-10 to stop alarm-fired self-recovery; see
+        // session-do.ts:_checkOrphanTurns docstring). Real orphans
+        // from a previous DO incarnation are typically minutes+ old.
+        Date.now() - 120_000,
         Date.now(),
         sessionId,
       )
@@ -490,7 +494,9 @@ describe("SessionDO recovery — DO-level", () => {
       `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
         WHERE id=?`,
     )
-      .bind("turn_dead", Date.now(), Date.now(), sessionId)
+      // Old turn_started_at — clears the 90s grace period in
+      // _checkOrphanTurns. See sibling test above for context.
+      .bind("turn_dead", Date.now() - 120_000, Date.now(), sessionId)
       .run();
 
     await runInDurableObject(stub, async (_inst, state) => {
@@ -535,7 +541,8 @@ describe("SessionDO recovery — DO-level", () => {
       `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
         WHERE id=?`,
     )
-      .bind("turn_combined", Date.now() - 5_000, Date.now(), sessionId)
+      // Old turn_started_at — clears _checkOrphanTurns 90s grace.
+      .bind("turn_combined", Date.now() - 120_000, Date.now(), sessionId)
       .run();
 
     await runDurableObjectAlarm(stub);
