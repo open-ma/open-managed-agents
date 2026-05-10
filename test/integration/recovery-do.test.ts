@@ -818,6 +818,265 @@ describe("SessionDO recovery — DO-level", () => {
     expect(String(data.content)).toMatch(/interrupted/i);
   });
 
+  // ─────────────────────────────────────────────────────────────────
+  // keepAliveWhile + OR-rearm wiring
+  //
+  // The actual fix for the staging eviction bug — sub-agents bypass
+  // sessions.status='running' (they don't write that row), so alarm
+  // rearm has to also read _activeKeepAlive. These tests prove the
+  // wiring isn't dead: the runSubAgent path goes through
+  // adapter.keepAliveWhile, which fires setAlarm + populates
+  // _activeKeepAlive, and the alarm() rearm logic respects that set.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("adapter.keepAliveWhile populates _activeKeepAlive during fn + clears in finally", async () => {
+    // Mirror of cloudflare/agents SDK's "should increment refs" +
+    // "should decrement when disposed" + "should clean up even when
+    // the function throws", but exercising the REAL CF wiring in
+    // SessionDO.getRuntimeAdapter (not just the port mock).
+    const sessionId = await newSessionDirect("keepalive_wiring");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Success path: refs go 0 → 1 (during) → 0 (after).
+    let observedDuring = -1;
+    await runInDurableObject(stub, async (instance) => {
+      const adapter = (instance as unknown as { runtimeAdapter: { keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T> } }).runtimeAdapter;
+      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
+      expect(set.size).toBe(0);
+      const r = await adapter.keepAliveWhile(async () => {
+        observedDuring = set.size;
+        return "ok";
+      });
+      expect(r).toBe("ok");
+      expect(set.size).toBe(0);
+    });
+    expect(observedDuring).toBe(1);
+
+    // Throw path: refs still clear in finally.
+    let caught = false;
+    await runInDurableObject(stub, async (instance) => {
+      const adapter = (instance as unknown as { runtimeAdapter: { keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T> } }).runtimeAdapter;
+      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
+      try {
+        await adapter.keepAliveWhile(async () => {
+          throw new Error("boom");
+        });
+      } catch {
+        caught = true;
+      }
+      expect(set.size).toBe(0);
+    });
+    expect(caught).toBe(true);
+  });
+
+  it("adapter.keepAliveWhile schedules an alarm on entry (CF wiring proof)", async () => {
+    // Without this, the no-op `(fn) => fn()` slot in runSubAgent
+    // (the actual line that was changed in dd21bdd) could regress to
+    // a no-op CF impl and tests would still pass via the port mock.
+    // We spy on ctx.storage.setAlarm directly because miniflare's
+    // runDurableObjectAlarm clears the slot post-handler, making
+    // state.storage.getAlarm() unreliable for "did alarm rearm" checks.
+    const sessionId = await newSessionDirect("keepalive_alarm");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmTimes: number[] = [];
+    await runInDurableObject(stub, async (instance) => {
+      const ctx = (instance as unknown as { ctx: { storage: { setAlarm: (t: number) => Promise<void> } } }).ctx;
+      const orig = ctx.storage.setAlarm.bind(ctx.storage);
+      ctx.storage.setAlarm = async (t: number) => {
+        setAlarmTimes.push(t);
+        return orig(t);
+      };
+      const adapter = (instance as unknown as { runtimeAdapter: { keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T> } }).runtimeAdapter;
+      await adapter.keepAliveWhile(async () => "ok");
+      ctx.storage.setAlarm = orig; // restore
+    });
+    // setAlarm should have been called at least once with t ≈ now+30s.
+    expect(setAlarmTimes.length).toBeGreaterThan(0);
+    const t = setAlarmTimes[setAlarmTimes.length - 1];
+    expect(t).toBeGreaterThan(Date.now());
+    expect(t - Date.now()).toBeLessThan(60_000);
+  });
+
+  it("alarm() rearms while _activeKeepAlive.size > 0 even with no inflight turn", async () => {
+    // The OR-rearm: `_activeKeepAlive.size > 0 || _hasInflightTurn()`.
+    // Sub-agents bypass beginTurn/sessions.status — without the OR,
+    // alarm wouldn't rearm during a long sub-agent call and the DO
+    // would get evicted. This is the load-bearing change.
+    //
+    // We can't read state.storage.getAlarm() post-handler — miniflare
+    // clears the alarm slot once the handler completes regardless of
+    // any setAlarm call inside it. Spy on ctx.storage.setAlarm to
+    // catch the rearm directly.
+    const sessionId = await newSessionDirect("rearm_or_keepalive");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmCalls: number[] = [];
+    await runInDurableObject(stub, async (instance, state) => {
+      // Sanity: row is idle — any rearm comes from the OR branch.
+      const row = await env.AUTH_DB
+        .prepare(`SELECT status FROM sessions WHERE id=?`)
+        .bind(sessionId)
+        .first();
+      expect(row?.status).toBe("idle");
+
+      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
+      set.add(99);
+
+      const ctx = (instance as unknown as { ctx: { storage: { setAlarm: (t: number) => Promise<void> } } }).ctx;
+      const orig = ctx.storage.setAlarm.bind(ctx.storage);
+      ctx.storage.setAlarm = async (t: number) => {
+        setAlarmCalls.push(t);
+        return orig(t);
+      };
+      await state.storage.deleteAlarm();
+      await state.storage.setAlarm(Date.now() - 1000); // due now
+      // Note: that setAlarm call lands BEFORE the spy was installed;
+      // setAlarmCalls only records calls from inside alarm() onward.
+      ctx.storage.setAlarm = async (t: number) => {
+        setAlarmCalls.push(t);
+        return orig(t);
+      };
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // alarm() should have called setAlarm at least once (the rearm).
+    expect(setAlarmCalls.length).toBeGreaterThan(0);
+    const lastT = setAlarmCalls[setAlarmCalls.length - 1];
+    expect(lastT).toBeGreaterThan(Date.now());
+    expect(lastT - Date.now()).toBeLessThan(60_000);
+
+    // Cleanup so the next test isn't polluted.
+    await runInDurableObject(stub, (instance) => {
+      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
+      set.delete(99);
+    });
+  });
+
+  it("alarm() does NOT rearm when both _activeKeepAlive empty AND no inflight turn", async () => {
+    // Negative case for the OR-rearm — proves we're not just leaking
+    // setAlarm calls regardless of state. Same spy approach as the
+    // positive case above.
+    const sessionId = await newSessionDirect("rearm_idle");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmCallsInsideAlarm: number[] = [];
+    let spyArmed = false;
+    await runInDurableObject(stub, async (instance, state) => {
+      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
+      expect(set.size).toBe(0);
+
+      const ctx = (instance as unknown as { ctx: { storage: { setAlarm: (t: number) => Promise<void> } } }).ctx;
+      const orig = ctx.storage.setAlarm.bind(ctx.storage);
+      await state.storage.deleteAlarm();
+      await state.storage.setAlarm(Date.now() - 1000);
+      // Install the spy AFTER the trigger setAlarm so we only count
+      // calls from inside alarm().
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmCallsInsideAlarm.push(t);
+        return orig(t);
+      };
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+    expect(setAlarmCallsInsideAlarm.length).toBe(0);
+  });
+
+  it("_finalizeStaleTurns no half-state — endTurn failure suppresses event emit", async () => {
+    // Reviewer-flagged: the previous shape emitted session.status_rescheduled
+    // BEFORE endTurn, so a throw in endTurn left Console showing
+    // "rescheduled" with no resolution and the row stuck 'running'.
+    // The new shape only emits on endTurn success. Test by stubbing
+    // adapter.endTurn to throw and asserting NO rescheduled/idle event
+    // landed in the event log.
+    const sessionId = await newSessionDirect("finalize_no_half");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_endturn_fails", Date.now() - 120_000, sessionId)
+      .run();
+
+    await runInDurableObject(stub, async (instance) => {
+      const adapter = (instance as unknown as { runtimeAdapter: { endTurn: (s: string, t: string, st: string) => Promise<void> } }).runtimeAdapter;
+      const orig = adapter.endTurn.bind(adapter);
+      adapter.endTurn = async () => {
+        throw new Error("simulated endTurn failure");
+      };
+      const finalize = (instance as unknown as { _finalizeStaleTurns: () => Promise<void> })._finalizeStaleTurns.bind(instance);
+      await finalize();
+      // Restore so subsequent test isolation isn't broken by this stub.
+      adapter.endTurn = orig;
+    });
+
+    // Row must still be 'running' (endTurn was the throw site).
+    const row = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(row.status).toBe("running");
+
+    // No rescheduled/idle event leaked out.
+    const events = await stub.fetch(new Request("http://internal/events"));
+    const { data } = await events.json() as { data: Array<{ type: string }> };
+    expect(data.find((e) => e.type === "session.status_rescheduled")).toBeUndefined();
+    expect(data.find((e) => e.type === "session.status_idle")).toBeUndefined();
+  });
+
+  it("cold-start guard resets to false on flush failure — next fetch retries", async () => {
+    // Reviewer-flagged: the previous shape set _coldStartFlushDone=true
+    // synchronously before the async flush; if the flush rejected, the
+    // guard stayed true forever and recovery was permanently dead. New
+    // shape resets to false in .catch() so a future fetch retries.
+    const sessionId = await newSessionDirect("cold_start_retry");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_retry_target", Date.now() - 120_000, sessionId)
+      .run();
+
+    // Reset guard + stub _finalizeStaleTurns to throw on first call,
+    // succeed on second. Confirms (a) first fetch trips guard + flush
+    // throws, (b) guard reset, (c) second fetch retries + succeeds.
+    let calls = 0;
+    await runInDurableObject(stub, (instance) => {
+      (instance as { _coldStartFlushDone: boolean })._coldStartFlushDone = false;
+      const orig = (instance as unknown as { _finalizeStaleTurns: () => Promise<void> })._finalizeStaleTurns.bind(instance);
+      (instance as unknown as { _finalizeStaleTurns: () => Promise<void> })._finalizeStaleTurns = async () => {
+        calls++;
+        if (calls === 1) throw new Error("first attempt fails");
+        return orig();
+      };
+    });
+
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(1);
+    // Guard should have been reset by the .catch.
+    const guardAfterFail = await runInDurableObject(stub, (instance) => {
+      return (instance as { _coldStartFlushDone: boolean })._coldStartFlushDone;
+    });
+    expect(guardAfterFail).toBe(false);
+
+    // Second fetch — flush retries + succeeds.
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(calls).toBe(2);
+    const row = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(row.status).toBe("idle");
+  });
+
   it("hintTurnEnded is idempotent — double-fire from endTurn + outer finally is safe", async () => {
     // turn-runtime.ts fires hintTurnEnded in its outer finally as a
     // safety net for endTurn throwing; adapter.endTurn ALSO fires it
