@@ -145,11 +145,13 @@ export function ListPage<T>({
                 <line x1="21" y1="21" x2="16.65" y2="16.65" />
               </svg>
               <input
-                type="text"
+                type="search"
                 value={searchValue ?? ""}
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder={searchPlaceholder ?? "Search..."}
                 className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-full sm:w-64"
+                autoComplete="off"
+                name="oma-list-search"
               />
             </div>
           )}
