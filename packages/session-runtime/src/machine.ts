@@ -141,7 +141,7 @@ export class SessionStateMachine {
     const turnId = nanoid();
     this.activeTurnId = turnId;
     await this.deps.adapter.beginTurn(this.deps.sessionId, turnId);
-    this.deps.adapter.hintTurnInFlight?.(this.deps.sessionId);
+    this.deps.adapter.hintTurnInFlight?.(this.deps.sessionId, turnId);
 
     try {
       // Memory store mounts: optional adapter step, runs once per turn

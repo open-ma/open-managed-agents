@@ -273,19 +273,27 @@ export class SessionDO extends DurableObject<Env> {
   private _runtimeAdapter: RuntimeAdapter | null = null;
 
   /**
-   * In-memory mirror of "is there a turn currently running in this DO?"
-   * Maintained via the RuntimeAdapter's onTurnInFlight / onTurnEnded
-   * callbacks (wired in the lazy `runtimeAdapter` getter below). Used
-   * by deriveStatus() — the unified marker on D1's `sessions.turn_id`
-   * is the source of truth, but reading it requires an async D1
-   * round-trip and deriveStatus is called sync from the API layer.
+   * Set of turn ids currently in flight in THIS DO isolate.
+   * Maintained via RuntimeAdapter.hintTurnInFlight / hintTurnEnded
+   * callbacks (port contract; see ports.ts:111+). Each entry's
+   * lifetime is exactly one runAgentTurn invocation.
    *
-   * Lost on eviction; re-seeded on next alarm() via _checkOrphanTurns
-   * (which reads the D1 row authoritatively). Worst case: a stale
-   * "idle" between cold-start and the first alarm — alarm fires
-   * immediately on cold-start with an in-flight turn.
+   * Sole consumer: `_checkOrphanTurns` filters out `o.turn_id ∈
+   * _activeTurnIds` — exact match like Node SessionStateMachine's
+   * `if (o.turn_id === this.activeTurnId) continue` (machine.ts:183).
+   * Replaces a defensive `_inflightTurnHints + 90s grace period`
+   * filter in the orphan check that was needed because earlier the
+   * shell had no handle on the turnId minted inside runAgentTurn —
+   * the hint callbacks now carry it (port v2).
+   *
+   * `deriveStatus()` also reads `.size > 0` — single source of truth
+   * for "is anything running" replaces the prior `_inflightTurnHints`
+   * counter.
+   *
+   * Lost on eviction; cold-start sees empty set, so a D1 row from a
+   * dead incarnation is correctly identified as orphan.
    */
-  private _inflightTurnHints = 0;
+  private _activeTurnIds = new Set<string>();
 
   /**
    * Synchronous re-entry guard for drainEventQueue, keyed by
@@ -295,24 +303,28 @@ export class SessionDO extends DurableObject<Env> {
    * drainEventQueue('sthr_xyz') don't block each other; that's the
    * whole point of per-thread parallelism.
    *
-   * Why a counter alone isn't enough: _inflightTurnHints is only
-   * incremented inside onTurnInFlight, which runs after several awaits
-   * (runAgentTurn → adapter.beginTurn). Two concurrent callers within
-   * the same thread (POST handler's fire-and-forget drain + the 5s
-   * recoverEventQueue alarm tail) both pass the status check before
-   * either increments hints, then both pick the same pending user
-   * event and run the LLM twice for the same turn (observed on
-   * sess-88mm28kjaihxlca3, 2026-05-09: turn:9 ran twice in parallel).
+   * Distinct from _activeTurnIds: _draining is the *entry guard*,
+   * checked synchronously before any await. _activeTurnIds is the
+   * *active set*, populated asynchronously after beginTurn returns.
+   * Both signals together cover the gap between "drain entered" and
+   * "turn registered via hintTurnInFlight".
    */
   private _draining = new Set<string>();
 
   /**
-   * Per-thread abort controllers — replaces single
-   * `currentAbortController`. Set by processUserMessage / sub-agent
-   * runs at turn start, cleared at turn end. user.interrupt with
-   * `session_thread_id` uses this to abort exactly that thread's
-   * in-flight turn without affecting siblings (AMA spec semantics).
-   * /destroy iterates the map to abort everything.
+   * Per-thread abort controllers — replaces the single
+   * `currentAbortController` we used pre-thread-aware. Set by
+   * processUserMessage / sub-agent runs at turn start, cleared at
+   * turn end. user.interrupt with `session_thread_id` uses this to
+   * abort exactly that thread's in-flight turn without touching
+   * siblings (AMA spec semantics). /destroy iterates the map.
+   *
+   * Distinct from _activeTurnIds — that one is for orphan
+   * detection (keyed by turnId, the runAgentTurn nanoid), this one
+   * is for caller-initiated abort (keyed by session_thread_id, the
+   * AMA-spec thread id the SDK speaks). The two signals never
+   * overlap; merging would force one consumer to scan the other's
+   * key shape.
    */
   private _threadAbortControllers = new Map<string, AbortController>();
 
@@ -1192,20 +1204,22 @@ export class SessionDO extends DurableObject<Env> {
       // No sandbox at adapter level — turn-runtime doesn't use it; the
       // legacy sandbox getter (this.getOrCreateSandbox()) stays as-is
       // for the harness path which constructs its own ctx.
-      onTurnInFlight: () => {
+      onTurnInFlight: (_sessionId, turnId) => {
         // Fire-and-forget setAlarm. CF's alarm queue de-dupes, so back-
         // to-back calls are fine. The alarm() handler re-arms while a
-        // turn is still in flight (status='running' in sessions table).
+        // turn is still in flight.
         void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
-        // In-memory mirror so deriveStatus() (sync, called from many
-        // places) can answer "running" without an async D1 round-trip.
-        // The unified marker on D1's sessions.turn_id is the source of
-        // truth; this is just a local cache. _checkOrphanTurns rebuilds
-        // it on cold start.
-        this._inflightTurnHints += 1;
+        // Register this turn id so _checkOrphanTurns + deriveStatus
+        // see it. Lost on eviction → cold-start sees empty set → real
+        // orphans (D1 row from a dead incarnation) get recovered on
+        // the first alarm pass.
+        this._activeTurnIds.add(turnId);
       },
-      onTurnEnded: () => {
-        if (this._inflightTurnHints > 0) this._inflightTurnHints -= 1;
+      onTurnEnded: (_sessionId, turnId) => {
+        // Idempotent: turn-runtime.ts also fires hintTurnEnded as a
+        // safety net in its outer finally if endTurn itself throws.
+        // Set.delete on missing key is a no-op.
+        this._activeTurnIds.delete(turnId);
       },
     });
     // Provider call only used if sharding is in play; today the lazy
@@ -4134,12 +4148,14 @@ export class SessionDO extends DurableObject<Env> {
     if (this._state?.terminated_at != null || this._state?.status === "terminated") {
       return "terminated";
     }
-    // cf_agents_runs was dropped in Phase 4; the unified-runtime marker
-    // for "is there an in-flight turn" lives on D1's `sessions.turn_id`,
-    // which is async. _inflightTurnHints is the sync local mirror set
-    // by the RuntimeAdapter callbacks (onTurnInFlight / onTurnEnded).
-    // _checkOrphanTurns rebuilds it on cold-start by reading D1.
-    return this._inflightTurnHints > 0 ? "running" : "idle";
+    // The unified-runtime marker for "is there an in-flight turn" lives
+    // on D1's `sessions.turn_id`, which is async. _activeTurnIds is the
+    // sync local mirror populated by RuntimeAdapter's onTurnInFlight /
+    // onTurnEnded callbacks (turn ids minted in runAgentTurn). On cold
+    // start the set is empty until the first alarm-fired
+    // _checkOrphanTurns reconciles, but D1 is the source of truth so
+    // orphan recovery still triggers from there.
+    return this._activeTurnIds.size > 0 ? "running" : "idle";
   }
 
   /**
@@ -4779,36 +4795,22 @@ export class SessionDO extends DurableObject<Env> {
   private async _checkOrphanTurns(): Promise<void> {
     if (!this._state) return;
     const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
-    // ports.ts:91-94 contract: "caller must filter out its own active turn
-    // before treating each row as an orphan". Node SessionStateMachine
-    // tracks `activeTurnId` per call; we don't have that handle here
-    // (runAgentTurn mints the turn_id internally and never exposes it
-    // back to SessionDO), so approximate with two cheap defenses:
+    // ports.ts contract: caller MUST filter out its own active turn ids
+    // before treating each row as an orphan. We track these in
+    // _activeTurnIds (populated from RuntimeAdapter's hintTurnInFlight
+    // callback the moment beginTurn lands the D1 write). Mirrors Node
+    // SessionStateMachine.onWake's `if (o.turn_id === this.activeTurnId)
+    // continue` (machine.ts:183), just generalized to a Set because
+    // sub-agents can have concurrent turns.
     //
-    //   (1) hint-counter > 0 → there's an in-flight turn locally; the
-    //       D1 row is almost certainly ours. The keep-alive 30s alarm
-    //       used to wake up mid-stream and "recover" our own active
-    //       turn — observed on staging session sess-slqg7xf4kvm6s2j4
-    //       2026-05-10T07:01:43Z: turn:2 streamText started at 07:01:13,
-    //       alarm fired at 07:01:42 + 30s, listOrphanTurns returned
-    //       turn:utJ4WbfdpFwWPemoUobhL (our own), no filter → emitted
-    //       session.status_rescheduled + spawned a parallel streamText
-    //       race against the one already running.
-    //   (2) age < 90s → grace period for the alarm racing beginTurn's
-    //       D1 write or a fresh turn that started before this alarm
-    //       tick but the hint hasn't propagated yet (cold-start). 90s
-    //       is twice the keep-alive interval — within one alarm cycle
-    //       the turn is either still alive (hint will be set on the
-    //       next tick) or genuinely stuck.
-    //
-    // Real orphans (DO actually evicted, fresh incarnation reading
-    // residue from the previous one) have hint==0 AND age >> 90s, so
-    // they still get recovered.
-    const nowMs = Date.now();
-    const MIN_ORPHAN_AGE_MS = 90_000;
+    // Pre-fix this loop iterated all rows blindly and the keep-alive
+    // alarm regularly woke up mid-stream to "recover" our own active
+    // turn — observed on staging sess-slqg7xf4kvm6s2j4 (2026-05-10
+    // 07:01:43Z): emitted session.status_rescheduled + spawned a
+    // parallel streamText racing the original. Then we patched it with
+    // a 90s grace period; the proper fix is the explicit set check.
     for (const o of orphans) {
-      if (this._inflightTurnHints > 0) continue;
-      if (nowMs - (o.turn_started_at ?? 0) < MIN_ORPHAN_AGE_MS) continue;
+      if (this._activeTurnIds.has(o.turn_id)) continue;
       try {
         await this.onFiberRecovered({
           id: o.turn_id,
