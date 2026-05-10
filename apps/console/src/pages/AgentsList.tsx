@@ -820,12 +820,19 @@ export function AgentsList() {
                 <div className="space-y-5">
                   {createError && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{createError}</div>}
 
-                  <div>
-                    <label className="text-sm font-medium text-fg block mb-2">Default policy</label>
+                  <p className="text-xs text-fg-subtle leading-relaxed">
+                    Built-in toolset (AMA <span className="font-mono">agent_toolset_20260401</span>).
+                    Multi-agent delegation lives in its own tab and is a separate
+                    AMA field <span className="font-mono">multiagent</span> — not part of this toolset.
+                    External MCP tools live in the MCP Servers tab.
+                  </p>
+
+                  <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
+                    <div className="text-sm font-medium text-fg mb-1">Default policy</div>
                     <p className="text-xs text-fg-subtle mb-3">
-                      Applies to every built-in tool unless overridden below.
+                      Applies to every tool below that's set to <span className="font-mono">default</span>.
                     </p>
-                    <div className="flex items-center gap-4">
+                    <div className="flex flex-wrap items-center gap-4">
                       <label className="flex items-center gap-2 text-sm">
                         <input
                           type="checkbox"
@@ -833,14 +840,15 @@ export function AgentsList() {
                           onChange={(e) => setForm({ ...form, toolDefaultEnabled: e.target.checked })}
                           className="accent-brand"
                         />
-                        Enable all tools by default
+                        Enable tools
                       </label>
                       <div className="flex items-center gap-2 text-sm">
                         <span className="text-fg-muted">Permission:</span>
                         <select
                           value={form.toolDefaultPermission}
+                          disabled={!form.toolDefaultEnabled}
                           onChange={(e) => setForm({ ...form, toolDefaultPermission: e.target.value as "always_allow" | "always_ask" })}
-                          className="border border-border rounded-md px-2 py-1 text-sm bg-bg text-fg outline-none focus:border-brand"
+                          className="border border-border rounded-md px-2 py-1 text-sm bg-bg text-fg outline-none focus:border-brand disabled:opacity-40"
                         >
                           <option value="always_allow">always_allow</option>
                           <option value="always_ask">always_ask</option>
@@ -852,15 +860,34 @@ export function AgentsList() {
                   <div>
                     <label className="text-sm font-medium text-fg block mb-2">Per-tool overrides</label>
                     <p className="text-xs text-fg-subtle mb-3">
-                      "default" leaves the tool to inherit the policy above.
-                      "always_ask" emits a <span className="font-mono">user.tool_confirmation</span> event the
-                      client must approve before the tool runs.
+                      Each row's effective state is shown in the dropdown.
+                      Pick <span className="font-mono">default</span> to inherit the policy above;
+                      pick a specific value to override.
+                      <span className="font-mono">always_ask</span> emits a{" "}
+                      <span className="font-mono">user.tool_confirmation</span> event the client must
+                      approve before each call.
                     </p>
                     <div className="border border-border rounded-md divide-y divide-border">
                       {BUILTIN_TOOLS.map((bt) => {
                         const current = form.toolOverrides[bt.name] ?? "default";
+                        // Effective state when "default" is selected, so the
+                        // user always knows what the row resolves to. Mirrors
+                        // the runtime's getEnabledTools + getToolPermission.
+                        const effectiveLabel = !form.toolDefaultEnabled
+                          ? "disabled"
+                          : form.toolDefaultPermission;
+                        // Color the row when it's "off" so the disabled
+                        // outcome is visually obvious.
+                        const isOff =
+                          current === "disabled" ||
+                          (current === "default" && !form.toolDefaultEnabled);
                         return (
-                          <div key={bt.name} className="flex items-center justify-between px-3 py-2 gap-3">
+                          <div
+                            key={bt.name}
+                            className={`flex items-center justify-between px-3 py-2 gap-3 ${
+                              isOff ? "opacity-50" : ""
+                            }`}
+                          >
                             <div className="min-w-0">
                               <div className="text-sm font-mono text-fg">{bt.label}</div>
                               <div className="text-xs text-fg-subtle truncate">{bt.description}</div>
@@ -876,7 +903,7 @@ export function AgentsList() {
                               }}
                               className="border border-border rounded-md px-2 py-1 text-xs bg-bg text-fg outline-none focus:border-brand shrink-0"
                             >
-                              <option value="default">default</option>
+                              <option value="default">default ({effectiveLabel})</option>
                               <option value="always_allow">always_allow</option>
                               <option value="always_ask">always_ask</option>
                               <option value="disabled">disabled</option>
