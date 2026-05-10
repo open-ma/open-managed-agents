@@ -453,6 +453,273 @@ describe("threads HTTP endpoints", () => {
     });
   });
 
+  // ─── drainEventQueue concurrency guard ─────────────────────────────
+  // The original sess-88mm28kjaihxlca3 race: two concurrent drain
+  // attempts on the same thread both passed the deriveStatus check
+  // before either incremented hints, and both ran the LLM. Sync
+  // _draining set fixes that — these tests pin the contract.
+  it("drainEventQueue is mutually exclusive within a thread", async () => {
+    const stub = freshDoStub("drain_mutex_same");
+    await seedSchemaAndState(stub);
+
+    const result = await runInDurableObject(stub, async (instance) => {
+      const drainSet = (instance as { _draining: Set<string> })._draining;
+      // Pre-set the in-flight flag — second caller must see it and
+      // early-return without doing any work. Equivalent to what
+      // happens when caller A is mid-drain and caller B fires.
+      drainSet.add("sthr_primary");
+      const before = Array.from(drainSet);
+      // Call drainEventQueue — must early-return synchronously
+      // because the flag is already there.
+      const drainPromise = (instance as { drainEventQueue: (t: string) => Promise<void> })
+        .drainEventQueue("sthr_primary");
+      const after = Array.from(drainSet);
+      await drainPromise;
+      // After the call returns, the flag is still set (we own it).
+      const stillSet = drainSet.has("sthr_primary");
+      // Cleanup so the test is isolated.
+      drainSet.delete("sthr_primary");
+      return { before, after, stillSet };
+    });
+    expect(result.before).toEqual(["sthr_primary"]);
+    expect(result.after).toEqual(["sthr_primary"]);
+    expect(result.stillSet).toBe(true);
+  });
+
+  it("drainEventQueue across different threads doesn't share the mutex", async () => {
+    // Spy on _draining.add to record whether drainEventQueue('sthr_subA')
+    // entered the body (which calls add(threadId)). With primary already
+    // in the set, a global-mutex implementation would early-return for
+    // subA without ever adding it. Per-thread mutex must add subA
+    // before the body proceeds. Using the spy is more reliable than
+    // observing post-state, which can't distinguish early-return from
+    // a same-tick add-then-remove cycle when no pending events exist.
+    const stub = freshDoStub("drain_mutex_cross");
+    await seedSchemaAndState(stub);
+
+    const result = await runInDurableObject(stub, async (instance) => {
+      const drainSet = (instance as { _draining: Set<string> })._draining;
+      drainSet.add("sthr_primary");
+      const adds: string[] = [];
+      const originalAdd = drainSet.add.bind(drainSet);
+      drainSet.add = (item: string) => {
+        adds.push(item);
+        return originalAdd(item);
+      };
+      await (instance as { drainEventQueue: (t: string) => Promise<void> })
+        .drainEventQueue("sthr_subA");
+      drainSet.delete("sthr_primary"); // cleanup
+      return { adds };
+    });
+    // The body's `this._draining.add(threadId)` ran for sthr_subA,
+    // proving the early-return check is per-thread (`.has(threadId)`),
+    // not a global flag (`.size > 0`).
+    expect(result.adds).toContain("sthr_subA");
+  });
+
+  // ─── 5-message burst (the user-visible bug) ────────────────────────
+  // Pre-rewrite, drainEventQueue used a `lastIdleSeq` window: any
+  // user.message appended between turn-start and the matching
+  // status_idle was silently skipped (#2-5 in a 5-msg burst). With
+  // per-event processed_at, all 5 land in the pending index and
+  // get drained sequentially — no message lost.
+  it("five user.messages burst all land as pending until drained", async () => {
+    const stub = freshDoStub("five_msg_burst");
+    await seedSchemaAndState(stub);
+
+    // POST 5 user.messages back-to-back (no awaits between server
+    // calls — simulates a user spamming Enter while a turn is mid-flight).
+    const responses = await Promise.all(
+      Array.from({ length: 5 }).map((_, i) =>
+        stub.fetch(
+          new Request("http://internal/event", {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({
+              type: "user.message",
+              content: [{ type: "text", text: `burst-${i + 1}` }],
+            }),
+          }),
+        ),
+      ),
+    );
+    for (const r of responses) {
+      expect([200, 202]).toContain(r.status);
+    }
+
+    // All 5 should be in the events table. processed_at may be NULL
+    // (still pending) or set (drain caught up) — both are valid;
+    // what matters is none silently dropped.
+    const rows = await runInDurableObject(stub, async (_inst, state) => {
+      const out: Array<{ seq: number; type: string; data: string; processed: boolean }> = [];
+      for (const row of state.storage.sql.exec(
+        `SELECT seq, type, data, processed_at FROM events
+           WHERE type = 'user.message' AND session_thread_id = 'sthr_primary'
+           ORDER BY seq`,
+      )) {
+        out.push({
+          seq: row.seq as number,
+          type: row.type as string,
+          data: row.data as string,
+          processed: row.processed_at != null,
+        });
+      }
+      return out;
+    });
+    expect(rows).toHaveLength(5);
+    // Order-agnostic: Promise.all kicks off all 5 in parallel — DO
+    // SQLite serializes inserts but the parallel POSTs don't preserve
+    // caller order. The contract that matters is "all 5 landed", not
+    // their seq order. Pre-rewrite, only burst-1 would land and #2-5
+    // would be silently dropped by the lastIdleSeq window.
+    const texts = new Set(rows.map((r) => JSON.parse(r.data).content[0].text));
+    expect(texts).toEqual(new Set(["burst-1", "burst-2", "burst-3", "burst-4", "burst-5"]));
+  });
+
+  // ─── End-to-end interrupt: AMA "queued inputs are flushed" ─────────
+  // Seed a session with 3 pending user.messages on primary, POST
+  // user.interrupt, observe: queue flushed (cancelled_at on all 3),
+  // user.interrupt + session.status_idle appended, no session.error,
+  // /events round-trip returns the cancelled events with metadata.
+  it("user.interrupt flushes pending queue + writes idle, no session.error", async () => {
+    const stub = freshDoStub("interrupt_e2e");
+    await seedSchemaAndState(stub);
+
+    // Seed 3 pending user.messages directly into the events table —
+    // bypasses the POST /event drain trigger (which would race the
+    // interrupt). These represent "queued inputs" per AMA spec.
+    await runInDurableObject(stub, (_inst, state) => {
+      for (let i = 1; i <= 3; i++) {
+        state.storage.sql.exec(
+          `INSERT INTO events (type, data, processed_at, session_thread_id)
+           VALUES ('user.message', ?, NULL, 'sthr_primary')`,
+          JSON.stringify({
+            type: "user.message",
+            content: [{ type: "text", text: `pending-${i}` }],
+          }),
+        );
+      }
+    });
+
+    const beforeCount = await runInDurableObject(stub, (_inst, state) => {
+      let pending = 0;
+      for (const row of state.storage.sql.exec(
+        `SELECT COUNT(*) AS n FROM events
+           WHERE type = 'user.message' AND session_thread_id = 'sthr_primary'
+             AND processed_at IS NULL AND cancelled_at IS NULL`,
+      )) {
+        pending = row.n as number;
+      }
+      return pending;
+    });
+    expect(beforeCount).toBe(3);
+
+    // Interrupt the primary thread.
+    const res = await stub.fetch(
+      new Request("http://internal/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ type: "user.interrupt" }),
+      }),
+    );
+    expect([200, 202]).toContain(res.status);
+
+    const after = await runInDurableObject(stub, (_inst, state) => {
+      // Pending count after — should be zero (all 3 cancelled).
+      let pending = 0;
+      for (const row of state.storage.sql.exec(
+        `SELECT COUNT(*) AS n FROM events
+           WHERE type = 'user.message' AND session_thread_id = 'sthr_primary'
+             AND processed_at IS NULL AND cancelled_at IS NULL`,
+      )) {
+        pending = row.n as number;
+      }
+      // Cancelled count — should be 3.
+      let cancelled = 0;
+      for (const row of state.storage.sql.exec(
+        `SELECT COUNT(*) AS n FROM events
+           WHERE type = 'user.message' AND session_thread_id = 'sthr_primary'
+             AND cancelled_at IS NOT NULL`,
+      )) {
+        cancelled = row.n as number;
+      }
+      // Lifecycle events written by interrupt handler.
+      const lifecycle: string[] = [];
+      for (const row of state.storage.sql.exec(
+        `SELECT type FROM events
+           WHERE type IN ('user.interrupt', 'session.status_idle', 'session.error')
+           ORDER BY seq`,
+      )) {
+        lifecycle.push(row.type as string);
+      }
+      return { pending, cancelled, lifecycle };
+    });
+    expect(after.pending).toBe(0);
+    expect(after.cancelled).toBe(3);
+    // Interrupt + idle should be there. session.error must NOT —
+    // user.interrupt is control flow, not error.
+    expect(after.lifecycle).toContain("user.interrupt");
+    expect(after.lifecycle).toContain("session.status_idle");
+    expect(after.lifecycle).not.toContain("session.error");
+  });
+
+  // ─── Cross-thread flush isolation (data-level) ─────────────────────
+  // The earlier "user.interrupt with session_thread_id aborts only
+  // the matching turn" test covers AbortController scoping. This one
+  // covers the SQL UPDATE: cancelling sthr_X must not touch sthr_Y's
+  // pending rows.
+  it("user.interrupt on sthr_X leaves sthr_Y pending events untouched", async () => {
+    const stub = freshDoStub("interrupt_cross_data");
+    await seedSchemaAndState(stub);
+
+    await runInDurableObject(stub, (_inst, state) => {
+      // 2 pending on subA, 2 pending on subB.
+      for (const t of ["sthr_subA", "sthr_subB"]) {
+        for (let i = 1; i <= 2; i++) {
+          state.storage.sql.exec(
+            `INSERT INTO events (type, data, processed_at, session_thread_id)
+             VALUES ('user.message', ?, NULL, ?)`,
+            JSON.stringify({ type: "user.message", content: [{ type: "text", text: `${t}-${i}` }] }),
+            t,
+          );
+        }
+      }
+    });
+
+    // Interrupt subA only.
+    const res = await stub.fetch(
+      new Request("http://internal/event", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          type: "user.interrupt",
+          session_thread_id: "sthr_subA",
+        }),
+      }),
+    );
+    expect([200, 202]).toContain(res.status);
+
+    const state = await runInDurableObject(stub, (_inst, s) => {
+      const counts: Record<string, { pending: number; cancelled: number }> = {};
+      for (const t of ["sthr_subA", "sthr_subB"]) {
+        let pending = 0;
+        let cancelled = 0;
+        for (const row of s.storage.sql.exec(
+          `SELECT processed_at, cancelled_at FROM events
+             WHERE type = 'user.message' AND session_thread_id = ?`,
+          t,
+        )) {
+          if (row.cancelled_at != null) cancelled += 1;
+          else if (row.processed_at == null) pending += 1;
+        }
+        counts[t] = { pending, cancelled };
+      }
+      return counts;
+    });
+    expect(state.sthr_subA).toEqual({ pending: 0, cancelled: 2 });
+    expect(state.sthr_subB).toEqual({ pending: 2, cancelled: 0 });
+  });
+
   it("broadcastStreamEnd('completed') does NOT inject placeholder agent.message", async () => {
     // Successful stream-end is the harness's job to follow up with
     // the canonical agent.message via the normal step-finish path.
