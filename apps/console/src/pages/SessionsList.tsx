@@ -419,7 +419,17 @@ export function SessionsList() {
           )}
           <div>
             <label className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></label>
-            <input value={form.title} onChange={(e) => setForm({ ...form, title: e.target.value })} className={inputCls} placeholder="My conversation" />
+            {/* autoComplete=off + an unrecognised name to defeat Chrome /
+                Safari email autofill — first text input in the dialog
+                got pre-filled with the user's saved email otherwise. */}
+            <input
+              value={form.title}
+              onChange={(e) => setForm({ ...form, title: e.target.value })}
+              className={inputCls}
+              placeholder="My conversation"
+              autoComplete="off"
+              name="oma-session-title"
+            />
           </div>
 
           {vaults.length > 0 && (
