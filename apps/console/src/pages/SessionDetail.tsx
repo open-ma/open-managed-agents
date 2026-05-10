@@ -613,15 +613,22 @@ export function SessionDetail() {
                 nonUserSeen[i] = seen;
                 if (!filtered[i].type?.startsWith("user.")) seen = true;
               }
-              // Pre-pair agent.tool_use ↔ agent.tool_result so the bubble
-              // renders one collapsible card per tool call instead of two
-              // disconnected blocks. Standalone results (no matching use
-              // — shouldn't happen in practice but guard) still render
-              // alone via the orphan path below.
+              // Pre-pair tool_use ↔ result events. Three flavors per the
+              // wire spec emitted in default-loop.ts:emitToolCallEvent /
+              // emitToolResultEvent:
+              //   • builtin tools  → agent.tool_use         + agent.tool_result        (key: tool_use_id)
+              //   • custom tools   → agent.custom_tool_use  + agent.tool_result        (key: tool_use_id) ← same result type
+              //   • MCP tools      → agent.mcp_tool_use     + agent.mcp_tool_result    (key: mcp_tool_use_id)
+              // The previous pairing only covered builtin → custom tools
+              // (e.g. general_subagent) showed their result as an "unpaired"
+              // orphan block because the use side was custom_tool_use.
               const resultByToolUseId = new Map<string, typeof filtered[number]>();
               for (const ev of filtered) {
                 if (ev.type === "agent.tool_result") {
                   const id = (ev as { tool_use_id?: string }).tool_use_id;
+                  if (id) resultByToolUseId.set(id, ev);
+                } else if (ev.type === "agent.mcp_tool_result") {
+                  const id = (ev as { mcp_tool_use_id?: string }).mcp_tool_use_id;
                   if (id) resultByToolUseId.set(id, ev);
                 }
               }
@@ -639,15 +646,28 @@ export function SessionDetail() {
                   (e as { id?: string }).id
                   ?? (e as { seq?: number }).seq
                   ?? `idx-${e.type}-${i}`;
-                // Tool-result that's been folded into its tool_use card —
-                // skip standalone render.
+                // Tool-result that's been folded into its use card —
+                // skip standalone render. Both wire shapes: agent.tool_result
+                // (covers builtin + custom) keys on tool_use_id;
+                // agent.mcp_tool_result keys on mcp_tool_use_id.
                 if (e.type === "agent.tool_result") {
                   const tuid = (e as { tool_use_id?: string }).tool_use_id;
                   if (tuid && pairedResultIds.has(tuid)) return null;
                 }
-                // Tool-use: pair with its result if present, render as one card.
+                if (e.type === "agent.mcp_tool_result") {
+                  const tuid = (e as { mcp_tool_use_id?: string }).mcp_tool_use_id;
+                  if (tuid && pairedResultIds.has(tuid)) return null;
+                }
+                // Tool-use of any flavor: pair with its result if present,
+                // render as one card. All three use-types carry the
+                // call id on EventBase.id (overrides the inherited field
+                // per emitToolCallEvent), so the lookup is uniform.
                 let pairedResult: typeof filtered[number] | undefined;
-                if (e.type === "agent.tool_use") {
+                if (
+                  e.type === "agent.tool_use"
+                  || e.type === "agent.custom_tool_use"
+                  || e.type === "agent.mcp_tool_use"
+                ) {
                   const tuid = (e as { id?: string }).id;
                   if (tuid && resultByToolUseId.has(tuid)) {
                     pairedResult = resultByToolUseId.get(tuid);
@@ -1281,11 +1301,16 @@ function EventBubble({
       );
     }
 
-    case "agent.tool_use": {
+    case "agent.tool_use":
+    case "agent.custom_tool_use":
+    case "agent.mcp_tool_use": {
       // Compact one-liner header: tool name + a short input preview so
       // operators can scan a long conversation without expanding every
       // call. Expanded view shows full input JSON and (when paired) the
       // matching result inline — single visual block per tool call.
+      // All three use-types share the same shape (id + name + input);
+      // MCP additionally carries mcp_server_name which we surface as a
+      // small label so operators can tell built-in vs MCP at a glance.
       const inputPreview = (() => {
         const obj = event.input as Record<string, unknown> | undefined;
         if (!obj || typeof obj !== "object") return "";
@@ -1316,6 +1341,11 @@ function EventBubble({
               <path strokeLinecap="round" strokeLinejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
             </svg>
             <span className="font-mono text-xs text-fg shrink-0">{event.name}</span>
+            {event.type === "agent.mcp_tool_use" && (event as { mcp_server_name?: string }).mcp_server_name && (
+              <span className="text-[10px] text-fg-subtle font-mono uppercase tracking-wide bg-bg-muted rounded px-1 py-0.5 shrink-0">
+                mcp · {(event as { mcp_server_name: string }).mcp_server_name}
+              </span>
+            )}
             {inputPreview && (
               <span className="text-xs text-fg-subtle truncate">
                 {inputPreview.length > 80 ? inputPreview.slice(0, 80) + "…" : inputPreview}
