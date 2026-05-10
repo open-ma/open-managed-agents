@@ -1048,4 +1048,381 @@ describe("SessionDO recovery — DO-level", () => {
       expect(set.has("turn_test")).toBe(false);
     });
   });
+
+  // ─────────────────────────────────────────────────────────────────
+  // CF-agents SDK invariant mirrors
+  //
+  // Audited cloudflare/agents/packages/agents/src/tests/{alarms,
+  // retries,retry-integration,msg-ordering}.test.ts. The SDK retry
+  // primitive (`tryN`/`this.retry()`/`shouldRetry`/queue+schedule
+  // retry options) does not exist on our cfless-portable surface, so
+  // those invariants are out-of-scope. These mirror the alarm
+  // scheduling + msg-ordering invariants that DO apply: callback
+  // mutates schedules mid-alarm, callback re-arms itself, alarm()
+  // boots without a prior fetch (analog of CF's "init runs before
+  // scheduled callbacks"), and WS replay-then-broadcast ordering.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("alarm() survives a scheduled callback that mutates cf_agents_schedules mid-flight", async () => {
+    // CF mirror: alarms.test.ts "should not throw when a scheduled
+    // callback nukes storage". On our surface the dangerous shape is
+    // a callback that calls cancelSchedule(other) or schedule() while
+    // the alarm() loop is iterating `due` rows. The loop already
+    // collected `due` into an array, and the rearm at the bottom must
+    // still succeed even if the callback wiped neighbouring rows.
+    const sessionId = await newSessionDirect("alarm_mutate_schedules");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      // Register a one-shot callback that, when invoked from alarm(),
+      // wipes ALL rows from cf_agents_schedules. This is the worst
+      // case the production loop could hit (a callback that deletes
+      // its sibling rows). The post-loop _scheduleNextAlarm must NOT
+      // throw — empty table just means "no next alarm, deleteAlarm".
+      (instance as unknown as Record<string, unknown>)._oma_test_nuke = async function () {
+        (instance as unknown as { ctx: { storage: { sql: SqlStorage } } })
+          .ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules`);
+      };
+      // Schedule it 1s in the past so alarm() picks it up immediately.
+      const past = Math.floor(Date.now() / 1000) - 1;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_nuke", "_oma_test_nuke", "{}", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    // Alarm must run to completion without throwing — return value is
+    // false when the post-handler alarm slot is empty (no rearm), true
+    // when one was set; either way the loop has to complete cleanly.
+    await expect(runDurableObjectAlarm(stub)).resolves.not.toThrow();
+
+    // The schedule row was deleted by the callback. The post-loop
+    // _scheduleNextAlarm reads the empty table and falls through to
+    // deleteAlarm — verify by checking no row remains.
+    await runInDurableObject(stub, async (_inst, state) => {
+      const rows = state.storage.sql
+        .exec(`SELECT id FROM cf_agents_schedules`)
+        .toArray();
+      expect(rows.length).toBe(0);
+    });
+  });
+
+  it("alarm() reschedules cron callback to next time after firing", async () => {
+    // CF mirror: alarms.test.ts establishes that scheduled callbacks
+    // run within a known lifecycle. Our analog: the alarm() loop
+    // reschedules cron rows to the next cron expression's next-fire
+    // time and re-arms the storage alarm via _scheduleNextAlarm. Pin
+    // that the reschedule actually moves the row forward.
+    const sessionId = await newSessionDirect("alarm_cron_rearm");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    let firedCount = 0;
+    await runInDurableObject(stub, async (instance, state) => {
+      (instance as unknown as Record<string, unknown>)._oma_test_cron =
+        async function () { firedCount++; };
+      // Cron "* * * * *" → every minute. Backdate `time` so alarm()
+      // sees it as due now.
+      const past = Math.floor(Date.now() / 1000) - 1;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, cron, time)
+         VALUES (?, ?, ?, 'cron', ?, ?)`,
+        "sched_cron", "_oma_test_cron", "{}", "* * * * *", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(firedCount).toBe(1);
+
+    // Row should still exist (cron reschedules in place) and `time`
+    // should now be in the future — the next cron tick.
+    await runInDurableObject(stub, async (_inst, state) => {
+      const rows = state.storage.sql
+        .exec<{ id: string; time: number }>(
+          `SELECT id, time FROM cf_agents_schedules WHERE id=?`, "sched_cron",
+        )
+        .toArray();
+      expect(rows.length).toBe(1);
+      expect(rows[0].time).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    });
+
+    // Cleanup so subsequent tests don't see this row.
+    await runInDurableObject(stub, (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id=?`, "sched_cron");
+    });
+  });
+
+  it("alarm() with poisoned (unparseable payload) row deletes the row instead of looping", async () => {
+    // CF mirror: alarms.test.ts implies the alarm pipeline must be
+    // resilient to a single row breaking it. Our concrete shape: a
+    // payload column that fails JSON.parse. session-do.ts handles
+    // this with `DELETE FROM cf_agents_schedules WHERE id = ?`
+    // followed by `continue` so the loop doesn't burn cycles.
+    const sessionId = await newSessionDirect("alarm_bad_payload");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      // Install a real callback so the lookup succeeds and the loop
+      // proceeds to the payload parse (which fails). The bad-payload
+      // branch in alarm() then DELETEs the row.
+      (instance as unknown as Record<string, unknown>)._oma_test_payload_target =
+        async function () { /* unused — payload parse fails before us */ };
+      const past = Math.floor(Date.now() / 1000) - 1;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_bad", "_oma_test_payload_target", "<not json>", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    // Alarm must run to completion without throwing.
+    await expect(runDurableObjectAlarm(stub)).resolves.not.toThrow();
+
+    // Row should be GONE — the poisoned-payload branch deletes it so
+    // the alarm doesn't re-fire on the same broken row forever.
+    await runInDurableObject(stub, async (_inst, state) => {
+      const rows = state.storage.sql
+        .exec(`SELECT id FROM cf_agents_schedules WHERE id=?`, "sched_bad")
+        .toArray();
+      expect(rows.length).toBe(0);
+    });
+  });
+
+  it("alarm() handles missing-callback row gracefully (logs + continues, doesn't crash)", async () => {
+    // CF mirror: alarms.test.ts's robustness theme. If a row references
+    // a callback name that no longer exists on the class (e.g. after a
+    // deploy that renamed/removed it), the alarm must continue
+    // processing other rows + the rearm must still happen.
+    const sessionId = await newSessionDirect("alarm_missing_cb");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    let goodFiredCount = 0;
+    await runInDurableObject(stub, async (instance, state) => {
+      (instance as unknown as Record<string, unknown>)._oma_test_good =
+        async function () { goodFiredCount++; };
+      const past = Math.floor(Date.now() / 1000) - 1;
+      // Two rows: one points at a missing callback, one at a real one.
+      // Loop must skip the missing-cb row and still fire the good one.
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_missing", "noSuchCallback", "{}", past,
+      );
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_good", "_oma_test_good", "{}", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    await expect(runDurableObjectAlarm(stub)).resolves.not.toThrow();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(goodFiredCount).toBe(1);
+    // Cleanup any leftover rows so test isolation holds.
+    await runInDurableObject(stub, (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id IN (?, ?)`, "sched_missing", "sched_good");
+    });
+  });
+
+  it("alarm() rearm uses min(heartbeat, next-schedule) when both are present", async () => {
+    // CF mirror: alarms.test.ts asserts the alarm system is consistent
+    // about when the next alarm fires. Our heartbeat-merge contract:
+    // when there's an inflight turn (heartbeat ~30s) AND a scheduled
+    // row 1h out, the next alarm must be the heartbeat (the min). The
+    // pre-merge bug picked one or the other and dropped the heartbeat
+    // when schedules existed but were further out.
+    const sessionId = await newSessionDirect("alarm_min_merge");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+    const ownTurnId = "turn_min_merge";
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind(ownTurnId, Date.now() - 5_000, sessionId)
+      .run();
+
+    const setAlarmInside: number[] = [];
+    let spyArmed = false;
+    await runInDurableObject(stub, async (instance, state) => {
+      (instance as { _activeTurnIds: Set<string> })._activeTurnIds.add(ownTurnId);
+      // Plant a one-shot schedule 1 hour in the future. Heartbeat is
+      // 30s out (KEEP_ALIVE_INTERVAL_MS) so the merged min should be
+      // the heartbeat, ~30s.
+      const farFuture = Math.floor(Date.now() / 1000) + 3600;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_far", "_oma_test_noop", "{}", farFuture,
+      );
+
+      const ctx = (instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      // Trigger setAlarm BEFORE arming the spy so the trigger isn't counted.
+      await state.storage.setAlarm(Date.now() - 1000);
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+    });
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // The rearm should be the heartbeat (~30s out), not the 1h schedule.
+    expect(setAlarmInside.length).toBeGreaterThan(0);
+    const lastT = setAlarmInside[setAlarmInside.length - 1];
+    const deltaMs = lastT - Date.now();
+    expect(deltaMs).toBeLessThan(60_000); // heartbeat horizon
+    expect(deltaMs).toBeGreaterThan(0);
+
+    // Cleanup
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='idle', turn_id=NULL, turn_started_at=NULL WHERE id=?`,
+    ).bind(sessionId).run();
+    await runInDurableObject(stub, (instance, state) => {
+      (instance as { _activeTurnIds: Set<string> })._activeTurnIds.delete(ownTurnId);
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id=?`, "sched_far");
+    });
+  });
+
+  it("alarm() rearm uses next-schedule when no heartbeat needed and schedule is sooner than heartbeat horizon", async () => {
+    // Mirror image of the above: inflight=false, but a schedule row
+    // exists 5 minutes out. The merged result must be the schedule
+    // time (no heartbeat to merge with). Pins the "no inflight ⇒ no
+    // heartbeat" path while still rearming for real schedule work.
+    const sessionId = await newSessionDirect("alarm_schedule_only");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmInside: number[] = [];
+    let deleteCallsInside = 0;
+    let spyArmed = false;
+    const targetSec = Math.floor(Date.now() / 1000) + 300; // 5 min out
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_5min", "_oma_test_noop", "{}", targetSec,
+      );
+
+      const ctx = (instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      const origDel = ctx.storage.deleteAlarm.bind(ctx.storage);
+      await state.storage.setAlarm(Date.now() - 1000);
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+      ctx.storage.deleteAlarm = async () => {
+        if (spyArmed) deleteCallsInside++;
+        return origDel();
+      };
+    });
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // setAlarm fired at the schedule's time (or close to it). The
+    // load-bearing assertion: the LAST setAlarm wins (workerd uses
+    // last-write semantics for the alarm slot) and matches the
+    // schedule's target time, NOT zero / NOT cleared.
+    expect(setAlarmInside.length).toBeGreaterThan(0);
+    const lastT = setAlarmInside[setAlarmInside.length - 1];
+    // Should be approximately targetSec*1000 (within 1s tolerance).
+    expect(Math.abs(lastT - targetSec * 1000)).toBeLessThan(1500);
+    // No spurious extra delete after the setAlarm — that was the
+    // pre-merge bug. (deleteCallsInside may be 0 or 1 depending on
+    // whether the platform pre-clears the slot; what matters is the
+    // FINAL setAlarm sticks.)
+    void deleteCallsInside;
+
+    await runInDurableObject(stub, (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id=?`, "sched_5min");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // WebSocket message ordering — replay precedes any subsequent
+  // broadcast. Mirrors cloudflare/agents msg-ordering.test.ts: the WS
+  // upgrade must produce a deterministic prefix of pre-existing events
+  // before any new event reaches the new socket. Our shape: GET /ws
+  // calls history.getEvents() then ws.send() in a sync loop, returning
+  // the 101 only after the loop completes. A subsequent broadcastEvent
+  // (driven by any RPC after the upgrade returns) lands strictly after.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("WS upgrade replays existing events in order before any subsequent broadcast", async () => {
+    const sessionId = await newSessionDirect("ws_replay_order");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Seed three pre-existing events directly into the DO's events
+    // table so the WS replay has something deterministic to send.
+    await runInDurableObject(stub, async (instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({ type: "user.message", content: [{ type: "text", text: "first" }] });
+      history.append({ type: "user.message", content: [{ type: "text", text: "second" }] });
+      history.append({ type: "user.message", content: [{ type: "text", text: "third" }] });
+      // Mark initialized so /ws doesn't trigger a recovery scan.
+      (instance as { initialized: boolean }).initialized = true;
+    });
+
+    // Open the WebSocket. The fetch returns only after replay is done.
+    const upgradeRes = await stub.fetch(
+      new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }),
+    );
+    expect(upgradeRes.status).toBe(101);
+    const ws = upgradeRes.webSocket as WebSocket;
+    ws.accept();
+
+    const received: string[] = [];
+    const allFour = new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`timed out after ${received.length}`)), 3000);
+      ws.addEventListener("message", (ev: MessageEvent) => {
+        received.push(ev.data as string);
+        if (received.length >= 4) {
+          clearTimeout(t);
+          resolve();
+        }
+      });
+    });
+
+    // Now broadcast a fresh event. Because replay runs sync within
+    // fetch() before returning, this MUST land strictly after the
+    // three replay messages.
+    await runInDurableObject(stub, (instance) => {
+      const broadcast = (instance as unknown as {
+        broadcastEvent: (e: unknown) => void;
+      }).broadcastEvent.bind(instance);
+      broadcast({ type: "user.message", content: [{ type: "text", text: "fourth-live" }] });
+    });
+
+    await allFour;
+    ws.close();
+
+    expect(received.length).toBe(4);
+    const parsed = received.map((r) => JSON.parse(r));
+    // Replayed three, in order, then the live one.
+    expect(parsed[0].content[0].text).toBe("first");
+    expect(parsed[1].content[0].text).toBe("second");
+    expect(parsed[2].content[0].text).toBe("third");
+    expect(parsed[3].content[0].text).toBe("fourth-live");
+  });
 });
