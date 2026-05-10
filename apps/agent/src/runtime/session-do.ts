@@ -3533,6 +3533,16 @@ export class SessionDO extends DurableObject<Env> {
 
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
+    // Status-pair invariant: every status_running emit (line ~3889
+    // below) MUST be followed by exactly one status_idle emit before
+    // this function returns. The success path emits at line ~4067; the
+    // error paths historically didn't, leaving Console showing
+    // "Running" forever even after adapter.endTurn flipped the D1 row
+    // to 'idle' (Console derives the pill from SSE events, not D1
+    // polling). Tracked via this flag — finally emits if no earlier
+    // path did.
+    let idleEmitted = false;
+
     // Reuse session-level sandbox (singleton) — files persist across turns.
     // Returned object is a lazy proxy: the underlying container is warmed up
     // on first method call, in parallel with model fetch / TTFT. Cron-only
@@ -4066,12 +4076,17 @@ export class SessionDO extends DurableObject<Env> {
       };
       history.append(idleEvent);
       this.broadcastEvent(idleEvent);
+      idleEmitted = true;
     } catch (err) {
       const errorMessage = this.describeError(err);
 
       // Don't retry if aborted
       if (err instanceof Error && err.name === "AbortError") {
-        // Interrupt was handled — don't emit error
+        // Interrupt handler (POST /event user.interrupt branch) already
+        // appended its own session.status_idle synchronously before
+        // the abort propagated, so the finally block must NOT emit a
+        // second one — this flag suppresses the duplicate.
+        idleEmitted = true;
         return;
       }
 
@@ -4118,6 +4133,22 @@ export class SessionDO extends DurableObject<Env> {
       // mutex'd by _draining so this is theoretical safety only.
       if (this._threadAbortControllers.get(turnThreadId) === abortController) {
         this._threadAbortControllers.delete(turnThreadId);
+      }
+      // Catch-all status_idle emit. Pairs with the status_running emit
+      // at the start of this function so Console's status pill never
+      // hangs at "Running" after the turn dies in any non-AbortError
+      // way (model crash, transient retries exhausted, anything that
+      // hits the catch block above without already setting idleEmitted).
+      // No stop_reason — error paths don't have a meaningful one and
+      // the field is optional in SessionStatusEvent.
+      if (!idleEmitted) {
+        try {
+          const idleEvent: SessionEvent = { type: "session.status_idle" };
+          history.append(idleEvent);
+          this.broadcastEvent(idleEvent);
+        } catch (err) {
+          console.warn(`[processUserMessage] catch-all idle emit failed:`, err);
+        }
       }
       // Status auto-derives — Workspace backup is fired by
       // OmaSandbox.onActivityExpired when the container's sleepAfter
