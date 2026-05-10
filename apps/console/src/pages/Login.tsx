@@ -427,6 +427,13 @@ export function Login() {
                 placeholder="you@example.com"
                 required
                 autoFocus
+                // Explicit role so browser keeps autofill scoped to
+                // sign-in fields and doesn't spread it to arbitrary
+                // text inputs on other pages (Sessions Title /
+                // ListPage search). HTML5 spec: "username" is the
+                // canonical token for sign-in identifier.
+                name="email"
+                autoComplete={mode === "signup" ? "email" : "username"}
               />
             </div>
           )}
@@ -457,6 +464,11 @@ export function Login() {
                 placeholder="Min 8 characters"
                 required
                 minLength={8}
+                name="password"
+                // current-password for login (pw managers offer to
+                // fill); new-password for signup (suggest strong + skip
+                // fill).
+                autoComplete={mode === "login" ? "current-password" : "new-password"}
               />
             </div>
           )}
@@ -499,6 +511,8 @@ export function Login() {
                 placeholder="Min 8 characters"
                 required
                 minLength={8}
+                name="new-password"
+                autoComplete="new-password"
               />
             </div>
           )}
