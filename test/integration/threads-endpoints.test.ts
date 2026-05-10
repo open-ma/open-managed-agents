@@ -753,4 +753,165 @@ describe("threads HTTP endpoints", () => {
     });
   });
 
+  // ─── recoverEventQueue safety-net (alarm path) ─────────────────────
+  // Triggered by the 5-second `recoverEventQueue` schedule armed by
+  // POST /event. Guards against the case where the primary in-band
+  // drain (drainEventQueue called from the POST handler) didn't catch
+  // up before DO eviction. The contract:
+  //   1. SELECT DISTINCT session_thread_id over the partial pending
+  //      index → one entry per thread with pending events.
+  //   2. Promise.all kicks off drainEventQueue per thread (no global
+  //      mutex; per-thread mutex from _draining set keeps each call
+  //      isolated).
+  //   3. Empty pending set → defensive primary drain (cheap no-op).
+  it("recoverEventQueue drains every thread that has pending events", async () => {
+    // Spy on drainEventQueue: confirms recoverEventQueue dispatched a
+    // call for each thread with pending rows (3 distinct thread ids).
+    const stub = freshDoStub("recover_multi_thread");
+    await seedSchemaAndState(stub);
+
+    const result = await runInDurableObject(stub, async (instance) => {
+      // Seed pending events on 3 different threads. Includes a 3rd
+      // thread (sthr_subC) we manufacture inline, plus pre-existing
+      // sthr_subA + sthr_primary from the seed helper.
+      const sql = (instance as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql;
+      sql.exec(
+        `INSERT INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
+         VALUES ('sthr_subC', 'agent_worker', 'WorkerC', 'sthr_primary', ?)`,
+        Date.now() - 1000,
+      );
+      for (const tid of ["sthr_primary", "sthr_subA", "sthr_subC"]) {
+        sql.exec(
+          `INSERT INTO events (type, data, processed_at, session_thread_id)
+           VALUES ('user.message', ?, NULL, ?)`,
+          JSON.stringify({ type: "user.message", content: [{ type: "text", text: `pending on ${tid}` }] }),
+          tid,
+        );
+      }
+
+      // Spy: replace drainEventQueue with a capture wrapper. Returns
+      // immediately so we don't accidentally fire a real LLM turn.
+      const calls: string[] = [];
+      (instance as { drainEventQueue: (t: string) => Promise<void> }).drainEventQueue = async (
+        threadId: string,
+      ) => {
+        calls.push(threadId);
+      };
+
+      await (instance as { recoverEventQueue: () => Promise<void> }).recoverEventQueue();
+      return { calls };
+    });
+    // All three thread ids should have been drained. Order isn't
+    // guaranteed (Promise.all + DISTINCT scan order is implementation-
+    // defined), so compare as a set.
+    expect(new Set(result.calls)).toEqual(
+      new Set(["sthr_primary", "sthr_subA", "sthr_subC"]),
+    );
+  });
+
+  it("recoverEventQueue with no pending events runs a defensive primary drain", async () => {
+    // Empty pending set: the cursor returns zero rows. Implementation
+    // falls back to a single drainEventQueue("sthr_primary") call so
+    // the alarm tail isn't wasted — the partial-index lookup inside
+    // drainEventQueue early-returns when there's nothing to do.
+    const stub = freshDoStub("recover_empty");
+    await seedSchemaAndState(stub);
+
+    const result = await runInDurableObject(stub, async (instance) => {
+      const calls: string[] = [];
+      (instance as { drainEventQueue: (t: string) => Promise<void> }).drainEventQueue = async (
+        threadId: string,
+      ) => {
+        calls.push(threadId);
+      };
+      await (instance as { recoverEventQueue: () => Promise<void> }).recoverEventQueue();
+      return { calls };
+    });
+    expect(result.calls).toEqual(["sthr_primary"]);
+  });
+
+  it("recoverEventQueue DISTINCT query collapses duplicate thread ids", async () => {
+    // Multiple pending rows per thread → only one drain call per
+    // thread. SELECT DISTINCT session_thread_id is the contract.
+    // Without it, a thread with N queued messages would trigger N
+    // parallel drain attempts (each early-returning thanks to the
+    // _draining mutex, but wasteful).
+    const stub = freshDoStub("recover_distinct");
+    await seedSchemaAndState(stub);
+
+    const result = await runInDurableObject(stub, async (instance) => {
+      const sql = (instance as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql;
+      // 5 pending on primary + 3 pending on subA = 8 rows, 2 threads.
+      for (let i = 0; i < 5; i++) {
+        sql.exec(
+          `INSERT INTO events (type, data, processed_at, session_thread_id)
+           VALUES ('user.message', ?, NULL, 'sthr_primary')`,
+          JSON.stringify({ type: "user.message", content: [{ type: "text", text: `p${i}` }] }),
+        );
+      }
+      for (let i = 0; i < 3; i++) {
+        sql.exec(
+          `INSERT INTO events (type, data, processed_at, session_thread_id)
+           VALUES ('user.message', ?, NULL, 'sthr_subA')`,
+          JSON.stringify({ type: "user.message", content: [{ type: "text", text: `a${i}` }] }),
+        );
+      }
+      const calls: string[] = [];
+      (instance as { drainEventQueue: (t: string) => Promise<void> }).drainEventQueue = async (
+        threadId: string,
+      ) => {
+        calls.push(threadId);
+      };
+      await (instance as { recoverEventQueue: () => Promise<void> }).recoverEventQueue();
+      return { calls };
+    });
+    // Exactly 2 calls (one per thread), not 8.
+    expect(result.calls.length).toBe(2);
+    expect(new Set(result.calls)).toEqual(new Set(["sthr_primary", "sthr_subA"]));
+  });
+
+  it("two parallel recoverEventQueue calls don't double-drain a thread", async () => {
+    // Re-entrant safety: the alarm could fire while a prior alarm-
+    // dispatched drain is still in flight. Per-thread mutex (_draining
+    // Set) absorbs the second attempt — drainEventQueue's early-return
+    // when this._draining.has(threadId) is the load-bearing line. We
+    // verify the contract by parking a thread in the mutex and proving
+    // a fresh recoverEventQueue → drain dispatch sees the early-return
+    // (call still happens, but the body doesn't re-add to the set).
+    const stub = freshDoStub("recover_reentrant");
+    await seedSchemaAndState(stub);
+
+    const result = await runInDurableObject(stub, async (instance) => {
+      const sql = (instance as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql;
+      sql.exec(
+        `INSERT INTO events (type, data, processed_at, session_thread_id)
+         VALUES ('user.message', ?, NULL, 'sthr_primary')`,
+        JSON.stringify({ type: "user.message", content: [{ type: "text", text: "x" }] }),
+      );
+      const drainSet = (instance as { _draining: Set<string> })._draining;
+      // Park primary in the mutex — simulates "first alarm's drain
+      // is still mid-flight."
+      drainSet.add("sthr_primary");
+      // Spy on _draining.add — only ONE entry (the one we pre-set)
+      // should remain after recoverEventQueue runs the real
+      // drainEventQueue, because the early-return inside
+      // drainEventQueue skips the body's `add(threadId)` call.
+      const adds: string[] = [];
+      const originalAdd = drainSet.add.bind(drainSet);
+      drainSet.add = (item: string) => {
+        adds.push(item);
+        return originalAdd(item);
+      };
+
+      await (instance as { recoverEventQueue: () => Promise<void> }).recoverEventQueue();
+      drainSet.delete("sthr_primary"); // cleanup
+      return { adds };
+    });
+    // No re-add of sthr_primary by drainEventQueue's body — the
+    // early-return tripped before the add. (The pre-set we did at
+    // setup time happens before the spy is installed, so it doesn't
+    // appear in `adds`.)
+    expect(result.adds).not.toContain("sthr_primary");
+  });
+
 });
