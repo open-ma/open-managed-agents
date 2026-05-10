@@ -583,14 +583,44 @@ export function SessionDetail() {
         <>
           {/* Events */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
-            {events
-              .filter((e) => {
+            {(() => {
+              // Per-thread "still pending" derivation. The wire-level
+              // `processed_at_ms` only flips when the agent picks an
+              // event up server-side; Console gets the user.message via
+              // SSE BEFORE drain runs, so processed_at_ms is null at
+              // arrival and never updates live (no re-broadcast on
+              // server-side UPDATE). Without this client derive the
+              // hourglass would stay forever even while the agent is
+              // streaming a reply.
+              //
+              // Heuristic: a user.message is "really" pending only if
+              // no later event on the same thread is non-user (i.e. no
+              // agent.* / span.* / session.status_idle has followed).
+              // As soon as the agent emits anything for this thread,
+              // the user message is no longer awaiting ingestion.
+              const filtered = events.filter((e) => {
                 const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
                 return tid === activeThreadId;
-              })
-              .map((e, i) => (
-                <EventBubble key={i} event={e} />
-              ))}
+              });
+              // For each user.* event index, find whether any later
+              // index in the same filtered array is a non-user event.
+              // O(n) — single right-to-left pass tracking "have we
+              // seen a non-user event yet" per thread; works because
+              // we're already filtered to one thread.
+              const nonUserSeen: boolean[] = new Array(filtered.length).fill(false);
+              let seen = false;
+              for (let i = filtered.length - 1; i >= 0; i--) {
+                nonUserSeen[i] = seen;
+                if (!filtered[i].type?.startsWith("user.")) seen = true;
+              }
+              return filtered.map((e, i) => (
+                <EventBubble
+                  key={i}
+                  event={e}
+                  livePending={!nonUserSeen[i]}
+                />
+              ));
+            })()}
             {/* In-flight thinking streams. Render before message/tool
                 streams so the visual order roughly matches what the
                 LLM produced (Anthropic emits reasoning before text/tool). */}
@@ -1076,17 +1106,38 @@ function ToolInputStreamingBubble({ name, partial }: { name?: string; partial: s
   );
 }
 
-function EventBubble({ event }: { event: Event }) {
+function EventBubble({
+  event,
+  livePending = false,
+}: {
+  event: Event;
+  /**
+   * Caller-derived "no agent.* event has followed this user.* event
+   * yet on the same thread" hint. The wire-level processed_at_ms
+   * doesn't update live (no SSE re-broadcast on server UPDATE), so
+   * we combine: pending iff (livePending AND wire-level says NULL)
+   * OR (livePending true and we have no wire info yet). When livePending
+   * is false we KNOW the agent has responded — drop the hourglass
+   * regardless of wire state, otherwise the bubble would stay pending
+   * for the entire turn even while the agent is mid-stream.
+   */
+  livePending?: boolean;
+}) {
   const [toolOpen, setToolOpen] = useState(false);
 
   // AMA pending lifecycle (set by event-log adapter from row.processed_at /
-  // row.cancelled_at). Pending = drainEventQueue hasn't picked the event
-  // up yet; cancelled = user.interrupt flushed the queued message before
-  // it ran. Cancelled events stay in the log for audit but the LLM never
-  // sees them (eventsToMessages skips); show them with strikethrough so
-  // operators know the user retracted them.
+  // row.cancelled_at). Cancelled events stay in the log for audit but
+  // the LLM never sees them (eventsToMessages skips); show them with
+  // strikethrough so operators know the user retracted them.
   const meta = event as { processed_at_ms?: number | null; cancelled_at_ms?: number | null };
-  const isPending = meta.processed_at_ms == null && meta.cancelled_at_ms == null;
+  // The hourglass shows when BOTH conditions hold:
+  //   1. Caller says no later non-user event has arrived (livePending)
+  //   2. Wire-level processed_at_ms agrees (still null)
+  // Either condition flipping → no longer pending.
+  const isPending =
+    livePending &&
+    meta.processed_at_ms == null &&
+    meta.cancelled_at_ms == null;
   const isCancelled = meta.cancelled_at_ms != null;
 
   switch (event.type) {

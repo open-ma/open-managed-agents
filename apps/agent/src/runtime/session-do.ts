@@ -1005,9 +1005,22 @@ export class SessionDO extends DurableObject<Env> {
       this.broadcastedMessageIds.clear();
 
       const turnName = `turn:${pendingUserEvent.seq}`;
-      // Capture seq for the finally below — must mark processed even
-      // on error / interrupt so the row doesn't loop forever.
       const pendingSeq = pendingUserEvent.seq;
+      // AMA spec: processed_at = "wall-clock ingestion time", i.e. when
+      // the agent picks the event up — not when the turn finishes.
+      // Set it BEFORE runAgentTurn so:
+      //   1. The next loop iteration's pending-index lookup skips it
+      //      even before the turn completes (defends against any
+      //      interleaved drain re-entry getting past the mutex).
+      //   2. Console + SDK consumers that derive "agent has started
+      //      processing" from `processed_at != null` get the right
+      //      semantic — pre-fix, user.message stayed pending until
+      //      turn end (5–30s), so the UI hourglass never went away
+      //      while the agent was already streaming a reply.
+      this.ctx.storage.sql.exec(
+        `UPDATE events SET processed_at = ? WHERE seq = ?`,
+        Date.now(), pendingSeq,
+      );
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
@@ -1088,26 +1101,13 @@ export class SessionDO extends DurableObject<Env> {
         ) {
           this.terminate("billing");
         }
-        // Mark the row processed even on error — without this, a turn
-        // that throws would loop forever (next iteration finds the same
-        // pending row again). "Processed" here means "the queue moved
-        // past it", not "succeeded".
-        this.ctx.storage.sql.exec(
-          `UPDATE events SET processed_at = ? WHERE seq = ?`,
-          Date.now(), pendingSeq,
-        );
-        // Status auto-derives from sessions.turn_id once the
-        // RuntimeAdapter.endTurn callback fires. No setState needed.
+        // processed_at was set up-front — no need to re-mark on
+        // catch. Status auto-derives from sessions.turn_id once the
+        // RuntimeAdapter.endTurn callback fires.
         break; // Stop draining on error — let the client decide what to do
       }
-      // Successful turn — mark row processed so the next loop iteration
-      // moves past it. Done outside the try block so a SQL error here
-      // (extremely unlikely — DO SQLite is local) doesn't get caught
-      // and turned into a session.error event.
-      this.ctx.storage.sql.exec(
-        `UPDATE events SET processed_at = ? WHERE seq = ?`,
-        Date.now(), pendingSeq,
-      );
+      // processed_at already set up-front; on success the row is
+      // already out of the pending-index. Just continue the while loop.
     }
     } finally {
       this._draining.delete(threadId);
