@@ -296,22 +296,6 @@ export class SessionDO extends DurableObject<Env> {
   private _activeTurnIds = new Set<string>();
 
   /**
-   * Active keep-alive scopes (sub-agent runs, long tool calls). Pattern
-   * borrowed from cloudflare/agents SDK keepAliveWhile: each entry is
-   * a synthetic id added on enter / removed in finally. The alarm()
-   * handler rearms when `size > 0`, independent of
-   * sessions.status='running' (which only covers supervisor turns —
-   * sub-agents don't write that row).
-   *
-   * Lost on eviction; if the DO comes back via cold-start, the new
-   * instance starts with size=0 and the orphan turn appears via
-   * `sessions.status='running'` instead. Cold-start orphan flush
-   * (separate path) handles those.
-   */
-  private _activeKeepAlive = new Set<number>();
-  private _keepAliveSeq = 0;
-
-  /**
    * Cold-start flush guard. The first fetch() after DO activation
    * triggers _finalizeStaleTurns() once; subsequent fetch()es skip it
    * (alarm() takes over for ongoing detection). false → not yet done.
@@ -1245,30 +1229,6 @@ export class SessionDO extends DurableObject<Env> {
         // safety net in its outer finally if endTurn itself throws.
         // Set.delete on missing key is a no-op.
         this._activeTurnIds.delete(turnId);
-      },
-      // CF DO keep-alive for long-running async work (sub-agents,
-      // long tool calls). Pattern borrowed from cloudflare/agents
-      // SDK's keepAliveWhile: setAlarm at start so CF sees scheduled
-      // work; refresh on each beat; clear in finally. The alarm()
-      // handler reads `_activeKeepAlive > 0` to decide whether to
-      // rearm independently of the sessions.status='running' check —
-      // sub-agents don't write that row, so without this they were
-      // invisible to the rearm logic and got their parent DO evicted
-      // mid-flight.
-      keepAliveWhile: async <T>(fn: () => Promise<T>): Promise<T> => {
-        // Generate id first (cheap; can't throw). The Set.add and
-        // setAlarm both go inside try so a synchronous throw at
-        // either site still hits finally and clears the ref —
-        // belt-and-braces (neither call should throw in practice
-        // but the leak would be silent if either ever did).
-        const id = ++this._keepAliveSeq;
-        try {
-          this._activeKeepAlive.add(id);
-          void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
-          return await fn();
-        } finally {
-          this._activeKeepAlive.delete(id);
-        }
       },
     });
     // Provider call only used if sharding is in play; today the lazy
@@ -3495,11 +3455,16 @@ export class SessionDO extends DurableObject<Env> {
           this.creditUsageToThread(threadId, { input_tokens, output_tokens });
         },
         abortSignal: abortController.signal,
-        // Real keep-alive (was identity no-op). Routes through the
-        // RuntimeAdapter so cfless Node SessionRegistry uses identity
-        // (no eviction model) while CF SessionDO heartbeats setAlarm.
-        // Sub-agent runs > 30s previously lost the parent DO mid-stream.
-        keepAliveWhile: <T>(fn: () => Promise<T>) => this.runtimeAdapter.keepAliveWhile!(fn),
+        // Sub-agent runs inside supervisor's harness.run, which is
+        // wrapped by adapter.beginTurn → sessions.status='running' for
+        // the entire nested-await chain. The supervisor's status
+        // marker covers sub-agent execution — no separate keep-alive
+        // needed. (Earlier we routed this through a dedicated
+        // RuntimeAdapter.keepAliveWhile port, but it was redundant
+        // with the supervisor marker; reverted 2026-05-10 after
+        // root-cause analysis pointed at alarm body running LLM
+        // streams as the actual eviction trigger.)
+        keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
@@ -4723,13 +4688,29 @@ export class SessionDO extends DurableObject<Env> {
       const recoveryMs = (recoveringRows[0].execution_started_at + HUNG_SCHEDULE_TIMEOUT_SECONDS) * 1000;
       nextMs = nextMs === null ? recoveryMs : Math.min(nextMs, recoveryMs);
     }
-    // Keep-alive (was: _keepAliveRefs branch) now flows through
-    // hintTurnInFlight → setAlarm at beginTurn, plus the alarm() handler's
-    // own rearm-while-inflight check after _checkOrphanTurns. So
-    // _scheduleNextAlarm only schedules data-driven wakeups (cron / one-
-    // shot wakeups / hung interval recovery). Cleaner separation.
-    if (nextMs !== null) {
-      await this.ctx.storage.setAlarm(nextMs);
+    // Heartbeat-merge: when a turn is in flight (sessions.status =
+    // 'running' — covers supervisor + the entire nested sub-agent
+    // call tree since beginTurn wraps the whole harness.run chain),
+    // we want a heartbeat alarm KEEP_ALIVE_INTERVAL_MS out. Merge it
+    // with any data-driven wakeup so a single setAlarm fires for the
+    // earlier of the two — never two writes, never a stale deleteAlarm
+    // clobbering the heartbeat.
+    //
+    // Pre-merge bug (caught by code review 2026-05-10): the heartbeat
+    // setAlarm and the data-driven setAlarm/deleteAlarm were two
+    // separate calls in sequence. When `cf_agents_schedules` was empty
+    // (the common case for a session not running cron / interval
+    // tasks) the second branch hit deleteAlarm() and silently undid
+    // the heartbeat — DO would not get a wakeup and CF would evict
+    // before the next external request arrived.
+    const wantsHeartbeat = await this._hasInflightTurn();
+    const heartbeatMs = wantsHeartbeat ? Date.now() + KEEP_ALIVE_INTERVAL_MS : null;
+    let mergedNextMs: number | null = nextMs;
+    if (heartbeatMs !== null) {
+      mergedNextMs = mergedNextMs === null ? heartbeatMs : Math.min(mergedNextMs, heartbeatMs);
+    }
+    if (mergedNextMs !== null) {
+      await this.ctx.storage.setAlarm(mergedNextMs);
     } else {
       await this.ctx.storage.deleteAlarm();
     }
@@ -4826,21 +4807,11 @@ export class SessionDO extends DurableObject<Env> {
     // documented stance: "LLM calls are NOT replayed.")
     await this._finalizeStaleTurns();
 
-    // Keep-alive rearm: while either (a) a supervisor turn is in flight
-    // (sessions row marked status='running') or (b) a sub-agent / long
-    // tool call is wrapped in keepAliveWhile, reschedule the alarm 30s
-    // out so the DO doesn't get evicted mid-flight.
-    //
-    // Why both checks: sessions.status only reflects supervisor turns
-    // (set by beginTurn). Sub-agents and long tools don't write that
-    // row — _activeKeepAlive is the in-memory counter for those. After
-    // an eviction _activeKeepAlive is empty and the orphan turn (if
-    // any) appears via the sessions row check, so cold-start recovery
-    // still happens; this OR-rearm only matters for live in-flight
-    // work in the current incarnation.
-    if (this._activeKeepAlive.size > 0 || (await this._hasInflightTurn())) {
-      await this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
-    }
+    // (Keep-alive rearm — sub-agent + supervisor heartbeat — folded
+    // into _scheduleNextAlarm below so it can MERGE with data-driven
+    // wakeups and not get clobbered by the deleteAlarm() branch when
+    // cf_agents_schedules is empty. The merge picks min(heartbeat, next
+    // schedule) so we never sleep past the heartbeat horizon.)
 
     // Container keepalive: while there's at least one background_tasks row,
     // ping the sandbox container to reset its sleepAfter timer. Means

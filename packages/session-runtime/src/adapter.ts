@@ -32,11 +32,6 @@ export interface RuntimeAdapterOptions {
    *  _checkOrphanTurns pass treats a row left behind by an out-of-band
    *  crash as a real orphan. Node leaves it unset. */
   onTurnEnded?: (sessionId: string, turnId: TurnId) => void;
-  /** Long-running keep-alive wrapper. CF: setAlarm-based heartbeat that
-   *  refreshes the eviction horizon for the duration of fn. Node: leave
-   *  unset (identity passthrough at the call site). See ports.ts for the
-   *  contract. */
-  keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
 }
 
 export class RuntimeAdapterImpl implements RuntimeAdapter {
@@ -46,7 +41,6 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
   readonly sandbox?: SandboxExecutor;
   private readonly onTurnInFlight?: (sessionId: string, turnId: TurnId) => void;
   private readonly onTurnEnded?: (sessionId: string, turnId: TurnId) => void;
-  private readonly _keepAliveWhile?: <T>(fn: () => Promise<T>) => Promise<T>;
 
   constructor(opts: RuntimeAdapterOptions) {
     this.sql = opts.sql;
@@ -55,7 +49,6 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
     this.sandbox = opts.sandbox;
     this.onTurnInFlight = opts.onTurnInFlight;
     this.onTurnEnded = opts.onTurnEnded;
-    this._keepAliveWhile = opts.keepAliveWhile;
   }
 
   async beginTurn(sessionId: string, turnId: TurnId): Promise<void> {
@@ -127,11 +120,5 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
 
   hintTurnEnded(sessionId: string, turnId: TurnId): void {
     this.onTurnEnded?.(sessionId, turnId);
-  }
-
-  async keepAliveWhile<T>(fn: () => Promise<T>): Promise<T> {
-    // Default to identity when no platform hook is wired (Node, tests).
-    // CF wires opts.keepAliveWhile to a setAlarm-based heartbeat.
-    return this._keepAliveWhile ? this._keepAliveWhile(fn) : fn();
   }
 }

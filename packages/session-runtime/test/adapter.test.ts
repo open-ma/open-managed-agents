@@ -37,11 +37,6 @@ interface Fixture {
   sql: SqlClient;
   adapter: RuntimeAdapter;
   hintFires: string[];
-  /** keepAliveWhile observer wired into the adapter (CF would do this
-   *  via setAlarm + a refs counter). The fixture mirrors the same
-   *  mechanic in-memory so we can assert refs invariants without
-   *  requiring a real DO. */
-  keepAlive: { refs: number; alarmsSet: number; releases: number };
 }
 
 async function newFixture(): Promise<Fixture> {
@@ -78,30 +73,14 @@ async function newFixture(): Promise<Fixture> {
   const eventLog = new SqlEventLog(sql, "sess_test", () => {});
   const streams = new SqlStreamRepo(sql, "sess_test");
   const hintFires: string[] = [];
-  const keepAlive = { refs: 0, alarmsSet: 0, releases: 0 };
   const adapter = new RuntimeAdapterImpl({
     sql,
     eventLog,
     streams,
     onTurnInFlight: (sid) => hintFires.push(sid),
-    // Mirror CF SessionDO's keepAliveWhile shape: increment refs at
-    // start, fire-and-forget setAlarm, decrement in finally. The
-    // adapter is the contract; the platform decides what setAlarm
-    // means. Tests assert refs invariants only — alarm wiring is
-    // observed via `alarmsSet` counter.
-    keepAliveWhile: async <T>(fn: () => Promise<T>): Promise<T> => {
-      keepAlive.refs++;
-      keepAlive.alarmsSet++;
-      try {
-        return await fn();
-      } finally {
-        keepAlive.refs--;
-        keepAlive.releases++;
-      }
-    },
   });
 
-  return { sql, adapter, hintFires, keepAlive };
+  return { sql, adapter, hintFires };
 }
 
 async function readSession(
@@ -387,104 +366,3 @@ describe("RuntimeAdapter — unified shape (Node + CF)", () => {
   });
 });
 
-// ─────────────────────────────────────────────────────────────────────
-// keepAliveWhile — port shape borrowed from cloudflare/agents SDK
-// (which this codebase migrated FROM for cfless portability). Same
-// invariants their `keep-alive.test.ts` asserts against their
-// AIChatAgent.keepAliveWhile implementation; here we exercise the
-// RuntimeAdapter port that both CF SessionDO and Node Registry
-// implement, so the contract stays platform-neutral.
-// ─────────────────────────────────────────────────────────────────────
-describe("RuntimeAdapter — keepAliveWhile", () => {
-  let f: Fixture;
-  beforeEach(async () => {
-    f = await newFixture();
-  });
-
-  it("returns the function result", async () => {
-    const r = await f.adapter.keepAliveWhile!(async () => "completed");
-    expect(r).toBe("completed");
-  });
-
-  it("increments refs while fn is running and clears in finally (success)", async () => {
-    expect(f.keepAlive.refs).toBe(0);
-    let observedDuringFn = -1;
-    await f.adapter.keepAliveWhile!(async () => {
-      observedDuringFn = f.keepAlive.refs;
-    });
-    expect(observedDuringFn).toBe(1);
-    expect(f.keepAlive.refs).toBe(0);
-    expect(f.keepAlive.releases).toBe(1);
-  });
-
-  it("clears refs even when fn throws", async () => {
-    expect(f.keepAlive.refs).toBe(0);
-    let caught = false;
-    try {
-      await f.adapter.keepAliveWhile!(async () => {
-        expect(f.keepAlive.refs).toBe(1);
-        throw new Error("boom");
-      });
-    } catch {
-      caught = true;
-    }
-    expect(caught).toBe(true);
-    expect(f.keepAlive.refs).toBe(0);
-    expect(f.keepAlive.releases).toBe(1);
-  });
-
-  it("schedules an alarm on entry (fixture proxy for CF setAlarm)", async () => {
-    expect(f.keepAlive.alarmsSet).toBe(0);
-    await f.adapter.keepAliveWhile!(async () => "x");
-    expect(f.keepAlive.alarmsSet).toBe(1);
-  });
-
-  it("supports concurrent overlapping invocations (refs add)", async () => {
-    expect(f.keepAlive.refs).toBe(0);
-    let releaseInner!: () => void;
-    const innerHeld = new Promise<void>((r) => { releaseInner = r; });
-
-    // Start outer fiber, hold it open via a manual gate while we start
-    // an inner fiber and observe refs=2 — the additive semantic is what
-    // makes nested sub-agents safe.
-    const outerPromise = f.adapter.keepAliveWhile!(async () => {
-      const innerResult = await f.adapter.keepAliveWhile!(async () => {
-        expect(f.keepAlive.refs).toBe(2);
-        await innerHeld;
-        return "inner-done";
-      });
-      expect(f.keepAlive.refs).toBe(1);
-      return innerResult;
-    });
-    // Nudge the event loop so the inner fiber registers before we release.
-    await new Promise((r) => setTimeout(r, 5));
-    releaseInner();
-    const r = await outerPromise;
-    expect(r).toBe("inner-done");
-    expect(f.keepAlive.refs).toBe(0);
-    expect(f.keepAlive.releases).toBe(2);
-  });
-
-  it("identity passthrough when keepAliveWhile callback is unwired (Node default)", async () => {
-    // Node SessionRegistry doesn't have eviction so it leaves
-    // opts.keepAliveWhile unset. The adapter MUST fall back to a
-    // bare-fn invocation rather than throwing — otherwise sub-agent
-    // call sites that always wrap in keepAliveWhile (CF + Node
-    // share the same default-loop) would break under Node.
-    const eventLog = (
-      f.adapter as unknown as { eventLog: typeof f.adapter.eventLog }
-    ).eventLog;
-    const streams = (f.adapter as unknown as { streams: typeof f.adapter.streams }).streams;
-    const nodeAdapter = new RuntimeAdapterImpl({
-      sql: f.sql,
-      eventLog,
-      streams,
-      // keepAliveWhile intentionally omitted
-    });
-    const r = await nodeAdapter.keepAliveWhile!(async () => "node-ok");
-    expect(r).toBe("node-ok");
-    // Fixture's keepAlive counter belongs to a DIFFERENT adapter, so
-    // no observable side effect from the Node-shaped one.
-    expect(f.keepAlive.refs).toBe(0);
-  });
-});
