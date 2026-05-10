@@ -653,6 +653,171 @@ describe("SessionDO recovery — DO-level", () => {
     expect(after.turn_id).toBeNull();
   });
 
+  // ─────────────────────────────────────────────────────────────────
+  // Cold-start orphan flush + alarm hygiene
+  //
+  // The new path (replaces the old onFiberRecovered → recoverAgentTurn
+  // chain that re-ran the LLM in alarm and burned the 180s wall budget,
+  // observed on staging sess-slqg7xf4kvm6s2j4 2026-05-10). Mirrors the
+  // shape of cloudflare/agents SDK's run-fiber.test.ts cleanup
+  // assertions — same family of guarantees, ours implemented on top of
+  // the event log instead of cf_agents_runs.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("first fetch() triggers _finalizeStaleTurns once; subsequent fetches skip", async () => {
+    // Setup: orphan turn marker from a prior incarnation. Cold-start
+    // fetch() should run the flush exactly once and the guard should
+    // prevent re-flushing on later fetches.
+    const sessionId = await newSessionDirect("cold_start_once");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_prior", Date.now() - 300_000, sessionId)
+      .run();
+
+    // Reset the in-memory cold-start guard so the test acts on a fresh
+    // incarnation. (Outside of tests this is set by class instantiation.)
+    await runInDurableObject(stub, (instance) => {
+      (instance as { _coldStartFlushDone: boolean })._coldStartFlushDone = false;
+    });
+
+    // First fetch — any cheap endpoint will do; the flush is wired into
+    // the fetch() entry, not any specific route.
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    // Background flush is fire-and-forget — let it land.
+    await new Promise((r) => setTimeout(r, 150));
+
+    const afterFirst = await env.AUTH_DB
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(afterFirst.status).toBe("idle");
+    expect(afterFirst.turn_id).toBeNull();
+
+    // Re-poison the row to simulate a second orphan post-cold-start.
+    // The guard means the second fetch should NOT clear it (only the
+    // alarm path catches mid-life orphans).
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_again", Date.now() - 60_000, sessionId)
+      .run();
+
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const afterSecond = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    // Still 'running' because the cold-start guard tripped — alarm()
+    // would catch this on its next fire (separate code path covered
+    // by the alarm() tests above).
+    expect(afterSecond.status).toBe("running");
+  });
+
+  it("alarm() finishes fast (no LLM replay) even with stale turn", async () => {
+    // alarm() previously routed orphans through recoverAgentTurn which
+    // ran the LLM stream from inside alarm and burned the 180s wall
+    // budget (3-min CF cap). The new path is SQL-only and should
+    // complete in milliseconds.
+    const sessionId = await newSessionDirect("alarm_fast");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Seed event-log noise + arm the alarm in the same RPC (matches
+    // the working orphan_combined test pattern — single RPC keeps
+    // the storage view consistent across DO incarnations).
+    await runInDurableObject(stub, async (_instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      for (let i = 0; i < 10; i++) {
+        history.append({ type: "agent.tool_use", id: `tu_${i}`, name: "noop", input: {} });
+      }
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    // Plant the orphan-turn marker in D1 (after seed; matches
+    // orphan_combined).
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_burn", Date.now() - 120_000, sessionId)
+      .run();
+
+    const t0 = Date.now();
+    await runDurableObjectAlarm(stub);
+    const elapsed = Date.now() - t0;
+    // Settle any deferred writes the alarm body kicked off (matches
+    // the orphan_combined test that asserts the same row state).
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The SQL-only flush should be well under 1 second on the
+    // miniflare/in-memory test harness; pre-fix the LLM replay path
+    // would block until 180s-cap or a fake-LLM stub completed.
+    // Generous bound: 1500ms covers even slow CI.
+    expect(elapsed).toBeLessThan(1500);
+
+    const after = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+  });
+
+  it("_finalizeStaleTurns emits aborted tool_result for unpaired tool_use", async () => {
+    // Mirror the existing "injects placeholder tool_result for orphan
+    // agent.tool_use" test, but explicitly through the new _finalizeStaleTurns
+    // path (alarm-triggered) and asserts the abort marker shape ours
+    // contributes (is_error: true + a "Tool call interrupted" message).
+    const sessionId = await newSessionDirect("finalize_aborted_result");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_with_unpaired", Date.now() - 120_000, sessionId)
+      .run();
+    await runInDurableObject(stub, async (_instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({
+        type: "agent.tool_use",
+        id: "tu_orphan_x",
+        name: "noop",
+        input: {},
+      });
+    });
+
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const events = await runInDurableObject(stub, (instance) => {
+      const sql = (instance as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql;
+      return sql.exec(
+        `SELECT type, data FROM events WHERE type='agent.tool_result' OR type='agent.mcp_tool_result'`,
+      ).toArray();
+    });
+    const aborted = events.find((e) => {
+      try {
+        const d = JSON.parse(e.data as string);
+        return d.tool_use_id === "tu_orphan_x";
+      } catch {
+        return false;
+      }
+    });
+    expect(aborted).toBeDefined();
+    const data = JSON.parse(aborted!.data as string);
+    expect(data.is_error).toBe(true);
+    expect(String(data.content)).toMatch(/interrupted/i);
+  });
+
   it("hintTurnEnded is idempotent — double-fire from endTurn + outer finally is safe", async () => {
     // turn-runtime.ts fires hintTurnEnded in its outer finally as a
     // safety net for endTurn throwing; adapter.endTurn ALSO fires it
