@@ -424,6 +424,32 @@ export function SessionDetail() {
     setSending(false);
   };
 
+  // Stop button — posts user.interrupt to abort whatever turn(s) are
+  // running on the active thread. Server-side this triggers the
+  // thread-scoped AbortController, marks pending events cancelled, and
+  // emits status_idle. Recovery path for the "stuck Running" failure
+  // mode where a DO eviction killed an in-flight stream and no clean
+  // status_idle was ever broadcast.
+  const [interrupting, setInterrupting] = useState(false);
+  const interrupt = async () => {
+    if (!id) return;
+    setInterrupting(true);
+    try {
+      await api(`/v1/sessions/${id}/events`, {
+        method: "POST",
+        body: JSON.stringify({
+          events: [{
+            type: "user.interrupt",
+            ...(activeThreadId !== "sthr_primary" ? { session_thread_id: activeThreadId } : {}),
+          }],
+        }),
+      });
+    } catch (e) {
+      console.error("interrupt failed", e);
+    }
+    setInterrupting(false);
+  };
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -432,6 +458,22 @@ export function SessionDetail() {
           <Link to="/sessions" className="text-fg-subtle hover:text-fg-muted text-sm">&larr; Sessions</Link>
           <span className="text-fg-subtle">/</span>
           <h2 className="font-mono text-sm text-fg-muted truncate flex-1" title={id}>{title}</h2>
+          {/* Stop / Interrupt — only while the session is actively running.
+              Posts user.interrupt scoped to the active thread; server fires
+              thread AbortController + flushes pending events + emits
+              status_idle. Recovery path for stuck-Running sessions where a
+              DO eviction killed the stream and no clean status_idle ever
+              landed. */}
+          {status === "running" && (
+            <button
+              onClick={() => void interrupt()}
+              disabled={interrupting}
+              className="px-2.5 py-1 rounded-md text-xs font-medium border border-border bg-bg-surface text-fg-muted hover:text-fg hover:border-border-strong disabled:opacity-50 transition-colors"
+              title="Interrupt the active turn on this thread"
+            >
+              {interrupting ? "Stopping…" : "Stop"}
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <StatusPill status={status as "idle" | "running" | "terminated" | "error" | string} />
