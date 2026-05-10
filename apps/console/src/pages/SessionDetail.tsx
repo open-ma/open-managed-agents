@@ -613,6 +613,19 @@ export function SessionDetail() {
                 nonUserSeen[i] = seen;
                 if (!filtered[i].type?.startsWith("user.")) seen = true;
               }
+              // Pre-pair agent.tool_use ↔ agent.tool_result so the bubble
+              // renders one collapsible card per tool call instead of two
+              // disconnected blocks. Standalone results (no matching use
+              // — shouldn't happen in practice but guard) still render
+              // alone via the orphan path below.
+              const resultByToolUseId = new Map<string, typeof filtered[number]>();
+              for (const ev of filtered) {
+                if (ev.type === "agent.tool_result") {
+                  const id = (ev as { tool_use_id?: string }).tool_use_id;
+                  if (id) resultByToolUseId.set(id, ev);
+                }
+              }
+              const pairedResultIds = new Set<string>();
               return filtered.map((e, i) => {
                 // Stable React key — `e.id` (sevt_*) lives on every event
                 // server-side via the stamp callback in session-do.ts, so
@@ -626,11 +639,27 @@ export function SessionDetail() {
                   (e as { id?: string }).id
                   ?? (e as { seq?: number }).seq
                   ?? `idx-${e.type}-${i}`;
+                // Tool-result that's been folded into its tool_use card —
+                // skip standalone render.
+                if (e.type === "agent.tool_result") {
+                  const tuid = (e as { tool_use_id?: string }).tool_use_id;
+                  if (tuid && pairedResultIds.has(tuid)) return null;
+                }
+                // Tool-use: pair with its result if present, render as one card.
+                let pairedResult: typeof filtered[number] | undefined;
+                if (e.type === "agent.tool_use") {
+                  const tuid = (e as { id?: string }).id;
+                  if (tuid && resultByToolUseId.has(tuid)) {
+                    pairedResult = resultByToolUseId.get(tuid);
+                    pairedResultIds.add(tuid);
+                  }
+                }
                 return (
                   <EventBubble
                     key={stableKey}
                     event={e}
                     livePending={!nonUserSeen[i]}
+                    pairedResult={pairedResult}
                   />
                 );
               });
@@ -1123,6 +1152,7 @@ function ToolInputStreamingBubble({ name, partial }: { name?: string; partial: s
 function EventBubble({
   event,
   livePending = false,
+  pairedResult,
 }: {
   event: Event;
   /**
@@ -1136,6 +1166,15 @@ function EventBubble({
    * for the entire turn even while the agent is mid-stream.
    */
   livePending?: boolean;
+  /**
+   * The matching `agent.tool_result` for an `agent.tool_use` event, when
+   * present in the same filtered list. Caller pre-pairs by tool_use_id
+   * and suppresses the orphan tool_result render. Lets the tool_use
+   * card show input + output in one collapsible block instead of two
+   * disconnected bubbles (the prior layout had a disconnected green
+   * "success-styled" result floating below the call card).
+   */
+  pairedResult?: Event;
 }) {
   const [toolOpen, setToolOpen] = useState(false);
 
@@ -1242,33 +1281,94 @@ function EventBubble({
       );
     }
 
-    case "agent.tool_use":
+    case "agent.tool_use": {
+      // Compact one-liner header: tool name + a short input preview so
+      // operators can scan a long conversation without expanding every
+      // call. Expanded view shows full input JSON and (when paired) the
+      // matching result inline — single visual block per tool call.
+      const inputPreview = (() => {
+        const obj = event.input as Record<string, unknown> | undefined;
+        if (!obj || typeof obj !== "object") return "";
+        // Heuristic: prefer the "primary" string field if any of the
+        // common tool input keys exist (task/message/command/path/query),
+        // otherwise show the first string value.
+        const primaryKeys = ["task", "message", "command", "path", "query", "url", "input", "text"];
+        for (const k of primaryKeys) {
+          if (typeof obj[k] === "string") return obj[k] as string;
+        }
+        for (const v of Object.values(obj)) {
+          if (typeof v === "string") return v;
+        }
+        return "";
+      })();
+      const resultText = pairedResult
+        ? (typeof (pairedResult as { content?: unknown }).content === "string"
+            ? ((pairedResult as { content: string }).content)
+            : JSON.stringify((pairedResult as { content?: unknown }).content))
+        : null;
       return (
         <div className="max-w-2xl">
           <button
             onClick={() => setToolOpen(!toolOpen)}
             className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors w-full text-left"
           >
-            <svg className="w-3.5 h-3.5 text-info shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5 text-fg-muted shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
             </svg>
-            <span className="font-medium">{event.name}</span>
-            <svg className={`w-3 h-3 ml-auto text-fg-subtle transition-transform ${toolOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <span className="font-mono text-xs text-fg shrink-0">{event.name}</span>
+            {inputPreview && (
+              <span className="text-xs text-fg-subtle truncate">
+                {inputPreview.length > 80 ? inputPreview.slice(0, 80) + "…" : inputPreview}
+              </span>
+            )}
+            {!pairedResult && (
+              // Pending result — visually distinct so operators know the
+              // tool call hasn't returned yet. Without this hint a stuck
+              // call looks identical to a finished-but-collapsed call.
+              <span className="text-[10px] text-fg-subtle font-mono uppercase tracking-wide ml-1 shrink-0">
+                ⏳
+              </span>
+            )}
+            <svg className={`w-3 h-3 ml-auto text-fg-subtle transition-transform shrink-0 ${toolOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
           {toolOpen && (
-            <pre className="mt-1 bg-bg-surface border border-border rounded-lg p-3 text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto text-fg-muted">
-              {JSON.stringify(event.input, null, 2)}
-            </pre>
+            <div className="mt-1 border border-border rounded-lg overflow-hidden">
+              <div className="bg-bg-surface px-3 py-1.5 text-[10px] uppercase tracking-wide text-fg-subtle font-medium border-b border-border">
+                Input
+              </div>
+              <pre className="bg-bg-surface px-3 py-2 text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto text-fg-muted">
+                {JSON.stringify(event.input, null, 2)}
+              </pre>
+              {resultText !== null && (
+                <>
+                  <div className="bg-bg-surface px-3 py-1.5 text-[10px] uppercase tracking-wide text-fg-subtle font-medium border-y border-border">
+                    Output
+                  </div>
+                  <div className="px-3 py-2 text-xs whitespace-pre-wrap text-fg max-h-96 overflow-y-auto">
+                    {resultText}
+                  </div>
+                </>
+              )}
+            </div>
           )}
         </div>
       );
+    }
 
     case "agent.tool_result":
+      // Orphan tool_result — caller couldn't pair it with a tool_use
+      // (race / out-of-order delivery, or recovery-injected placeholder).
+      // Fall back to a neutral standalone block; no green/success color
+      // since success/failure isn't conveyed by tool_result in the
+      // current spec.
       return (
         <div className="max-w-2xl">
-          <div className="border-l-3 border-success bg-bg-surface rounded-r-lg px-3 py-2 text-xs font-mono max-h-40 overflow-y-auto text-fg-muted whitespace-pre-wrap">
+          <div className="border-l-2 border-border bg-bg-surface rounded-r-lg px-3 py-2 text-xs whitespace-pre-wrap text-fg-muted max-h-40 overflow-y-auto">
+            <span className="text-[10px] uppercase tracking-wide text-fg-subtle font-medium block mb-1">
+              tool result · unpaired
+            </span>
             {typeof event.content === "string" ? event.content : JSON.stringify(event.content)}
           </div>
         </div>
