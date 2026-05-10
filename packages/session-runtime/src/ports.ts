@@ -101,12 +101,34 @@ export interface RuntimeAdapter {
 
   /**
    * Optional hook the per-platform shell wires up. Called by the state
-   * machine right after beginTurn. CF impl uses it to set a 30s self-
-   * rearming alarm (so the DO doesn't get evicted mid-turn). Node impl is
-   * unset — fly/k8s won't evict an in-flight HTTP request, so no
-   * keepAlive equivalent is needed.
+   * machine right after beginTurn. CF impl uses it to:
+   *   1. Set a 30s self-rearming alarm so the DO doesn't get evicted
+   *      mid-turn.
+   *   2. Track turnId in a local set so `_checkOrphanTurns` can filter
+   *      out the caller's own active turns — exactly the contract that
+   *      ports.listOrphanTurns documents above ("caller MUST filter
+   *      out its own in-progress turn"). Without this signal the CF
+   *      shell has no handle on the turnId minted inside runAgentTurn.
+   *
+   * Node impl is a no-op — SessionStateMachine tracks `activeTurnId`
+   * directly via runTurn / onWake (fly/k8s don't evict in-flight HTTP).
    *
    * MUST NOT block the turn — fire-and-forget only.
    */
-  hintTurnInFlight?(sessionId: string): void;
+  hintTurnInFlight?(sessionId: string, turnId: TurnId): void;
+
+  /**
+   * Sibling of hintTurnInFlight — fired when runAgentTurn's finally
+   * block runs (turn naturally ended OR threw). CF impl uses it to
+   * remove turnId from the local active set so the next
+   * _checkOrphanTurns pass treats a row left behind by an
+   * out-of-band crash (e.g. DO evicted between endTurn write and
+   * this callback) as a real orphan.
+   *
+   * Node impl is a no-op — SessionStateMachine clears activeTurnId
+   * in its own runTurn finally.
+   *
+   * MUST NOT block — fire-and-forget.
+   */
+  hintTurnEnded?(sessionId: string, turnId: TurnId): void;
 }
