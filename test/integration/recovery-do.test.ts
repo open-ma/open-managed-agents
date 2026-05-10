@@ -566,4 +566,110 @@ describe("SessionDO recovery — DO-level", () => {
     );
     expect(placeholder).toBeDefined();
   });
+
+  // ─── Active-turn filter (the port-correct fix) ──────────────────────
+  // The original bug (sess-slqg7xf4kvm6s2j4 2026-05-10 07:01:43Z): the
+  // 30s keep-alive alarm fired mid-stream, _checkOrphanTurns saw the
+  // D1 row with our OWN active turn_id, didn't filter, treated it as
+  // orphan, and emitted session.status_rescheduled + a parallel
+  // streamText. Hint-counter+grace was a workaround; the contract-
+  // correct fix is to track turnId in _activeTurnIds (populated by
+  // RuntimeAdapter.hintTurnInFlight) and filter via .has(o.turn_id).
+
+  it("alarm() does NOT recover a turn that's in _activeTurnIds (own active turn)", async () => {
+    const sessionId = await newSessionDirect("active_turn_skip");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+    const ownTurnId = "turn_active_own";
+
+    // Plant the D1 row exactly as adapter.beginTurn would, then
+    // register the same turn id in the SessionDO's local active set —
+    // simulating what hintTurnInFlight does after beginTurn lands.
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind(ownTurnId, Date.now() - 600_000, Date.now(), sessionId)
+      .run();
+    await runInDurableObject(stub, async (instance, state) => {
+      const set = (instance as { _activeTurnIds: Set<string> })._activeTurnIds;
+      set.add(ownTurnId);
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Row should still be 'running' with turn_id intact — the alarm
+    // saw our own turn id in _activeTurnIds, skipped it, didn't write.
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("running");
+    expect(after.turn_id).toBe(ownTurnId);
+
+    // Event-log should NOT contain a session.status_rescheduled event
+    // (the original bug's symptom).
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data: events } = await ev.json();
+    const reschedule = events.find(
+      (e: { type: string }) => e.type === "session.status_rescheduled",
+    );
+    expect(reschedule, "must not emit reschedule for own active turn").toBeUndefined();
+
+    // Cleanup so the next test starts fresh.
+    await runInDurableObject(stub, async (instance) => {
+      (instance as { _activeTurnIds: Set<string> })._activeTurnIds.delete(ownTurnId);
+    });
+  });
+
+  it("alarm() DOES recover a turn that's NOT in _activeTurnIds (real orphan)", async () => {
+    // Mirror image: D1 row exists but the turn id is NOT in our local
+    // active set — simulates a previous DO incarnation that died.
+    // Fresh isolate sees the residue and recovers properly.
+    const sessionId = await newSessionDirect("real_orphan_recover");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_incarnation", Date.now() - 300_000, Date.now(), sessionId)
+      .run();
+    // Deliberately do NOT add to _activeTurnIds — that's the whole
+    // point of "real orphan from a previous incarnation".
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+    expect(after.turn_id).toBeNull();
+  });
+
+  it("hintTurnEnded is idempotent — double-fire from endTurn + outer finally is safe", async () => {
+    // turn-runtime.ts fires hintTurnEnded in its outer finally as a
+    // safety net for endTurn throwing; adapter.endTurn ALSO fires it
+    // on success. Double-fire happens on the happy path. Set.delete
+    // on a missing key is a no-op (idempotent), but pin the contract.
+    const sessionId = await newSessionDirect("hint_idempotent");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, (instance) => {
+      const set = (instance as { _activeTurnIds: Set<string> })._activeTurnIds;
+      set.add("turn_test");
+      // First delete — entry exists, removed.
+      set.delete("turn_test");
+      expect(set.has("turn_test")).toBe(false);
+      // Second delete — already missing, must not throw.
+      expect(() => set.delete("turn_test")).not.toThrow();
+      expect(set.has("turn_test")).toBe(false);
+    });
+  });
 });

@@ -21,14 +21,16 @@ export interface RuntimeAdapterOptions {
   /** Optional — only SessionStateMachine.runHarnessTurn uses this.
    *  turn-runtime.ts callers (CF SessionDO today) leave it unset. */
   sandbox?: SandboxExecutor;
-  /** Per-platform shell hook. CF: setAlarm(now+30s). Node: leave unset. */
-  onTurnInFlight?: (sessionId: string) => void;
-  /** Optional symmetric hook fired after endTurn's UPDATE lands. CF
-   *  uses it to decrement an in-memory in-flight counter that backs the
-   *  sync `deriveStatus()` API (the unified marker is on D1's
-   *  `sessions.turn_id` which the DO can't read sync, so we mirror
-   *  begin/end here). Node leaves it unset — fly/k8s read status from
-   *  the row directly. */
+  /** Per-platform shell hook. CF: setAlarm(now+30s) AND register turnId
+   *  into the local active-turn set so _checkOrphanTurns can filter
+   *  out the caller's own active turns (port contract; see ports.ts).
+   *  Node: leave unset (SessionStateMachine tracks activeTurnId
+   *  directly in runTurn). */
+  onTurnInFlight?: (sessionId: string, turnId: TurnId) => void;
+  /** Symmetric hook fired after endTurn's UPDATE lands. CF uses it to
+   *  remove turnId from the local active-turn set so the next
+   *  _checkOrphanTurns pass treats a row left behind by an out-of-band
+   *  crash as a real orphan. Node leaves it unset. */
   onTurnEnded?: (sessionId: string, turnId: TurnId) => void;
 }
 
@@ -37,7 +39,7 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
   readonly eventLog: EventLogRepo;
   readonly streams: StreamRepo;
   readonly sandbox?: SandboxExecutor;
-  private readonly onTurnInFlight?: (sessionId: string) => void;
+  private readonly onTurnInFlight?: (sessionId: string, turnId: TurnId) => void;
   private readonly onTurnEnded?: (sessionId: string, turnId: TurnId) => void;
 
   constructor(opts: RuntimeAdapterOptions) {
@@ -112,7 +114,11 @@ export class RuntimeAdapterImpl implements RuntimeAdapter {
     }));
   }
 
-  hintTurnInFlight(sessionId: string): void {
-    this.onTurnInFlight?.(sessionId);
+  hintTurnInFlight(sessionId: string, turnId: TurnId): void {
+    this.onTurnInFlight?.(sessionId, turnId);
+  }
+
+  hintTurnEnded(sessionId: string, turnId: TurnId): void {
+    this.onTurnEnded?.(sessionId, turnId);
   }
 }
