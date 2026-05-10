@@ -4779,11 +4779,36 @@ export class SessionDO extends DurableObject<Env> {
   private async _checkOrphanTurns(): Promise<void> {
     if (!this._state) return;
     const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    // ports.ts:91-94 contract: "caller must filter out its own active turn
+    // before treating each row as an orphan". Node SessionStateMachine
+    // tracks `activeTurnId` per call; we don't have that handle here
+    // (runAgentTurn mints the turn_id internally and never exposes it
+    // back to SessionDO), so approximate with two cheap defenses:
+    //
+    //   (1) hint-counter > 0 → there's an in-flight turn locally; the
+    //       D1 row is almost certainly ours. The keep-alive 30s alarm
+    //       used to wake up mid-stream and "recover" our own active
+    //       turn — observed on staging session sess-slqg7xf4kvm6s2j4
+    //       2026-05-10T07:01:43Z: turn:2 streamText started at 07:01:13,
+    //       alarm fired at 07:01:42 + 30s, listOrphanTurns returned
+    //       turn:utJ4WbfdpFwWPemoUobhL (our own), no filter → emitted
+    //       session.status_rescheduled + spawned a parallel streamText
+    //       race against the one already running.
+    //   (2) age < 90s → grace period for the alarm racing beginTurn's
+    //       D1 write or a fresh turn that started before this alarm
+    //       tick but the hint hasn't propagated yet (cold-start). 90s
+    //       is twice the keep-alive interval — within one alarm cycle
+    //       the turn is either still alive (hint will be set on the
+    //       next tick) or genuinely stuck.
+    //
+    // Real orphans (DO actually evicted, fresh incarnation reading
+    // residue from the previous one) have hint==0 AND age >> 90s, so
+    // they still get recovered.
+    const nowMs = Date.now();
+    const MIN_ORPHAN_AGE_MS = 90_000;
     for (const o of orphans) {
-      // The recovery path is identical to the legacy onFiberRecovered
-      // entry — routes through recoverAgentTurn (which reads event log
-      // + streams). We pass a minimal context shape so the existing
-      // recovery code keeps working.
+      if (this._inflightTurnHints > 0) continue;
+      if (nowMs - (o.turn_started_at ?? 0) < MIN_ORPHAN_AGE_MS) continue;
       try {
         await this.onFiberRecovered({
           id: o.turn_id,
