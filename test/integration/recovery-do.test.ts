@@ -1029,6 +1029,119 @@ describe("SessionDO recovery — DO-level", () => {
     expect(row.status).toBe("idle");
   });
 
+  it("regression: sess-slqg7xf4kvm6s2j4 cascade — orphan turn + N unpaired tool_uses recovered in one cold-start", async () => {
+    // End-to-end regression guard for the staging cascade observed on
+    // 2026-05-10:
+    //   - long-running session (5h21m) with active sub-agent calls
+    //   - DO evicted mid-stream by CF (memory / scale-down / random)
+    //   - left sessions.status='running' + ~30 unpaired tool_use events
+    //   - next alarm ran recoverAgentTurn → re-ran LLM stream IN alarm
+    //     → burned the 180s wall budget → CF cancelled the alarm →
+    //     no rearm → DO evicted again → cycle repeats
+    //   - UI stuck "Running" forever, orphan tool_use cards never
+    //     resolved, no events flowed
+    //
+    // Component-level tests above each cover one slice (alarm hygiene,
+    // tool_use cleanup, status flip, heartbeat-merge no-clobber). This
+    // test stitches them: setup the exact failure shape, trigger
+    // cold-start once, assert full recovery in a single SQL-only pass.
+    //
+    // Post-fix invariants asserted here:
+    //   (a) Recovery completes in milliseconds (no LLM replay → no
+    //       180s burn → alarm budget intact)
+    //   (b) Every unpaired tool_use of every wire-spec type
+    //       (agent.tool_use, agent.mcp_tool_use) gets a paired
+    //       aborted *_tool_result with is_error=true
+    //   (c) sessions row flips to idle, turn_id cleared
+    //   (d) Event log carries session.status_rescheduled +
+    //       session.status_idle in that order
+    const sessionId = await newSessionDirect("regression_slqg7xf4");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // 1. Orphan turn marker — long-dead supervisor turn from a
+    //    previous DO incarnation.
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_supervisor", Date.now() - 600_000, sessionId)
+      .run();
+
+    // 2. Mixed unpaired tool_use events from the dead turn. Names
+    //    mirror what the staging session was actually running
+    //    (general_subagent + web_search + bash + a couple MCP tools).
+    //    Use SqliteHistory so writes go through the same code path
+    //    a live harness would use.
+    await runInDurableObject(stub, async (_inst, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({ type: "agent.tool_use", id: "tu_general_subagent", name: "general_subagent", input: { task: "research" } });
+      history.append({ type: "agent.tool_use", id: "tu_web_search", name: "web_search", input: { query: "anthropic" } });
+      history.append({ type: "agent.tool_use", id: "tu_bash", name: "bash", input: { command: "ls" } });
+      history.append({ type: "agent.mcp_tool_use", id: "mtu_linear", mcp_server_name: "linear", name: "create_issue", input: { title: "x" } });
+      history.append({ type: "agent.mcp_tool_use", id: "mtu_slack", mcp_server_name: "slack", name: "post_message", input: { channel: "general" } });
+      // Reset cold-start guard so the next fetch fires _finalizeStaleTurns.
+      (_inst as { _coldStartFlushDone: boolean })._coldStartFlushDone = false;
+    });
+
+    // 3. Single cold-start fetch — flush is fire-and-forget, settle
+    //    the deferred work then assert the whole recovered shape.
+    const t0 = Date.now();
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 200));
+    const elapsed = Date.now() - t0;
+
+    // (a) bounded execution — no LLM replay anywhere on the path.
+    //     Generous bound covers slow CI; pre-fix would have run for
+    //     up to 180s × N retries.
+    expect(elapsed).toBeLessThan(2000);
+
+    // (c) sessions row reconciled.
+    const row = await env.AUTH_DB
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(row.status).toBe("idle");
+    expect(row.turn_id).toBeNull();
+
+    // (b) every unpaired tool_use got AT LEAST ONE aborted result.
+    //     (Existing SqliteHistory recovery path also runs from
+    //     fetchInner's init pass, so every id may end up with two
+    //     placeholders — pre-existing duplication, not load-bearing
+    //     for the regression. Match the existing-test pattern of
+    //     `find` rather than exact-count.)
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data } = await ev.json() as {
+      data: Array<{ type: string; data: Record<string, unknown> }>;
+    };
+    for (const id of ["tu_general_subagent", "tu_web_search", "tu_bash"]) {
+      const matches = data.filter((e) =>
+        e.type === "agent.tool_result" && e.data.tool_use_id === id,
+      );
+      expect(matches.length, `aborted tool_result for ${id}`).toBeGreaterThanOrEqual(1);
+      // At least one of the placeholders carries the abort marker.
+      const hasAbortMarker = matches.some(
+        (r) => r.data.is_error === true && /interrupted/i.test(String(r.data.content)),
+      );
+      expect(hasAbortMarker, `is_error+interrupted marker for ${id}`).toBe(true);
+    }
+    for (const id of ["mtu_linear", "mtu_slack"]) {
+      const matches = data.filter((e) =>
+        e.type === "agent.mcp_tool_result" && e.data.mcp_tool_use_id === id,
+      );
+      expect(matches.length, `aborted mcp_tool_result for ${id}`).toBeGreaterThanOrEqual(1);
+      const hasAbortMarker = matches.some((r) => r.data.is_error === true);
+      expect(hasAbortMarker, `is_error marker for ${id}`).toBe(true);
+    }
+
+    // (d) lifecycle events appended in order: rescheduled before idle.
+    const reschedIdx = data.findIndex((e) => e.type === "session.status_rescheduled");
+    const idleIdx = data.findIndex((e) => e.type === "session.status_idle");
+    expect(reschedIdx).toBeGreaterThanOrEqual(0);
+    expect(idleIdx).toBeGreaterThanOrEqual(0);
+    expect(reschedIdx).toBeLessThan(idleIdx);
+  });
+
   it("hintTurnEnded is idempotent — double-fire from endTurn + outer finally is safe", async () => {
     // turn-runtime.ts fires hintTurnEnded in its outer finally as a
     // safety net for endTurn throwing; adapter.endTurn ALSO fires it
