@@ -260,6 +260,7 @@ app.post("/", async (c) => {
       aux_model: body.aux_model,
       appendable_prompts: body.appendable_prompts,
       runtime_binding: body.runtime_binding,
+      enable_general_subagent: (body as { enable_general_subagent?: boolean }).enable_general_subagent,
     },
   });
   return c.json(toApiAgent(row), 201);
@@ -396,6 +397,7 @@ const updateAgent = async (c: any) => {
         aux_model: body.aux_model,
         appendable_prompts: body.appendable_prompts,
         runtime_binding: body.runtime_binding,
+        enable_general_subagent: (body as { enable_general_subagent?: boolean }).enable_general_subagent,
       },
     });
     return c.json(toApiAgent(row));
