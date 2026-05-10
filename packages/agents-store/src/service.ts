@@ -38,6 +38,7 @@ export interface NewAgentInput {
   aux_model?: AgentConfig["aux_model"];
   appendable_prompts?: string[];
   runtime_binding?: AgentConfig["runtime_binding"];
+  enable_general_subagent?: boolean;
 }
 
 /** Mutable subset for `update`. Per-field `null` means "clear" — service
@@ -58,6 +59,7 @@ export interface UpdateAgentInput {
   aux_model?: AgentConfig["aux_model"] | null;
   appendable_prompts?: string[] | null;
   runtime_binding?: AgentConfig["runtime_binding"] | null;
+  enable_general_subagent?: boolean | null;
 }
 
 /** Default tools value when none provided — matches agents.ts:125. */
@@ -79,6 +81,7 @@ const UPDATABLE_FIELDS = [
   "metadata",
   "appendable_prompts",
   "runtime_binding",
+  "enable_general_subagent",
 ] as const;
 
 /**
@@ -144,6 +147,7 @@ export class AgentService {
       aux_model: opts.input.aux_model,
       appendable_prompts: opts.input.appendable_prompts,
       runtime_binding: opts.input.runtime_binding,
+      enable_general_subagent: opts.input.enable_general_subagent,
       version: 1,
       created_at: nowIso,
       updated_at: nowIso,

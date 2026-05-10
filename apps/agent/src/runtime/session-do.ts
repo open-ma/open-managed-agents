@@ -3225,15 +3225,66 @@ export class SessionDO extends DurableObject<Env> {
     // in their in-memory Map — both work but new threads land on `sthr_`.
     const threadId = `sthr_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 
-    // Fetch sub-agent config. Uses getAgentConfig so the parent agent's
-    // snapshot is consulted when the sub-agent id matches the session's
-    // agent_id; otherwise falls back to KV (broken in staging — sub-agents
-    // with arbitrary ids aren't snapshotted).
-    // TODO(staging-kv): pre-fetch sub-agent configs at /init when the agent
-    // declares them in mcp_servers / sub_agents.
-    const subAgent = await this.getAgentConfig(agentId);
-    if (!subAgent) {
-      return `Sub-agent error: agent "${agentId}" not found`;
+    // Reserved id "general" → opt-in built-in delegation tool. Uses a
+    // synthesized config: parent's model + a generic system prompt + a
+    // safe built-in tool subset. Bypasses getAgentConfig (no KV lookup,
+    // no snapshot dependency — works around the staging-KV miss for
+    // arbitrary sub-agent ids documented below).
+    let subAgent: AgentConfig | null;
+    if (agentId === "general") {
+      const parentSnapshot = this.state.agent_snapshot;
+      subAgent = {
+        id: "general",
+        name: "general",
+        // Inherit parent's model so the delegation cost mirrors the
+        // caller's per-token rate. aux_model isn't used here — the
+        // sub-agent's full LLM call should match the caller.
+        model: parentSnapshot?.model ?? "claude-sonnet-4-6",
+        system:
+          "You are a focused sub-agent. The user message contains a single " +
+          "task delegated to you by another agent. Do exactly that task and " +
+          "return a concise text result — no preamble, no follow-up questions, " +
+          "no offers to do additional work. You share the same sandbox as the " +
+          "calling agent (files persist) but cannot delegate further or use " +
+          "MCP tools.",
+        tools: [
+          {
+            type: "agent_toolset_20260401",
+            // Explicit subset — bash + file ops only. No web tools (the
+            // caller controls those). No schedule (sub-agents can't
+            // outlive their parent turn). Permission inherited from the
+            // toolset's default (always_allow) — no per-tool override
+            // needed.
+            configs: [
+              { name: "bash", enabled: true },
+              { name: "read", enabled: true },
+              { name: "write", enabled: true },
+              { name: "edit", enabled: true },
+              { name: "grep", enabled: true },
+              { name: "glob", enabled: true },
+              // explicitly off:
+              { name: "web_fetch", enabled: false },
+              { name: "web_search", enabled: false },
+            ],
+          },
+        ],
+        // No callable_agents → can't delegate further (matches AMA spec
+        // "Only one level of delegation"). No MCP. No skills. No
+        // appendable_prompts. No schedule wakeup wiring.
+        version: 1,
+        created_at: new Date().toISOString(),
+      } as AgentConfig;
+    } else {
+      // Fetch sub-agent config. Uses getAgentConfig so the parent agent's
+      // snapshot is consulted when the sub-agent id matches the session's
+      // agent_id; otherwise falls back to KV (broken in staging — sub-agents
+      // with arbitrary ids aren't snapshotted).
+      // TODO(staging-kv): pre-fetch sub-agent configs at /init when the agent
+      // declares them in mcp_servers / sub_agents.
+      subAgent = await this.getAgentConfig(agentId);
+      if (!subAgent) {
+        return `Sub-agent error: agent "${agentId}" not found`;
+      }
     }
 
     // In-memory map (hot path config lookup) + persistent threads row
