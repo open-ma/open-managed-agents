@@ -283,6 +283,40 @@ export function Layout() {
 
   return (
     <div className="flex h-screen bg-bg">
+      {/*
+        Autofill honeypot. Chrome / Safari ignore autoComplete="off" on
+        text inputs and aggressively offer the saved login email/password
+        on the FIRST plausible-looking input they find. Sit a hidden
+        input + password pair at the very top of the authenticated DOM so
+        the browser fills it instead of any real Title / search /
+        whatever input downstream. tabIndex + aria-hidden keep it out of
+        keyboard nav and a11y trees.
+
+        Why position:absolute + offscreen instead of display:none:
+        browsers may skip display:none inputs entirely (no autofill at
+        all → they just move on to the next visible input). Offscreen
+        but in the layout tree IS visible enough for autofill heuristics
+        but invisible to users.
+
+        autoComplete=username + current-password mirrors the canonical
+        login pair so the browser's heuristic matches here first.
+      */}
+      <div
+        aria-hidden="true"
+        style={{
+          position: "absolute",
+          left: "-9999px",
+          top: "-9999px",
+          height: 0,
+          width: 0,
+          overflow: "hidden",
+          pointerEvents: "none",
+        }}
+      >
+        <input type="text" tabIndex={-1} autoComplete="username" name="username" />
+        <input type="password" tabIndex={-1} autoComplete="current-password" name="password" />
+      </div>
+
       {/* Desktop sidebar */}
       <aside className="hidden md:flex w-60 shrink-0 bg-bg-sidebar border-r border-border flex-col">
         <SidebarContent />
