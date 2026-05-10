@@ -197,7 +197,17 @@ export function SessionsList() {
       });
       setShowCreate(false);
       nav(`/sessions/${session.id}`);
-    } catch {}
+    } catch (err) {
+      // 402 = no balance for cloud sandbox. Toast with the server's
+      // "Insufficient balance" message has already shown; close the
+      // modal and surface the Billing page so the user can top up
+      // without hunting in the sidebar.
+      if ((err as { status?: number }).status === 402) {
+        setShowCreate(false);
+        nav("/billing");
+      }
+      // Other failures: leave modal open so the user can adjust + retry.
+    }
   };
 
   const toggleVault = (id: string) => {

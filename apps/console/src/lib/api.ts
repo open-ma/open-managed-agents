@@ -87,7 +87,10 @@ export function useApi() {
       const msg = err instanceof Error ? err.message : "network error";
       // Don't toast aborted requests (component unmount is a normal flow).
       if (!(err instanceof DOMException && err.name === "AbortError")) {
-        toast(`${(init?.method || "GET")} ${path}: ${msg}`, "error");
+        // User-facing toast: skip the METHOD path: prefix (debug noise);
+        // log the full thing to console for dev triage.
+        console.error(`[api] ${(init?.method || "GET")} ${path}: ${msg}`);
+        toast(`Network error: ${msg}`, "error");
       }
       throw err;
     }
@@ -125,10 +128,20 @@ export function useApi() {
       // chasing "why don't I see anything" issues for far too long; almost
       // every endpoint failure here is something the user could act on
       // (re-login, switch tenant, retry) once they know it happened.
+      //
+      // Toast format: server message verbatim. The previous shape prefixed
+      // the API path (e.g. "/v1/sessions: Insufficient balance.") which
+      // leaked debug info into UX. Path + status still go to console for
+      // dev triage.
       if (!shouldSilenceAuthError(path, res.status)) {
-        toast(`${path}: ${message}`, "error");
+        console.error(`[api] ${res.status} ${path}: ${message}`);
+        toast(message, "error");
       }
-      throw new Error(message);
+      // Attach status so callers can branch on specific cases
+      // (e.g. SessionsList redirects to /billing on 402).
+      const e = new Error(message) as Error & { status?: number };
+      e.status = res.status;
+      throw e;
     }
     // Successful response — clear the self-heal sentinel so a future stale
     // tenant can self-heal again later in the same browser session.
