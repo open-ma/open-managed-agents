@@ -819,170 +819,122 @@ describe("SessionDO recovery — DO-level", () => {
   });
 
   // ─────────────────────────────────────────────────────────────────
-  // keepAliveWhile + OR-rearm wiring
+  // Alarm heartbeat-merge regression guards
   //
-  // The actual fix for the staging eviction bug — sub-agents bypass
-  // sessions.status='running' (they don't write that row), so alarm
-  // rearm has to also read _activeKeepAlive. These tests prove the
-  // wiring isn't dead: the runSubAgent path goes through
-  // adapter.keepAliveWhile, which fires setAlarm + populates
-  // _activeKeepAlive, and the alarm() rearm logic respects that set.
+  // _scheduleNextAlarm() runs at the end of alarm() and was historically
+  // calling deleteAlarm() whenever cf_agents_schedules was empty —
+  // silently clobbering the keep-alive heartbeat that the supervisor
+  // turn relies on. Pre-2026-05-10 this latent bug only mattered when
+  // alarm() also burned its 180s wall-time budget on LLM replay (caught
+  // by code review on session sess-slqg7xf4kvm6s2j4). The merge fix in
+  // _scheduleNextAlarm folds the heartbeat into the same setAlarm call
+  // (min(heartbeat, next-schedule)) so it can't be clobbered.
   // ─────────────────────────────────────────────────────────────────
 
-  it("adapter.keepAliveWhile populates _activeKeepAlive during fn + clears in finally", async () => {
-    // Mirror of cloudflare/agents SDK's "should increment refs" +
-    // "should decrement when disposed" + "should clean up even when
-    // the function throws", but exercising the REAL CF wiring in
-    // SessionDO.getRuntimeAdapter (not just the port mock).
-    const sessionId = await newSessionDirect("keepalive_wiring");
+  it("alarm() with inflight supervisor turn does NOT clobber its own heartbeat", async () => {
+    // Pre-merge: alarm() set the heartbeat then _scheduleNextAlarm()
+    // called deleteAlarm() 5ms later when cf_agents_schedules was
+    // empty (the common case). Asserting "setAlarm fired" alone is
+    // necessary-not-sufficient; we MUST also assert deleteAlarm did
+    // NOT fire. Spy on both. Use a real supervisor inflight marker
+    // (sessions.status='running' with a turn_id we own — covered by
+    // _activeTurnIds so finalize doesn't try to clean it up).
+    const sessionId = await newSessionDirect("heartbeat_no_clobber");
     const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
 
-    // Success path: refs go 0 → 1 (during) → 0 (after).
-    let observedDuring = -1;
-    await runInDurableObject(stub, async (instance) => {
-      const adapter = (instance as unknown as { runtimeAdapter: { keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T> } }).runtimeAdapter;
-      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
-      expect(set.size).toBe(0);
-      const r = await adapter.keepAliveWhile(async () => {
-        observedDuring = set.size;
-        return "ok";
-      });
-      expect(r).toBe("ok");
-      expect(set.size).toBe(0);
-    });
-    expect(observedDuring).toBe(1);
+    // Plant a "live supervisor turn" — D1 row marked running, plus
+    // register the turn_id in _activeTurnIds so _finalizeStaleTurns
+    // skips it (matches the contract for the caller's own active turn).
+    const ownTurnId = "turn_inflight_supervisor";
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind(ownTurnId, Date.now() - 10_000, sessionId)
+      .run();
 
-    // Throw path: refs still clear in finally.
-    let caught = false;
-    await runInDurableObject(stub, async (instance) => {
-      const adapter = (instance as unknown as { runtimeAdapter: { keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T> } }).runtimeAdapter;
-      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
-      try {
-        await adapter.keepAliveWhile(async () => {
-          throw new Error("boom");
-        });
-      } catch {
-        caught = true;
-      }
-      expect(set.size).toBe(0);
-    });
-    expect(caught).toBe(true);
-  });
-
-  it("adapter.keepAliveWhile schedules an alarm on entry (CF wiring proof)", async () => {
-    // Without this, the no-op `(fn) => fn()` slot in runSubAgent
-    // (the actual line that was changed in dd21bdd) could regress to
-    // a no-op CF impl and tests would still pass via the port mock.
-    // We spy on ctx.storage.setAlarm directly because miniflare's
-    // runDurableObjectAlarm clears the slot post-handler, making
-    // state.storage.getAlarm() unreliable for "did alarm rearm" checks.
-    const sessionId = await newSessionDirect("keepalive_alarm");
-    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
-
-    const setAlarmTimes: number[] = [];
-    await runInDurableObject(stub, async (instance) => {
-      const ctx = (instance as unknown as { ctx: { storage: { setAlarm: (t: number) => Promise<void> } } }).ctx;
-      const orig = ctx.storage.setAlarm.bind(ctx.storage);
-      ctx.storage.setAlarm = async (t: number) => {
-        setAlarmTimes.push(t);
-        return orig(t);
-      };
-      const adapter = (instance as unknown as { runtimeAdapter: { keepAliveWhile: <T>(fn: () => Promise<T>) => Promise<T> } }).runtimeAdapter;
-      await adapter.keepAliveWhile(async () => "ok");
-      ctx.storage.setAlarm = orig; // restore
-    });
-    // setAlarm should have been called at least once with t ≈ now+30s.
-    expect(setAlarmTimes.length).toBeGreaterThan(0);
-    const t = setAlarmTimes[setAlarmTimes.length - 1];
-    expect(t).toBeGreaterThan(Date.now());
-    expect(t - Date.now()).toBeLessThan(60_000);
-  });
-
-  it("alarm() rearms while _activeKeepAlive.size > 0 even with no inflight turn", async () => {
-    // The OR-rearm: `_activeKeepAlive.size > 0 || _hasInflightTurn()`.
-    // Sub-agents bypass beginTurn/sessions.status — without the OR,
-    // alarm wouldn't rearm during a long sub-agent call and the DO
-    // would get evicted. This is the load-bearing change.
-    //
-    // We can't read state.storage.getAlarm() post-handler — miniflare
-    // clears the alarm slot once the handler completes regardless of
-    // any setAlarm call inside it. Spy on ctx.storage.setAlarm to
-    // catch the rearm directly.
-    const sessionId = await newSessionDirect("rearm_or_keepalive");
-    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
-
-    const setAlarmCalls: number[] = [];
-    await runInDurableObject(stub, async (instance, state) => {
-      // Sanity: row is idle — any rearm comes from the OR branch.
-      const row = await env.AUTH_DB
-        .prepare(`SELECT status FROM sessions WHERE id=?`)
-        .bind(sessionId)
-        .first();
-      expect(row?.status).toBe("idle");
-
-      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
-      set.add(99);
-
-      const ctx = (instance as unknown as { ctx: { storage: { setAlarm: (t: number) => Promise<void> } } }).ctx;
-      const orig = ctx.storage.setAlarm.bind(ctx.storage);
-      ctx.storage.setAlarm = async (t: number) => {
-        setAlarmCalls.push(t);
-        return orig(t);
-      };
-      await state.storage.deleteAlarm();
-      await state.storage.setAlarm(Date.now() - 1000); // due now
-      // Note: that setAlarm call lands BEFORE the spy was installed;
-      // setAlarmCalls only records calls from inside alarm() onward.
-      ctx.storage.setAlarm = async (t: number) => {
-        setAlarmCalls.push(t);
-        return orig(t);
-      };
-    });
-    await runDurableObjectAlarm(stub);
-    await new Promise((r) => setTimeout(r, 50));
-
-    // alarm() should have called setAlarm at least once (the rearm).
-    expect(setAlarmCalls.length).toBeGreaterThan(0);
-    const lastT = setAlarmCalls[setAlarmCalls.length - 1];
-    expect(lastT).toBeGreaterThan(Date.now());
-    expect(lastT - Date.now()).toBeLessThan(60_000);
-
-    // Cleanup so the next test isn't polluted.
-    await runInDurableObject(stub, (instance) => {
-      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
-      set.delete(99);
-    });
-  });
-
-  it("alarm() does NOT rearm when both _activeKeepAlive empty AND no inflight turn", async () => {
-    // Negative case for the OR-rearm — proves we're not just leaking
-    // setAlarm calls regardless of state. Same spy approach as the
-    // positive case above.
-    const sessionId = await newSessionDirect("rearm_idle");
-    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
-
-    const setAlarmCallsInsideAlarm: number[] = [];
+    const setAlarmInside: number[] = [];
+    let deleteCallsInside = 0;
     let spyArmed = false;
     await runInDurableObject(stub, async (instance, state) => {
-      const set = (instance as { _activeKeepAlive: Set<number> })._activeKeepAlive;
-      expect(set.size).toBe(0);
+      const set = (instance as { _activeTurnIds: Set<string> })._activeTurnIds;
+      set.add(ownTurnId);
 
-      const ctx = (instance as unknown as { ctx: { storage: { setAlarm: (t: number) => Promise<void> } } }).ctx;
-      const orig = ctx.storage.setAlarm.bind(ctx.storage);
+      const ctx = (instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      const origDel = ctx.storage.deleteAlarm.bind(ctx.storage);
+
+      // Trigger the alarm BEFORE installing spies so the trigger
+      // setAlarm/deleteAlarm calls aren't counted.
       await state.storage.deleteAlarm();
       await state.storage.setAlarm(Date.now() - 1000);
-      // Install the spy AFTER the trigger setAlarm so we only count
-      // calls from inside alarm().
+
       spyArmed = true;
       ctx.storage.setAlarm = async (t: number) => {
-        if (spyArmed) setAlarmCallsInsideAlarm.push(t);
-        return orig(t);
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+      ctx.storage.deleteAlarm = async () => {
+        if (spyArmed) deleteCallsInside++;
+        return origDel();
       };
     });
     await runDurableObjectAlarm(stub);
     await new Promise((r) => setTimeout(r, 50));
     spyArmed = false;
-    expect(setAlarmCallsInsideAlarm.length).toBe(0);
+
+    // setAlarm fired — heartbeat scheduled ~30s out.
+    expect(setAlarmInside.length).toBeGreaterThan(0);
+    const lastT = setAlarmInside[setAlarmInside.length - 1];
+    expect(lastT).toBeGreaterThan(Date.now());
+    expect(lastT - Date.now()).toBeLessThan(60_000);
+    // deleteAlarm did NOT fire — the heartbeat survives. This is the
+    // load-bearing regression guard. Pre-merge it would have been > 0.
+    expect(deleteCallsInside).toBe(0);
+  });
+
+  it("alarm() with no inflight turn calls deleteAlarm (no leaked heartbeat)", async () => {
+    // Negative case — proves the heartbeat is conditional on
+    // _hasInflightTurn(), not unconditional.
+    const sessionId = await newSessionDirect("no_heartbeat_when_idle");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmInside: number[] = [];
+    let deleteCallsInside = 0;
+    let spyArmed = false;
+    await runInDurableObject(stub, async (_instance, state) => {
+      const ctx = (_instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      const origDel = ctx.storage.deleteAlarm.bind(ctx.storage);
+
+      await state.storage.deleteAlarm();
+      await state.storage.setAlarm(Date.now() - 1000);
+
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+      ctx.storage.deleteAlarm = async () => {
+        if (spyArmed) deleteCallsInside++;
+        return origDel();
+      };
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // No setAlarm — nothing to keep alive.
+    expect(setAlarmInside.length).toBe(0);
+    // deleteAlarm DID fire — _scheduleNextAlarm cleared the slot
+    // because nothing's scheduled and no heartbeat needed.
+    expect(deleteCallsInside).toBeGreaterThan(0);
   });
 
   it("_finalizeStaleTurns no half-state — endTurn failure suppresses event emit", async () => {
