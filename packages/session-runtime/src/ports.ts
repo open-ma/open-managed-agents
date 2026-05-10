@@ -131,4 +131,31 @@ export interface RuntimeAdapter {
    * MUST NOT block — fire-and-forget.
    */
   hintTurnEnded?(sessionId: string, turnId: TurnId): void;
+
+  /**
+   * Wrap a long-running async operation in a platform-appropriate
+   * keep-alive heartbeat. Caller MUST use this for any work that runs
+   * for tens of seconds without independently writing the sessions row
+   * — sub-agent invocations and long tool calls being the canonical
+   * cases.
+   *
+   * Why: the supervisor's beginTurn → status='running' is the alarm-
+   * rearm signal on CF. While the supervisor is awaiting a long
+   * sub-agent, status stays 'running' so alarm rearms — but the
+   * heartbeat needs to actually fire faster than CF's eviction window
+   * (~70s). Without this wrap, sub-agent calls > 30-60s have been
+   * observed to lose their parent DO mid-stream (alarm misses → DO
+   * evicted → all in-flight Promises dropped).
+   *
+   * CF impl: setAlarm(now+30s) at start, refresh on each beat (driven
+   * by the alarm() handler), clear in finally. Composes cleanly with
+   * hintTurnInFlight (both setAlarm calls dedupe inside CF's queue).
+   *
+   * Node impl: identity passthrough — no eviction model. Safe default
+   * if not provided is the identity wrapper at the call site.
+   *
+   * Idempotent across nested calls — wrapping inside an already-wrapped
+   * scope just refreshes the heartbeat horizon.
+   */
+  keepAliveWhile?<T>(fn: () => Promise<T>): Promise<T>;
 }

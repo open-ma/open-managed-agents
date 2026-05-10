@@ -296,6 +296,31 @@ export class SessionDO extends DurableObject<Env> {
   private _activeTurnIds = new Set<string>();
 
   /**
+   * Active keep-alive scopes (sub-agent runs, long tool calls). Pattern
+   * borrowed from cloudflare/agents SDK keepAliveWhile: each entry is
+   * a synthetic id added on enter / removed in finally. The alarm()
+   * handler rearms when `size > 0`, independent of
+   * sessions.status='running' (which only covers supervisor turns —
+   * sub-agents don't write that row).
+   *
+   * Lost on eviction; if the DO comes back via cold-start, the new
+   * instance starts with size=0 and the orphan turn appears via
+   * `sessions.status='running'` instead. Cold-start orphan flush
+   * (separate path) handles those.
+   */
+  private _activeKeepAlive = new Set<number>();
+  private _keepAliveSeq = 0;
+
+  /**
+   * Cold-start flush guard. The first fetch() after DO activation
+   * triggers _finalizeStaleTurns() once; subsequent fetch()es skip it
+   * (alarm() takes over for ongoing detection). false → not yet done.
+   * Set to true synchronously at fetch() entry so concurrent first
+   * requests don't double-fire.
+   */
+  private _coldStartFlushDone = false;
+
+  /**
    * Synchronous re-entry guard for drainEventQueue, keyed by
    * session_thread_id. Single-isolate JS single-thread makes Set add/has
    * a true mutex within the same thread. Cross-thread drains run
@@ -1221,6 +1246,27 @@ export class SessionDO extends DurableObject<Env> {
         // Set.delete on missing key is a no-op.
         this._activeTurnIds.delete(turnId);
       },
+      // CF DO keep-alive for long-running async work (sub-agents,
+      // long tool calls). Pattern borrowed from cloudflare/agents
+      // SDK's keepAliveWhile: setAlarm at start so CF sees scheduled
+      // work; refresh on each beat; clear in finally. The alarm()
+      // handler reads `_activeKeepAlive > 0` to decide whether to
+      // rearm independently of the sessions.status='running' check —
+      // sub-agents don't write that row, so without this they were
+      // invisible to the rearm logic and got their parent DO evicted
+      // mid-flight.
+      keepAliveWhile: async <T>(fn: () => Promise<T>): Promise<T> => {
+        const id = ++this._keepAliveSeq;
+        this._activeKeepAlive.add(id);
+        try {
+          // Set the heartbeat alarm at start so CF immediately treats
+          // the DO as having scheduled work.
+          void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
+          return await fn();
+        } finally {
+          this._activeKeepAlive.delete(id);
+        }
+      },
     });
     // Provider call only used if sharding is in play; today the lazy
     // env.AUTH_DB path covers the single-shard default. Keep the
@@ -1264,6 +1310,19 @@ export class SessionDO extends DurableObject<Env> {
    * handle everything here and only delegate alarm() to Agent's scheduler.
    */
   async fetch(request: Request): Promise<Response> {
+    // Cold-start orphan flush: first request after DO activation triggers
+    // a one-shot scan of unpaired tool_use + stale 'running' turns and
+    // emits abort events for them. Idempotent (cheap when there's nothing
+    // stale). Captures the case where a previous incarnation died
+    // mid-stream — the alarm path catches the same condition but only
+    // after the first alarm tick fires, which can be many seconds after
+    // the user's first request lands.
+    if (!this._coldStartFlushDone) {
+      this._coldStartFlushDone = true;
+      void this._finalizeStaleTurns().catch((err) => {
+        console.warn(`[cold-start-flush] failed:`, err);
+      });
+    }
     try {
       return await this.fetchInner(request);
     } catch (err) {
@@ -3426,7 +3485,11 @@ export class SessionDO extends DurableObject<Env> {
           this.creditUsageToThread(threadId, { input_tokens, output_tokens });
         },
         abortSignal: abortController.signal,
-        keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
+        // Real keep-alive (was identity no-op). Routes through the
+        // RuntimeAdapter so cfless Node SessionRegistry uses identity
+        // (no eviction model) while CF SessionDO heartbeats setAlarm.
+        // Sub-agent runs > 30s previously lost the parent DO mid-stream.
+        keepAliveWhile: <T>(fn: () => Promise<T>) => this.runtimeAdapter.keepAliveWhile!(fn),
       },
     };
 
@@ -4743,18 +4806,29 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // Orphan-turn recovery: was _checkRunFibers (cf_agents_runs scan).
-    // Now reads sessions WHERE status='running' via the unified adapter
-    // and runs the same recovery.ts logic Node does. Same call site
-    // (alarm-triggered), same effect.
-    await this._checkOrphanTurns();
+    // Stale-turn cleanup. Replaces the old _checkOrphanTurns →
+    // onFiberRecovered → recoverAgentTurn chain that re-ran the LLM
+    // stream from inside alarm() — burned the 180s wall-time budget,
+    // got the alarm canceled, and made the eviction problem worse.
+    // _finalizeStaleTurns is SQL-only; appends aborted tool_results +
+    // status_idle for stuck turns so Console + history are consistent
+    // and the user can re-send to continue. (cloudflare/agents SDK's
+    // documented stance: "LLM calls are NOT replayed.")
+    await this._finalizeStaleTurns();
 
-    // Keep-alive rearm: while a turn is in flight (this DO's
-    // sessions row marked status='running'), reschedule the alarm 30s
-    // out so the DO doesn't get evicted before the LLM call returns.
-    // The status flip back to 'idle' in adapter.endTurn naturally stops
-    // the rearm loop.
-    if (await this._hasInflightTurn()) {
+    // Keep-alive rearm: while either (a) a supervisor turn is in flight
+    // (sessions row marked status='running') or (b) a sub-agent / long
+    // tool call is wrapped in keepAliveWhile, reschedule the alarm 30s
+    // out so the DO doesn't get evicted mid-flight.
+    //
+    // Why both checks: sessions.status only reflects supervisor turns
+    // (set by beginTurn). Sub-agents and long tools don't write that
+    // row — _activeKeepAlive is the in-memory counter for those. After
+    // an eviction _activeKeepAlive is empty and the orphan turn (if
+    // any) appears via the sessions row check, so cold-start recovery
+    // still happens; this OR-rearm only matters for live in-flight
+    // work in the current incarnation.
+    if (this._activeKeepAlive.size > 0 || (await this._hasInflightTurn())) {
       await this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
     }
 
@@ -4823,6 +4897,137 @@ export class SessionDO extends DurableObject<Env> {
       // Mark the orphan turn idle. recoverAgentTurn doesn't do this
       // (it ran before the unified table existed).
       await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
+    }
+  }
+
+  /**
+   * Lightweight stale-turn cleanup — replacement for the old
+   * onFiberRecovered → recoverAgentTurn chain that re-ran the LLM
+   * stream from inside alarm() and routinely burned the 180s
+   * Workers wall-time budget (observed 2026-05-10 sess-slqg7xf4: 6
+   * consecutive 180s alarm fires + 110s alarm gap = DO evicted).
+   *
+   * Aligns with cloudflare/agents SDK guidance: "LLM calls are NOT
+   * replayed — if streaming mid-response when evicted, that stream is
+   * lost permanently." Recovery == surface the interruption + clean
+   * up state, not auto-replay.
+   *
+   * What this does:
+   *   1. For every unpaired tool_use (no matching tool_result by id),
+   *      append an aborted tool_result so Console pairing collapses
+   *      the bubble + history is consistent for any future re-prompt.
+   *   2. For every stuck `sessions.status='running'` row whose turn_id
+   *      isn't in `_activeTurnIds` (i.e. dead from a prior incarnation),
+   *      append `session.status_rescheduled` + `session.status_idle`
+   *      then call adapter.endTurn to flip the row.
+   *
+   * All SQL writes; no LLM call, no harness re-run. Cheap enough to
+   * call from alarm() AND first-fetch.
+   */
+  private async _finalizeStaleTurns(): Promise<void> {
+    if (!this._state) return;
+    // Ensure events table exists (alarm() runs without going through
+    // fetchInner's ensureSchema). Cheap idempotent CREATE IF NOT EXISTS.
+    try { this.ensureSchema(); } catch { /* schema already up-to-date */ }
+    const sql = this.ctx.storage.sql;
+
+    // 1. Unpaired tool_use detection. Three flavors per the wire spec
+    //    in default-loop.ts:emitToolCallEvent:
+    //      • agent.tool_use         → result keyed by tool_use_id
+    //      • agent.custom_tool_use  → result keyed by tool_use_id
+    //      • agent.mcp_tool_use     → result keyed by mcp_tool_use_id
+    //    The pairing key for use→result is always the use's own `id`.
+    //    Wrapped in try blocks so a missing events table (very early
+    //    cold-start) doesn't short-circuit the sessions row cleanup
+    //    below — that's the contract callers depend on.
+    const usedIds = new Map<string, { type: string; thread?: string | null }>();
+    try {
+      const useCursor = sql.exec(
+        `SELECT type, data, session_thread_id FROM events
+          WHERE type IN ('agent.tool_use','agent.custom_tool_use','agent.mcp_tool_use')`,
+      );
+      for (const row of useCursor) {
+        try {
+          const d = JSON.parse(row.data as string) as { id?: string };
+          if (d.id) usedIds.set(d.id, {
+            type: row.type as string,
+            thread: row.session_thread_id as string | null,
+          });
+        } catch { /* skip malformed */ }
+      }
+    } catch { /* events table missing — skip flush, do row cleanup below */ }
+    if (usedIds.size > 0) {
+      try {
+        const resCursor = sql.exec(
+          `SELECT data FROM events
+            WHERE type IN ('agent.tool_result','agent.mcp_tool_result')`,
+        );
+        for (const row of resCursor) {
+          try {
+            const d = JSON.parse(row.data as string) as {
+              tool_use_id?: string;
+              mcp_tool_use_id?: string;
+            };
+            const id = d.tool_use_id ?? d.mcp_tool_use_id;
+            if (id) usedIds.delete(id);
+          } catch { /* skip */ }
+        }
+      } catch { /* skip */ }
+    }
+    let flushed = 0;
+    for (const [id, meta] of usedIds) {
+      const isMcp = meta.type === "agent.mcp_tool_use";
+      const event = isMcp
+        ? {
+            type: "agent.mcp_tool_result" as const,
+            mcp_tool_use_id: id,
+            content: "Tool call interrupted (DO eviction or restart). Re-send your message to retry.",
+            is_error: true,
+          }
+        : {
+            type: "agent.tool_result" as const,
+            tool_use_id: id,
+            content: "Tool call interrupted (DO eviction or restart). Re-send your message to retry.",
+            is_error: true,
+          };
+      const tagged = (meta.thread
+        ? { ...event, session_thread_id: meta.thread }
+        : event) as unknown as SessionEvent;
+      try {
+        await this.runtimeAdapter.eventLog.append(tagged);
+        this.broadcastEvent(tagged);
+        flushed++;
+      } catch (err) {
+        console.warn(`[finalize-stale] failed to flush tool_use ${id}:`, err);
+      }
+    }
+
+    // 2. Force-end stale sessions rows. Skip turns currently held in
+    //    _activeTurnIds (live work in this incarnation). endTurn is
+    //    the contract — emit the events on a best-effort basis but
+    //    don't let an event-log glitch leave the row stuck.
+    const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    let ended = 0;
+    for (const o of orphans) {
+      if (this._activeTurnIds.has(o.turn_id)) continue;
+      const reschedEvent = {
+        type: "session.status_rescheduled",
+        reason: "DO eviction or restart — stream lost; re-send to continue.",
+      } as unknown as SessionEvent;
+      const idleEvent = { type: "session.status_idle" } as unknown as SessionEvent;
+      try { await this.runtimeAdapter.eventLog.append(reschedEvent); } catch {}
+      try { this.broadcastEvent(reschedEvent); } catch {}
+      try {
+        await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
+        ended++;
+      } catch (err) {
+        console.warn(`[finalize-stale] endTurn failed for ${o.turn_id}:`, err);
+      }
+      try { await this.runtimeAdapter.eventLog.append(idleEvent); } catch {}
+      try { this.broadcastEvent(idleEvent); } catch {}
+    }
+    if (flushed > 0 || ended > 0) {
+      console.log(`[finalize-stale] flushed ${flushed} tool_uses, ended ${ended} stale turns`);
     }
   }
 
