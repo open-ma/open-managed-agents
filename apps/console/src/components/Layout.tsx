@@ -21,6 +21,7 @@ import {
   SlackIcon,
   VaultIcon,
 } from "./icons";
+import { consolePlugins } from "../plugins/registry";
 
 interface NavItem {
   to: string;
@@ -75,6 +76,11 @@ const navGroups: NavGroup[] = [
       { to: "/integrations/slack", label: "Slack", icon: SlackIcon },
     ],
   },
+  // Plugin-contributed groups (hosted-only extensions). Default empty
+  // in OSS — hosted overlay-replaces plugins/registry.ts to add
+  // billing / etc. The PluginNavItem shape mirrors NavItem above so
+  // the spread is type-checked by tsc.
+  ...consolePlugins.flatMap((p) => p.navGroups ?? []),
 ];
 
 /* ── Chevron icon for collapsible groups ── */
