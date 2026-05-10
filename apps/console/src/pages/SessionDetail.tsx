@@ -613,13 +613,27 @@ export function SessionDetail() {
                 nonUserSeen[i] = seen;
                 if (!filtered[i].type?.startsWith("user.")) seen = true;
               }
-              return filtered.map((e, i) => (
-                <EventBubble
-                  key={i}
-                  event={e}
-                  livePending={!nonUserSeen[i]}
-                />
-              ));
+              return filtered.map((e, i) => {
+                // Stable React key — `e.id` (sevt_*) lives on every event
+                // server-side via the stamp callback in session-do.ts, so
+                // SSE-arrived rows already have it. Fall back to seq for
+                // legacy events that pre-date the stamp, and to a synthetic
+                // marker (type + index) as last resort. Index alone broke
+                // because new events appended mid-list re-keyed every later
+                // bubble → React unmount/remount → the entire conversation
+                // appeared to flicker on every chunk delivery.
+                const stableKey =
+                  (e as { id?: string }).id
+                  ?? (e as { seq?: number }).seq
+                  ?? `idx-${e.type}-${i}`;
+                return (
+                  <EventBubble
+                    key={stableKey}
+                    event={e}
+                    livePending={!nonUserSeen[i]}
+                  />
+                );
+              });
             })()}
             {/* In-flight thinking streams. Render before message/tool
                 streams so the visual order roughly matches what the
