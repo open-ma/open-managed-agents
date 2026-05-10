@@ -4090,8 +4090,27 @@ export class SessionDO extends DurableObject<Env> {
         return;
       }
 
-      const TRANSIENT_PATTERNS = ["timeout", "network", "ECONNREFUSED", "fetch failed", "rate limit", "429", "503"];
-      const isTransient = TRANSIENT_PATTERNS.some((p) => errorMessage.toLowerCase().includes(p.toLowerCase()));
+      // Inverted policy: retry by default, only short-circuit on errors
+      // we KNOW won't recover from a re-run. The previous shape was a
+      // TRANSIENT allowlist of substrings ("timeout", "ECONNREFUSED"...);
+      // every new transient class (CF "version rollout", container OOM,
+      // future infra wording) silently fell off the list and the user
+      // saw a hard failure. Inverted is robust to vendor-side wording
+      // changes and to net-new infra failure modes.
+      //
+      // FATAL list is short and high-confidence — these are deterministic
+      // user-fixable conditions where retrying just wastes tokens.
+      const FATAL_PATTERNS = [
+        "Agent not found",
+        "Environment not found",
+        "Insufficient balance",
+        "Unauthorized",
+        "Forbidden",
+      ];
+      const isFatal = FATAL_PATTERNS.some((p) =>
+        errorMessage.toLowerCase().includes(p.toLowerCase()),
+      );
+      const isTransient = !isFatal;
 
       if (isTransient && retryCount < 2) {
         const rescheduledEvent: SessionEvent = {
@@ -4104,6 +4123,10 @@ export class SessionDO extends DurableObject<Env> {
         // Exponential backoff: 1s, 2s
         const delay = 1000 * Math.pow(2, retryCount);
         await new Promise(r => setTimeout(r, delay));
+        // Recursive call owns the next idle emit (success or its own
+        // finally). Suppress this frame's catch-all so we don't get
+        // two status_idle events on a successful retry.
+        idleEmitted = true;
         return this.processUserMessage(userMessage, retryCount + 1, skipAppend);
       }
 
