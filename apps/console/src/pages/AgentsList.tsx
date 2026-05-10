@@ -35,6 +35,24 @@ const ANTHROPIC_SKILLS = [
   { id: "docx", label: "Word (docx)" },
 ];
 
+// AMA spec built-in tool names — must match
+// `BetaManagedAgentsAgentToolConfig.name` enum in the SDK. Source of
+// truth lives in the agent_toolset_20260401 toolset; emitting unknown
+// names here would still validate at the API layer but produces a tool
+// the runtime never wires.
+const BUILTIN_TOOLS: Array<{ name: string; label: string; description: string }> = [
+  { name: "bash", label: "bash", description: "Run shell commands in the sandbox" },
+  { name: "edit", label: "edit", description: "In-place file edits" },
+  { name: "read", label: "read", description: "Read files from the sandbox FS" },
+  { name: "write", label: "write", description: "Create or overwrite files" },
+  { name: "glob", label: "glob", description: "Pattern-match file paths" },
+  { name: "grep", label: "grep", description: "Search file contents" },
+  { name: "web_fetch", label: "web_fetch", description: "Fetch a URL" },
+  { name: "web_search", label: "web_search", description: "Web search" },
+];
+
+type ToolOverride = "default" | "always_allow" | "always_ask" | "disabled";
+
 const INITIAL_FORM = {
   name: "", model: "", system: "", description: "",
   modelCardId: "",
@@ -50,6 +68,15 @@ const INITIAL_FORM = {
   /** Local skill ids to HIDE from this agent's ACP child. Empty = all
    *  detected local skills are visible (the daemon's default). */
   localSkillBlocklist: [] as string[],
+  // Built-in tool policy. `agent_toolset_20260401` toolset's
+  // `default_config` controls fallback enabled/permission for any
+  // tool without a specific override. `toolOverrides` is a per-tool
+  // 4-state: "default" (no entry emitted in configs[]), "always_allow",
+  // "always_ask", or "disabled" (enabled=false). Pre-rewrite the form
+  // hard-coded an empty toolset → all tools enabled + always_allow.
+  toolDefaultEnabled: true,
+  toolDefaultPermission: "always_allow" as "always_allow" | "always_ask",
+  toolOverrides: {} as Record<string, ToolOverride>,
 };
 
 export function AgentsList() {
@@ -75,7 +102,7 @@ export function AgentsList() {
   const [createStep, setCreateStep] = useState<"template" | "form">("template");
   const [templateSearch, setTemplateSearch] = useState("");
   const [form, setForm] = useState({ ...INITIAL_FORM });
-  const [tab, setTab] = useState<"basic" | "skills" | "mcp" | "agents">("basic");
+  const [tab, setTab] = useState<"basic" | "tools" | "skills" | "mcp" | "agents">("basic");
   const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
   const [codeValue, setCodeValue] = useState("");
 
@@ -138,6 +165,34 @@ export function AgentsList() {
   // Keep refresh hook reachable for create / archive callbacks.
   void refreshAgents;
 
+  // Serialize the form's tool-policy state into the AMA-shape
+  // `tools` array. Always emits exactly one toolset entry of type
+  // `agent_toolset_20260401`; per-tool overrides only land in
+  // `configs[]` when they differ from the default — keeps payloads
+  // minimal and edits round-trippable through the YAML/JSON view.
+  const buildToolsField = () => {
+    const overrides = Object.entries(form.toolOverrides)
+      .filter(([, v]) => v !== "default")
+      .map(([name, v]) => {
+        if (v === "disabled") return { name, enabled: false };
+        return {
+          name,
+          enabled: true,
+          permission_policy: { type: v as "always_allow" | "always_ask" },
+        };
+      });
+    return [
+      {
+        type: "agent_toolset_20260401",
+        default_config: {
+          enabled: form.toolDefaultEnabled,
+          permission_policy: { type: form.toolDefaultPermission },
+        },
+        ...(overrides.length > 0 ? { configs: overrides } : {}),
+      },
+    ];
+  };
+
   const create = async () => {
     setCreateError("");
     try {
@@ -146,7 +201,7 @@ export function AgentsList() {
         model: form.model,
         system: form.system || undefined,
         description: form.description || undefined,
-        tools: [{ type: "agent_toolset_20260401" }],
+        tools: buildToolsField(),
       };
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
@@ -244,7 +299,7 @@ export function AgentsList() {
     };
     if (form.system) config.system = form.system;
     if (form.description) config.description = form.description;
-    config.tools = [{ type: "agent_toolset_20260401" }];
+    config.tools = buildToolsField();
     if (form.mcpServers.length) config.mcp_servers = form.mcpServers;
     if (form.skills.length) config.skills = form.skills;
     if (form.callableAgents.length) {
@@ -265,6 +320,32 @@ export function AgentsList() {
       try {
         const parsed = createMode === "yaml" ? yaml.load(codeValue) as Record<string, unknown> : JSON.parse(codeValue);
         const rb = parsed.runtime_binding as { runtime_id?: string; acp_agent_id?: string; local_skill_blocklist?: string[] } | undefined;
+        // Tool policy round-trip: extract default + per-tool overrides
+        // from the first agent_toolset_20260401 entry (custom tools and
+        // MCP toolsets pass through untouched in YAML/JSON view but
+        // can't currently be edited in the Form view — they survive
+        // the round-trip via the YAML mode if the user toggled to it).
+        const toolset = Array.isArray(parsed.tools)
+          ? (parsed.tools as Array<Record<string, unknown>>).find(
+              (t) => t?.type === "agent_toolset_20260401",
+            )
+          : undefined;
+        const dc = (toolset?.default_config ?? {}) as {
+          enabled?: boolean;
+          permission_policy?: { type?: string };
+        };
+        const cfgs = (toolset?.configs ?? []) as Array<{
+          name?: string;
+          enabled?: boolean;
+          permission_policy?: { type?: string };
+        }>;
+        const overrides: Record<string, ToolOverride> = {};
+        for (const c of cfgs) {
+          if (!c?.name) continue;
+          if (c.enabled === false) overrides[c.name] = "disabled";
+          else if (c.permission_policy?.type === "always_ask") overrides[c.name] = "always_ask";
+          else if (c.permission_policy?.type === "always_allow") overrides[c.name] = "always_allow";
+        }
         setForm({
           ...INITIAL_FORM,
           name: String(parsed.name || ""),
@@ -283,6 +364,9 @@ export function AgentsList() {
           runtimeId: rb?.runtime_id ?? "",
           acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
           localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist) ? rb.local_skill_blocklist : [],
+          toolDefaultEnabled: dc.enabled ?? true,
+          toolDefaultPermission: dc.permission_policy?.type === "always_ask" ? "always_ask" : "always_allow",
+          toolOverrides: overrides,
         });
       } catch { /* keep current form if parse fails */ }
     } else {
@@ -472,6 +556,11 @@ export function AgentsList() {
               {createMode === "form" && (
               <div className="flex gap-1 mt-3">
                 <button onClick={() => setTab("basic")} className={tabCls("basic")}>Basic</button>
+                <button onClick={() => setTab("tools")} className={tabCls("tools")}>
+                  Tools {Object.keys(form.toolOverrides).length > 0 && (
+                    <span className="ml-1 text-xs opacity-60">({Object.keys(form.toolOverrides).length})</span>
+                  )}
+                </button>
                 <button onClick={() => setTab("skills")} className={tabCls("skills")}>
                   Skills {form.skills.length > 0 && <span className="ml-1 text-xs opacity-60">({form.skills.length})</span>}
                 </button>
@@ -722,6 +811,80 @@ export function AgentsList() {
                         )}
                       </>
                     )}
+                  </div>
+                </div>
+              )}
+
+              {/* Tools tab */}
+              {createMode === "form" && tab === "tools" && (
+                <div className="space-y-5">
+                  {createError && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{createError}</div>}
+
+                  <div>
+                    <label className="text-sm font-medium text-fg block mb-2">Default policy</label>
+                    <p className="text-xs text-fg-subtle mb-3">
+                      Applies to every built-in tool unless overridden below.
+                    </p>
+                    <div className="flex items-center gap-4">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={form.toolDefaultEnabled}
+                          onChange={(e) => setForm({ ...form, toolDefaultEnabled: e.target.checked })}
+                          className="accent-brand"
+                        />
+                        Enable all tools by default
+                      </label>
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="text-fg-muted">Permission:</span>
+                        <select
+                          value={form.toolDefaultPermission}
+                          onChange={(e) => setForm({ ...form, toolDefaultPermission: e.target.value as "always_allow" | "always_ask" })}
+                          className="border border-border rounded-md px-2 py-1 text-sm bg-bg text-fg outline-none focus:border-brand"
+                        >
+                          <option value="always_allow">always_allow</option>
+                          <option value="always_ask">always_ask</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium text-fg block mb-2">Per-tool overrides</label>
+                    <p className="text-xs text-fg-subtle mb-3">
+                      "default" leaves the tool to inherit the policy above.
+                      "always_ask" emits a <span className="font-mono">user.tool_confirmation</span> event the
+                      client must approve before the tool runs.
+                    </p>
+                    <div className="border border-border rounded-md divide-y divide-border">
+                      {BUILTIN_TOOLS.map((bt) => {
+                        const current = form.toolOverrides[bt.name] ?? "default";
+                        return (
+                          <div key={bt.name} className="flex items-center justify-between px-3 py-2 gap-3">
+                            <div className="min-w-0">
+                              <div className="text-sm font-mono text-fg">{bt.label}</div>
+                              <div className="text-xs text-fg-subtle truncate">{bt.description}</div>
+                            </div>
+                            <select
+                              value={current}
+                              onChange={(e) => {
+                                const v = e.target.value as ToolOverride;
+                                const next = { ...form.toolOverrides };
+                                if (v === "default") delete next[bt.name];
+                                else next[bt.name] = v;
+                                setForm({ ...form, toolOverrides: next });
+                              }}
+                              className="border border-border rounded-md px-2 py-1 text-xs bg-bg text-fg outline-none focus:border-brand shrink-0"
+                            >
+                              <option value="default">default</option>
+                              <option value="always_allow">always_allow</option>
+                              <option value="always_ask">always_ask</option>
+                              <option value="disabled">disabled</option>
+                            </select>
+                          </div>
+                        );
+                      })}
+                    </div>
                   </div>
                 </div>
               )}
