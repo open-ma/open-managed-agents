@@ -24,6 +24,19 @@ export const authMiddleware = createMiddleware<{
   if (c.req.path.startsWith("/v1/mcp-proxy/")) {
     return next();
   }
+  // OAuth Authorization Code flow's browser-redirect endpoints have to be
+  // reachable from a popup window with no session cookie / API key — the
+  // user is *acquiring* a credential, they don't have one yet. Both the
+  // initial /authorize redirect and the upstream's /callback land here
+  // unauthenticated. The routes themselves validate state/nonce per
+  // RFC 6749, so dropping authMiddleware doesn't widen the attack surface.
+  // /v1/oauth/refresh stays gated (called by logged-in worker code only).
+  if (
+    c.req.path.startsWith("/v1/oauth/authorize") ||
+    c.req.path.startsWith("/v1/oauth/callback")
+  ) {
+    return next();
+  }
 
   // 1. Try API Key authentication (for CLI / SDK)
   const apiKey = c.req.header("x-api-key");

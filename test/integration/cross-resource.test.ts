@@ -1103,41 +1103,38 @@ describe("GitHub Repository + Env Secret resources", () => {
 });
 
 // ============================================================
-// Command Secret Credentials
+// cap_cli Credentials
 // ============================================================
-describe("Command Secret Credentials", () => {
-  it("command_secret credential stores prefix and env_var", async () => {
-    const v = await post("/v1/vaults", { name: "cmd-secret-vault" });
+describe("cap_cli Credentials", () => {
+  it("cap_cli credential stores cli_id", async () => {
+    const v = await post("/v1/vaults", { name: "capcli-vault" });
     const vault = (await v.json()) as any;
 
     const res = await post(`/v1/vaults/${vault.id}/credentials`, {
-      display_name: "Wrangler Token",
+      display_name: "Cloudflare API token",
       auth: {
-        type: "command_secret",
-        command_prefixes: ["wrangler", "npx wrangler"],
-        env_var: "CLOUDFLARE_API_TOKEN",
+        type: "cap_cli",
+        cli_id: "wrangler",
         token: "cf_secret_token_123",
       },
     });
     expect(res.status).toBe(201);
     const cred = (await res.json()) as any;
-    expect(cred.auth.type).toBe("command_secret");
-    expect(cred.auth.command_prefixes).toEqual(["wrangler", "npx wrangler"]);
-    expect(cred.auth.env_var).toBe("CLOUDFLARE_API_TOKEN");
+    expect(cred.auth.type).toBe("cap_cli");
+    expect(cred.auth.cli_id).toBe("wrangler");
     // Token must be stripped
     expect(cred.auth.token).toBeUndefined();
   });
 
-  it("command_secret token stripped from credential list", async () => {
-    const v = await post("/v1/vaults", { name: "cmd-strip-vault" });
+  it("cap_cli token stripped from credential list", async () => {
+    const v = await post("/v1/vaults", { name: "capcli-strip-vault" });
     const vault = (await v.json()) as any;
 
     await post(`/v1/vaults/${vault.id}/credentials`, {
       display_name: "GH CLI",
       auth: {
-        type: "command_secret",
-        command_prefixes: ["gh"],
-        env_var: "GH_TOKEN",
+        type: "cap_cli",
+        cli_id: "gh",
         token: "gh_secret_456",
       },
     });
@@ -1150,22 +1147,23 @@ describe("Command Secret Credentials", () => {
     }
   });
 
-  it("command_secret with multiple prefixes", async () => {
-    const v = await post("/v1/vaults", { name: "multi-prefix-vault" });
+  it("cap_cli with extras (e.g. AWS access_key_id)", async () => {
+    const v = await post("/v1/vaults", { name: "extras-vault" });
     const vault = (await v.json()) as any;
 
     const res = await post(`/v1/vaults/${vault.id}/credentials`, {
-      display_name: "Docker Token",
+      display_name: "AWS account",
       auth: {
-        type: "command_secret",
-        command_prefixes: ["docker", "docker-compose", "docker compose"],
-        env_var: "DOCKER_TOKEN",
-        token: "docker_secret",
+        type: "cap_cli",
+        cli_id: "aws",
+        token: "secret_access_key",
+        extras: { access_key_id: "AKIATESTING" },
       },
     });
     expect(res.status).toBe(201);
     const cred = (await res.json()) as any;
-    expect(cred.auth.command_prefixes).toHaveLength(3);
+    expect(cred.auth.cli_id).toBe("aws");
+    expect(cred.auth.extras?.access_key_id).toBe("AKIATESTING");
   });
 
   it("vault with mixed credential types", async () => {
@@ -1177,8 +1175,8 @@ describe("Command Secret Credentials", () => {
       auth: { type: "static_bearer", mcp_server_url: "https://mcp.example.com", token: "bearer_tok" },
     });
     await post(`/v1/vaults/${vault.id}/credentials`, {
-      display_name: "CLI Secret",
-      auth: { type: "command_secret", command_prefixes: ["aws"], env_var: "AWS_TOKEN", token: "aws_tok" },
+      display_name: "AWS CLI",
+      auth: { type: "cap_cli", cli_id: "aws", token: "aws_tok" },
     });
     await post(`/v1/vaults/${vault.id}/credentials`, {
       display_name: "OAuth MCP",
@@ -1190,7 +1188,7 @@ describe("Command Secret Credentials", () => {
     expect(body.data).toHaveLength(3);
     const types = body.data.map((c: any) => c.auth.type);
     expect(types).toContain("static_bearer");
-    expect(types).toContain("command_secret");
+    expect(types).toContain("cap_cli");
     expect(types).toContain("mcp_oauth");
 
     // No secrets leaked
@@ -1201,13 +1199,13 @@ describe("Command Secret Credentials", () => {
     }
   });
 
-  it("command_secret credential delete works", async () => {
-    const v = await post("/v1/vaults", { name: "cmd-del-vault" });
+  it("cap_cli credential delete works", async () => {
+    const v = await post("/v1/vaults", { name: "capcli-del-vault" });
     const vault = (await v.json()) as any;
 
     const res = await post(`/v1/vaults/${vault.id}/credentials`, {
       display_name: "Deletable",
-      auth: { type: "command_secret", command_prefixes: ["kubectl"], env_var: "KUBE_TOKEN", token: "k_tok" },
+      auth: { type: "cap_cli", cli_id: "kubectl", token: "k_tok" },
     });
     const cred = (await res.json()) as any;
 

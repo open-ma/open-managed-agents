@@ -50,10 +50,6 @@ const PROVIDER_ID: ProviderId = "linear";
 /** Linear's hosted MCP server. Outbound injection matches by hostname. */
 const LINEAR_MCP_URL = "https://mcp.linear.app/mcp";
 
-// MVP: hardcoded repo for the open-ma fleet. Move to publication.githubRepoUrl
-// when we add per-publication GitHub config.
-const PROD_GITHUB_REPO_URL = "https://github.com/open-ma/open-managed-agents.git";
-
 export class LinearProvider implements IntegrationProvider {
   readonly id: ProviderId = PROVIDER_ID;
   private readonly graphql: LinearGraphQLClient;
@@ -771,9 +767,6 @@ export class LinearProvider implements IntegrationProvider {
         mcpServers,
         metadata: { linear: { publicationId: publication.id, issueId: event.issueId, workspaceId: event.workspaceId } },
         initialEvent: sessionEvent,
-        // MVP: hardcoded for the open-ma fleet. Move to publication.githubRepoUrl
-        // when the schema lands.
-        githubRepoUrl: PROD_GITHUB_REPO_URL,
       });
       await this.container.issueSessions.insert({
         tenantId: publication.tenantId,
@@ -795,7 +788,6 @@ export class LinearProvider implements IntegrationProvider {
       mcpServers,
       metadata: { linear: { publicationId: publication.id, issueId: event.issueId, workspaceId: event.workspaceId } },
       initialEvent: sessionEvent,
-      githubRepoUrl: PROD_GITHUB_REPO_URL,
     });
     return created.sessionId;
   }
@@ -1357,7 +1349,6 @@ export class LinearProvider implements IntegrationProvider {
           },
         },
         initialEvent: sessionEvent,
-        githubRepoUrl: PROD_GITHUB_REPO_URL,
       });
       sessionId = created.sessionId;
 

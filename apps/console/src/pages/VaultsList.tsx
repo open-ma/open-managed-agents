@@ -9,9 +9,27 @@ import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 interface Vault { id: string; name: string; created_at: string; archived_at?: string; }
 interface Credential {
   id: string; display_name: string; vault_id: string;
-  auth: { type: string; mcp_server_url?: string; command_prefixes?: string[]; env_var?: string };
+  auth: { type: string; mcp_server_url?: string; cli_id?: string };
   created_at: string; archived_at?: string;
 }
+
+// First-wave cap CLI list. Mirrors @open-managed-agents/cap builtinSpecs.
+// Source of truth for the CLIs available to the "+ Add CLI" picker.
+// `oauth: true` enables the device flow button; CLIs without it require
+// manual token entry only.
+const CAP_CLIS: Array<{ cli_id: string; label: string; helper: string; oauth?: boolean }> = [
+  { cli_id: "gh", label: "GitHub CLI (gh)", helper: "Personal access token (ghp_...)", oauth: true },
+  { cli_id: "glab", label: "GitLab CLI (glab)", helper: "Personal access token (glpat-...)", oauth: true },
+  { cli_id: "fly", label: "Fly.io (fly / flyctl)", helper: "Fly API token (fo1_...)" },
+  { cli_id: "vercel", label: "Vercel CLI", helper: "Account access token" },
+  { cli_id: "doctl", label: "DigitalOcean (doctl)", helper: "API token (dop_v1_...)" },
+  { cli_id: "npm", label: "npm registry", helper: "Granular access token (npm_...)" },
+  { cli_id: "aws", label: "AWS CLI / SDKs", helper: "AWS secret access key" },
+  { cli_id: "gcloud", label: "Google Cloud SDK", helper: "OAuth access token", oauth: true },
+  { cli_id: "kubectl", label: "kubectl", helper: "Bearer token for the API server" },
+  { cli_id: "docker", label: "Docker registry", helper: "Registry password / PAT" },
+  { cli_id: "git", label: "git (HTTPS remotes)", helper: "Personal access token" },
+];
 
 export function VaultsList() {
   const { api } = useApi();
@@ -26,11 +44,26 @@ export function VaultsList() {
   const [mcpSearch, setMcpSearch] = useState("");
   const [connecting, setConnecting] = useState<string | null>(null);
 
-  // Manual credential form (for command_secret type)
-  const [showManualCred, setShowManualCred] = useState(false);
-  const [manualForm, setManualForm] = useState({
-    display_name: "", token: "", command_prefixes: "", env_var: "",
+  // Add-CLI form (cap_cli credentials).
+  const [showAddCli, setShowAddCli] = useState(false);
+  const [cliForm, setCliForm] = useState({
+    cli_id: "gh", display_name: "", token: "",
   });
+
+  // OAuth device flow state for cap_cli credentials.
+  // Set when "Sign in via OAuth" is clicked. The poll loop fires until
+  // ready / failure, then writes a cap_cli credential.
+  const [deviceFlow, setDeviceFlow] = useState<{
+    cli_id: string;
+    session_id: string;
+    user_code: string;
+    verification_uri: string;
+    verification_uri_complete?: string;
+    interval_seconds: number;
+    expires_at_ms: number;
+    status: "polling" | "ready" | "expired" | "denied" | "error";
+    error?: string;
+  } | null>(null);
 
   const {
     items: vaults,
@@ -77,23 +110,100 @@ export function VaultsList() {
     window.open(authUrl, "oauth", "width=600,height=700,popup=yes");
   };
 
-  const createManualCred = async () => {
+  const createCapCliCred = async () => {
     if (!selectedVault) return;
+    const defaultName = CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.label ?? cliForm.cli_id;
     await api(`/v1/vaults/${selectedVault.id}/credentials`, {
       method: "POST",
       body: JSON.stringify({
-        display_name: manualForm.display_name,
+        display_name: cliForm.display_name || defaultName,
         auth: {
-          type: "command_secret",
-          command_prefixes: manualForm.command_prefixes.split(",").map(s => s.trim()).filter(Boolean),
-          env_var: manualForm.env_var,
-          token: manualForm.token,
+          type: "cap_cli",
+          cli_id: cliForm.cli_id,
+          token: cliForm.token,
         },
       }),
     });
-    setShowManualCred(false);
-    setManualForm({ display_name: "", token: "", command_prefixes: "", env_var: "" });
+    setShowAddCli(false);
+    setCliForm({ cli_id: "gh", display_name: "", token: "" });
     openVault(selectedVault);
+  };
+
+  // Drive cap's OAuth Device Authorization Grant for the selected CLI.
+  // Sequence: POST /initiate → show user_code + URL → poll /poll until
+  // ready / terminal failure → write cap_cli credential and close modal.
+  const startDeviceFlow = async () => {
+    if (!selectedVault) return;
+    setDeviceFlow(null);
+    try {
+      const init = await api<{
+        session_id: string;
+        user_code: string;
+        verification_uri: string;
+        verification_uri_complete?: string;
+        interval_seconds: number;
+        expires_at_ms: number;
+      }>(`/v1/cap-cli/oauth/initiate`, {
+        method: "POST",
+        body: JSON.stringify({ vault_id: selectedVault.id, cli_id: cliForm.cli_id }),
+      });
+      const flow = { ...init, cli_id: cliForm.cli_id, status: "polling" as const };
+      setDeviceFlow(flow);
+      void pollDeviceFlow(flow);
+    } catch (err) {
+      setDeviceFlow({
+        cli_id: cliForm.cli_id,
+        session_id: "",
+        user_code: "",
+        verification_uri: "",
+        interval_seconds: 0,
+        expires_at_ms: 0,
+        status: "error",
+        error: (err as Error).message,
+      });
+    }
+  };
+
+  const pollDeviceFlow = async (flow: { session_id: string; interval_seconds: number; expires_at_ms: number }) => {
+    let interval = flow.interval_seconds;
+    while (Date.now() < flow.expires_at_ms) {
+      await new Promise((r) => setTimeout(r, interval * 1000));
+      try {
+        const r = await api<{
+          status: "pending" | "slow_down" | "ready" | "expired" | "denied" | "error";
+          new_interval_seconds?: number;
+          oauth_error?: string;
+          description?: string;
+          credential_id?: string;
+        }>(`/v1/cap-cli/oauth/poll`, {
+          method: "POST",
+          body: JSON.stringify({ session_id: flow.session_id }),
+        });
+        if (r.status === "pending") continue;
+        if (r.status === "slow_down") {
+          interval = r.new_interval_seconds ?? interval + 5;
+          continue;
+        }
+        if (r.status === "ready") {
+          setDeviceFlow((prev) => (prev ? { ...prev, status: "ready" } : null));
+          if (selectedVault) openVault(selectedVault);
+          setTimeout(() => {
+            setShowAddCli(false);
+            setDeviceFlow(null);
+          }, 1500);
+          return;
+        }
+        // expired / denied / error
+        setDeviceFlow((prev) =>
+          prev ? { ...prev, status: r.status as "expired" | "denied" | "error", error: r.description ?? r.oauth_error } : null,
+        );
+        return;
+      } catch (err) {
+        setDeviceFlow((prev) => (prev ? { ...prev, status: "error", error: (err as Error).message } : null));
+        return;
+      }
+    }
+    setDeviceFlow((prev) => (prev ? { ...prev, status: "expired" } : null));
   };
 
   const deleteCred = async (credId: string) => {
@@ -199,7 +309,7 @@ export function VaultsList() {
         footer={
           <div className="flex gap-2">
             <Button variant="secondary" size="sm" onClick={() => setShowAddCred(true)}>+ Connect service</Button>
-            <Button variant="ghost" size="sm" onClick={() => setShowManualCred(true)}>+ Add secret</Button>
+            <Button variant="ghost" size="sm" onClick={() => setShowAddCli(true)}>+ Add CLI</Button>
             <div className="flex-1" />
             <Button variant="ghost" onClick={() => setSelectedVault(null)}>Close</Button>
           </div>
@@ -213,7 +323,7 @@ export function VaultsList() {
           <div className="text-fg-subtle text-sm py-4 text-center">Loading...</div>
         ) : credentials.length === 0 ? (
           <div className="text-center py-8 text-fg-subtle text-sm">
-            No credentials yet. Connect an MCP server or add a command secret.
+            No credentials yet. Connect an MCP server or add a CLI token.
           </div>
         ) : (
           <div className="space-y-2">
@@ -224,16 +334,16 @@ export function VaultsList() {
                   <div className="min-w-0">
                     <div className="font-medium text-sm text-fg truncate">{c.display_name}</div>
                     <div className="text-xs text-fg-muted font-mono truncate">
-                      {c.auth.mcp_server_url || c.auth.command_prefixes?.join(", ") || c.id}
+                      {c.auth.mcp_server_url || c.auth.cli_id || c.id}
                     </div>
                   </div>
                 </div>
                 <div className="flex items-center gap-2 shrink-0">
                   <span className={`text-[10px] px-2 py-0.5 rounded-full ${
                     c.auth.type === "mcp_oauth" ? "bg-info-subtle text-info"
-                    : c.auth.type === "command_secret" ? "bg-brand-subtle text-brand"
+                    : c.auth.type === "cap_cli" ? "bg-brand-subtle text-brand"
                     : "bg-success-subtle text-success"
-                  }`}>{c.auth.type === "mcp_oauth" ? "OAuth" : c.auth.type === "command_secret" ? "Secret" : "Bearer"}</span>
+                  }`}>{c.auth.type === "mcp_oauth" ? "OAuth" : c.auth.type === "cap_cli" ? "CLI" : "Bearer"}</span>
                   <button onClick={() => deleteCred(c.id)} className="text-xs text-fg-subtle hover:text-danger transition-colors">Delete</button>
                 </div>
               </div>
@@ -300,34 +410,91 @@ export function VaultsList() {
         </div>
       </Modal>
 
-      {/* Add Manual Secret (command_secret) */}
+      {/* Add CLI credential (cap_cli) */}
       <Modal
-        open={showManualCred && !!selectedVault}
-        onClose={() => setShowManualCred(false)}
-        title="Add Command Secret"
+        open={showAddCli && !!selectedVault}
+        onClose={() => { setShowAddCli(false); setDeviceFlow(null); }}
+        title="Add a CLI"
+        subtitle="cap injects the token at HTTPS time. Sandbox process never sees the secret."
         footer={
-          <>
-            <Button variant="ghost" onClick={() => setShowManualCred(false)}>Cancel</Button>
-            <Button onClick={createManualCred} disabled={!manualForm.display_name || !manualForm.token}>Create</Button>
-          </>
+          deviceFlow?.status === "polling" ? (
+            <Button variant="ghost" onClick={() => { setDeviceFlow(null); }}>Cancel</Button>
+          ) : (
+            <>
+              <Button variant="ghost" onClick={() => setShowAddCli(false)}>Cancel</Button>
+              <Button onClick={createCapCliCred} disabled={!cliForm.token}>Create</Button>
+            </>
+          )
         }
       >
         <div className="space-y-3">
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Display Name</label>
-            <input value={manualForm.display_name} onChange={(e) => setManualForm({ ...manualForm, display_name: e.target.value })} className={inputCls} placeholder="GitHub Token" />
+            <label className="text-sm text-fg-muted block mb-1">CLI</label>
+            <select
+              value={cliForm.cli_id}
+              onChange={(e) => { setCliForm({ ...cliForm, cli_id: e.target.value }); setDeviceFlow(null); }}
+              className={inputCls}
+              disabled={deviceFlow?.status === "polling"}
+            >
+              {CAP_CLIS.map((c) => (
+                <option key={c.cli_id} value={c.cli_id}>{c.label}{c.oauth ? " (OAuth supported)" : ""}</option>
+              ))}
+            </select>
+            <div className="text-xs text-fg-subtle mt-1">
+              {CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.helper}
+            </div>
+          </div>
+
+          {/* Device flow panel */}
+          {CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.oauth && (
+            <div className="border border-border rounded-md p-3 bg-bg-surface">
+              {!deviceFlow && (
+                <Button variant="secondary" size="sm" onClick={startDeviceFlow}>
+                  Sign in via {cliForm.cli_id} OAuth
+                </Button>
+              )}
+              {deviceFlow?.status === "polling" && (
+                <div className="space-y-2 text-sm">
+                  <div className="text-fg-muted">
+                    Open <a href={deviceFlow.verification_uri_complete ?? deviceFlow.verification_uri} target="_blank" rel="noreferrer" className="text-brand underline">{deviceFlow.verification_uri_complete ?? deviceFlow.verification_uri}</a> and enter:
+                  </div>
+                  <div className="font-mono text-2xl text-center tracking-widest text-fg py-2 select-all">
+                    {deviceFlow.user_code}
+                  </div>
+                  <div className="text-xs text-fg-subtle text-center">Waiting for confirmation… (polls every {deviceFlow.interval_seconds}s)</div>
+                </div>
+              )}
+              {deviceFlow?.status === "ready" && (
+                <div className="text-sm text-success">✓ Token acquired and stored.</div>
+              )}
+              {(deviceFlow?.status === "expired" || deviceFlow?.status === "denied" || deviceFlow?.status === "error") && (
+                <div className="text-sm text-danger">
+                  {deviceFlow.status === "denied" ? "Access denied by user." : deviceFlow.status === "expired" ? "Code expired — try again." : `OAuth error: ${deviceFlow.error ?? "unknown"}`}
+                </div>
+              )}
+            </div>
+          )}
+
+          <div>
+            <label className="text-sm text-fg-muted block mb-1">Display Name <span className="text-fg-subtle">(optional)</span></label>
+            <input
+              value={cliForm.display_name}
+              onChange={(e) => setCliForm({ ...cliForm, display_name: e.target.value })}
+              className={inputCls}
+              placeholder={CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.label ?? cliForm.cli_id}
+              disabled={deviceFlow?.status === "polling"}
+            />
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Command Prefixes <span className="text-fg-subtle">(comma-separated)</span></label>
-            <input value={manualForm.command_prefixes} onChange={(e) => setManualForm({ ...manualForm, command_prefixes: e.target.value })} className={inputCls} placeholder="git, gh" />
-          </div>
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">Environment Variable</label>
-            <input value={manualForm.env_var} onChange={(e) => setManualForm({ ...manualForm, env_var: e.target.value })} className={inputCls} placeholder="GITHUB_TOKEN" />
-          </div>
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only)</span></label>
-            <input type="password" value={manualForm.token} onChange={(e) => setManualForm({ ...manualForm, token: e.target.value })} className={inputCls} placeholder="••••••••" />
+            <label className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only — leave blank to use OAuth above)</span></label>
+            <input
+              type="password"
+              value={cliForm.token}
+              onChange={(e) => setCliForm({ ...cliForm, token: e.target.value })}
+              className={inputCls}
+              placeholder="••••••••"
+              disabled={deviceFlow?.status === "polling"}
+            />
           </div>
         </div>
       </Modal>

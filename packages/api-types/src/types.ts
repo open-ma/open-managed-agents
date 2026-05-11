@@ -800,7 +800,7 @@ export interface VaultConfig {
 // --- Credential ---
 
 export interface CredentialAuth {
-  type: "mcp_oauth" | "static_bearer" | "command_secret";
+  type: "mcp_oauth" | "static_bearer" | "cap_cli";
   // mcp_oauth / static_bearer: match by MCP server URL
   mcp_server_url?: string;
   // mcp_oauth fields
@@ -811,16 +811,20 @@ export interface CredentialAuth {
   client_secret?: string;
   expires_at?: string;           // ISO 8601, when access_token expires
   authorization_server?: string; // cached OAuth authorization server URL
-  // static_bearer fields
+  // static_bearer / cap_cli fields
   token?: string;
-  // command_secret: inject env var only for matching command prefixes
-  command_prefixes?: string[];    // e.g. ["wrangler", "npx wrangler"]
-  env_var?: string;               // e.g. "CLOUDFLARE_API_TOKEN"
   // Provider tag: when set, the outbound proxy can request a token refresh
   // via the integrations gateway (which holds the secrets needed to mint a
   // fresh token — e.g. GitHub App private key). Used to support short-lived
   // upstream tokens (GitHub installation tokens, ~1hr TTL).
   provider?: "github" | "linear";
+  // cap_cli: inject credential when sandbox traffic matches a registered
+  // cap CLI spec (gh, aws, kubectl, …). The token is held in main worker
+  // and injected by the outbound proxy at HTTPS time — never enters the
+  // sandbox container's process env. Replaces the old `command_secret`
+  // type which injected tokens directly into subprocess env (leaky).
+  cli_id?: string;                 // matches a cap.builtinSpecs cli_id (e.g. "gh", "aws")
+  extras?: Record<string, string>; // mode-specific extra fields (e.g. AWS access_key_id)
 }
 
 export interface CredentialConfig {

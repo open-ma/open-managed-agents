@@ -50,6 +50,11 @@ import type { Env, AgentConfig, CredentialConfig } from "@open-managed-agents/sh
 import { log, logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import type { KvStore } from "@open-managed-agents/kv-store";
+import { builtinSpecs, createSpecRegistry } from "@open-managed-agents/cap";
+
+// Module-level: the cap spec registry is pure data + immutable. Building
+// once amortises validation across every outbound request.
+const capRegistry = createSpecRegistry(builtinSpecs);
 
 const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
 
@@ -211,6 +216,35 @@ export async function resolveOutboundCredentialByHost(
   const grouped = await services.credentials
     .listByVaults({ tenantId, vaultIds })
     .catch(() => []);
+
+  // First pass: cap_cli credentials matched via cap's spec registry.
+  // Cap owns the per-CLI knowledge — endpoints (`api.github.com`,
+  // `*.amazonaws.com`, …), header shape, OAuth refresh metadata. Here we
+  // just match by hostname → cli_id and find a cap_cli credential whose
+  // cli_id matches. Header rewrite happens later in forwardWithRefresh.
+  const capSpec = capRegistry.byHostname(hostname);
+  if (capSpec) {
+    for (const g of grouped) {
+      for (const c of g.credentials) {
+        const auth = (c as unknown as CredentialConfig).auth as
+          | { type?: string; cli_id?: string; token?: string }
+          | undefined;
+        if (auth?.type !== "cap_cli") continue;
+        if (auth.cli_id !== capSpec.cli_id) continue;
+        if (!auth.token) continue;
+        // Treat every cap_cli credential as a static bearer for the
+        // matched hostname. Header-mode CLIs (gh, glab, fly, …) all
+        // emit `Authorization: Bearer <token>` which matches existing
+        // forwardWithRefresh behaviour. metadata_ep / exec_helper modes
+        // need the full cap.handleHttp pipeline — wired in PR 2.
+        return { upstreamUrl: `https://${hostname}/`, upstreamToken: auth.token };
+      }
+    }
+  }
+
+  // Second pass: legacy mcp_oauth / static_bearer matched by mcp_server_url.
+  // Kept for MCP server credentials (Linear / Slack / Notion etc.) that
+  // aren't routed through cap — those are MCP-OAuth, not CLI.
   for (const g of grouped) {
     for (const c of g.credentials) {
       const auth = (c as unknown as CredentialConfig).auth as

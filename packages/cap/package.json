@@ -1,0 +1,19 @@
+{
+  "name": "@open-managed-agents/cap",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI Auth Protocol — declarative spec + pure-function enforcement for injecting credentials into common CLIs.",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./test-fakes": "./src/test-fakes.ts"
+  },
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run --config vitest.config.ts",
+    "check:no-io": "node scripts/check-no-io.mjs"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
+  }
+}
