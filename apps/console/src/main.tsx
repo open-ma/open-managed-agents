@@ -11,6 +11,7 @@ import { AgentsList } from "./pages/AgentsList";
 import { AgentDetail } from "./pages/AgentDetail";
 import { SessionsList } from "./pages/SessionsList";
 import { SessionDetail } from "./pages/SessionDetail";
+import { FilesList } from "./pages/FilesList";
 import { EnvironmentsList } from "./pages/EnvironmentsList";
 import { EnvironmentDetail } from "./pages/EnvironmentDetail";
 import { VaultsList } from "./pages/VaultsList";
@@ -57,6 +58,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="agents/:id" element={<AgentDetail />} />
             <Route path="sessions" element={<SessionsList />} />
             <Route path="sessions/:id" element={<SessionDetail />} />
+            <Route path="files" element={<FilesList />} />
             <Route path="evals" element={<EvalRunsList />} />
             <Route path="evals/:id" element={<EvalRunDetail />} />
             <Route path="environments" element={<EnvironmentsList />} />
