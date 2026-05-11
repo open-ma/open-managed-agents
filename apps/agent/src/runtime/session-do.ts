@@ -223,6 +223,19 @@ interface SessionState {
    * prefix bytes and bust the cache).
    */
   session_init_done?: boolean;
+  /**
+   * Wall-clock create timestamp (Unix ms). Used by the hybrid-billing
+   * `session_alive_seconds` emit at terminate time. Set lazily on /init —
+   * pre-billing sessions read undefined and the emit is skipped (the
+   * cost would be 0 cents anyway after the rate cap).
+   */
+  created_at_ms?: number;
+  /**
+   * Idempotency guard for the session_alive_seconds emit. Set once at
+   * terminate; the second terminate call (DO restart hits the same
+   * /destroy) checks this and skips the duplicate emit.
+   */
+  session_alive_billed?: boolean;
 }
 
 const INITIAL_SESSION_STATE: SessionState = {
@@ -1346,6 +1359,12 @@ export class SessionDO extends DurableObject<Env> {
         vault_credentials: params.vault_credentials,
         event_hooks: params.event_hooks,
         terminated_at: null,
+        // Stamp wall-clock create on first /init only — re-init shouldn't
+        // reset the alive-seconds counter mid-session. (D1's
+        // sessions.created_at is the canonical source; this DO copy lets
+        // terminate compute elapsed without an async D1 read on the way out.)
+        created_at_ms: this.state.created_at_ms ?? Date.now(),
+        session_alive_billed: false,
       });
 
       // Outbound credential snapshot — DELETED. The legacy path published
@@ -2314,7 +2333,44 @@ export class SessionDO extends DurableObject<Env> {
   private getBrowserSession(): BrowserSession | null {
     if (!this.env.BROWSER) return null;
     if (!this.browserSession) {
-      this.browserSession = createBrowserSession(this.env.BROWSER as unknown as { fetch: typeof fetch });
+      const tenantId = this.state.tenant_id;
+      const sessionId = this.state.session_id;
+      const agentId = this.state.agent_id || null;
+      // Hybrid-billing hook: emit one browser_active_seconds row when the
+      // BrowserSession closes (DELETE /destroy path or hibernation
+      // teardown). Skipped when tenant/session aren't set yet (early-init
+      // edge — no usage to attribute).
+      const hook = tenantId && sessionId
+        ? {
+            tenantId,
+            sessionId,
+            agentId,
+            onClose: async (elapsedSeconds: number) => {
+              try {
+                const { getCfServicesForTenant } = await import("@open-managed-agents/services");
+                const services = await getCfServicesForTenant(this.env, tenantId);
+                await services.usage.recordUsage({
+                  tenantId,
+                  sessionId,
+                  agentId,
+                  kind: "browser_active_seconds",
+                  value: elapsedSeconds,
+                });
+                console.log(
+                  `[session_do] usage emit browser_active_seconds=${elapsedSeconds} session=${sessionId.slice(0, 12)}`,
+                );
+              } catch (err) {
+                console.error(
+                  `[session_do] browser usage emit failed: ${(err as Error).message ?? err}`,
+                );
+              }
+            },
+          }
+        : null;
+      this.browserSession = createBrowserSession(
+        this.env.BROWSER as unknown as { fetch: typeof fetch },
+        hook,
+      );
     }
     return this.browserSession;
   }
@@ -2742,6 +2798,26 @@ export class SessionDO extends DurableObject<Env> {
           tenantId: this.state.tenant_id,
           environmentId: this.state.environment_id,
           sessionId: this.state.session_id,
+        });
+      }
+
+      // Hand billing context to OmaSandbox so its onStop hook (sleepAfter
+      // teardown OR explicit destroy) emits one sandbox_active_seconds
+      // row scoped to this (tenant, session, agent). Same idempotency
+      // story as setBackupContext — same-session rewarms keep the
+      // original startedAt; new-session containers mint a fresh one.
+      const sandboxAny = sandbox as unknown as {
+        setBillingContext?: (c: {
+          tenantId: string;
+          sessionId: string;
+          agentId: string | null;
+        }) => Promise<void>;
+      };
+      if (sandboxAny.setBillingContext && this.state.session_id && this.state.tenant_id) {
+        await sandboxAny.setBillingContext({
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+          agentId: this.state.agent_id || null,
         });
       }
 
@@ -4328,6 +4404,17 @@ export class SessionDO extends DurableObject<Env> {
       ctrl.abort();
     }
     this._threadAbortControllers.clear();
+    // Hybrid-billing: emit session_alive_seconds covering wall-clock
+    // (created_at_ms → now) on terminate. Idempotent via
+    // session_alive_billed; fire-and-forget so the terminate path can
+    // proceed if the usage_events write hiccups.
+    //
+    // TODO: 24h cron sweep — long-running session that never terminates
+    // never emits. Schedule a SessionDO alarm every 24h to slice the
+    // alive-seconds window, write an interim event with the partial
+    // seconds, advance the cursor (created_at_ms = now). Out of scope
+    // for v1.
+    void this._recordSessionAliveOnTerminate();
     const event: SessionEvent = {
       type: "session.status_terminated",
       reason,
@@ -4354,6 +4441,49 @@ export class SessionDO extends DurableObject<Env> {
             `[session_do] terminate writeback to D1 failed: ${(err as Error).message ?? err}`,
           );
         });
+    }
+  }
+
+  /**
+   * Hybrid-billing: emit one session_alive_seconds row spanning
+   * created_at_ms → now. Idempotent — called from terminate() but skips
+   * the write if session_alive_billed is already true (DO restart hits
+   * /destroy a second time).
+   */
+  private async _recordSessionAliveOnTerminate(): Promise<void> {
+    try {
+      if (this._state?.session_alive_billed) return;
+      const tenantId = this.state.tenant_id;
+      const sessionId = this.state.session_id;
+      const createdAt = this._state?.created_at_ms;
+      if (!tenantId || !sessionId || !createdAt) return;
+      const elapsedMs = Date.now() - createdAt;
+      const seconds = Math.floor(elapsedMs / 1000);
+      if (seconds <= 0) {
+        // Mark as billed anyway so we don't keep retrying for a
+        // sub-second session.
+        this.setState({ ...this.state, session_alive_billed: true });
+        return;
+      }
+      // getCfServicesForTenant resolves the per-tenant DB then builds
+      // the Services container — the same path used for backup writes.
+      const { getCfServicesForTenant } = await import("@open-managed-agents/services");
+      const services = await getCfServicesForTenant(this.env, tenantId);
+      await services.usage.recordUsage({
+        tenantId,
+        sessionId,
+        agentId: this.state.agent_id || null,
+        kind: "session_alive_seconds",
+        value: seconds,
+      });
+      this.setState({ ...this.state, session_alive_billed: true });
+      console.log(
+        `[session_do] usage emit session_alive_seconds=${seconds} session=${sessionId.slice(0, 12)}`,
+      );
+    } catch (err) {
+      console.error(
+        `[session_do] _recordSessionAliveOnTerminate failed: ${(err as Error).message ?? err}`,
+      );
     }
   }
 
