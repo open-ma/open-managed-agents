@@ -5097,8 +5097,24 @@ export class SessionDO extends DurableObject<Env> {
     //    iff the row actually flipped.
     const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
     let ended = 0;
+    // Race window: cold-start flush is fire-and-forget from fetch();
+    // the same fetch() may concurrently route a POST /event into
+    // drainEventQueue → adapter.beginTurn (writes D1 row) →
+    // hintTurnInFlight callback (populates _activeTurnIds). If we read
+    // listOrphanTurns BETWEEN the D1 write landing and the in-memory
+    // set add, the brand-new turn looks like an orphan and we'd
+    // incorrectly emit rescheduled+idle for it (caught 2026-05-11
+    // bench scenario 08, sess-hn5kmowudx42awm0). Filter by
+    // turn_started_at age — anything that started < 30s ago is
+    // necessarily either still in-flight or just-completed; not an
+    // orphan worth reaping. Real orphans (DO eviction) have
+    // turn_started_at from a previous incarnation, which is by
+    // definition older than the current process's lifetime.
+    const FRESH_TURN_GRACE_MS = 30_000;
+    const now = Date.now();
     for (const o of orphans) {
       if (this._activeTurnIds.has(o.turn_id)) continue;
+      if (now - o.turn_started_at < FRESH_TURN_GRACE_MS) continue;
       try {
         await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
       } catch (err) {
