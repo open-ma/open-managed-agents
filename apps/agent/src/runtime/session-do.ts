@@ -20,6 +20,7 @@ import {
   AuthError,
   BillingError,
   ConfigError,
+  ModelError,
   TransientInfraError,
 } from "@open-managed-agents/shared";
 import {
@@ -4153,7 +4154,12 @@ export class SessionDO extends DurableObject<Env> {
       const isFatal =
         classified instanceof BillingError ||
         classified instanceof ConfigError ||
-        classified instanceof AuthError;
+        classified instanceof AuthError ||
+        // ModelError = deterministic LLM-side condition (silent_stop,
+        // refused, malformed). Same prompt → same fail. Retrying just
+        // burns tokens. Caught 2026-05-11 sess-y2bfxm1de4e1zqxm: 4
+        // failed messages × 3 retries = 12 wasted LLM calls.
+        classified instanceof ModelError;
       const isTransient = !isFatal;
 
       if (isTransient && retryCount < 2) {
