@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:staging": "VITE_API_TARGET=https://app.staging.openma.dev vite",
     "build": "vite build",
     "preview": "vite preview"
   },
