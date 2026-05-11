@@ -1575,27 +1575,36 @@ export class SessionDO extends DurableObject<Env> {
           (body as unknown as { session_thread_id?: string })
             .session_thread_id ?? "sthr_primary";
         const ctrl = this._threadAbortControllers.get(targetThread);
+        const hadActiveTurn = !!ctrl;
         if (ctrl) {
           ctrl.abort();
           this._threadAbortControllers.delete(targetThread);
         }
         const cancelTs = Date.now();
-        this.ctx.storage.sql.exec(
+        const cancelResult = this.ctx.storage.sql.exec(
           `UPDATE events SET cancelled_at = ?
              WHERE session_thread_id = ?
                AND processed_at IS NULL AND cancelled_at IS NULL
                AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
           cancelTs, targetThread,
         );
-        // Status auto-derives via the abort propagating through runtime
-        // adapter.endTurn.
-        const idleEvent: SessionEvent = {
-          type: "session.status_idle",
-          ...(targetThread !== "sthr_primary" ? { session_thread_id: targetThread } : {}),
-        };
+        const cancelledCount = (cancelResult as { rowsWritten?: number }).rowsWritten ?? 0;
         history.append(body as UserInterruptEvent);
-        history.append(idleEvent);
-        this.broadcastEvent(idleEvent);
+        // Emit status_idle when interrupt actually changed thread state:
+        // either an active turn was aborted, or queued events were
+        // cancelled. Skip when both are false (no-op interrupt) — that
+        // case had been emitting a duplicate status_idle right after a
+        // natural-end one, observed 2026-05-11 sess-y5saq (seq 93 idle
+        // stop_reason=end_turn, seq 95 idle stop_reason=None).
+        const shouldEmitIdle = hadActiveTurn || cancelledCount > 0;
+        if (shouldEmitIdle) {
+          const idleEvent: SessionEvent = {
+            type: "session.status_idle",
+            ...(targetThread !== "sthr_primary" ? { session_thread_id: targetThread } : {}),
+          };
+          history.append(idleEvent);
+          this.broadcastEvent(idleEvent);
+        }
         return new Response(null, { status: 202 });
       }
 
