@@ -20,7 +20,23 @@ import type { BrowserSession } from "./browser-tools";
 // classification list and the registration list MUST be the same set, or
 // downstream consumers (Console UI, SDK event filters, billing) will see
 // mis-typed events.
-export const ALL_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "browser", "schedule", "cancel_schedule", "list_schedules"];
+/** Tools enabled by default when an agent has no explicit tools config.
+ *  Excludes opt-in tools that bias the LLM away from cheaper alternatives
+ *  — see OPT_IN_TOOLS below. */
+export const DEFAULT_TOOLS = ["bash", "read", "write", "edit", "glob", "grep", "web_fetch", "web_search", "schedule", "cancel_schedule", "list_schedules"];
+
+/** Tools recognised but NOT registered by default — agents must opt in
+ *  via tools config (`{ name: "browser", enabled: true }`).
+ *  - `browser`: heavy multi-step session (navigate / click / screenshot).
+ *    Available web_fetch + web_search satisfy 95% of read-only research;
+ *    the LLM otherwise tends to reach for browser even for simple lookups
+ *    because the description sounds more "agentic". Make it opt-in so the
+ *    default tool list nudges toward the cheaper path. */
+export const OPT_IN_TOOLS = ["browser"];
+
+/** Backwards-compat union — used as the recognised-tool-name set for
+ *  validation. New callers should prefer DEFAULT_TOOLS or OPT_IN_TOOLS. */
+export const ALL_TOOLS = [...DEFAULT_TOOLS, ...OPT_IN_TOOLS];
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
@@ -286,9 +302,11 @@ export function getToolPermission(agentConfig: AgentConfig, toolName: string): s
 }
 
 function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
-  const allTools = new Set(ALL_TOOLS);
+  // Default = DEFAULT_TOOLS only. OPT_IN_TOOLS (browser) require an
+  // explicit per-tool { enabled: true } in the agent's tools config.
+  const defaultSet = new Set(DEFAULT_TOOLS);
 
-  if (!tools || tools.length === 0) return allTools;
+  if (!tools || tools.length === 0) return defaultSet;
 
   for (const t of tools) {
     if (t.type === "custom") continue;
@@ -298,8 +316,11 @@ function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
       const enabled = new Set<string>();
       const defaultEnabled = ts.default_config?.enabled ?? true;
 
+      // "default_config.enabled = true" turns on the DEFAULT set —
+      // still NOT opt-in tools. To get browser, the agent must have
+      // an explicit `{ name: "browser", enabled: true }` in configs.
       if (defaultEnabled) {
-        for (const name of allTools) enabled.add(name);
+        for (const name of defaultSet) enabled.add(name);
       }
 
       for (const c of ts.configs) {
@@ -309,10 +330,10 @@ function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
       return enabled;
     }
 
-    return allTools;
+    return defaultSet;
   }
 
-  return allTools;
+  return defaultSet;
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
