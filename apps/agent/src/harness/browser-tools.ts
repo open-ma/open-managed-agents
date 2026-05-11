@@ -8,6 +8,11 @@
  *
  * Tools mirror Playwright's locator-based API but stay coarse so the LLM
  * doesn't have to think about implementation details.
+ *
+ * Hybrid-billing hook: createBrowserSession optionally accepts a
+ * BillingHook { tenantId, sessionId, agentId?, onClose } — invoked once
+ * on close() with the Page-open elapsed seconds. SessionDO wires the
+ * onClose callback to UsageStore.recordUsage(kind=browser_active_seconds).
  */
 import { z } from "zod";
 import { tool } from "ai";
@@ -24,12 +29,32 @@ export interface BrowserSession {
 }
 
 /**
+ * Hook the caller (SessionDO) optionally passes to attribute the
+ * browser_active_seconds emit. Pure data shape — no SDK dependency in
+ * this module.
+ */
+export interface BrowserBillingHook {
+  tenantId: string;
+  sessionId: string;
+  agentId?: string | null;
+  /** Called once on close() with elapsed wall-clock seconds (Page-open → close). */
+  onClose: (elapsedSeconds: number) => Promise<void> | void;
+}
+
+/**
  * Holds one Browser+Page across the session's lifetime. In-memory only —
  * recreated if the DO hibernates.
+ *
+ * `hook` is optional so unit tests / non-billing call sites pass null
+ * and get the original behavior.
  */
-export function createBrowserSession(binding: BrowserWorker): BrowserSession {
+export function createBrowserSession(
+  binding: BrowserWorker,
+  hook?: BrowserBillingHook | null,
+): BrowserSession {
   let browser: Browser | null = null;
   let page: Page | null = null;
+  let openedAtMs: number | null = null;
 
   async function ensure(): Promise<Page> {
     if (page) return page;
@@ -37,6 +62,7 @@ export function createBrowserSession(binding: BrowserWorker): BrowserSession {
     browser = await launch(binding, { keep_alive: 600_000 });
     const context = await browser.newContext();
     page = await context.newPage();
+    openedAtMs = Date.now();
     return page;
   }
 
@@ -44,11 +70,29 @@ export function createBrowserSession(binding: BrowserWorker): BrowserSession {
     page: ensure,
     isOpen: () => page !== null,
     async close() {
+      const wasOpen = page !== null && openedAtMs !== null;
+      const elapsedMs = wasOpen ? Date.now() - (openedAtMs as number) : 0;
       try {
         if (browser) await browser.close();
       } catch {}
       browser = null;
       page = null;
+      openedAtMs = null;
+      // Emit billing AFTER browser teardown so a slow close() doesn't
+      // delay the cleanup (and so close() failure paths still record
+      // the elapsed time the user got value from).
+      if (wasOpen && hook) {
+        const seconds = Math.floor(elapsedMs / 1000);
+        if (seconds > 0) {
+          try {
+            await hook.onClose(seconds);
+          } catch (err) {
+            console.error(
+              `[browser-tools] billing hook failed: ${(err as Error)?.message ?? err}`,
+            );
+          }
+        }
+      }
     },
   };
 }
