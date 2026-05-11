@@ -2,7 +2,7 @@ import { streamText, stepCountIs } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { HarnessInterface, HarnessContext, HarnessRuntime } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
-import { generateEventId, classifyExternalError } from "@open-managed-agents/shared";
+import { generateEventId, classifyExternalError, ModelError } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
@@ -669,7 +669,13 @@ export class DefaultHarness implements HarnessInterface {
         if (currentMessageId) {
           await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
         }
-        throw new Error(
+        // Throw as ModelError so processUserMessage's catch classifies
+        // it as fatal (no retry). silent_stop is deterministic per
+        // (model, prompt) — observed 2026-05-11 sess-y2bfxm1de4e1zqxm
+        // burning 12 LLM calls retrying the same empty response 3x ×
+        // 4 messages. classifyExternalError doesn't have a pattern
+        // for it; we know the class at the throw site, just type it.
+        throw new ModelError(
           `silent_stop: model returned finish_reason=${finishReason} with empty text and no tool calls`,
         );
       }

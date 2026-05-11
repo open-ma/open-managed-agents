@@ -227,14 +227,15 @@ export function SessionDetail() {
 
     if (ev.type === "session.status_running") setStatus("running");
     if (ev.type === "session.status_idle") setStatus("idle");
-    // Defense-in-depth: terminal events should also collapse the
-    // "Running" pill even if the server forgot to emit a paired
-    // status_idle (historical bug class — see processUserMessage's
-    // catch-all idle emit). Both are end-of-turn signals: error means
-    // the turn died non-recoverably, rescheduled means it gave up
-    // after retry exhaustion. Either way the user can re-send.
+    // session.error → idle: defense-in-depth for the catch-all status_idle
+    // emit (processUserMessage finally) in case a future code path forgets
+    // to pair status_running with status_idle. Note: do NOT also map
+    // status_rescheduled — that's a transient retry-pending state, not a
+    // terminal one. Mapping it caused observed pill flicker
+    // running→idle→running→idle×3 during exponential-backoff retries
+    // (sess-y2bfxm1de4e1zqxm 2026-05-11). The next status_running event
+    // for the retry attempt naturally restores the pill.
     if (ev.type === "session.error") setStatus("idle");
-    if (ev.type === "session.status_rescheduled") setStatus("idle");
     // Live-update the thread selector when a sub-agent spawns. We don't
     // auto-switch the operator's view — they stay on whatever they're
     // watching; the new tab just appears alongside.
