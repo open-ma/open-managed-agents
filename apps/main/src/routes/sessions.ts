@@ -20,6 +20,7 @@ import {
   type NewResourceInput,
 } from "@open-managed-agents/sessions-store";
 import { jsonPage, parsePageQuery } from "../lib/list-page";
+import { parseRepoSlug } from "../lib/github-creds";
 
 const app = new Hono<{
   Bindings: Env;
@@ -300,6 +301,26 @@ app.post("/", async (c) => {
       }
       seenMemoryStoreIds.add(r.memory_store_id);
     }
+  }
+
+  // Reject duplicate github_repository (same owner/repo slug) within a
+  // single session — the per-repo proxy resolver matches by slug, so two
+  // resources with the same slug would always pick the first one and the
+  // second's token would be silently unused. Surface as 422 instead.
+  const seenGithubSlugs = new Set<string>();
+  for (const r of body.resources ?? []) {
+    if (r.type !== "github_repository" && r.type !== "github_repo") continue;
+    const repoUrl = r.url || r.repo_url;
+    if (!repoUrl) continue;
+    const slug = parseRepoSlug(repoUrl);
+    if (!slug) continue;
+    if (seenGithubSlugs.has(slug)) {
+      return c.json(
+        { error: `Duplicate github_repository resource for ${slug}` },
+        422,
+      );
+    }
+    seenGithubSlugs.add(slug);
   }
 
   // Verify agent exists

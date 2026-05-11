@@ -301,8 +301,92 @@ const r2OutboundPassthrough = async (request: Request): Promise<Response> => {
   );
 };
 
+// Per-host network-layer GitHub credential injection (γ proxy).
+//
+// Sandbox containers fire plain HTTPS at github.com (smart-HTTP git
+// protocol) and api.github.com (REST/GraphQL) with no Authorization
+// header — neither ~/.git-credentials nor GITHUB_TOKEN env exists in the
+// sandbox by design. We resolve the right token via main worker RPC
+// (per-session, per-repo path matching with first-resource fallback),
+// inject Authorization with the host-appropriate scheme, and forward.
+//
+// Auth scheme is host-specific:
+//   - github.com   → Basic base64("x-access-token:<token>") (smart-HTTP)
+//   - api.github.com → Bearer <token> (REST/GraphQL)
+//
+// Pass-through (no auth header added) when:
+//   - the session has no github_repository resources
+//   - the per-session credential lookup fails
+//
+// Multi-repo fallback: if the request URL doesn't match any mounted
+// repo's owner/repo slug, we use the first declared repo's token.
+// Known limitation: cross-token mutations (graphql to repo B with token
+// A's scope) return GitHub's standard error envelope; we don't retry.
+const githubAuthHandler = async (
+  request: Request,
+  env: unknown,
+  ctx: SdkContext<OutboundContextParams>,
+): Promise<Response> => {
+  const url = new URL(request.url);
+  const params = ctx.params ?? {};
+  const e = env as Env;
+
+  let cred: { scheme: "Basic" | "Bearer"; token: string; slug: string } | null = null;
+  if (params.tenantId && params.sessionId && e.MAIN_MCP) {
+    try {
+      cred = await e.MAIN_MCP.lookupGithubCredential({
+        tenantId: params.tenantId,
+        sessionId: params.sessionId,
+        hostname: url.hostname,
+        pathname: url.pathname,
+      });
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] lookupGithubCredential threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
+      );
+      // Fall through unauthenticated — same as legacy behaviour for
+      // RPC failure; agent sees 401, can retry.
+    }
+  }
+
+  const outHeaders = new Headers(request.headers);
+  for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
+  if (cred) {
+    const value = cred.scheme === "Basic"
+      ? `Basic ${btoa(`x-access-token:${cred.token}`)}`
+      : `Bearer ${cred.token}`;
+    outHeaders.set("authorization", value);
+  }
+
+  let upstreamReq: Request;
+  if (request.method === "GET" || request.method === "HEAD") {
+    upstreamReq = new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      redirect: "manual",
+    });
+  } else {
+    // Materialize body — Workers needs known-length to set Content-Length
+    // (same constraint as injectVaultCredsHandler / r2OutboundPassthrough).
+    const bodyBytes = await request.arrayBuffer();
+    upstreamReq = new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      body: bodyBytes,
+      redirect: "manual",
+    });
+  }
+
+  console.log(
+    `[oma-sandbox] github host=${url.hostname} method=${request.method} cred=${cred ? cred.slug : "none"}`,
+  );
+  return fetch(upstreamReq);
+};
+
 (OmaSandbox as unknown as {
-  outboundByHost: Record<string, (req: Request) => Promise<Response>>;
+  outboundByHost: Record<string, (req: Request, env: unknown, ctx: SdkContext<OutboundContextParams>) => Promise<Response>>;
 }).outboundByHost = {
   "*.r2.cloudflarestorage.com": r2OutboundPassthrough,
+  "github.com": githubAuthHandler,
+  "api.github.com": githubAuthHandler,
 };

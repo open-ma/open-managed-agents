@@ -31,7 +31,6 @@ export async function mountResources(
   memoryStoreLookup?: (storeId: string) => Promise<{ name: string } | null>,
 ): Promise<void> {
   let hasGitRepo = false;
-  let lastGitToken: string | null = null;
   // Buffer env vars across the loop so we make a single setEnvVars call
   // at the end. setEnvVars on most sandbox implementations is a network
   // round-trip per call; one batched call beats one-per-resource.
@@ -46,10 +45,12 @@ export async function mountResources(
         case "github_repository":
         case "github_repo": {
           hasGitRepo = true;
-          const resId = res.id as string;
-          const token = resId ? secretStore?.get(resId) || null : null;
-          if (token) lastGitToken = token;
-          await mountGitRepo(sandbox, res, token);
+          // Token is no longer pulled into the sandbox — the agent worker's
+          // outbound proxy injects Authorization on every github.com /
+          // api.github.com call by RPC-ing main per request. mountGitRepo
+          // therefore clones / fetches with no auth surface inside the
+          // container; the proxy makes those calls succeed.
+          await mountGitRepo(sandbox, res);
           break;
         }
         case "memory_store":
@@ -79,11 +80,6 @@ export async function mountResources(
 
   // kv reserved for future use (memory_store, etc.); intentionally unused for files now.
   void kv;
-
-  // Register last token for gh CLI (gh only supports one GH_TOKEN)
-  if (lastGitToken && sandbox.registerCommandSecrets) {
-    sandbox.registerCommandSecrets("gh", { GITHUB_TOKEN: lastGitToken, GH_TOKEN: lastGitToken });
-  }
 
   // Apply collected env vars in a single call. setEnvVars is optional on
   // SandboxExecutor (some test fakes omit it) — silently skip when
@@ -190,37 +186,34 @@ async function mountMemoryStore(
 async function mountGitRepo(
   sandbox: SandboxExecutor,
   res: Record<string, unknown>,
-  token: string | null,
 ): Promise<void> {
   const repoUrl = res.url as string || res.repo_url as string;
   if (!repoUrl) return;
 
   const targetDir = (res.mount_path as string) || "/workspace";
 
-  // Store credential BEFORE clone so git can auth automatically
-  if (token) {
-    // Write credential to .git-credentials (per-repo, per-host)
-    // Format: https://user:token@host/path.git (one per line)
-    try {
-      const url = new URL(repoUrl);
-      const credLine = `https://x-access-token:${token}@${url.hostname}${url.pathname}`;
-      await sandbox.exec(`git config --global credential.helper store`, 5000);
-      const writeResult = await sandbox.exec(`echo '${credLine.replace(/'/g, "'\\''")}' >> $HOME/.git-credentials && chmod 600 $HOME/.git-credentials && echo CRED_OK`, 5000);
-      if (!writeResult.includes("CRED_OK")) {
-        console.error("[resource-mounter] credential write failed:", writeResult);
-      }
-    } catch (err) {
-      console.error("[resource-mounter] credential setup error:", err);
-    }
-  }
+  // Disable interactive credential prompting BEFORE any git network call.
+  // The network-layer proxy (apps/agent/src/oma-sandbox.ts githubAuthHandler)
+  // injects Authorization on every github.com / api.github.com request, so
+  // the happy path never sees a 401 inside git. If the proxy fails to
+  // resolve a token (no github_repository resource matched, RPC error, …),
+  // git would otherwise hang waiting for stdin or invoke a GUI askpass —
+  // /bin/true returns immediately so git fails fast and surfaces an error
+  // to the agent. No credential helper is configured at all on purpose:
+  // ~/.git-credentials and credential.helper are intentionally unset so
+  // the only auth path is the worker proxy.
+  await sandbox.exec(
+    `git config --global core.askpass /bin/true && ` +
+    `git config --global credential.helper "" && ` +
+    `git config --global --unset-all credential.helper 2>/dev/null; true`,
+    5000,
+  );
 
-  // Clone repo
+  // Clone the repo's default branch first. Branch checkout is handled
+  // separately below so we can fall back to creating a new local branch
+  // when the requested name doesn't exist on the remote.
   if (sandbox.gitCheckout) {
-    const checkout = res.checkout as { type?: string; name?: string; sha?: string } | undefined;
-    await sandbox.gitCheckout(repoUrl, {
-      branch: checkout?.type === "branch" ? checkout.name : undefined,
-      targetDir,
-    });
+    await sandbox.gitCheckout(repoUrl, { targetDir });
   } else {
     await sandbox.exec(`git clone ${repoUrl} ${targetDir} 2>&1`, 120000);
   }
@@ -231,9 +224,20 @@ async function mountGitRepo(
     10000
   );
 
-  // Handle checkout (commit SHA)
   const checkout = res.checkout as { type?: string; name?: string; sha?: string } | undefined;
-  if (checkout?.type === "commit" && checkout.sha) {
+  if (checkout?.type === "branch" && checkout.name) {
+    // Try fetch + checkout (DWIM creates a local tracking branch when
+    // origin/<name> exists). If the remote doesn't have the branch,
+    // create it locally off the just-cloned default HEAD instead of
+    // failing the whole mount.
+    const branch = checkout.name.replace(/[^A-Za-z0-9._/-]/g, "");
+    if (branch) {
+      await sandbox.exec(
+        `cd ${targetDir} && (git fetch origin ${branch}:refs/remotes/origin/${branch} 2>/dev/null && git checkout ${branch}) || git checkout -b ${branch}`,
+        60000,
+      );
+    }
+  } else if (checkout?.type === "commit" && checkout.sha) {
     await sandbox.exec(`cd ${targetDir} && git checkout ${checkout.sha}`, 30000);
   }
 }
