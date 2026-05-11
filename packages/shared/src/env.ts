@@ -137,6 +137,19 @@ export interface Env {
       sessionId: string;
       hostname: string;
     }): Promise<{ type: "bearer"; token: string } | null>;
+    /**
+     * Per-repo GitHub credential lookup for the network-layer proxy
+     * (oma-sandbox.ts githubAuthHandler). Returns the picked token +
+     * scheme for the request URL, or null when no github_repository
+     * resource is attached to the session. See lib/github-creds.ts in
+     * apps/main for the picking rule.
+     */
+    lookupGithubCredential(opts: {
+      tenantId: string;
+      sessionId: string;
+      hostname: string;
+      pathname: string;
+    }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null>;
   };
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).

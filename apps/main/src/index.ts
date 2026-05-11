@@ -29,6 +29,7 @@ import mcpProxyRoutes, {
   resolveOutboundCredentialByHost,
   forwardWithRefresh,
 } from "./routes/mcp-proxy";
+import { resolveGithubCredentials } from "./lib/github-creds";
 import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
 import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
@@ -427,6 +428,36 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     );
     if (!cred) return null;
     return { type: "bearer", token: cred.upstreamToken };
+  }
+
+  /**
+   * Per-repo GitHub credential lookup for the network-layer proxy.
+   *
+   * Returns:
+   *   - null  → no credential available (caller passes through unauth'd):
+   *             host isn't a GitHub host we route, OR session is gone /
+   *             archived, OR session has no github_repository resources
+   *   - {...} → the chosen token + scheme + owner/repo slug. Slug is for
+   *             log correlation; the token never lands in any log.
+   *
+   * Pick rule: path-matched resource if the request URL has owner/repo
+   * AND it matches a resource; otherwise the first declared resource's
+   * token. See `resolveGithubCredentials` for the trade-off rationale.
+   */
+  async lookupGithubCredential(opts: {
+    tenantId: string;
+    sessionId: string;
+    hostname: string;
+    pathname: string;
+  }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null> {
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    return resolveGithubCredentials(
+      services,
+      opts.tenantId,
+      opts.sessionId,
+      opts.hostname,
+      opts.pathname,
+    );
   }
 
   /**
