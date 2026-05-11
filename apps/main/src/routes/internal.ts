@@ -54,12 +54,6 @@ interface CreateSessionBody {
   mcpServers?: Array<{ name: string; url: string; type?: string }>;
   metadata?: Record<string, unknown>;
   initialEvent?: { type: string; content: unknown[]; metadata?: Record<string, unknown> };
-  /**
-   * Optional repo URL to mount as a github_repository resource. Token is
-   * pulled from any vaultIds entry that has a command_secret credential
-   * with env_var=GITHUB_TOKEN — providers never see the token.
-   */
-  githubRepoUrl?: string;
 }
 
 interface ResumeSessionBody {
@@ -78,26 +72,32 @@ interface CreateVaultCredentialBody {
   provider?: "github" | "linear";
 }
 
-interface AddCommandSecretBody {
-  action: "add_command_secret";
+interface AddCapCliBody {
+  action: "add_cap_cli";
   userId: string;
   /** Existing vault id; null = create fresh vault. */
   vaultId: string | null;
   vaultName: string;
   displayName: string;
-  commandPrefixes: string[];
-  envVar: string;
+  /** cap CLI id, e.g. "gh" / "aws" / "kubectl" — must match a builtin spec. */
+  cliId: string;
   token: string;
+  /** Optional unix-ms expiration (for short-lived upstream tokens). */
+  expiresAt?: number;
+  /** Optional refresh token (resolver may use to mint a fresh access token). */
+  refreshToken?: string;
+  /** Mode-specific extras (e.g. AWS access_key_id / session_token). */
+  extras?: Record<string, string>;
   provider?: "github" | "linear";
 }
 
 interface RotateBody {
-  action: "rotate_bearer" | "rotate_command_secret";
+  action: "rotate_bearer" | "rotate_cap_cli";
   userId: string;
   vaultId: string;
   newToken: string;
-  /** Required only when action=rotate_command_secret (disambiguates if vault has multiple). */
-  envVar?: string;
+  /** Required only when action=rotate_cap_cli (disambiguates if vault has multiple). */
+  cliId?: string;
 }
 
 /**
@@ -294,33 +294,6 @@ app.post("/sessions", async (c) => {
     }),
   });
 
-  // Materialize a github_repository resource from the supplied repo URL.
-  // The token is sourced from a command_secret credential (env_var=GITHUB_TOKEN)
-  // in one of the vaults — provider doesn't pass it inline. SessionDO picks
-  // this up via sessions-store at warmup.
-  if (body.githubRepoUrl) {
-    const ghToken = await findGithubTokenInVaults(vaultCredentials);
-    if (ghToken) {
-      const added = await c.var.services.sessions.addResource({
-        tenantId,
-        sessionId,
-        resource: {
-          type: "github_repository",
-          url: body.githubRepoUrl,
-          repo_url: body.githubRepoUrl,
-          mount_path: "/workspace",
-        },
-      });
-      // Token continues to live in the per-session secret store.
-      await c.var.services.sessionSecrets.put({
-        tenantId,
-        sessionId,
-        resourceId: added.id,
-        value: ghToken,
-      });
-    }
-  }
-
   // Seed the session with the initial event, if any.
   if (body.initialEvent) {
     await binding.fetch(`https://sandbox/sessions/${sessionId}/event`, {
@@ -389,14 +362,14 @@ app.get("/sessions/:id", async (c) => {
  * POST /v1/internal/vaults
  * Body discriminated by `action`:
  *   - "create_with_credential":  CreateVaultCredentialBody  → fresh vault + static_bearer
- *   - "add_command_secret":      AddCommandSecretBody       → command_secret cred (in existing or fresh vault)
+ *   - "add_cap_cli":             AddCapCliBody              → cap_cli cred (in existing or fresh vault)
  *
  * Both return { vaultId, credentialId }.
  */
 app.post("/vaults", async (c) => {
   const body = (await c.req.json()) as
     | CreateVaultCredentialBody
-    | AddCommandSecretBody;
+    | AddCapCliBody;
 
   if (body.action === "create_with_credential") {
     if (!body.userId || !body.mcpServerUrl || !body.bearerToken) {
@@ -427,10 +400,10 @@ app.post("/vaults", async (c) => {
     return c.json({ vaultId: vault.id, credentialId: credential.id });
   }
 
-  if (body.action === "add_command_secret") {
-    if (!body.userId || !body.commandPrefixes?.length || !body.envVar || !body.token) {
+  if (body.action === "add_cap_cli") {
+    if (!body.userId || !body.cliId || !body.token) {
       return c.json(
-        { error: "userId, commandPrefixes, envVar, token required" },
+        { error: "userId, cliId, token required" },
         400,
       );
     }
@@ -456,10 +429,14 @@ app.post("/vaults", async (c) => {
       vaultId,
       displayName: body.displayName,
       auth: {
-        type: "command_secret",
-        command_prefixes: body.commandPrefixes,
-        env_var: body.envVar,
+        type: "cap_cli",
+        cli_id: body.cliId,
         token: body.token,
+        ...(body.expiresAt !== undefined
+          ? { expires_at: new Date(body.expiresAt).toISOString() }
+          : {}),
+        ...(body.refreshToken ? { refresh_token: body.refreshToken } : {}),
+        ...(body.extras ? { extras: body.extras } : {}),
         provider: body.provider,
       },
     });
@@ -472,7 +449,7 @@ app.post("/vaults", async (c) => {
 /**
  * POST /v1/internal/vaults/rotate
  * Replace the token on a credential in the given vault, looking it up by
- * type (and env_var for command_secret). Used to refresh short-lived upstream
+ * type (and cli_id for cap_cli). Used to refresh short-lived upstream
  * tokens (e.g. GitHub installation tokens, ~1hr TTL) without the caller
  * having to remember credential ids.
  */
@@ -490,10 +467,10 @@ app.post("/vaults/rotate", async (c) => {
 
   const target = list.find((cred) => {
     if (body.action === "rotate_bearer") return cred.auth?.type === "static_bearer";
-    if (body.action === "rotate_command_secret") {
+    if (body.action === "rotate_cap_cli") {
       return (
-        cred.auth?.type === "command_secret" &&
-        (!body.envVar || cred.auth.env_var === body.envVar)
+        cred.auth?.type === "cap_cli" &&
+        (!body.cliId || cred.auth.cli_id === body.cliId)
       );
     }
     return false;
@@ -505,8 +482,8 @@ app.post("/vaults/rotate", async (c) => {
       return c.json({ error: "credential is not static_bearer" }, 400);
     }
   } else {
-    if (target.auth?.type !== "command_secret") {
-      return c.json({ error: "credential is not command_secret" }, 400);
+    if (target.auth?.type !== "cap_cli") {
+      return c.json({ error: "credential is not cap_cli" }, 400);
     }
   }
 
@@ -530,30 +507,6 @@ async function resolveTenantId(env: Env, userId: string): Promise<string | null>
     .bind(userId)
     .first<{ tenantId: string | null }>();
   return row?.tenantId ?? null;
-}
-
-/**
- * Scan vault credentials for a `command_secret` credential whose env_var is
- * GITHUB_TOKEN. Used by the integrations gateway to materialize a
- * github_repository resource without ever sending the token over the
- * service-binding wire.
- */
-async function findGithubTokenInVaults(
-  vaultCredentials: Array<{ vault_id: string; credentials: CredentialConfig[] }>,
-): Promise<string | null> {
-  for (const v of vaultCredentials) {
-    for (const c of v.credentials) {
-      if (
-        c.auth?.type === "command_secret" &&
-        c.auth.env_var === "GITHUB_TOKEN" &&
-        typeof c.auth.token === "string" &&
-        c.auth.token.length > 0
-      ) {
-        return c.auth.token;
-      }
-    }
-  }
-  return null;
 }
 
 /**

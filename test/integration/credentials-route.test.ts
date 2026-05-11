@@ -127,12 +127,12 @@ describe("OPE-7 e2e — credential routes via services container", () => {
     expect(secondRes.status).toBe(201);
   });
 
-  it("allows multiple command_secret credentials with no mcp_server_url (NULL allowed in partial UNIQUE)", async () => {
+  it("allows multiple cap_cli credentials with no mcp_server_url (NULL allowed in partial UNIQUE)", async () => {
     const v = await createVault("e2e-vault-4");
     for (let i = 0; i < 3; i++) {
       const res = await createCredential(v.id, {
-        display_name: `cmd-${i}`,
-        auth: { type: "command_secret", env_var: `E_${i}`, token: `t${i}` },
+        display_name: `cli-${i}`,
+        auth: { type: "cap_cli", cli_id: `cli_${i}`, token: `t${i}` },
       });
       expect(res.status).toBe(201);
     }

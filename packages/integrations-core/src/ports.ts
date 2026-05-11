@@ -116,13 +116,6 @@ export interface CreateSessionInput {
   metadata: Record<string, unknown>;
   /** First user.message-shaped event. */
   initialEvent: SessionEventInput;
-  /**
-   * Optional GitHub repo to mount as a `github_repository` resource on the
-   * session. The token is looked up host-side from a `command_secret`
-   * credential (env_var=GITHUB_TOKEN) in one of the supplied vaultIds, so
-   * the provider never has to handle the token directly.
-   */
-  githubRepoUrl?: string;
 }
 
 export interface SessionEventInput {
@@ -166,18 +159,25 @@ export interface CreateCredentialInput {
   provider?: ProviderTag;
 }
 
-export interface CreateCommandSecretInput {
+export interface CreateCapCliInput {
   userId: UserId;
   /** Existing vault id to attach the credential to. Pass null to create a fresh vault. */
   vaultId: string | null;
   vaultName: string;
   displayName: string;
-  /** Command prefixes that trigger env injection. e.g. `["gh", "git"]`. */
-  commandPrefixes: ReadonlyArray<string>;
-  /** Env var name. e.g. `"GITHUB_TOKEN"`. */
-  envVar: string;
-  /** Token value. Stored encrypted. */
+  /**
+   * cap CLI id, e.g. `"gh"` / `"aws"` / `"kubectl"`. Must match a builtin
+   * spec in @open-managed-agents/cap.
+   */
+  cliId: string;
+  /** Token value. Stored encrypted. Injected by cap proxy at HTTPS time. */
   token: string;
+  /** Optional ISO-8601 expiration for short-lived upstream tokens. */
+  expiresAt?: string;
+  /** Optional refresh token (the resolver may use it to mint fresh access tokens). */
+  refreshToken?: string;
+  /** Mode-specific extras (e.g. AWS access_key_id / session_token). */
+  extras?: Record<string, string>;
   /** Provider tag — see CreateCredentialInput. */
   provider?: ProviderTag;
 }
@@ -201,16 +201,17 @@ export interface VaultManager {
   ): Promise<{ vaultId: string; credentialId: string }>;
 
   /**
-   * Add a `command_secret` credential to an existing vault (or create a fresh
+   * Add a `cap_cli` credential to an existing vault (or create a fresh
    * vault when `vaultId` is null). Returns the vault id and credential id.
    *
-   * Use this alongside `createCredentialForUser` when one identity needs both
-   * an MCP-injected bearer (for hosted MCP servers) AND a sandbox-injected
-   * env var (for CLI tools that consume the same token). E.g. GitHub: same
-   * `ghs_*` token, two surfaces.
+   * Use this alongside `createCredentialForUser` when one identity needs
+   * both an MCP-injected bearer (for hosted MCP servers) AND a sandbox
+   * CLI token. cap proxy injects the token at HTTPS time when sandbox
+   * traffic matches the registered cap CLI spec — token never enters the
+   * sandbox process env.
    */
-  addCommandSecretCredential(
-    input: CreateCommandSecretInput,
+  addCapCliCredential(
+    input: CreateCapCliInput,
   ): Promise<{ vaultId: string; credentialId: string }>;
 
   /**
@@ -229,14 +230,14 @@ export interface VaultManager {
   }): Promise<boolean>;
 
   /**
-   * Replace the token on the command_secret credential in this vault matching
-   * the given env var name. The vault may hold multiple command_secret creds
-   * (one per env var); `envVar` disambiguates.
+   * Replace the token on the cap_cli credential in this vault matching
+   * the given cli_id. The vault may hold multiple cap_cli creds (one per
+   * cli_id); `cliId` disambiguates.
    */
-  rotateCommandSecretToken(input: {
+  rotateCapCliToken(input: {
     userId: UserId;
     vaultId: string;
-    envVar: string;
+    cliId: string;
     newToken: string;
   }): Promise<boolean>;
 }

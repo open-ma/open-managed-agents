@@ -65,11 +65,14 @@ export default defineConfig({
       "@open-managed-agents/environment-images/cf-base-snapshot": "./packages/environment-images/src/adapters/cf-base-snapshot/index.ts",
       "@open-managed-agents/environment-images/cf-dockerfile": "./packages/environment-images/src/adapters/cf-dockerfile/index.ts",
       "@open-managed-agents/environment-images": "./packages/environment-images/src/index.ts",
+      "@open-managed-agents/cap/test-fakes": "./packages/cap/src/test-fakes.ts",
+      "@open-managed-agents/cap": "./packages/cap/src/index.ts",
+      "@open-managed-agents/oma-cap-adapter": "./packages/oma-cap-adapter/src/index.ts",
     },
   },
   test: {
     testTimeout: 30000,
-    exclude: ["**/node_modules/**", "**/.git/**", "**/.claude/worktrees/**", "test/e2e/**"],
+    exclude: ["**/node_modules/**", "**/.git/**", "**/.claude/worktrees/**", "test/e2e/**", "packages/cap/test/**", "packages/session-runtime/test/**"],
     pool: cloudflarePool(cfWorkerOptions),
   },
 });

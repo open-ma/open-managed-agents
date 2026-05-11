@@ -244,14 +244,13 @@ describe("GitHubProvider — A1 (per-agent App) install flow", () => {
     expect(vault.userId).toBe("usr_a");
     expect(vault.provider).toBe("github");
 
-    // Same token also stashed as a command_secret for sandbox `gh`/`git`.
-    expect(c.vaults.commandSecrets).toHaveLength(1);
-    const cmdSec = c.vaults.commandSecrets[0];
-    expect(cmdSec.token).toBe("ghs_install_token_xyz");
-    expect(cmdSec.envVar).toBe("GITHUB_TOKEN");
-    expect(cmdSec.commandPrefixes).toEqual(["gh", "git"]);
-    expect(cmdSec.provider).toBe("github");
-    expect(cmdSec.vaultId).toBe(vault ? "vlt_1" : null); // attached to same vault
+    // Same token also stashed as a cap_cli credential for sandbox gh/git.
+    expect(c.vaults.capCli).toHaveLength(1);
+    const capCred = c.vaults.capCli[0];
+    expect(capCred.token).toBe("ghs_install_token_xyz");
+    expect(capCred.cliId).toBe("gh");
+    expect(capCred.provider).toBe("github");
+    expect(capCred.vaultId).toBe(vault ? "vlt_1" : null); // attached to same vault
 
     // App row's publicationId is now linked.
     const app = await c.githubApps.get(appOmaId);
