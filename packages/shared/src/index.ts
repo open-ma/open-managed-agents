@@ -10,6 +10,7 @@ export * from "@open-managed-agents/api-types";
 export * from "@open-managed-agents/eval-core";
 
 export * from "./env";
+export * from "./errors";
 export * from "./id";
 export * from "./format";
 export * from "./log";
