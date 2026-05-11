@@ -15,6 +15,62 @@ interface Session {
   metadata?: Record<string, unknown>;
 }
 interface Vault { id: string; name: string; }
+interface FilePick { id: string; filename: string; size_bytes: number; }
+interface MemoryStorePick { id: string; name: string; }
+
+/** Discriminated union for one row in the dynamic Resources list. Mapped
+ *  to the wire `{type, ...}` resource object at submit time (see `create`). */
+type ResourceRow =
+  | { kind: "github"; url: string; token: string; checkout_type: "none" | "branch" | "commit"; checkout_name: string; mount_path: string }
+  | { kind: "file"; file_id: string; mount_path: string }
+  | { kind: "memory_store"; memory_store_id: string; mount_path: string; access: "read_write" | "read_only" }
+  | { kind: "env"; name: string; value: string };
+
+function blankResource(kind: ResourceRow["kind"]): ResourceRow {
+  switch (kind) {
+    case "github": return { kind, url: "", token: "", checkout_type: "none", checkout_name: "", mount_path: "" };
+    case "file": return { kind, file_id: "", mount_path: "" };
+    case "memory_store": return { kind, memory_store_id: "", mount_path: "", access: "read_write" };
+    case "env": return { kind, name: "", value: "" };
+  }
+}
+
+function kindLabel(kind: ResourceRow["kind"]): string {
+  switch (kind) {
+    case "github": return "GitHub repository";
+    case "file": return "File";
+    case "memory_store": return "Memory store";
+    case "env": return "Environment variable";
+  }
+}
+
+/** Best-effort `<repo-name>` extraction from GitHub URL forms. Used to
+ *  derive the default mount path /workspace/<repo-name>. Returns null when
+ *  the URL doesn't look like GitHub (caller falls back to /workspace). */
+function parseGitHubRepoName(url: string): string | null {
+  const trimmed = url.trim().replace(/\.git$/, "");
+  if (!trimmed) return null;
+  // Full URL: https://github.com/owner/repo
+  try {
+    const u = new URL(trimmed);
+    if (u.hostname !== "github.com" && u.hostname !== "www.github.com") return null;
+    const parts = u.pathname.replace(/^\/+/, "").split("/").filter(Boolean);
+    return parts[1] || null;
+  } catch {
+    // SSH: git@github.com:owner/repo
+    const ssh = trimmed.match(/^git@github\.com:[^/]+\/([^/]+)$/);
+    if (ssh) return ssh[1];
+    // Bare: owner/repo
+    const bare = trimmed.match(/^[^/]+\/([^/]+)$/);
+    if (bare) return bare[1];
+    return null;
+  }
+}
+
+function defaultMountPath(githubUrl: string): string {
+  const name = parseGitHubRepoName(githubUrl);
+  return name ? `/workspace/${name}` : "/workspace";
+}
 
 /** Tiny "🔗 Linear" pill shown when a session was triggered by a Linear webhook. */
 function LinearBadge({ metadata }: { metadata?: Record<string, unknown> }) {
@@ -91,24 +147,23 @@ export function SessionsList() {
   } | null>(null);
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
+  const [files, setFiles] = useState<FilePick[]>([]);
+  const [memoryStores, setMemoryStores] = useState<MemoryStorePick[]>([]);
   const [, setAuxLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
   const [form, setForm] = useState({
     agent: "", environment_id: "", title: "",
     vault_ids: [] as string[],
-    github_url: "", github_token: "", github_branch: "",
-    env_vars: [{ name: "", value: "" }],
+    resources: [] as ResourceRow[],
   });
-  // Per-row toggle for masking the env value input. Default: masked. We
-  // intentionally use a text input + a visual mask via the toggle (rather
-  // than type="password") so the UI stops implying that the value is
-  // encrypted at rest — env values are stored alongside other session
-  // resources without app-level encryption today (see the "env" type
-  // rename in api-types/types.ts:801 for the matching back-end change).
-  const [revealedEnvIdx, setRevealedEnvIdx] = useState<Set<number>>(new Set());
-  const toggleEnvReveal = (idx: number) => setRevealedEnvIdx((prev) => {
+  // Per-field reveal toggle for any masked input (env value, github token).
+  // Keyed by `${idx}:${field}`. We intentionally don't try to keep stale
+  // entries valid across resource list mutations — adding/removing a row
+  // just clears the set, which costs at worst one re-click.
+  const [revealedSecrets, setRevealedSecrets] = useState<Set<string>>(new Set());
+  const toggleReveal = (key: string) => setRevealedSecrets((prev) => {
     const next = new Set(prev);
-    if (next.has(idx)) next.delete(idx); else next.add(idx);
+    if (next.has(key)) next.delete(key); else next.add(key);
     return next;
   });
 
@@ -136,14 +191,18 @@ export function SessionsList() {
   const loadAux = async () => {
     setAuxLoading(true);
     try {
-      const [a, e, v] = await Promise.all([
+      const [a, e, v, f, m] = await Promise.all([
         api<{ data: Array<{ id: string; name: string }> }>("/v1/agents?limit=200"),
         api<{ data: Array<{ id: string; name: string }> }>("/v1/environments?limit=200"),
         api<{ data: Vault[] }>("/v1/vaults?limit=200").catch(() => ({ data: [] })),
+        api<{ data: FilePick[] }>("/v1/files?limit=200").catch(() => ({ data: [] })),
+        api<{ data: MemoryStorePick[] }>("/v1/memory_stores").catch(() => ({ data: [] })),
       ]);
       setAgents(a.data);
       setEnvs(e.data);
       setVaults(v.data);
+      setFiles(f.data);
+      setMemoryStores(m.data);
     } catch {}
     setAuxLoading(false);
   };
@@ -160,23 +219,57 @@ export function SessionsList() {
     selectedAgentDetail ?? agents.find((a) => a.id === form.agent);
   const isLocalRuntime = !!selectedAgent?.runtime_binding;
 
+  // Per-row validation for the Create button. Only github currently has
+  // hard-required fields beyond the type picker (URL + token); the other
+  // kinds are skip-on-incomplete during submit.
+  const resourcesValid = form.resources.every((r) => {
+    if (r.kind === "github") return !!r.url && !!r.token;
+    return true;
+  });
+
   const create = async () => {
     try {
       const resources: Array<Record<string, unknown>> = [];
-
-      if (form.github_url) {
-        const res: Record<string, unknown> = { type: "github_repository", url: form.github_url };
-        if (form.github_token) res.authorization_token = form.github_token;
-        if (form.github_branch) res.checkout = { type: "branch", name: form.github_branch };
-        resources.push(res);
-      }
-
-      for (const s of form.env_vars) {
-        if (s.name && s.value) {
+      for (const r of form.resources) {
+        if (r.kind === "github") {
+          // Token is required — UI gates the Create button on this, but we
+          // double-check so a stale row from a previous validation pass
+          // can't slip through.
+          if (!r.url || !r.token) continue;
+          const res: Record<string, unknown> = {
+            type: "github_repository",
+            url: r.url,
+            authorization_token: r.token,
+            // Always send mount_path: derive /workspace/<repo-name> from the
+            // URL when the user left it blank. Mirrors the in-form preview.
+            mount_path: r.mount_path || defaultMountPath(r.url),
+          };
+          if (r.checkout_type === "branch" && r.checkout_name) {
+            res.checkout = { type: "branch", name: r.checkout_name };
+          } else if (r.checkout_type === "commit" && r.checkout_name) {
+            res.checkout = { type: "commit", sha: r.checkout_name };
+          }
+          resources.push(res);
+        } else if (r.kind === "file") {
+          if (!r.file_id) continue;
+          const res: Record<string, unknown> = { type: "file", file_id: r.file_id };
+          if (r.mount_path) res.mount_path = r.mount_path;
+          resources.push(res);
+        } else if (r.kind === "memory_store") {
+          if (!r.memory_store_id) continue;
+          const res: Record<string, unknown> = {
+            type: "memory_store",
+            memory_store_id: r.memory_store_id,
+            access: r.access,
+          };
+          if (r.mount_path) res.mount_path = r.mount_path;
+          resources.push(res);
+        } else if (r.kind === "env") {
+          if (!r.name || !r.value) continue;
           // type=env (was env_secret pre-rename). Server still accepts the
           // legacy alias so older console builds keep working — see
           // sessions.ts:262.
-          resources.push({ type: "env", name: s.name, value: s.value });
+          resources.push({ type: "env", name: r.name, value: r.value });
         }
       }
 
@@ -217,28 +310,25 @@ export function SessionsList() {
     }));
   };
 
-  const updateEnvVar = (idx: number, field: "name" | "value", val: string) => {
-    setForm(f => {
-      const vars = [...f.env_vars];
-      vars[idx] = { ...vars[idx], [field]: val };
-      return { ...f, env_vars: vars };
+  const updateResource = <K extends ResourceRow["kind"]>(
+    idx: number,
+    patch: Partial<Extract<ResourceRow, { kind: K }>>,
+  ) => {
+    setForm((f) => {
+      const next = [...f.resources];
+      next[idx] = { ...next[idx], ...patch } as ResourceRow;
+      return { ...f, resources: next };
     });
   };
 
-  const addEnvVar = () => {
-    setForm(f => ({ ...f, env_vars: [...f.env_vars, { name: "", value: "" }] }));
+  const addResource = (kind: ResourceRow["kind"]) => {
+    setForm((f) => ({ ...f, resources: [...f.resources, blankResource(kind)] }));
+    setRevealedSecrets(new Set());
   };
 
-  const removeEnvVar = (idx: number) => {
-    setForm(f => ({ ...f, env_vars: f.env_vars.filter((_, i) => i !== idx) }));
-    setRevealedEnvIdx((prev) => {
-      const next = new Set<number>();
-      for (const i of prev) {
-        if (i < idx) next.add(i);
-        else if (i > idx) next.add(i - 1);
-      }
-      return next;
-    });
+  const removeResource = (idx: number) => {
+    setForm((f) => ({ ...f, resources: f.resources.filter((_, i) => i !== idx) }));
+    setRevealedSecrets(new Set());
   };
 
   const statusCls = (status?: string) => {
@@ -362,10 +452,11 @@ export function SessionsList() {
         onClose={() => setShowCreate(false)}
         title="New Session"
         subtitle="Start a conversation with an agent."
+        maxWidth="max-w-2xl"
         footer={
           <>
             <Button variant="ghost" onClick={() => setShowCreate(false)}>Cancel</Button>
-            <Button onClick={create} disabled={!form.agent || (!isLocalRuntime && !form.environment_id)}>Create</Button>
+            <Button onClick={create} disabled={!form.agent || (!isLocalRuntime && !form.environment_id) || !resourcesValid}>Create</Button>
           </>
         }
       >
@@ -460,63 +551,252 @@ export function SessionsList() {
             </div>
           )}
 
-          <details className="group">
-            <summary className="text-sm font-medium text-fg cursor-pointer hover:text-brand">GitHub Repository <span className="text-fg-subtle font-normal">(optional)</span></summary>
-            <div className="mt-2 space-y-2 pl-1">
-              <div>
-                <label className="text-xs text-fg-muted block mb-0.5">Repository URL</label>
-                <input value={form.github_url} onChange={(e) => setForm({ ...form, github_url: e.target.value })} className={inputCls} placeholder="https://github.com/owner/repo" />
-              </div>
-              <div>
-                <label className="text-xs text-fg-muted block mb-0.5">Access Token <span className="text-fg-subtle">(write-only, never returned)</span></label>
-                <input type="password" value={form.github_token} onChange={(e) => setForm({ ...form, github_token: e.target.value })} className={inputCls} placeholder="ghp_..." />
-              </div>
-              <div>
-                <label className="text-xs text-fg-muted block mb-0.5">Branch <span className="text-fg-subtle">(optional)</span></label>
-                <input value={form.github_branch} onChange={(e) => setForm({ ...form, github_branch: e.target.value })} className={inputCls} placeholder="main" />
-              </div>
+          <div>
+            <div className="flex items-center justify-between mb-1">
+              <label className="text-sm text-fg-muted">Resources <span className="text-fg-subtle">(optional)</span></label>
             </div>
-          </details>
-
-          <details className="group">
-            <summary className="text-sm font-medium text-fg cursor-pointer hover:text-brand">Environment Variables <span className="text-fg-subtle font-normal">(optional)</span></summary>
-            <div className="mt-2 space-y-2 pl-1">
-              <p className="text-xs text-fg-subtle">
-                Plain environment variables passed to the agent. For tokens that need encryption, use credential vaults instead.
-              </p>
-              {form.env_vars.map((s, i) => {
-                const revealed = revealedEnvIdx.has(i);
-                return (
-                  <div key={i} className="flex gap-2 items-start">
-                    <div className="flex-1">
-                      <input value={s.name} onChange={(e) => updateEnvVar(i, "name", e.target.value)} className={inputCls} placeholder="ENV_VAR_NAME" />
-                    </div>
-                    <div className="flex-1 relative">
-                      <input
-                        type={revealed ? "text" : "password"}
-                        value={s.value}
-                        onChange={(e) => updateEnvVar(i, "value", e.target.value)}
-                        className={`${inputCls} pr-12`}
-                        placeholder="value"
-                      />
+            <p className="text-xs text-fg-subtle mb-2">
+              Mount files, GitHub repositories, memory stores, or pass environment variables into the session.
+            </p>
+            {form.resources.length === 0 ? (
+              <div className="text-xs text-fg-subtle border border-dashed border-border rounded-lg px-3 py-3 text-center">
+                No resources added.
+              </div>
+            ) : (
+              <div className="space-y-2">
+                {(() => {
+                  // Compute the first github row index + total count once so
+                  // we can mark it "primary" inline. The proxy resolver uses
+                  // the first declared github_repository's token for any
+                  // request whose URL doesn't carry an owner/repo slug
+                  // (graphql, /user, /search, …). Only show the hint when
+                  // there are 2+ github resources — for a single repo the
+                  // "first" semantics aren't meaningful.
+                  const githubIdxs = form.resources
+                    .map((r, i) => (r.kind === "github" ? i : -1))
+                    .filter((i) => i >= 0);
+                  const firstGithubIdx = githubIdxs[0] ?? -1;
+                  const showPrimaryHint = githubIdxs.length > 1;
+                  return form.resources.map((r, i) => (
+                  <div key={i} className="border border-border rounded-lg bg-bg-surface p-3">
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-xs font-medium text-fg inline-flex items-center gap-2">
+                        {kindLabel(r.kind)}
+                        {showPrimaryHint && r.kind === "github" && i === firstGithubIdx && (
+                          <span
+                            className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-brand/10 border border-brand/30 text-brand"
+                            title="This repo's token is used for GitHub API calls that don't target a specific repo (GraphQL, Search, /user, …)"
+                          >
+                            primary
+                          </span>
+                        )}
+                      </span>
                       <button
                         type="button"
-                        onClick={() => toggleEnvReveal(i)}
-                        className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
-                        aria-label={revealed ? "Hide value" : "Show value"}
+                        onClick={() => removeResource(i)}
+                        className="text-fg-subtle hover:text-danger text-xs"
+                        aria-label="Remove resource"
                       >
-                        {revealed ? "hide" : "show"}
+                        Remove
                       </button>
                     </div>
-                    {form.env_vars.length > 1 && (
-                      <button onClick={() => removeEnvVar(i)} className="text-fg-subtle hover:text-danger text-xs mt-2">Remove</button>
+                    {r.kind === "github" && (
+                      <div className="space-y-2">
+                        <div>
+                          <label className="text-xs text-fg-muted block mb-0.5">Repository URL <span className="text-danger">*</span></label>
+                          <input
+                            value={r.url}
+                            onChange={(e) => updateResource<"github">(i, { url: e.target.value })}
+                            className={inputCls}
+                            placeholder="https://github.com/owner/repo"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-fg-muted block mb-0.5">
+                            Authorization Token <span className="text-danger">*</span>
+                          </label>
+                          <div className="relative">
+                            <input
+                              type={revealedSecrets.has(`${i}:token`) ? "text" : "password"}
+                              value={r.token}
+                              onChange={(e) => updateResource<"github">(i, { token: e.target.value })}
+                              className={`${inputCls} pr-12`}
+                              placeholder="ghp_xxxxxxxxxxxxxxxxxxxx"
+                            />
+                            {r.token && (
+                              <button
+                                type="button"
+                                onClick={() => toggleReveal(`${i}:token`)}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
+                                aria-label="Toggle token visibility"
+                              >
+                                {revealedSecrets.has(`${i}:token`) ? "hide" : "show"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-xs text-fg-muted block mb-0.5">Checkout</label>
+                            <select
+                              value={r.checkout_type}
+                              onChange={(e) => updateResource<"github">(i, { checkout_type: e.target.value as "none" | "branch" | "commit", checkout_name: "" })}
+                              className={inputCls}
+                            >
+                              <option value="none">None</option>
+                              <option value="branch">Branch</option>
+                              <option value="commit">Commit</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-fg-muted block mb-0.5">
+                              {r.checkout_type === "commit" ? "Commit SHA" : "Name"}
+                            </label>
+                            <input
+                              value={r.checkout_name}
+                              onChange={(e) => updateResource<"github">(i, { checkout_name: e.target.value })}
+                              className={inputCls}
+                              disabled={r.checkout_type === "none"}
+                              placeholder={r.checkout_type === "commit" ? "abc123..." : "main"}
+                            />
+                          </div>
+                        </div>
+                        <div>
+                          <label className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
+                          <input
+                            value={r.mount_path}
+                            onChange={(e) => updateResource<"github">(i, { mount_path: e.target.value })}
+                            className={inputCls}
+                            placeholder={`${defaultMountPath(r.url)} (default)`}
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {r.kind === "file" && (
+                      <div className="space-y-2">
+                        <div>
+                          <div className="flex items-center justify-between mb-0.5">
+                            <label className="text-xs text-fg-muted">File <span className="text-danger">*</span></label>
+                            <a href="/files" className="text-xs text-brand hover:underline">Manage files →</a>
+                          </div>
+                          <select
+                            value={r.file_id}
+                            onChange={(e) => updateResource<"file">(i, { file_id: e.target.value })}
+                            className={inputCls}
+                          >
+                            <option value="">Select file...</option>
+                            {files.map((f) => (
+                              <option key={f.id} value={f.id}>
+                                {f.filename} ({f.id})
+                              </option>
+                            ))}
+                          </select>
+                          {files.length === 0 && (
+                            <p className="text-xs text-fg-subtle mt-1">No files yet — upload via the AMA SDK or POST /v1/files.</p>
+                          )}
+                        </div>
+                        <div>
+                          <label className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
+                          <input
+                            value={r.mount_path}
+                            onChange={(e) => updateResource<"file">(i, { mount_path: e.target.value })}
+                            className={inputCls}
+                            placeholder="/mnt/session/uploads/<file_id> (default)"
+                          />
+                        </div>
+                      </div>
+                    )}
+                    {r.kind === "memory_store" && (
+                      <div className="space-y-2">
+                        <div>
+                          <div className="flex items-center justify-between mb-0.5">
+                            <label className="text-xs text-fg-muted">Store <span className="text-danger">*</span></label>
+                            <a href="/memory" className="text-xs text-brand hover:underline">Manage stores →</a>
+                          </div>
+                          <select
+                            value={r.memory_store_id}
+                            onChange={(e) => updateResource<"memory_store">(i, { memory_store_id: e.target.value })}
+                            className={inputCls}
+                          >
+                            <option value="">Select store...</option>
+                            {memoryStores.map((m) => (
+                              <option key={m.id} value={m.id}>
+                                {m.name} ({m.id})
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2">
+                          <div>
+                            <label className="text-xs text-fg-muted block mb-0.5">Access</label>
+                            <select
+                              value={r.access}
+                              onChange={(e) => updateResource<"memory_store">(i, { access: e.target.value as "read_write" | "read_only" })}
+                              className={inputCls}
+                            >
+                              <option value="read_write">Read / Write</option>
+                              <option value="read_only">Read only</option>
+                            </select>
+                          </div>
+                          <div>
+                            <label className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
+                            <input
+                              value={r.mount_path}
+                              onChange={(e) => updateResource<"memory_store">(i, { mount_path: e.target.value })}
+                              className={inputCls}
+                              placeholder="/mnt/memory/<name>/ (default)"
+                            />
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                    {r.kind === "env" && (
+                      <div className="grid grid-cols-2 gap-2">
+                        <div>
+                          <label className="text-xs text-fg-muted block mb-0.5">Name <span className="text-danger">*</span></label>
+                          <input
+                            value={r.name}
+                            onChange={(e) => updateResource<"env">(i, { name: e.target.value })}
+                            className={inputCls}
+                            placeholder="ENV_VAR_NAME"
+                          />
+                        </div>
+                        <div>
+                          <label className="text-xs text-fg-muted block mb-0.5">Value <span className="text-danger">*</span></label>
+                          <div className="relative">
+                            <input
+                              type={revealedSecrets.has(`${i}:value`) ? "text" : "password"}
+                              value={r.value}
+                              onChange={(e) => updateResource<"env">(i, { value: e.target.value })}
+                              className={`${inputCls} pr-12`}
+                              placeholder="value"
+                            />
+                            {r.value && (
+                              <button
+                                type="button"
+                                onClick={() => toggleReveal(`${i}:value`)}
+                                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
+                                aria-label="Toggle value visibility"
+                              >
+                                {revealedSecrets.has(`${i}:value`) ? "hide" : "show"}
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      </div>
                     )}
                   </div>
-                );
-              })}
-              <button onClick={addEnvVar} className="text-xs text-fg-muted hover:text-fg">+ Add variable</button>
+                ));
+                })()}
+              </div>
+            )}
+            <div className="flex flex-wrap gap-2 mt-2">
+              <button type="button" onClick={() => addResource("github")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ GitHub repo</button>
+              <button type="button" onClick={() => addResource("file")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ File</button>
+              <button type="button" onClick={() => addResource("memory_store")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ Memory store</button>
+              <button type="button" onClick={() => addResource("env")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ Env var</button>
             </div>
-          </details>
+          </div>
         </div>
       </Modal>
     </ListPage>
