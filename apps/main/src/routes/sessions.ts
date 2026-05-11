@@ -3,7 +3,7 @@ import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent, SessionResource } from "@open-managed-agents/shared";
 import { generateFileId, buildTrajectory, fileR2Key, generateEventId, LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
-import { logWarn, logError, recordEvent, errFields } from "@open-managed-agents/shared";
+import { logWarn, logError, recordEvent, errFields, classifyExternalError } from "@open-managed-agents/shared";
 import { rateLimitSessionCreate } from "../rate-limit";
 import { checkDailySessionCap } from "../quotas";
 import type { SessionRecord, FullStatus } from "@open-managed-agents/shared";
@@ -460,10 +460,21 @@ app.post("/", async (c) => {
         );
       }
     } catch (err) {
+      // Boundary: meter is a separate Worker (service binding RPC). Run
+      // through classifyExternalError so the logged error carries the
+      // typed class name (TransientInfraError / NetworkError / etc.) —
+      // and so a future refactor that promotes this from fail-open to
+      // re-throw inherits the typing for free without re-doing the work.
+      // TODO: extend wrapper coverage to other boundaries as new failure
+      // modes surface (D1 client, KV ops, MCP transport).
+      const classified = classifyExternalError(err);
+      const e = classified instanceof Error ? classified : err;
       // Fail open: a meter outage shouldn't block new sessions. The
       // follow-up usage_events write still records the session so the
       // meter can reconcile out-of-band on next sweep.
-      console.error(`[sessions] USAGE_METER.canStartSandbox failed: ${(err as Error)?.message ?? err}`);
+      console.error(
+        `[sessions] USAGE_METER.canStartSandbox failed [${(e as Error)?.name ?? "unknown"}]: ${(e as Error)?.message ?? e}`,
+      );
     }
   }
 

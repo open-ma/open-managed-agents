@@ -11,7 +11,17 @@ import {
   type PartialStream,
 } from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn, log, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
+import {
+  logWarn,
+  log,
+  generateEventId,
+  generateOutcomeId,
+  classifyExternalError,
+  AuthError,
+  BillingError,
+  ConfigError,
+  TransientInfraError,
+} from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
   CfDoEventLog,
@@ -2218,6 +2228,19 @@ export class SessionDO extends DurableObject<Env> {
       "mountWorkspace",
       "gitCheckout",
     ]);
+    // Methods we additionally want to run through classifyExternalError on
+    // throw — covers the workspace-backup R2 path (createWorkspaceBackup /
+    // restoreWorkspaceBackup) that doesn't go through warmup but still
+    // raises CF-shaped errors ("version rollout", "Sandbox error", 503).
+    // exec / startProcess / readFile / writeFile already classify via the
+    // needsWarm wrapper below; everything in this set additionally
+    // classifies even though it doesn't need warmup.
+    const classifyOnly = new Set<string>([
+      "createWorkspaceBackup",
+      "restoreWorkspaceBackup",
+      "snapshotWorkspaceNow",
+      "mountSessionOutputs",
+    ]);
     const ensureWarm = async (): Promise<void> => {
       // Cold path — warmup never ran or was reset by a recycle below.
       if (!this.sandboxWarmupPromise) {
@@ -2251,10 +2274,24 @@ export class SessionDO extends DurableObject<Env> {
       get: (target, prop, receiver) => {
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") return value;
-        if (!needsWarm.has(prop as string)) return value.bind(target);
+        const name = prop as string;
+        const wantsWarm = needsWarm.has(name);
+        const wantsClassify = wantsWarm || classifyOnly.has(name);
+        if (!wantsWarm && !wantsClassify) return value.bind(target);
         return async (...args: unknown[]) => {
-          await ensureWarm();
-          return (value as (...a: unknown[]) => unknown).apply(target, args);
+          if (wantsWarm) await ensureWarm();
+          try {
+            return await (value as (...a: unknown[]) => unknown).apply(target, args);
+          } catch (err) {
+            // Boundary: turn raw CF Containers / SDK errors into typed
+            // OmaErrors (TransientInfraError for "version rollout",
+            // RateLimitedError for 429, etc.) so processUserMessage's
+            // retry switch can dispatch via instanceof. Falls back to
+            // re-throwing the original error if no pattern matches.
+            // TODO: extend wrapper coverage to other boundaries as new
+            // failure modes surface (D1 client, KV ops, MCP transport).
+            throw classifyExternalError(err);
+          }
         };
       },
     }) as SandboxExecutor;
@@ -4090,26 +4127,24 @@ export class SessionDO extends DurableObject<Env> {
         return;
       }
 
-      // Inverted policy: retry by default, only short-circuit on errors
-      // we KNOW won't recover from a re-run. The previous shape was a
-      // TRANSIENT allowlist of substrings ("timeout", "ECONNREFUSED"...);
-      // every new transient class (CF "version rollout", container OOM,
-      // future infra wording) silently fell off the list and the user
-      // saw a hard failure. Inverted is robust to vendor-side wording
-      // changes and to net-new infra failure modes.
+      // Retry-by-default policy. Specific fatal classes short-circuit;
+      // everything else (including unclassified errors) re-runs once
+      // before surfacing. The previous shape was a TRANSIENT allowlist
+      // of substrings ("timeout", "ECONNREFUSED"...); every new transient
+      // class (CF "version rollout", container OOM, future infra wording)
+      // silently fell off the list and the user saw a hard failure.
       //
-      // FATAL list is short and high-confidence — these are deterministic
-      // user-fixable conditions where retrying just wastes tokens.
-      const FATAL_PATTERNS = [
-        "Agent not found",
-        "Environment not found",
-        "Insufficient balance",
-        "Unauthorized",
-        "Forbidden",
-      ];
-      const isFatal = FATAL_PATTERNS.some((p) =>
-        errorMessage.toLowerCase().includes(p.toLowerCase()),
-      );
+      // Boundary wrappers (wrapSandboxWithLazyWarmup, the streamText
+      // boundary, the USAGE_METER boundary) re-throw native errors as
+      // typed OmaErrors via classifyExternalError, so most well-known
+      // fatal conditions arrive here as the right class already.
+      // For errors that escaped the boundaries (D1, KV, future SDKs),
+      // run classifyExternalError once more inline as belt-and-braces.
+      const classified = classifyExternalError(err);
+      const isFatal =
+        classified instanceof BillingError ||
+        classified instanceof ConfigError ||
+        classified instanceof AuthError;
       const isTransient = !isFatal;
 
       if (isTransient && retryCount < 2) {

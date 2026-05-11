@@ -2,7 +2,7 @@ import { streamText, stepCountIs } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { HarnessInterface, HarnessContext, HarnessRuntime } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
-import { generateEventId } from "@open-managed-agents/shared";
+import { generateEventId, classifyExternalError } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
@@ -674,6 +674,18 @@ export class DefaultHarness implements HarnessInterface {
         );
       }
       return { finishReason, text: finalText, toolCalls, toolResults, usage };
+      } catch (err) {
+        // Boundary: streamText + the read awaits above (finishReason /
+        // text / toolCalls / usage) are the LLM-provider edge. Native
+        // SDK errors (Anthropic 401/429/5xx, the `silent_stop` Error we
+        // throw above, network failures during streamText's underlying
+        // fetch) are remapped to typed OmaErrors here so
+        // processUserMessage's catch dispatches by class (BillingError /
+        // AuthError → fatal; everything else → retry-by-default) instead
+        // of substring matching the message.
+        // TODO: extend wrapper coverage to other boundaries as new
+        // failure modes surface (D1 client, KV ops, MCP transport).
+        throw classifyExternalError(err);
       } finally {
         const totalElapsed = Date.now() - streamStartedAt;
         console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);
