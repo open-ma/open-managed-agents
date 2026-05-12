@@ -270,7 +270,7 @@ and hand them the install URL with the same a/b choice.
   (`oma linear unpublish <pub>`), re-run the publish flow, and pass the
   `lin_wh_…` value Linear shows (right side of the OAuth app's Webhooks
   panel) to `oma linear submit --webhook-secret`.
-- `MCP_SIGNING_KEY` rotation breaks already-stored secrets — they were
+- `PLATFORM_ROOT_SECRET` rotation breaks already-stored secrets — they were
   encrypted with the old key and won't decrypt. Re-run the publish flow.
 - A delivery shows `reason=installation_not_found_or_revoked` after the
   install was approved — the App row's `publication_id` is null because

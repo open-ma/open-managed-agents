@@ -8,6 +8,10 @@ const cfWorkerOptions = {
       API_KEY: "test-key",
       ANTHROPIC_API_KEY: "sk-ant-test-key",
       BETTER_AUTH_SECRET: "test-auth-secret-for-vitest",
+      // Required by buildServices for at-rest encryption of credentials.auth
+      // and model_cards.api_key_cipher. Tests don't care about the value as
+      // long as it's stable across encrypt/decrypt within a single process.
+      PLATFORM_ROOT_SECRET: "test-platform-root-secret-padded-to-thirtytwo",
       RATE_LIMIT_WRITE: 10000,
       RATE_LIMIT_READ: 10000,
     },

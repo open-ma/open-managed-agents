@@ -161,7 +161,7 @@ export interface Env {
   // OAuth callbacks etc. when the gateway is on a different host).
   INTEGRATIONS_PUBLIC_URL?: string;
   // Used by integrations subsystem to sign tokens at rest. Gateway's value.
-  MCP_SIGNING_KEY?: string;
+  PLATFORM_ROOT_SECRET?: string;
   // Killswitch for per-tenant D1 routing. Unset / "true" / anything else =
   // routing enabled (the default — uses tenant_shard meta table). Set to
   // "false" or "0" to roll back to the shared-AUTH_DB provider without

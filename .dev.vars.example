@@ -1,2 +1,7 @@
 API_KEY=dev-test-key-change-me
 ANTHROPIC_API_KEY=sk-ant-xxx
+
+# Required: at-rest encryption key for credentials.auth and
+# model_cards.api_key_cipher. Workers throw at first request if missing.
+# Generate with:  openssl rand -base64 32
+PLATFORM_ROOT_SECRET=

@@ -44,16 +44,16 @@ app.use("*", async (c, next) => {
 
 /**
  * Build the integrations repo bag for this request. Returns null with a 503
- * Response when MCP_SIGNING_KEY is missing — caller should `return` it.
+ * Response when PLATFORM_ROOT_SECRET is missing — caller should `return` it.
  *
  * apps/main consumes only the repo half of the integrations Container; the
  * SessionCreator/VaultManager half lives in apps/integrations because it
  * needs the MAIN service binding (which apps/main does not have on itself).
  */
 function reposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response }) {
-  const k = (c.env as unknown as Record<string, unknown>).MCP_SIGNING_KEY;
+  const k = (c.env as unknown as Record<string, unknown>).PLATFORM_ROOT_SECRET;
   if (typeof k !== "string" || !k) {
-    return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
+    return { repos: null, err: c.json({ error: "PLATFORM_ROOT_SECRET not configured" }, 503) as Response };
   }
   if (!c.env.INTEGRATIONS_DB) {
     return { repos: null, err: c.json({ error: "INTEGRATIONS_DB binding missing" }, 503) as Response };
@@ -62,7 +62,7 @@ function reposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response })
     repos: buildCfRepos({
       integrationsDb: c.env.INTEGRATIONS_DB,
       controlPlaneDb: c.env.AUTH_DB,
-      MCP_SIGNING_KEY: k,
+      PLATFORM_ROOT_SECRET: k,
     }),
     err: null,
   };
@@ -74,9 +74,9 @@ function reposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response })
  * setup the linear/github routes use.
  */
 function slackReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response }) {
-  const k = (c.env as unknown as Record<string, unknown>).MCP_SIGNING_KEY;
+  const k = (c.env as unknown as Record<string, unknown>).PLATFORM_ROOT_SECRET;
   if (typeof k !== "string" || !k) {
-    return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
+    return { repos: null, err: c.json({ error: "PLATFORM_ROOT_SECRET not configured" }, 503) as Response };
   }
   if (!c.env.INTEGRATIONS_DB) {
     return { repos: null, err: c.json({ error: "INTEGRATIONS_DB binding missing" }, 503) as Response };
@@ -103,9 +103,9 @@ function slackReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Respon
  * the same shape as `slackReposOr503` so the route handlers stay symmetric.
  */
 function githubReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Response }) {
-  const k = (c.env as unknown as Record<string, unknown>).MCP_SIGNING_KEY;
+  const k = (c.env as unknown as Record<string, unknown>).PLATFORM_ROOT_SECRET;
   if (typeof k !== "string" || !k) {
-    return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
+    return { repos: null, err: c.json({ error: "PLATFORM_ROOT_SECRET not configured" }, 503) as Response };
   }
   if (!c.env.INTEGRATIONS_DB) {
     return { repos: null, err: c.json({ error: "INTEGRATIONS_DB binding missing" }, 503) as Response };

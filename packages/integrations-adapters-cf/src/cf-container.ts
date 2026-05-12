@@ -56,7 +56,7 @@ export interface CfReposEnv {
   /** Control-plane DB for cross-tenant lookups (TenantResolver).
    *  Always env.AUTH_DB — the better-auth user table never moves. */
   controlPlaneDb: D1Database;
-  MCP_SIGNING_KEY: string;
+  PLATFORM_ROOT_SECRET: string;
 }
 
 /** Env subset needed by buildCfContainer (extends CfReposEnv). */
@@ -73,15 +73,15 @@ export interface CfContainerEnv extends CfReposEnv {
  *
  * Token-at-rest encryption uses the "integrations.tokens" label so the derived
  * key is distinct from the JWT signing key, even though both seed from the
- * same MCP_SIGNING_KEY root secret.
+ * same PLATFORM_ROOT_SECRET root secret.
  */
 export function buildCfRepos(env: CfReposEnv) {
   const idb = env.integrationsDb;
   const clock = new SystemClock();
   const ids = new CryptoIdGenerator();
-  const cryptoImpl = new WebCryptoAesGcm(env.MCP_SIGNING_KEY, "integrations.tokens");
+  const cryptoImpl = new WebCryptoAesGcm(env.PLATFORM_ROOT_SECRET, "integrations.tokens");
   const hmac = new WebCryptoHmacVerifier();
-  const jwt = new WebCryptoJwtSigner(env.MCP_SIGNING_KEY);
+  const jwt = new WebCryptoJwtSigner(env.PLATFORM_ROOT_SECRET);
   const http = new WorkerHttpClient();
   // TenantResolver always queries control-plane (better-auth `user` table) —
   // it must work without per-tenant routing being decided yet (e.g. install
