@@ -9,6 +9,8 @@
 //      mode-specific invariant
 
 import { awsSpec } from "./aws";
+import { azSpec } from "./az";
+import { cfSpec } from "./cf";
 import { doctlSpec } from "./doctl";
 import { dockerSpec } from "./docker";
 import { flySpec } from "./fly";
@@ -16,6 +18,7 @@ import { gcloudSpec } from "./gcloud";
 import { ghSpec } from "./gh";
 import { gitSpec } from "./git";
 import { glabSpec } from "./glab";
+import { herokuSpec } from "./heroku";
 import { kubectlSpec } from "./kubectl";
 import { npmSpec } from "./npm";
 import { vercelSpec } from "./vercel";
@@ -23,6 +26,8 @@ import type { CapSpec } from "../types";
 
 export const builtinSpecs: readonly CapSpec[] = [
   awsSpec,
+  azSpec,
+  cfSpec,
   doctlSpec,
   dockerSpec,
   flySpec,
@@ -30,6 +35,7 @@ export const builtinSpecs: readonly CapSpec[] = [
   ghSpec,
   gitSpec,
   glabSpec,
+  herokuSpec,
   kubectlSpec,
   npmSpec,
   vercelSpec,
@@ -37,6 +43,8 @@ export const builtinSpecs: readonly CapSpec[] = [
 
 export {
   awsSpec,
+  azSpec,
+  cfSpec,
   doctlSpec,
   dockerSpec,
   flySpec,
@@ -44,6 +52,7 @@ export {
   ghSpec,
   gitSpec,
   glabSpec,
+  herokuSpec,
   kubectlSpec,
   npmSpec,
   vercelSpec,
