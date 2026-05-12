@@ -29,7 +29,7 @@
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
-    "ai": "^6.0.158",
+    "ai": "^6.0.177",
     "better-auth": "^1.6.3",
     "better-sqlite3": "^11.5.0",
     "chokidar": "^4.0.0",
