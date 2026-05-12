@@ -104,6 +104,26 @@ export function createAuth(env: Env) {
     socialProviders,
     database: drizzleAdapter(db, { provider: "sqlite", schema }),
     trustedOrigins: ["*"],
+    // Cross-subdomain session cookies. Hosted sets AUTH_COOKIE_DOMAIN
+    // to ".openma.dev" so the cookie minted on app.openma.dev is also
+    // sent on requests to openma.dev (apex landing) — lets the marketing
+    // site show "logged in as X" without re-auth. Self-hosters leaving
+    // the var unset get default per-host scoping.
+    ...(env.AUTH_COOKIE_DOMAIN
+      ? {
+          advanced: {
+            crossSubDomainCookies: {
+              enabled: true,
+              domain: env.AUTH_COOKIE_DOMAIN,
+            },
+            defaultCookieAttributes: {
+              domain: env.AUTH_COOKIE_DOMAIN,
+              sameSite: "lax" as const,
+              secure: true,
+            },
+          },
+        }
+      : {}),
     user: {
       additionalFields: {
         tenantId: { type: "string", required: false },
