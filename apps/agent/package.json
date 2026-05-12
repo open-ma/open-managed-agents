@@ -11,6 +11,7 @@
     "./harness/tools": "./src/harness/tools.ts",
     "./harness/registry": "./src/harness/registry.ts",
     "./harness/provider": "./src/harness/provider.ts",
+    "./harness/platform-guidance": "./src/harness/platform-guidance.ts",
     "./runtime/history": "./src/runtime/history.ts"
   },
   "dependencies": {
