@@ -24,16 +24,32 @@
 
 import { Sandbox } from "@cloudflare/sandbox";
 import type { Env } from "@open-managed-agents/shared";
-import { buildCfTenantDbProvider } from "@open-managed-agents/services";
+import {
+  buildCfTenantDbProvider,
+  getCfServicesForTenant,
+} from "@open-managed-agents/services";
 import { recordBackup } from "./runtime/workspace-backups";
 
 const BACKUP_TTL_SEC = 7 * 24 * 3600;
 const BACKUP_CTX_KEY = "oma_backup_ctx";
+// Per-container persistent storage of billing context — survives across
+// onStart/onStop cycles within the same DO. We need both the (tenant,
+// session, agent) tuple AND the start timestamp so onStop can compute
+// elapsed seconds even after a DO restart.
+const BILLING_CTX_KEY = "oma_billing_ctx";
 
 interface BackupContext {
   tenantId: string;
   environmentId: string;
   sessionId: string;
+}
+
+interface BillingContext {
+  tenantId: string;
+  sessionId: string;
+  agentId: string | null;
+  /** Unix ms when the container most recently started (or first call landed). */
+  startedAt: number;
 }
 
 // Match the SDK's OutboundHandlerContext shape (see @cloudflare/containers).
@@ -182,6 +198,35 @@ export class OmaSandbox extends Sandbox {
   }
 
   /**
+   * Per-container billing context. SessionDO calls this once per warmup
+   * with (tenant, session, agent). We use it to attribute the
+   * sandbox_active_seconds emit at onStop time — without context the
+   * emit silently no-ops (self-host / dev path).
+   *
+   * startedAt is mint-or-fetch: if a context already exists in storage
+   * we keep its startedAt (containers within one logical session may
+   * stop/restart on idle teardown — we credit the user only for the
+   * fresh window). Actual lifecycle events come through onStart / onStop
+   * below.
+   */
+  async setBillingContext(ctx: Omit<BillingContext, "startedAt">): Promise<void> {
+    const existing = (await this.ctx.storage.get(BILLING_CTX_KEY)) as
+      | BillingContext
+      | undefined;
+    if (existing && existing.sessionId === ctx.sessionId) {
+      // Same session, container still warm — keep the original startedAt
+      // so we don't double-bill on a no-op re-warm.
+      return;
+    }
+    await this.ctx.storage.put(BILLING_CTX_KEY, {
+      tenantId: ctx.tenantId,
+      sessionId: ctx.sessionId,
+      agentId: ctx.agentId,
+      startedAt: Date.now(),
+    });
+  }
+
+  /**
    * Snapshot /workspace into BACKUP_BUCKET + record the handle in AUTH_DB
    * scoped to the stored backup context. Best-effort: any failure logs
    * and returns; never throws because all callers (sleepAfter teardown,
@@ -256,6 +301,66 @@ export class OmaSandbox extends Sandbox {
     const reason = typeof params.reason === "string" ? params.reason : "unknown";
     // 137 = SIGKILL (likely OOM or destroy()); 143 = SIGTERM (graceful)
     console.log(`[oma-sandbox] onStop exit=${ec} reason=${reason}`);
+    await this.recordSandboxActiveOnStop();
+  }
+
+  /**
+   * Public entry point for the SessionDO `/destroy` path to emit the
+   * sandbox_active_seconds row BEFORE calling `sandbox.destroy()`. The
+   * CF Containers SDK fires `onStop` async to destroy() — by the time
+   * SessionDO returns 200, the onStop callback may still be inflight or
+   * may have been dropped if the DO got evicted. Calling this explicitly
+   * gives us a synchronous emit in the SessionDO's request lifecycle.
+   *
+   * Idempotent via storage-delete-after-emit — a later onStop fires this
+   * again but reads `undefined` from storage and no-ops.
+   */
+  async emitSandboxActiveNow(): Promise<void> {
+    await this.recordSandboxActiveOnStop();
+  }
+
+  /**
+   * Compute container active-seconds from the stored billing context's
+   * startedAt and emit one usage_events row of kind=sandbox_active_seconds.
+   * Resets the startedAt cursor so a re-start in the same session DO
+   * doesn't re-bill the previous window.
+   *
+   * Best-effort: any failure logs and returns. We do NOT block the
+   * container teardown on a billing emit (that would couple billing
+   * availability to sandbox availability — wrong direction).
+   */
+  private async recordSandboxActiveOnStop(): Promise<void> {
+    try {
+      const env = this.env as Env;
+      const ctx = (await this.ctx.storage.get(BILLING_CTX_KEY)) as
+        | BillingContext
+        | undefined;
+      if (!ctx) return;
+      const elapsedMs = Date.now() - ctx.startedAt;
+      if (elapsedMs <= 0) return;
+      const seconds = Math.floor(elapsedMs / 1000);
+      if (seconds <= 0) return;
+      const services = await getCfServicesForTenant(env, ctx.tenantId);
+      await services.usage.recordUsage({
+        tenantId: ctx.tenantId,
+        sessionId: ctx.sessionId,
+        agentId: ctx.agentId,
+        kind: "sandbox_active_seconds",
+        value: seconds,
+      });
+      // Drop the stored context so a re-start in the same DO mints a
+      // fresh window (re-warm = new billing window, not "continue prior
+      // window"). The next setBillingContext() call from SessionDO at
+      // warmup will repopulate.
+      await this.ctx.storage.delete(BILLING_CTX_KEY);
+      console.log(
+        `[oma-sandbox] usage emit sandbox_active_seconds=${seconds} session=${ctx.sessionId.slice(0, 12)}`,
+      );
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] recordSandboxActiveOnStop failed: ${(err as Error).message ?? err}`,
+      );
+    }
   }
 }
 
