@@ -22,10 +22,11 @@ export const MCP_REGISTRY: McpRegistryEntry[] = [
   { id: "asana", name: "Asana", url: "https://mcp.asana.com/v2/mcp", icon: "https://asana.com/favicon.ico" },
   { id: "atlassian", name: "Atlassian Rovo", url: "https://mcp.atlassian.com/v1/mcp", icon: "https://atlassian.com/favicon.ico" },
   { id: "clickup", name: "ClickUp", url: "https://mcp.clickup.com/mcp", icon: "https://clickup.com/favicon.ico" },
+  { id: "feishu", name: "Feishu (飞书)", url: "https://mcp.feishu.cn/mcp", icon: "https://www.feishu.cn/favicon.ico" },
   { id: "github", name: "GitHub", url: "https://api.githubcopilot.com/mcp/", icon: "https://github.com/favicon.ico" },
-  { id: "intercom", name: "Intercom", url: "https://mcp.intercom.com/mcp", icon: "https://intercom.com/favicon.ico" },
+  { id: "intercom", name: "Intercom", url: "https://mcp.intercom.com/mcp", icon: "https://www.intercom.com/favicon.ico" },
   { id: "linear", name: "Linear", url: "https://mcp.linear.app/mcp", icon: "https://linear.app/favicon.ico" },
-  { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", icon: "https://notion.so/favicon.ico" },
+  { id: "notion", name: "Notion", url: "https://mcp.notion.com/mcp", icon: "https://www.notion.so/images/favicon.ico" },
   { id: "sentry", name: "Sentry", url: "https://mcp.sentry.dev/mcp", icon: "https://sentry.io/favicon.ico" },
   { id: "slack", name: "Slack", url: "https://mcp.slack.com/mcp", icon: "https://slack.com/favicon.ico" },
 ];
