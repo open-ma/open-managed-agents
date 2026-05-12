@@ -1,6 +1,7 @@
 import type { SandboxExecutor, ProcessHandle } from "../harness/interface";
 import type { Env } from "@open-managed-agents/shared";
 import { getSandbox as cfGetSandbox } from "@cloudflare/sandbox";
+import { sessionOutputsPrefix } from "@open-managed-agents/shared";
 // `bash-parser` is CJS; the bundler handles interop for worker builds.
 // eslint-disable-next-line @typescript-eslint/ban-ts-comment
 // @ts-ignore
@@ -219,7 +220,9 @@ export class CloudflareSandbox implements SandboxExecutor {
     }
     const sandbox = await this.getSandbox();
     const mountPath = `/mnt/session/outputs`;
-    const prefix = `/t/${opts.tenantId}/session-outputs/${opts.sessionId}/`;
+    // s3fs wants a leading-slash prefix for directory scope; the shared
+    // helper returns the R2-key form (no leading slash) so we prepend.
+    const prefix = `/${sessionOutputsPrefix(opts.tenantId, opts.sessionId)}`;
     const fuse = this.fuseR2ConfigOrNull();
     const bucketName = "managed-agents-files";
 

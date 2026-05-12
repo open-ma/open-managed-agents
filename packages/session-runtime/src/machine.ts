@@ -72,6 +72,12 @@ export interface SessionMachineDeps {
    *  the shell calls sandbox.mountMemoryStore directly via sandbox. */
   mountMemoryStores?(opts: { sandbox: SandboxExecutor }): Promise<void>;
 
+  /** Mount /mnt/session/outputs/ into the sandbox. Per-session bound
+   *  directory the agent uses to deliver final artefacts; the same path
+   *  is exposed by the main worker via GET /v1/sessions/:id/outputs.
+   *  Optional — sandboxes / hosts that don't support it skip silently. */
+  mountSessionOutputs?(opts: { sandbox: SandboxExecutor }): Promise<void>;
+
   /** Build the LanguageModel for this turn. CF reads env from
    *  bindings; Node from process.env. */
   buildModel(agent: AgentConfig): LanguageModel;
@@ -149,6 +155,14 @@ export class SessionStateMachine {
       // user.message without restarting.
       if (this.deps.mountMemoryStores) {
         await this.deps.mountMemoryStores({ sandbox: this.deps.sandbox });
+      }
+
+      // /mnt/session/outputs/ mount. Idempotent on the supported adapters
+      // (LocalSubprocess re-symlinks, CF re-mounts the R2 prefix), so
+      // re-running per turn is safe and means the path is always present
+      // for a fresh sandbox that warmed in this turn.
+      if (this.deps.mountSessionOutputs) {
+        await this.deps.mountSessionOutputs({ sandbox: this.deps.sandbox });
       }
 
       const tools = await this.deps.buildTools(agent, this.deps.sandbox);
