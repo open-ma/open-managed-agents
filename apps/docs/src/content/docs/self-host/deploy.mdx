@@ -78,7 +78,7 @@ End-to-end deploy of openma to your own Cloudflare account. Plan on 30–60 minu
    npx wrangler secret put BETTER_AUTH_SECRET       # any random 32+ char string
    npx wrangler secret put API_KEY                  # initial dev API key
    npx wrangler secret put INTEGRATIONS_INTERNAL_SECRET   # shared between main + integrations
-   npx wrangler secret put MCP_SIGNING_KEY          # for outbound MCP token signing
+   npx wrangler secret put PLATFORM_ROOT_SECRET    # at-rest encryption + outbound MCP token signing
 
    # Per worker — repeat for apps/main, apps/agent, apps/integrations as needed
    npx wrangler secret put ANTHROPIC_API_KEY -c apps/agent/wrangler.jsonc

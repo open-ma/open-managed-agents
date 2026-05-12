@@ -754,6 +754,9 @@ importers:
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../files-store
+      '@open-managed-agents/integrations-adapters-cf':
+        specifier: workspace:*
+        version: link:../integrations-adapters-cf
       '@open-managed-agents/kv-store':
         specifier: workspace:*
         version: link:../kv-store

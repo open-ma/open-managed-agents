@@ -37,7 +37,7 @@ function cfEnvOf(env: Env): CfContainerEnv {
   return {
     integrationsDb: env.INTEGRATIONS_DB,
     controlPlaneDb: env.AUTH_DB,
-    MCP_SIGNING_KEY: env.MCP_SIGNING_KEY,
+    PLATFORM_ROOT_SECRET: env.PLATFORM_ROOT_SECRET,
     MAIN: env.MAIN,
     INTEGRATIONS_INTERNAL_SECRET: env.INTEGRATIONS_INTERNAL_SECRET,
   };

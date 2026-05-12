@@ -25,6 +25,9 @@ function envWith(extras: Record<string, string | undefined> = {}): Env {
   return {
     AUTH_DB: fakeDb,
     CONFIG_KV: {} as unknown,
+    // Required by buildServices for at-rest encryption — value doesn't matter
+    // for these tests since they don't actually run encrypt/decrypt.
+    PLATFORM_ROOT_SECRET: "test-platform-root-secret-for-services-dispatch",
     ...extras,
   } as unknown as Env;
 }

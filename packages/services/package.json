@@ -11,6 +11,7 @@
     "@open-managed-agents/blob-store": "workspace:*",
     "@open-managed-agents/kv-store": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",
+    "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
     "@open-managed-agents/sessions-store": "workspace:*",
