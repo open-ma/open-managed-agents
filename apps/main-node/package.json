@@ -33,7 +33,7 @@
     "better-auth": "^1.6.3",
     "better-sqlite3": "^11.5.0",
     "chokidar": "^4.0.0",
-    "hono": "^4.7.0",
+    "hono": "^4.12.18",
     "nanoid": "^5.1.0",
     "turndown": "^7.2.0"
   },
