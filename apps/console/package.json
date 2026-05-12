@@ -4,6 +4,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:staging": "VITE_API_TARGET=https://app.staging.openma.dev vite",
     "build": "vite build",
     "preview": "vite preview"
   },
@@ -11,7 +12,9 @@
     "@open-managed-agents/acp-runtime": "workspace:*",
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
+    "@radix-ui/react-select": "^2.2.6",
     "better-auth": "^1.6.3",
+    "cmdk": "^1.1.1",
     "highlight.js": "^11.11.1",
     "js-yaml": "^4.1.1",
     "react": "^19.1.0",

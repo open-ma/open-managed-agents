@@ -474,6 +474,53 @@ export class CloudflareSandbox implements SandboxExecutor {
   }
 
   /**
+   * Forward (tenant, session, agent) tuple to OmaSandbox so its onStop /
+   * pre-destroy emit can attribute the sandbox_active_seconds row. The
+   * wrapper exists because SessionDO holds a CloudflareSandbox, not the
+   * underlying DO stub — without this passthrough, the optional-chain
+   * check at session-do.ts warmup silently no-ops.
+   */
+  async setBillingContext(opts: {
+    tenantId: string;
+    sessionId: string;
+    agentId: string | null;
+  }): Promise<void> {
+    if (!opts.tenantId || !opts.sessionId) return;
+    try {
+      const sandbox = (await this.getSandbox()) as unknown as {
+        setBillingContext?: (c: { tenantId: string; sessionId: string; agentId: string | null }) => Promise<void>;
+      };
+      if (typeof sandbox.setBillingContext !== "function") return;
+      await sandbox.setBillingContext(opts);
+    } catch (err) {
+      console.error(
+        `[sandbox] setBillingContext failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
+  /**
+   * Trigger the sandbox_active_seconds emit synchronously. Called by
+   * SessionDO's `/destroy` handler BEFORE `destroy()` so the write lands
+   * in the request lifecycle (CF's onStop callback fires async to destroy
+   * and can be dropped on DO eviction). Idempotent via storage-delete
+   * inside OmaSandbox.
+   */
+  async emitSandboxActiveNow(): Promise<void> {
+    try {
+      const sandbox = (await this.getSandbox()) as unknown as {
+        emitSandboxActiveNow?: () => Promise<void>;
+      };
+      if (typeof sandbox.emitSandboxActiveNow !== "function") return;
+      await sandbox.emitSandboxActiveNow();
+    } catch (err) {
+      console.error(
+        `[sandbox] emitSandboxActiveNow failed: ${(err as Error).message ?? err}`,
+      );
+    }
+  }
+
+  /**
    * Reset the CF Container's sleepAfter inactivity timer. SessionDO calls
    * this from its alarm while there are background_tasks rows so a long-
    * running `python script.py &` survives past sleepAfter without us doing

@@ -3,6 +3,7 @@ import { Link, useSearchParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { A1FormStep, A1InstallLink } from "../api/types";
 import { SecretInput, TextInput } from "../../components/Input";
+import { Combobox } from "../../components/Combobox";
 
 const api = new IntegrationsApi();
 
@@ -282,33 +283,27 @@ function PickStep(props: {
     <div className="space-y-5">
       <div className="grid md:grid-cols-2 gap-4">
         <Field label="Agent">
-          <select
+          <Combobox<{ id: string; name: string }>
             value={props.agentId}
-            onChange={(e) => props.setAgentId(e.target.value)}
-            className={selectCls}
-          >
-            <option value="">Pick an agent…</option>
-            {props.agents.map((a) => (
-              <option key={a.id} value={a.id}>
-                {a.name}
-              </option>
-            ))}
-          </select>
+            onValueChange={(v) => props.setAgentId(v)}
+            endpoint="/v1/agents"
+            getValue={(a) => a.id}
+            getLabel={(a) => a.name}
+            getTextLabel={(a) => a.name}
+            placeholder="Pick an agent…"
+          />
         </Field>
 
         <Field label="Environment">
-          <select
+          <Combobox<{ id: string; name: string }>
             value={props.envId}
-            onChange={(e) => props.setEnvId(e.target.value)}
-            className={selectCls}
-          >
-            <option value="">Pick an environment…</option>
-            {props.envs.map((e) => (
-              <option key={e.id} value={e.id}>
-                {e.name}
-              </option>
-            ))}
-          </select>
+            onValueChange={(v) => props.setEnvId(v)}
+            endpoint="/v1/environments"
+            getValue={(e) => e.id}
+            getLabel={(e) => e.name}
+            getTextLabel={(e) => e.name}
+            placeholder="Pick an environment…"
+          />
         </Field>
       </div>
 

@@ -49,6 +49,7 @@ export function SessionDetail() {
     | { kind: "vault"; id: string }
     | null
   >(null);
+  const [showFiles, setShowFiles] = useState(false);
   const [linear, setLinear] = useState<{
     issueId?: string;
     issueIdentifier?: string;
@@ -68,6 +69,19 @@ export function SessionDetail() {
    *  if the fetch failed (404 = trajectory not built yet, 5xx = sandbox
    *  flaky); both keep the trigger from re-firing every render. */
   const [trajectory, setTrajectory] = useState<Trajectory | "loading" | "error" | undefined>(undefined);
+  /** Sub-agent threads in this session. Primary is implicit at index 0
+   *  (label "Main"). Empty when the session has only the primary thread,
+   *  in which case the selector UI is hidden entirely. Refreshed on
+   *  `session.thread_created` events arriving over SSE.
+   *  parent_thread_id powers the tree view (coordinator → worker → sub-
+   *  worker); missing parents fall back to the primary root. */
+  const [threads, setThreads] = useState<
+    Array<{ id: string; agent_name?: string; parent_thread_id?: string | null }>
+  >([]);
+  /** Currently-active thread id. Defaults to 'sthr_primary'. Filters
+   *  the events array at render time. SSE-driven new threads don't
+   *  auto-switch — the operator stays on whatever they're watching. */
+  const [activeThreadId, setActiveThreadId] = useState<string>("sthr_primary");
   const [showTrajectory, setShowTrajectory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenKeys = useRef(new Set<string>());
@@ -214,6 +228,42 @@ export function SessionDetail() {
 
     if (ev.type === "session.status_running") setStatus("running");
     if (ev.type === "session.status_idle") setStatus("idle");
+    // session.error → idle: defense-in-depth for the catch-all status_idle
+    // emit (processUserMessage finally) in case a future code path forgets
+    // to pair status_running with status_idle. Note: do NOT also map
+    // status_rescheduled — that's a transient retry-pending state, not a
+    // terminal one. Mapping it caused observed pill flicker
+    // running→idle→running→idle×3 during exponential-backoff retries
+    // (sess-y2bfxm1de4e1zqxm 2026-05-11). The next status_running event
+    // for the retry attempt naturally restores the pill.
+    if (ev.type === "session.error") setStatus("idle");
+    // Live-update the thread selector when a sub-agent spawns. We don't
+    // auto-switch the operator's view — they stay on whatever they're
+    // watching; the new tab just appears alongside.
+    if (ev.type === "session.thread_created") {
+      const tc = ev as {
+        session_thread_id?: string;
+        agent_name?: string;
+        parent_thread_id?: string | null;
+      };
+      if (tc.session_thread_id && tc.session_thread_id !== "sthr_primary") {
+        setThreads((prev) =>
+          prev.some((t) => t.id === tc.session_thread_id)
+            ? prev
+            : [
+                ...prev,
+                {
+                  id: tc.session_thread_id!,
+                  agent_name: tc.agent_name,
+                  // SessionDO emits thread_created with parent_thread_id;
+                  // older sessions (pre-Phase 1) may not — fall back to
+                  // primary so the tree stays well-formed.
+                  parent_thread_id: tc.parent_thread_id ?? "sthr_primary",
+                },
+              ],
+        );
+      }
+    }
     // Don't return — Timeline's bucketIntoTurns uses these as the close
     // boundary of a turn. Conversation view's EventBubble switch silently
     // skips unknown types so leaving them in `events` is harmless there.
@@ -293,16 +343,42 @@ export function SessionDetail() {
 
     // Load history. The /events endpoint wraps each event as { seq, type, ts,
     // data }; promote seq + ts onto the inner event so timeline has them.
-    api<{ data: Array<{ seq?: number; type: string; ts?: string; data: Event }> }>(`/v1/sessions/${id}/events?limit=1000&order=asc`)
-      .then((res) => {
-        for (const e of res.data) {
-          const inner = e.data || (e as unknown as Event);
-          if (e.ts && !inner.ts) inner.ts = e.ts;
-          if (e.seq !== undefined && inner.seq === undefined) inner.seq = e.seq;
-          addEvent(inner);
+    // Paginate ASC from seq 0 in pages of 200 — long sessions stream older
+    // events progressively rather than blocking the UI on a single 1000-row
+    // payload (the legacy `limit=1000` would also silently truncate at the
+    // hard ceiling for ultra-long histories). Each page is added as it
+    // arrives, so the timeline starts populating after the first roundtrip.
+    void (async () => {
+      let afterSeq = 0;
+      const pageLimit = 200;
+      // Bound the loop so a malformed `next_page` never spins forever.
+      // Even at 200/page this covers 100k events, well past anything the
+      // sandbox SQL store retains in practice.
+      for (let i = 0; i < 500; i++) {
+        try {
+          const res = await api<{
+            data: Array<{ seq?: number; type: string; ts?: string; data: Event }>;
+            has_more?: boolean;
+            next_page?: string | null;
+          }>(`/v1/sessions/${id}/events?limit=${pageLimit}&order=asc&after_seq=${afterSeq}`);
+          for (const e of res.data) {
+            const inner = e.data || (e as unknown as Event);
+            if (e.ts && !inner.ts) inner.ts = e.ts;
+            if (e.seq !== undefined && inner.seq === undefined) inner.seq = e.seq;
+            addEvent(inner);
+          }
+          if (!res.has_more || !res.next_page) break;
+          // next_page is "seq_<n>" per session-do.ts:1568.
+          const m = /^seq_(\d+)$/.exec(res.next_page);
+          if (!m) break;
+          const nextAfter = parseInt(m[1], 10);
+          if (!Number.isFinite(nextAfter) || nextAfter <= afterSeq) break;
+          afterSeq = nextAfter;
+        } catch {
+          break;
         }
-      })
-      .catch(() => {});
+      }
+    })();
 
     // Connect SSE
     const abort = new AbortController();
@@ -320,6 +396,19 @@ export function SessionDetail() {
     api<Trajectory>(`/v1/sessions/${id}/trajectory`)
       .then((t) => setTrajectory(t))
       .catch(() => setTrajectory("error"));
+
+    // Threads list (primary + sub-agent). Primary is always present
+    // (seeded by SessionDO on /init). Filter to non-primary so the
+    // selector only renders when there's something to switch between
+    // — single-thread sessions get zero UI clutter.
+    api<{
+      data: Array<{ id: string; agent_name?: string; parent_thread_id?: string | null }>;
+    }>(`/v1/sessions/${id}/threads`)
+      .then((res) => {
+        const subThreads = (res.data ?? []).filter((t) => t.id !== "sthr_primary");
+        setThreads(subThreads);
+      })
+      .catch(() => setThreads([]));
 
     return () => { abort.abort(); };
   }, [id]);
@@ -345,6 +434,32 @@ export function SessionDetail() {
     setSending(false);
   };
 
+  // Stop button — posts user.interrupt to abort whatever turn(s) are
+  // running on the active thread. Server-side this triggers the
+  // thread-scoped AbortController, marks pending events cancelled, and
+  // emits status_idle. Recovery path for the "stuck Running" failure
+  // mode where a DO eviction killed an in-flight stream and no clean
+  // status_idle was ever broadcast.
+  const [interrupting, setInterrupting] = useState(false);
+  const interrupt = async () => {
+    if (!id) return;
+    setInterrupting(true);
+    try {
+      await api(`/v1/sessions/${id}/events`, {
+        method: "POST",
+        body: JSON.stringify({
+          events: [{
+            type: "user.interrupt",
+            ...(activeThreadId !== "sthr_primary" ? { session_thread_id: activeThreadId } : {}),
+          }],
+        }),
+      });
+    } catch (e) {
+      console.error("interrupt failed", e);
+    }
+    setInterrupting(false);
+  };
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -353,6 +468,33 @@ export function SessionDetail() {
           <Link to="/sessions" className="text-fg-subtle hover:text-fg-muted text-sm">&larr; Sessions</Link>
           <span className="text-fg-subtle">/</span>
           <h2 className="font-mono text-sm text-fg-muted truncate flex-1" title={id}>{title}</h2>
+          {/* Stop / Interrupt — only while the session is actively running.
+              Posts user.interrupt scoped to the active thread; server fires
+              thread AbortController + flushes pending events + emits
+              status_idle. Recovery path for stuck-Running sessions where a
+              DO eviction killed the stream and no clean status_idle ever
+              landed. */}
+          {status === "running" && (
+            <button
+              onClick={() => void interrupt()}
+              disabled={interrupting}
+              className="px-2.5 py-1 rounded-md text-xs font-medium border border-border bg-bg-surface text-fg-muted hover:text-fg hover:border-border-strong disabled:opacity-50 transition-colors"
+              title="Interrupt the active turn on this thread"
+            >
+              {interrupting ? "Stopping…" : "Stop"}
+            </button>
+          )}
+          <button
+            onClick={() => setShowFiles((v) => !v)}
+            className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors ${
+              showFiles
+                ? "bg-bg-surface text-fg border-border-strong"
+                : "bg-bg-surface text-fg-muted border-border hover:text-fg hover:border-border-strong"
+            }`}
+            title="Files the agent wrote to /mnt/session/outputs/"
+          >
+            Files
+          </button>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
           <StatusPill status={status as "idle" | "running" | "terminated" | "error" | string} />
@@ -399,6 +541,21 @@ export function SessionDetail() {
           {sessionMeta.createdAt && <RelativeTimeBadge iso={sessionMeta.createdAt} />}
         </div>
       </div>
+
+      {/* Thread selector — only when sub-agent threads exist. Primary
+          is implicit at index 0 ("Main"); sub-agent tabs appear as new
+          threads spawn (live-updated by session.thread_created handler).
+          Selecting a thread filters both Conversation and Timeline views.
+          Renders as a depth-indented tree when sub-agents themselves
+          spawn sub-workers — flat horizontal row for the common case
+          (single layer of workers under primary). */}
+      {threads.length > 0 && (
+        <ThreadTree
+          threads={threads}
+          activeThreadId={activeThreadId}
+          onSelect={setActiveThreadId}
+        />
+      )}
 
       {/* View tabs */}
       <div className="px-8 border-b border-border flex items-center gap-1 shrink-0">
@@ -479,15 +636,117 @@ export function SessionDetail() {
         </div>
       )}
 
+      {/* Filter by selected thread. Untagged events (legacy + spans
+          that haven't been thread-stamped yet) are treated as primary —
+          matches the bridge filter in handleSSEStream. */}
+      {(() => null)()}
       <div className="flex-1 flex min-h-0">
         <div className="flex-1 flex flex-col min-w-0">
       {view === "chat" ? (
         <>
           {/* Events */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
-            {events.map((e, i) => (
-              <EventBubble key={i} event={e} />
-            ))}
+            {(() => {
+              // Per-thread "still pending" derivation. The wire-level
+              // `processed_at_ms` only flips when the agent picks an
+              // event up server-side; Console gets the user.message via
+              // SSE BEFORE drain runs, so processed_at_ms is null at
+              // arrival and never updates live (no re-broadcast on
+              // server-side UPDATE). Without this client derive the
+              // hourglass would stay forever even while the agent is
+              // streaming a reply.
+              //
+              // Heuristic: a user.message is "really" pending only if
+              // no later event on the same thread is non-user (i.e. no
+              // agent.* / span.* / session.status_idle has followed).
+              // As soon as the agent emits anything for this thread,
+              // the user message is no longer awaiting ingestion.
+              const filtered = events.filter((e) => {
+                const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
+                return tid === activeThreadId;
+              });
+              // For each user.* event index, find whether any later
+              // index in the same filtered array is a non-user event.
+              // O(n) — single right-to-left pass tracking "have we
+              // seen a non-user event yet" per thread; works because
+              // we're already filtered to one thread.
+              const nonUserSeen: boolean[] = new Array(filtered.length).fill(false);
+              let seen = false;
+              for (let i = filtered.length - 1; i >= 0; i--) {
+                nonUserSeen[i] = seen;
+                if (!filtered[i].type?.startsWith("user.")) seen = true;
+              }
+              // Pre-pair tool_use ↔ result events. Three flavors per the
+              // wire spec emitted in default-loop.ts:emitToolCallEvent /
+              // emitToolResultEvent:
+              //   • builtin tools  → agent.tool_use         + agent.tool_result        (key: tool_use_id)
+              //   • custom tools   → agent.custom_tool_use  + agent.tool_result        (key: tool_use_id) ← same result type
+              //   • MCP tools      → agent.mcp_tool_use     + agent.mcp_tool_result    (key: mcp_tool_use_id)
+              // The previous pairing only covered builtin → custom tools
+              // (e.g. general_subagent) showed their result as an "unpaired"
+              // orphan block because the use side was custom_tool_use.
+              const resultByToolUseId = new Map<string, typeof filtered[number]>();
+              for (const ev of filtered) {
+                if (ev.type === "agent.tool_result") {
+                  const id = (ev as { tool_use_id?: string }).tool_use_id;
+                  if (id) resultByToolUseId.set(id, ev);
+                } else if (ev.type === "agent.mcp_tool_result") {
+                  const id = (ev as { mcp_tool_use_id?: string }).mcp_tool_use_id;
+                  if (id) resultByToolUseId.set(id, ev);
+                }
+              }
+              const pairedResultIds = new Set<string>();
+              return filtered.map((e, i) => {
+                // Stable React key — `e.id` (sevt_*) lives on every event
+                // server-side via the stamp callback in session-do.ts, so
+                // SSE-arrived rows already have it. Fall back to seq for
+                // legacy events that pre-date the stamp, and to a synthetic
+                // marker (type + index) as last resort. Index alone broke
+                // because new events appended mid-list re-keyed every later
+                // bubble → React unmount/remount → the entire conversation
+                // appeared to flicker on every chunk delivery.
+                const stableKey =
+                  (e as { id?: string }).id
+                  ?? (e as { seq?: number }).seq
+                  ?? `idx-${e.type}-${i}`;
+                // Tool-result that's been folded into its use card —
+                // skip standalone render. Both wire shapes: agent.tool_result
+                // (covers builtin + custom) keys on tool_use_id;
+                // agent.mcp_tool_result keys on mcp_tool_use_id.
+                if (e.type === "agent.tool_result") {
+                  const tuid = (e as { tool_use_id?: string }).tool_use_id;
+                  if (tuid && pairedResultIds.has(tuid)) return null;
+                }
+                if (e.type === "agent.mcp_tool_result") {
+                  const tuid = (e as { mcp_tool_use_id?: string }).mcp_tool_use_id;
+                  if (tuid && pairedResultIds.has(tuid)) return null;
+                }
+                // Tool-use of any flavor: pair with its result if present,
+                // render as one card. All three use-types carry the
+                // call id on EventBase.id (overrides the inherited field
+                // per emitToolCallEvent), so the lookup is uniform.
+                let pairedResult: typeof filtered[number] | undefined;
+                if (
+                  e.type === "agent.tool_use"
+                  || e.type === "agent.custom_tool_use"
+                  || e.type === "agent.mcp_tool_use"
+                ) {
+                  const tuid = (e as { id?: string }).id;
+                  if (tuid && resultByToolUseId.has(tuid)) {
+                    pairedResult = resultByToolUseId.get(tuid);
+                    pairedResultIds.add(tuid);
+                  }
+                }
+                return (
+                  <EventBubble
+                    key={stableKey}
+                    event={e}
+                    livePending={!nonUserSeen[i]}
+                    pairedResult={pairedResult}
+                  />
+                );
+              });
+            })()}
             {/* In-flight thinking streams. Render before message/tool
                 streams so the visual order roughly matches what the
                 LLM produced (Anthropic emits reasoning before text/tool). */}
@@ -536,7 +795,12 @@ export function SessionDetail() {
           </div>
         </>
       ) : (
-        <TimelineView events={events} />
+        <TimelineView
+          events={events.filter((e) => {
+            const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
+            return tid === activeThreadId;
+          })}
+        />
       )}
         </div>
         {resourcePanel && (
@@ -544,6 +808,9 @@ export function SessionDetail() {
             panel={resourcePanel}
             onClose={() => setResourcePanel(null)}
           />
+        )}
+        {showFiles && id && (
+          <FilesPanel sessionId={id} onClose={() => setShowFiles(false)} />
         )}
       </div>
       <TrajectoryViewerModal
@@ -685,6 +952,105 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
   );
 }
 
+/** Tighter visual than ViewTab — sub-agent tabs typically need to fit
+ *  more than the 2-3 view options. Smaller padding + horizontal scroll
+ *  in the parent keeps long sub-agent rosters readable. */
+function ThreadTab({
+  label,
+  active,
+  onClick,
+  depth = 0,
+}: {
+  label: string;
+  active: boolean;
+  onClick: () => void;
+  depth?: number;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      className={`py-1.5 text-xs whitespace-nowrap border-b-2 transition-colors flex items-center gap-1 ${
+        active
+          ? "border-info text-fg font-medium"
+          : "border-transparent text-fg-subtle hover:text-fg-muted"
+      }`}
+      style={{ paddingLeft: `${0.75 + depth * 0.75}rem`, paddingRight: "0.75rem" }}
+    >
+      {/* Tree branch glyph for depth>0 — visual cue that this thread
+          was spawned by another (rather than being a sibling of Main).
+          Plain text (not a unicode-only flair) so it survives in both
+          dark and light themes without needing a separate icon. */}
+      {depth > 0 && <span className="text-fg-subtle">└</span>}
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/**
+ * Depth-indented thread tree. Root = sthr_primary (rendered as "Main");
+ * children indented by parent_thread_id. DFS pre-order so the tree
+ * reads top-to-bottom like a stack trace: parents above their children.
+ *
+ * Orphans (parent_thread_id pointing at a thread we don't know about
+ * — possible mid-spawn race or stale snapshot) get re-parented to
+ * sthr_primary so they stay visible instead of being hidden in a
+ * dangling subtree.
+ */
+function ThreadTree({
+  threads,
+  activeThreadId,
+  onSelect,
+}: {
+  threads: Array<{ id: string; agent_name?: string; parent_thread_id?: string | null }>;
+  activeThreadId: string;
+  onSelect: (id: string) => void;
+}) {
+  const knownIds = new Set<string>(["sthr_primary", ...threads.map((t) => t.id)]);
+  const childrenOf = new Map<string, typeof threads>();
+  for (const t of threads) {
+    const parent =
+      t.parent_thread_id && knownIds.has(t.parent_thread_id)
+        ? t.parent_thread_id
+        : "sthr_primary";
+    const arr = childrenOf.get(parent) ?? [];
+    arr.push(t);
+    childrenOf.set(parent, arr);
+  }
+  const flat: Array<{ id: string; label: string; depth: number }> = [
+    { id: "sthr_primary", label: "Main", depth: 0 },
+  ];
+  const walk = (parentId: string, depth: number) => {
+    const kids = childrenOf.get(parentId) ?? [];
+    for (const k of kids) {
+      flat.push({ id: k.id, label: k.agent_name ?? k.id.slice(0, 12), depth });
+      walk(k.id, depth + 1);
+    }
+  };
+  walk("sthr_primary", 1);
+  const maxDepth = flat.reduce((m, n) => Math.max(m, n.depth), 0);
+  // When the tree is shallow (one layer of workers under Main), keep
+  // the original horizontal row for zero visual change vs Phase 3.
+  // Deeper trees switch to a vertical stacked layout so the indentation
+  // is actually readable.
+  const isFlat = maxDepth <= 1;
+  const containerClass = isFlat
+    ? "px-8 border-b border-border flex items-center gap-1 shrink-0 overflow-x-auto"
+    : "px-8 py-1 border-b border-border flex flex-col items-stretch gap-0 shrink-0 overflow-y-auto max-h-40";
+  return (
+    <div className={containerClass}>
+      {flat.map((n) => (
+        <ThreadTab
+          key={n.id}
+          label={n.label}
+          depth={isFlat ? 0 : n.depth}
+          active={activeThreadId === n.id}
+          onClick={() => onSelect(n.id)}
+        />
+      ))}
+    </div>
+  );
+}
+
 function SessionDurationBadge({ events }: { events: Event[] }) {
   if (events.length === 0) return null;
   let first = Infinity;
@@ -806,6 +1172,94 @@ function ResourcePanel({
   );
 }
 
+interface SessionOutputFile {
+  filename: string;
+  size_bytes: number;
+  uploaded_at: string;
+  media_type: string;
+}
+
+function formatBytes(n: number): string {
+  if (n < 1024) return `${n} B`;
+  if (n < 1024 * 1024) return `${(n / 1024).toFixed(1)} KB`;
+  if (n < 1024 * 1024 * 1024) return `${(n / 1024 / 1024).toFixed(1)} MB`;
+  return `${(n / 1024 / 1024 / 1024).toFixed(2)} GB`;
+}
+
+function FilesPanel({ sessionId, onClose }: { sessionId: string; onClose: () => void }) {
+  const { api } = useApi();
+  const [files, setFiles] = useState<SessionOutputFile[] | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    setFiles(null);
+    setErr(null);
+    api<{ data: SessionOutputFile[]; has_more: boolean }>(
+      `/v1/sessions/${sessionId}/outputs`,
+    )
+      .then((d) => setFiles(d.data ?? []))
+      .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
+    // api closure changes every render; sessionId is the only stable input
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sessionId]);
+
+  return (
+    <aside className="w-[420px] shrink-0 border-l border-border bg-bg flex flex-col min-h-0">
+      <div className="px-4 py-3 border-b border-border flex items-start gap-3 shrink-0">
+        <div className="min-w-0 flex-1">
+          <div className="text-[10px] uppercase tracking-wide text-fg-subtle font-mono">
+            Files
+          </div>
+          <div className="text-base font-semibold text-fg">Session outputs</div>
+          <div className="text-xs text-fg-muted mt-0.5">
+            Files the agent wrote to <code className="font-mono">/mnt/session/outputs/</code>
+          </div>
+        </div>
+        <button
+          onClick={onClose}
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none px-1"
+          title="Close"
+        >
+          ×
+        </button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-4 text-xs">
+        {err && <div className="text-danger">Failed to load: {err}</div>}
+        {!files && !err && <div className="text-fg-subtle">Loading…</div>}
+        {files && files.length === 0 && (
+          <div className="text-fg-subtle">
+            No files yet. The agent must write under <code className="font-mono">/mnt/session/outputs/</code> for files to appear here.
+          </div>
+        )}
+        {files && files.length > 0 && (
+          <ul className="space-y-1">
+            {files.map((f) => (
+              <li
+                key={f.filename}
+                className="flex items-center gap-3 py-2 border-b border-border/40 last:border-b-0"
+              >
+                <div className="min-w-0 flex-1">
+                  <a
+                    href={`/v1/sessions/${sessionId}/outputs/${encodeURIComponent(f.filename)}`}
+                    download={f.filename}
+                    className="font-mono text-fg hover:text-info truncate block"
+                    title={f.filename}
+                  >
+                    {f.filename}
+                  </a>
+                  <div className="text-[10px] text-fg-subtle mt-0.5">
+                    {formatBytes(f.size_bytes)} · {f.media_type} · {new Date(f.uploaded_at).toLocaleString()}
+                  </div>
+                </div>
+              </li>
+            ))}
+          </ul>
+        )}
+      </div>
+    </aside>
+  );
+}
+
 /** In-progress assistant message rendered from accumulated chunk
  *  deltas. Looks like a normal agent bubble but ends in a soft
  *  pulsing block cursor so it reads as live. Replaced by a real
@@ -869,8 +1323,49 @@ function ToolInputStreamingBubble({ name, partial }: { name?: string; partial: s
   );
 }
 
-function EventBubble({ event }: { event: Event }) {
+function EventBubble({
+  event,
+  livePending = false,
+  pairedResult,
+}: {
+  event: Event;
+  /**
+   * Caller-derived "no agent.* event has followed this user.* event
+   * yet on the same thread" hint. The wire-level processed_at_ms
+   * doesn't update live (no SSE re-broadcast on server UPDATE), so
+   * we combine: pending iff (livePending AND wire-level says NULL)
+   * OR (livePending true and we have no wire info yet). When livePending
+   * is false we KNOW the agent has responded — drop the hourglass
+   * regardless of wire state, otherwise the bubble would stay pending
+   * for the entire turn even while the agent is mid-stream.
+   */
+  livePending?: boolean;
+  /**
+   * The matching `agent.tool_result` for an `agent.tool_use` event, when
+   * present in the same filtered list. Caller pre-pairs by tool_use_id
+   * and suppresses the orphan tool_result render. Lets the tool_use
+   * card show input + output in one collapsible block instead of two
+   * disconnected bubbles (the prior layout had a disconnected green
+   * "success-styled" result floating below the call card).
+   */
+  pairedResult?: Event;
+}) {
   const [toolOpen, setToolOpen] = useState(false);
+
+  // AMA pending lifecycle (set by event-log adapter from row.processed_at /
+  // row.cancelled_at). Cancelled events stay in the log for audit but
+  // the LLM never sees them (eventsToMessages skips); show them with
+  // strikethrough so operators know the user retracted them.
+  const meta = event as { processed_at_ms?: number | null; cancelled_at_ms?: number | null };
+  // The hourglass shows when BOTH conditions hold:
+  //   1. Caller says no later non-user event has arrived (livePending)
+  //   2. Wire-level processed_at_ms agrees (still null)
+  // Either condition flipping → no longer pending.
+  const isPending =
+    livePending &&
+    meta.processed_at_ms == null &&
+    meta.cancelled_at_ms == null;
+  const isCancelled = meta.cancelled_at_ms != null;
 
   switch (event.type) {
     case "user.message": {
@@ -906,13 +1401,25 @@ function EventBubble({ event }: { event: Event }) {
         );
       }
 
+      // Pending: drainEventQueue hasn't picked it up yet. Render with
+      // muted bg + hourglass label. Cancelled: render strikethrough +
+      // muted bg with a "retracted" label so the audit trail is visible
+      // without competing with live messages for attention.
+      const labelText = isCancelled ? "Retracted" : isPending ? "Pending…" : "You";
+      const bubbleClass = isCancelled
+        ? "bg-bg-muted text-fg-subtle rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed line-through opacity-70"
+        : isPending
+        ? "bg-bg-surface border border-border-strong text-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed"
+        : "bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed";
       return (
         <div className="flex justify-end">
           <div className="max-w-lg">
-            <div className="text-xs text-fg-subtle text-right mb-1">You</div>
-            <div className="bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed">
-              {text}
+            <div className="text-xs text-fg-subtle text-right mb-1 flex items-center justify-end gap-1">
+              {isPending && <span aria-hidden>⏳</span>}
+              {isCancelled && <span aria-hidden>✗</span>}
+              <span>{labelText}</span>
             </div>
+            <div className={bubbleClass}>{text}</div>
           </div>
         </div>
       );
@@ -949,32 +1456,103 @@ function EventBubble({ event }: { event: Event }) {
     }
 
     case "agent.tool_use":
+    case "agent.custom_tool_use":
+    case "agent.mcp_tool_use": {
+      // Compact one-liner header: tool name + a short input preview so
+      // operators can scan a long conversation without expanding every
+      // call. Expanded view shows full input JSON and (when paired) the
+      // matching result inline — single visual block per tool call.
+      // All three use-types share the same shape (id + name + input);
+      // MCP additionally carries mcp_server_name which we surface as a
+      // small label so operators can tell built-in vs MCP at a glance.
+      const inputPreview = (() => {
+        const obj = event.input as Record<string, unknown> | undefined;
+        if (!obj || typeof obj !== "object") return "";
+        // Heuristic: prefer the "primary" string field if any of the
+        // common tool input keys exist (task/message/command/path/query),
+        // otherwise show the first string value.
+        const primaryKeys = ["task", "message", "command", "path", "query", "url", "input", "text"];
+        for (const k of primaryKeys) {
+          if (typeof obj[k] === "string") return obj[k] as string;
+        }
+        for (const v of Object.values(obj)) {
+          if (typeof v === "string") return v;
+        }
+        return "";
+      })();
+      const resultText = pairedResult
+        ? (typeof (pairedResult as { content?: unknown }).content === "string"
+            ? ((pairedResult as { content: string }).content)
+            : JSON.stringify((pairedResult as { content?: unknown }).content))
+        : null;
       return (
         <div className="max-w-2xl">
           <button
             onClick={() => setToolOpen(!toolOpen)}
             className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors w-full text-left"
           >
-            <svg className="w-3.5 h-3.5 text-info shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <svg className="w-3.5 h-3.5 text-fg-muted shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <path strokeLinecap="round" strokeLinejoin="round" d="M14.7 6.3a1 1 0 000 1.4l1.6 1.6a1 1 0 001.4 0l3.77-3.77a6 6 0 01-7.94 7.94l-6.91 6.91a2.12 2.12 0 01-3-3l6.91-6.91a6 6 0 017.94-7.94l-3.76 3.76z" />
             </svg>
-            <span className="font-medium">{event.name}</span>
-            <svg className={`w-3 h-3 ml-auto text-fg-subtle transition-transform ${toolOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+            <span className="font-mono text-xs text-fg shrink-0">{event.name}</span>
+            {event.type === "agent.mcp_tool_use" && (event as { mcp_server_name?: string }).mcp_server_name && (
+              <span className="text-[10px] text-fg-subtle font-mono uppercase tracking-wide bg-bg-muted rounded px-1 py-0.5 shrink-0">
+                mcp · {(event as { mcp_server_name: string }).mcp_server_name}
+              </span>
+            )}
+            {inputPreview && (
+              <span className="text-xs text-fg-subtle truncate">
+                {inputPreview.length > 80 ? inputPreview.slice(0, 80) + "…" : inputPreview}
+              </span>
+            )}
+            {!pairedResult && (
+              // Pending result — visually distinct so operators know the
+              // tool call hasn't returned yet. Without this hint a stuck
+              // call looks identical to a finished-but-collapsed call.
+              <span className="text-[10px] text-fg-subtle font-mono uppercase tracking-wide ml-1 shrink-0">
+                ⏳
+              </span>
+            )}
+            <svg className={`w-3 h-3 ml-auto text-fg-subtle transition-transform shrink-0 ${toolOpen ? "rotate-180" : ""}`} fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
               <polyline points="6 9 12 15 18 9" />
             </svg>
           </button>
           {toolOpen && (
-            <pre className="mt-1 bg-bg-surface border border-border rounded-lg p-3 text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto text-fg-muted">
-              {JSON.stringify(event.input, null, 2)}
-            </pre>
+            <div className="mt-1 border border-border rounded-lg overflow-hidden">
+              <div className="bg-bg-surface px-3 py-1.5 text-[10px] uppercase tracking-wide text-fg-subtle font-medium border-b border-border">
+                Input
+              </div>
+              <pre className="bg-bg-surface px-3 py-2 text-xs font-mono overflow-x-auto max-h-48 overflow-y-auto text-fg-muted">
+                {JSON.stringify(event.input, null, 2)}
+              </pre>
+              {resultText !== null && (
+                <>
+                  <div className="bg-bg-surface px-3 py-1.5 text-[10px] uppercase tracking-wide text-fg-subtle font-medium border-y border-border">
+                    Output
+                  </div>
+                  <div className="px-3 py-2 text-xs whitespace-pre-wrap text-fg max-h-96 overflow-y-auto">
+                    {resultText}
+                  </div>
+                </>
+              )}
+            </div>
           )}
         </div>
       );
+    }
 
     case "agent.tool_result":
+      // Orphan tool_result — caller couldn't pair it with a tool_use
+      // (race / out-of-order delivery, or recovery-injected placeholder).
+      // Fall back to a neutral standalone block; no green/success color
+      // since success/failure isn't conveyed by tool_result in the
+      // current spec.
       return (
         <div className="max-w-2xl">
-          <div className="border-l-3 border-success bg-bg-surface rounded-r-lg px-3 py-2 text-xs font-mono max-h-40 overflow-y-auto text-fg-muted whitespace-pre-wrap">
+          <div className="border-l-2 border-border bg-bg-surface rounded-r-lg px-3 py-2 text-xs whitespace-pre-wrap text-fg-muted max-h-40 overflow-y-auto">
+            <span className="text-[10px] uppercase tracking-wide text-fg-subtle font-medium block mb-1">
+              tool result · unpaired
+            </span>
             {typeof event.content === "string" ? event.content : JSON.stringify(event.content)}
           </div>
         </div>

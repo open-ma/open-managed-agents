@@ -78,13 +78,19 @@ function slackReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Respon
   if (typeof k !== "string" || !k) {
     return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
   }
+  if (!c.env.INTEGRATIONS_DB) {
+    return { repos: null, err: c.json({ error: "INTEGRATIONS_DB binding missing" }, 503) as Response };
+  }
   const crypto = new WebCryptoAesGcm(k, "integrations.tokens");
   const ids = new CryptoIdGenerator();
+  // slack_* tables live on INTEGRATIONS_DB (migration 0016 dropped them
+  // from AUTH_DB). Passing AUTH_DB here is a stale pre-split mistake —
+  // queries would error with "no such table: slack_installations".
   return {
     repos: {
-      installations: new D1SlackInstallationRepo(c.env.AUTH_DB, crypto, ids),
-      publications: new D1SlackPublicationRepo(c.env.AUTH_DB, ids),
-      apps: new D1SlackAppRepo(c.env.AUTH_DB, crypto, ids),
+      installations: new D1SlackInstallationRepo(c.env.INTEGRATIONS_DB, crypto, ids),
+      publications: new D1SlackPublicationRepo(c.env.INTEGRATIONS_DB, ids),
+      apps: new D1SlackAppRepo(c.env.INTEGRATIONS_DB, crypto, ids),
     },
     err: null,
   };
@@ -101,13 +107,17 @@ function githubReposOr503(c: { env: Env; json: (b: unknown, s?: number) => Respo
   if (typeof k !== "string" || !k) {
     return { repos: null, err: c.json({ error: "MCP_SIGNING_KEY not configured" }, 503) as Response };
   }
+  if (!c.env.INTEGRATIONS_DB) {
+    return { repos: null, err: c.json({ error: "INTEGRATIONS_DB binding missing" }, 503) as Response };
+  }
   const crypto = new WebCryptoAesGcm(k, "integrations.tokens");
   const ids = new CryptoIdGenerator();
+  // github_* tables live on INTEGRATIONS_DB (migration 0016).
   return {
     repos: {
-      installations: new D1GitHubInstallationRepo(c.env.AUTH_DB, crypto, ids),
-      publications: new D1GitHubPublicationRepo(c.env.AUTH_DB, ids),
-      apps: new D1GitHubAppRepo(c.env.AUTH_DB, crypto, ids),
+      installations: new D1GitHubInstallationRepo(c.env.INTEGRATIONS_DB, crypto, ids),
+      publications: new D1GitHubPublicationRepo(c.env.INTEGRATIONS_DB, ids),
+      apps: new D1GitHubAppRepo(c.env.INTEGRATIONS_DB, crypto, ids),
     },
     err: null,
   };

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { GitHubA1FormStep, GitHubA1InstallLink } from "../api/types";
+import { Combobox } from "../../components/Combobox";
 
 const api = new IntegrationsApi();
 
@@ -328,26 +329,26 @@ function ConfigForm({
   return (
     <form onSubmit={(e) => { e.preventDefault(); onSubmit(); }} className="space-y-5">
       <Field label="Agent">
-        <select
+        <Combobox<{ id: string; name: string }>
           value={agentId}
-          onChange={(e) => onAgent(e.target.value)}
-          className="w-full px-3 py-2 border border-border rounded-md bg-bg text-[14px]"
-          required
-        >
-          <option value="">Pick an agent…</option>
-          {agents.map((a) => <option key={a.id} value={a.id}>{a.name}</option>)}
-        </select>
+          onValueChange={(v) => onAgent(v)}
+          endpoint="/v1/agents"
+          getValue={(a) => a.id}
+          getLabel={(a) => a.name}
+          getTextLabel={(a) => a.name}
+          placeholder="Pick an agent…"
+        />
       </Field>
       <Field label="Environment">
-        <select
+        <Combobox<{ id: string; name: string }>
           value={envId}
-          onChange={(e) => onEnv(e.target.value)}
-          className="w-full px-3 py-2 border border-border rounded-md bg-bg text-[14px]"
-          required
-        >
-          <option value="">Pick an environment…</option>
-          {environments.map((e) => <option key={e.id} value={e.id}>{e.name}</option>)}
-        </select>
+          onValueChange={(v) => onEnv(v)}
+          endpoint="/v1/environments"
+          getValue={(e) => e.id}
+          getLabel={(e) => e.name}
+          getTextLabel={(e) => e.name}
+          placeholder="Pick an environment…"
+        />
       </Field>
       <Field
         label="Bot name (visible in GitHub)"

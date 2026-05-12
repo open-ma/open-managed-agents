@@ -86,16 +86,26 @@ import {
 import {
   TenantShardDirectoryService,
   ShardPoolService,
+  MemoryStoreTenantIndexService,
   createCfTenantShardDirectoryService,
   createCfShardPoolService,
+  createCfMemoryStoreTenantIndexService,
 } from "@open-managed-agents/tenant-dbs-store";
 import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
 import { type KvStore, CfKvStore } from "@open-managed-agents/kv-store";
 import { parseStoreBackends, pickBackend } from "./store-backends";
+import { type UsageStore, createCfUsageStore } from "./usage";
 
 export { parseStoreBackends, pickBackend } from "./store-backends";
 export type { StoreBackendName, BackendFactories } from "./store-backends";
 export { getPgPool } from "./pg-pool";
+export {
+  SqlUsageStore,
+  createCfUsageStore,
+  clampUsageValue,
+  MAX_VALUE_PER_EMIT_SEC,
+} from "./usage";
+export type { UsageStore, UsageKind, UsageEventInput, UsageEventRow } from "./usage";
 
 /**
  * The platform-agnostic service surface. Every service the application uses
@@ -121,6 +131,11 @@ export interface Services {
   /** Control-plane: per-shard status / capacity / tenant count. Used for
    *  shard selection at sign-up + capacity monitoring. */
   shardPool: ShardPoolService;
+  /** Control-plane: memory_store_id → tenant_id index. Populated on
+   *  store creation, consumed by the R2 memory-events queue consumer to
+   *  resolve the per-tenant shard from an R2 storage key (which carries
+   *  no tenant_id). */
+  memoryStoreTenantIndex: MemoryStoreTenantIndexService;
   /**
    * File-bytes blob store (R2 FILES_BUCKET in CF, local-FS / S3 in Node).
    * Null when the underlying storage isn't configured — routes that need it
@@ -140,6 +155,14 @@ export interface Services {
    * replacements in Phase C, not KvStore wrappers.
    */
   kv: KvStore;
+  /**
+   * Usage event recorder/reader. Per-tenant `usage_events` table populated
+   * by sandbox / browser / session lifecycle hooks; consumed by the hosted
+   * billing worker's reconcile cron via /v1/internal/usage_events. OSS owns
+   * the count, hosted owns the rate map + ledger debit. See
+   * packages/services/src/usage.ts for details.
+   */
+  usage: UsageStore;
 }
 
 /**
@@ -247,13 +270,26 @@ export function buildServices(env: Env, db: D1Database): Services {
     }),
     outboundSnapshots: createCfOutboundSnapshotService(env),
     sessionSecrets: createCfSessionSecretService(env),
-    // Control-plane services: always query env.AUTH_DB, never the per-tenant db.
-    tenantShardDirectory: createCfTenantShardDirectoryService({ controlPlaneDb: env.AUTH_DB }),
-    shardPool: createCfShardPoolService({ controlPlaneDb: env.AUTH_DB }),
+    // Control-plane services: always query env.ROUTER_DB (not the per-tenant
+    // db). Falls back to env.AUTH_DB during the rollout grace period when
+    // ROUTER_DB binding may not yet be present in older deployments.
+    tenantShardDirectory: createCfTenantShardDirectoryService({
+      controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+    }),
+    shardPool: createCfShardPoolService({
+      controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+    }),
+    memoryStoreTenantIndex: createCfMemoryStoreTenantIndexService({
+      controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+    }),
     // File blob storage. CF: R2 binding; self-host: S3 / local-FS adapter.
     filesBlob: blobStoreFromR2(env.FILES_BUCKET),
     // Generic KV. CF: CONFIG_KV binding; self-host: SQL-table-backed adapter.
     kv: new CfKvStore(env.CONFIG_KV),
+    // Resource usage event log. Tenant-scoped table on the resolved per-
+    // tenant DB (no STORE_BACKENDS dispatch — Postgres adapter would just
+    // swap the underlying SqlClient).
+    usage: createCfUsageStore({ db }),
   };
 }
 
@@ -287,9 +323,15 @@ export function buildCfTenantDbProvider(env: Env): TenantDbProvider {
   if (disabled) {
     return new CfSharedAuthDbProvider(env.AUTH_DB);
   }
+  // controlPlaneDb = env.ROUTER_DB → routing tables live on the dedicated
+  //                                    router DB (no SPOF on shard 0).
+  // defaultBinding = env.AUTH_DB    → unmapped tenants fall back to shard 0.
+  // ROUTER_DB binding is optional in older deployments — fall back to
+  // env.AUTH_DB for the routing reads too in that case (legacy 0003
+  // migration left the routing tables in AUTH_DB).
   return new MetaTableTenantDbProvider(
     env as unknown as Record<string, unknown>,
-    env.AUTH_DB,
+    env.ROUTER_DB ?? env.AUTH_DB,
     env.AUTH_DB,
   );
 }
@@ -309,6 +351,42 @@ export async function getCfServicesForTenant(
   const provider = buildCfTenantDbProvider(env);
   const db = await provider.resolve(tenantId);
   return buildCfServices(env, db);
+}
+
+/**
+ * Cross-shard fan-out for non-Hono entry points (cron sweeps, admin scans,
+ * eval-runner). Iterates every shard registered in shard_pool, builds the
+ * Services container against each shard's DB, and runs `fn` per shard in
+ * parallel. Returns the array of fn results.
+ *
+ * Why this lives in services and not in app code: callers should depend on
+ * the abstract "for every shard, here's a Services" contract — not on the
+ * CF-specific list of binding names. Adding shards = INSERT shard_pool +
+ * add wrangler binding; no code change in cron / eval-runner / etc.
+ *
+ * Bindings declared in shard_pool but not present on this worker are
+ * skipped with a logged warning rather than throwing — useful when a
+ * worker (e.g. apps/agent) is intentionally bound to a subset.
+ */
+export async function forEachShardServices<T>(
+  env: Env,
+  fn: (services: Services, shardName: string) => Promise<T>,
+): Promise<T[]> {
+  const controlPlaneDb = env.ROUTER_DB ?? env.AUTH_DB;
+  const pool = createCfShardPoolService({ controlPlaneDb });
+  const shards = await pool.listAll();
+  const envBindings = env as unknown as Record<string, D1Database | undefined>;
+  return Promise.all(
+    shards.map(async (shard) => {
+      const db = envBindings[shard.bindingName];
+      if (!db) {
+        // Soft-skip: useful when apps/agent etc. binds a subset.
+        // The CF entry that owns the cron must bind every shard.
+        return undefined as T;
+      }
+      return fn(buildCfServices(env, db), shard.bindingName);
+    }),
+  ).then((results) => results.filter((x) => x !== undefined) as T[]);
 }
 
 // Future:

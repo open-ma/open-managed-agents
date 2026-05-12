@@ -71,3 +71,31 @@ export interface ShardPoolRepo {
   incrementTenantCount(bindingName: string): Promise<void>;
   listAll(): Promise<readonly ShardPoolRow[]>;
 }
+
+// ─── Memory store → tenant index ────────────────────────────────────────
+//
+// Lives in the same control-plane DB as tenant_shard / shard_pool.
+// Populated synchronously when a memory store is created (REST POST
+// /v1/memory). Consumed by the R2 memory-events queue consumer to
+// resolve which AUTH_DB_NN shard owns a given memory_store — R2 events
+// carry only the storage key (`<store_id>/<path>`), no tenant_id, so
+// without this index the consumer would have to fall back to env.AUTH_DB
+// and write cross-shard ghost rows for any tenant not on shard 0.
+
+export interface MemoryStoreTenantRow {
+  storeId: string;
+  tenantId: string;
+  createdAt: number;
+}
+
+export interface MemoryStoreTenantIndexRepo {
+  /** O(1) lookup. Hot path — every R2 memory event hits this. Returns
+   *  null for store_ids that pre-date the index (caller treats as
+   *  "use the default shard"). */
+  lookup(storeId: string): Promise<string | null>;
+  /** Idempotent: re-running create-store on the same store_id MUST NOT
+   *  re-route to a different tenant. PK collision is a no-op. */
+  register(storeId: string, tenantId: string, nowMs: number): Promise<void>;
+  /** For admin views / backfill scripts. */
+  listAll(): Promise<readonly MemoryStoreTenantRow[]>;
+}

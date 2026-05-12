@@ -14,6 +14,8 @@ import {
   type Actor,
 } from "@open-managed-agents/memory-store";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { buildCfTenantDbProvider } from "@open-managed-agents/services";
+import { createCfMemoryStoreTenantIndexService } from "@open-managed-agents/tenant-dbs-store";
 
 /**
  * Cloudflare Queue consumer for R2 Event Notifications on MEMORY_BUCKET.
@@ -61,13 +63,52 @@ export async function handleMemoryEvents(
     return;
   }
 
+  // Composition root for the CF queue handler. Build the runtime-agnostic
+  // services this handler needs from CF env bindings here; pass services
+  // (ports) into the per-message processing path.
   const blobs = new CfR2BlobStore(env.MEMORY_BUCKET);
-  const memoryRepo = new SqlMemoryRepo(new CfD1SqlClient(env.AUTH_DB));
+  const provider = buildCfTenantDbProvider(env);
+  const tenantIndex = createCfMemoryStoreTenantIndexService({
+    controlPlaneDb: env.ROUTER_DB ?? env.AUTH_DB,
+  });
+  // Per-batch cache of store_id → SqlMemoryRepo. The repo wraps the
+  // resolved per-tenant shard's SqlClient. Avoids one ROUTER_DB lookup
+  // per message when a batch has many events for the same store
+  // (typical agent burst writes).
+  const repoCache = new Map<string, SqlMemoryRepo>();
+  const resolveRepo = async (storeId: string): Promise<SqlMemoryRepo> => {
+    const cached = repoCache.get(storeId);
+    if (cached) return cached;
+    let tenantId: string | null = null;
+    try {
+      tenantId = await tenantIndex.lookup(storeId);
+    } catch (err) {
+      // Index lookup itself failed (control-plane DB down). Don't crash
+      // the batch — fall back to AUTH_DB. Worst case: a few writes land
+      // on the wrong shard until the control-plane recovers.
+      logWarn(
+        { op: "queue.memory_events.lookup_failed", store_id: storeId, err },
+        "memory_store_tenant lookup failed; falling back to AUTH_DB",
+      );
+    }
+    if (!tenantId) {
+      // Legacy / pre-shard fallback: store_id has no entry in the index.
+      // All such stores live on AUTH_DB_00 (= AUTH_DB) since they were
+      // created before this index existed. Wrap and cache.
+      const fallback = new SqlMemoryRepo(new CfD1SqlClient(env.AUTH_DB));
+      repoCache.set(storeId, fallback);
+      return fallback;
+    }
+    const db = await provider.resolve(tenantId);
+    const repo = new SqlMemoryRepo(new CfD1SqlClient(db));
+    repoCache.set(storeId, repo);
+    return repo;
+  };
   const now = Date.now();
 
   for (const message of batch.messages) {
     try {
-      await processOne(message.body, { blobs, memoryRepo, nowMs: now });
+      await processOne(message.body, { blobs, resolveRepo, nowMs: now });
       message.ack();
     } catch (err) {
       logWarn(
@@ -88,7 +129,7 @@ async function processOne(
   event: R2EventMessage,
   ctx: {
     blobs: CfR2BlobStore;
-    memoryRepo: SqlMemoryRepo;
+    resolveRepo: (storeId: string) => Promise<SqlMemoryRepo>;
     nowMs: number;
   },
 ): Promise<void> {
@@ -104,9 +145,12 @@ async function processOne(
   }
 
   const { storeId, memoryPath } = parsed;
+  // Route to the shard owning this store. Falls back to AUTH_DB for
+  // pre-shard stores via lookupTenantForStore returning null.
+  const memoryRepo = await ctx.resolveRepo(storeId);
 
   if (event.action === "DeleteObject" || event.action === "LifecycleDeletion") {
-    const result = await ctx.memoryRepo.deleteFromEvent({
+    const result = await memoryRepo.deleteFromEvent({
       storeId,
       path: memoryPath,
       actor: deriveActor(undefined),
@@ -147,7 +191,7 @@ async function processOne(
     const head = await ctx.blobs.head(key);
     const actor = deriveActor(head ? null : undefined);
 
-    const result = await ctx.memoryRepo.upsertFromEvent({
+    const result = await memoryRepo.upsertFromEvent({
       storeId,
       path: memoryPath,
       contentSha256: sha,

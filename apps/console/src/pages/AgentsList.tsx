@@ -3,6 +3,8 @@ import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { ListPage } from "../components/ListPage";
+import { Select, SelectOption, SelectGroup, SelectGroupLabel } from "../components/Select";
+import { Combobox } from "../components/Combobox";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
@@ -33,6 +35,25 @@ const ANTHROPIC_SKILLS = [
   { id: "docx", label: "Word (docx)" },
 ];
 
+// AMA spec built-in tool names — must match
+// `BetaManagedAgentsAgentToolConfig.name` enum in the SDK. Source of
+// truth lives in the agent_toolset_20260401 toolset; emitting unknown
+// names here would still validate at the API layer but produces a tool
+// the runtime never wires.
+const BUILTIN_TOOLS: Array<{ name: string; label: string; description: string }> = [
+  { name: "bash", label: "bash", description: "Run shell commands in the sandbox" },
+  { name: "edit", label: "edit", description: "In-place file edits" },
+  { name: "read", label: "read", description: "Read files from the sandbox FS" },
+  { name: "write", label: "write", description: "Create or overwrite files" },
+  { name: "glob", label: "glob", description: "Pattern-match file paths" },
+  { name: "grep", label: "grep", description: "Search file contents" },
+  { name: "web_fetch", label: "web_fetch", description: "Fetch a URL → markdown. Default for any web read." },
+  { name: "web_search", label: "web_search", description: "Web search via DuckDuckGo. Default for lookups." },
+  { name: "browser", label: "browser (opt-in)", description: "Heavy multi-step browser session (navigate / click / screenshot). Off by default — LLMs over-reach for it on simple lookups. Enable only when you need interactive navigation, JS-rendered SPAs, or auth flows." },
+];
+
+type ToolOverride = "default" | "always_allow" | "always_ask" | "disabled";
+
 const INITIAL_FORM = {
   name: "", model: "", system: "", description: "",
   modelCardId: "",
@@ -48,6 +69,19 @@ const INITIAL_FORM = {
   /** Local skill ids to HIDE from this agent's ACP child. Empty = all
    *  detected local skills are visible (the daemon's default). */
   localSkillBlocklist: [] as string[],
+  // Built-in tool policy. `agent_toolset_20260401` toolset's
+  // `default_config` controls fallback enabled/permission for any
+  // tool without a specific override. `toolOverrides` is a per-tool
+  // 4-state: "default" (no entry emitted in configs[]), "always_allow",
+  // "always_ask", or "disabled" (enabled=false). Pre-rewrite the form
+  // hard-coded an empty toolset → all tools enabled + always_allow.
+  toolDefaultEnabled: true,
+  toolDefaultPermission: "always_allow" as "always_allow" | "always_ask",
+  toolOverrides: {} as Record<string, ToolOverride>,
+  // Opt-in to the built-in `general_subagent` tool. Server-side this
+  // flag drives both the tool registration (apps/agent/src/harness/
+  // tools.ts) and runSubAgent's reserved-id branch (session-do.ts).
+  enableGeneralSubagent: false,
 };
 
 export function AgentsList() {
@@ -73,7 +107,7 @@ export function AgentsList() {
   const [createStep, setCreateStep] = useState<"template" | "form">("template");
   const [templateSearch, setTemplateSearch] = useState("");
   const [form, setForm] = useState({ ...INITIAL_FORM });
-  const [tab, setTab] = useState<"basic" | "skills" | "mcp" | "agents">("basic");
+  const [tab, setTab] = useState<"basic" | "tools" | "skills" | "mcp" | "agents">("basic");
   const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
   const [codeValue, setCodeValue] = useState("");
 
@@ -136,6 +170,34 @@ export function AgentsList() {
   // Keep refresh hook reachable for create / archive callbacks.
   void refreshAgents;
 
+  // Serialize the form's tool-policy state into the AMA-shape
+  // `tools` array. Always emits exactly one toolset entry of type
+  // `agent_toolset_20260401`; per-tool overrides only land in
+  // `configs[]` when they differ from the default — keeps payloads
+  // minimal and edits round-trippable through the YAML/JSON view.
+  const buildToolsField = () => {
+    const overrides = Object.entries(form.toolOverrides)
+      .filter(([, v]) => v !== "default")
+      .map(([name, v]) => {
+        if (v === "disabled") return { name, enabled: false };
+        return {
+          name,
+          enabled: true,
+          permission_policy: { type: v as "always_allow" | "always_ask" },
+        };
+      });
+    return [
+      {
+        type: "agent_toolset_20260401",
+        default_config: {
+          enabled: form.toolDefaultEnabled,
+          permission_policy: { type: form.toolDefaultPermission },
+        },
+        ...(overrides.length > 0 ? { configs: overrides } : {}),
+      },
+    ];
+  };
+
   const create = async () => {
     setCreateError("");
     try {
@@ -144,12 +206,15 @@ export function AgentsList() {
         model: form.model,
         system: form.system || undefined,
         description: form.description || undefined,
-        tools: [{ type: "agent_toolset_20260401" }],
+        tools: buildToolsField(),
       };
       if (form.mcpServers.length) payload.mcp_servers = form.mcpServers;
       if (form.skills.length) payload.skills = form.skills;
       if (form.callableAgents.length) {
         payload.multiagent = { type: "coordinator", agents: form.callableAgents };
+      }
+      if (form.enableGeneralSubagent) {
+        payload.enable_general_subagent = true;
       }
       // Local-runtime agent: opt into acp-proxy harness when both runtimeId
       // and acpAgentId are set. Partial config silently falls back to the
@@ -242,11 +307,14 @@ export function AgentsList() {
     };
     if (form.system) config.system = form.system;
     if (form.description) config.description = form.description;
-    config.tools = [{ type: "agent_toolset_20260401" }];
+    config.tools = buildToolsField();
     if (form.mcpServers.length) config.mcp_servers = form.mcpServers;
     if (form.skills.length) config.skills = form.skills;
     if (form.callableAgents.length) {
       config.multiagent = { type: "coordinator", agents: form.callableAgents };
+    }
+    if (form.enableGeneralSubagent) {
+      config.enable_general_subagent = true;
     }
     return config;
   };
@@ -263,6 +331,32 @@ export function AgentsList() {
       try {
         const parsed = createMode === "yaml" ? yaml.load(codeValue) as Record<string, unknown> : JSON.parse(codeValue);
         const rb = parsed.runtime_binding as { runtime_id?: string; acp_agent_id?: string; local_skill_blocklist?: string[] } | undefined;
+        // Tool policy round-trip: extract default + per-tool overrides
+        // from the first agent_toolset_20260401 entry (custom tools and
+        // MCP toolsets pass through untouched in YAML/JSON view but
+        // can't currently be edited in the Form view — they survive
+        // the round-trip via the YAML mode if the user toggled to it).
+        const toolset = Array.isArray(parsed.tools)
+          ? (parsed.tools as Array<Record<string, unknown>>).find(
+              (t) => t?.type === "agent_toolset_20260401",
+            )
+          : undefined;
+        const dc = (toolset?.default_config ?? {}) as {
+          enabled?: boolean;
+          permission_policy?: { type?: string };
+        };
+        const cfgs = (toolset?.configs ?? []) as Array<{
+          name?: string;
+          enabled?: boolean;
+          permission_policy?: { type?: string };
+        }>;
+        const overrides: Record<string, ToolOverride> = {};
+        for (const c of cfgs) {
+          if (!c?.name) continue;
+          if (c.enabled === false) overrides[c.name] = "disabled";
+          else if (c.permission_policy?.type === "always_ask") overrides[c.name] = "always_ask";
+          else if (c.permission_policy?.type === "always_allow") overrides[c.name] = "always_allow";
+        }
         setForm({
           ...INITIAL_FORM,
           name: String(parsed.name || ""),
@@ -281,6 +375,10 @@ export function AgentsList() {
           runtimeId: rb?.runtime_id ?? "",
           acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
           localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist) ? rb.local_skill_blocklist : [],
+          toolDefaultEnabled: dc.enabled ?? true,
+          toolDefaultPermission: dc.permission_policy?.type === "always_ask" ? "always_ask" : "always_allow",
+          toolOverrides: overrides,
+          enableGeneralSubagent: parsed.enable_general_subagent === true,
         });
       } catch { /* keep current form if parse fails */ }
     } else {
@@ -470,6 +568,11 @@ export function AgentsList() {
               {createMode === "form" && (
               <div className="flex gap-1 mt-3">
                 <button onClick={() => setTab("basic")} className={tabCls("basic")}>Basic</button>
+                <button onClick={() => setTab("tools")} className={tabCls("tools")}>
+                  Tools {Object.keys(form.toolOverrides).length > 0 && (
+                    <span className="ml-1 text-xs opacity-60">({Object.keys(form.toolOverrides).length})</span>
+                  )}
+                </button>
                 <button onClick={() => setTab("skills")} className={tabCls("skills")}>
                   Skills {form.skills.length > 0 && <span className="ml-1 text-xs opacity-60">({form.skills.length})</span>}
                 </button>
@@ -519,27 +622,32 @@ export function AgentsList() {
                     ) : (
                       <div>
                         <label className="text-sm text-fg-muted block mb-1">Model</label>
-                        <select
+                        <Combobox<ModelCard>
                           value={selectedCardId}
-                          onChange={(e) => {
-                            const cardId = e.target.value;
-                            const card = modelCards.find((mc) => mc.id === cardId);
-                            setForm({ ...form, modelCardId: cardId, model: card?.model_id ?? "" });
+                          onValueChange={(v, item) => {
+                            setForm({ ...form, modelCardId: v, model: item?.model_id ?? v });
                           }}
-                          className={inputCls}
-                        >
-                          {/* Paste-mode: form.model came from YAML/JSON but doesn't
-                              match any card. Surface the mismatch instead of silently
-                              showing the first card as if it were chosen. */}
-                          {!selectedCardId && form.model && (
-                            <option value="">⚠ {form.model} — no matching card, pick one</option>
+                          endpoint="/v1/model_cards"
+                          getValue={(mc) => mc.id}
+                          getLabel={(mc) => (
+                            <span>
+                              {mc.is_default ? "★ " : ""}{mc.model_id}
+                              {mc.model !== mc.model_id && (
+                                <span className="text-fg-subtle text-[12px]"> ({mc.model})</span>
+                              )}
+                            </span>
                           )}
-                          {modelCards.map((mc) => (
-                            <option key={mc.id} value={mc.id}>
-                              {mc.is_default ? "★ " : ""}{mc.model_id}{mc.model !== mc.model_id ? ` (${mc.model})` : ""}
-                            </option>
-                          ))}
-                        </select>
+                          getTextLabel={(mc) =>
+                            `${mc.is_default ? "★ " : ""}${mc.model_id}${
+                              mc.model !== mc.model_id ? ` (${mc.model})` : ""
+                            }`
+                          }
+                          placeholder={
+                            !selectedCardId && form.model
+                              ? `⚠ ${form.model} — no matching card, pick one`
+                              : "Select a model card..."
+                          }
+                        />
                       </div>
                     )
                   )}
@@ -572,10 +680,10 @@ export function AgentsList() {
                       </p>
                     ) : (
                       <>
-                        <select
-                          value={form.runtimeId}
-                          onChange={(e) => {
-                            const rid = e.target.value;
+                        <Select
+                          value={form.runtimeId || "__cloud__"}
+                          onValueChange={(v) => {
+                            const rid = v === "__cloud__" ? "" : v;
                             // Auto-pick the first detected ACP agent on the
                             // chosen runtime — user doesn't have to know what
                             // strings the daemon's manifest emits. Falls back
@@ -588,15 +696,15 @@ export function AgentsList() {
                               acpAgentId: rid && first ? first : form.acpAgentId,
                             });
                           }}
-                          className={inputCls}
+                          placeholder="— Cloud (run on OMA) —"
                         >
-                          <option value="">— Cloud (run on OMA) —</option>
+                          <SelectOption value="__cloud__">— Cloud (run on OMA) —</SelectOption>
                           {runtimes.map((r) => (
-                            <option key={r.id} value={r.id} disabled={r.status !== "online"}>
+                            <SelectOption key={r.id} value={r.id} disabled={r.status !== "online"}>
                               {r.hostname} ({r.status}{r.status === "online" && r.agents.length ? ` · ${r.agents.length} agents` : ""})
-                            </option>
+                            </SelectOption>
                           ))}
-                        </select>
+                        </Select>
                         {form.runtimeId && (
                           <div className="mt-2">
                             <label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</label>
@@ -617,26 +725,27 @@ export function AgentsList() {
                               const otherDetected = detectedAgents.filter((a) => !featuredIds.has(a.id));
                               return (
                                 <>
-                                  <select
+                                  <Select
                                     value={form.acpAgentId}
-                                    onChange={(e) => setForm({ ...form, acpAgentId: e.target.value, localSkillBlocklist: [] })}
-                                    className={inputCls}
+                                    onValueChange={(v) => setForm({ ...form, acpAgentId: v, localSkillBlocklist: [] })}
                                   >
                                     {featuredDetected.length > 0 && (
-                                      <optgroup label="★ Featured">
+                                      <SelectGroup>
+                                        <SelectGroupLabel>★ Featured</SelectGroupLabel>
                                         {featuredDetected.map((a) => (
-                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                          <SelectOption key={a.id} value={a.id}>{a.id}</SelectOption>
                                         ))}
-                                      </optgroup>
+                                      </SelectGroup>
                                     )}
                                     {otherDetected.length > 0 && (
-                                      <optgroup label="Other detected on this runtime">
+                                      <SelectGroup>
+                                        <SelectGroupLabel>Other detected on this runtime</SelectGroupLabel>
                                         {otherDetected.map((a) => (
-                                          <option key={a.id} value={a.id}>{a.id}</option>
+                                          <SelectOption key={a.id} value={a.id}>{a.id}</SelectOption>
                                         ))}
-                                      </optgroup>
+                                      </SelectGroup>
                                     )}
-                                  </select>
+                                  </Select>
                                 </>
                               );
                             })()}
@@ -718,6 +827,107 @@ export function AgentsList() {
                 </div>
               )}
 
+              {/* Tools tab */}
+              {createMode === "form" && tab === "tools" && (
+                <div className="space-y-5">
+                  {createError && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{createError}</div>}
+
+                  <p className="text-xs text-fg-subtle leading-relaxed">
+                    Built-in toolset (AMA <span className="font-mono">agent_toolset_20260401</span>).
+                    Multi-agent delegation lives in its own tab and is a separate
+                    AMA field <span className="font-mono">multiagent</span> — not part of this toolset.
+                    External MCP tools live in the MCP Servers tab.
+                  </p>
+
+                  <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
+                    <div className="text-sm font-medium text-fg mb-1">Default policy</div>
+                    <p className="text-xs text-fg-subtle mb-3">
+                      Applies to every tool below that's set to <span className="font-mono">default</span>.
+                    </p>
+                    <div className="flex flex-wrap items-center gap-4">
+                      <label className="flex items-center gap-2 text-sm">
+                        <input
+                          type="checkbox"
+                          checked={form.toolDefaultEnabled}
+                          onChange={(e) => setForm({ ...form, toolDefaultEnabled: e.target.checked })}
+                          className="accent-brand"
+                        />
+                        Enable tools
+                      </label>
+                      <div className="flex items-center gap-2 text-sm">
+                        <span className="text-fg-muted">Permission:</span>
+                        <select
+                          value={form.toolDefaultPermission}
+                          disabled={!form.toolDefaultEnabled}
+                          onChange={(e) => setForm({ ...form, toolDefaultPermission: e.target.value as "always_allow" | "always_ask" })}
+                          className="border border-border rounded-md px-2 py-1 text-sm bg-bg text-fg outline-none focus:border-brand disabled:opacity-40"
+                        >
+                          <option value="always_allow">always_allow</option>
+                          <option value="always_ask">always_ask</option>
+                        </select>
+                      </div>
+                    </div>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium text-fg block mb-2">Per-tool overrides</label>
+                    <p className="text-xs text-fg-subtle mb-3">
+                      Each row's effective state is shown in the dropdown.
+                      Pick <span className="font-mono">default</span> to inherit the policy above;
+                      pick a specific value to override.
+                      <span className="font-mono">always_ask</span> emits a{" "}
+                      <span className="font-mono">user.tool_confirmation</span> event the client must
+                      approve before each call.
+                    </p>
+                    <div className="border border-border rounded-md divide-y divide-border">
+                      {BUILTIN_TOOLS.map((bt) => {
+                        const current = form.toolOverrides[bt.name] ?? "default";
+                        // Effective state when "default" is selected, so the
+                        // user always knows what the row resolves to. Mirrors
+                        // the runtime's getEnabledTools + getToolPermission.
+                        const effectiveLabel = !form.toolDefaultEnabled
+                          ? "disabled"
+                          : form.toolDefaultPermission;
+                        // Color the row when it's "off" so the disabled
+                        // outcome is visually obvious.
+                        const isOff =
+                          current === "disabled" ||
+                          (current === "default" && !form.toolDefaultEnabled);
+                        return (
+                          <div
+                            key={bt.name}
+                            className={`flex items-center justify-between px-3 py-2 gap-3 ${
+                              isOff ? "opacity-50" : ""
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="text-sm font-mono text-fg">{bt.label}</div>
+                              <div className="text-xs text-fg-subtle truncate">{bt.description}</div>
+                            </div>
+                            <select
+                              value={current}
+                              onChange={(e) => {
+                                const v = e.target.value as ToolOverride;
+                                const next = { ...form.toolOverrides };
+                                if (v === "default") delete next[bt.name];
+                                else next[bt.name] = v;
+                                setForm({ ...form, toolOverrides: next });
+                              }}
+                              className="border border-border rounded-md px-2 py-1 text-xs bg-bg text-fg outline-none focus:border-brand shrink-0"
+                            >
+                              <option value="default">default ({effectiveLabel})</option>
+                              <option value="always_allow">always_allow</option>
+                              <option value="always_ask">always_ask</option>
+                              <option value="disabled">disabled</option>
+                            </select>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              )}
+
               {/* Skills tab */}
               {createMode === "form" && tab === "skills" && (
                 <div className="space-y-4">
@@ -790,10 +1000,10 @@ export function AgentsList() {
                         </div>
                         <div className="w-24">
                           <label className="text-xs text-fg-muted block mb-0.5">Type</label>
-                          <select value={mcp.type} onChange={(e) => updateMcp(i, "type", e.target.value)} className={inputCls}>
-                            <option>sse</option>
-                            <option>stdio</option>
-                          </select>
+                          <Select value={mcp.type} onValueChange={(v) => updateMcp(i, "type", v)}>
+                            <SelectOption value="sse">sse</SelectOption>
+                            <SelectOption value="stdio">stdio</SelectOption>
+                          </Select>
                         </div>
                         <button onClick={() => removeMcp(i)} className="self-end px-2 py-2 text-fg-subtle hover:text-danger transition-colors">×</button>
                       </div>
@@ -814,9 +1024,35 @@ export function AgentsList() {
 
               {/* Multi-agent tab */}
               {createMode === "form" && tab === "agents" && (
-                <div className="space-y-3">
-                  <label className="text-sm font-medium text-fg block">Callable Agents</label>
-                  <p className="text-xs text-fg-subtle mb-2">Select agents that this agent can delegate tasks to.</p>
+                <div className="space-y-5">
+                  {/* Built-in general sub-agent — opt-in. Doesn't require
+                      managing a dedicated callable_agents entry; spawns a
+                      generic delegate that inherits this agent's model +
+                      sandbox. Useful for one-off task delegation. */}
+                  <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
+                    <label className="flex items-start gap-2 text-sm cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={form.enableGeneralSubagent}
+                        onChange={(e) => setForm({ ...form, enableGeneralSubagent: e.target.checked })}
+                        className="accent-brand mt-0.5"
+                      />
+                      <div>
+                        <div className="font-medium text-fg">Enable general sub-agent</div>
+                        <p className="text-xs text-fg-subtle mt-0.5">
+                          Exposes a built-in <span className="font-mono">general_subagent(task)</span> tool.
+                          Spawns a generic sub-agent thread (reserved id <span className="font-mono">general</span>)
+                          inheriting this agent's model + sandbox, with a safe built-in tool subset
+                          (bash/read/write/edit/grep/glob). No roster setup needed.
+                        </p>
+                      </div>
+                    </label>
+                  </div>
+
+                  <div>
+                    <label className="text-sm font-medium text-fg block">Callable Agents</label>
+                    <p className="text-xs text-fg-subtle mb-2">Specific agents this agent can delegate to via <span className="font-mono">call_agent_&lt;id&gt;</span> tools.</p>
+                  </div>
 
                   {form.callableAgents.map((ca, i) => {
                     const agentInfo = allAgents.find(a => a.id === ca.id);
@@ -833,12 +1069,20 @@ export function AgentsList() {
 
                   <div>
                     <label className="text-xs text-fg-muted block mb-1">Add agent</label>
-                    <select onChange={(e) => { if (e.target.value) addCallable(e.target.value); e.target.value = ""; }} className={inputCls}>
-                      <option value="">Select an agent...</option>
-                      {allAgents
-                        .filter(a => !form.callableAgents.find(c => c.id === a.id))
-                        .map(a => <option key={a.id} value={a.id}>{a.name} ({a.id})</option>)}
-                    </select>
+                    <Combobox<Agent>
+                      value=""
+                      onValueChange={(v) => { if (v) addCallable(v); }}
+                      endpoint="/v1/agents"
+                      getValue={(a) => a.id}
+                      getLabel={(a) => (
+                        <span>
+                          {a.name} <span className="text-fg-subtle text-[12px]">({a.id})</span>
+                        </span>
+                      )}
+                      getTextLabel={(a) => `${a.name} (${a.id})`}
+                      placeholder="Select an agent..."
+                      excludeIds={form.callableAgents.map((c) => c.id)}
+                    />
                   </div>
 
                   {form.callableAgents.length === 0 && allAgents.length === 0 && (

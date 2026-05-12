@@ -3,6 +3,7 @@ import type { Env } from "@open-managed-agents/shared";
 import type { AgentConfig, EnvironmentConfig, VaultConfig, CredentialConfig } from "@open-managed-agents/shared";
 import { generateVaultId } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
+import { forEachShardServices } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 
 // Internal endpoints, called only by the integrations gateway worker via the
@@ -11,6 +12,12 @@ import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 // the calling worker to have already authenticated the OMA user.
 //
 // Mounted at /v1/internal/* in apps/main/src/index.ts.
+//
+// EXCEPTION: /v1/internal/usage_events/* uses BILLING_INTERNAL_SECRET
+// (separate Bearer header, separate scope) because the caller is the
+// hosted billing worker — a different trust principal than the
+// integrations gateway. Mounted as a sub-app at the bottom of this file
+// before the default export so it bypasses the integrations auth gate.
 
 const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
 
@@ -33,7 +40,19 @@ function integrationsOrigin(env: Env): string {
 
 // Header-secret auth middleware. Reject early if the secret is missing or
 // the binding isn't configured.
+//
+// Scope: every route in `app` (the integrations-internal API). The
+// /v1/internal/usage_events/* sub-app is mounted on a separate Hono
+// instance below with its OWN bearer auth (BILLING_INTERNAL_SECRET) so
+// the two trust principals don't share a secret.
 app.use("*", async (c, next) => {
+  // Skip integrations-secret check for paths owned by the billing sub-app
+  // — they're mounted on the same /v1/internal/* prefix from a different
+  // Hono. Without this short-circuit the integrations gate would 401 the
+  // billing worker before the request ever reached its own auth middleware.
+  if (c.req.path.startsWith("/v1/internal/usage_events")) {
+    return next();
+  }
   const expected = c.env.INTEGRATIONS_INTERNAL_SECRET;
   if (!expected) {
     return c.json({ error: "internal endpoints not configured" }, 503);
@@ -537,6 +556,139 @@ async function fetchVaultCredentials(
 // (apps/agent/wrangler.jsonc → script_name: "managed-agents") and calls
 // `runtime_room_stub.fetch("http://runtime-room/_attach_harness", ...)`.
 // One less worker hop, no shared INTEGRATIONS_INTERNAL_SECRET on agent.
+
+// ─────────────────────────────────────────────────────────────────────
+// /v1/internal/usage_events/* — billing reconcile API
+//
+// Service-to-service: the hosted billing worker
+// (managed-agents-billing) calls these endpoints from a daily cron to
+// pull unbilled raw usage events, apply its rate map, debit
+// credit_ledger, then ack the ids back. OSS knows nothing about money;
+// this is purely the read+ack surface over the per-tenant `usage_events`
+// table.
+//
+// Auth: Bearer BILLING_INTERNAL_SECRET (separate from the integrations
+// gateway secret because the trust principal is different — we don't
+// want the integrations gateway able to ack billing rows or vice versa).
+// 503 when secret is unset (self-host / dev with no billing worker).
+//
+// Cross-shard fan-out: `forEachShardServices` enumerates every shard
+// registered in shard_pool and runs the read against each shard's
+// per-tenant DB. Single shard = no overhead; multi-shard = parallel
+// fan-out with results merged client-side.
+// ─────────────────────────────────────────────────────────────────────
+const billingApp = new Hono<{ Bindings: Env }>();
+
+billingApp.use("/usage_events/*", async (c, next) => {
+  const expected = c.env.BILLING_INTERNAL_SECRET;
+  if (!expected) {
+    return c.json({ error: "billing internal endpoints not configured" }, 503);
+  }
+  const auth = c.req.header("authorization") ?? "";
+  const provided = auth.startsWith("Bearer ") ? auth.slice("Bearer ".length) : "";
+  if (!provided || provided !== expected) {
+    return c.json({ error: "unauthorized" }, 401);
+  }
+  await next();
+});
+
+/**
+ * GET /v1/internal/usage_events
+ * Query:
+ *   tenant_id  optional — filter to a single tenant. If omitted, returns
+ *              unbilled events across ALL tenants on every shard, ordered
+ *              by (tenant_id, id).
+ *   since      optional — id cursor; only returns rows with id > since.
+ *              Defaults to 0. Per-tenant cursor; the caller passes a
+ *              global cursor at its own risk (rows interleave between
+ *              shards/tenants).
+ *   limit      optional — per-tenant cap. Default 500, max 5000.
+ *
+ * Response:
+ *   {
+ *     events: [{ id, tenant_id, session_id, agent_id, kind, value,
+ *                created_at, billed_at }, ...],
+ *     count: number
+ *   }
+ */
+billingApp.get("/usage_events", async (c) => {
+  const sinceRaw = c.req.query("since");
+  const limitRaw = c.req.query("limit");
+  const tenantFilter = c.req.query("tenant_id");
+  const since = sinceRaw ? Math.max(0, Number.parseInt(sinceRaw, 10) || 0) : 0;
+  const limit = limitRaw ? Math.max(1, Math.min(5000, Number.parseInt(limitRaw, 10) || 500)) : 500;
+
+  // Fan out to every shard. listUnbilled is per-tenant, so we have to
+  // discover the tenant set on each shard before reading. The simplest
+  // discovery query: SELECT DISTINCT tenant_id FROM usage_events WHERE
+  // billed_at IS NULL — bounded by the unbilled-rows index.
+  const perShard = await forEachShardServices(c.env, async (services, _shardName) => {
+    // Pull tenant ids with unbilled events on this shard.
+    const tenantsRow = tenantFilter
+      ? [{ tenant_id: tenantFilter }]
+      : await listUnbilledTenantsOnShard(services);
+    const out: unknown[] = [];
+    for (const { tenant_id } of tenantsRow) {
+      const rows = await services.usage.listUnbilled(tenant_id, since, limit);
+      out.push(...rows);
+    }
+    return out;
+  });
+
+  // Flatten + sort by (tenant_id, id) ASC for caller stability.
+  const merged: Array<{ id: number; tenant_id: string }> = [];
+  for (const list of perShard) {
+    if (Array.isArray(list)) merged.push(...(list as Array<{ id: number; tenant_id: string }>));
+  }
+  merged.sort((a, b) => {
+    if (a.tenant_id < b.tenant_id) return -1;
+    if (a.tenant_id > b.tenant_id) return 1;
+    return a.id - b.id;
+  });
+
+  return c.json({ events: merged, count: merged.length });
+});
+
+/**
+ * POST /v1/internal/usage_events/ack
+ * Body: { ids: number[] }
+ *
+ * Marks the given ids as billed (sets billed_at = now). Idempotent: a
+ * second ack with overlapping ids is a no-op. Cross-shard: fans out to
+ * every shard; each shard's ack only touches its own rows (id is
+ * AUTOINCREMENT but unique per shard — the caller's id set is grouped
+ * by shard implicitly by tenant routing on the read side).
+ */
+billingApp.post("/usage_events/ack", async (c) => {
+  const body = await c.req.json<{ ids?: unknown }>().catch(() => ({} as { ids?: unknown }));
+  const idsRaw = Array.isArray(body?.ids) ? (body.ids as unknown[]) : [];
+  const ids = idsRaw.filter(
+    (n: unknown): n is number =>
+      typeof n === "number" && Number.isInteger(n) && n > 0,
+  );
+  if (!ids.length) {
+    return c.json({ ok: true, acked: 0 });
+  }
+  await forEachShardServices(c.env, async (services) => {
+    await services.usage.ack(ids);
+  });
+  return c.json({ ok: true, acked: ids.length });
+});
+
+// Helper: enumerate tenants with unbilled events on this shard. Used by
+// the cross-shard fan-out so the caller doesn't have to pre-enumerate.
+async function listUnbilledTenantsOnShard(
+  services: Services,
+): Promise<Array<{ tenant_id: string }>> {
+  return services.usage.listUnbilledTenants();
+}
+
+// Mount the billing sub-app onto the same /v1/internal/* base. Because
+// we Hono-mount via `app.route("/", billingApp)`, every billingApp path
+// becomes a sibling under `/v1/internal/*` — and the integrations auth
+// middleware above explicitly skips /v1/internal/usage_events/* paths
+// so this sub-app's own bearer middleware is the only gate.
+app.route("/", billingApp);
 
 export default app;
 

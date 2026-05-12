@@ -4,14 +4,17 @@
 
 export { SqlTenantShardDirectoryRepo } from "./sql-tenant-shard-repo";
 export { SqlShardPoolRepo } from "./sql-shard-pool-repo";
+export { SqlMemoryStoreTenantIndexRepo } from "./sql-memory-store-tenant-index-repo";
 
 import { SqlTenantShardDirectoryRepo } from "./sql-tenant-shard-repo";
 import { SqlShardPoolRepo } from "./sql-shard-pool-repo";
+import { SqlMemoryStoreTenantIndexRepo } from "./sql-memory-store-tenant-index-repo";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import {
   TenantShardDirectoryService,
   ShardPoolService,
+  MemoryStoreTenantIndexService,
 } from "../service";
 
 export function createCfTenantShardDirectoryService(deps: {
@@ -28,6 +31,14 @@ export function createCfShardPoolService(deps: {
   return new ShardPoolService(new SqlShardPoolRepo(new CfD1SqlClient(deps.controlPlaneDb)));
 }
 
+export function createCfMemoryStoreTenantIndexService(deps: {
+  controlPlaneDb: D1Database;
+}): MemoryStoreTenantIndexService {
+  return new MemoryStoreTenantIndexService(
+    new SqlMemoryStoreTenantIndexRepo(new CfD1SqlClient(deps.controlPlaneDb)),
+  );
+}
+
 export function createSqliteTenantShardDirectoryService(deps: {
   client: SqlClient;
 }): TenantShardDirectoryService {
@@ -38,4 +49,10 @@ export function createSqliteShardPoolService(deps: {
   client: SqlClient;
 }): ShardPoolService {
   return new ShardPoolService(new SqlShardPoolRepo(deps.client));
+}
+
+export function createSqliteMemoryStoreTenantIndexService(deps: {
+  client: SqlClient;
+}): MemoryStoreTenantIndexService {
+  return new MemoryStoreTenantIndexService(new SqlMemoryStoreTenantIndexRepo(deps.client));
 }

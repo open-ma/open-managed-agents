@@ -24,15 +24,32 @@
 
 import { Sandbox } from "@cloudflare/sandbox";
 import type { Env } from "@open-managed-agents/shared";
+import {
+  buildCfTenantDbProvider,
+  getCfServicesForTenant,
+} from "@open-managed-agents/services";
 import { recordBackup } from "./runtime/workspace-backups";
 
 const BACKUP_TTL_SEC = 7 * 24 * 3600;
 const BACKUP_CTX_KEY = "oma_backup_ctx";
+// Per-container persistent storage of billing context — survives across
+// onStart/onStop cycles within the same DO. We need both the (tenant,
+// session, agent) tuple AND the start timestamp so onStop can compute
+// elapsed seconds even after a DO restart.
+const BILLING_CTX_KEY = "oma_billing_ctx";
 
 interface BackupContext {
   tenantId: string;
   environmentId: string;
   sessionId: string;
+}
+
+interface BillingContext {
+  tenantId: string;
+  sessionId: string;
+  agentId: string | null;
+  /** Unix ms when the container most recently started (or first call landed). */
+  startedAt: number;
 }
 
 // Match the SDK's OutboundHandlerContext shape (see @cloudflare/containers).
@@ -181,6 +198,35 @@ export class OmaSandbox extends Sandbox {
   }
 
   /**
+   * Per-container billing context. SessionDO calls this once per warmup
+   * with (tenant, session, agent). We use it to attribute the
+   * sandbox_active_seconds emit at onStop time — without context the
+   * emit silently no-ops (self-host / dev path).
+   *
+   * startedAt is mint-or-fetch: if a context already exists in storage
+   * we keep its startedAt (containers within one logical session may
+   * stop/restart on idle teardown — we credit the user only for the
+   * fresh window). Actual lifecycle events come through onStart / onStop
+   * below.
+   */
+  async setBillingContext(ctx: Omit<BillingContext, "startedAt">): Promise<void> {
+    const existing = (await this.ctx.storage.get(BILLING_CTX_KEY)) as
+      | BillingContext
+      | undefined;
+    if (existing && existing.sessionId === ctx.sessionId) {
+      // Same session, container still warm — keep the original startedAt
+      // so we don't double-bill on a no-op re-warm.
+      return;
+    }
+    await this.ctx.storage.put(BILLING_CTX_KEY, {
+      tenantId: ctx.tenantId,
+      sessionId: ctx.sessionId,
+      agentId: ctx.agentId,
+      startedAt: Date.now(),
+    });
+  }
+
+  /**
    * Snapshot /workspace into BACKUP_BUCKET + record the handle in AUTH_DB
    * scoped to the stored backup context. Best-effort: any failure logs
    * and returns; never throws because all callers (sleepAfter teardown,
@@ -209,7 +255,12 @@ export class OmaSandbox extends Sandbox {
       });
       const elapsedMs = Date.now() - startMs;
       if (!backup) return;
-      await recordBackup(env.AUTH_DB, {
+      // Route to the tenant's shard — workspace_backups is per-tenant data.
+      // The CF tenant-DB provider is the wiring boundary; resolve once and
+      // pass the resolved DB into the (port-shaped) recordBackup function.
+      const provider = buildCfTenantDbProvider(env);
+      const backupDb = await provider.resolve(ctx.tenantId);
+      await recordBackup(backupDb, {
         tenantId: ctx.tenantId,
         environmentId: ctx.environmentId,
         handle: { id: backup.id, dir: backup.dir, localBucket: backup.localBucket },
@@ -250,6 +301,66 @@ export class OmaSandbox extends Sandbox {
     const reason = typeof params.reason === "string" ? params.reason : "unknown";
     // 137 = SIGKILL (likely OOM or destroy()); 143 = SIGTERM (graceful)
     console.log(`[oma-sandbox] onStop exit=${ec} reason=${reason}`);
+    await this.recordSandboxActiveOnStop();
+  }
+
+  /**
+   * Public entry point for the SessionDO `/destroy` path to emit the
+   * sandbox_active_seconds row BEFORE calling `sandbox.destroy()`. The
+   * CF Containers SDK fires `onStop` async to destroy() — by the time
+   * SessionDO returns 200, the onStop callback may still be inflight or
+   * may have been dropped if the DO got evicted. Calling this explicitly
+   * gives us a synchronous emit in the SessionDO's request lifecycle.
+   *
+   * Idempotent via storage-delete-after-emit — a later onStop fires this
+   * again but reads `undefined` from storage and no-ops.
+   */
+  async emitSandboxActiveNow(): Promise<void> {
+    await this.recordSandboxActiveOnStop();
+  }
+
+  /**
+   * Compute container active-seconds from the stored billing context's
+   * startedAt and emit one usage_events row of kind=sandbox_active_seconds.
+   * Resets the startedAt cursor so a re-start in the same session DO
+   * doesn't re-bill the previous window.
+   *
+   * Best-effort: any failure logs and returns. We do NOT block the
+   * container teardown on a billing emit (that would couple billing
+   * availability to sandbox availability — wrong direction).
+   */
+  private async recordSandboxActiveOnStop(): Promise<void> {
+    try {
+      const env = this.env as Env;
+      const ctx = (await this.ctx.storage.get(BILLING_CTX_KEY)) as
+        | BillingContext
+        | undefined;
+      if (!ctx) return;
+      const elapsedMs = Date.now() - ctx.startedAt;
+      if (elapsedMs <= 0) return;
+      const seconds = Math.floor(elapsedMs / 1000);
+      if (seconds <= 0) return;
+      const services = await getCfServicesForTenant(env, ctx.tenantId);
+      await services.usage.recordUsage({
+        tenantId: ctx.tenantId,
+        sessionId: ctx.sessionId,
+        agentId: ctx.agentId,
+        kind: "sandbox_active_seconds",
+        value: seconds,
+      });
+      // Drop the stored context so a re-start in the same DO mints a
+      // fresh window (re-warm = new billing window, not "continue prior
+      // window"). The next setBillingContext() call from SessionDO at
+      // warmup will repopulate.
+      await this.ctx.storage.delete(BILLING_CTX_KEY);
+      console.log(
+        `[oma-sandbox] usage emit sandbox_active_seconds=${seconds} session=${ctx.sessionId.slice(0, 12)}`,
+      );
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] recordSandboxActiveOnStop failed: ${(err as Error).message ?? err}`,
+      );
+    }
   }
 }
 
@@ -301,8 +412,92 @@ const r2OutboundPassthrough = async (request: Request): Promise<Response> => {
   );
 };
 
+// Per-host network-layer GitHub credential injection (γ proxy).
+//
+// Sandbox containers fire plain HTTPS at github.com (smart-HTTP git
+// protocol) and api.github.com (REST/GraphQL) with no Authorization
+// header — neither ~/.git-credentials nor GITHUB_TOKEN env exists in the
+// sandbox by design. We resolve the right token via main worker RPC
+// (per-session, per-repo path matching with first-resource fallback),
+// inject Authorization with the host-appropriate scheme, and forward.
+//
+// Auth scheme is host-specific:
+//   - github.com   → Basic base64("x-access-token:<token>") (smart-HTTP)
+//   - api.github.com → Bearer <token> (REST/GraphQL)
+//
+// Pass-through (no auth header added) when:
+//   - the session has no github_repository resources
+//   - the per-session credential lookup fails
+//
+// Multi-repo fallback: if the request URL doesn't match any mounted
+// repo's owner/repo slug, we use the first declared repo's token.
+// Known limitation: cross-token mutations (graphql to repo B with token
+// A's scope) return GitHub's standard error envelope; we don't retry.
+const githubAuthHandler = async (
+  request: Request,
+  env: unknown,
+  ctx: SdkContext<OutboundContextParams>,
+): Promise<Response> => {
+  const url = new URL(request.url);
+  const params = ctx.params ?? {};
+  const e = env as Env;
+
+  let cred: { scheme: "Basic" | "Bearer"; token: string; slug: string } | null = null;
+  if (params.tenantId && params.sessionId && e.MAIN_MCP) {
+    try {
+      cred = await e.MAIN_MCP.lookupGithubCredential({
+        tenantId: params.tenantId,
+        sessionId: params.sessionId,
+        hostname: url.hostname,
+        pathname: url.pathname,
+      });
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] lookupGithubCredential threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
+      );
+      // Fall through unauthenticated — same as legacy behaviour for
+      // RPC failure; agent sees 401, can retry.
+    }
+  }
+
+  const outHeaders = new Headers(request.headers);
+  for (const h of HOP_BY_HOP_OR_CF_HEADERS) outHeaders.delete(h);
+  if (cred) {
+    const value = cred.scheme === "Basic"
+      ? `Basic ${btoa(`x-access-token:${cred.token}`)}`
+      : `Bearer ${cred.token}`;
+    outHeaders.set("authorization", value);
+  }
+
+  let upstreamReq: Request;
+  if (request.method === "GET" || request.method === "HEAD") {
+    upstreamReq = new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      redirect: "manual",
+    });
+  } else {
+    // Materialize body — Workers needs known-length to set Content-Length
+    // (same constraint as injectVaultCredsHandler / r2OutboundPassthrough).
+    const bodyBytes = await request.arrayBuffer();
+    upstreamReq = new Request(request.url, {
+      method: request.method,
+      headers: outHeaders,
+      body: bodyBytes,
+      redirect: "manual",
+    });
+  }
+
+  console.log(
+    `[oma-sandbox] github host=${url.hostname} method=${request.method} cred=${cred ? cred.slug : "none"}`,
+  );
+  return fetch(upstreamReq);
+};
+
 (OmaSandbox as unknown as {
-  outboundByHost: Record<string, (req: Request) => Promise<Response>>;
+  outboundByHost: Record<string, (req: Request, env: unknown, ctx: SdkContext<OutboundContextParams>) => Promise<Response>>;
 }).outboundByHost = {
   "*.r2.cloudflarestorage.com": r2OutboundPassthrough,
+  "github.com": githubAuthHandler,
+  "api.github.com": githubAuthHandler,
 };

@@ -48,13 +48,33 @@ export class SqlEventLog implements EventLogRepo {
 
   async appendAsync(event: SessionEvent): Promise<void> {
     const ts = Date.now();
+    // Mirror cf-do/index.ts: user.* are pending until drained;
+    // everything else is "ingested" at write time. session_thread_id
+    // defaults to primary; events from sub-agent threads carry their
+    // own session_thread_id on the wire.
+    const isPending =
+      event.type === "user.message" ||
+      event.type === "user.tool_confirmation" ||
+      event.type === "user.custom_tool_result";
+    const processedAt = isPending ? null : ts;
+    const threadId =
+      (event as unknown as { session_thread_id?: string }).session_thread_id ??
+      "sthr_primary";
     await this.sql
       .prepare(
-        `INSERT INTO session_events (session_id, seq, type, data, ts)
-         SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?
+        `INSERT INTO session_events (session_id, seq, type, data, ts, processed_at, session_thread_id)
+         SELECT ?, COALESCE(MAX(seq), 0) + 1, ?, ?, ?, ?, ?
            FROM session_events WHERE session_id = ?`,
       )
-      .bind(this.sessionId, event.type, JSON.stringify(event), ts, this.sessionId)
+      .bind(
+        this.sessionId,
+        event.type,
+        JSON.stringify(event),
+        ts,
+        processedAt,
+        threadId,
+        this.sessionId,
+      )
       .run();
   }
 
@@ -83,20 +103,29 @@ export class SqlEventLog implements EventLogRepo {
   async getEventsAsync(afterSeq?: number): Promise<SessionEvent[]> {
     const sql =
       afterSeq !== undefined
-        ? `SELECT seq, type, data, ts FROM session_events
+        ? `SELECT seq, type, data, ts, processed_at, cancelled_at, session_thread_id FROM session_events
            WHERE session_id = ? AND seq > ? ORDER BY seq`
-        : `SELECT seq, type, data, ts FROM session_events
+        : `SELECT seq, type, data, ts, processed_at, cancelled_at, session_thread_id FROM session_events
            WHERE session_id = ? ORDER BY seq`;
     const stmt =
       afterSeq !== undefined
         ? this.sql.prepare(sql).bind(this.sessionId, afterSeq)
         : this.sql.prepare(sql).bind(this.sessionId);
-    const r = await stmt.all<{ seq: number; type: string; data: string; ts: number }>();
+    const r = await stmt.all<{
+      seq: number; type: string; data: string; ts: number;
+      processed_at: number | null; cancelled_at: number | null; session_thread_id: string | null;
+    }>();
     return (r.results ?? []).map((row) => {
-      const ev = JSON.parse(row.data) as SessionEvent & { seq?: number; ts?: number };
+      const ev = JSON.parse(row.data) as SessionEvent & Record<string, unknown>;
       ev.seq = row.seq;
       ev.ts = row.ts;
-      return ev;
+      // Stash row-level pending lifecycle onto the event object — same
+      // contract as cf-do/index.ts so eventsToMessages can skip cancelled
+      // events without a separate query path.
+      if (row.processed_at !== null) ev.processed_at_ms = row.processed_at;
+      if (row.cancelled_at !== null) ev.cancelled_at_ms = row.cancelled_at;
+      if (row.session_thread_id != null) ev.session_thread_id = row.session_thread_id;
+      return ev as SessionEvent;
     });
   }
 
@@ -256,12 +285,48 @@ export async function ensureSchema(sql: SqlClient): Promise<void> {
       type TEXT NOT NULL,
       data TEXT NOT NULL,
       ts BIGINT NOT NULL,
+      -- Mirror of cf-do/index.ts pending lifecycle. processed_at is NULL
+      -- for queued user.* events, set to wall-clock ms when the harness
+      -- ingests them. cancelled_at is set by user.interrupt's flush
+      -- UPDATE. session_thread_id defaults to 'sthr_primary'; sub-agent
+      -- threads use 'sthr_*' ids spawned by SessionStateMachine when
+      -- it grows multi-thread support.
+      processed_at BIGINT,
+      cancelled_at BIGINT,
+      session_thread_id TEXT,
       PRIMARY KEY (session_id, seq)
     );
   `);
+  // Idempotent ALTER for pre-existing schemas. SQLite has no
+  // `ADD COLUMN IF NOT EXISTS` syntax — probe with PRAGMA table_info
+  // and add only what's missing. PG users wire a PG SqlClient; this
+  // path uses better-sqlite3's own SQLite. PG would substitute its own
+  // information_schema lookup but that ships when the PG adapter does.
+  const cols = new Set<string>();
+  const info = await sql.prepare(`PRAGMA table_info(session_events)`).all<{ name: string }>();
+  for (const row of info.results ?? []) cols.add(row.name);
+  if (!cols.has("processed_at")) {
+    await sql.exec(`ALTER TABLE session_events ADD COLUMN processed_at BIGINT`);
+    await sql.exec(`UPDATE session_events SET processed_at = ts WHERE processed_at IS NULL`);
+  }
+  if (!cols.has("cancelled_at")) {
+    await sql.exec(`ALTER TABLE session_events ADD COLUMN cancelled_at BIGINT`);
+  }
+  if (!cols.has("session_thread_id")) {
+    await sql.exec(`ALTER TABLE session_events ADD COLUMN session_thread_id TEXT`);
+    await sql.exec(`UPDATE session_events SET session_thread_id = 'sthr_primary' WHERE session_thread_id IS NULL`);
+  }
   await sql.exec(`
     CREATE INDEX IF NOT EXISTS idx_session_events_type
       ON session_events (session_id, type, seq DESC);
+  `);
+  // Pending hot-path index. Both SQLite and PG support partial indexes
+  // with WHERE clauses. Mirrors cf-do/index.ts idx_events_pending.
+  await sql.exec(`
+    CREATE INDEX IF NOT EXISTS idx_session_events_pending
+      ON session_events (session_id, session_thread_id, seq)
+      WHERE processed_at IS NULL AND cancelled_at IS NULL
+        AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result');
   `);
   await sql.exec(`
     CREATE TABLE IF NOT EXISTS session_streams (
