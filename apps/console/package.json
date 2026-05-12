@@ -15,7 +15,7 @@
     "highlight.js": "^11.11.1",
     "js-yaml": "^4.1.1",
     "react": "^19.1.0",
-    "react-dom": "^19.1.0",
+    "react-dom": "^19.2.6",
     "react-markdown": "^10.1.0",
     "react-router": "^7.5.0",
     "rehype-highlight": "^7.0.2",
