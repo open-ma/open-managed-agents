@@ -30,7 +30,7 @@
     "@open-managed-agents/sql-client": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
     "ai": "^6.0.158",
-    "better-auth": "^1.6.3",
+    "better-auth": "^1.6.10",
     "better-sqlite3": "^11.5.0",
     "chokidar": "^4.0.0",
     "hono": "^4.7.0",
