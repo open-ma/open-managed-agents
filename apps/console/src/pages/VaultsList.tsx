@@ -4,6 +4,7 @@ import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
+import { TextInput, SecretInput } from "../components/Input";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 
 interface Vault { id: string; name: string; created_at: string; archived_at?: string; }
@@ -480,7 +481,7 @@ export function VaultsList() {
 
           <div>
             <label className="text-sm text-fg-muted block mb-1">Display Name <span className="text-fg-subtle">(optional)</span></label>
-            <input
+            <TextInput
               value={cliForm.display_name}
               onChange={(e) => setCliForm({ ...cliForm, display_name: e.target.value })}
               className={inputCls}
@@ -490,8 +491,7 @@ export function VaultsList() {
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only — leave blank to use OAuth above)</span></label>
-            <input
-              type="password"
+            <SecretInput
               value={cliForm.token}
               onChange={(e) => setCliForm({ ...cliForm, token: e.target.value })}
               className={inputCls}

@@ -4,6 +4,7 @@ import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
+import { TextInput, SecretInput } from "../components/Input";
 import type { ModelCard } from "@open-managed-agents/api-types";
 
 const PROVIDERS = [
@@ -220,8 +221,8 @@ export function ModelCardsList() {
               Model ID *
               <span className="ml-1 text-xs text-fg-subtle">(tenant-unique handle agents reference)</span>
             </label>
-            <input value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
-              placeholder="claude-prod, claude-sonnet-4-6, bedrock-sonnet, ..." autoComplete="off" />
+            <TextInput value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
+              placeholder="claude-prod, claude-sonnet-4-6, bedrock-sonnet, ..." />
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">API Format *</label>
@@ -245,9 +246,9 @@ export function ModelCardsList() {
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
-            <input type="password" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
+            <SecretInput value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
               placeholder={editingId ? "Leave blank to keep current key" : "sk-..."}
-              autoComplete="new-password" name="model-api-key-field"
+              name="model-api-key-field"
               onBlur={() => { if (OFFICIAL_PROVIDERS.has(form.provider) && form.api_key) fetchModels(form.provider, form.api_key); }} />
             {OFFICIAL_PROVIDERS.has(form.provider) && modelsLoading && (
               <p className="text-xs text-fg-subtle mt-1">Loading models...</p>
