@@ -12,9 +12,11 @@
   --color-fg-muted: #4a4f5a;
   --color-fg-subtle: #8a8f99;
   --color-border: #e6e7eb;
-  --color-brand: #ea580c;
-  --color-brand-subtle: #fef3eb;
-  --color-link: #c2410c;
+  /* Citrus / tangerine — brighter than the previous brick-orange so the
+     CTAs read as fresh, not blood-orange. */
+  --color-brand: #f97316;        /* orange-500 */
+  --color-brand-subtle: #fff7ed; /* orange-50 */
+  --color-link: #ea580c;         /* orange-600 — slightly darker for AAA on body bg */
 }
 
 .dark {
@@ -24,9 +26,9 @@
   --color-fg-muted: #b3b8c1;
   --color-fg-subtle: #7c828c;
   --color-border: #2a2e36;
-  --color-brand: #fb923c;
-  --color-brand-subtle: #29170a;
-  --color-link: #fdba74;
+  --color-brand: #fdba74;        /* orange-300 — pops on dark, no muddiness */
+  --color-brand-subtle: #2a1808;
+  --color-link: #fed7aa;         /* orange-200 */
 }
 
 html {
