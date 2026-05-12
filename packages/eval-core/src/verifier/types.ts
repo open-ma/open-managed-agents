@@ -10,7 +10,7 @@
 // which Verifier produced a given reward, so a session can be re-graded
 // with a different one without re-executing.
 //
-// Design rule (per docs/handoff-verifier-framework.md):
+// Design rule (per docs/archive/handoff-verifier-framework.md):
 //   Task + Agent execution + Verifier → Score
 //     Outcome: score → needs_revision/satisfied (supervisor loop)
 //     Eval:    score → pass/fail (quality report)
