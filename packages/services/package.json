@@ -23,6 +23,6 @@
     "@open-managed-agents/session-secrets-store": "workspace:*",
     "@open-managed-agents/tenant-db": "workspace:*",
     "@open-managed-agents/tenant-dbs-store": "workspace:*",
-    "hono": "^4.7.0"
+    "hono": "^4.12.18"
   }
 }

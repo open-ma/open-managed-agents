@@ -30,6 +30,6 @@
     "@open-managed-agents/tenant-dbs-store": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
     "fflate": "^0.8.2",
-    "hono": "^4.7.0"
+    "hono": "^4.12.18"
   }
 }
