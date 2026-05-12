@@ -139,7 +139,7 @@ export async function runAgentTurn<T>(
   // doesn't get evicted mid-turn; Node leaves it unset (fly/k8s won't
   // evict in-flight HTTP).
   await agent.adapter.beginTurn(agent.sessionId, turnId);
-  agent.adapter.hintTurnInFlight?.(agent.sessionId);
+  agent.adapter.hintTurnInFlight?.(agent.sessionId, turnId);
 
   try {
     let result: T;
@@ -179,6 +179,12 @@ export async function runAgentTurn<T>(
     } catch (err) {
       console.warn(`[turn] endTurn failed: ${err instanceof Error ? err.message : String(err)}`);
     }
+    // Symmetric to hintTurnInFlight above. CF shell uses this to drop
+    // turnId from its local active set; Node shell no-ops (machine.ts
+    // tracks via activeTurnId). Fired before the elapsed-time log so
+    // any orphan-detection that runs concurrently sees the up-to-date
+    // membership.
+    agent.adapter.hintTurnEnded?.(agent.sessionId, turnId);
     const totalElapsed = Date.now() - turnStartedAt;
     console.log(`[turn] END name=${turnName} elapsed=${totalElapsed}ms`);
   }

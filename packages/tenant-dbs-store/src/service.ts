@@ -1,4 +1,6 @@
 import type {
+  MemoryStoreTenantIndexRepo,
+  MemoryStoreTenantRow,
   NewShardPool,
   NewTenantShard,
   ShardPoolRepo,
@@ -67,6 +69,33 @@ export class ShardPoolService {
   }
 
   listAll(): Promise<readonly ShardPoolRow[]> {
+    return this.repo.listAll();
+  }
+}
+
+/**
+ * Service wrapper around MemoryStoreTenantIndexRepo. Used by:
+ *   - REST POST /v1/memory (route handler) to register on store creation
+ *   - apps/main/src/queue/memory-events.ts to look up tenant from
+ *     R2 event's storage key
+ *
+ * Both paths consume only this service — no direct SQL, no D1Database
+ * in the call chain. CF wiring is in packages/services.
+ */
+export class MemoryStoreTenantIndexService {
+  constructor(private readonly repo: MemoryStoreTenantIndexRepo) {}
+
+  /** Returns null for legacy stores not in the index — caller falls back. */
+  lookup(storeId: string): Promise<string | null> {
+    return this.repo.lookup(storeId);
+  }
+
+  /** Idempotent — safe to call from a retry on store creation. */
+  register(storeId: string, tenantId: string, nowMs: number = Date.now()): Promise<void> {
+    return this.repo.register(storeId, tenantId, nowMs);
+  }
+
+  listAll(): Promise<readonly MemoryStoreTenantRow[]> {
     return this.repo.listAll();
   }
 }

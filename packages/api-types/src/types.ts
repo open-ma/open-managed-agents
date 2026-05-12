@@ -103,6 +103,16 @@ export interface AgentConfig {
    * Resolved by session-do at init; empty/missing = no extra segments.
    */
   appendable_prompts?: string[];
+  /**
+   * Opt-in built-in delegation tool. When true, the harness exposes a
+   * `general_subagent(task)` tool that spawns a generic sub-agent thread
+   * (reserved id "general"). The sub-agent inherits this agent's model
+   * + sandbox, runs with a generic system prompt + a safe built-in tool
+   * subset, and cannot delegate further. Bypasses the `callable_agents`
+   * roster — useful for one-off task delegation without managing a
+   * dedicated sub-agent definition.
+   */
+  enable_general_subagent?: boolean;
   version: number;
   created_at: string;
   updated_at?: string;

@@ -76,6 +76,15 @@ app.post("/", async (c) => {
       name: body.name,
       description: body.description,
     });
+
+    // Index store_id → tenant_id so the memory queue consumer
+    // (apps/main/src/queue/memory-events.ts) can route R2 events to
+    // the right shard. R2 events carry only the storage key
+    // (`<store_id>/<path>`) — no tenant_id — so without this index
+    // the consumer would write the memories UPSERT to the wrong shard.
+    // The service abstracts the underlying control-plane DB.
+    await c.var.services.memoryStoreTenantIndex.register(store.id, t);
+
     return c.json(toApiStore(store), 201);
   } catch (err) {
     return handle(err);

@@ -4,6 +4,7 @@ import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { Select, SelectOption } from "../components/Select";
 import { ListPage } from "../components/ListPage";
 
 interface Env { id: string; name: string; config: Record<string, unknown>; created_at: string; archived_at?: string; status?: string; }
@@ -120,9 +121,9 @@ export function EnvironmentsList() {
           </div>
           <div>
             <label className="text-sm text-fg-muted block mb-1">Hosting Type</label>
-            <select disabled className="w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none opacity-70">
-              <option>Cloud</option>
-            </select>
+            <Select value="cloud" onValueChange={() => {}} disabled>
+              <SelectOption value="cloud">Cloud</SelectOption>
+            </Select>
             <p className="text-xs text-fg-subtle mt-1">This cannot be changed after creation.</p>
           </div>
           <div>

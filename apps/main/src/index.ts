@@ -24,11 +24,13 @@ import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
 import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
+import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
   forwardWithRefresh,
 } from "./routes/mcp-proxy";
+import { resolveGithubCredentials } from "./lib/github-creds";
 import { tickEvalRuns } from "./eval-runner";
 import { handleMemoryEvents } from "./queue/memory-events";
 import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
@@ -135,6 +137,52 @@ app.route("/v1/evals", evalsRoutes);
 app.route("/v1/cost_report", costReportRoutes);
 app.route("/v1/integrations", integrationsRoutes);
 app.route("/v1/runtimes", runtimesRoutes);
+app.route("/v1/stats", statsRoutes);
+
+// Billing-API proxy needs the session-resolved tenant_id, so it must
+// run authMiddleware first. The proxy handler below short-circuits
+// before tenantDb/services middlewares (it doesn't need them).
+app.use("/billing-api/*", authMiddleware);
+app.use("/billing-api/*", rateLimitMiddleware);
+
+// Billing-API proxy — same-origin escape hatch for hosted plugins.
+//
+// Hosted Console (apps/console plugins/billing/) lives on app.openma.dev
+// while the billing worker lives on billing.openma.dev. Direct browser
+// → billing-worker calls would need CORS + a spoofable tenant header,
+// since better-auth cookies don't cross subdomain boundaries by default
+// and the billing worker has no auth middleware.
+//
+// Solution: proxy /billing-api/* through here. authMiddleware above has
+// already resolved c.var.tenant_id from the session cookie; we forward
+// to the USAGE_METER_HTTP service binding and inject x-oma-tenant-id
+// server-side so the header is no longer client-controlled.
+//
+// In self-host (OSS-only) USAGE_METER_HTTP is unbound and this returns
+// 404 — the hosted billing plugin isn't loaded there anyway, so no
+// browser code reaches this route.
+app.all("/billing-api/*", async (c) => {
+  const meter = (c.env as { USAGE_METER_HTTP?: Fetcher }).USAGE_METER_HTTP;
+  if (!meter) return c.json({ error: "billing not configured" }, 404);
+  const tenantId = c.get("tenant_id" as never) as string | undefined;
+  if (!tenantId) return c.json({ error: "unauthorized" }, 401);
+
+  const url = new URL(c.req.url);
+  url.pathname = url.pathname.replace(/^\/billing-api/, "");
+
+  const headers = new Headers(c.req.raw.headers);
+  headers.set("x-oma-tenant-id", tenantId);
+  headers.delete("cookie"); // billing worker doesn't need it; reduces leak surface
+
+  const init: RequestInit = {
+    method: c.req.method,
+    headers,
+    body: c.req.method === "GET" || c.req.method === "HEAD"
+      ? null
+      : await c.req.raw.clone().arrayBuffer(),
+  };
+  return meter.fetch(url.toString(), init);
+});
 // MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a
 // path-prefix skip) — auth is the Bearer oma_* the ACP child sends.
 app.route("/v1/mcp-proxy", mcpProxyRoutes);
@@ -382,6 +430,36 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     );
     if (!cred) return null;
     return { type: "bearer", token: cred.upstreamToken };
+  }
+
+  /**
+   * Per-repo GitHub credential lookup for the network-layer proxy.
+   *
+   * Returns:
+   *   - null  → no credential available (caller passes through unauth'd):
+   *             host isn't a GitHub host we route, OR session is gone /
+   *             archived, OR session has no github_repository resources
+   *   - {...} → the chosen token + scheme + owner/repo slug. Slug is for
+   *             log correlation; the token never lands in any log.
+   *
+   * Pick rule: path-matched resource if the request URL has owner/repo
+   * AND it matches a resource; otherwise the first declared resource's
+   * token. See `resolveGithubCredentials` for the trade-off rationale.
+   */
+  async lookupGithubCredential(opts: {
+    tenantId: string;
+    sessionId: string;
+    hostname: string;
+    pathname: string;
+  }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null> {
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    return resolveGithubCredentials(
+      services,
+      opts.tenantId,
+      opts.sessionId,
+      opts.hostname,
+      opts.pathname,
+    );
   }
 
   /**

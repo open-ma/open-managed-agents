@@ -2,7 +2,7 @@ import { streamText, stepCountIs } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { HarnessInterface, HarnessContext, HarnessRuntime } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
-import { generateEventId } from "@open-managed-agents/shared";
+import { generateEventId, classifyExternalError, ModelError } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
@@ -622,7 +622,27 @@ export class DefaultHarness implements HarnessInterface {
       // streamText returns a StreamTextResult; consumeStream forces the
       // pipeline to drain so onChunk + onStepFinish fully fire before
       // we read final fields.
-      await r.consumeStream();
+      try {
+        await r.consumeStream();
+      } catch (err) {
+        // Mid-stream abort (user.interrupt, abort signal trip). The
+        // streams table has chunks accumulated so far; if we don't
+        // finalize + persist as agent.message here, the partial text
+        // sits at status='streaming' until cold-start recovery picks
+        // it up. broadcastStreamEnd("aborted") does both: finalizes
+        // the row AND appends agent.message with the partial (see
+        // session-do.ts:broadcastStreamEnd) so the next turn's LLM
+        // context includes what the model said before the cut.
+        //
+        // Re-throw so drainEventQueue's TurnAborted handling still
+        // runs (status_idle, queue flush already happened in the
+        // POST /event handler).
+        if (currentMessageId) {
+          await runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
+          currentMessageId = null;
+        }
+        throw err;
+      }
       const finishReason = await r.finishReason;
       const finalText = await r.text;
       const toolCalls = await r.toolCalls;
@@ -649,11 +669,29 @@ export class DefaultHarness implements HarnessInterface {
         if (currentMessageId) {
           await runtime.broadcastStreamEnd(currentMessageId, "aborted", "silent_stop");
         }
-        throw new Error(
+        // Throw as ModelError so processUserMessage's catch classifies
+        // it as fatal (no retry). silent_stop is deterministic per
+        // (model, prompt) — observed 2026-05-11 sess-y2bfxm1de4e1zqxm
+        // burning 12 LLM calls retrying the same empty response 3x ×
+        // 4 messages. classifyExternalError doesn't have a pattern
+        // for it; we know the class at the throw site, just type it.
+        throw new ModelError(
           `silent_stop: model returned finish_reason=${finishReason} with empty text and no tool calls`,
         );
       }
       return { finishReason, text: finalText, toolCalls, toolResults, usage };
+      } catch (err) {
+        // Boundary: streamText + the read awaits above (finishReason /
+        // text / toolCalls / usage) are the LLM-provider edge. Native
+        // SDK errors (Anthropic 401/429/5xx, the `silent_stop` Error we
+        // throw above, network failures during streamText's underlying
+        // fetch) are remapped to typed OmaErrors here so
+        // processUserMessage's catch dispatches by class (BillingError /
+        // AuthError → fatal; everything else → retry-by-default) instead
+        // of substring matching the message.
+        // TODO: extend wrapper coverage to other boundaries as new
+        // failure modes surface (D1 client, KV ops, MCP transport).
+        throw classifyExternalError(err);
       } finally {
         const totalElapsed = Date.now() - streamStartedAt;
         console.log(`[stream] streamText END elapsed=${totalElapsed}ms`);

@@ -53,6 +53,8 @@ export default defineConfig({
       "@open-managed-agents/session-secrets-store/test-fakes": "./packages/session-secrets-store/src/test-fakes.ts",
       "@open-managed-agents/session-secrets-store": "./packages/session-secrets-store/src/index.ts",
       "@open-managed-agents/services": "./packages/services/src/index.ts",
+      "@open-managed-agents/sql-client/adapters/cf-d1": "./packages/sql-client/src/adapters/cf-d1.ts",
+      "@open-managed-agents/sql-client": "./packages/sql-client/src/index.ts",
       "@open-managed-agents/tenant-db/test-fakes": "./packages/tenant-db/src/test-fakes.ts",
       "@open-managed-agents/tenant-db": "./packages/tenant-db/src/index.ts",
       "@open-managed-agents/tenant-dbs-store/test-fakes": "./packages/tenant-dbs-store/src/test-fakes.ts",

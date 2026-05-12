@@ -1,6 +1,20 @@
 export interface Env {
   CONFIG_KV: KVNamespace;
+  /** @deprecated Pre-shard binding. Equivalent to AUTH_DB_00 (the original
+   *  openma-auth database) for back-compat during the shard rollout. New
+   *  code MUST use `getShardForTenant(env, tenantId)` from
+   *  @open-managed-agents/sql-client to route to the correct shard. */
   AUTH_DB: D1Database;
+  /** Tenant→shard routing table. Holds tenant_shard + shard_pool tables.
+   *  Every per-tenant query reads this first (cached in SHARD_CACHE_KV
+   *  with 1hr TTL). See packages/sql-client/src/shard.ts. */
+  ROUTER_DB?: D1Database;
+  /** Tenant data shard 0 — the original openma-auth, holds all
+   *  pre-shard tenants. */
+  AUTH_DB_00?: D1Database;
+  AUTH_DB_01?: D1Database;
+  AUTH_DB_02?: D1Database;
+  AUTH_DB_03?: D1Database;
   /** Integration subsystem D1 (linear_* / github_* / slack_* tables).
    *  Separate database from AUTH_DB to isolate webhook write traffic and
    *  let the integration subsystem evolve schema independently.
@@ -80,6 +94,12 @@ export interface Env {
   // Shared with apps/integrations gateway. Gates /v1/internal/* endpoints.
   // Must match INTEGRATIONS_INTERNAL_SECRET on the integrations worker.
   INTEGRATIONS_INTERNAL_SECRET?: string;
+  // Shared with packages/billing/ in openma-hosted. Gates the
+  // /v1/internal/usage_events read+ack endpoints used by the hosted
+  // billing reconcile cron. Self-host deployments leave it unset and
+  // the endpoint returns 503; the OSS billing path is unreachable
+  // without an out-of-band billing worker anyway.
+  BILLING_INTERNAL_SECRET?: string;
   // Service binding to apps/integrations for proxying install initiation
   // calls from the Console (single-origin, no CORS).
   INTEGRATIONS?: Fetcher;
@@ -123,6 +143,19 @@ export interface Env {
       sessionId: string;
       hostname: string;
     }): Promise<{ type: "bearer"; token: string } | null>;
+    /**
+     * Per-repo GitHub credential lookup for the network-layer proxy
+     * (oma-sandbox.ts githubAuthHandler). Returns the picked token +
+     * scheme for the request URL, or null when no github_repository
+     * resource is attached to the session. See lib/github-creds.ts in
+     * apps/main for the picking rule.
+     */
+    lookupGithubCredential(opts: {
+      tenantId: string;
+      sessionId: string;
+      hostname: string;
+      pathname: string;
+    }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null>;
   };
   // Public URL of the integrations gateway (used to build redirect URLs to
   // OAuth callbacks etc. when the gateway is on a different host).

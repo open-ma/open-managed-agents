@@ -11,6 +11,7 @@ import { AgentsList } from "./pages/AgentsList";
 import { AgentDetail } from "./pages/AgentDetail";
 import { SessionsList } from "./pages/SessionsList";
 import { SessionDetail } from "./pages/SessionDetail";
+import { FilesList } from "./pages/FilesList";
 import { EnvironmentsList } from "./pages/EnvironmentsList";
 import { EnvironmentDetail } from "./pages/EnvironmentDetail";
 import { VaultsList } from "./pages/VaultsList";
@@ -40,6 +41,7 @@ import {
   IntegrationsSlackWorkspace,
   IntegrationsSlackPublishPage,
 } from "./pages/IntegrationsSlack";
+import { consolePlugins } from "./plugins/registry";
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>
@@ -56,6 +58,7 @@ createRoot(document.getElementById("root")!).render(
             <Route path="agents/:id" element={<AgentDetail />} />
             <Route path="sessions" element={<SessionsList />} />
             <Route path="sessions/:id" element={<SessionDetail />} />
+            <Route path="files" element={<FilesList />} />
             <Route path="evals" element={<EvalRunsList />} />
             <Route path="evals/:id" element={<EvalRunDetail />} />
             <Route path="environments" element={<EnvironmentsList />} />
@@ -98,6 +101,14 @@ createRoot(document.getElementById("root")!).render(
               path="integrations/slack/installations/:id"
               element={<IntegrationsSlackWorkspace />}
             />
+            {/* Plugin-contributed routes (hosted-only extensions). Default
+                empty in OSS — hosted deploy overlay replaces
+                plugins/registry.ts to inject billing / etc. */}
+            {consolePlugins.flatMap((p) =>
+              (p.routes ?? []).map((r) => (
+                <Route key={`${p.id}:${r.path}`} path={r.path} element={r.element} />
+              )),
+            )}
             <Route path="*" element={<Navigate to="/agents" replace />} />
           </Route>
         </Routes>

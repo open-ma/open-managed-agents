@@ -145,6 +145,17 @@ function buildMessages(
 
   for (let i = fromIdx; i < toIdx; i++) {
     const event = events[i];
+    // AMA `user.interrupt` flushes pending user inputs by setting
+    // `cancelled_at` on their event-log row. Adapter (`getEvents` in
+    // packages/event-log/src/cf-do/index.ts) stashes that as
+    // `cancelled_at_ms` on the parsed event. Skip everything that's
+    // been cancelled so the LLM context never sees a flushed input.
+    // Only user.* events are ever cancelled today; the guard is
+    // type-agnostic so future cancellation kinds (e.g. partial
+    // assistant message rollback) inherit the same behavior.
+    if ((event as unknown as { cancelled_at_ms?: number }).cancelled_at_ms != null) {
+      continue;
+    }
     switch (event.type) {
       case "user.message": {
         flushAssistant();

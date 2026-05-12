@@ -161,6 +161,16 @@ export class InMemorySessionRepo implements SessionRepo {
     return false;
   }
 
+  async count(
+    tenantId: string,
+    opts: { includeArchived: boolean },
+  ): Promise<number> {
+    return Array.from(this.sessions.values())
+      .filter((s) => s.tenant_id === tenantId)
+      .filter((s) => opts.includeArchived || s.archived_at === null)
+      .length;
+  }
+
   async update(
     tenantId: string,
     sessionId: string,

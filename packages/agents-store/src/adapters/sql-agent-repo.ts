@@ -3,6 +3,7 @@ import type { PageCursor } from "@open-managed-agents/shared";
 import {
   cursorBinds,
   cursorWhereSql,
+  escapeLikePattern,
   fetchN,
   trimPage,
 } from "@open-managed-agents/shared";
@@ -99,18 +100,37 @@ export class SqlAgentRepo implements AgentRepo {
       includeArchived: boolean;
       limit: number;
       after?: PageCursor;
+      q?: string;
     },
   ): Promise<{ items: AgentRow[]; hasMore: boolean }> {
     const archived = opts.includeArchived ? "" : "AND archived_at IS NULL";
+    // agents.name lives in the JSON config blob, so the q-filter has to
+    // pull it out via json_extract. SQLite's LIKE is ASCII-case-insensitive
+    // by default; we explicitly bind ESCAPE '\' so a user-supplied `%`/`_`
+    // is literal, not a wildcard. See escapeLikePattern.
+    const qClause = opts.q
+      ? `AND json_extract(config, '$.name') LIKE ? ESCAPE '\\'`
+      : "";
     const sql =
       `SELECT id, tenant_id, config, version, created_at, updated_at, archived_at ` +
-      `FROM agents WHERE tenant_id = ? ${archived} ${cursorWhereSql(opts.after)} ` +
+      `FROM agents WHERE tenant_id = ? ${archived} ${qClause} ${cursorWhereSql(opts.after)} ` +
       `ORDER BY created_at DESC, id DESC LIMIT ?`;
-    const result = await this.db
-      .prepare(sql)
-      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
-      .all<DbAgent>();
+    const binds: unknown[] = [tenantId];
+    if (opts.q) binds.push(`%${escapeLikePattern(opts.q)}%`);
+    binds.push(...cursorBinds(opts.after), fetchN(opts.limit));
+    const result = await this.db.prepare(sql).bind(...binds).all<DbAgent>();
     return trimPage((result.results ?? []).map(toRow), opts.limit);
+  }
+
+  async count(
+    tenantId: string,
+    opts: { includeArchived: boolean },
+  ): Promise<number> {
+    const sql = opts.includeArchived
+      ? `SELECT COUNT(*) AS c FROM agents WHERE tenant_id = ?`
+      : `SELECT COUNT(*) AS c FROM agents WHERE tenant_id = ? AND archived_at IS NULL`;
+    const row = await this.db.prepare(sql).bind(tenantId).first<{ c: number }>();
+    return row?.c ?? 0;
   }
 
   async updateWithVersionSnapshot(

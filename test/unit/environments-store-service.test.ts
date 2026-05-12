@@ -374,8 +374,9 @@ describe("toEnvironmentConfig — API shape conversion", () => {
     });
     const cfg = toEnvironmentConfig(updated);
     expect(cfg.description).toBe("desc");
-    expect(cfg.sandbox_worker_name).toBe("sandbox-x");
-    expect(cfg.build_error).toBe("boom");
+    // sandbox_worker_name + build_error were dropped from the public API
+    // shape by the AMA wire alignment (PR #55) — toEnvironmentConfig now
+    // only surfaces the fields Anthropic's BetaEnvironment exposes.
     expect(cfg.metadata).toEqual({ src: "test" });
     expect(cfg.updated_at).not.toBeUndefined();
   });

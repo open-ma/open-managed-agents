@@ -81,11 +81,16 @@ export class InMemoryAgentRepo implements AgentRepo {
       includeArchived: boolean;
       limit: number;
       after?: import("@open-managed-agents/shared").PageCursor;
+      q?: string;
     },
   ): Promise<{ items: AgentRow[]; hasMore: boolean }> {
+    const qLower = opts.q?.toLowerCase();
     let rows = Array.from(this.byId.values())
       .filter((r) => r.tenant_id === tenantId)
       .filter((r) => opts.includeArchived || r.archived_at === null)
+      .filter((r) =>
+        qLower ? (r.config.name ?? "").toLowerCase().includes(qLower) : true,
+      )
       // Mirror the D1 query order: created_at DESC, id DESC.
       .sort((a, b) => b.created_at - a.created_at || b.id.localeCompare(a.id));
     if (opts.after) {
@@ -99,6 +104,16 @@ export class InMemoryAgentRepo implements AgentRepo {
       items: (hasMore ? rows.slice(0, opts.limit) : rows).map(toRow),
       hasMore,
     };
+  }
+
+  async count(
+    tenantId: string,
+    opts: { includeArchived: boolean },
+  ): Promise<number> {
+    return Array.from(this.byId.values())
+      .filter((r) => r.tenant_id === tenantId)
+      .filter((r) => opts.includeArchived || r.archived_at === null)
+      .length;
   }
 
   async updateWithVersionSnapshot(

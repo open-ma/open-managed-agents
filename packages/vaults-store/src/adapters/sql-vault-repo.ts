@@ -2,6 +2,7 @@ import type { SqlClient } from "@open-managed-agents/sql-client";
 import {
   cursorBinds,
   cursorWhereSql,
+  escapeLikePattern,
   fetchN,
   trimPage,
   type PageCursor,
@@ -68,18 +69,31 @@ export class SqlVaultRepo implements VaultRepo {
       includeArchived: boolean;
       limit: number;
       after?: PageCursor;
+      q?: string;
     },
   ): Promise<{ items: VaultRow[]; hasMore: boolean }> {
     const archived = opts.includeArchived ? "" : "AND archived_at IS NULL";
+    const qClause = opts.q ? `AND name LIKE ? ESCAPE '\\'` : "";
     const sql =
       `SELECT id, tenant_id, name, created_at, updated_at, archived_at ` +
-      `FROM vaults WHERE tenant_id = ? ${archived} ${cursorWhereSql(opts.after)} ` +
+      `FROM vaults WHERE tenant_id = ? ${archived} ${qClause} ${cursorWhereSql(opts.after)} ` +
       `ORDER BY created_at DESC, id DESC LIMIT ?`;
-    const result = await this.db
-      .prepare(sql)
-      .bind(tenantId, ...cursorBinds(opts.after), fetchN(opts.limit))
-      .all<DbVault>();
+    const binds: unknown[] = [tenantId];
+    if (opts.q) binds.push(`%${escapeLikePattern(opts.q)}%`);
+    binds.push(...cursorBinds(opts.after), fetchN(opts.limit));
+    const result = await this.db.prepare(sql).bind(...binds).all<DbVault>();
     return trimPage((result.results ?? []).map(toRow), opts.limit);
+  }
+
+  async count(
+    tenantId: string,
+    opts: { includeArchived: boolean },
+  ): Promise<number> {
+    const sql = opts.includeArchived
+      ? `SELECT COUNT(*) AS c FROM vaults WHERE tenant_id = ?`
+      : `SELECT COUNT(*) AS c FROM vaults WHERE tenant_id = ? AND archived_at IS NULL`;
+    const row = await this.db.prepare(sql).bind(tenantId).first<{ c: number }>();
+    return row?.c ?? 0;
   }
 
   async update(

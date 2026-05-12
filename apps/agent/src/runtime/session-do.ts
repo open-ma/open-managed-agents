@@ -11,7 +11,18 @@ import {
   type PartialStream,
 } from "./turn-runtime";
 import type { Env } from "@open-managed-agents/shared";
-import { logWarn, log, generateEventId, generateOutcomeId } from "@open-managed-agents/shared";
+import {
+  logWarn,
+  log,
+  generateEventId,
+  generateOutcomeId,
+  classifyExternalError,
+  AuthError,
+  BillingError,
+  ConfigError,
+  ModelError,
+  TransientInfraError,
+} from "@open-managed-agents/shared";
 import {
   CfDoStreamRepo,
   CfDoEventLog,
@@ -24,7 +35,6 @@ import {
   type RuntimeAdapter,
 } from "@open-managed-agents/session-runtime";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
-import { buildCfTenantDbProvider } from "@open-managed-agents/services";
 import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import type {
   AgentConfig,
@@ -53,7 +63,7 @@ import {
 } from "./outcome-supervisor";
 import { buildTools } from "../harness/tools";
 import { MemoryStoreService } from "@open-managed-agents/memory-store";
-import { buildCfServices, getCfServicesForTenant } from "@open-managed-agents/services";
+import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { ensureSetupApplied } from "./setup-on-warmup";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
@@ -156,8 +166,32 @@ interface SessionState {
    *  status — the only state value that needed to survive in storage; the
    *  rest are derivable from cf_agents_runs row presence. */
   terminated_at: number | null;
+  /**
+   * Session-wide token totals. Kept in sync with the per-thread breakdown
+   * in `thread_usage` so existing reads (POST /usage echo, /full-status)
+   * keep working without a refactor at every call site. New code should
+   * prefer `thread_usage` for per-thread granularity (AMA SessionThread
+   * .usage shape).
+   */
   input_tokens: number;
   output_tokens: number;
+  /**
+   * Per-thread cumulative usage. Keyed by session_thread_id
+   * ("sthr_primary" or sub-agent "sthr_*"). Mirrors the AMA
+   * BetaManagedAgentsSessionThreadUsage shape minus the cache_creation
+   * sub-breakdown by lifetime (we only have one bucket today).
+   * Optional: pre-thread-usage sessions read as `undefined` and the
+   * serializer falls back to null; new sessions populate it.
+   */
+  thread_usage?: Record<
+    string,
+    {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens: number;
+      cache_read_input_tokens: number;
+    }
+  >;
   vault_ids: string[];
   pending_tool_calls: PendingToolCall[];
   outcome: ActiveOutcome | null;
@@ -189,6 +223,19 @@ interface SessionState {
    * prefix bytes and bust the cache).
    */
   session_init_done?: boolean;
+  /**
+   * Wall-clock create timestamp (Unix ms). Used by the hybrid-billing
+   * `session_alive_seconds` emit at terminate time. Set lazily on /init —
+   * pre-billing sessions read undefined and the emit is skipped (the
+   * cost would be 0 cents anyway after the rate cap).
+   */
+  created_at_ms?: number;
+  /**
+   * Idempotency guard for the session_alive_seconds emit. Set once at
+   * terminate; the second terminate call (DO restart hits the same
+   * /destroy) checks this and skips the duplicate emit.
+   */
+  session_alive_billed?: boolean;
 }
 
 const INITIAL_SESSION_STATE: SessionState = {
@@ -250,19 +297,69 @@ export class SessionDO extends DurableObject<Env> {
   private _runtimeAdapter: RuntimeAdapter | null = null;
 
   /**
-   * In-memory mirror of "is there a turn currently running in this DO?"
-   * Maintained via the RuntimeAdapter's onTurnInFlight / onTurnEnded
-   * callbacks (wired in the lazy `runtimeAdapter` getter below). Used
-   * by deriveStatus() — the unified marker on D1's `sessions.turn_id`
-   * is the source of truth, but reading it requires an async D1
-   * round-trip and deriveStatus is called sync from the API layer.
+   * Set of turn ids currently in flight in THIS DO isolate.
+   * Maintained via RuntimeAdapter.hintTurnInFlight / hintTurnEnded
+   * callbacks (port contract; see ports.ts:111+). Each entry's
+   * lifetime is exactly one runAgentTurn invocation.
    *
-   * Lost on eviction; re-seeded on next alarm() via _checkOrphanTurns
-   * (which reads the D1 row authoritatively). Worst case: a stale
-   * "idle" between cold-start and the first alarm — alarm fires
-   * immediately on cold-start with an in-flight turn.
+   * Sole consumer: `_checkOrphanTurns` filters out `o.turn_id ∈
+   * _activeTurnIds` — exact match like Node SessionStateMachine's
+   * `if (o.turn_id === this.activeTurnId) continue` (machine.ts:183).
+   * Replaces a defensive `_inflightTurnHints + 90s grace period`
+   * filter in the orphan check that was needed because earlier the
+   * shell had no handle on the turnId minted inside runAgentTurn —
+   * the hint callbacks now carry it (port v2).
+   *
+   * `deriveStatus()` also reads `.size > 0` — single source of truth
+   * for "is anything running" replaces the prior `_inflightTurnHints`
+   * counter.
+   *
+   * Lost on eviction; cold-start sees empty set, so a D1 row from a
+   * dead incarnation is correctly identified as orphan.
    */
-  private _inflightTurnHints = 0;
+  private _activeTurnIds = new Set<string>();
+
+  /**
+   * Cold-start flush guard. The first fetch() after DO activation
+   * triggers _finalizeStaleTurns() once; subsequent fetch()es skip it
+   * (alarm() takes over for ongoing detection). false → not yet done.
+   * Set to true synchronously at fetch() entry so concurrent first
+   * requests don't double-fire.
+   */
+  private _coldStartFlushDone = false;
+
+  /**
+   * Synchronous re-entry guard for drainEventQueue, keyed by
+   * session_thread_id. Single-isolate JS single-thread makes Set add/has
+   * a true mutex within the same thread. Cross-thread drains run
+   * concurrently — drainEventQueue('sthr_primary') and
+   * drainEventQueue('sthr_xyz') don't block each other; that's the
+   * whole point of per-thread parallelism.
+   *
+   * Distinct from _activeTurnIds: _draining is the *entry guard*,
+   * checked synchronously before any await. _activeTurnIds is the
+   * *active set*, populated asynchronously after beginTurn returns.
+   * Both signals together cover the gap between "drain entered" and
+   * "turn registered via hintTurnInFlight".
+   */
+  private _draining = new Set<string>();
+
+  /**
+   * Per-thread abort controllers — replaces the single
+   * `currentAbortController` we used pre-thread-aware. Set by
+   * processUserMessage / sub-agent runs at turn start, cleared at
+   * turn end. user.interrupt with `session_thread_id` uses this to
+   * abort exactly that thread's in-flight turn without touching
+   * siblings (AMA spec semantics). /destroy iterates the map.
+   *
+   * Distinct from _activeTurnIds — that one is for orphan
+   * detection (keyed by turnId, the runAgentTurn nanoid), this one
+   * is for caller-initiated abort (keyed by session_thread_id, the
+   * AMA-spec thread id the SDK speaks). The two signals never
+   * overlap; merging would force one consumer to scan the other's
+   * key shape.
+   */
+  private _threadAbortControllers = new Map<string, AbortController>();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -396,7 +493,6 @@ export class SessionDO extends DurableObject<Env> {
    */
   private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
-  private currentAbortController: AbortController | null = null;
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
@@ -458,6 +554,37 @@ export class SessionDO extends DurableObject<Env> {
       },
       broadcastStreamEnd: async (messageId: string, status, errorText?: string) => {
         if (!this.streams) this.ensureSchema();
+        // Aborted streams need their partial text persisted as a
+        // canonical agent.message before we lose access to the
+        // streams row. Without this, mid-stream aborts (user.interrupt,
+        // model timeout, MCP cancel) leave the streams row stuck at
+        // status='streaming' until cold-start recovery — meanwhile
+        // eventsToMessages doesn't see the partial text and the next
+        // turn's LLM context is missing what the model just said.
+        //
+        // Mirrors recovery.ts:69-78. Same dedup + placeholder fallback.
+        // Done before finalize so a concurrent reader never observes
+        // a stream that's both finalized AND missing from history.
+        if (status === "aborted" && !this.broadcastedMessageIds.has(messageId)) {
+          const row = await this.streams!.get(messageId);
+          const partial = row?.chunks?.join("") ?? "";
+          const partialEvent = tag({
+            type: "agent.message",
+            id: messageId,
+            content: [{ type: "text", text: partial || "(interrupted before any tokens streamed)" }],
+          } as unknown as SessionEvent);
+          // Append directly to the events table — broadcastEvent's
+          // dedup hits the broadcastedMessageIds set, but the persist
+          // path is what matters most (Console replay, LLM context).
+          const history = new SqliteHistory(
+            this.ctx.storage.sql,
+            this.env.FILES_BUCKET ?? null,
+            `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+          );
+          history.append(partialEvent);
+          this.broadcastedMessageIds.add(messageId);
+          fire(partialEvent);
+        }
         await this.streams!.finalize(messageId, status, errorText);
         fire(tag({
           type: "agent.message_stream_end",
@@ -523,10 +650,30 @@ export class SessionDO extends DurableObject<Env> {
    * Scheduled recovery callback: called by Agent's schedule system
    * 5 seconds after an event is received. If the primary waitUntil
    * path already drained the queue, this is a no-op.
+   *
+   * Drains every thread that has pending events. Cheap — the partial
+   * pending-index makes "list distinct thread_ids with pending rows"
+   * an O(log n) scan, and per-thread mutex (_draining set) means a
+   * thread that's already draining returns immediately.
    */
   async recoverEventQueue(): Promise<void> {
     this.ensureSchema();
-    await this.drainEventQueue();
+    const cursor = this.ctx.storage.sql.exec(
+      `SELECT DISTINCT session_thread_id FROM events
+         WHERE processed_at IS NULL AND cancelled_at IS NULL
+           AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
+    );
+    const threadIds: string[] = [];
+    for (const row of cursor) {
+      threadIds.push((row.session_thread_id as string) ?? "sthr_primary");
+    }
+    if (threadIds.length === 0) {
+      // Nothing pending anywhere; defensive primary drain (cheap, returns
+      // immediately when the partial index is empty).
+      await this.drainEventQueue("sthr_primary");
+      return;
+    }
+    await Promise.all(threadIds.map((t) => this.drainEventQueue(t)));
   }
 
   /**
@@ -852,50 +999,73 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Drain the event queue: check the events table for unprocessed user
-   * events and run the harness for each one.
+   * Drain the event queue for one thread: pull pending user events
+   * (processed_at IS NULL AND cancelled_at IS NULL) in seq order and
+   * run the harness for each. Loops until the thread's queue is empty.
    *
-   * The events table IS the queue — no separate pending flag needed.
-   * After the harness completes a turn, we check again for new events
-   * that arrived during execution, looping until the queue is drained.
+   * Per-thread mutex via _draining set: two callers for the same
+   * thread early-return; cross-thread drains run in parallel.
    *
-   * Concurrency guard: if status is already "running", skip — another
-   * drainEventQueue is already active.
+   * Pending boundary: each row's `processed_at` column is the
+   * authoritative "this event has been ingested" marker. On successful
+   * (or failed) turn completion we UPDATE events SET processed_at=now
+   * for the row. Old behavior (lastIdleSeq window) lost any user.message
+   * appended between turn start and turn-end status_idle (5 messages
+   * sent during a long-running turn would all be skipped).
    */
-  private async drainEventQueue(): Promise<void> {
-    // Concurrency guard — only one drain loop at a time. Status is derived
-    // from cf_agents_runs presence, so eviction in the setState→runFiber
-    // window can't strand the session at "running": the next caller derives
-    // "idle" automatically once the orphan fiber row is cleaned up.
-    const currentStatus = this.deriveStatus();
-    if (currentStatus === "running" || currentStatus === "terminated") {
-      return;
-    }
+  private async drainEventQueue(threadId: string = "sthr_primary"): Promise<void> {
+    // Sync re-entry mutex per thread — two callers for the same thread
+    // can't both reach the SQL pending lookup before either marks a
+    // row as processed.
+    if (this._draining.has(threadId)) return;
+    if (this.deriveStatus() === "terminated") return;
+    this._draining.add(threadId);
 
+    try {
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
     while (true) {
-      const lastIdleSeq = Math.max(
-        this.getLastEventSeq("session.status_idle"),
-        this.getLastEventSeq("session.error"),
+      // Partial-index lookup — see ensureSchema's idx_events_pending.
+      // Returns the lowest-seq pending user event for this thread, or
+      // nothing (loop exits).
+      const cursor = this.ctx.storage.sql.exec(
+        `SELECT seq, data FROM events
+           WHERE session_thread_id = ?
+             AND processed_at IS NULL AND cancelled_at IS NULL
+             AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')
+           ORDER BY seq ASC LIMIT 1`,
+        threadId,
       );
-      const pendingUserEvent = this.getFirstEventAfter(lastIdleSeq, [
-        "user.message",
-        "user.tool_confirmation",
-        "user.custom_tool_result",
-      ]);
+      let pendingUserEvent: { seq: number; data: string } | null = null;
+      for (const row of cursor) {
+        pendingUserEvent = { seq: row.seq as number, data: row.data as string };
+      }
 
       if (!pendingUserEvent) {
         break;
       }
 
-      // No setState({status:"running"}) — runFiber's INSERT into
-      // cf_agents_runs is the single source of truth for "in flight."
       // Fresh per-turn dedup window for agent.message broadcasts. See
       // broadcastedMessageIds field doc for the recovery-replay context.
       this.broadcastedMessageIds.clear();
 
       const turnName = `turn:${pendingUserEvent.seq}`;
+      const pendingSeq = pendingUserEvent.seq;
+      // AMA spec: processed_at = "wall-clock ingestion time", i.e. when
+      // the agent picks the event up — not when the turn finishes.
+      // Set it BEFORE runAgentTurn so:
+      //   1. The next loop iteration's pending-index lookup skips it
+      //      even before the turn completes (defends against any
+      //      interleaved drain re-entry getting past the mutex).
+      //   2. Console + SDK consumers that derive "agent has started
+      //      processing" from `processed_at != null` get the right
+      //      semantic — pre-fix, user.message stayed pending until
+      //      turn end (5–30s), so the UI hourglass never went away
+      //      while the agent was already streaming a reply.
+      this.ctx.storage.sql.exec(
+        `UPDATE events SET processed_at = ? WHERE seq = ?`,
+        Date.now(), pendingSeq,
+      );
       try {
         const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
 
@@ -944,10 +1114,23 @@ export class SessionDO extends DurableObject<Env> {
         if (err instanceof TurnAborted) {
           console.warn(`[drain] turn ${turnName} aborted: ${err.cause.kind}`);
         }
-        const errorMsg = this.describeError(err);
-        const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
-        history.append(errorEvent);
-        this.broadcastEvent(errorEvent);
+        // User-initiated interrupt is not a session.error — the
+        // POST /event handler for user.interrupt has already
+        // appended `user.interrupt` + `session.status_idle`, and
+        // the harness's stream-end fixup persisted any partial
+        // agent.message. Writing session.error here would just
+        // pollute the timeline with a misleading "error" frame.
+        // Other TurnAborted causes (model_error 402/403, MCP
+        // timeout, manual destroy) still surface as session.error
+        // since the user didn't trigger them.
+        const isUserInterrupt =
+          err instanceof TurnAborted && err.cause.kind === "user_aborted";
+        if (!isUserInterrupt) {
+          const errorMsg = this.describeError(err);
+          const errorEvent: SessionEvent = { type: "session.error", error: errorMsg };
+          history.append(errorEvent);
+          this.broadcastEvent(errorEvent);
+        }
 
         // AMA RetryStatusTerminal: certain model errors are unrecoverable
         // and must transition the session to `terminated` state. Today we
@@ -963,10 +1146,16 @@ export class SessionDO extends DurableObject<Env> {
         ) {
           this.terminate("billing");
         }
-        // Status auto-derives from sessions.turn_id once the
-        // RuntimeAdapter.endTurn callback fires. No setState needed.
+        // processed_at was set up-front — no need to re-mark on
+        // catch. Status auto-derives from sessions.turn_id once the
+        // RuntimeAdapter.endTurn callback fires.
         break; // Stop draining on error — let the client decide what to do
       }
+      // processed_at already set up-front; on success the row is
+      // already out of the pending-index. Just continue the while loop.
+    }
+    } finally {
+      this._draining.delete(threadId);
     }
   }
 
@@ -1048,20 +1237,22 @@ export class SessionDO extends DurableObject<Env> {
       // No sandbox at adapter level — turn-runtime doesn't use it; the
       // legacy sandbox getter (this.getOrCreateSandbox()) stays as-is
       // for the harness path which constructs its own ctx.
-      onTurnInFlight: () => {
+      onTurnInFlight: (_sessionId, turnId) => {
         // Fire-and-forget setAlarm. CF's alarm queue de-dupes, so back-
         // to-back calls are fine. The alarm() handler re-arms while a
-        // turn is still in flight (status='running' in sessions table).
+        // turn is still in flight.
         void this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
-        // In-memory mirror so deriveStatus() (sync, called from many
-        // places) can answer "running" without an async D1 round-trip.
-        // The unified marker on D1's sessions.turn_id is the source of
-        // truth; this is just a local cache. _checkOrphanTurns rebuilds
-        // it on cold start.
-        this._inflightTurnHints += 1;
+        // Register this turn id so _checkOrphanTurns + deriveStatus
+        // see it. Lost on eviction → cold-start sees empty set → real
+        // orphans (D1 row from a dead incarnation) get recovered on
+        // the first alarm pass.
+        this._activeTurnIds.add(turnId);
       },
-      onTurnEnded: () => {
-        if (this._inflightTurnHints > 0) this._inflightTurnHints -= 1;
+      onTurnEnded: (_sessionId, turnId) => {
+        // Idempotent: turn-runtime.ts also fires hintTurnEnded as a
+        // safety net in its outer finally if endTurn itself throws.
+        // Set.delete on missing key is a no-op.
+        this._activeTurnIds.delete(turnId);
       },
     });
     // Provider call only used if sharding is in play; today the lazy
@@ -1106,6 +1297,26 @@ export class SessionDO extends DurableObject<Env> {
    * handle everything here and only delegate alarm() to Agent's scheduler.
    */
   async fetch(request: Request): Promise<Response> {
+    // Cold-start orphan flush: first request after DO activation triggers
+    // a one-shot scan of unpaired tool_use + stale 'running' turns and
+    // emits abort events for them. Idempotent (cheap when there's nothing
+    // stale). Captures the case where a previous incarnation died
+    // mid-stream — the alarm path catches the same condition but only
+    // after the first alarm tick fires, which can be many seconds after
+    // the user's first request lands.
+    //
+    // Guard semantics: the boolean is set BEFORE the async flush so two
+    // concurrent first-fetches don't both fire the flush. On flush
+    // failure the guard resets to false so a subsequent fetch retries —
+    // a permanently-sticky guard would leave the recovery primitive
+    // dead after a transient error.
+    if (!this._coldStartFlushDone) {
+      this._coldStartFlushDone = true;
+      void this._finalizeStaleTurns().catch((err) => {
+        console.warn(`[cold-start-flush] failed:`, err);
+        this._coldStartFlushDone = false;
+      });
+    }
     try {
       return await this.fetchInner(request);
     } catch (err) {
@@ -1148,6 +1359,12 @@ export class SessionDO extends DurableObject<Env> {
         vault_credentials: params.vault_credentials,
         event_hooks: params.event_hooks,
         terminated_at: null,
+        // Stamp wall-clock create on first /init only — re-init shouldn't
+        // reset the alive-seconds counter mid-session. (D1's
+        // sessions.created_at is the canonical source; this DO copy lets
+        // terminate compute elapsed without an async D1 read on the way out.)
+        created_at_ms: this.state.created_at_ms ?? Date.now(),
+        session_alive_billed: false,
       });
 
       // Outbound credential snapshot — DELETED. The legacy path published
@@ -1161,6 +1378,11 @@ export class SessionDO extends DurableObject<Env> {
       // .outboundForward), main does the live vault lookup, and the agent
       // worker never holds plaintext credentials. See file-level comment
       // on apps/agent/src/oma-sandbox.ts for the full rationale.
+
+      // Seed the primary thread row in DO SQLite. Done after setState so
+      // _ensurePrimaryThread can read agent_id / agent_snapshot from
+      // this.state. Idempotent (INSERT OR IGNORE) — safe across re-init.
+      this._ensurePrimaryThread();
 
       // Pre-flight events from main worker (e.g. credential refresh warnings).
       // Append in order so the console renders them as the first items in the
@@ -1187,11 +1409,11 @@ export class SessionDO extends DurableObject<Env> {
 
     // DELETE /destroy — tear down sandbox and clean up
     if (request.method === "DELETE" && url.pathname === "/destroy") {
-      // Abort any running harness
-      if (this.currentAbortController) {
-        this.currentAbortController.abort();
-        this.currentAbortController = null;
+      // Abort every in-flight thread (primary + any sub-agents).
+      for (const ctrl of this._threadAbortControllers.values()) {
+        ctrl.abort();
       }
+      this._threadAbortControllers.clear();
       // Snapshot /workspace BEFORE we destroy the container — once destroy()
       // runs the container is gone and we can't read its filesystem.
       // CF's "persist across sessions" pattern (changelog 2026-02-23):
@@ -1215,6 +1437,21 @@ export class SessionDO extends DurableObject<Env> {
       // failure logs and we proceed with destroy.
       if (this.sandbox?.snapshotWorkspaceNow) {
         try { await this.sandbox.snapshotWorkspaceNow(); } catch {}
+      }
+      // Emit sandbox_active_seconds BEFORE destroy. CF's onStop callback
+      // runs async to destroy() and can be dropped if the OmaSandbox DO
+      // gets evicted before it fires (observed empirically on staging).
+      // The explicit emit here puts the write in SessionDO's request
+      // lifecycle — synchronous and reliable. onStop still wired as a
+      // fallback for non-/destroy teardowns (sleepAfter, OOM); the
+      // emit is idempotent (storage delete after success).
+      const sandboxBilling = this.sandbox as unknown as {
+        emitSandboxActiveNow?: () => Promise<void>;
+      } | null;
+      if (sandboxBilling?.emitSandboxActiveNow) {
+        try { await sandboxBilling.emitSandboxActiveNow(); } catch (err) {
+          logWarn({ op: "session_do.destroy.sandbox_emit", session_id: this.state.session_id, err }, "sandbox usage emit failed");
+        }
       }
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
@@ -1267,6 +1504,34 @@ export class SessionDO extends DurableObject<Env> {
       const mountFileIds = raw._mount_file_ids;
       delete (raw as { _mount_file_ids?: string[] })._mount_file_ids;
       const body = raw as SessionEvent;
+      // Reject events targeting an archived thread before any side effects
+      // (history.append, broadcastEvent, drainEventQueue). Primary thread
+      // can't be archived (handler at /threads/:tid/archive enforces 400),
+      // so 'sthr_primary' is always allowed without a SQL lookup.
+      const targetThreadId =
+        (body as unknown as { session_thread_id?: string }).session_thread_id ??
+        "sthr_primary";
+      if (targetThreadId !== "sthr_primary") {
+        let archived = false;
+        for (const row of this.ctx.storage.sql.exec(
+          `SELECT archived_at FROM threads WHERE id = ? LIMIT 1`,
+          targetThreadId,
+        )) {
+          archived = row.archived_at != null;
+        }
+        if (archived) {
+          return new Response(
+            JSON.stringify({
+              type: "error",
+              error: {
+                type: "invalid_request_error",
+                message: `Thread ${targetThreadId} is archived and cannot receive new events`,
+              },
+            }),
+            { status: 409, headers: { "content-type": "application/json" } },
+          );
+        }
+      }
       const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
       // Auto-mount referenced files into the sandbox FS so agent's bash/read
@@ -1303,8 +1568,12 @@ export class SessionDO extends DurableObject<Env> {
       }
 
       if (body.type === "user.message") {
-        history.append(body);
-        this.broadcastEvent(body);
+        const um = body as UserMessageEvent;
+        const umThread =
+          (um as unknown as { session_thread_id?: string })
+            .session_thread_id ?? "sthr_primary";
+        history.append(um);
+        this.broadcastEvent(um);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
@@ -1320,45 +1589,87 @@ export class SessionDO extends DurableObject<Env> {
         //       rearm path covers what it used to defend.
         // The 5s recoverEventQueue schedule above is the safety-net
         // re-trigger if this background promise dies before drain runs.
-        console.log("[post /event] user.message appended, firing drainEventQueue");
-        this.drainEventQueue();
+        console.log(`[post /event] user.message appended (thread=${umThread}), firing drainEventQueue`);
+        this.drainEventQueue(umThread);
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.interrupt") {
-        // Abort the running harness
-        if (this.currentAbortController) {
-          this.currentAbortController.abort();
-          this.currentAbortController = null;
+        // AMA-spec semantics for user.interrupt:
+        //   1. Abort the in-flight turn for the target thread (only that
+        //      thread — siblings keep running). If no session_thread_id
+        //      is set, defaults to primary.
+        //   2. Flush queued user.* events for that thread (mark
+        //      cancelled_at). AMA's BetaManagedAgentsRetryStatusExhausted
+        //      doc says "queued inputs are flushed and the session
+        //      returns to idle"; user.interrupt mirrors that semantic.
+        //      eventsToMessages skips cancelled events so they never
+        //      reach the LLM context.
+        //   3. Append the user.interrupt event itself + idle marker.
+        const targetThread =
+          (body as unknown as { session_thread_id?: string })
+            .session_thread_id ?? "sthr_primary";
+        const ctrl = this._threadAbortControllers.get(targetThread);
+        const hadActiveTurn = !!ctrl;
+        if (ctrl) {
+          ctrl.abort();
+          this._threadAbortControllers.delete(targetThread);
         }
-        // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
-        const idleEvent: SessionEvent = { type: "session.status_idle" };
+        const cancelTs = Date.now();
+        const cancelResult = this.ctx.storage.sql.exec(
+          `UPDATE events SET cancelled_at = ?
+             WHERE session_thread_id = ?
+               AND processed_at IS NULL AND cancelled_at IS NULL
+               AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
+          cancelTs, targetThread,
+        );
+        const cancelledCount = (cancelResult as { rowsWritten?: number }).rowsWritten ?? 0;
         history.append(body as UserInterruptEvent);
-        history.append(idleEvent);
-        this.broadcastEvent(idleEvent);
+        // Emit status_idle when interrupt actually changed thread state:
+        // either an active turn was aborted, or queued events were
+        // cancelled. Skip when both are false (no-op interrupt) — that
+        // case had been emitting a duplicate status_idle right after a
+        // natural-end one, observed 2026-05-11 sess-y5saq (seq 93 idle
+        // stop_reason=end_turn, seq 95 idle stop_reason=None).
+        const shouldEmitIdle = hadActiveTurn || cancelledCount > 0;
+        if (shouldEmitIdle) {
+          const idleEvent: SessionEvent = {
+            type: "session.status_idle",
+            ...(targetThread !== "sthr_primary" ? { session_thread_id: targetThread } : {}),
+          };
+          history.append(idleEvent);
+          this.broadcastEvent(idleEvent);
+        }
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.tool_confirmation") {
-        history.append(body as UserToolConfirmationEvent);
+        const tc = body as UserToolConfirmationEvent;
+        const tcThread =
+          (tc as unknown as { session_thread_id?: string }).session_thread_id ??
+          "sthr_primary";
+        history.append(tc);
         this.broadcastEvent(body);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
         console.log("[post /event] tool_confirmation appended, firing drainEventQueue (no await)");
-        this.drainEventQueue();
+        this.drainEventQueue(tcThread);
         return new Response(null, { status: 202 });
       }
 
       if (body.type === "user.custom_tool_result") {
         const customResult = body as UserCustomToolResultEvent;
+        const ctrThread =
+          (customResult as unknown as { session_thread_id?: string })
+            .session_thread_id ?? "sthr_primary";
         history.append(customResult);
         this.broadcastEvent(customResult);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
         console.log("[post /event] custom_tool_result appended, firing drainEventQueue (no await)");
-        this.drainEventQueue();
+        this.drainEventQueue(ctrThread);
         return new Response(null, { status: 202 });
       }
 
@@ -1592,20 +1903,30 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
-    // POST /usage — increment token usage counters
+    // POST /usage — increment token usage counters. Now thread-aware:
+    // body may carry session_thread_id (defaults to sthr_primary) and
+    // optional cache_creation_input_tokens / cache_read_input_tokens for
+    // the per-thread breakdown that GET /threads/:id surfaces. The
+    // session-wide echo (input_tokens / output_tokens) stays unchanged
+    // for back-compat with existing /full-status consumers.
     if (request.method === "POST" && url.pathname === "/usage") {
       const body = (await request.json()) as {
-        input_tokens: number;
-        output_tokens: number;
+        input_tokens?: number;
+        output_tokens?: number;
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+        session_thread_id?: string;
       };
-
-      const newInput = this.state.input_tokens + (body.input_tokens || 0);
-      const newOutput = this.state.output_tokens + (body.output_tokens || 0);
-      this.setState({ ...this.state, input_tokens: newInput, output_tokens: newOutput });
-
+      const threadId = body.session_thread_id ?? "sthr_primary";
+      this.creditUsageToThread(threadId, {
+        input_tokens: body.input_tokens ?? 0,
+        output_tokens: body.output_tokens ?? 0,
+        cache_creation_input_tokens: body.cache_creation_input_tokens,
+        cache_read_input_tokens: body.cache_read_input_tokens,
+      });
       return Response.json({
-        input_tokens: newInput,
-        output_tokens: newOutput,
+        input_tokens: this.state.input_tokens,
+        output_tokens: this.state.output_tokens,
       });
     }
 
@@ -1656,24 +1977,143 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // GET /threads — list all threads in this session
+    // GET /threads — list session threads (AMA shape).
+    //
+    // Reads from the `threads` SQL table (DO storage), not the in-memory
+    // Map — that one only holds sub-agent threads spawned in the current
+    // isolate; the SQL table survives DO eviction and includes the
+    // primary thread (seeded on /init).
+    //
+    // Query params:
+    //   ?include_archived=true  → include archived rows (default off)
+    //
+    // Response shape mirrors BetaManagedAgentsSessionThread minimally:
+    // id / agent_id / agent_name / parent_thread_id / created_at /
+    // archived_at / status / stats. usage stays null until per-thread
+    // token accounting lands (today tokens are session-wide on
+    // state.input_tokens / state.output_tokens — no thread breakdown).
     if (request.method === "GET" && url.pathname === "/threads") {
-      const threadList = Array.from(this.threads.entries()).map(([id, t]) => ({
-        session_thread_id: id,
-        agent_id: t.agentId,
-        agent_name: t.agentConfig.name,
-      }));
-      return Response.json({ data: threadList });
+      const includeArchived = url.searchParams.get("include_archived") === "true";
+      const cursor = includeArchived
+        ? this.ctx.storage.sql.exec(
+            `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+               FROM threads ORDER BY created_at`,
+          )
+        : this.ctx.storage.sql.exec(
+            `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+               FROM threads WHERE archived_at IS NULL ORDER BY created_at`,
+          );
+      const data = [] as Array<Record<string, unknown>>;
+      for (const row of cursor) {
+        data.push(this._serializeThreadRow(row));
+      }
+      return Response.json({ data });
     }
 
-    // GET /threads/:thread_id/events — events for a specific thread
+    // GET /threads/:thread_id — single thread metadata.
+    const threadGetMatch = url.pathname.match(/^\/threads\/([^/]+)$/);
+    if (request.method === "GET" && threadGetMatch) {
+      const threadId = threadGetMatch[1];
+      let row: Record<string, unknown> | undefined;
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+           FROM threads WHERE id = ? LIMIT 1`,
+        threadId,
+      )) {
+        row = r;
+      }
+      if (!row) {
+        return Response.json(
+          { error: { type: "not_found", message: `thread ${threadId} not found` } },
+          { status: 404 },
+        );
+      }
+      return Response.json(this._serializeThreadRow(row));
+    }
+
+    // POST /threads/:thread_id/archive — soft-delete (status flips to
+    // archived; subsequent POST /event for this thread should 409).
+    // Idempotent — re-archive returns the existing archived_at.
+    const threadArchiveMatch = url.pathname.match(/^\/threads\/([^/]+)\/archive$/);
+    if (request.method === "POST" && threadArchiveMatch) {
+      const threadId = threadArchiveMatch[1];
+      // Refuse archiving the primary thread — the session itself is the
+      // primary thread's lifecycle, not the thread row's.
+      if (threadId === "sthr_primary") {
+        return Response.json(
+          { error: { type: "invalid_request", message: "cannot archive the primary thread" } },
+          { status: 400 },
+        );
+      }
+      let exists = false;
+      for (const _ of this.ctx.storage.sql.exec(
+        `SELECT 1 FROM threads WHERE id = ? LIMIT 1`,
+        threadId,
+      )) {
+        exists = true;
+      }
+      if (!exists) {
+        return Response.json(
+          { error: { type: "not_found", message: `thread ${threadId} not found` } },
+          { status: 404 },
+        );
+      }
+      // Set archived_at only if not already set — preserves the original
+      // archive timestamp on idempotent re-archive.
+      this.ctx.storage.sql.exec(
+        `UPDATE threads SET archived_at = ? WHERE id = ? AND archived_at IS NULL`,
+        Date.now(), threadId,
+      );
+      // Drop the in-memory config map entry — future agent calls referencing
+      // this thread should fail loudly rather than silently spawn against an
+      // archived row.
+      this.threads.delete(threadId);
+      // Echo the (now archived) thread back so the caller can read the
+      // archived_at timestamp without an extra GET.
+      let row: Record<string, unknown> | undefined;
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT id, agent_id, agent_name, parent_thread_id, created_at, archived_at
+           FROM threads WHERE id = ? LIMIT 1`,
+        threadId,
+      )) {
+        row = r;
+      }
+      return Response.json(this._serializeThreadRow(row!));
+    }
+
+    // GET /threads/:thread_id/events — paginated event list scoped to
+    // one thread. Filter happens at the SQL level via the
+    // session_thread_id column populated by CfDoEventLog.append.
     const threadEventsMatch = url.pathname.match(/^\/threads\/([^/]+)\/events$/);
     if (request.method === "GET" && threadEventsMatch) {
       const threadId = threadEventsMatch[1];
-      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      const allEvents = history.getEvents();
-      const threadEvents = allEvents.filter((e: any) => e.thread_id === threadId);
-      return Response.json({ data: threadEvents });
+      const limit = Math.min(
+        parseInt(url.searchParams.get("limit") ?? "200", 10) || 200,
+        1000,
+      );
+      const afterSeq = parseInt(url.searchParams.get("after_seq") ?? "0", 10) || 0;
+      const order = url.searchParams.get("order") === "desc" ? "DESC" : "ASC";
+      const cursor = this.ctx.storage.sql.exec(
+        `SELECT seq, type, data, ts, processed_at, cancelled_at, session_thread_id
+           FROM events
+           WHERE session_thread_id = ? AND seq > ?
+           ORDER BY seq ${order} LIMIT ?`,
+        threadId, afterSeq, limit,
+      );
+      const data = [] as Array<Record<string, unknown>>;
+      for (const row of cursor) {
+        const ev = JSON.parse(row.data as string);
+        if (row.processed_at != null) ev.processed_at_ms = row.processed_at;
+        if (row.cancelled_at != null) ev.cancelled_at_ms = row.cancelled_at;
+        if (row.session_thread_id != null) ev.session_thread_id = row.session_thread_id;
+        data.push({
+          seq: row.seq,
+          type: row.type,
+          ts: row.ts,
+          data: ev,
+        });
+      }
+      return Response.json({ data });
     }
 
     // GET /full-status — session status with usage and outcome evaluations.
@@ -1832,6 +2272,19 @@ export class SessionDO extends DurableObject<Env> {
       "mountWorkspace",
       "gitCheckout",
     ]);
+    // Methods we additionally want to run through classifyExternalError on
+    // throw — covers the workspace-backup R2 path (createWorkspaceBackup /
+    // restoreWorkspaceBackup) that doesn't go through warmup but still
+    // raises CF-shaped errors ("version rollout", "Sandbox error", 503).
+    // exec / startProcess / readFile / writeFile already classify via the
+    // needsWarm wrapper below; everything in this set additionally
+    // classifies even though it doesn't need warmup.
+    const classifyOnly = new Set<string>([
+      "createWorkspaceBackup",
+      "restoreWorkspaceBackup",
+      "snapshotWorkspaceNow",
+      "mountSessionOutputs",
+    ]);
     const ensureWarm = async (): Promise<void> => {
       // Cold path — warmup never ran or was reset by a recycle below.
       if (!this.sandboxWarmupPromise) {
@@ -1865,10 +2318,24 @@ export class SessionDO extends DurableObject<Env> {
       get: (target, prop, receiver) => {
         const value = Reflect.get(target, prop, receiver);
         if (typeof value !== "function") return value;
-        if (!needsWarm.has(prop as string)) return value.bind(target);
+        const name = prop as string;
+        const wantsWarm = needsWarm.has(name);
+        const wantsClassify = wantsWarm || classifyOnly.has(name);
+        if (!wantsWarm && !wantsClassify) return value.bind(target);
         return async (...args: unknown[]) => {
-          await ensureWarm();
-          return (value as (...a: unknown[]) => unknown).apply(target, args);
+          if (wantsWarm) await ensureWarm();
+          try {
+            return await (value as (...a: unknown[]) => unknown).apply(target, args);
+          } catch (err) {
+            // Boundary: turn raw CF Containers / SDK errors into typed
+            // OmaErrors (TransientInfraError for "version rollout",
+            // RateLimitedError for 429, etc.) so processUserMessage's
+            // retry switch can dispatch via instanceof. Falls back to
+            // re-throwing the original error if no pattern matches.
+            // TODO: extend wrapper coverage to other boundaries as new
+            // failure modes surface (D1 client, KV ops, MCP transport).
+            throw classifyExternalError(err);
+          }
         };
       },
     }) as SandboxExecutor;
@@ -1881,7 +2348,44 @@ export class SessionDO extends DurableObject<Env> {
   private getBrowserSession(): BrowserSession | null {
     if (!this.env.BROWSER) return null;
     if (!this.browserSession) {
-      this.browserSession = createBrowserSession(this.env.BROWSER as unknown as { fetch: typeof fetch });
+      const tenantId = this.state.tenant_id;
+      const sessionId = this.state.session_id;
+      const agentId = this.state.agent_id || null;
+      // Hybrid-billing hook: emit one browser_active_seconds row when the
+      // BrowserSession closes (DELETE /destroy path or hibernation
+      // teardown). Skipped when tenant/session aren't set yet (early-init
+      // edge — no usage to attribute).
+      const hook = tenantId && sessionId
+        ? {
+            tenantId,
+            sessionId,
+            agentId,
+            onClose: async (elapsedSeconds: number) => {
+              try {
+                const { getCfServicesForTenant } = await import("@open-managed-agents/services");
+                const services = await getCfServicesForTenant(this.env, tenantId);
+                await services.usage.recordUsage({
+                  tenantId,
+                  sessionId,
+                  agentId,
+                  kind: "browser_active_seconds",
+                  value: elapsedSeconds,
+                });
+                console.log(
+                  `[session_do] usage emit browser_active_seconds=${elapsedSeconds} session=${sessionId.slice(0, 12)}`,
+                );
+              } catch (err) {
+                console.error(
+                  `[session_do] browser usage emit failed: ${(err as Error).message ?? err}`,
+                );
+              }
+            },
+          }
+        : null;
+      this.browserSession = createBrowserSession(
+        this.env.BROWSER as unknown as { fetch: typeof fetch },
+        hook,
+      );
     }
     return this.browserSession;
   }
@@ -2026,8 +2530,12 @@ export class SessionDO extends DurableObject<Env> {
               "skipping workspace restore — session attaches github_repository (git clone needs empty /workspace)",
             );
           } else {
+            // Route to the tenant's shard — workspace_backups is per-tenant
+            // data, so the row lives wherever this tenant was sharded.
+            const provider = buildCfTenantDbProvider(this.env);
+            const backupDb = await provider.resolve(this.state.tenant_id);
             const handle = await findWorkspaceBackup(
-              this.env.AUTH_DB,
+              backupDb,
               this.state.tenant_id,
               this.state.environment_id,
               this.state.session_id ?? "unknown",
@@ -2297,6 +2805,26 @@ export class SessionDO extends DurableObject<Env> {
         });
       }
 
+      // Hand billing context to OmaSandbox so its onStop hook (sleepAfter
+      // teardown OR explicit destroy) emits one sandbox_active_seconds
+      // row scoped to this (tenant, session, agent). Same idempotency
+      // story as setBackupContext — same-session rewarms keep the
+      // original startedAt; new-session containers mint a fresh one.
+      const sandboxAny = sandbox as unknown as {
+        setBillingContext?: (c: {
+          tenantId: string;
+          sessionId: string;
+          agentId: string | null;
+        }) => Promise<void>;
+      };
+      if (sandboxAny.setBillingContext && this.state.session_id && this.state.tenant_id) {
+        await sandboxAny.setBillingContext({
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+          agentId: this.state.agent_id || null,
+        });
+      }
+
       // Drop a per-warmup marker so the proxy can detect a recycled
       // container later (just check `cat /tmp/.oma-warm` matches the
       // gen we set). /tmp clears on restart so the absence IS the signal.
@@ -2331,6 +2859,78 @@ export class SessionDO extends DurableObject<Env> {
         // Connection already closed
       }
     }
+  }
+
+  /**
+   * Inspect an outbound event for a `span.model_request_end` carrying
+   * `model_usage` and credit cache tokens to the given thread. Input /
+   * output token totals already arrive via reportUsage at the end of the
+   * turn (default-loop step 10), so this only handles the cache-bucket
+   * deltas reportUsage doesn't carry. Idempotent across primary +
+   * sub-agent broadcast paths because each model_request_end event is
+   * emitted exactly once per LLM step.
+   */
+  private maybeCreditCacheTokens(threadId: string, event: SessionEvent): void {
+    if (event.type !== "span.model_request_end") return;
+    const usage = (event as unknown as {
+      model_usage?: {
+        cache_creation_input_tokens?: number;
+        cache_read_input_tokens?: number;
+      };
+    }).model_usage;
+    if (!usage) return;
+    const cc = usage.cache_creation_input_tokens || 0;
+    const cr = usage.cache_read_input_tokens || 0;
+    if (cc === 0 && cr === 0) return;
+    this.creditUsageToThread(threadId, {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: cc,
+      cache_read_input_tokens: cr,
+    });
+  }
+
+  /**
+   * Credit token usage to a specific thread AND keep the session-wide
+   * `state.input_tokens` / `state.output_tokens` in sync. Cache token
+   * fields are tracked per-thread only — the session-wide totals just
+   * cover input/output (their existing meaning).
+   *
+   * Called from the `reportUsage` closures wired into HarnessRuntime
+   * for both the primary turn and sub-agent turns; threadId is the
+   * session_thread_id the closure was bound to ("sthr_primary" or a
+   * sub-agent "sthr_*").
+   */
+  private creditUsageToThread(
+    threadId: string,
+    delta: {
+      input_tokens: number;
+      output_tokens: number;
+      cache_creation_input_tokens?: number;
+      cache_read_input_tokens?: number;
+    },
+  ): void {
+    const existing = this.state.thread_usage ?? {};
+    const prior = existing[threadId] ?? {
+      input_tokens: 0,
+      output_tokens: 0,
+      cache_creation_input_tokens: 0,
+      cache_read_input_tokens: 0,
+    };
+    const next = {
+      input_tokens: prior.input_tokens + (delta.input_tokens || 0),
+      output_tokens: prior.output_tokens + (delta.output_tokens || 0),
+      cache_creation_input_tokens:
+        prior.cache_creation_input_tokens + (delta.cache_creation_input_tokens || 0),
+      cache_read_input_tokens:
+        prior.cache_read_input_tokens + (delta.cache_read_input_tokens || 0),
+    };
+    this.setState({
+      ...this.state,
+      input_tokens: (this.state.input_tokens ?? 0) + (delta.input_tokens || 0),
+      output_tokens: (this.state.output_tokens ?? 0) + (delta.output_tokens || 0),
+      thread_usage: { ...existing, [threadId]: next },
+    });
   }
 
   /**
@@ -2775,37 +3375,113 @@ export class SessionDO extends DurableObject<Env> {
    * Run a sub-agent within the same session. Creates an isolated thread
    * with its own message history but shares the same sandbox. Events are
    * tagged with thread_id and written to the parent event log.
+   *
+   * `parentThreadId` records which thread spawned this one — primary
+   * for top-level call_agent_*, or a sub-agent's own threadId when one
+   * sub-agent recursively delegates. Stored in the threads SQL row and
+   * broadcast on session.thread_created so consumers can build the
+   * full tree (Console renders nested when depth > 1).
    */
   private async runSubAgent(
     agentId: string,
     message: string,
     parentHistory: HistoryStore,
     sandbox: SandboxExecutor,
+    parentThreadId: string = "sthr_primary",
   ): Promise<string> {
-    // Generate a unique thread ID
-    const threadId = `thread_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 8)}`;
+    // Generate a unique thread ID. Prefix `sthr_` matches AMA spec
+    // (BetaManagedAgentsSessionThread.id is `sthr_*`); previous prefix
+    // was `thread_*` and pre-existing live sessions may still hold those
+    // in their in-memory Map — both work but new threads land on `sthr_`.
+    const threadId = `sthr_${Date.now().toString(36)}${Math.random().toString(36).slice(2, 10)}`;
 
-    // Fetch sub-agent config. Uses getAgentConfig so the parent agent's
-    // snapshot is consulted when the sub-agent id matches the session's
-    // agent_id; otherwise falls back to KV (broken in staging — sub-agents
-    // with arbitrary ids aren't snapshotted).
-    // TODO(staging-kv): pre-fetch sub-agent configs at /init when the agent
-    // declares them in mcp_servers / sub_agents.
-    const subAgent = await this.getAgentConfig(agentId);
-    if (!subAgent) {
-      return `Sub-agent error: agent "${agentId}" not found`;
+    // Reserved id "general" → opt-in built-in delegation tool. Uses a
+    // synthesized config: parent's model + a generic system prompt + a
+    // safe built-in tool subset. Bypasses getAgentConfig (no KV lookup,
+    // no snapshot dependency — works around the staging-KV miss for
+    // arbitrary sub-agent ids documented below).
+    let subAgent: AgentConfig | null;
+    if (agentId === "general") {
+      const parentSnapshot = this.state.agent_snapshot;
+      subAgent = {
+        id: "general",
+        name: "general",
+        // Inherit parent's model so the delegation cost mirrors the
+        // caller's per-token rate. aux_model isn't used here — the
+        // sub-agent's full LLM call should match the caller.
+        model: parentSnapshot?.model ?? "claude-sonnet-4-6",
+        system:
+          "You are a focused sub-agent. The user message contains a single " +
+          "task delegated to you by another agent. Do exactly that task and " +
+          "return a concise text result — no preamble, no follow-up questions, " +
+          "no offers to do additional work. You share the same sandbox as the " +
+          "calling agent (files persist) but cannot delegate further or use " +
+          "MCP tools.",
+        tools: [
+          {
+            type: "agent_toolset_20260401",
+            // Explicit subset — bash + file ops only. No web tools (the
+            // caller controls those). No schedule (sub-agents can't
+            // outlive their parent turn). Permission inherited from the
+            // toolset's default (always_allow) — no per-tool override
+            // needed.
+            configs: [
+              { name: "bash", enabled: true },
+              { name: "read", enabled: true },
+              { name: "write", enabled: true },
+              { name: "edit", enabled: true },
+              { name: "grep", enabled: true },
+              { name: "glob", enabled: true },
+              // explicitly off:
+              { name: "web_fetch", enabled: false },
+              { name: "web_search", enabled: false },
+            ],
+          },
+        ],
+        // No callable_agents → can't delegate further (matches AMA spec
+        // "Only one level of delegation"). No MCP. No skills. No
+        // appendable_prompts. No schedule wakeup wiring.
+        version: 1,
+        created_at: new Date().toISOString(),
+      } as AgentConfig;
+    } else {
+      // Fetch sub-agent config. Uses getAgentConfig so the parent agent's
+      // snapshot is consulted when the sub-agent id matches the session's
+      // agent_id; otherwise falls back to KV (broken in staging — sub-agents
+      // with arbitrary ids aren't snapshotted).
+      // TODO(staging-kv): pre-fetch sub-agent configs at /init when the agent
+      // declares them in mcp_servers / sub_agents.
+      subAgent = await this.getAgentConfig(agentId);
+      if (!subAgent) {
+        return `Sub-agent error: agent "${agentId}" not found`;
+      }
     }
 
-    // Store thread
+    // In-memory map (hot path config lookup) + persistent threads row
+    // (Phase 1 — survives DO eviction, lets HTTP CRUD see this thread).
+    // INSERT OR IGNORE for safety against rare ID collision.
     this.threads.set(threadId, { agentId, agentConfig: subAgent });
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
+       VALUES (?, ?, ?, ?, ?)`,
+      threadId,
+      agentId,
+      subAgent.name,
+      parentThreadId,
+      Date.now(),
+    );
 
-    // Emit thread_created
+    // Emit thread_created. Includes parent_thread_id so Console (and any
+    // other SSE consumers) can build a tree without a follow-up GET
+    // /threads round-trip. Mirrors the threads table column written
+    // above.
     const threadCreatedEvent: SessionEvent = {
       type: "session.thread_created",
       session_thread_id: threadId,
       agent_id: agentId,
       agent_name: subAgent.name,
-    };
+      parent_thread_id: parentThreadId,
+    } as SessionEvent;
     parentHistory.append(threadCreatedEvent);
     this.broadcastEvent(threadCreatedEvent);
 
@@ -2854,11 +3530,23 @@ export class SessionDO extends DurableObject<Env> {
       // tools.schedule / cancel_schedule / list_schedules don't get
       // registered into subTools at all.
       delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
-        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
+        // Nested delegate: this sub-agent's threadId becomes the new
+        // child's parent. Lineage chain matches what Console renders.
+        return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
       },
     });
     const subModelId = typeof subAgent.model === "string" ? subAgent.model : subAgent.model?.id;
     const subModel = resolveModel(subModelId || this.env.ANTHROPIC_MODEL || "claude-sonnet-4-6", this.env.ANTHROPIC_API_KEY, this.env.ANTHROPIC_BASE_URL);
+
+    // Per-thread abort controller. Registered in _threadAbortControllers
+    // so a `user.interrupt` with this thread's session_thread_id (handled
+    // by the POST /event branch above) aborts exactly this sub-agent's
+    // in-flight turn without touching siblings or the primary thread.
+    // Cleared in finally with the same identity guard processUserMessage
+    // uses — so a re-entrant runSubAgent on the same threadId (rare; nested
+    // delegate) doesn't drop the inner controller's slot.
+    const abortController = new AbortController();
+    this._threadAbortControllers.set(threadId, abortController);
 
     // Build sub-agent context: own history, shared sandbox, parent event log
     const subCtx: HarnessContext = {
@@ -2873,7 +3561,9 @@ export class SessionDO extends DurableObject<Env> {
         ANTHROPIC_MODEL: this.env.ANTHROPIC_MODEL,
         TAVILY_API_KEY: this.env.TAVILY_API_KEY,
         delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
-          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox);
+          // Nested delegate inside the env block; see runtime block
+          // above for the same lineage rule.
+          return this.runSubAgent(nestedAgentId, nestedMessage, parentHistory, sandbox, threadId);
         },
       },
       runtime: {
@@ -2885,27 +3575,47 @@ export class SessionDO extends DurableObject<Env> {
           parentHistory.append(taggedEvent);
           this.broadcastEvent(taggedEvent);
           this.fanOutToHooks(taggedEvent);
+          this.maybeCreditCacheTokens(threadId, taggedEvent);
         },
         ...this.buildStreamRuntimeMethods(threadId),
         reportUsage: async (input_tokens: number, output_tokens: number) => {
-          this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
+          this.creditUsageToThread(threadId, { input_tokens, output_tokens });
         },
+        abortSignal: abortController.signal,
+        // Sub-agent runs inside supervisor's harness.run, which is
+        // wrapped by adapter.beginTurn → sessions.status='running' for
+        // the entire nested-await chain. The supervisor's status
+        // marker covers sub-agent execution — no separate keep-alive
+        // needed. (Earlier we routed this through a dedicated
+        // RuntimeAdapter.keepAliveWhile port, but it was redundant
+        // with the supervisor marker; reverted 2026-05-10 after
+        // root-cause analysis pointed at alarm body running LLM
+        // streams as the actual eviction trigger.)
         keepAliveWhile: <T>(fn: () => Promise<T>) => fn(),
       },
     };
 
-    // Run the sub-agent harness
-    await harness.run(subCtx);
+    let responseText = "";
+    try {
+      // Run the sub-agent harness
+      await harness.run(subCtx);
 
-    // Collect sub-agent response text from its history
-    const subEvents = subHistory.getEvents();
-    const responseText = subEvents
-      .filter((e: SessionEvent) => e.type === "agent.message")
-      .map((e: SessionEvent) => {
-        const msg = e as AgentMessageEvent;
-        return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
-      })
-      .join("\n");
+      // Collect sub-agent response text from its history
+      const subEvents = subHistory.getEvents();
+      responseText = subEvents
+        .filter((e: SessionEvent) => e.type === "agent.message")
+        .map((e: SessionEvent) => {
+          const msg = e as AgentMessageEvent;
+          return msg.content?.map((b) => b.type === "text" ? b.text : "").join("") || "";
+        })
+        .join("\n");
+    } finally {
+      // Identity-guarded delete: a nested runSubAgent on the same threadId
+      // would have replaced our slot — don't stomp on its controller.
+      if (this._threadAbortControllers.get(threadId) === abortController) {
+        this._threadAbortControllers.delete(threadId);
+      }
+    }
 
     // Emit thread_idle
     const threadIdleEvent: SessionEvent = { type: "session.thread_idle", session_thread_id: threadId };
@@ -2927,6 +3637,14 @@ export class SessionDO extends DurableObject<Env> {
     retryCount: number = 0,
     skipAppend: boolean = false
   ): Promise<void> {
+    // Resolved up front so closures built below (delegateToAgent in
+    // env / runtime blocks) can capture it. Defaults to primary —
+    // POST /event handler reads the same field for thread-scoped
+    // routing, so a user.message tagged sthr_X lands on this turn.
+    const turnThreadId =
+      (userMessage as unknown as { session_thread_id?: string })
+        .session_thread_id ?? "sthr_primary";
+
     const agentId = this.state.agent_id;
     if (!agentId) return;
 
@@ -2941,6 +3659,16 @@ export class SessionDO extends DurableObject<Env> {
     }
 
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
+
+    // Status-pair invariant: every status_running emit (line ~3889
+    // below) MUST be followed by exactly one status_idle emit before
+    // this function returns. The success path emits at line ~4067; the
+    // error paths historically didn't, leaving Console showing
+    // "Running" forever even after adapter.endTurn flipped the D1 row
+    // to 'idle' (Console derives the pill from SSE events, not D1
+    // polling). Tracked via this flag — finally emits if no earlier
+    // path did.
+    let idleEmitted = false;
 
     // Reuse session-level sandbox (singleton) — files persist across turns.
     // Returned object is a lazy proxy: the underlying container is warmed up
@@ -3028,7 +3756,10 @@ export class SessionDO extends DurableObject<Env> {
       cancelWakeup: (id) => this.cancelWakeup(id),
       listWakeups: () => this.listWakeups(),
       delegateToAgent: async (agentId: string, message: string) => {
-        return this.runSubAgent(agentId, message, history, sandbox);
+        // turnThreadId is captured from the enclosing processUserMessage
+        // scope (declared at the top of the function) — closure evals
+        // lazily at harness.run time, so TDZ isn't a concern.
+        return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
       },
       watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
         this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -3068,7 +3799,9 @@ export class SessionDO extends DurableObject<Env> {
     // failure report so the human (or calling system) can intervene.
     const loopStopGuidance =
       "If the same tool call fails three times in a row with substantively the same error, stop retrying. Report (a) what you were trying to do, (b) the exact error, and (c) what you would need to make progress (a missing credential, a corrected input, an upstream service to recover), then end the turn instead of looping.";
-    const platformGuidance = `${authenticatedCommandGuidance}\n\n${loopStopGuidance}`;
+    const sessionOutputsGuidance =
+      "Files you write under `/mnt/session/outputs/` persist after the session ends and are downloadable by the user from the session's Files panel. Use this path for final artifacts the user should keep (reports, exports, generated docs, packaged code). Files written anywhere else (e.g. `/workspace/`) are scratch — they may be lost on container recycle and are not user-accessible.";
+    const platformGuidance = `${authenticatedCommandGuidance}\n\n${loopStopGuidance}\n\n${sessionOutputsGuidance}`;
     const systemPrompt = rawSystemPrompt
       ? `${rawSystemPrompt}\n\n${platformGuidance}`
       : platformGuidance;
@@ -3216,9 +3949,16 @@ export class SessionDO extends DurableObject<Env> {
     // Create an abort controller for this execution. Stall detection now
     // lives inside default-loop.ts (in-closure setTimeout next to the
     // streamText call) so we no longer compose with a DO-instance
-    // controller here.
+    // controller here. Registered under the thread id so user.interrupt
+    // with `session_thread_id` aborts only the matching turn.
+    //
+    // Note: `turnThreadId` is also captured by the `delegateToAgent`
+    // closures above (in env / runtime blocks) so a sub-agent spawned
+    // from this turn records `parent_thread_id = turnThreadId` instead
+    // of always 'sthr_primary'. Closures eval lazily at harness.run
+    // time — TDZ for the const above is not a problem.
     const abortController = new AbortController();
-    this.currentAbortController = abortController;
+    this._threadAbortControllers.set(turnThreadId, abortController);
     const effectiveAbortSignal = abortController.signal;
 
     // --- Harness receives a fully-prepared context ---
@@ -3245,7 +3985,7 @@ export class SessionDO extends DurableObject<Env> {
         // — non-acp harnesses don't read it.
         RUNTIME_ROOM: this.env.RUNTIME_ROOM,
         delegateToAgent: async (agentId: string, message: string) => {
-          return this.runSubAgent(agentId, message, history, sandbox);
+          return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
         },
         watchBackgroundTask: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => {
           this.watchBackgroundTask(taskId, pid, outputFile, proc, sandbox);
@@ -3258,10 +3998,11 @@ export class SessionDO extends DurableObject<Env> {
           history.append(event);
           this.broadcastEvent(event);
           this.fanOutToHooks(event);
+          this.maybeCreditCacheTokens(turnThreadId, event);
         },
         ...this.buildStreamRuntimeMethods(),
         reportUsage: async (input_tokens: number, output_tokens: number) => {
-          this.setState({ ...this.state, input_tokens: this.state.input_tokens + input_tokens, output_tokens: this.state.output_tokens + output_tokens });
+          this.creditUsageToThread(turnThreadId, { input_tokens, output_tokens });
         },
         pendingConfirmations: [],
         abortSignal: effectiveAbortSignal,
@@ -3464,17 +4205,44 @@ export class SessionDO extends DurableObject<Env> {
       };
       history.append(idleEvent);
       this.broadcastEvent(idleEvent);
+      idleEmitted = true;
     } catch (err) {
       const errorMessage = this.describeError(err);
 
       // Don't retry if aborted
       if (err instanceof Error && err.name === "AbortError") {
-        // Interrupt was handled — don't emit error
+        // Interrupt handler (POST /event user.interrupt branch) already
+        // appended its own session.status_idle synchronously before
+        // the abort propagated, so the finally block must NOT emit a
+        // second one — this flag suppresses the duplicate.
+        idleEmitted = true;
         return;
       }
 
-      const TRANSIENT_PATTERNS = ["timeout", "network", "ECONNREFUSED", "fetch failed", "rate limit", "429", "503"];
-      const isTransient = TRANSIENT_PATTERNS.some((p) => errorMessage.toLowerCase().includes(p.toLowerCase()));
+      // Retry-by-default policy. Specific fatal classes short-circuit;
+      // everything else (including unclassified errors) re-runs once
+      // before surfacing. The previous shape was a TRANSIENT allowlist
+      // of substrings ("timeout", "ECONNREFUSED"...); every new transient
+      // class (CF "version rollout", container OOM, future infra wording)
+      // silently fell off the list and the user saw a hard failure.
+      //
+      // Boundary wrappers (wrapSandboxWithLazyWarmup, the streamText
+      // boundary, the USAGE_METER boundary) re-throw native errors as
+      // typed OmaErrors via classifyExternalError, so most well-known
+      // fatal conditions arrive here as the right class already.
+      // For errors that escaped the boundaries (D1, KV, future SDKs),
+      // run classifyExternalError once more inline as belt-and-braces.
+      const classified = classifyExternalError(err);
+      const isFatal =
+        classified instanceof BillingError ||
+        classified instanceof ConfigError ||
+        classified instanceof AuthError ||
+        // ModelError = deterministic LLM-side condition (silent_stop,
+        // refused, malformed). Same prompt → same fail. Retrying just
+        // burns tokens. Caught 2026-05-11 sess-y2bfxm1de4e1zqxm: 4
+        // failed messages × 3 retries = 12 wasted LLM calls.
+        classified instanceof ModelError;
+      const isTransient = !isFatal;
 
       if (isTransient && retryCount < 2) {
         const rescheduledEvent: SessionEvent = {
@@ -3487,6 +4255,10 @@ export class SessionDO extends DurableObject<Env> {
         // Exponential backoff: 1s, 2s
         const delay = 1000 * Math.pow(2, retryCount);
         await new Promise(r => setTimeout(r, delay));
+        // Recursive call owns the next idle emit (success or its own
+        // finally). Suppress this frame's catch-all so we don't get
+        // two status_idle events on a successful retry.
+        idleEmitted = true;
         return this.processUserMessage(userMessage, retryCount + 1, skipAppend);
       }
 
@@ -3511,11 +4283,32 @@ export class SessionDO extends DurableObject<Env> {
       // The sandbox is still alive (container persists independently).
       // Client can send a new user.message to retry.
     } finally {
-      this.currentAbortController = null;
-      // Status auto-derives — runFiber finally DELETEs cf_agents_runs row
-      // Workspace backup is fired by OmaSandbox.onActivityExpired when the
-      // container's sleepAfter elapses (see oma-sandbox.ts) — exactly one
-      // snapshot per quiet period. Explicit /destroy snapshots eagerly via
+      // Only delete if it's still ours — a sub-agent run within the same
+      // thread may have temporarily replaced it. Same-thread re-entry is
+      // mutex'd by _draining so this is theoretical safety only.
+      if (this._threadAbortControllers.get(turnThreadId) === abortController) {
+        this._threadAbortControllers.delete(turnThreadId);
+      }
+      // Catch-all status_idle emit. Pairs with the status_running emit
+      // at the start of this function so Console's status pill never
+      // hangs at "Running" after the turn dies in any non-AbortError
+      // way (model crash, transient retries exhausted, anything that
+      // hits the catch block above without already setting idleEmitted).
+      // No stop_reason — error paths don't have a meaningful one and
+      // the field is optional in SessionStatusEvent.
+      if (!idleEmitted) {
+        try {
+          const idleEvent: SessionEvent = { type: "session.status_idle" };
+          history.append(idleEvent);
+          this.broadcastEvent(idleEvent);
+        } catch (err) {
+          console.warn(`[processUserMessage] catch-all idle emit failed:`, err);
+        }
+      }
+      // Status auto-derives — Workspace backup is fired by
+      // OmaSandbox.onActivityExpired when the container's sleepAfter
+      // elapses (see oma-sandbox.ts) — exactly one snapshot per quiet
+      // period. Explicit /destroy snapshots eagerly via
       // sandbox.snapshotWorkspaceNow(). Per-turn backup is intentionally off.
     }
   }
@@ -3579,12 +4372,14 @@ export class SessionDO extends DurableObject<Env> {
     if (this._state?.terminated_at != null || this._state?.status === "terminated") {
       return "terminated";
     }
-    // cf_agents_runs was dropped in Phase 4; the unified-runtime marker
-    // for "is there an in-flight turn" lives on D1's `sessions.turn_id`,
-    // which is async. _inflightTurnHints is the sync local mirror set
-    // by the RuntimeAdapter callbacks (onTurnInFlight / onTurnEnded).
-    // _checkOrphanTurns rebuilds it on cold-start by reading D1.
-    return this._inflightTurnHints > 0 ? "running" : "idle";
+    // The unified-runtime marker for "is there an in-flight turn" lives
+    // on D1's `sessions.turn_id`, which is async. _activeTurnIds is the
+    // sync local mirror populated by RuntimeAdapter's onTurnInFlight /
+    // onTurnEnded callbacks (turn ids minted in runAgentTurn). On cold
+    // start the set is empty until the first alarm-fired
+    // _checkOrphanTurns reconciles, but D1 is the source of truth so
+    // orphan recovery still triggers from there.
+    return this._activeTurnIds.size > 0 ? "running" : "idle";
   }
 
   /**
@@ -3611,10 +4406,21 @@ export class SessionDO extends DurableObject<Env> {
   private terminate(reason: string): void {
     if (this._state?.terminated_at != null) return;
     this.setState({ ...this.state, terminated_at: Date.now() });
-    if (this.currentAbortController) {
-      this.currentAbortController.abort();
-      this.currentAbortController = null;
+    for (const ctrl of this._threadAbortControllers.values()) {
+      ctrl.abort();
     }
+    this._threadAbortControllers.clear();
+    // Hybrid-billing: emit session_alive_seconds covering wall-clock
+    // (created_at_ms → now) on terminate. Idempotent via
+    // session_alive_billed; fire-and-forget so the terminate path can
+    // proceed if the usage_events write hiccups.
+    //
+    // TODO: 24h cron sweep — long-running session that never terminates
+    // never emits. Schedule a SessionDO alarm every 24h to slice the
+    // alive-seconds window, write an interim event with the partial
+    // seconds, advance the cursor (created_at_ms = now). Out of scope
+    // for v1.
+    void this._recordSessionAliveOnTerminate();
     const event: SessionEvent = {
       type: "session.status_terminated",
       reason,
@@ -3641,6 +4447,49 @@ export class SessionDO extends DurableObject<Env> {
             `[session_do] terminate writeback to D1 failed: ${(err as Error).message ?? err}`,
           );
         });
+    }
+  }
+
+  /**
+   * Hybrid-billing: emit one session_alive_seconds row spanning
+   * created_at_ms → now. Idempotent — called from terminate() but skips
+   * the write if session_alive_billed is already true (DO restart hits
+   * /destroy a second time).
+   */
+  private async _recordSessionAliveOnTerminate(): Promise<void> {
+    try {
+      if (this._state?.session_alive_billed) return;
+      const tenantId = this.state.tenant_id;
+      const sessionId = this.state.session_id;
+      const createdAt = this._state?.created_at_ms;
+      if (!tenantId || !sessionId || !createdAt) return;
+      const elapsedMs = Date.now() - createdAt;
+      const seconds = Math.floor(elapsedMs / 1000);
+      if (seconds <= 0) {
+        // Mark as billed anyway so we don't keep retrying for a
+        // sub-second session.
+        this.setState({ ...this.state, session_alive_billed: true });
+        return;
+      }
+      // getCfServicesForTenant resolves the per-tenant DB then builds
+      // the Services container — the same path used for backup writes.
+      const { getCfServicesForTenant } = await import("@open-managed-agents/services");
+      const services = await getCfServicesForTenant(this.env, tenantId);
+      await services.usage.recordUsage({
+        tenantId,
+        sessionId,
+        agentId: this.state.agent_id || null,
+        kind: "session_alive_seconds",
+        value: seconds,
+      });
+      this.setState({ ...this.state, session_alive_billed: true });
+      console.log(
+        `[session_do] usage emit session_alive_seconds=${seconds} session=${sessionId.slice(0, 12)}`,
+      );
+    } catch (err) {
+      console.error(
+        `[session_do] _recordSessionAliveOnTerminate failed: ${(err as Error).message ?? err}`,
+      );
     }
   }
 
@@ -3727,6 +4576,173 @@ export class SessionDO extends DurableObject<Env> {
     // force-resets the row, then re-fires — pure noise that masks real
     // errors in observability. One-shot delete clears it.
     sql.exec(`DELETE FROM cf_agents_schedules WHERE callback = '_oma_stallCheckHeartbeat'`);
+
+    // Per-session thread directory (AMA `session_thread`-shaped). Lives
+    // here in DO SQLite — same atomicity domain as `events`, no need for
+    // D1 round-trip on the hot path. Spec note: AMA SDK exposes
+    // `BetaManagedAgentsSessionThread` with `id` (sthr_*), `agent_name`,
+    // `parent_thread_id` (NULL = primary), and `archived_at`. We mirror
+    // those fields plus `agent_id` for our internal config lookup.
+    //
+    // Primary thread row (`sthr_primary`) is seeded lazily on first
+    // turn — see _ensurePrimaryThread() — because at constructor time
+    // the agent_id isn't known yet (set on /init).
+    sql.exec(`
+      CREATE TABLE IF NOT EXISTS threads (
+        id TEXT PRIMARY KEY,
+        agent_id TEXT NOT NULL,
+        agent_name TEXT,
+        parent_thread_id TEXT,
+        created_at INTEGER NOT NULL,
+        archived_at INTEGER
+      )
+    `);
+    sql.exec(`CREATE INDEX IF NOT EXISTS idx_threads_parent ON threads(parent_thread_id, created_at)`);
+  }
+
+  /**
+   * Serialize a `threads` row into the AMA wire shape, including
+   * stats computed at read-time from the events table. Single source
+   * of truth for the /threads list, /threads/:tid get, and the
+   * archive echo response — keeps shape drift impossible.
+   *
+   * stats.elapsed_seconds: now - created_at, frozen at archived_at.
+   * stats.time_to_first_run_seconds: per AMA spec, 0 for child
+   *   threads (which spawn already running) and computed for primary.
+   * stats.active_seconds: SUM(end_ts - start_ts) over paired
+   *   span.model_request_start / span.model_request_end events scoped
+   *   to this thread. Whole-second resolution (events.ts is in
+   *   seconds). In-flight pairs are skipped.
+   * usage: read from state.thread_usage[id] (per-thread token counters,
+   *   credited from reportUsage + span.model_request_end cache fields).
+   *   Returns null for legacy sessions that pre-date the per-thread
+   *   bucket — the AMA SDK accepts null and treats it as "no usage
+   *   recorded yet."
+   */
+  private _serializeThreadRow(row: Record<string, unknown>): Record<string, unknown> {
+    const id = row.id as string;
+    const createdAt = row.created_at as number;
+    const archivedAt = row.archived_at as number | null | undefined;
+    const isPrimary = id === "sthr_primary";
+
+    const endTs = archivedAt ?? Date.now();
+    const elapsedSeconds = Math.max(0, Math.round((endTs - createdAt) / 1000));
+
+    let timeToFirstRunSeconds: number | null = 0;
+    if (isPrimary) {
+      // First user.message in the primary thread — processed_at is the
+      // ingestion time. Falls back to ts when processed_at is null
+      // (e.g. queued but never drained — rare but possible if the user
+      // archives before any turn runs).
+      let firstAt: number | null = null;
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT processed_at, ts FROM events
+           WHERE session_thread_id = ? AND type = 'user.message'
+           ORDER BY seq ASC LIMIT 1`,
+        id,
+      )) {
+        firstAt = (r.processed_at as number | null) ?? (r.ts as number);
+      }
+      timeToFirstRunSeconds = firstAt != null
+        ? Math.max(0, Math.round((firstAt - createdAt) / 1000))
+        : null;
+    }
+
+    // active_seconds: SUM(end_ts - start_ts) over paired
+    // span.model_request_start / span.model_request_end events for this
+    // thread. Pairs join on the start event's `id` ↔ end event's
+    // `model_request_start_id` (set by default-loop's onStepFinish/onError/
+    // onAbort). The SQL `ts` column is in seconds, so we get whole-second
+    // resolution which is fine for a "time spent in the model" stat.
+    //
+    // Sub-agent spans get session_thread_id stamped at write time by the
+    // tagged runtime.broadcast closure in runSubAgent; primary spans
+    // default to 'sthr_primary' via the cf-do INSERT default. Unpaired
+    // starts (turn still in flight) and unpaired ends (recovery edge
+    // cases) are skipped.
+    let activeSeconds = 0;
+    {
+      const starts = new Map<string, number>();
+      // One pass: bucket starts by id, on end events accumulate the diff.
+      for (const r of this.ctx.storage.sql.exec(
+        `SELECT type, data, ts FROM events
+           WHERE session_thread_id = ?
+             AND (type = 'span.model_request_start' OR type = 'span.model_request_end')
+           ORDER BY seq ASC`,
+        id,
+      )) {
+        const ts = r.ts as number;
+        let payload: Record<string, unknown> | null = null;
+        try {
+          payload = JSON.parse(r.data as string) as Record<string, unknown>;
+        } catch {
+          continue;
+        }
+        if (r.type === "span.model_request_start") {
+          const sid = payload?.id as string | undefined;
+          if (sid) starts.set(sid, ts);
+        } else {
+          const sid = payload?.model_request_start_id as string | undefined;
+          if (!sid) continue;
+          const startTs = starts.get(sid);
+          if (startTs == null) continue;
+          starts.delete(sid);
+          activeSeconds += Math.max(0, ts - startTs);
+        }
+      }
+    }
+
+    const updatedTs = archivedAt ?? createdAt;
+    const threadUsage = this.state.thread_usage?.[id];
+    const usage = threadUsage
+      ? {
+          input_tokens: threadUsage.input_tokens,
+          output_tokens: threadUsage.output_tokens,
+          cache_read_input_tokens: threadUsage.cache_read_input_tokens,
+          // AMA spec exposes cache_creation as a sub-shape with per-lifetime
+          // breakdown — we only have a single bucket so far, so emit it as
+          // the unbucketed total under `cache_creation_input_tokens` for
+          // back-compat with simpler readers; the AMA SDK accepts the extra
+          // field. (Add the nested cache_creation shape when we get TTL data
+          // from the provider.)
+          cache_creation_input_tokens: threadUsage.cache_creation_input_tokens,
+        }
+      : null;
+    return {
+      id,
+      type: "session_thread",
+      session_id: this.state.session_id,
+      agent_id: row.agent_id,
+      agent_name: row.agent_name,
+      parent_thread_id: row.parent_thread_id,
+      status: archivedAt != null ? "archived" : "active",
+      created_at: new Date(createdAt).toISOString(),
+      archived_at: archivedAt != null ? new Date(archivedAt).toISOString() : null,
+      updated_at: new Date(updatedTs).toISOString(),
+      stats: {
+        elapsed_seconds: elapsedSeconds,
+        active_seconds: activeSeconds,
+        time_to_first_run_seconds: timeToFirstRunSeconds,
+      },
+      usage,
+    };
+  }
+
+  /**
+   * Idempotent primary-thread seed. Called on first turn (lazy because
+   * agent_id isn't known until /init). Subsequent calls no-op via
+   * INSERT OR IGNORE.
+   */
+  private _ensurePrimaryThread(): void {
+    const agentId = this.state.agent_id;
+    if (!agentId) return; // pre-init; nothing to seed against
+    this.ctx.storage.sql.exec(
+      `INSERT OR IGNORE INTO threads (id, agent_id, agent_name, parent_thread_id, created_at)
+       VALUES ('sthr_primary', ?, ?, NULL, ?)`,
+      agentId,
+      this.state.agent_snapshot?.name ?? null,
+      Date.now(),
+    );
   }
 
   // ── Schedule API (mirrors cf-agents) ──────────────────────────────────
@@ -3912,13 +4928,29 @@ export class SessionDO extends DurableObject<Env> {
       const recoveryMs = (recoveringRows[0].execution_started_at + HUNG_SCHEDULE_TIMEOUT_SECONDS) * 1000;
       nextMs = nextMs === null ? recoveryMs : Math.min(nextMs, recoveryMs);
     }
-    // Keep-alive (was: _keepAliveRefs branch) now flows through
-    // hintTurnInFlight → setAlarm at beginTurn, plus the alarm() handler's
-    // own rearm-while-inflight check after _checkOrphanTurns. So
-    // _scheduleNextAlarm only schedules data-driven wakeups (cron / one-
-    // shot wakeups / hung interval recovery). Cleaner separation.
-    if (nextMs !== null) {
-      await this.ctx.storage.setAlarm(nextMs);
+    // Heartbeat-merge: when a turn is in flight (sessions.status =
+    // 'running' — covers supervisor + the entire nested sub-agent
+    // call tree since beginTurn wraps the whole harness.run chain),
+    // we want a heartbeat alarm KEEP_ALIVE_INTERVAL_MS out. Merge it
+    // with any data-driven wakeup so a single setAlarm fires for the
+    // earlier of the two — never two writes, never a stale deleteAlarm
+    // clobbering the heartbeat.
+    //
+    // Pre-merge bug (caught by code review 2026-05-10): the heartbeat
+    // setAlarm and the data-driven setAlarm/deleteAlarm were two
+    // separate calls in sequence. When `cf_agents_schedules` was empty
+    // (the common case for a session not running cron / interval
+    // tasks) the second branch hit deleteAlarm() and silently undid
+    // the heartbeat — DO would not get a wakeup and CF would evict
+    // before the next external request arrived.
+    const wantsHeartbeat = await this._hasInflightTurn();
+    const heartbeatMs = wantsHeartbeat ? Date.now() + KEEP_ALIVE_INTERVAL_MS : null;
+    let mergedNextMs: number | null = nextMs;
+    if (heartbeatMs !== null) {
+      mergedNextMs = mergedNextMs === null ? heartbeatMs : Math.min(mergedNextMs, heartbeatMs);
+    }
+    if (mergedNextMs !== null) {
+      await this.ctx.storage.setAlarm(mergedNextMs);
     } else {
       await this.ctx.storage.deleteAlarm();
     }
@@ -4005,20 +5037,21 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    // Orphan-turn recovery: was _checkRunFibers (cf_agents_runs scan).
-    // Now reads sessions WHERE status='running' via the unified adapter
-    // and runs the same recovery.ts logic Node does. Same call site
-    // (alarm-triggered), same effect.
-    await this._checkOrphanTurns();
+    // Stale-turn cleanup. Replaces the old _checkOrphanTurns →
+    // onFiberRecovered → recoverAgentTurn chain that re-ran the LLM
+    // stream from inside alarm() — burned the 180s wall-time budget,
+    // got the alarm canceled, and made the eviction problem worse.
+    // _finalizeStaleTurns is SQL-only; appends aborted tool_results +
+    // status_idle for stuck turns so Console + history are consistent
+    // and the user can re-send to continue. (cloudflare/agents SDK's
+    // documented stance: "LLM calls are NOT replayed.")
+    await this._finalizeStaleTurns();
 
-    // Keep-alive rearm: while a turn is in flight (this DO's
-    // sessions row marked status='running'), reschedule the alarm 30s
-    // out so the DO doesn't get evicted before the LLM call returns.
-    // The status flip back to 'idle' in adapter.endTurn naturally stops
-    // the rearm loop.
-    if (await this._hasInflightTurn()) {
-      await this.ctx.storage.setAlarm(Date.now() + KEEP_ALIVE_INTERVAL_MS);
-    }
+    // (Keep-alive rearm — sub-agent + supervisor heartbeat — folded
+    // into _scheduleNextAlarm below so it can MERGE with data-driven
+    // wakeups and not get clobbered by the deleteAlarm() branch when
+    // cf_agents_schedules is empty. The merge picks min(heartbeat, next
+    // schedule) so we never sleep past the heartbeat horizon.)
 
     // Container keepalive: while there's at least one background_tasks row,
     // ping the sandbox container to reset its sleepAfter timer. Means
@@ -4057,11 +5090,22 @@ export class SessionDO extends DurableObject<Env> {
   private async _checkOrphanTurns(): Promise<void> {
     if (!this._state) return;
     const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    // ports.ts contract: caller MUST filter out its own active turn ids
+    // before treating each row as an orphan. We track these in
+    // _activeTurnIds (populated from RuntimeAdapter's hintTurnInFlight
+    // callback the moment beginTurn lands the D1 write). Mirrors Node
+    // SessionStateMachine.onWake's `if (o.turn_id === this.activeTurnId)
+    // continue` (machine.ts:183), just generalized to a Set because
+    // sub-agents can have concurrent turns.
+    //
+    // Pre-fix this loop iterated all rows blindly and the keep-alive
+    // alarm regularly woke up mid-stream to "recover" our own active
+    // turn — observed on staging sess-slqg7xf4kvm6s2j4 (2026-05-10
+    // 07:01:43Z): emitted session.status_rescheduled + spawned a
+    // parallel streamText racing the original. Then we patched it with
+    // a 90s grace period; the proper fix is the explicit set check.
     for (const o of orphans) {
-      // The recovery path is identical to the legacy onFiberRecovered
-      // entry — routes through recoverAgentTurn (which reads event log
-      // + streams). We pass a minimal context shape so the existing
-      // recovery code keeps working.
+      if (this._activeTurnIds.has(o.turn_id)) continue;
       try {
         await this.onFiberRecovered({
           id: o.turn_id,
@@ -4074,6 +5118,159 @@ export class SessionDO extends DurableObject<Env> {
       // Mark the orphan turn idle. recoverAgentTurn doesn't do this
       // (it ran before the unified table existed).
       await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
+    }
+  }
+
+  /**
+   * Lightweight stale-turn cleanup — replacement for the old
+   * onFiberRecovered → recoverAgentTurn chain that re-ran the LLM
+   * stream from inside alarm() and routinely burned the 180s
+   * Workers wall-time budget (observed 2026-05-10 sess-slqg7xf4: 6
+   * consecutive 180s alarm fires + 110s alarm gap = DO evicted).
+   *
+   * Aligns with cloudflare/agents SDK guidance: "LLM calls are NOT
+   * replayed — if streaming mid-response when evicted, that stream is
+   * lost permanently." Recovery == surface the interruption + clean
+   * up state, not auto-replay.
+   *
+   * What this does:
+   *   1. For every unpaired tool_use (no matching tool_result by id),
+   *      append an aborted tool_result so Console pairing collapses
+   *      the bubble + history is consistent for any future re-prompt.
+   *   2. For every stuck `sessions.status='running'` row whose turn_id
+   *      isn't in `_activeTurnIds` (i.e. dead from a prior incarnation),
+   *      append `session.status_rescheduled` + `session.status_idle`
+   *      then call adapter.endTurn to flip the row.
+   *
+   * All SQL writes; no LLM call, no harness re-run. Cheap enough to
+   * call from alarm() AND first-fetch.
+   */
+  private async _finalizeStaleTurns(): Promise<void> {
+    if (!this._state) return;
+    // Ensure events table exists (alarm() runs without going through
+    // fetchInner's ensureSchema). Cheap idempotent CREATE IF NOT EXISTS.
+    try { this.ensureSchema(); } catch { /* schema already up-to-date */ }
+    const sql = this.ctx.storage.sql;
+
+    // 1. Unpaired tool_use detection. Three flavors per the wire spec
+    //    in default-loop.ts:emitToolCallEvent:
+    //      • agent.tool_use         → result keyed by tool_use_id
+    //      • agent.custom_tool_use  → result keyed by tool_use_id
+    //      • agent.mcp_tool_use     → result keyed by mcp_tool_use_id
+    //    The pairing key for use→result is always the use's own `id`.
+    //    Wrapped in try blocks so a missing events table (very early
+    //    cold-start) doesn't short-circuit the sessions row cleanup
+    //    below — that's the contract callers depend on.
+    const usedIds = new Map<string, { type: string; thread?: string | null }>();
+    try {
+      const useCursor = sql.exec(
+        `SELECT type, data, session_thread_id FROM events
+          WHERE type IN ('agent.tool_use','agent.custom_tool_use','agent.mcp_tool_use')`,
+      );
+      for (const row of useCursor) {
+        try {
+          const d = JSON.parse(row.data as string) as { id?: string };
+          if (d.id) usedIds.set(d.id, {
+            type: row.type as string,
+            thread: row.session_thread_id as string | null,
+          });
+        } catch { /* skip malformed */ }
+      }
+    } catch { /* events table missing — skip flush, do row cleanup below */ }
+    if (usedIds.size > 0) {
+      try {
+        const resCursor = sql.exec(
+          `SELECT data FROM events
+            WHERE type IN ('agent.tool_result','agent.mcp_tool_result')`,
+        );
+        for (const row of resCursor) {
+          try {
+            const d = JSON.parse(row.data as string) as {
+              tool_use_id?: string;
+              mcp_tool_use_id?: string;
+            };
+            const id = d.tool_use_id ?? d.mcp_tool_use_id;
+            if (id) usedIds.delete(id);
+          } catch { /* skip */ }
+        }
+      } catch { /* skip */ }
+    }
+    let flushed = 0;
+    for (const [id, meta] of usedIds) {
+      const isMcp = meta.type === "agent.mcp_tool_use";
+      const event = isMcp
+        ? {
+            type: "agent.mcp_tool_result" as const,
+            mcp_tool_use_id: id,
+            content: "Tool call interrupted (DO eviction or restart). Re-send your message to retry.",
+            is_error: true,
+          }
+        : {
+            type: "agent.tool_result" as const,
+            tool_use_id: id,
+            content: "Tool call interrupted (DO eviction or restart). Re-send your message to retry.",
+            is_error: true,
+          };
+      const tagged = (meta.thread
+        ? { ...event, session_thread_id: meta.thread }
+        : event) as unknown as SessionEvent;
+      try {
+        await this.runtimeAdapter.eventLog.append(tagged);
+        this.broadcastEvent(tagged);
+        flushed++;
+      } catch (err) {
+        console.warn(`[finalize-stale] failed to flush tool_use ${id}:`, err);
+      }
+    }
+
+    // 2. Force-end stale sessions rows. Skip turns currently held in
+    //    _activeTurnIds (live work in this incarnation). Order matters:
+    //    endTurn FIRST (the contract), events only on success. The
+    //    earlier shape (rescheduled → endTurn → idle) emitted a
+    //    rescheduled event even when endTurn threw, leaving Console
+    //    showing "rescheduled" with no resolution and the row still
+    //    'running'. Atomic-from-Console's-perspective: events appear
+    //    iff the row actually flipped.
+    const orphans = await this.runtimeAdapter.listOrphanTurns(this.state.session_id);
+    let ended = 0;
+    // Race window: cold-start flush is fire-and-forget from fetch();
+    // the same fetch() may concurrently route a POST /event into
+    // drainEventQueue → adapter.beginTurn (writes D1 row) →
+    // hintTurnInFlight callback (populates _activeTurnIds). If we read
+    // listOrphanTurns BETWEEN the D1 write landing and the in-memory
+    // set add, the brand-new turn looks like an orphan and we'd
+    // incorrectly emit rescheduled+idle for it (caught 2026-05-11
+    // bench scenario 08, sess-hn5kmowudx42awm0). Filter by
+    // turn_started_at age — anything that started < 30s ago is
+    // necessarily either still in-flight or just-completed; not an
+    // orphan worth reaping. Real orphans (DO eviction) have
+    // turn_started_at from a previous incarnation, which is by
+    // definition older than the current process's lifetime.
+    const FRESH_TURN_GRACE_MS = 30_000;
+    const now = Date.now();
+    for (const o of orphans) {
+      if (this._activeTurnIds.has(o.turn_id)) continue;
+      if (now - o.turn_started_at < FRESH_TURN_GRACE_MS) continue;
+      try {
+        await this.runtimeAdapter.endTurn(this.state.session_id, o.turn_id, "idle");
+      } catch (err) {
+        console.warn(`[finalize-stale] endTurn failed for ${o.turn_id}:`, err);
+        continue; // skip event emission — row is still in old state
+      }
+      ended++;
+      const reschedEvent = {
+        type: "session.status_rescheduled",
+        reason: "DO eviction or restart — stream lost; re-send to continue.",
+      } as unknown as SessionEvent;
+      const idleEvent = { type: "session.status_idle" } as unknown as SessionEvent;
+      // Events are best-effort post-cleanup; row is the source of truth.
+      try { await this.runtimeAdapter.eventLog.append(reschedEvent); } catch {}
+      try { this.broadcastEvent(reschedEvent); } catch {}
+      try { await this.runtimeAdapter.eventLog.append(idleEvent); } catch {}
+      try { this.broadcastEvent(idleEvent); } catch {}
+    }
+    if (flushed > 0 || ended > 0) {
+      console.log(`[finalize-stale] flushed ${flushed} tool_uses, ended ${ended} stale turns`);
     }
   }
 

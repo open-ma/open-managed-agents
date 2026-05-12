@@ -16,7 +16,8 @@
       "/health",
       "/linear/*",
       "/linear-setup/*",
-      "/agents/runtime/*"
+      "/agents/runtime/*",
+      "/billing-api/*"
     ]
   },
 
@@ -45,9 +46,15 @@
     { "binding": "MEMORY_BUCKET", "bucket_name": "managed-agents-memory" }
   ],
 
+  // D1 layout (post-shard rollout) — must match OSS apps/main/wrangler.jsonc.
+  // ROUTER_DB resolves tenant→shard. AUTH_DB legacy alias = AUTH_DB_00 same id.
   "d1_databases": [
-    { "binding": "AUTH_DB",         "database_name": "openma-auth",         "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" },
-    { "binding": "INTEGRATIONS_DB", "database_name": "openma-integrations", "database_id": "36f67512-b0d7-4300-9d57-f265cd9d3075" }
+    { "binding": "AUTH_DB",    "database_name": "openma-auth",          "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" },
+    { "binding": "ROUTER_DB",  "database_name": "openma-router",        "database_id": "6ddad512-7976-4912-8003-7746ba1e4cb6" },
+    { "binding": "AUTH_DB_00", "database_name": "openma-auth",          "database_id": "dbb5f01c-7016-4157-945d-f8ff9fbda967" },
+    { "binding": "AUTH_DB_01", "database_name": "openma-auth-shard-01", "database_id": "37a3138c-8d1e-4258-8a0d-e0da511b0175" },
+    { "binding": "AUTH_DB_02", "database_name": "openma-auth-shard-02", "database_id": "254c56dc-2a99-4266-87ae-9ff46355eb75" },
+    { "binding": "AUTH_DB_03", "database_name": "openma-auth-shard-03", "database_id": "a4f72551-7ce7-4da3-a33e-f4abb00bb86f" }
   ],
 
   "durable_objects": {
@@ -69,10 +76,15 @@
     { "binding": "VECTORIZE", "index_name": "memory-search" }
   ],
 
-  // Service bindings to agent workers
+  // Service bindings to agent workers + hosted-only meter.
+  // USAGE_METER points at packages/billing/ (entrypoint UsageMeter); the
+  // OSS Env declares the duck-typed contract so this binding is purely
+  // a hosted-deployment concern — self-host omits.
   "services": [
     { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default" },
-    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" }
+    { "binding": "INTEGRATIONS", "service": "managed-agents-integrations" },
+    { "binding": "USAGE_METER", "service": "managed-agents-billing", "entrypoint": "UsageMeter" },
+    { "binding": "USAGE_METER_HTTP", "service": "managed-agents-billing" }
   ],
 
   "migrations": [
@@ -177,8 +189,12 @@
         { "binding": "CONFIG_KV", "id": "f91ddab8abe64941bd3ef398b0c187a7" }
       ],
       "d1_databases": [
-        { "binding": "AUTH_DB",         "database_name": "openma-auth-staging",         "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" },
-        { "binding": "INTEGRATIONS_DB", "database_name": "openma-integrations-staging", "database_id": "e7247e7e-e60c-4c8e-ac1c-5eff7ad8cb95" }
+        { "binding": "AUTH_DB",    "database_name": "openma-auth-staging",          "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" },
+        { "binding": "ROUTER_DB",  "database_name": "openma-router-staging",        "database_id": "c238a338-9b6e-40c5-aaaa-48d4fe6dc63d" },
+        { "binding": "AUTH_DB_00", "database_name": "openma-auth-staging",          "database_id": "aff5dbb7-36f9-46b7-b82f-4513e5603ac6" },
+        { "binding": "AUTH_DB_01", "database_name": "openma-auth-shard-01-staging", "database_id": "fe6a34d1-cd8a-48a1-bff1-29032026d006" },
+        { "binding": "AUTH_DB_02", "database_name": "openma-auth-shard-02-staging", "database_id": "8636a018-8ac6-48c2-ae95-2f70919c8aab" },
+        { "binding": "AUTH_DB_03", "database_name": "openma-auth-shard-03-staging", "database_id": "8ce8f17d-7527-4a5a-b097-ce73251be55a" }
       ],
       "r2_buckets": [
         { "binding": "FILES_BUCKET", "bucket_name": "managed-agents-files" },
@@ -198,6 +214,9 @@
       "services": [
         { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default-staging" },
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }
+        // USAGE_METER intentionally omitted on staging — packages/billing
+        // isn't deployed there. The OSS contract is duck-typed optional,
+        // so canStartSandbox/recordUsage soft-skip when binding is absent.
       ],
       "durable_objects": {
         "bindings": [

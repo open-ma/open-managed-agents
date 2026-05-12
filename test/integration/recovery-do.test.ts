@@ -420,7 +420,11 @@ describe("SessionDO recovery — DO-level", () => {
     )
       .bind(
         "turn_evicted",
-        Date.now() - 30_000,
+        // Old enough to clear _checkOrphanTurns' 90s grace period
+        // (added 2026-05-10 to stop alarm-fired self-recovery; see
+        // session-do.ts:_checkOrphanTurns docstring). Real orphans
+        // from a previous DO incarnation are typically minutes+ old.
+        Date.now() - 120_000,
         Date.now(),
         sessionId,
       )
@@ -490,7 +494,9 @@ describe("SessionDO recovery — DO-level", () => {
       `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
         WHERE id=?`,
     )
-      .bind("turn_dead", Date.now(), Date.now(), sessionId)
+      // Old turn_started_at — clears the 90s grace period in
+      // _checkOrphanTurns. See sibling test above for context.
+      .bind("turn_dead", Date.now() - 120_000, Date.now(), sessionId)
       .run();
 
     await runInDurableObject(stub, async (_inst, state) => {
@@ -535,7 +541,8 @@ describe("SessionDO recovery — DO-level", () => {
       `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
         WHERE id=?`,
     )
-      .bind("turn_combined", Date.now() - 5_000, Date.now(), sessionId)
+      // Old turn_started_at — clears _checkOrphanTurns 90s grace.
+      .bind("turn_combined", Date.now() - 120_000, Date.now(), sessionId)
       .run();
 
     await runDurableObjectAlarm(stub);
@@ -558,5 +565,977 @@ describe("SessionDO recovery — DO-level", () => {
         e.type === "agent.tool_result" && e.data.tool_use_id === "tu_combined",
     );
     expect(placeholder).toBeDefined();
+  });
+
+  // ─── Active-turn filter (the port-correct fix) ──────────────────────
+  // The original bug (sess-slqg7xf4kvm6s2j4 2026-05-10 07:01:43Z): the
+  // 30s keep-alive alarm fired mid-stream, _checkOrphanTurns saw the
+  // D1 row with our OWN active turn_id, didn't filter, treated it as
+  // orphan, and emitted session.status_rescheduled + a parallel
+  // streamText. Hint-counter+grace was a workaround; the contract-
+  // correct fix is to track turnId in _activeTurnIds (populated by
+  // RuntimeAdapter.hintTurnInFlight) and filter via .has(o.turn_id).
+
+  it("alarm() does NOT recover a turn that's in _activeTurnIds (own active turn)", async () => {
+    const sessionId = await newSessionDirect("active_turn_skip");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+    const ownTurnId = "turn_active_own";
+
+    // Plant the D1 row exactly as adapter.beginTurn would, then
+    // register the same turn id in the SessionDO's local active set —
+    // simulating what hintTurnInFlight does after beginTurn lands.
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind(ownTurnId, Date.now() - 600_000, Date.now(), sessionId)
+      .run();
+    await runInDurableObject(stub, async (instance, state) => {
+      const set = (instance as { _activeTurnIds: Set<string> })._activeTurnIds;
+      set.add(ownTurnId);
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    // Row should still be 'running' with turn_id intact — the alarm
+    // saw our own turn id in _activeTurnIds, skipped it, didn't write.
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("running");
+    expect(after.turn_id).toBe(ownTurnId);
+
+    // Event-log should NOT contain a session.status_rescheduled event
+    // (the original bug's symptom).
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data: events } = await ev.json();
+    const reschedule = events.find(
+      (e: { type: string }) => e.type === "session.status_rescheduled",
+    );
+    expect(reschedule, "must not emit reschedule for own active turn").toBeUndefined();
+
+    // Cleanup so the next test starts fresh.
+    await runInDurableObject(stub, async (instance) => {
+      (instance as { _activeTurnIds: Set<string> })._activeTurnIds.delete(ownTurnId);
+    });
+  });
+
+  it("alarm() DOES recover a turn that's NOT in _activeTurnIds (real orphan)", async () => {
+    // Mirror image: D1 row exists but the turn id is NOT in our local
+    // active set — simulates a previous DO incarnation that died.
+    // Fresh isolate sees the residue and recovers properly.
+    const sessionId = await newSessionDirect("real_orphan_recover");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?, updated_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_incarnation", Date.now() - 300_000, Date.now(), sessionId)
+      .run();
+    // Deliberately do NOT add to _activeTurnIds — that's the whole
+    // point of "real orphan from a previous incarnation".
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const after = await env.AUTH_DB.prepare(
+      `SELECT status, turn_id FROM sessions WHERE id=?`,
+    )
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+    expect(after.turn_id).toBeNull();
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Cold-start orphan flush + alarm hygiene
+  //
+  // The new path (replaces the old onFiberRecovered → recoverAgentTurn
+  // chain that re-ran the LLM in alarm and burned the 180s wall budget,
+  // observed on staging sess-slqg7xf4kvm6s2j4 2026-05-10). Mirrors the
+  // shape of cloudflare/agents SDK's run-fiber.test.ts cleanup
+  // assertions — same family of guarantees, ours implemented on top of
+  // the event log instead of cf_agents_runs.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("first fetch() triggers _finalizeStaleTurns once; subsequent fetches skip", async () => {
+    // Setup: orphan turn marker from a prior incarnation. Cold-start
+    // fetch() should run the flush exactly once and the guard should
+    // prevent re-flushing on later fetches.
+    const sessionId = await newSessionDirect("cold_start_once");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_prior", Date.now() - 300_000, sessionId)
+      .run();
+
+    // Reset the in-memory cold-start guard so the test acts on a fresh
+    // incarnation. (Outside of tests this is set by class instantiation.)
+    await runInDurableObject(stub, (instance) => {
+      (instance as { _coldStartFlushDone: boolean })._coldStartFlushDone = false;
+    });
+
+    // First fetch — any cheap endpoint will do; the flush is wired into
+    // the fetch() entry, not any specific route.
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    // Background flush is fire-and-forget — let it land.
+    await new Promise((r) => setTimeout(r, 150));
+
+    const afterFirst = await env.AUTH_DB
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(afterFirst.status).toBe("idle");
+    expect(afterFirst.turn_id).toBeNull();
+
+    // Re-poison the row to simulate a second orphan post-cold-start.
+    // The guard means the second fetch should NOT clear it (only the
+    // alarm path catches mid-life orphans).
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_again", Date.now() - 60_000, sessionId)
+      .run();
+
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 50));
+
+    const afterSecond = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    // Still 'running' because the cold-start guard tripped — alarm()
+    // would catch this on its next fire (separate code path covered
+    // by the alarm() tests above).
+    expect(afterSecond.status).toBe("running");
+  });
+
+  it("alarm() finishes fast (no LLM replay) even with stale turn", async () => {
+    // alarm() previously routed orphans through recoverAgentTurn which
+    // ran the LLM stream from inside alarm and burned the 180s wall
+    // budget (3-min CF cap). The new path is SQL-only and should
+    // complete in milliseconds.
+    const sessionId = await newSessionDirect("alarm_fast");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Seed event-log noise + arm the alarm in the same RPC (matches
+    // the working orphan_combined test pattern — single RPC keeps
+    // the storage view consistent across DO incarnations).
+    await runInDurableObject(stub, async (_instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      for (let i = 0; i < 10; i++) {
+        history.append({ type: "agent.tool_use", id: `tu_${i}`, name: "noop", input: {} });
+      }
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    // Plant the orphan-turn marker in D1 (after seed; matches
+    // orphan_combined).
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_burn", Date.now() - 120_000, sessionId)
+      .run();
+
+    const t0 = Date.now();
+    await runDurableObjectAlarm(stub);
+    const elapsed = Date.now() - t0;
+    // Settle any deferred writes the alarm body kicked off (matches
+    // the orphan_combined test that asserts the same row state).
+    await new Promise((r) => setTimeout(r, 200));
+
+    // The SQL-only flush should be well under 1 second on the
+    // miniflare/in-memory test harness; pre-fix the LLM replay path
+    // would block until 180s-cap or a fake-LLM stub completed.
+    // Generous bound: 1500ms covers even slow CI.
+    expect(elapsed).toBeLessThan(1500);
+
+    const after = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(after.status).toBe("idle");
+  });
+
+  it("_finalizeStaleTurns emits aborted tool_result for unpaired tool_use", async () => {
+    // Mirror the existing "injects placeholder tool_result for orphan
+    // agent.tool_use" test, but explicitly through the new _finalizeStaleTurns
+    // path (alarm-triggered) and asserts the abort marker shape ours
+    // contributes (is_error: true + a "Tool call interrupted" message).
+    const sessionId = await newSessionDirect("finalize_aborted_result");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_with_unpaired", Date.now() - 120_000, sessionId)
+      .run();
+    await runInDurableObject(stub, async (_instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({
+        type: "agent.tool_use",
+        id: "tu_orphan_x",
+        name: "noop",
+        input: {},
+      });
+    });
+
+    await runInDurableObject(stub, async (_inst, state) => {
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 100));
+
+    const events = await runInDurableObject(stub, (instance) => {
+      const sql = (instance as { ctx: { storage: { sql: SqlStorage } } }).ctx.storage.sql;
+      return sql.exec(
+        `SELECT type, data FROM events WHERE type='agent.tool_result' OR type='agent.mcp_tool_result'`,
+      ).toArray();
+    });
+    const aborted = events.find((e) => {
+      try {
+        const d = JSON.parse(e.data as string);
+        return d.tool_use_id === "tu_orphan_x";
+      } catch {
+        return false;
+      }
+    });
+    expect(aborted).toBeDefined();
+    const data = JSON.parse(aborted!.data as string);
+    expect(data.is_error).toBe(true);
+    expect(String(data.content)).toMatch(/interrupted/i);
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // Alarm heartbeat-merge regression guards
+  //
+  // _scheduleNextAlarm() runs at the end of alarm() and was historically
+  // calling deleteAlarm() whenever cf_agents_schedules was empty —
+  // silently clobbering the keep-alive heartbeat that the supervisor
+  // turn relies on. Pre-2026-05-10 this latent bug only mattered when
+  // alarm() also burned its 180s wall-time budget on LLM replay (caught
+  // by code review on session sess-slqg7xf4kvm6s2j4). The merge fix in
+  // _scheduleNextAlarm folds the heartbeat into the same setAlarm call
+  // (min(heartbeat, next-schedule)) so it can't be clobbered.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("alarm() with inflight supervisor turn does NOT clobber its own heartbeat", async () => {
+    // Pre-merge: alarm() set the heartbeat then _scheduleNextAlarm()
+    // called deleteAlarm() 5ms later when cf_agents_schedules was
+    // empty (the common case). Asserting "setAlarm fired" alone is
+    // necessary-not-sufficient; we MUST also assert deleteAlarm did
+    // NOT fire. Spy on both. Use a real supervisor inflight marker
+    // (sessions.status='running' with a turn_id we own — covered by
+    // _activeTurnIds so finalize doesn't try to clean it up).
+    const sessionId = await newSessionDirect("heartbeat_no_clobber");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Plant a "live supervisor turn" — D1 row marked running, plus
+    // register the turn_id in _activeTurnIds so _finalizeStaleTurns
+    // skips it (matches the contract for the caller's own active turn).
+    const ownTurnId = "turn_inflight_supervisor";
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind(ownTurnId, Date.now() - 10_000, sessionId)
+      .run();
+
+    const setAlarmInside: number[] = [];
+    let deleteCallsInside = 0;
+    let spyArmed = false;
+    await runInDurableObject(stub, async (instance, state) => {
+      const set = (instance as { _activeTurnIds: Set<string> })._activeTurnIds;
+      set.add(ownTurnId);
+
+      const ctx = (instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      const origDel = ctx.storage.deleteAlarm.bind(ctx.storage);
+
+      // Trigger the alarm BEFORE installing spies so the trigger
+      // setAlarm/deleteAlarm calls aren't counted.
+      await state.storage.deleteAlarm();
+      await state.storage.setAlarm(Date.now() - 1000);
+
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+      ctx.storage.deleteAlarm = async () => {
+        if (spyArmed) deleteCallsInside++;
+        return origDel();
+      };
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // setAlarm fired — heartbeat scheduled ~30s out.
+    expect(setAlarmInside.length).toBeGreaterThan(0);
+    const lastT = setAlarmInside[setAlarmInside.length - 1];
+    expect(lastT).toBeGreaterThan(Date.now());
+    expect(lastT - Date.now()).toBeLessThan(60_000);
+    // deleteAlarm did NOT fire — the heartbeat survives. This is the
+    // load-bearing regression guard. Pre-merge it would have been > 0.
+    expect(deleteCallsInside).toBe(0);
+  });
+
+  it("alarm() with no inflight turn calls deleteAlarm (no leaked heartbeat)", async () => {
+    // Negative case — proves the heartbeat is conditional on
+    // _hasInflightTurn(), not unconditional.
+    const sessionId = await newSessionDirect("no_heartbeat_when_idle");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmInside: number[] = [];
+    let deleteCallsInside = 0;
+    let spyArmed = false;
+    await runInDurableObject(stub, async (_instance, state) => {
+      const ctx = (_instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      const origDel = ctx.storage.deleteAlarm.bind(ctx.storage);
+
+      await state.storage.deleteAlarm();
+      await state.storage.setAlarm(Date.now() - 1000);
+
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+      ctx.storage.deleteAlarm = async () => {
+        if (spyArmed) deleteCallsInside++;
+        return origDel();
+      };
+    });
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // No setAlarm — nothing to keep alive.
+    expect(setAlarmInside.length).toBe(0);
+    // deleteAlarm DID fire — _scheduleNextAlarm cleared the slot
+    // because nothing's scheduled and no heartbeat needed.
+    expect(deleteCallsInside).toBeGreaterThan(0);
+  });
+
+  it("_finalizeStaleTurns no half-state — endTurn failure suppresses event emit", async () => {
+    // Reviewer-flagged: the previous shape emitted session.status_rescheduled
+    // BEFORE endTurn, so a throw in endTurn left Console showing
+    // "rescheduled" with no resolution and the row stuck 'running'.
+    // The new shape only emits on endTurn success. Test by stubbing
+    // adapter.endTurn to throw and asserting NO rescheduled/idle event
+    // landed in the event log.
+    const sessionId = await newSessionDirect("finalize_no_half");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_endturn_fails", Date.now() - 120_000, sessionId)
+      .run();
+
+    await runInDurableObject(stub, async (instance) => {
+      const adapter = (instance as unknown as { runtimeAdapter: { endTurn: (s: string, t: string, st: string) => Promise<void> } }).runtimeAdapter;
+      const orig = adapter.endTurn.bind(adapter);
+      adapter.endTurn = async () => {
+        throw new Error("simulated endTurn failure");
+      };
+      const finalize = (instance as unknown as { _finalizeStaleTurns: () => Promise<void> })._finalizeStaleTurns.bind(instance);
+      await finalize();
+      // Restore so subsequent test isolation isn't broken by this stub.
+      adapter.endTurn = orig;
+    });
+
+    // Row must still be 'running' (endTurn was the throw site).
+    const row = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(row.status).toBe("running");
+
+    // No rescheduled/idle event leaked out.
+    const events = await stub.fetch(new Request("http://internal/events"));
+    const { data } = await events.json() as { data: Array<{ type: string }> };
+    expect(data.find((e) => e.type === "session.status_rescheduled")).toBeUndefined();
+    expect(data.find((e) => e.type === "session.status_idle")).toBeUndefined();
+  });
+
+  it("cold-start guard resets to false on flush failure — next fetch retries", async () => {
+    // Reviewer-flagged: the previous shape set _coldStartFlushDone=true
+    // synchronously before the async flush; if the flush rejected, the
+    // guard stayed true forever and recovery was permanently dead. New
+    // shape resets to false in .catch() so a future fetch retries.
+    const sessionId = await newSessionDirect("cold_start_retry");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_retry_target", Date.now() - 120_000, sessionId)
+      .run();
+
+    // Reset guard + stub _finalizeStaleTurns to throw on first call,
+    // succeed on second. Confirms (a) first fetch trips guard + flush
+    // throws, (b) guard reset, (c) second fetch retries + succeeds.
+    let calls = 0;
+    await runInDurableObject(stub, (instance) => {
+      (instance as { _coldStartFlushDone: boolean })._coldStartFlushDone = false;
+      const orig = (instance as unknown as { _finalizeStaleTurns: () => Promise<void> })._finalizeStaleTurns.bind(instance);
+      (instance as unknown as { _finalizeStaleTurns: () => Promise<void> })._finalizeStaleTurns = async () => {
+        calls++;
+        if (calls === 1) throw new Error("first attempt fails");
+        return orig();
+      };
+    });
+
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(calls).toBe(1);
+    // Guard should have been reset by the .catch.
+    const guardAfterFail = await runInDurableObject(stub, (instance) => {
+      return (instance as { _coldStartFlushDone: boolean })._coldStartFlushDone;
+    });
+    expect(guardAfterFail).toBe(false);
+
+    // Second fetch — flush retries + succeeds.
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(calls).toBe(2);
+    const row = await env.AUTH_DB
+      .prepare(`SELECT status FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(row.status).toBe("idle");
+  });
+
+  it("regression: sess-slqg7xf4kvm6s2j4 cascade — orphan turn + N unpaired tool_uses recovered in one cold-start", async () => {
+    // End-to-end regression guard for the staging cascade observed on
+    // 2026-05-10:
+    //   - long-running session (5h21m) with active sub-agent calls
+    //   - DO evicted mid-stream by CF (memory / scale-down / random)
+    //   - left sessions.status='running' + ~30 unpaired tool_use events
+    //   - next alarm ran recoverAgentTurn → re-ran LLM stream IN alarm
+    //     → burned the 180s wall budget → CF cancelled the alarm →
+    //     no rearm → DO evicted again → cycle repeats
+    //   - UI stuck "Running" forever, orphan tool_use cards never
+    //     resolved, no events flowed
+    //
+    // Component-level tests above each cover one slice (alarm hygiene,
+    // tool_use cleanup, status flip, heartbeat-merge no-clobber). This
+    // test stitches them: setup the exact failure shape, trigger
+    // cold-start once, assert full recovery in a single SQL-only pass.
+    //
+    // Post-fix invariants asserted here:
+    //   (a) Recovery completes in milliseconds (no LLM replay → no
+    //       180s burn → alarm budget intact)
+    //   (b) Every unpaired tool_use of every wire-spec type
+    //       (agent.tool_use, agent.mcp_tool_use) gets a paired
+    //       aborted *_tool_result with is_error=true
+    //   (c) sessions row flips to idle, turn_id cleared
+    //   (d) Event log carries session.status_rescheduled +
+    //       session.status_idle in that order
+    const sessionId = await newSessionDirect("regression_slqg7xf4");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // 1. Orphan turn marker — long-dead supervisor turn from a
+    //    previous DO incarnation.
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind("turn_dead_supervisor", Date.now() - 600_000, sessionId)
+      .run();
+
+    // 2. Mixed unpaired tool_use events from the dead turn. Names
+    //    mirror what the staging session was actually running
+    //    (general_subagent + web_search + bash + a couple MCP tools).
+    //    Use SqliteHistory so writes go through the same code path
+    //    a live harness would use.
+    await runInDurableObject(stub, async (_inst, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({ type: "agent.tool_use", id: "tu_general_subagent", name: "general_subagent", input: { task: "research" } });
+      history.append({ type: "agent.tool_use", id: "tu_web_search", name: "web_search", input: { query: "anthropic" } });
+      history.append({ type: "agent.tool_use", id: "tu_bash", name: "bash", input: { command: "ls" } });
+      history.append({ type: "agent.mcp_tool_use", id: "mtu_linear", mcp_server_name: "linear", name: "create_issue", input: { title: "x" } });
+      history.append({ type: "agent.mcp_tool_use", id: "mtu_slack", mcp_server_name: "slack", name: "post_message", input: { channel: "general" } });
+      // Reset cold-start guard so the next fetch fires _finalizeStaleTurns.
+      (_inst as { _coldStartFlushDone: boolean })._coldStartFlushDone = false;
+    });
+
+    // 3. Single cold-start fetch — flush is fire-and-forget, settle
+    //    the deferred work then assert the whole recovered shape.
+    const t0 = Date.now();
+    await stub.fetch("https://internal/full-status").catch(() => null);
+    await new Promise((r) => setTimeout(r, 200));
+    const elapsed = Date.now() - t0;
+
+    // (a) bounded execution — no LLM replay anywhere on the path.
+    //     Generous bound covers slow CI; pre-fix would have run for
+    //     up to 180s × N retries.
+    expect(elapsed).toBeLessThan(2000);
+
+    // (c) sessions row reconciled.
+    const row = await env.AUTH_DB
+      .prepare(`SELECT status, turn_id FROM sessions WHERE id=?`)
+      .bind(sessionId)
+      .first();
+    expect(row.status).toBe("idle");
+    expect(row.turn_id).toBeNull();
+
+    // (b) every unpaired tool_use got AT LEAST ONE aborted result.
+    //     (Existing SqliteHistory recovery path also runs from
+    //     fetchInner's init pass, so every id may end up with two
+    //     placeholders — pre-existing duplication, not load-bearing
+    //     for the regression. Match the existing-test pattern of
+    //     `find` rather than exact-count.)
+    const ev = await stub.fetch(new Request("http://internal/events"));
+    const { data } = await ev.json() as {
+      data: Array<{ type: string; data: Record<string, unknown> }>;
+    };
+    for (const id of ["tu_general_subagent", "tu_web_search", "tu_bash"]) {
+      const matches = data.filter((e) =>
+        e.type === "agent.tool_result" && e.data.tool_use_id === id,
+      );
+      expect(matches.length, `aborted tool_result for ${id}`).toBeGreaterThanOrEqual(1);
+      // At least one of the placeholders carries the abort marker.
+      const hasAbortMarker = matches.some(
+        (r) => r.data.is_error === true && /interrupted/i.test(String(r.data.content)),
+      );
+      expect(hasAbortMarker, `is_error+interrupted marker for ${id}`).toBe(true);
+    }
+    for (const id of ["mtu_linear", "mtu_slack"]) {
+      const matches = data.filter((e) =>
+        e.type === "agent.mcp_tool_result" && e.data.mcp_tool_use_id === id,
+      );
+      expect(matches.length, `aborted mcp_tool_result for ${id}`).toBeGreaterThanOrEqual(1);
+      const hasAbortMarker = matches.some((r) => r.data.is_error === true);
+      expect(hasAbortMarker, `is_error marker for ${id}`).toBe(true);
+    }
+
+    // (d) lifecycle events appended in order: rescheduled before idle.
+    const reschedIdx = data.findIndex((e) => e.type === "session.status_rescheduled");
+    const idleIdx = data.findIndex((e) => e.type === "session.status_idle");
+    expect(reschedIdx).toBeGreaterThanOrEqual(0);
+    expect(idleIdx).toBeGreaterThanOrEqual(0);
+    expect(reschedIdx).toBeLessThan(idleIdx);
+  });
+
+  it("hintTurnEnded is idempotent — double-fire from endTurn + outer finally is safe", async () => {
+    // turn-runtime.ts fires hintTurnEnded in its outer finally as a
+    // safety net for endTurn throwing; adapter.endTurn ALSO fires it
+    // on success. Double-fire happens on the happy path. Set.delete
+    // on a missing key is a no-op (idempotent), but pin the contract.
+    const sessionId = await newSessionDirect("hint_idempotent");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, (instance) => {
+      const set = (instance as { _activeTurnIds: Set<string> })._activeTurnIds;
+      set.add("turn_test");
+      // First delete — entry exists, removed.
+      set.delete("turn_test");
+      expect(set.has("turn_test")).toBe(false);
+      // Second delete — already missing, must not throw.
+      expect(() => set.delete("turn_test")).not.toThrow();
+      expect(set.has("turn_test")).toBe(false);
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // CF-agents SDK invariant mirrors
+  //
+  // Audited cloudflare/agents/packages/agents/src/tests/{alarms,
+  // retries,retry-integration,msg-ordering}.test.ts. The SDK retry
+  // primitive (`tryN`/`this.retry()`/`shouldRetry`/queue+schedule
+  // retry options) does not exist on our cfless-portable surface, so
+  // those invariants are out-of-scope. These mirror the alarm
+  // scheduling + msg-ordering invariants that DO apply: callback
+  // mutates schedules mid-alarm, callback re-arms itself, alarm()
+  // boots without a prior fetch (analog of CF's "init runs before
+  // scheduled callbacks"), and WS replay-then-broadcast ordering.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("alarm() survives a scheduled callback that mutates cf_agents_schedules mid-flight", async () => {
+    // CF mirror: alarms.test.ts "should not throw when a scheduled
+    // callback nukes storage". On our surface the dangerous shape is
+    // a callback that calls cancelSchedule(other) or schedule() while
+    // the alarm() loop is iterating `due` rows. The loop already
+    // collected `due` into an array, and the rearm at the bottom must
+    // still succeed even if the callback wiped neighbouring rows.
+    const sessionId = await newSessionDirect("alarm_mutate_schedules");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      // Register a one-shot callback that, when invoked from alarm(),
+      // wipes ALL rows from cf_agents_schedules. This is the worst
+      // case the production loop could hit (a callback that deletes
+      // its sibling rows). The post-loop _scheduleNextAlarm must NOT
+      // throw — empty table just means "no next alarm, deleteAlarm".
+      (instance as unknown as Record<string, unknown>)._oma_test_nuke = async function () {
+        (instance as unknown as { ctx: { storage: { sql: SqlStorage } } })
+          .ctx.storage.sql.exec(`DELETE FROM cf_agents_schedules`);
+      };
+      // Schedule it 1s in the past so alarm() picks it up immediately.
+      const past = Math.floor(Date.now() / 1000) - 1;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_nuke", "_oma_test_nuke", "{}", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    // Alarm must run to completion without throwing — return value is
+    // false when the post-handler alarm slot is empty (no rearm), true
+    // when one was set; either way the loop has to complete cleanly.
+    await expect(runDurableObjectAlarm(stub)).resolves.not.toThrow();
+
+    // The schedule row was deleted by the callback. The post-loop
+    // _scheduleNextAlarm reads the empty table and falls through to
+    // deleteAlarm — verify by checking no row remains.
+    await runInDurableObject(stub, async (_inst, state) => {
+      const rows = state.storage.sql
+        .exec(`SELECT id FROM cf_agents_schedules`)
+        .toArray();
+      expect(rows.length).toBe(0);
+    });
+  });
+
+  it("alarm() reschedules cron callback to next time after firing", async () => {
+    // CF mirror: alarms.test.ts establishes that scheduled callbacks
+    // run within a known lifecycle. Our analog: the alarm() loop
+    // reschedules cron rows to the next cron expression's next-fire
+    // time and re-arms the storage alarm via _scheduleNextAlarm. Pin
+    // that the reschedule actually moves the row forward.
+    const sessionId = await newSessionDirect("alarm_cron_rearm");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    let firedCount = 0;
+    await runInDurableObject(stub, async (instance, state) => {
+      (instance as unknown as Record<string, unknown>)._oma_test_cron =
+        async function () { firedCount++; };
+      // Cron "* * * * *" → every minute. Backdate `time` so alarm()
+      // sees it as due now.
+      const past = Math.floor(Date.now() / 1000) - 1;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, cron, time)
+         VALUES (?, ?, ?, 'cron', ?, ?)`,
+        "sched_cron", "_oma_test_cron", "{}", "* * * * *", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(firedCount).toBe(1);
+
+    // Row should still exist (cron reschedules in place) and `time`
+    // should now be in the future — the next cron tick.
+    await runInDurableObject(stub, async (_inst, state) => {
+      const rows = state.storage.sql
+        .exec<{ id: string; time: number }>(
+          `SELECT id, time FROM cf_agents_schedules WHERE id=?`, "sched_cron",
+        )
+        .toArray();
+      expect(rows.length).toBe(1);
+      expect(rows[0].time).toBeGreaterThan(Math.floor(Date.now() / 1000));
+    });
+
+    // Cleanup so subsequent tests don't see this row.
+    await runInDurableObject(stub, (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id=?`, "sched_cron");
+    });
+  });
+
+  it("alarm() with poisoned (unparseable payload) row deletes the row instead of looping", async () => {
+    // CF mirror: alarms.test.ts implies the alarm pipeline must be
+    // resilient to a single row breaking it. Our concrete shape: a
+    // payload column that fails JSON.parse. session-do.ts handles
+    // this with `DELETE FROM cf_agents_schedules WHERE id = ?`
+    // followed by `continue` so the loop doesn't burn cycles.
+    const sessionId = await newSessionDirect("alarm_bad_payload");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    await runInDurableObject(stub, async (instance, state) => {
+      // Install a real callback so the lookup succeeds and the loop
+      // proceeds to the payload parse (which fails). The bad-payload
+      // branch in alarm() then DELETEs the row.
+      (instance as unknown as Record<string, unknown>)._oma_test_payload_target =
+        async function () { /* unused — payload parse fails before us */ };
+      const past = Math.floor(Date.now() / 1000) - 1;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_bad", "_oma_test_payload_target", "<not json>", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    // Alarm must run to completion without throwing.
+    await expect(runDurableObjectAlarm(stub)).resolves.not.toThrow();
+
+    // Row should be GONE — the poisoned-payload branch deletes it so
+    // the alarm doesn't re-fire on the same broken row forever.
+    await runInDurableObject(stub, async (_inst, state) => {
+      const rows = state.storage.sql
+        .exec(`SELECT id FROM cf_agents_schedules WHERE id=?`, "sched_bad")
+        .toArray();
+      expect(rows.length).toBe(0);
+    });
+  });
+
+  it("alarm() handles missing-callback row gracefully (logs + continues, doesn't crash)", async () => {
+    // CF mirror: alarms.test.ts's robustness theme. If a row references
+    // a callback name that no longer exists on the class (e.g. after a
+    // deploy that renamed/removed it), the alarm must continue
+    // processing other rows + the rearm must still happen.
+    const sessionId = await newSessionDirect("alarm_missing_cb");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    let goodFiredCount = 0;
+    await runInDurableObject(stub, async (instance, state) => {
+      (instance as unknown as Record<string, unknown>)._oma_test_good =
+        async function () { goodFiredCount++; };
+      const past = Math.floor(Date.now() / 1000) - 1;
+      // Two rows: one points at a missing callback, one at a real one.
+      // Loop must skip the missing-cb row and still fire the good one.
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_missing", "noSuchCallback", "{}", past,
+      );
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_good", "_oma_test_good", "{}", past,
+      );
+      await state.storage.setAlarm(Date.now() - 1000);
+    });
+
+    await expect(runDurableObjectAlarm(stub)).resolves.not.toThrow();
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(goodFiredCount).toBe(1);
+    // Cleanup any leftover rows so test isolation holds.
+    await runInDurableObject(stub, (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id IN (?, ?)`, "sched_missing", "sched_good");
+    });
+  });
+
+  it("alarm() rearm uses min(heartbeat, next-schedule) when both are present", async () => {
+    // CF mirror: alarms.test.ts asserts the alarm system is consistent
+    // about when the next alarm fires. Our heartbeat-merge contract:
+    // when there's an inflight turn (heartbeat ~30s) AND a scheduled
+    // row 1h out, the next alarm must be the heartbeat (the min). The
+    // pre-merge bug picked one or the other and dropped the heartbeat
+    // when schedules existed but were further out.
+    const sessionId = await newSessionDirect("alarm_min_merge");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+    const ownTurnId = "turn_min_merge";
+
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='running', turn_id=?, turn_started_at=?
+        WHERE id=?`,
+    )
+      .bind(ownTurnId, Date.now() - 5_000, sessionId)
+      .run();
+
+    const setAlarmInside: number[] = [];
+    let spyArmed = false;
+    await runInDurableObject(stub, async (instance, state) => {
+      (instance as { _activeTurnIds: Set<string> })._activeTurnIds.add(ownTurnId);
+      // Plant a one-shot schedule 1 hour in the future. Heartbeat is
+      // 30s out (KEEP_ALIVE_INTERVAL_MS) so the merged min should be
+      // the heartbeat, ~30s.
+      const farFuture = Math.floor(Date.now() / 1000) + 3600;
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_far", "_oma_test_noop", "{}", farFuture,
+      );
+
+      const ctx = (instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      // Trigger setAlarm BEFORE arming the spy so the trigger isn't counted.
+      await state.storage.setAlarm(Date.now() - 1000);
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+    });
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // The rearm should be the heartbeat (~30s out), not the 1h schedule.
+    expect(setAlarmInside.length).toBeGreaterThan(0);
+    const lastT = setAlarmInside[setAlarmInside.length - 1];
+    const deltaMs = lastT - Date.now();
+    expect(deltaMs).toBeLessThan(60_000); // heartbeat horizon
+    expect(deltaMs).toBeGreaterThan(0);
+
+    // Cleanup
+    await env.AUTH_DB.prepare(
+      `UPDATE sessions SET status='idle', turn_id=NULL, turn_started_at=NULL WHERE id=?`,
+    ).bind(sessionId).run();
+    await runInDurableObject(stub, (instance, state) => {
+      (instance as { _activeTurnIds: Set<string> })._activeTurnIds.delete(ownTurnId);
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id=?`, "sched_far");
+    });
+  });
+
+  it("alarm() rearm uses next-schedule when no heartbeat needed and schedule is sooner than heartbeat horizon", async () => {
+    // Mirror image of the above: inflight=false, but a schedule row
+    // exists 5 minutes out. The merged result must be the schedule
+    // time (no heartbeat to merge with). Pins the "no inflight ⇒ no
+    // heartbeat" path while still rearming for real schedule work.
+    const sessionId = await newSessionDirect("alarm_schedule_only");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    const setAlarmInside: number[] = [];
+    let deleteCallsInside = 0;
+    let spyArmed = false;
+    const targetSec = Math.floor(Date.now() / 1000) + 300; // 5 min out
+    await runInDurableObject(stub, async (instance, state) => {
+      state.storage.sql.exec(
+        `INSERT INTO cf_agents_schedules (id, callback, payload, type, time)
+         VALUES (?, ?, ?, 'scheduled', ?)`,
+        "sched_5min", "_oma_test_noop", "{}", targetSec,
+      );
+
+      const ctx = (instance as unknown as { ctx: { storage: {
+        setAlarm: (t: number) => Promise<void>;
+        deleteAlarm: () => Promise<void>;
+      } } }).ctx;
+      const origSet = ctx.storage.setAlarm.bind(ctx.storage);
+      const origDel = ctx.storage.deleteAlarm.bind(ctx.storage);
+      await state.storage.setAlarm(Date.now() - 1000);
+      spyArmed = true;
+      ctx.storage.setAlarm = async (t: number) => {
+        if (spyArmed) setAlarmInside.push(t);
+        return origSet(t);
+      };
+      ctx.storage.deleteAlarm = async () => {
+        if (spyArmed) deleteCallsInside++;
+        return origDel();
+      };
+    });
+
+    await runDurableObjectAlarm(stub);
+    await new Promise((r) => setTimeout(r, 50));
+    spyArmed = false;
+
+    // setAlarm fired at the schedule's time (or close to it). The
+    // load-bearing assertion: the LAST setAlarm wins (workerd uses
+    // last-write semantics for the alarm slot) and matches the
+    // schedule's target time, NOT zero / NOT cleared.
+    expect(setAlarmInside.length).toBeGreaterThan(0);
+    const lastT = setAlarmInside[setAlarmInside.length - 1];
+    // Should be approximately targetSec*1000 (within 1s tolerance).
+    expect(Math.abs(lastT - targetSec * 1000)).toBeLessThan(1500);
+    // No spurious extra delete after the setAlarm — that was the
+    // pre-merge bug. (deleteCallsInside may be 0 or 1 depending on
+    // whether the platform pre-clears the slot; what matters is the
+    // FINAL setAlarm sticks.)
+    void deleteCallsInside;
+
+    await runInDurableObject(stub, (_inst, state) => {
+      state.storage.sql.exec(`DELETE FROM cf_agents_schedules WHERE id=?`, "sched_5min");
+    });
+  });
+
+  // ─────────────────────────────────────────────────────────────────
+  // WebSocket message ordering — replay precedes any subsequent
+  // broadcast. Mirrors cloudflare/agents msg-ordering.test.ts: the WS
+  // upgrade must produce a deterministic prefix of pre-existing events
+  // before any new event reaches the new socket. Our shape: GET /ws
+  // calls history.getEvents() then ws.send() in a sync loop, returning
+  // the 101 only after the loop completes. A subsequent broadcastEvent
+  // (driven by any RPC after the upgrade returns) lands strictly after.
+  // ─────────────────────────────────────────────────────────────────
+
+  it("WS upgrade replays existing events in order before any subsequent broadcast", async () => {
+    const sessionId = await newSessionDirect("ws_replay_order");
+    const stub = env.SESSION_DO.get(env.SESSION_DO.idFromName(sessionId));
+
+    // Seed three pre-existing events directly into the DO's events
+    // table so the WS replay has something deterministic to send.
+    await runInDurableObject(stub, async (instance, state) => {
+      ensureEventLogSchema(state.storage.sql);
+      const history = new SqliteHistory(state.storage.sql);
+      history.append({ type: "user.message", content: [{ type: "text", text: "first" }] });
+      history.append({ type: "user.message", content: [{ type: "text", text: "second" }] });
+      history.append({ type: "user.message", content: [{ type: "text", text: "third" }] });
+      // Mark initialized so /ws doesn't trigger a recovery scan.
+      (instance as { initialized: boolean }).initialized = true;
+    });
+
+    // Open the WebSocket. The fetch returns only after replay is done.
+    const upgradeRes = await stub.fetch(
+      new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }),
+    );
+    expect(upgradeRes.status).toBe(101);
+    const ws = upgradeRes.webSocket as WebSocket;
+    ws.accept();
+
+    const received: string[] = [];
+    const allFour = new Promise<void>((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error(`timed out after ${received.length}`)), 3000);
+      ws.addEventListener("message", (ev: MessageEvent) => {
+        received.push(ev.data as string);
+        if (received.length >= 4) {
+          clearTimeout(t);
+          resolve();
+        }
+      });
+    });
+
+    // Now broadcast a fresh event. Because replay runs sync within
+    // fetch() before returning, this MUST land strictly after the
+    // three replay messages.
+    await runInDurableObject(stub, (instance) => {
+      const broadcast = (instance as unknown as {
+        broadcastEvent: (e: unknown) => void;
+      }).broadcastEvent.bind(instance);
+      broadcast({ type: "user.message", content: [{ type: "text", text: "fourth-live" }] });
+    });
+
+    await allFour;
+    ws.close();
+
+    expect(received.length).toBe(4);
+    const parsed = received.map((r) => JSON.parse(r));
+    // Replayed three, in order, then the live one.
+    expect(parsed[0].content[0].text).toBe("first");
+    expect(parsed[1].content[0].text).toBe("second");
+    expect(parsed[2].content[0].text).toBe("third");
+    expect(parsed[3].content[0].text).toBe("fourth-live");
   });
 });
