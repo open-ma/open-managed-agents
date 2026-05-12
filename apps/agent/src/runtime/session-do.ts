@@ -51,6 +51,7 @@ import type {
 } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
+import { composeSystemPrompt } from "../harness/platform-guidance";
 import { resolveModel } from "../harness/provider";
 import type { ApiCompat } from "../harness/provider";
 import type { LanguageModel } from "ai";
@@ -3795,27 +3796,14 @@ export class SessionDO extends DurableObject<Env> {
     const creds = await this.resolveModelCardCredentials(effectiveHandle);
     const model = resolveModel(creds.model, creds.apiKey, creds.baseURL, creds.apiCompat, creds.customHeaders);
 
-    // Build system prompt: agent.system + platform guidance (auth + loop-stop).
+    // Build system prompt: agent.system + platform guidance. Shared with the
+    // self-host Node path via @open-managed-agents/agent/harness/platform-guidance
+    // so the two surfaces stay byte-identical (prompt-cache prefix invariant).
     // Skill / memory_store / appendable_prompt content is NOT appended here —
     // those are collected as platformReminders and injected by the harness's
-    // onSessionInit hook as <system-reminder> user.message events. This keeps
-    // the system field byte-stable across the session, which Anthropic's
-    // prompt cache requires for the cached prefix to survive past turn 1.
+    // onSessionInit hook as <system-reminder> user.message events.
     const rawSystemPrompt = agent.system || "";
-    const authenticatedCommandGuidance =
-      "For commands that may require authentication, prefer issuing a single command instead of a chained shell command. If an authenticated chained command fails, retry with a simpler single-command form.";
-    // Loop-stop guidance: prod incidents have shown agents retrying the same
-    // failing tool call indefinitely when an upstream credential is missing or
-    // an external API is down. Cap retries explicitly and require a structured
-    // failure report so the human (or calling system) can intervene.
-    const loopStopGuidance =
-      "If the same tool call fails three times in a row with substantively the same error, stop retrying. Report (a) what you were trying to do, (b) the exact error, and (c) what you would need to make progress (a missing credential, a corrected input, an upstream service to recover), then end the turn instead of looping.";
-    const sessionOutputsGuidance =
-      "Files you write under `/mnt/session/outputs/` persist after the session ends and are downloadable by the user from the session's Files panel. Use this path for final artifacts the user should keep (reports, exports, generated docs, packaged code). Files written anywhere else (e.g. `/workspace/`) are scratch — they may be lost on container recycle and are not user-accessible.";
-    const platformGuidance = `${authenticatedCommandGuidance}\n\n${loopStopGuidance}\n\n${sessionOutputsGuidance}`;
-    const systemPrompt = rawSystemPrompt
-      ? `${rawSystemPrompt}\n\n${platformGuidance}`
-      : platformGuidance;
+    const systemPrompt = composeSystemPrompt(rawSystemPrompt);
 
     // Collect platformReminders for harness.onSessionInit. These get
     // resolved ONCE at session-init and become part of the events stream.
