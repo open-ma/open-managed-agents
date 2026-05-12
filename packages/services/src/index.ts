@@ -94,10 +94,18 @@ import {
 import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
 import { type KvStore, CfKvStore } from "@open-managed-agents/kv-store";
 import { parseStoreBackends, pickBackend } from "./store-backends";
+import { type UsageStore, createCfUsageStore } from "./usage";
 
 export { parseStoreBackends, pickBackend } from "./store-backends";
 export type { StoreBackendName, BackendFactories } from "./store-backends";
 export { getPgPool } from "./pg-pool";
+export {
+  SqlUsageStore,
+  createCfUsageStore,
+  clampUsageValue,
+  MAX_VALUE_PER_EMIT_SEC,
+} from "./usage";
+export type { UsageStore, UsageKind, UsageEventInput, UsageEventRow } from "./usage";
 
 /**
  * The platform-agnostic service surface. Every service the application uses
@@ -147,6 +155,14 @@ export interface Services {
    * replacements in Phase C, not KvStore wrappers.
    */
   kv: KvStore;
+  /**
+   * Usage event recorder/reader. Per-tenant `usage_events` table populated
+   * by sandbox / browser / session lifecycle hooks; consumed by the hosted
+   * billing worker's reconcile cron via /v1/internal/usage_events. OSS owns
+   * the count, hosted owns the rate map + ledger debit. See
+   * packages/services/src/usage.ts for details.
+   */
+  usage: UsageStore;
 }
 
 /**
@@ -270,6 +286,10 @@ export function buildServices(env: Env, db: D1Database): Services {
     filesBlob: blobStoreFromR2(env.FILES_BUCKET),
     // Generic KV. CF: CONFIG_KV binding; self-host: SQL-table-backed adapter.
     kv: new CfKvStore(env.CONFIG_KV),
+    // Resource usage event log. Tenant-scoped table on the resolved per-
+    // tenant DB (no STORE_BACKENDS dispatch — Postgres adapter would just
+    // swap the underlying SqlClient).
+    usage: createCfUsageStore({ db }),
   };
 }
 

@@ -94,6 +94,12 @@ export interface Env {
   // Shared with apps/integrations gateway. Gates /v1/internal/* endpoints.
   // Must match INTEGRATIONS_INTERNAL_SECRET on the integrations worker.
   INTEGRATIONS_INTERNAL_SECRET?: string;
+  // Shared with packages/billing/ in openma-hosted. Gates the
+  // /v1/internal/usage_events read+ack endpoints used by the hosted
+  // billing reconcile cron. Self-host deployments leave it unset and
+  // the endpoint returns 503; the OSS billing path is unreachable
+  // without an out-of-band billing worker anyway.
+  BILLING_INTERNAL_SECRET?: string;
   // Service binding to apps/integrations for proxying install initiation
   // calls from the Console (single-origin, no CORS).
   INTEGRATIONS?: Fetcher;

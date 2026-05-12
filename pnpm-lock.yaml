@@ -720,6 +720,9 @@ importers:
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
+      '@open-managed-agents/sql-client':
+        specifier: workspace:*
+        version: link:../sql-client
       '@open-managed-agents/tenant-db':
         specifier: workspace:*
         version: link:../tenant-db
