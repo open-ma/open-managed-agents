@@ -25,6 +25,23 @@ function formatDate(d: Date) {
 const minutes = readingTimeMinutes(post.body ?? "");
 const slug = post.id;
 
+// Pick 3 related posts by tag overlap, falling back to recency.
+// Internal links are a real SEO signal — every post that ships should
+// link to 3 others, even if the overlap is loose.
+const allPosts = (await getCollection("blog", ({ data }) => !data.draft))
+  .filter((p) => p.id !== post.id);
+const related = allPosts
+  .map((p) => {
+    const overlap = p.data.tags.filter((t) => post.data.tags.includes(t)).length;
+    return { post: p, overlap };
+  })
+  .sort((a, b) => {
+    if (b.overlap !== a.overlap) return b.overlap - a.overlap;
+    return b.post.data.publishedAt.valueOf() - a.post.data.publishedAt.valueOf();
+  })
+  .slice(0, 3)
+  .map((r) => r.post);
+
 // Per-page structured data:
 //   - BlogPosting: tells Google this is an article (rich result eligible).
 //   - BreadcrumbList: powers the breadcrumb trail in search results.
@@ -100,7 +117,31 @@ const schemas = [
       <Content />
     </div>
 
-    <footer class="mt-16 pt-8 border-t border-[var(--color-border)] text-sm text-[var(--color-fg-muted)] flex flex-wrap gap-x-6 gap-y-2 justify-between">
+    {related.length > 0 && (
+      <aside class="mt-16 pt-8 border-t border-[var(--color-border)]">
+        <h2 class="font-display text-xl font-semibold mb-5">Related posts</h2>
+        <div class="grid sm:grid-cols-3 gap-4">
+          {related.map((r) => (
+            <a
+              href={`/blog/${r.id}`}
+              class="block border border-[var(--color-border)] rounded-lg p-4 hover:border-[var(--color-brand)] transition-colors no-underline"
+            >
+              <div class="text-xs text-[var(--color-fg-subtle)] mb-1">
+                {formatDate(r.data.publishedAt)}
+              </div>
+              <div class="font-semibold text-sm mb-1 text-[var(--color-fg)]">
+                {r.data.title}
+              </div>
+              <p class="text-xs text-[var(--color-fg-muted)] line-clamp-3">
+                {r.data.description}
+              </p>
+            </a>
+          ))}
+        </div>
+      </aside>
+    )}
+
+    <footer class="mt-12 pt-6 border-t border-[var(--color-border)] text-sm text-[var(--color-fg-muted)] flex flex-wrap gap-x-6 gap-y-2 justify-between">
       <a href="/blog" class="hover:underline">← All posts</a>
       <a href="/blog/rss.xml" class="hover:underline">Subscribe via RSS</a>
     </footer>

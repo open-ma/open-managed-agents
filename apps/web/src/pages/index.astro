@@ -1,6 +1,7 @@
 ---
 import Base from "../layouts/Base.astro";
 import { getCollection } from "astro:content";
+import { softwareApplicationSchema } from "../lib/seo";
 
 const posts = (await getCollection("blog", ({ data }) => !data.draft))
   .sort((a, b) => b.data.publishedAt.valueOf() - a.data.publishedAt.valueOf())
@@ -9,76 +10,276 @@ const posts = (await getCollection("blog", ({ data }) => !data.draft))
 function formatDate(d: Date) {
   return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
 }
+
+// SoftwareApplication is the homepage-only schema — anchors the
+// "Open Managed Agents" entity in Google's knowledge graph and makes
+// the page eligible for software-style rich snippets (price, license).
+const schemas = [softwareApplicationSchema()];
 ---
 
 <Base
-  title="openma — open-source meta-harness for AI agents"
-  description="openma runs your AI agent loop with sessions, sandboxes, memory, vaults, and crash recovery — managed for you. BYOK so you control LLM spend. Cloud or self-host. Make agents real members of Linear, Slack, GitHub."
+  title="Open Managed Agents — Open-source alternative to Anthropic's Managed Agents"
+  description="Open-source, self-hostable alternative to Anthropic's Managed Agents. Cloudflare Workers + Durable Objects. Apache 2.0. Drop-in compatible API."
   canonical="/"
-  keywords="AI agents, agent platform, BYOK, Cloudflare agents, Anthropic, OpenAI, agent harness, managed agents, agent SDK, AI infrastructure, sandbox, MCP"
+  keywords="open managed agents, anthropic managed agents alternative, open source agent platform, managed agents cloudflare, self-hosted managed agents, open source anthropic alternative, agent platform, agent infrastructure"
+  schemas={schemas}
 >
   <!-- Hero -->
   <section class="border-b border-[var(--color-border)]">
     <div class="max-w-5xl mx-auto px-4 py-20 md:py-28 text-center">
       <p class="text-sm font-mono uppercase tracking-wider text-[var(--color-fg-subtle)] mb-4">
-        AI agent platform · BYOK · Cloudflare-native
+        Apache 2.0 · Cloudflare-native · Self-hostable
       </p>
       <h1 class="font-display text-4xl md:text-6xl font-bold tracking-tight">
-        Run AI agents.<br />
-        <span class="text-[var(--color-brand)]">Bring your own key.</span>
+        Open Managed Agents
       </h1>
-      <p class="mt-6 text-lg md:text-xl text-[var(--color-fg-muted)] max-w-2xl mx-auto">
-        An open-source meta-harness for managed AI agents. Sessions, sandboxes,
-        memory, integrations, crash recovery — out of the box. Cloud or self-host.
+      <p class="mt-4 text-xl md:text-2xl text-[var(--color-fg-muted)]">
+        Open-source alternative to <span class="whitespace-nowrap">Anthropic's Managed Agents</span>.
+      </p>
+      <p class="mt-6 text-base md:text-lg text-[var(--color-fg-muted)] max-w-2xl mx-auto leading-relaxed">
+        A drop-in compatible agent platform you can run yourself. Sessions,
+        sandboxes, tools, memory, vaults, and crash recovery — all served from
+        Cloudflare Workers + Durable Objects, or a Docker container on your
+        own box. Same API surface as the proprietary version, with the source
+        code and the runtime under your control.
       </p>
       <div class="mt-8 flex items-center justify-center gap-3 flex-wrap">
         <a
-          href="https://app.openma.dev/login"
-          class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
-          >Get started</a
-        >
-        <a
           href="https://github.com/open-ma/open-managed-agents"
           target="_blank" rel="noopener"
+          class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
+          >★ Star on GitHub</a
+        >
+        <a
+          href="https://app.openma.dev/login"
           class="px-5 py-3 rounded-md border border-[var(--color-border)] font-medium"
-          >★ on GitHub</a
+          >Try the hosted version</a
         >
       </div>
       <p class="mt-3 text-xs text-[var(--color-fg-subtle)]">
-        Free tier: $1 trial credit, localRuntime unlimited
+        Self-host: <code class="font-mono">docker compose up</code>. Hosted: free
+        $1 trial credit, BYOK for LLM spend.
       </p>
     </div>
   </section>
 
-  <!-- Value pillars -->
-  <section class="max-w-5xl mx-auto px-4 py-16 grid md:grid-cols-3 gap-8">
-    {[
-      {
-        h: "BYOK, no token markup",
-        p: "We don't touch your Anthropic / OpenAI bill. You own the keys, you control the spend. We charge for sandbox compute.",
-      },
-      {
-        h: "Cloud or self-host",
-        p: "Same harness, same API, same Console. Cloudflare Workers + Containers for zero-ops, or fork + deploy your own copy.",
-      },
-      {
-        h: "Real integrations",
-        p: "Make an agent a member of your Linear / Slack / GitHub workspace. Assigned, mentioned, replied to like any other user.",
-      },
-    ].map((card) => (
+  <!-- Why Open Managed Agents -->
+  <section class="max-w-5xl mx-auto px-4 py-16">
+    <h2 class="font-display text-3xl font-bold mb-3 text-center">Why Open Managed Agents</h2>
+    <p class="text-center text-[var(--color-fg-muted)] max-w-2xl mx-auto mb-12">
+      The same shape of platform you'd get from a closed vendor — sessions,
+      sandboxes, tool dispatch, crash recovery, billing — but every layer is
+      inspectable, swappable, and yours to fork.
+    </p>
+    <div class="grid md:grid-cols-3 gap-8">
       <div class="border border-[var(--color-border)] rounded-lg p-6">
-        <h3 class="font-semibold text-lg mb-2">{card.h}</h3>
-        <p class="text-[var(--color-fg-muted)] text-sm leading-relaxed">{card.p}</p>
+        <h3 class="font-semibold text-lg mb-2">Drop-in compatible</h3>
+        <p class="text-[var(--color-fg-muted)] text-sm leading-relaxed">
+          The HTTP API mirrors Anthropic's Managed Agents — same
+          <code class="font-mono text-xs">/v1/agents</code>,
+          <code class="font-mono text-xs">/v1/sessions</code>, same event-stream
+          shape. Migrate by swapping the base URL.
+        </p>
       </div>
-    ))}
+      <div class="border border-[var(--color-border)] rounded-lg p-6">
+        <h3 class="font-semibold text-lg mb-2">Self-host on Cloudflare</h3>
+        <p class="text-[var(--color-fg-muted)] text-sm leading-relaxed">
+          Workers + Durable Objects + Containers + R2. One <code class="font-mono text-xs">wrangler deploy</code>,
+          no servers to patch. Or run the Node + Postgres flavor on your own
+          VPS if you can't be on Cloudflare.
+        </p>
+      </div>
+      <div class="border border-[var(--color-border)] rounded-lg p-6">
+        <h3 class="font-semibold text-lg mb-2">Apache 2.0</h3>
+        <p class="text-[var(--color-fg-muted)] text-sm leading-relaxed">
+          Permissive license. Fork it, ship it inside your product, run a
+          private fleet — no per-seat fee, no usage tax. The hosted service at
+          openma.dev is one deployment of the same code.
+        </p>
+      </div>
+    </div>
   </section>
 
-  <!-- Pricing teaser -->
+  <!-- How it works -->
   <section class="border-y border-[var(--color-border)] bg-[var(--color-bg-surface)]">
     <div class="max-w-5xl mx-auto px-4 py-16">
-      <h2 class="font-display text-3xl font-bold text-center mb-2">Simple, predictable pricing</h2>
-      <p class="text-center text-[var(--color-fg-muted)] mb-12">
-        Subscription credits roll into one wallet. Pay only for cloud sandbox time.
+      <h2 class="font-display text-3xl font-bold mb-3 text-center">How it works</h2>
+      <p class="text-center text-[var(--color-fg-muted)] max-w-2xl mx-auto mb-10">
+        A meta-harness — the platform that runs your agent loop. You write the
+        brain (read events, build context, call the model). The platform manages
+        the infrastructure (sandbox, event log, tools, crash recovery).
+      </p>
+
+      <div class="grid md:grid-cols-2 gap-8 items-start">
+        <pre class="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-4 text-xs leading-relaxed overflow-x-auto"><code>┌────────────────────────────────────┐
+│  Harness — your code               │
+│  reads events, calls the model     │
+├────────────────────────────────────┤
+│  Meta-harness (SessionDO)          │
+│  sandbox, event log, tools, vaults │
+├────────────────────────────────────┤
+│  Cloudflare                         │
+│  Workers + DO + Containers + R2    │
+└────────────────────────────────────┘</code></pre>
+
+        <div>
+          <p class="text-sm text-[var(--color-fg-muted)] mb-3">
+            Five-line quickstart. No SDK, no Cloudflare account needed for
+            local dev — Docker spins up a fully working stack.
+          </p>
+          <pre class="bg-[var(--color-bg)] border border-[var(--color-border)] rounded-lg p-4 text-xs leading-relaxed overflow-x-auto"><code>git clone https://github.com/open-ma/open-managed-agents
+cd open-managed-agents &amp;&amp; cp .env.example .env
+# Set ANTHROPIC_API_KEY in .env, then:
+docker compose up -d
+curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
+  "model":"claude-sonnet-4-6"&#125;'</code></pre>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- API compatibility -->
+  <section class="max-w-5xl mx-auto px-4 py-16">
+    <h2 class="font-display text-3xl font-bold mb-4">Drop-in compatible with Anthropic's Managed Agents API</h2>
+    <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
+      We track the public surface of Anthropic's Managed Agents API one-to-one.
+      Resources, request shapes, response shapes, the SSE event stream — all
+      the same. If your client code already speaks Managed Agents, point it at
+      <code class="font-mono text-sm">https://openma.dev</code> (hosted) or
+      <code class="font-mono text-sm">http://localhost:8787</code> (self-host)
+      and it works.
+    </p>
+    <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
+      What you get on top: every resource definition, every state-machine
+      transition, every retry rule is in source code you can read. No black
+      box. When something behaves unexpectedly, you can <em>see</em> why and
+      fix it — and your fix can ship as a PR.
+    </p>
+    <p class="text-[var(--color-fg-muted)] leading-relaxed">
+      Where the open implementation goes further: the harness layer is
+      explicit and replaceable. Anthropic's hosted version owns the agent
+      loop; here you can write your own. We ship a sensible default harness,
+      and you swap in custom context engineering, caching, compaction, or
+      tool-delivery logic without touching the platform. Read more in
+      <a href="/blog/anthropic-managed-agents-vs-open-managed-agents/">the technical comparison</a>.
+    </p>
+  </section>
+
+  <!-- Cloudflare -->
+  <section class="border-t border-[var(--color-border)] bg-[var(--color-bg-surface)]">
+    <div class="max-w-5xl mx-auto px-4 py-16">
+      <h2 class="font-display text-3xl font-bold mb-4">Built on Cloudflare Workers + Durable Objects</h2>
+      <p class="text-[var(--color-fg-muted)] leading-relaxed mb-6">
+        Cloudflare's primitives map almost too cleanly onto an agent platform.
+        Each session needs strong consistency and a long-lived event log:
+        Durable Objects with embedded SQLite. Each agent step needs a real
+        Linux sandbox with a writable filesystem: Cloudflare Containers. Tool
+        outputs and workspace snapshots need durable blob storage: R2.
+        Configuration and per-tenant state: KV and D1. One <code class="font-mono text-sm">wrangler deploy</code>
+        and the whole platform is up — there are no servers to patch, no Kafka
+        to operate, no Redis to scale.
+      </p>
+      <p class="text-[var(--color-fg-muted)] leading-relaxed mb-6">
+        The architecture is intentionally Cloudflare-default, not
+        Cloudflare-only. <code class="font-mono text-sm">packages/services</code> is a
+        backend abstraction layer: every store (agents, sessions, vaults,
+        memory) has a <code class="font-mono text-sm">cf</code> adapter (D1) and a
+        <code class="font-mono text-sm">pg</code> adapter (Postgres). Choice is per-store
+        via env var, so you can move one store at a time. The same pattern
+        applies to sandboxes — LocalSubprocess, LiteBox, E2B, Daytona, BoxRun
+        all swap in for the Cloudflare Sandbox without touching harness or
+        routes.
+      </p>
+      <p class="text-[var(--color-fg-muted)] leading-relaxed">
+        For self-hosters who can't run Cloudflare at all (data residency,
+        existing AWS investment, compliance), the Node + Postgres + S3
+        deployment is a first-class target. <code class="font-mono text-sm">docker compose up</code>
+        is the canonical local dev path, and the same Docker image runs in
+        production. Same API surface, same Console, same event-log semantics.
+        Walk through the deep dive in
+        <a href="/blog/self-host-agent-platform-cloudflare-workers/">the self-host guide</a>.
+      </p>
+    </div>
+  </section>
+
+  <!-- Comparison -->
+  <section class="max-w-5xl mx-auto px-4 py-16">
+    <h2 class="font-display text-3xl font-bold mb-4">Open Managed Agents vs Anthropic Managed Agents</h2>
+    <p class="text-[var(--color-fg-muted)] leading-relaxed mb-6">
+      Both run a managed agent loop on your behalf. The difference is who owns
+      the runtime, the data, and the bill.
+    </p>
+    <div class="overflow-x-auto">
+      <table class="w-full text-sm border border-[var(--color-border)] rounded-lg">
+        <thead>
+          <tr class="bg-[var(--color-bg-surface)] text-left">
+            <th class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">&nbsp;</th>
+            <th class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Open Managed Agents</th>
+            <th class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Anthropic Managed Agents</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">License</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Apache 2.0 — fork, embed, commercial use</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Proprietary, closed source</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Where it runs</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Your Cloudflare account, your VPS, or our hosted</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic-managed only</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Data residency</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">You pick the region (Cloudflare or your DC)</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic's chosen regions</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">LLM key</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">BYOK — Anthropic, OpenAI, OpenRouter, your own gateway</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic only, no BYOK</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Pricing model</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Sandbox compute only, no token markup; self-host is free</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Token + platform fees bundled</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Custom harness</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Yes — write your own loop, swap caching/compaction</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">No — vendor-defined loop</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Sandbox runtime</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Cloudflare Containers, LocalSubprocess, E2B, Daytona, BoxRun</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic-managed sandbox</td>
+          </tr>
+          <tr>
+            <td class="px-4 py-3 font-medium">API surface</td>
+            <td class="px-4 py-3"><code class="font-mono text-xs">/v1/agents</code>, <code class="font-mono text-xs">/v1/sessions</code> — drop-in compatible</td>
+            <td class="px-4 py-3">Same shape (we mirror it)</td>
+          </tr>
+        </tbody>
+      </table>
+    </div>
+    <p class="text-xs text-[var(--color-fg-subtle)] mt-4">
+      Comparison is structural — feature parity is an explicit roadmap item;
+      see the
+      <a href="https://github.com/open-ma/open-managed-agents">repo</a> for the
+      current matrix, or
+      <a href="/blog/migrate-from-anthropic-managed-agents/">the migration
+      guide</a> for the practical steps.
+    </p>
+  </section>
+
+  <!-- Pricing teaser (kept — relevant to hosted CTA) -->
+  <section class="border-y border-[var(--color-border)] bg-[var(--color-bg-surface)]">
+    <div class="max-w-5xl mx-auto px-4 py-16">
+      <h2 class="font-display text-3xl font-bold text-center mb-2">Hosted pricing (optional)</h2>
+      <p class="text-center text-[var(--color-fg-muted)] mb-12 max-w-2xl mx-auto">
+        Self-host is free forever. The hosted service at openma.dev is for
+        teams who'd rather not run the infra themselves. BYOK for the LLM —
+        we only charge for sandbox compute.
       </p>
       <div class="grid md:grid-cols-3 gap-6">
         <div class="border border-[var(--color-border)] rounded-lg bg-[var(--color-bg)] p-6">
@@ -111,8 +312,8 @@ function formatDate(d: Date) {
         </div>
       </div>
       <p class="text-center text-xs text-[var(--color-fg-subtle)] mt-8">
-        Top up any time at $0.005 / minute. Credits never expire (top-ups);
-        subscription credits expire 90 days from grant.
+        Self-host always remains free. Hosted is one packaging of the same
+        Apache 2.0 codebase.
       </p>
     </div>
   </section>
@@ -138,24 +339,30 @@ function formatDate(d: Date) {
     </section>
   )}
 
-  <!-- CTA -->
+  <!-- Get started -->
   <section class="border-t border-[var(--color-border)]">
     <div class="max-w-3xl mx-auto px-4 py-16 text-center">
-      <h2 class="font-display text-3xl font-bold mb-3">Ship your first agent in 5 minutes.</h2>
+      <h2 class="font-display text-3xl font-bold mb-3">Get started</h2>
       <p class="text-[var(--color-fg-muted)] mb-6">
-        Sign in with your Anthropic key, define a harness, hit /v1/sessions.
-        Local dev needs no Cloudflare account.
+        Self-host: clone the repo, set <code class="font-mono text-sm">ANTHROPIC_API_KEY</code>,
+        <code class="font-mono text-sm">docker compose up</code>. Hosted: sign in, BYOK, ship.
       </p>
       <div class="flex items-center justify-center gap-3 flex-wrap">
         <a
-          href="https://app.openma.dev/login"
+          href="https://github.com/open-ma/open-managed-agents"
+          target="_blank" rel="noopener"
           class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
-          >Try it free</a
+          >Clone the repo</a
         >
         <a
           href="https://docs.openma.dev"
           class="px-5 py-3 rounded-md border border-[var(--color-border)] font-medium"
           >Read the docs</a
+        >
+        <a
+          href="https://app.openma.dev/login"
+          class="px-5 py-3 rounded-md border border-[var(--color-border)] font-medium"
+          >Try hosted</a
         >
       </div>
     </div>

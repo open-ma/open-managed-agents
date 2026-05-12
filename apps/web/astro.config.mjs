@@ -5,7 +5,10 @@ import sitemap from "@astrojs/sitemap";
 
 // https://astro.build/config
 export default defineConfig({
-  site: "https://www.openma.dev",
+  // Apex is canonical. The worker (src/worker.ts) 301-redirects
+  // www→apex, so canonical/og:url/sitemap entries must point at apex
+  // — otherwise every link Google indexes resolves through a 301.
+  site: "https://openma.dev",
   trailingSlash: "always",
   integrations: [
     sitemap({

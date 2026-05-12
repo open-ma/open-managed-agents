@@ -6,6 +6,9 @@
 //   - WebSite: also on every page. Includes a SearchAction stub so we
 //     can wire up sitelinks search box later (currently no-op until we
 //     have search).
+//   - SoftwareApplication: emitted on the homepage. Tells Google this
+//     site represents a product — eligible for software-style rich
+//     snippets and reinforces the "Open Managed Agents" entity name.
 //   - BlogPosting + BreadcrumbList: emitted only on /blog/[slug] pages.
 //     Powers article rich results in Google.
 //
@@ -13,8 +16,9 @@
 // We deliberately avoid microdata / RDFa — JSON-LD is what Google
 // recommends and it doesn't pollute the rendered HTML.
 
-const SITE_URL = "https://www.openma.dev";
-const ORG_NAME = "openma";
+const SITE_URL = "https://openma.dev";
+const REPO_URL = "https://github.com/open-ma/open-managed-agents";
+const ORG_NAME = "Open Managed Agents";
 const ORG_LOGO = `${SITE_URL}/logo.svg`;
 const TWITTER_HANDLE = "openma_dev"; // placeholder; update if/when registered
 
@@ -32,10 +36,11 @@ export function organizationSchema() {
     url: SITE_URL,
     logo: ORG_LOGO,
     sameAs: [
-      "https://github.com/open-ma/open-managed-agents",
+      REPO_URL,
       `https://twitter.com/${TWITTER_HANDLE}`,
     ],
-    description: "Open-source meta-harness for AI agents. Run on Cloudflare or self-host.",
+    description:
+      "Open Managed Agents — open-source, self-hostable alternative to Anthropic's Managed Agents. Cloudflare Workers + Durable Objects. Apache 2.0.",
   };
 }
 
@@ -45,7 +50,8 @@ export function websiteSchema() {
     "@type": "WebSite",
     name: ORG_NAME,
     url: SITE_URL,
-    description: "Open-source meta-harness for AI agents.",
+    description:
+      "Open-source, self-hostable alternative to Anthropic's Managed Agents.",
     potentialAction: {
       "@type": "SearchAction",
       // Stub for future sitelinks search box. Google indexes this even
@@ -57,6 +63,32 @@ export function websiteSchema() {
       },
       "query-input": "required name=search_term_string",
     },
+  };
+}
+
+/**
+ * SoftwareApplication schema for the homepage. Anchors the "Open Managed
+ * Agents" entity in Google's knowledge graph and makes the page eligible
+ * for software-style rich snippets (price, license, download).
+ *
+ * Keep this minimal — Google ignores most fields but uses name +
+ * applicationCategory + offers + downloadUrl + license heavily.
+ */
+export function softwareApplicationSchema() {
+  return {
+    "@context": "https://schema.org",
+    "@type": "SoftwareApplication",
+    name: ORG_NAME,
+    alternateName: ["openma", "open-managed-agents"],
+    applicationCategory: "DeveloperApplication",
+    operatingSystem: "Cross-platform",
+    offers: { "@type": "Offer", price: "0", priceCurrency: "USD" },
+    url: SITE_URL,
+    downloadUrl: REPO_URL,
+    license: "https://www.apache.org/licenses/LICENSE-2.0",
+    description:
+      "Open-source, self-hostable alternative to Anthropic's Managed Agents. Cloudflare Workers + Durable Objects. Drop-in compatible API.",
+    sameAs: [REPO_URL],
   };
 }
 

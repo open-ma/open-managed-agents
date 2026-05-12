@@ -1,0 +1,83 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630">
+  <!-- 1200x630 OG card. Designed to read clearly when scaled down to
+       the small thumbnail Twitter / LinkedIn / Slack render in feed.
+       Background uses brand orange-50; text uses fg + brand-orange. -->
+
+  <!-- Background -->
+  <rect width="1200" height="630" fill="#ffffff"/>
+  <rect width="1200" height="630" fill="url(#bg-grad)"/>
+  <defs>
+    <linearGradient id="bg-grad" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fff7ed"/>
+      <stop offset="100%" stop-color="#ffedd5"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Subtle geometric mark (top right) — orange tinted blocks evoking the
+       harness/sandbox/infrastructure split shown in the homepage diagram. -->
+  <g opacity="0.18" transform="translate(960, 80)">
+    <rect x="0"   y="0"   width="160" height="36" fill="#f97316" rx="4"/>
+    <rect x="0"   y="56"  width="160" height="36" fill="#f97316" rx="4"/>
+    <rect x="0"   y="112" width="160" height="36" fill="#f97316" rx="4"/>
+  </g>
+
+  <!-- Brand row -->
+  <g transform="translate(80, 100)">
+    <!-- Wordmark (mono) -->
+    <text x="0" y="0"
+      font-family="'JetBrains Mono','Menlo','Monaco',monospace"
+      font-weight="700"
+      font-size="36"
+      fill="#16181d"
+      letter-spacing="0.5">openma</text>
+  </g>
+
+  <!-- Eyebrow -->
+  <text x="80" y="240"
+    font-family="'DM Sans',-apple-system,'Segoe UI','Helvetica Neue',sans-serif"
+    font-weight="500"
+    font-size="22"
+    letter-spacing="3"
+    fill="#ea580c">APACHE 2.0  ·  CLOUDFLARE-NATIVE  ·  SELF-HOSTABLE</text>
+
+  <!-- Headline -->
+  <text x="80" y="320"
+    font-family="'Source Serif 4',Georgia,'Times New Roman',serif"
+    font-weight="700"
+    font-size="76"
+    fill="#16181d">Open Managed Agents</text>
+
+  <!-- Subhead -->
+  <text x="80" y="400"
+    font-family="'DM Sans',-apple-system,'Segoe UI','Helvetica Neue',sans-serif"
+    font-weight="400"
+    font-size="36"
+    fill="#4a4f5a">Open-source alternative to Anthropic's Managed Agents.</text>
+
+  <!-- Body line -->
+  <text x="80" y="465"
+    font-family="'DM Sans',-apple-system,'Segoe UI','Helvetica Neue',sans-serif"
+    font-weight="400"
+    font-size="26"
+    fill="#4a4f5a">Cloudflare Workers + Durable Objects.  Drop-in compatible API.</text>
+
+  <!-- Bottom row: URL on left, github tag on right -->
+  <g transform="translate(80, 560)">
+    <text x="0" y="0"
+      font-family="'JetBrains Mono','Menlo','Monaco',monospace"
+      font-weight="500"
+      font-size="22"
+      fill="#16181d">openma.dev</text>
+  </g>
+  <g transform="translate(1120, 560)" text-anchor="end">
+    <text x="0" y="0"
+      font-family="'JetBrains Mono','Menlo','Monaco',monospace"
+      font-weight="500"
+      font-size="22"
+      fill="#4a4f5a">github.com/open-ma/open-managed-agents</text>
+  </g>
+
+  <!-- Brand accent bar bottom -->
+  <rect x="0" y="620" width="1200" height="10" fill="#f97316"/>
+</svg>
