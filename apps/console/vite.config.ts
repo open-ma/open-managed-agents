@@ -4,6 +4,16 @@ import tailwindcss from "@tailwindcss/vite";
 
 const API_TARGET = process.env.VITE_API_TARGET || "http://localhost:8787";
 
+// Shared proxy config. cookieDomainRewrite makes Set-Cookie headers from
+// any non-localhost API target (staging / prod) land on localhost so
+// browser-side auth works through the dev proxy.
+const proxyOpts = {
+  target: API_TARGET,
+  changeOrigin: true,
+  secure: true,
+  cookieDomainRewrite: "localhost",
+};
+
 export default defineConfig({
   plugins: [react(), tailwindcss()],
   build: {
@@ -12,14 +22,14 @@ export default defineConfig({
   },
   server: {
     proxy: {
-      "/v1":         { target: API_TARGET, changeOrigin: true, secure: true },
-      "/auth":       { target: API_TARGET, changeOrigin: true, secure: true },
-      "/auth-info":  { target: API_TARGET, changeOrigin: true, secure: true },
-      "/health":     { target: API_TARGET, changeOrigin: true, secure: true },
-      "/linear":     { target: API_TARGET, changeOrigin: true, secure: true },
-      "/linear-setup": { target: API_TARGET, changeOrigin: true, secure: true },
-      "/github":     { target: API_TARGET, changeOrigin: true, secure: true },
-      "/github-setup": { target: API_TARGET, changeOrigin: true, secure: true },
+      "/v1": proxyOpts,
+      "/auth": proxyOpts,
+      "/auth-info": proxyOpts,
+      "/health": proxyOpts,
+      "/linear": proxyOpts,
+      "/linear-setup": proxyOpts,
+      "/github": proxyOpts,
+      "/github-setup": proxyOpts,
     },
   },
 });
