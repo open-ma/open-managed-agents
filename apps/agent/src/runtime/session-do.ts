@@ -1438,6 +1438,21 @@ export class SessionDO extends DurableObject<Env> {
       if (this.sandbox?.snapshotWorkspaceNow) {
         try { await this.sandbox.snapshotWorkspaceNow(); } catch {}
       }
+      // Emit sandbox_active_seconds BEFORE destroy. CF's onStop callback
+      // runs async to destroy() and can be dropped if the OmaSandbox DO
+      // gets evicted before it fires (observed empirically on staging).
+      // The explicit emit here puts the write in SessionDO's request
+      // lifecycle — synchronous and reliable. onStop still wired as a
+      // fallback for non-/destroy teardowns (sleepAfter, OOM); the
+      // emit is idempotent (storage delete after success).
+      const sandboxBilling = this.sandbox as unknown as {
+        emitSandboxActiveNow?: () => Promise<void>;
+      } | null;
+      if (sandboxBilling?.emitSandboxActiveNow) {
+        try { await sandboxBilling.emitSandboxActiveNow(); } catch (err) {
+          logWarn({ op: "session_do.destroy.sandbox_emit", session_id: this.state.session_id, err }, "sandbox usage emit failed");
+        }
+      }
       // Destroy the sandbox container (kills processes, unmounts, stops container)
       if (this.sandbox?.destroy) {
         try { await this.sandbox.destroy(); } catch (err) {
@@ -3795,7 +3810,9 @@ export class SessionDO extends DurableObject<Env> {
     // failure report so the human (or calling system) can intervene.
     const loopStopGuidance =
       "If the same tool call fails three times in a row with substantively the same error, stop retrying. Report (a) what you were trying to do, (b) the exact error, and (c) what you would need to make progress (a missing credential, a corrected input, an upstream service to recover), then end the turn instead of looping.";
-    const platformGuidance = `${authenticatedCommandGuidance}\n\n${loopStopGuidance}`;
+    const sessionOutputsGuidance =
+      "Files you write under `/mnt/session/outputs/` persist after the session ends and are downloadable by the user from the session's Files panel. Use this path for final artifacts the user should keep (reports, exports, generated docs, packaged code). Files written anywhere else (e.g. `/workspace/`) are scratch — they may be lost on container recycle and are not user-accessible.";
+    const platformGuidance = `${authenticatedCommandGuidance}\n\n${loopStopGuidance}\n\n${sessionOutputsGuidance}`;
     const systemPrompt = rawSystemPrompt
       ? `${rawSystemPrompt}\n\n${platformGuidance}`
       : platformGuidance;
