@@ -37,10 +37,6 @@ export interface Env {
   // agents at a relay you control.
   GITHUB_MCP_URL?: string;
 
-  // TEMP: gates one-shot admin endpoint that dumps a Linear installation's
-  // App OAuth access token. Remove after verifying staging end-to-end.
-  TEMP_DEBUG_TOKEN?: string;
-
   // Per-IP and per-tenant rate limit on webhook receivers. Optional —
   // middleware soft-passes when absent so dev / OSS deployments without
   // CF Rate Limiting configured still work. Tuned in wrangler.jsonc.
