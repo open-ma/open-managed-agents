@@ -14,7 +14,7 @@
     "better-auth": "^1.6.3",
     "highlight.js": "^11.11.1",
     "js-yaml": "^4.1.1",
-    "react": "^19.1.0",
+    "react": "^19.2.6",
     "react-dom": "^19.1.0",
     "react-markdown": "^10.1.0",
     "react-router": "^7.5.0",
