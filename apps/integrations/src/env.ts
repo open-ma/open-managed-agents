@@ -25,7 +25,7 @@ export interface Env {
   // Signs short-lived JWTs handed to agent sessions for MCP tool calls.
   // Also used as the seed for AES-GCM token-at-rest encryption (with a
   // distinct label per use, so JWT signing keys ≠ token encryption keys).
-  MCP_SIGNING_KEY: string;
+  PLATFORM_ROOT_SECRET: string;
 
   // Shared secret with apps/main, gating /v1/internal/* endpoints. Must match
   // INTEGRATIONS_INTERNAL_SECRET on the main worker.

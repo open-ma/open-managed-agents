@@ -55,7 +55,7 @@ brew install cloudflared                      # tunnel to expose :8787 publicly
 ### 1. Generate two secrets (once per laptop)
 
 ```bash
-openssl rand -base64 32   # MCP_SIGNING_KEY
+openssl rand -base64 32   # PLATFORM_ROOT_SECRET
 openssl rand -base64 32   # INTEGRATIONS_INTERNAL_SECRET
 ```
 
@@ -63,14 +63,14 @@ openssl rand -base64 32   # INTEGRATIONS_INTERNAL_SECRET
 
 `apps/main/.dev.vars`:
 ```
-MCP_SIGNING_KEY=<value-1>
+PLATFORM_ROOT_SECRET=<value-1>
 INTEGRATIONS_INTERNAL_SECRET=<value-2>
 # plus whatever else apps/main needs (BETTER_AUTH_SECRET, ANTHROPIC_API_KEY, ...)
 ```
 
 `apps/integrations/.dev.vars`:
 ```
-MCP_SIGNING_KEY=<value-1>
+PLATFORM_ROOT_SECRET=<value-1>
 INTEGRATIONS_INTERNAL_SECRET=<value-2>
 GATEWAY_ORIGIN=http://localhost:8787
 ```

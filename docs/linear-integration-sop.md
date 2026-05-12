@@ -38,11 +38,11 @@ export GATEWAY="https://managed-agents-integrations.acme.workers.dev"
 
 ```bash
 # Random 32 bytes, base64. Run twice — DIFFERENT values for each var.
-openssl rand -base64 32   # MCP_SIGNING_KEY
+openssl rand -base64 32   # PLATFORM_ROOT_SECRET
 openssl rand -base64 32   # INTEGRATIONS_INTERNAL_SECRET
 ```
 
-Save both to your password manager. The same `MCP_SIGNING_KEY` and `INTEGRATIONS_INTERNAL_SECRET` are set on **both** the gateway worker and the main worker. If they don't match, things fail with "401 unauthorized" or "invalid token".
+Save both to your password manager. The same `PLATFORM_ROOT_SECRET` and `INTEGRATIONS_INTERNAL_SECRET` are set on **both** the gateway worker and the main worker. If they don't match, things fail with "401 unauthorized" or "invalid token".
 
 ---
 
@@ -87,7 +87,7 @@ Commit this change. (Different env? Use a `[env.production]` block, but for one-
 cd apps/integrations
 
 # Set the 2 secrets (paste the value when prompted)
-wrangler secret put MCP_SIGNING_KEY                # from step 2
+wrangler secret put PLATFORM_ROOT_SECRET                # from step 2
 wrangler secret put INTEGRATIONS_INTERNAL_SECRET   # from step 2
 
 # Deploy
@@ -111,7 +111,7 @@ If you get HTML instead of JSON, the URL is wrong (probably hitting your main wo
 cd apps/main
 
 # Same two secrets — MUST match step 2's values exactly
-wrangler secret put MCP_SIGNING_KEY
+wrangler secret put PLATFORM_ROOT_SECRET
 wrangler secret put INTEGRATIONS_INTERNAL_SECRET
 
 wrangler deploy
@@ -221,17 +221,17 @@ In Linear, this agent appears as its own user with `@<persona>` autocomplete and
 
 ### Rotate per-app `client_secret` or `webhook_secret`
 
-Per-app secrets live in D1 (`linear_apps.client_secret_cipher` / `webhook_secret_cipher`), encrypted with `MCP_SIGNING_KEY`. To rotate one publication's secrets without rotating `MCP_SIGNING_KEY`:
+Per-app secrets live in D1 (`linear_apps.client_secret_cipher` / `webhook_secret_cipher`), encrypted with `PLATFORM_ROOT_SECRET`. To rotate one publication's secrets without rotating `PLATFORM_ROOT_SECRET`:
 
 1. In Linear app settings, click "Regenerate" for the secret.
 2. Re-publish from Console (the wizard re-encrypts and writes the new value).
 
-### Rotate `MCP_SIGNING_KEY`
+### Rotate `PLATFORM_ROOT_SECRET`
 
 ⚠️ **Destructive**: rotating this orphans all encrypted-at-rest tokens (`linear_installations.access_token_cipher`, `linear_apps.client_secret_cipher`, etc.). Existing publications will fail with "missing client secret" until they're re-installed.
 
 Process:
-1. `wrangler secret put MCP_SIGNING_KEY` on **both** workers.
+1. `wrangler secret put PLATFORM_ROOT_SECRET` on **both** workers.
 2. `wrangler deploy` both.
 3. Tell users to re-publish their Linear integrations from Console.
 
@@ -261,13 +261,13 @@ Skip step 1 (no public URL needed). Use `wrangler dev` for both workers:
 # Terminal 1 — gateway
 cd apps/integrations
 echo 'GATEWAY_ORIGIN = "http://localhost:8788"' > .dev.vars
-echo 'MCP_SIGNING_KEY = "..."' >> .dev.vars
+echo 'PLATFORM_ROOT_SECRET = "..."' >> .dev.vars
 echo 'INTEGRATIONS_INTERNAL_SECRET = "..."' >> .dev.vars
 wrangler dev --port 8788
 
 # Terminal 2 — main
 cd apps/main
-echo 'MCP_SIGNING_KEY = "..."' > .dev.vars
+echo 'PLATFORM_ROOT_SECRET = "..."' > .dev.vars
 echo 'INTEGRATIONS_INTERNAL_SECRET = "..."' >> .dev.vars
 wrangler dev --port 8787
 ```
