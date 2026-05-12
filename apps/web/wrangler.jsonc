@@ -1,0 +1,35 @@
+{
+  "$schema": "../../node_modules/wrangler/config-schema.json",
+  "name": "openma-web",
+  "compatibility_date": "2025-04-01",
+  "main": "./src/worker.ts",
+
+  // Astro builds to ./dist; assets binding lets the redirect worker
+  // call env.ASSETS.fetch() to serve the static site for everything
+  // that isn't a www→apex redirect.
+  "assets": {
+    "binding": "ASSETS",
+    "directory": "./dist",
+    "not_found_handling": "404-page"
+  },
+
+  // OSS template defaults to www.openma.dev only — the hosted overlay
+  // (openma-hosted/wrangler/web.jsonc) claims both apex + www and the
+  // worker handles the redirect at runtime.
+  "workers_dev": true,
+  "routes": [
+    { "pattern": "www.openma.dev", "custom_domain": true }
+  ],
+
+  "observability": { "enabled": true },
+
+  "env": {
+    "staging": {
+      "name": "openma-web-staging",
+      "routes": [
+        { "pattern": "www.staging.openma.dev", "custom_domain": true }
+      ],
+      "observability": { "enabled": true }
+    }
+  }
+}

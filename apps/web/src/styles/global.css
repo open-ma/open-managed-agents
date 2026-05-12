@@ -1,0 +1,87 @@
+@import "tailwindcss";
+
+/* Mirror the Console design tokens so cross-link feel is consistent. */
+@theme {
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-display: "Source Serif 4", ui-serif, Georgia, serif;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+
+  --color-bg: #ffffff;
+  --color-bg-surface: #f7f7f8;
+  --color-fg: #16181d;
+  --color-fg-muted: #4a4f5a;
+  --color-fg-subtle: #8a8f99;
+  --color-border: #e6e7eb;
+  --color-brand: #ea580c;
+  --color-brand-subtle: #fef3eb;
+  --color-link: #c2410c;
+}
+
+.dark {
+  --color-bg: #0e1014;
+  --color-bg-surface: #1a1d22;
+  --color-fg: #f3f4f6;
+  --color-fg-muted: #b3b8c1;
+  --color-fg-subtle: #7c828c;
+  --color-border: #2a2e36;
+  --color-brand: #fb923c;
+  --color-brand-subtle: #29170a;
+  --color-link: #fdba74;
+}
+
+html {
+  background: var(--color-bg);
+  color: var(--color-fg);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+}
+
+a {
+  color: var(--color-link);
+  text-decoration: none;
+}
+a:hover {
+  text-decoration: underline;
+}
+
+/* Markdown rendered prose (blog posts). Tailwind's typography plugin would
+   give richer defaults; keeping minimal here to avoid an extra dep. */
+.prose {
+  max-width: 70ch;
+  line-height: 1.7;
+}
+.prose h1 { font-family: var(--font-display); font-size: 2rem; font-weight: 700; margin-top: 2.5rem; margin-bottom: 1rem; }
+.prose h2 { font-family: var(--font-display); font-size: 1.5rem; font-weight: 600; margin-top: 2rem; margin-bottom: 0.75rem; }
+.prose h3 { font-size: 1.2rem; font-weight: 600; margin-top: 1.5rem; margin-bottom: 0.5rem; }
+.prose p { margin: 1rem 0; }
+.prose ul, .prose ol { margin: 1rem 0; padding-left: 1.5rem; }
+.prose li { margin: 0.25rem 0; }
+.prose code {
+  font-family: var(--font-mono);
+  font-size: 0.9em;
+  background: var(--color-bg-surface);
+  padding: 0.125rem 0.35rem;
+  border-radius: 0.25rem;
+}
+.prose pre {
+  background: var(--color-bg-surface);
+  padding: 1rem;
+  border-radius: 0.5rem;
+  overflow-x: auto;
+  margin: 1rem 0;
+  font-family: var(--font-mono);
+  font-size: 0.875rem;
+}
+.prose pre code { background: none; padding: 0; }
+.prose blockquote {
+  border-left: 3px solid var(--color-brand);
+  padding-left: 1rem;
+  color: var(--color-fg-muted);
+  font-style: italic;
+  margin: 1rem 0;
+}
+.prose img {
+  max-width: 100%;
+  border-radius: 0.5rem;
+  margin: 1.5rem 0;
+}
