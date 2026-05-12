@@ -76,7 +76,7 @@ Use the abstract repos in `packages/integrations-adapters-cf/`. They give you ty
 
 ## Webhook security
 
-The base provider verifies webhook signatures using `MCP_SIGNING_KEY` for outbound delivery and per-provider signing keys for inbound. Don't bypass this. If the third-party service has its own signature scheme, validate it inside `parseWebhook` and return `null` on failure.
+The base provider verifies webhook signatures using `PLATFORM_ROOT_SECRET` for outbound delivery and per-provider signing keys for inbound. Don't bypass this. If the third-party service has its own signature scheme, validate it inside `parseWebhook` and return `null` on failure.
 
 <Aside type="caution" title="Tenant isolation">
   Every webhook event must be resolved to a tenant before dispatching. The adapters expose `findInstallationByExternalId` for this — use it.

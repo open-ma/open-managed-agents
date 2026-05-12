@@ -91,6 +91,9 @@ import {
   createCfShardPoolService,
   createCfMemoryStoreTenantIndexService,
 } from "@open-managed-agents/tenant-dbs-store";
+import {
+  WebCryptoAesGcm,
+} from "@open-managed-agents/integrations-adapters-cf";
 import { type BlobStore, blobStoreFromR2 } from "@open-managed-agents/blob-store";
 import { type KvStore, CfKvStore } from "@open-managed-agents/kv-store";
 import { parseStoreBackends, pickBackend } from "./store-backends";
@@ -202,6 +205,19 @@ export interface AppContextWithTenant {
 // ============================================================
 
 /**
+ * Build a label-scoped at-rest encryption boundary for a single subsystem.
+ * Each subsystem (model cards, credentials, …) passes a distinct `label`;
+ * HKDF-style derivation in WebCryptoAesGcm gives each one a different AES key,
+ * so a leak in one subsystem cannot decrypt another's ciphertexts.
+ *
+ * Caller MUST have already verified that env.PLATFORM_ROOT_SECRET is non-empty
+ * (buildServices throws at boot if it isn't).
+ */
+function mintCrypto(env: Env, label: string): WebCryptoAesGcm {
+  return new WebCryptoAesGcm(env.PLATFORM_ROOT_SECRET!, label);
+}
+
+/**
  * Production / staging on Cloudflare Workers. Wires every service against
  * the resolved per-tenant D1 database. The TenantDbProvider middleware
  * resolves the right DB for the current request before this factory runs.
@@ -225,9 +241,23 @@ export interface AppContextWithTenant {
  */
 export function buildServices(env: Env, db: D1Database): Services {
   const overrides = parseStoreBackends(env);
+  // At-rest encryption is mandatory in this build. Refuse to start if the
+  // signing key isn't configured rather than silently writing plaintext —
+  // historical regressions of that exact shape are why this check exists.
+  if (!env.PLATFORM_ROOT_SECRET) {
+    throw new Error(
+      "buildServices: PLATFORM_ROOT_SECRET is required for at-rest encryption of credentials.auth and model_cards.api_key_cipher. " +
+        "Set it via `wrangler secret put PLATFORM_ROOT_SECRET` (or in .dev.vars for local dev). " +
+        "Generate with: openssl rand -base64 32",
+    );
+  }
   return {
     credentials: pickBackend(overrides, "credentials", {
-      cf: () => createCfCredentialService({ db }),
+      cf: () =>
+        createCfCredentialService(
+          { db },
+          { crypto: mintCrypto(env, "credentials.auth") },
+        ),
       // pg: () => createPgCredentialService({ pg: getPgPool(env) }),
     }),
     memory: pickBackend(overrides, "memory", {
@@ -257,7 +287,11 @@ export function buildServices(env: Env, db: D1Database): Services {
       // pg: () => createPgEvalRunService({ pg: getPgPool(env) }),
     }),
     modelCards: pickBackend(overrides, "modelCards", {
-      cf: () => createCfModelCardService({ db }),
+      cf: () =>
+        createCfModelCardService(
+          { db },
+          { crypto: mintCrypto(env, "model.cards.keys") },
+        ),
       // pg: () => createPgModelCardService({ pg: getPgPool(env) }),
     }),
     agents: pickBackend(overrides, "agents", {

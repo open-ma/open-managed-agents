@@ -84,7 +84,7 @@ CI 必须配置（`deploy.yml` 也已经在用）：
 - `vars.CF_SUBDOMAIN` —— 你 Cloudflare 账号的 workers.dev 子域
 - `vars.CLOUDFLARE_ACCOUNT_ID`
 - `secrets.CLOUDFLARE_API_TOKEN`
-- `secrets.API_KEY`、`secrets.ANTHROPIC_API_KEY`、`secrets.BETTER_AUTH_SECRET`、`secrets.INTEGRATIONS_INTERNAL_SECRET`、`secrets.MCP_SIGNING_KEY`、`secrets.INTERNAL_TOKEN`
+- `secrets.API_KEY`、`secrets.ANTHROPIC_API_KEY`、`secrets.BETTER_AUTH_SECRET`、`secrets.INTEGRATIONS_INTERNAL_SECRET`、`secrets.PLATFORM_ROOT_SECRET`、`secrets.INTERNAL_TOKEN`
 - 可选：`secrets.ANTHROPIC_BASE_URL`、`secrets.TAVILY_API_KEY`
 
 Lane 使用 Cloudflare 公开的「永远通过」Turnstile key（site `1x00000000000000000000AA` / secret `1x0000000000000000000000000000000AA`），这两个值硬编码在 `lane-generate.mjs` 和 `deploy-lane.yml` 里，让 `/auth/*` 流程不依赖把 prod 的真实 Turnstile secret 暴露到 lane。**不要在 lane 上用敏感凭据注册账号——AUTH_DB 与 prod 共享，用户记录会持久存在。**

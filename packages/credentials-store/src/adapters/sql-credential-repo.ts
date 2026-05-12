@@ -4,6 +4,7 @@ import { CredentialDuplicateMcpUrlError, CredentialNotFoundError } from "../erro
 import type {
   CredentialRepo,
   CredentialUpdateFields,
+  Crypto,
   NewCredentialInput,
 } from "../ports";
 import type { CredentialRow } from "../types";
@@ -15,11 +16,22 @@ import type { CredentialRow } from "../types";
  * Hot fields (auth_type, mcp_server_url, provider) are denormalized into their
  * own columns for indexing; the full CredentialAuth lives in the `auth` JSON
  * column. Writers must keep them in sync — see `bindAuthColumns`.
+ *
+ * The `auth` column is encrypted via the {@link Crypto} port. The denormalized
+ * hot-path columns stay plaintext (they're SQL index keys, not secrets).
+ * See ports.ts for the rationale on placing crypto at the repo layer.
  */
 export class SqlCredentialRepo implements CredentialRepo {
-  constructor(private readonly db: SqlClient) {}
+  private readonly db: SqlClient;
+  private readonly crypto: Crypto;
+
+  constructor(db: SqlClient, opts?: { crypto?: Crypto }) {
+    this.db = db;
+    this.crypto = opts?.crypto ?? identityCrypto;
+  }
 
   async insert(input: NewCredentialInput): Promise<CredentialRow> {
+    const authCipher = await this.crypto.encrypt(JSON.stringify(input.auth));
     try {
       await this.db
         .prepare(
@@ -35,7 +47,7 @@ export class SqlCredentialRepo implements CredentialRepo {
           input.auth.type,
           input.auth.mcp_server_url ?? null,
           input.auth.provider ?? null,
-          JSON.stringify(input.auth),
+          authCipher,
           input.createdAt,
         )
         .run();
@@ -61,7 +73,7 @@ export class SqlCredentialRepo implements CredentialRepo {
       )
       .bind(credentialId, tenantId, vaultId)
       .first<DbCredential>();
-    return row ? toRow(row) : null;
+    return row ? await this.toRow(row) : null;
   }
 
   async list(
@@ -76,7 +88,7 @@ export class SqlCredentialRepo implements CredentialRepo {
          FROM credentials WHERE tenant_id = ? AND vault_id = ? AND archived_at IS NULL
          ORDER BY created_at ASC`;
     const result = await this.db.prepare(sql).bind(tenantId, vaultId).all<DbCredential>();
-    return (result.results ?? []).map(toRow);
+    return this.toRows(result.results ?? []);
   }
 
   async countAll(tenantId: string, vaultId: string): Promise<number> {
@@ -101,7 +113,7 @@ export class SqlCredentialRepo implements CredentialRepo {
       )
       .bind(tenantId, vaultId, mcpServerUrl)
       .first<DbCredential>();
-    return row ? toRow(row) : null;
+    return row ? await this.toRow(row) : null;
   }
 
   async listByVaults(tenantId: string, vaultIds: string[]): Promise<CredentialRow[]> {
@@ -116,7 +128,7 @@ export class SqlCredentialRepo implements CredentialRepo {
       )
       .bind(tenantId, ...vaultIds)
       .all<DbCredential>();
-    return (result.results ?? []).map(toRow);
+    return this.toRows(result.results ?? []);
   }
 
   async listProviderTagged(tenantId: string, vaultIds: string[]): Promise<CredentialRow[]> {
@@ -131,7 +143,7 @@ export class SqlCredentialRepo implements CredentialRepo {
       )
       .bind(tenantId, ...vaultIds)
       .all<DbCredential>();
-    return (result.results ?? []).map(toRow);
+    return this.toRows(result.results ?? []);
   }
 
   async update(
@@ -149,13 +161,15 @@ export class SqlCredentialRepo implements CredentialRepo {
     if (update.auth !== undefined) {
       // Keep denormalized columns in sync with the JSON blob. mcp_server_url
       // is immutable per service-layer check, but we still rewrite it for
-      // correctness if a caller ever bypasses the service.
+      // correctness if a caller ever bypasses the service. The JSON blob is
+      // encrypted; the denormalized columns stay plaintext for indexing.
+      const authCipher = await this.crypto.encrypt(JSON.stringify(update.auth));
       sets.push("auth_type = ?", "mcp_server_url = ?", "provider = ?", "auth = ?");
       binds.push(
         update.auth.type,
         update.auth.mcp_server_url ?? null,
         update.auth.provider ?? null,
-        JSON.stringify(update.auth),
+        authCipher,
       );
     }
     sets.push("updated_at = ?");
@@ -216,6 +230,24 @@ export class SqlCredentialRepo implements CredentialRepo {
       .bind(credentialId, tenantId, vaultId)
       .run();
   }
+
+  private async toRow(r: DbCredential): Promise<CredentialRow> {
+    const authJson = await this.crypto.decrypt(r.auth);
+    return {
+      id: r.id,
+      tenant_id: r.tenant_id,
+      vault_id: r.vault_id,
+      display_name: r.display_name,
+      auth: JSON.parse(authJson) as CredentialAuth,
+      created_at: msToIso(r.created_at),
+      updated_at: r.updated_at !== null ? msToIso(r.updated_at) : null,
+      archived_at: r.archived_at !== null ? msToIso(r.archived_at) : null,
+    };
+  }
+
+  private async toRows(rs: DbCredential[]): Promise<CredentialRow[]> {
+    return Promise.all(rs.map((r) => this.toRow(r)));
+  }
 }
 
 interface DbCredential {
@@ -223,23 +255,10 @@ interface DbCredential {
   tenant_id: string;
   vault_id: string;
   display_name: string;
-  auth: string; // JSON
+  auth: string; // ciphertext (was: plaintext JSON pre-encryption rollout)
   created_at: number;
   updated_at: number | null;
   archived_at: number | null;
-}
-
-function toRow(r: DbCredential): CredentialRow {
-  return {
-    id: r.id,
-    tenant_id: r.tenant_id,
-    vault_id: r.vault_id,
-    display_name: r.display_name,
-    auth: JSON.parse(r.auth) as CredentialAuth,
-    created_at: msToIso(r.created_at),
-    updated_at: r.updated_at !== null ? msToIso(r.updated_at) : null,
-    archived_at: r.archived_at !== null ? msToIso(r.archived_at) : null,
-  };
 }
 
 function msToIso(ms: number): string {
@@ -257,3 +276,17 @@ function isMcpUrlUniqueViolation(err: unknown): boolean {
     (/mcp_server_url/i.test(msg) || /idx_credentials_mcp_url_active/i.test(msg))
   );
 }
+
+/**
+ * Identity (passthrough) crypto — used as the default when callers don't wire
+ * a real one. Matches the legacy plaintext-on-disk behavior so existing tests
+ * keep working without ceremony. Production wiring MUST override this.
+ */
+const identityCrypto: Crypto = {
+  async encrypt(plaintext) {
+    return plaintext;
+  },
+  async decrypt(ciphertext) {
+    return ciphertext;
+  },
+};
