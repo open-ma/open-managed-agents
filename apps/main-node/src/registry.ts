@@ -53,6 +53,13 @@ export interface SessionRegistryDeps {
     tenantId: string,
   ): (opts: { sandbox: SandboxExecutor }) => Promise<void>;
 
+  /** Mount /mnt/session/outputs/ into the sandbox. Optional — operators
+   *  that don't configure an outputs root may omit it. */
+  buildSessionOutputsMounter?(
+    sessionId: string,
+    tenantId: string,
+  ): (opts: { sandbox: SandboxExecutor }) => Promise<void>;
+
   /** Build the LanguageModel for the agent. Reads env, applies custom
    *  headers, picks the right provider. */
   buildModel(agent: AgentConfig): LanguageModel;
@@ -181,6 +188,10 @@ export class SessionRegistry {
     });
 
     const memoryMounter = this.deps.buildMemoryMounter(sessionId, tenantId);
+    const outputsMounter = this.deps.buildSessionOutputsMounter?.(
+      sessionId,
+      tenantId,
+    );
 
     const machine = new SessionStateMachine({
       sessionId,
@@ -192,6 +203,7 @@ export class SessionRegistry {
         return row ?? null;
       },
       mountMemoryStores: memoryMounter,
+      mountSessionOutputs: outputsMounter,
       buildModel: (agent) => this.deps.buildModel(agent),
       buildTools: (agent, sb) => this.deps.buildTools(agent, sb),
       buildHarness: () => this.deps.buildHarness(),

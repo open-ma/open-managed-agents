@@ -442,5 +442,6 @@ export const sandboxFactory: SandboxFactory = async (ctx) => {
   return new LocalSubprocessSandbox({
     workdir: ctx.workdir,
     memoryRoot: ctx.memoryRoot,
+    outputsRoot: ctx.outputsRoot,
   });
 };

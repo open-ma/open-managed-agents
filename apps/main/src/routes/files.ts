@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import type { Env } from "@open-managed-agents/shared";
-import { generateFileId, fileR2Key } from "@open-managed-agents/shared";
+import { generateFileId, fileR2Key, sessionOutputsPrefix } from "@open-managed-agents/shared";
 import { toFileRecord, FileNotFoundError } from "@open-managed-agents/files-store";
 import type { Services } from "@open-managed-agents/services";
 import { checkUploadFreq, checkUploadSize } from "../quotas";
@@ -14,7 +14,7 @@ const app = new Hono<{
 //
 // Files the agent writes to /mnt/session/outputs/ inside the sandbox land
 // in R2 under `t/<tenant>/session-outputs/<session>/<filename>` with no
-// D1 row (the mount is bytes-only, see sessions.ts:1985 SESSION_OUTPUTS_PREFIX).
+// D1 row (the mount is bytes-only — listing scans the R2 prefix directly).
 // To make these reachable through the standard AMA Files API, we synthesize
 // file rows on the fly:
 //
@@ -27,9 +27,6 @@ const app = new Hono<{
 // so we never need a backing index. base64url encoding so filenames with
 // special chars (spaces, slashes — though slashes shouldn't reach here)
 // don't break URL routing.
-
-const SESSION_OUTPUTS_PREFIX = (tenantId: string, sessionId: string) =>
-  `t/${tenantId}/session-outputs/${sessionId}/`;
 
 function encodeOutputId(sessionId: string, filename: string): string {
   // base64url; strip padding so the id stays URL-friendly
@@ -85,7 +82,7 @@ async function listSessionOutputAsFiles(
   tenantId: string,
   sessionId: string,
 ): Promise<ApiFileRecord[]> {
-  const prefix = SESSION_OUTPUTS_PREFIX(tenantId, sessionId);
+  const prefix = sessionOutputsPrefix(tenantId, sessionId);
   const list = await bucket.list({ prefix, limit: 1000 });
   return list.objects.map((o: R2Object) => {
     const filename = o.key.slice(prefix.length);
@@ -248,7 +245,7 @@ app.get("/:id", async (c) => {
   if (decoded) {
     const bucket = c.env.FILES_BUCKET;
     if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
-    const r2Key = `${SESSION_OUTPUTS_PREFIX(t, decoded.sessionId)}${decoded.filename}`;
+    const r2Key = `${sessionOutputsPrefix(t, decoded.sessionId)}${decoded.filename}`;
     const head = await bucket.head(r2Key);
     if (!head) return c.json({ error: "File not found" }, 404);
     const record: ApiFileRecord = {
@@ -285,7 +282,7 @@ app.get("/:id/content", async (c) => {
   // Synthesized session-output id: stream R2 directly.
   const decoded = decodeOutputId(id);
   if (decoded) {
-    const r2Key = `${SESSION_OUTPUTS_PREFIX(t, decoded.sessionId)}${decoded.filename}`;
+    const r2Key = `${sessionOutputsPrefix(t, decoded.sessionId)}${decoded.filename}`;
     const obj = await r2.get(r2Key);
     if (!obj) return c.json({ error: "File content not found" }, 404);
     return new Response(obj.body, {
