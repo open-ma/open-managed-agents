@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare Workers" />
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" />
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
   <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
 </p>
@@ -41,7 +41,7 @@ crash-recovery semantics. Switch between them by changing env vars, not code.
 ## Quick start: self-host (Docker)
 
 ```bash
-git clone https://github.com/anthropics/open-managed-agents.git
+git clone https://github.com/open-ma/open-managed-agents.git
 cd open-managed-agents
 cp .env.example .env
 $EDITOR .env   # set ANTHROPIC_API_KEY + BETTER_AUTH_SECRET (openssl rand -hex 32)
@@ -81,13 +81,13 @@ Console UI, operator gotchas): **[docs.openma.dev/self-host](https://docs.openma
 Requires [Workers Paid plan](https://developers.cloudflare.com/workers/platform/pricing/) (for Durable Objects + Containers).
 
 ```bash
-git clone https://github.com/anthropics/open-managed-agents.git
+git clone https://github.com/open-ma/open-managed-agents.git
 cd open-managed-agents
-npm install
+pnpm install
 
 # Local dev (no CF account needed) — wrangler dev with simulators
 cp .dev.vars.example .dev.vars && $EDITOR .dev.vars   # ANTHROPIC_API_KEY=...
-npm run dev
+pnpm dev
 # API   → http://localhost:8787
 # Console → http://localhost:5173
 
@@ -504,4 +504,4 @@ The `docs/` folder at the repo root contains **internal design RFCs** — not th
 
 ## License
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)

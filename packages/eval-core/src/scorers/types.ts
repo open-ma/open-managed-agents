@@ -1,6 +1,6 @@
 // Scorer types — pure functions over Trajectory.
 //
-// Design principles (per docs/handoff-verifier-framework.md discussion):
+// Design principles (per docs/archive/handoff-verifier-framework.md discussion):
 // - Score is structured (not just float) so it composes; eval can pass/fail,
 //   RL can take .value as reward, outcome can use .reason as feedback
 // - case-insensitive matching by DEFAULT for natural-language scorers,

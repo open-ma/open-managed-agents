@@ -492,7 +492,7 @@ Linear webhook  ──▶  apps/integrations /linear/webhook
 
 **抉择**：自定义 harness 通过 `oma deploy --harness my-harness.ts` 走 esbuild + `wrangler deploy`，与平台代码同一 isolate。
 
-**思考**：见 [`docs/serverless-harness-sdk.md`](docs/serverless-harness-sdk.md)。CF Workers 不允许 `eval`/动态 import；Service Binding 方案会把 sandbox/broadcast/history 这些 *活引用* 序列化成 RPC，把 50 步 loop 变成数百次跨网络往返。Compile-time 注入用「重新部署」换「零开销 + 零安全成本」，与 Vercel/Lambda 心智一致。
+**思考**：见 [`docs/archive/serverless-harness-sdk.md`](docs/archive/serverless-harness-sdk.md)。CF Workers 不允许 `eval`/动态 import；Service Binding 方案会把 sandbox/broadcast/history 这些 *活引用* 序列化成 RPC，把 50 步 loop 变成数百次跨网络往返。Compile-time 注入用「重新部署」换「零开销 + 零安全成本」，与 Vercel/Lambda 心智一致。
 
 ### ③ R2 字节真相 + D1 索引 + Queue 拉平
 
@@ -534,7 +534,7 @@ Linear webhook  ──▶  apps/integrations /linear/webhook
 | Eval | Layer 1 deterministic + Layer 2 judge | pass/fail + report |
 | RL | verifier（确定性） | scalar 0–1 |
 
-**思考**：见 [`docs/handoff-verifier-framework.md`](docs/handoff-verifier-framework.md)。三者本质都是 `(task, trajectory) → score`，只是延迟/成本/确定性不同。一个统一接口让平台同时是产品、是评测、是训练场——这是「Cursor 训练 Composer / Cognition 训练 Devin」模式的开源等价物。
+**思考**：见 [`docs/archive/handoff-verifier-framework.md`](docs/archive/handoff-verifier-framework.md)。三者本质都是 `(task, trajectory) → score`，只是延迟/成本/确定性不同。一个统一接口让平台同时是产品、是评测、是训练场——这是「Cursor 训练 Composer / Cognition 训练 Devin」模式的开源等价物。
 
 ---
 
@@ -543,11 +543,11 @@ Linear webhook  ──▶  apps/integrations /linear/webhook
 | 想做的事 | 改动哪些模块 | 参考文档 |
 |---|---|---|
 | 新增工具 | `apps/agent/src/harness/tools.ts` 注册；如有需要更新 `agent_toolset_*` | `AGENTS.md` |
-| 写自定义 harness | 实现 `HarnessInterface`，`registerHarness("...")`；本地 `oma deploy --harness` | `docs/serverless-harness-sdk.md` |
+| 写自定义 harness | 实现 `HarnessInterface`，`registerHarness("...")`；本地 `oma deploy --harness` | `docs/archive/serverless-harness-sdk.md` |
 | 新增 store | 复制任一 `*-store` 模板 → 加进 `Services` → 路由消费 | `packages/services/README.md` |
 | 接入新第三方平台 | 新建 `packages/<provider>/` 实现 `integrations-core` ports；在 `apps/integrations/wire.ts` 注册；加 `routes/<provider>/` | `docs/linear-integration-design.md` |
 | 改用自托管 Postgres | 新增 `buildNodeServices`；改 `apps/main/src/index.ts` 工厂调用 | `packages/services/README.md` |
-| 让 agent 跑在用户机器 | 已支持：用户 `oma bridge setup && bridge daemon`；agent 配置 `harness: "acp-proxy"` | `docs/external-agent-runtime.md` |
+| 让 agent 跑在用户机器 | 已支持：用户 `oma bridge setup && bridge daemon`；agent 配置 `harness: "acp-proxy"` | `docs/archive/external-agent-runtime.md` |
 | 训练自有模型 | 用 `rl/cli.ts rollout` + `rl/verl/verl_trainer.py`；`provider.ts` 已支持 `oai-compatible` 指向 vLLM | `rl/README.md`、`docs/trajectory-v1-spec.md` |
 
 ## 9. 小结
