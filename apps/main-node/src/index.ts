@@ -65,16 +65,19 @@ import {
 } from "@open-managed-agents/credentials-store";
 import { SqlEventLog, ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
-import { generateEventId } from "@open-managed-agents/shared";
+import { generateEventId, guessSessionOutputMime } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
+import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
 import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
 import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
-import { mkdirSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { mkdirSync, createReadStream } from "node:fs";
+import { stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
+import { dirname, join, relative, resolve as resolvePath } from "node:path";
+import { Readable } from "node:stream";
 import { nanoid } from "nanoid";
 import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
@@ -368,6 +371,14 @@ const memoryWatcher = startMemoryBlobWatcher({
   memoryRoot: memoryBlobs.baseDir,
   memoryRepo: new SqlMemoryRepo(sql),
 });
+
+// Session outputs root: backing store for /mnt/session/outputs/ — the
+// AMA-aligned magic dir an agent writes deliverable artefacts into.
+// LocalSubprocessSandbox symlinks <workdir>/.mnt/session/outputs →
+// <outputsRoot>/<tenant>/<session>/; GET /v1/sessions/:id/outputs serves
+// from the same root.
+const outputsRoot = process.env.SESSION_OUTPUTS_DIR ?? "./data/session-outputs";
+mkdirSync(outputsRoot, { recursive: true });
 
 // Vaults: per-tenant credential containers. Created via REST, consumed by
 // the oma-vault sidecar (apps/oma-vault) which reads the same sqlite file.
@@ -699,6 +710,10 @@ async function buildSandbox(
       // Memory blob root — adapters that mount via host-fs (LocalSubprocess)
       // read this; remote ones (Daytona/E2B) ignore it and use s3fs.
       memoryRoot: memoryBlobs.baseDir,
+      // Session outputs root — same shape as memoryRoot. LocalSubprocess
+      // symlinks per-(tenant,session) dirs under here when
+      // mountSessionOutputs is called.
+      outputsRoot,
     },
     process.env,
   );
@@ -737,6 +752,17 @@ const sessionRegistry = new SessionRegistry({
         storeId: binding.store_id,
         readOnly: binding.access === "read_only",
       });
+    }
+  },
+  buildSessionOutputsMounter: (sessionId, tenantId) => async ({ sandbox }) => {
+    if (!sandbox.mountSessionOutputs) return;
+    try {
+      await sandbox.mountSessionOutputs({ tenantId, sessionId });
+    } catch (err) {
+      console.warn(
+        `[main-node] mountSessionOutputs failed session=${sessionId.slice(0, 12)}:`,
+        err,
+      );
     }
   },
   buildModel: (agent) => {
@@ -780,13 +806,15 @@ const sessionRegistry = new SessionRegistry({
     // default-loop's eventsToMessages projection sees the conversation
     // context BEFORE harness.run reads from it.
     await runtime.refreshHistory();
+    const rawSystemPrompt = input.agent.system ?? "";
     const ctx: HarnessContext = {
       agent: input.agent,
       userMessage: input.userMessage,
       session_id: input.sessionId,
       tools: input.tools as HarnessContext["tools"],
       model: input.model,
-      systemPrompt: input.agent.system ?? "",
+      systemPrompt: composeSystemPrompt(rawSystemPrompt),
+      rawSystemPrompt,
       env: {
         ANTHROPIC_API_KEY: apiKey,
         ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
@@ -1026,6 +1054,96 @@ v1.get("/sessions/:id/memory_stores", async (c) => {
     .bind(sid)
     .all<{ store_id: string; access: string; created_at: number }>();
   return c.json({ data: rows.results ?? [] });
+});
+
+// ── Session outputs (/mnt/session/outputs/) ──────────────────────────────
+//
+// Mirrors apps/main's GET /v1/sessions/:id/outputs[/:filename] (R2-backed
+// on CF, host-fs-backed here). The sandbox writes to /mnt/session/outputs/
+// which is symlinked to <outputsRoot>/<tenant>/<session>/; the routes below
+// read from the same dir.
+
+const sessionOutputsDir = (tenantId: string, sessionId: string): string =>
+  resolvePath(outputsRoot, tenantId, sessionId);
+
+v1.get("/sessions/:id/outputs", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const dir = sessionOutputsDir(c.var.tenant_id, sid);
+  let entries: string[];
+  try {
+    entries = await fsReaddir(dir);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return c.json({ data: [], has_more: false });
+    }
+    throw err;
+  }
+
+  const data: Array<{
+    filename: string;
+    size_bytes: number;
+    uploaded_at: string;
+    media_type: string;
+  }> = [];
+  for (const filename of entries) {
+    try {
+      const st = await fsStat(join(dir, filename));
+      if (!st.isFile()) continue;
+      data.push({
+        filename,
+        size_bytes: st.size,
+        uploaded_at: new Date(st.mtimeMs).toISOString(),
+        media_type: guessSessionOutputMime(filename),
+      });
+    } catch {
+      // skip unreadable entries
+    }
+  }
+  return c.json({ data, has_more: false });
+});
+
+v1.get("/sessions/:id/outputs/:filename", async (c) => {
+  const sid = c.req.param("id");
+  const filename = c.req.param("filename");
+  // Path traversal guard — filename must be a single component.
+  if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
+    return c.json({ error: "Invalid filename" }, 400);
+  }
+
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const full = join(sessionOutputsDir(c.var.tenant_id, sid), filename);
+  let st;
+  try {
+    st = await fsStat(full);
+    if (!st.isFile()) return c.json({ error: "Output file not found" }, 404);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
+      return c.json({ error: "Output file not found" }, 404);
+    }
+    throw err;
+  }
+
+  const nodeStream = createReadStream(full);
+  // Convert the node Readable into a Web ReadableStream for Hono.
+  const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>;
+  return new Response(webStream, {
+    headers: {
+      "Content-Type": guessSessionOutputMime(filename),
+      "Content-Length": String(st.size),
+      "Content-Disposition": `attachment; filename="${filename}"`,
+    },
+  });
 });
 
 // ── Vaults + credentials (Phase B-vault) ──────────────────────────────────

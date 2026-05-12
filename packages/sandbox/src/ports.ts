@@ -140,6 +140,10 @@ export interface SandboxFactoryContext {
    *  via symlink (LocalSubprocess) read from this; remote adapters
    *  (Daytona/E2B) typically use s3fs and ignore it. */
   memoryRoot?: string;
+  /** Session-outputs root on the host. LocalSubprocess symlinks
+   *  per-(tenant, session) dirs under here when mountSessionOutputs
+   *  is called; remote adapters that don't host-mount can ignore it. */
+  outputsRoot?: string;
 }
 
 /** Read-only view of process env handed to the factory. Whole `process.env`

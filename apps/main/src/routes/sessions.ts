@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { Context } from "hono";
 import type { Env } from "@open-managed-agents/shared";
 import type { UserMessageEvent, AgentConfig, EnvironmentConfig, StoredEvent, ContentBlock, CredentialConfig, SessionEvent, SessionResource } from "@open-managed-agents/shared";
-import { generateFileId, buildTrajectory, fileR2Key, generateEventId, LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
+import { generateFileId, buildTrajectory, fileR2Key, generateEventId, LOCAL_RUNTIME_ENV_ID, sessionOutputsPrefix, guessSessionOutputMime } from "@open-managed-agents/shared";
 import { logWarn, logError, recordEvent, errFields, classifyExternalError } from "@open-managed-agents/shared";
 import { rateLimitSessionCreate } from "../rate-limit";
 import { checkDailySessionCap } from "../quotas";
@@ -985,7 +985,7 @@ app.delete("/:id", async (c) => {
   // forever — and worse, becomes unreachable too because the outputs
   // route 404s once the session row is gone.
   if (c.env.FILES_BUCKET) {
-    const prefix = SESSION_OUTPUTS_PREFIX(t, id);
+    const prefix = sessionOutputsPrefix(t, id);
     let cursor: string | undefined;
     let deleted = 0;
     try {
@@ -2115,23 +2115,6 @@ function parseGitHubOrg(repoUrl: string): string | null {
 // can coexist: /outputs/ for transparent agent artefacts, /files for
 // explicit "save this for later cross-session reference" promotion.
 
-const SESSION_OUTPUTS_PREFIX = (tenantId: string, sessionId: string) =>
-  `t/${tenantId}/session-outputs/${sessionId}/`;
-
-const OUTPUT_MIME_GUESS: Record<string, string> = {
-  pdf: "application/pdf", png: "image/png", jpg: "image/jpeg", jpeg: "image/jpeg",
-  gif: "image/gif", webp: "image/webp", txt: "text/plain", md: "text/markdown",
-  csv: "text/csv", json: "application/json", html: "text/html", htm: "text/html",
-  mp4: "video/mp4", webm: "video/webm", mov: "video/quicktime",
-  mp3: "audio/mpeg", wav: "audio/wav", ogg: "audio/ogg",
-  zip: "application/zip", tar: "application/x-tar", gz: "application/gzip",
-};
-
-function guessOutputMime(filename: string): string {
-  const ext = filename.toLowerCase().split(".").pop() || "";
-  return OUTPUT_MIME_GUESS[ext] || "application/octet-stream";
-}
-
 // GET /v1/sessions/:id/outputs — list files agent wrote to /mnt/session/outputs/.
 app.get("/:id/outputs", async (c) => {
   const t = c.get("tenant_id");
@@ -2142,7 +2125,7 @@ app.get("/:id/outputs", async (c) => {
   const bucket = c.env.FILES_BUCKET;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
-  const prefix = SESSION_OUTPUTS_PREFIX(t, id);
+  const prefix = sessionOutputsPrefix(t, id);
   const list = await bucket.list({ prefix, limit: 1000 });
 
   const data = list.objects.map((o: R2Object) => {
@@ -2151,7 +2134,7 @@ app.get("/:id/outputs", async (c) => {
       filename,
       size_bytes: o.size,
       uploaded_at: o.uploaded.toISOString(),
-      media_type: o.httpMetadata?.contentType || guessOutputMime(filename),
+      media_type: o.httpMetadata?.contentType || guessSessionOutputMime(filename),
     };
   });
   return c.json({ data, has_more: list.truncated });
@@ -2174,13 +2157,13 @@ app.get("/:id/outputs/:filename", async (c) => {
   const bucket = c.env.FILES_BUCKET;
   if (!bucket) return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
 
-  const r2Key = `${SESSION_OUTPUTS_PREFIX(t, id)}${filename}`;
+  const r2Key = `${sessionOutputsPrefix(t, id)}${filename}`;
   const obj = await bucket.get(r2Key);
   if (!obj) return c.json({ error: "Output file not found" }, 404);
 
   return new Response(obj.body, {
     headers: {
-      "Content-Type": obj.httpMetadata?.contentType || guessOutputMime(filename),
+      "Content-Type": obj.httpMetadata?.contentType || guessSessionOutputMime(filename),
       "Content-Length": String(obj.size),
       "Content-Disposition": `attachment; filename="${filename}"`,
     },
