@@ -305,6 +305,21 @@ export class OmaSandbox extends Sandbox {
   }
 
   /**
+   * Public entry point for the SessionDO `/destroy` path to emit the
+   * sandbox_active_seconds row BEFORE calling `sandbox.destroy()`. The
+   * CF Containers SDK fires `onStop` async to destroy() — by the time
+   * SessionDO returns 200, the onStop callback may still be inflight or
+   * may have been dropped if the DO got evicted. Calling this explicitly
+   * gives us a synchronous emit in the SessionDO's request lifecycle.
+   *
+   * Idempotent via storage-delete-after-emit — a later onStop fires this
+   * again but reads `undefined` from storage and no-ops.
+   */
+  async emitSandboxActiveNow(): Promise<void> {
+    await this.recordSandboxActiveOnStop();
+  }
+
+  /**
    * Compute container active-seconds from the stored billing context's
    * startedAt and emit one usage_events row of kind=sandbox_active_seconds.
    * Resets the startedAt cursor so a re-start in the same session DO
