@@ -1,0 +1,54 @@
+---
+import Base from "../../layouts/Base.astro";
+import { getCollection } from "astro:content";
+
+const posts = (await getCollection("blog", ({ data }) => !data.draft))
+  .sort((a, b) => b.data.publishedAt.valueOf() - a.data.publishedAt.valueOf());
+
+function formatDate(d: Date) {
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+---
+
+<Base
+  title="Blog"
+  description="openma blog — posts about agents, infrastructure, and the people building them."
+  canonical="/blog"
+>
+  <div class="max-w-3xl mx-auto px-4 py-12">
+    <h1 class="font-display text-4xl font-bold mb-2">Blog</h1>
+    <p class="text-[var(--color-fg-muted)] mb-12">
+      Notes from building openma. Agent design, integrations, billing, the
+      occasional postmortem.
+    </p>
+
+    {posts.length === 0 && (
+      <p class="text-[var(--color-fg-muted)]">No posts yet — first one's coming soon.</p>
+    )}
+
+    <ul class="space-y-8">
+      {posts.map((post) => (
+        <li>
+          <article>
+            <div class="text-xs text-[var(--color-fg-subtle)] uppercase tracking-wider mb-1">
+              {formatDate(post.data.publishedAt)}
+              {post.data.tags.length > 0 && (
+                <span class="ml-2">
+                  {post.data.tags.map((t) => (
+                    <span class="ml-1 inline-block px-1.5 py-0.5 rounded bg-[var(--color-bg-surface)] text-[var(--color-fg-muted)] normal-case">
+                      {t}
+                    </span>
+                  ))}
+                </span>
+              )}
+            </div>
+            <h2 class="font-display text-2xl font-semibold mb-1">
+              <a href={`/blog/${post.id}`} class="text-[var(--color-fg)]">{post.data.title}</a>
+            </h2>
+            <p class="text-[var(--color-fg-muted)]">{post.data.description}</p>
+          </article>
+        </li>
+      ))}
+    </ul>
+  </div>
+</Base>
