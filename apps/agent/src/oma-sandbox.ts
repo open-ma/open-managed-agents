@@ -417,22 +417,28 @@ const r2OutboundPassthrough = async (request: Request): Promise<Response> => {
 // Sandbox containers fire plain HTTPS at github.com (smart-HTTP git
 // protocol) and api.github.com (REST/GraphQL) with no Authorization
 // header — neither ~/.git-credentials nor GITHUB_TOKEN env exists in the
-// sandbox by design. We resolve the right token via main worker RPC
-// (per-session, per-repo path matching with first-resource fallback),
-// inject Authorization with the host-appropriate scheme, and forward.
+// sandbox by design. Two-track credential resolution:
+//
+//   ① per-repo lookup (lookupGithubCredential): for sessions that
+//     attached one or more github_repository resources. Most specific —
+//     matches the request's owner/repo path, returns that resource's
+//     scoped token.
+//   ② vault fallback (lookupOutboundCredential → cap_cli cli_id="gh"):
+//     for sessions whose vault has a cap_cli credential for gh but no
+//     per-repo resource. Generic GitHub access via the user's vault.
+//
+// Per-repo wins over vault (more specific scope > less specific). When
+// neither matches, fall through unauthenticated — same as before.
 //
 // Auth scheme is host-specific:
 //   - github.com   → Basic base64("x-access-token:<token>") (smart-HTTP)
 //   - api.github.com → Bearer <token> (REST/GraphQL)
 //
-// Pass-through (no auth header added) when:
-//   - the session has no github_repository resources
-//   - the per-session credential lookup fails
-//
-// Multi-repo fallback: if the request URL doesn't match any mounted
-// repo's owner/repo slug, we use the first declared repo's token.
-// Known limitation: cross-token mutations (graphql to repo B with token
-// A's scope) return GitHub's standard error envelope; we don't retry.
+// Multi-repo per-repo fallback: if the request URL doesn't match any
+// mounted repo's owner/repo slug, lookupGithubCredential uses the first
+// declared repo's token. Cross-token mutations (graphql to repo B with
+// token A's scope) return GitHub's standard error envelope; we don't
+// retry.
 const githubAuthHandler = async (
   request: Request,
   env: unknown,
@@ -443,6 +449,8 @@ const githubAuthHandler = async (
   const e = env as Env;
 
   let cred: { scheme: "Basic" | "Bearer"; token: string; slug: string } | null = null;
+
+  // ① per-repo first
   if (params.tenantId && params.sessionId && e.MAIN_MCP) {
     try {
       cred = await e.MAIN_MCP.lookupGithubCredential({
@@ -455,8 +463,36 @@ const githubAuthHandler = async (
       console.error(
         `[oma-sandbox] lookupGithubCredential threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
       );
-      // Fall through unauthenticated — same as legacy behaviour for
-      // RPC failure; agent sees 401, can retry.
+      // Fall through to vault fallback below.
+    }
+  }
+
+  // ② vault fallback (cap_cli cli_id="gh")
+  //
+  // Always query at api.github.com (cap's gh spec endpoint) regardless of
+  // the actual request host — same GitHub token serves both git protocol
+  // and REST API, scheme is decided locally based on request host. cap's
+  // spec model intentionally doesn't carry per-endpoint scheme config;
+  // GitHub's dual-scheme quirk lives in this GitHub-specific handler.
+  if (!cred && params.tenantId && params.sessionId && e.MAIN_MCP) {
+    try {
+      const fallback = await e.MAIN_MCP.lookupOutboundCredential({
+        tenantId: params.tenantId,
+        sessionId: params.sessionId,
+        hostname: "api.github.com",
+      });
+      if (fallback) {
+        cred = {
+          scheme: url.hostname === "github.com" ? "Basic" : "Bearer",
+          token: fallback.token,
+          slug: "vault:gh",
+        };
+      }
+    } catch (err) {
+      console.error(
+        `[oma-sandbox] cap fallback threw host=${url.hostname}: ${(err as Error)?.message ?? err}`,
+      );
+      // Fall through unauthenticated.
     }
   }
 

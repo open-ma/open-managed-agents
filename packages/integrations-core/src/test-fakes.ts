@@ -14,7 +14,7 @@ import type {
   CapabilitySet,
   Clock,
   Crypto,
-  CreateCommandSecretInput,
+  CreateCapCliInput,
   CreateCredentialInput,
   CreateSessionInput,
   DispatchRule,
@@ -166,10 +166,10 @@ export class FakeSessionCreator implements SessionCreator {
 
 export class FakeVaultManager implements VaultManager {
   readonly created: CreateCredentialInput[] = [];
-  readonly commandSecrets: CreateCommandSecretInput[] = [];
+  readonly capCli: CreateCapCliInput[] = [];
   readonly rotations: Array<
     | { kind: "bearer"; vaultId: string; credentialId: string; newToken: string }
-    | { kind: "command_secret"; vaultId: string; credentialId: string; newToken: string }
+    | { kind: "cap_cli"; vaultId: string; credentialId: string; newToken: string }
   > = [];
   private counter = 0;
 
@@ -181,10 +181,10 @@ export class FakeVaultManager implements VaultManager {
     return { vaultId: `vlt_${this.counter}`, credentialId: `crd_${this.counter}` };
   }
 
-  async addCommandSecretCredential(
-    input: CreateCommandSecretInput,
+  async addCapCliCredential(
+    input: CreateCapCliInput,
   ): Promise<{ vaultId: string; credentialId: string }> {
-    this.commandSecrets.push(input);
+    this.capCli.push(input);
     if (input.vaultId) {
       this.counter += 1;
       return { vaultId: input.vaultId, credentialId: `crd_${this.counter}` };
@@ -207,16 +207,16 @@ export class FakeVaultManager implements VaultManager {
     return true;
   }
 
-  async rotateCommandSecretToken(input: {
+  async rotateCapCliToken(input: {
     userId: string;
     vaultId: string;
-    envVar: string;
+    cliId: string;
     newToken: string;
   }): Promise<boolean> {
     this.rotations.push({
-      kind: "command_secret",
+      kind: "cap_cli",
       vaultId: input.vaultId,
-      credentialId: `(by-env:${input.envVar})`,
+      credentialId: `(by-cli:${input.cliId})`,
       newToken: input.newToken,
     });
     return true;

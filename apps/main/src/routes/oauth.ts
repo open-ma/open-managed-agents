@@ -3,7 +3,6 @@ import type { Env } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
 import type { CredentialAuth } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
-import { kvKey } from "../kv-helpers";
 
 const app = new Hono<{
   Bindings: Env;
@@ -164,10 +163,13 @@ app.get("/authorize", async (c) => {
     return c.json({ error: "mcp_server_url and vault_id are required" }, 400);
   }
 
-  // Verify vault exists
+  // Verify vault exists. Vaults live in D1 (vaults-store) since the
+  // KV → D1 migration; this route was missed in that sweep — every
+  // OAuth flow returned 404 "Vault not found" because KV was always
+  // empty. Read via the service like every other route does.
   const t = c.get("tenant_id");
-  const vaultData = await c.var.services.kv.get(kvKey(t, "vault", vaultId));
-  if (!vaultData) {
+  const vault = await c.var.services.vaults.get({ tenantId: t, vaultId });
+  if (!vault) {
     return c.json({ error: "Vault not found" }, 404);
   }
 

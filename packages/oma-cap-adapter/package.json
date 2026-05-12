@@ -1,0 +1,15 @@
+{
+  "name": "@open-managed-agents/oma-cap-adapter",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/cap": "workspace:*",
+    "@open-managed-agents/credentials-store": "workspace:*",
+    "@open-managed-agents/sessions-store": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*"
+  }
+}
