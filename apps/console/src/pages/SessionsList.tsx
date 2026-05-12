@@ -145,6 +145,15 @@ export function SessionsList() {
     name: string;
     runtime_binding?: { runtime_id: string; acp_agent_id: string };
   } | null>(null);
+  // Agent's MCP servers (from /v1/agents/{id} fetched on pick). Used to
+  // warn the user when their selected vaults don't carry credentials for
+  // a server the agent is configured to use — agent will hit those MCP
+  // endpoints unauthenticated and fail mid-conversation.
+  const [agentMcpUrls, setAgentMcpUrls] = useState<string[]>([]);
+  // Per-vault credential hostnames cache. Populated lazily as the user
+  // toggles vaults. Lookups are by hostname (matches outbound proxy logic
+  // in apps/main/src/routes/mcp-proxy.ts:resolveOutboundCredentialByHost).
+  const [vaultCredHosts, setVaultCredHosts] = useState<Record<string, Set<string>>>({});
   const [envs, setEnvs] = useState<Array<{ id: string; name: string }>>([]);
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [files, setFiles] = useState<FilePick[]>([]);
@@ -208,6 +217,85 @@ export function SessionsList() {
   };
 
   useEffect(() => { loadAux(); }, []);
+
+  // Fetch the picked agent's mcp_servers list. Combobox only carries the
+  // light row (id/name/runtime_binding); we need the full row to know
+  // which MCP endpoints the agent will dial. Refetch on agent change;
+  // clear on unselect.
+  useEffect(() => {
+    if (!form.agent) {
+      setAgentMcpUrls([]);
+      return;
+    }
+    let cancelled = false;
+    api<{ mcp_servers?: Array<{ url?: string }> }>(`/v1/agents/${form.agent}`)
+      .then((row) => {
+        if (cancelled) return;
+        const urls = (row.mcp_servers ?? [])
+          .map((s) => s.url)
+          .filter((u): u is string => typeof u === "string" && u.length > 0);
+        setAgentMcpUrls(urls);
+      })
+      .catch(() => {
+        if (!cancelled) setAgentMcpUrls([]);
+      });
+    return () => { cancelled = true; };
+  }, [form.agent, api]);
+
+  // Lazy-load credential hostnames for any newly-selected vault. Cache
+  // forever within this modal lifetime — credential rotation mid-form is
+  // not a real workflow.
+  useEffect(() => {
+    const missing = form.vault_ids.filter((vid) => !(vid in vaultCredHosts));
+    if (missing.length === 0) return;
+    let cancelled = false;
+    Promise.all(
+      missing.map(async (vid) => {
+        try {
+          const r = await api<{ data: Array<{ auth?: { mcp_server_url?: string } }> }>(
+            `/v1/vaults/${vid}/credentials`,
+          );
+          const hosts = new Set<string>();
+          for (const cred of r.data) {
+            const u = cred.auth?.mcp_server_url;
+            if (!u) continue;
+            try { hosts.add(new URL(u).hostname); } catch { /* ignore malformed */ }
+          }
+          return [vid, hosts] as const;
+        } catch {
+          return [vid, new Set<string>()] as const;
+        }
+      }),
+    ).then((entries) => {
+      if (cancelled) return;
+      setVaultCredHosts((prev) => {
+        const next = { ...prev };
+        for (const [vid, hosts] of entries) next[vid] = hosts;
+        return next;
+      });
+    });
+    return () => { cancelled = true; };
+  }, [form.vault_ids, vaultCredHosts, api]);
+
+  // Compute MCP servers the agent uses but no selected vault has credentials for.
+  // Empty when: no agent picked, or agent has no MCP servers, or every server
+  // is covered by at least one selected vault. The proxy resolver matches by
+  // hostname (not full URL), so we compare hostnames here.
+  const unauthedMcpServers = useMemo(() => {
+    if (agentMcpUrls.length === 0) return [];
+    const coveredHosts = new Set<string>();
+    for (const vid of form.vault_ids) {
+      const hosts = vaultCredHosts[vid];
+      if (hosts) for (const h of hosts) coveredHosts.add(h);
+    }
+    const missing: Array<{ url: string; host: string }> = [];
+    for (const url of agentMcpUrls) {
+      let host: string;
+      try { host = new URL(url).hostname; } catch { continue; }
+      if (!coveredHosts.has(host)) missing.push({ url, host });
+    }
+    return missing;
+  }, [agentMcpUrls, form.vault_ids, vaultCredHosts]);
 
   // Computed: which agent is selected, and is it bound to a local runtime?
   // The Environment picker, the Create-button enable condition, and the
@@ -548,6 +636,23 @@ export function SessionsList() {
                   </label>
                 ))}
               </div>
+              {unauthedMcpServers.length > 0 && (
+                <div className="mt-2 px-3 py-2 rounded-md border border-warning/40 bg-warning/5 text-xs text-warning">
+                  <div className="font-medium mb-1">
+                    {unauthedMcpServers.length === 1
+                      ? "1 MCP server has no matching credential in selected vaults:"
+                      : `${unauthedMcpServers.length} MCP servers have no matching credentials in selected vaults:`}
+                  </div>
+                  <ul className="space-y-0.5 font-mono">
+                    {unauthedMcpServers.map((s) => (
+                      <li key={s.url}>· {s.host}</li>
+                    ))}
+                  </ul>
+                  <div className="mt-1 text-fg-muted font-sans">
+                    Agent will dial these endpoints unauthenticated. Add a vault credential for each, or expect the agent to see 401s mid-conversation.
+                  </div>
+                </div>
+              )}
             </div>
           )}
 

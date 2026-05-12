@@ -3,7 +3,7 @@
 // shared internal secret.
 
 import type {
-  CreateCommandSecretInput,
+  CreateCapCliInput,
   CreateCredentialInput,
   VaultManager,
 } from "@open-managed-agents/integrations-core";
@@ -43,18 +43,20 @@ export class ServiceBindingVaultManager implements VaultManager {
     });
   }
 
-  async addCommandSecretCredential(
-    input: CreateCommandSecretInput,
+  async addCapCliCredential(
+    input: CreateCapCliInput,
   ): Promise<{ vaultId: string; credentialId: string }> {
     return this.post({
-      action: "add_command_secret",
+      action: "add_cap_cli",
       userId: input.userId,
       vaultId: input.vaultId,
       vaultName: input.vaultName,
       displayName: input.displayName,
-      commandPrefixes: input.commandPrefixes,
-      envVar: input.envVar,
+      cliId: input.cliId,
       token: input.token,
+      ...(input.expiresAt !== undefined ? { expiresAt: Date.parse(input.expiresAt) } : {}),
+      ...(input.refreshToken ? { refreshToken: input.refreshToken } : {}),
+      ...(input.extras ? { extras: input.extras } : {}),
       provider: input.provider,
     });
   }
@@ -86,10 +88,10 @@ export class ServiceBindingVaultManager implements VaultManager {
     return true;
   }
 
-  async rotateCommandSecretToken(input: {
+  async rotateCapCliToken(input: {
     userId: string;
     vaultId: string;
-    envVar: string;
+    cliId: string;
     newToken: string;
   }): Promise<boolean> {
     const res = await this.main.fetch(`http://main${this.path}/rotate`, {
@@ -99,17 +101,17 @@ export class ServiceBindingVaultManager implements VaultManager {
         "x-internal-secret": this.secret,
       },
       body: JSON.stringify({
-        action: "rotate_command_secret",
+        action: "rotate_cap_cli",
         userId: input.userId,
         vaultId: input.vaultId,
-        envVar: input.envVar,
+        cliId: input.cliId,
         newToken: input.newToken,
       }),
     });
     if (res.status === 404) return false;
     if (!res.ok) {
       throw new Error(
-        `VaultManager.rotateCommandSecretToken: ${res.status} ${await res.text()}`,
+        `VaultManager.rotateCapCliToken: ${res.status} ${await res.text()}`,
       );
     }
     return true;
