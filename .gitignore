@@ -20,6 +20,12 @@ apps/*/wrangler.lane-*.jsonc
 test-heatmap.html
 test/eval/data/
 
+# RL training artifacts
+rl/output/
+rl/tasks/terminal-bench/results/
+rl/tasks/terminal-bench/tb-source/
+rl/tasks/terminal-bench/findings-*.md
+
 # Internal docs (screenshots, design notes, TODOs)
 .docs/
 
@@ -37,3 +43,4 @@ test/eval/data/
 # pnpm content store (created when --store-dir=. is used locally)
 .pnpm-store/
 data/
+.env

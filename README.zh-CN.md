@@ -5,7 +5,7 @@
 <p align="center">
   <img src="https://img.shields.io/badge/Cloudflare-Workers-F38020?logo=cloudflare&logoColor=white" alt="Cloudflare Workers" />
   <img src="https://img.shields.io/badge/TypeScript-5.8-3178C6?logo=typescript&logoColor=white" alt="TypeScript" />
-  <img src="https://img.shields.io/badge/License-MIT-green.svg" alt="MIT License" />
+  <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
   <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
 </p>
@@ -25,9 +25,9 @@
 ### 1. 安装
 
 ```bash
-git clone https://github.com/anthropics/open-managed-agents.git
+git clone https://github.com/open-ma/open-managed-agents.git
 cd open-managed-agents
-npm install
+pnpm install
 ```
 
 ### 2. 本地运行
@@ -46,7 +46,7 @@ ANTHROPIC_API_KEY=sk-ant-xxx
 ```
 
 ```bash
-npm run dev
+pnpm dev
 # API   → http://localhost:8787
 # 控制台 → http://localhost:5173
 ```
@@ -483,4 +483,4 @@ pnpm deploy:docs    # 构建 + wrangler部署（Cloudflare Worker静态资源）
 
 ## 许可证
 
-[MIT](LICENSE)
+[Apache 2.0](LICENSE)

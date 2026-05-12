@@ -23,7 +23,7 @@
     "access": "public"
   },
   "keywords": ["ai", "agents", "managed-agents", "openma", "sdk", "llm", "streaming", "sse"],
-  "license": "MIT",
+  "license": "Apache-2.0",
   "homepage": "https://openma.dev",
   "repository": {
     "type": "git",

@@ -131,7 +131,7 @@ const PROBE_HEADERS: Record<string, string> = parseHeaders(process.env.PROBE_HEA
 let reqIdx = 0;
 const debugFetch: typeof fetch = async (input, init) => {
   // No beta stripping — testing whether X-From routes around the cache
-  // bypass that hits when X-Sub-Module:claude-code-internal sees any beta.
+  // bypass that hits when a privileged sub-module identifier sees any beta.
   let cleanInit = init;
   if (cleanInit?.body && process.env.PROBE_DUMP_BODY === "1") {
     try {

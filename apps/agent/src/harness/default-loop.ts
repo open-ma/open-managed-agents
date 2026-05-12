@@ -832,7 +832,6 @@ function resolveContextWindowTokens(model: LanguageModel): number {
 //   anthropic: cache_control breakpoints on system / last tool / mid / last msg
 //   openai:    automatic on the API side (no client-side knob to set)
 //   google:    cachedContent (different model — explicit cache resource creation)
-//   minimax:   TBD
 //   others:    no-op
 //
 // Adding a provider later: add a case below; the calling harness code

@@ -15,7 +15,6 @@ import slackWebhook from "./routes/slack/webhook";
 import slackPublications from "./routes/slack/publications";
 import slackDedicatedCallback from "./routes/slack/dedicated-callback";
 import slackSetupPage from "./routes/slack/setup-page";
-import { buildContainer } from "./wire";
 import { buildProviders } from "./providers";
 
 // Integrations gateway worker: receives 3rd-party webhooks (Linear + GitHub +
@@ -28,93 +27,6 @@ import { buildProviders } from "./providers";
 const app = new Hono<{ Bindings: Env }>();
 
 app.get("/health", (c) => c.json({ status: "ok" }));
-
-// Staging-only gate for the TEMP admin endpoints below. We detect staging
-// by hostname rather than introducing a new env var: only the staging
-// `wrangler.jsonc` env stanza names "staging" in GATEWAY_ORIGIN. A prod
-// deploy that accidentally inherits TEMP_DEBUG_TOKEN still gets 404'd.
-function isStagingEnv(env: Env): boolean {
-  return /\bstaging\b/i.test(env.GATEWAY_ORIGIN ?? "");
-}
-
-// TEMP one-shot admin: dump a Linear installation's App OAuth access token.
-// Used to validate end-to-end on a fresh env. Remove this route + the
-// TEMP_DEBUG_TOKEN secret after verification.
-app.get("/admin/dump-linear-installation-token", async (c) => {
-  if (!isStagingEnv(c.env)) {
-    return c.notFound();
-  }
-  if (
-    !c.env.TEMP_DEBUG_TOKEN ||
-    c.req.header("x-debug-token") !== c.env.TEMP_DEBUG_TOKEN
-  ) {
-    return c.json({ error: "unauthorized" }, 401);
-  }
-  const id = c.req.query("installation_id");
-  if (!id) return c.json({ error: "installation_id required" }, 400);
-  const container = buildContainer(c.env);
-  const inst = await container.installations.get(id);
-  if (!inst) return c.json({ error: "not_found" }, 404);
-  const token = await container.installations.getAccessToken(id);
-  if (!token) return c.json({ error: "no token" }, 404);
-  return c.json({
-    installationId: inst.id,
-    userId: inst.userId,
-    workspaceId: inst.workspaceId,
-    workspaceName: inst.workspaceName,
-    vaultId: inst.vaultId,
-    botUserId: inst.botUserId,
-    scopes: inst.scopes,
-    token,
-  });
-});
-
-// TEMP one-shot admin: build a Linear OAuth re-authorize URL for an existing
-// installation that pre-dates refresh_token capture. Open the returned URL,
-// approve on linear.app, and the callback at /linear/oauth/reauth/.../callback
-// rotates this row's tokens in place (capturing refresh_token this time).
-// Remove together with /admin/dump-linear-installation-token.
-app.get("/admin/linear-reauth-link", async (c) => {
-  if (!isStagingEnv(c.env)) {
-    return c.notFound();
-  }
-  if (
-    !c.env.TEMP_DEBUG_TOKEN ||
-    c.req.header("x-debug-token") !== c.env.TEMP_DEBUG_TOKEN
-  ) {
-    return c.json({ error: "unauthorized" }, 401);
-  }
-  const installationId = c.req.query("installation_id");
-  if (!installationId) return c.json({ error: "installation_id required" }, 400);
-
-  const container = buildContainer(c.env);
-  const { linear } = buildProviders(c.env);
-
-  let result;
-  try {
-    result = await linear.buildReauthorizeUrl({
-      installationId,
-      redirectBase: c.env.GATEWAY_ORIGIN,
-    });
-  } catch (err) {
-    return c.json(
-      { error: "build_reauth_url_failed", details: err instanceof Error ? err.message : String(err) },
-      500,
-    );
-  }
-  // container is referenced indirectly via the provider; touch to silence
-  // unused-var if the noUnusedLocals lint kicks in.
-  void container;
-
-  return c.json({
-    installationId,
-    appId: result.appId,
-    workspaceName: result.workspaceName,
-    botUserId: result.botUserId,
-    authorizeUrl: result.authorizeUrl,
-    note: "Open authorizeUrl, approve on linear.app, and the callback rotates this install's tokens in place.",
-  });
-});
 
 // Linear
 app.route("/linear/oauth/app", linearDedicatedCallback);

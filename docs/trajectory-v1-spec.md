@@ -15,7 +15,7 @@ This doc locks that trace down as **the canonical OMA Trajectory format**: stabl
 
 ## Non-goals
 
-- Not unifying scorer / verifier / reward function interfaces (deliberate — see `docs/handoff-verifier-framework.md` discussion).
+- Not unifying scorer / verifier / reward function interfaces (deliberate — see `docs/archive/handoff-verifier-framework.md` discussion).
 - Not adopting OTel GenAI as the *internal* format (too generic; multi-agent / supervisor / sandbox aren't first-class). Adopted only as a *projection*.
 - Not designing benchmarks (SWE-bench, GAIA loaders) — those are dataset adapters that *produce* Trajectories.
 
@@ -241,7 +241,7 @@ No event format changes. No runtime emit changes (other than optional `parent_ev
 - `rl/types.ts` — current RL trajectory shape (will become projection target)
 - `test/eval/types.ts` — current eval shape
 - `apps/agent/src/harness/outcome-evaluator.ts` — current outcome evaluator
-- `docs/handoff-verifier-framework.md` — context from prior session
+- `docs/archive/handoff-verifier-framework.md` — context from prior session
 - Inspect AI `TaskState`: https://github.com/UKGovernmentBEIS/inspect_ai/blob/main/src/inspect_ai/solver/_task_state.py
 - OTel GenAI semantic conventions: https://opentelemetry.io/docs/specs/semconv/gen-ai/
 - verl / SkyRL / OpenRLHF — RL trajectory shape references
