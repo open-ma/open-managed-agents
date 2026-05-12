@@ -5,7 +5,7 @@ import { organizationSchema, websiteSchema } from "../lib/seo";
 export interface Props {
   title: string;
   description?: string;
-  /** Canonical path under https://www.openma.dev — leading slash. */
+  /** Canonical path under https://openma.dev — leading slash. */
   canonical?: string;
   /** og:type. Default "website"; "article" for blog posts. */
   ogType?: "website" | "article";
@@ -31,11 +31,15 @@ const {
   keywords,
 } = Astro.props;
 
-const SITE = "https://www.openma.dev";
-// Append " — openma" only when the title doesn't already contain "openma".
-// Avoids "openma — openma" on the homepage and the seed posts.
-const fullTitle = /openma/i.test(title) ? title : `${title} — openma`;
-const desc = description ?? "Open-source meta-harness for AI agents. BYOK, sandboxed cloud or self-host. Make agents real members of your Linear, Slack, GitHub workspaces.";
+const SITE = "https://openma.dev";
+// Append " — Open Managed Agents" only when the title doesn't already
+// contain the full brand. We deliberately don't match on "openma"
+// alone, so a post like "Hello, openma" still gets the suffix for
+// SERP branding.
+const fullTitle = /open managed agents/i.test(title)
+  ? title
+  : `${title} — Open Managed Agents`;
+const desc = description ?? "Open-source, self-hostable alternative to Anthropic's Managed Agents. Cloudflare Workers + Durable Objects. Apache 2.0. Drop-in compatible API.";
 const url = canonical ? `${SITE}${canonical}` : Astro.url.toString();
 const finalOgImage = ogImage ?? `${SITE}/og-default.png`;
 
@@ -57,7 +61,14 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
     <meta name="theme-color" content="#ea580c" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#fb923c" media="(prefers-color-scheme: dark)" />
 
+    <!-- Favicons + manifest. SVG primary; PNG fallbacks for Safari /
+         Android home screen. The PNG set is generated from
+         public/og-default.svg + the wordmark — see public/README.md. -->
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <link rel="icon" type="image/png" sizes="32x32" href="/favicon-32.png" />
+    <link rel="icon" type="image/png" sizes="16x16" href="/favicon-16.png" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png" />
+    <link rel="manifest" href="/site.webmanifest" />
 
     <!-- Theme: system preference with manual override. -->
     <script is:inline>
@@ -81,12 +92,12 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
     <meta property="og:description" content={desc} />
     <meta property="og:url" content={url} />
     <meta property="og:type" content={ogType} />
-    <meta property="og:site_name" content="openma" />
+    <meta property="og:site_name" content="Open Managed Agents" />
     <meta property="og:locale" content="en_US" />
     <meta property="og:image" content={finalOgImage} />
     <meta property="og:image:width" content="1200" />
     <meta property="og:image:height" content="630" />
-    <meta property="og:image:alt" content={`${fullTitle} — open-source meta-harness for AI agents`} />
+    <meta property="og:image:alt" content={fullTitle} />
     {publishedAt && (
       <meta property="article:published_time" content={publishedAt.toISOString()} />
     )}
@@ -103,7 +114,7 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
     <meta name="twitter:image" content={finalOgImage} />
 
     <!-- RSS -->
-    <link rel="alternate" type="application/rss+xml" title="openma blog" href="/blog/rss.xml" />
+    <link rel="alternate" type="application/rss+xml" title="Open Managed Agents — Blog" href="/blog/rss.xml" />
 
     <!-- JSON-LD structured data — Organization + WebSite on every page,
          plus per-page schemas (BlogPosting, BreadcrumbList) injected by callers. -->
@@ -114,7 +125,7 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
   <body class="bg-bg text-fg">
     <header class="border-b border-[var(--color-border)]">
       <div class="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
-        <a href="/" class="flex items-center gap-2 text-fg hover:text-fg" aria-label="openma home">
+        <a href="/" class="flex items-center gap-2 text-fg hover:text-fg" aria-label="Open Managed Agents — home">
           <img src="/logo.svg" alt="" class="h-7" width="28" height="28" />
           <span class="font-mono font-bold">openma</span>
         </a>
@@ -137,7 +148,7 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
 
     <footer class="border-t border-[var(--color-border)] mt-20">
       <div class="max-w-5xl mx-auto px-4 py-8 text-sm text-[var(--color-fg-muted)] flex flex-wrap gap-x-8 gap-y-2 justify-between">
-        <div>© {new Date().getFullYear()} openma. MIT licensed.</div>
+        <div>© {new Date().getFullYear()} Open Managed Agents. Apache 2.0 licensed.</div>
         <nav class="flex gap-5" aria-label="Footer">
           <a href="/blog">Blog</a>
           <a href="https://docs.openma.dev">Docs</a>

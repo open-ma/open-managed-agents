@@ -12,11 +12,11 @@
 
 # Open Managed Agents
 
-**一个开源的AI智能体元框架，运行在Cloudflare上。**
+**Anthropic Managed Agents 的开源替代品** —— 一个你可以自部署的 AI 智能体元框架。
 
-编写一个框架，部署它 —— 平台会自动运行，内置会话、沙箱、工具、记忆、保险库和崩溃恢复功能。
+🌐 **[openma.dev](https://openma.dev)** · 📖 **[docs.openma.dev](https://docs.openma.dev)** · 💬 **[github.com/open-ma/open-managed-agents](https://github.com/open-ma/open-managed-agents)**
 
-📖 **完整文档：** [docs.openma.dev](https://docs.openma.dev)
+编写一个框架，部署它 —— 平台会自动运行，内置会话、沙箱、工具、记忆、保险库和崩溃恢复功能。API 与 Anthropic 的 Managed Agents 兼容；可运行在 Cloudflare Workers + Durable Objects 上，或者直接 `docker compose up` 在你自己的机器上。
 
 ---
 

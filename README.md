@@ -12,11 +12,11 @@
 
 # Open Managed Agents
 
-**An open-source meta-harness for AI agents.**
+**Open-source alternative to Anthropic's Managed Agents** — a meta-harness for AI agents you can run yourself.
 
-Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, and crash recovery out of the box.
+🌐 **[openma.dev](https://openma.dev)** · 📖 **[docs.openma.dev](https://docs.openma.dev)** · 💬 **[github.com/open-ma/open-managed-agents](https://github.com/open-ma/open-managed-agents)**
 
-📖 **Full documentation:** [docs.openma.dev](https://docs.openma.dev)
+Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, and crash recovery out of the box. Drop-in compatible with Anthropic's Managed Agents API; runs on Cloudflare Workers + Durable Objects, or `docker compose up` on your own box.
 
 ---
 

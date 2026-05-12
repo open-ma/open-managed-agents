@@ -2,6 +2,9 @@ node_modules/
 dist/
 .wrangler/
 .dev.vars
+# Astro content-collection types cache (apps/web). Regenerated on
+# `astro check` / `astro build`; not part of source.
+.astro/
 
 # pnpm
 pnpm-debug.log*
