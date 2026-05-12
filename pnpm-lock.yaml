@@ -699,6 +699,9 @@ importers:
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../files-store
+      '@open-managed-agents/integrations-adapters-cf':
+        specifier: workspace:*
+        version: link:../integrations-adapters-cf
       '@open-managed-agents/kv-store':
         specifier: workspace:*
         version: link:../kv-store
@@ -1260,6 +1263,34 @@ packages:
     engines: {node: '>=18.0.0'}
     cpu: [arm64]
     os: [darwin]
+
+  '@boxlite-ai/boxlite-linux-arm64-gnu@0.8.2':
+    resolution: {integrity: sha512-x/VR5JtGj3Z8LCo+rPeaHUfpCztKMcYt0GnFpq+OwrH0WIZj7P5Rz98INmF8aaX7CoJmA+livT1cwJuOZwaQ0w==}
+    engines: {node: '>=18.0.0'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@boxlite-ai/boxlite-linux-arm64-gnu@0.9.3':
+    resolution: {integrity: sha512-LzlBz8VHGZbiJP/1JztlBNHKSAATksIJgjxMcWxsJLLxENrsCgsi0hLfeRKLDvmsyuQawcpzbYzoSYRbAKkCjw==}
+    engines: {node: '>=18.0.0'}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@boxlite-ai/boxlite-linux-x64-gnu@0.8.2':
+    resolution: {integrity: sha512-xTZNgHGlsBrhXlPy/BuoCVKefIs3kZcBMUXBMehk7WzMXNSz8nnNjAz2wr7IuR1qwNrqTn9S+08dDpCmKvuJNg==}
+    engines: {node: '>=18.0.0'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@boxlite-ai/boxlite-linux-x64-gnu@0.9.3':
+    resolution: {integrity: sha512-azwKVAiEBUvGTy0kg9bBumUBOysyUVNG8llqOss6Xdu5yu0tm7NRZXgcT9nnS/vuRBPH5056C0iUwsxGI3QgXA==}
+    engines: {node: '>=18.0.0'}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
 
   '@boxlite-ai/boxlite@0.8.2':
     resolution: {integrity: sha512-PvoTMjOwZWPnseW7WINoIYctIQQB6XlQJTvCut9dWlNmQ2hKVGCX3gX1GruO93SNCv+yai005i23BomtKEQxEw==}
@@ -2329,6 +2360,11 @@ packages:
 
   '@pagefind/default-ui@1.5.2':
     resolution: {integrity: sha512-pm1LMnQg8N2B3n2TnjKlhaFihpz6zTiA4HiGQ6/slKO/+8K9CAU5kcjdSSPgpuk1PMuuN4hxLipUIifnrkl3Sg==}
+
+  '@pagefind/freebsd-x64@1.5.2':
+    resolution: {integrity: sha512-7EVzo9+0w+2cbe671BtMj10UlNo83I+HrLVLfRxO731svHRJKUfJ/mo05gU14pe9PCfpKNQT8FS3Xc/oDN6pOA==}
+    cpu: [x64]
+    os: [freebsd]
 
   '@pagefind/linux-arm64@1.5.2':
     resolution: {integrity: sha512-Ovt9+K35sqzn8H3ZMXGwls4TD/wMJuvRtShHIsmUQREmaxjrDEX7gHckRCrwYJ4XE1H1p6HkLz3wukrAnsfXQw==}
@@ -7448,14 +7484,30 @@ snapshots:
   '@boxlite-ai/boxlite-darwin-arm64@0.9.3':
     optional: true
 
+  '@boxlite-ai/boxlite-linux-arm64-gnu@0.8.2':
+    optional: true
+
+  '@boxlite-ai/boxlite-linux-arm64-gnu@0.9.3':
+    optional: true
+
+  '@boxlite-ai/boxlite-linux-x64-gnu@0.8.2':
+    optional: true
+
+  '@boxlite-ai/boxlite-linux-x64-gnu@0.9.3':
+    optional: true
+
   '@boxlite-ai/boxlite@0.8.2(playwright-core@1.59.1)':
     optionalDependencies:
       '@boxlite-ai/boxlite-darwin-arm64': 0.8.2
+      '@boxlite-ai/boxlite-linux-arm64-gnu': 0.8.2
+      '@boxlite-ai/boxlite-linux-x64-gnu': 0.8.2
       playwright-core: 1.59.1
 
   '@boxlite-ai/boxlite@0.9.3(playwright-core@1.59.1)':
     optionalDependencies:
       '@boxlite-ai/boxlite-darwin-arm64': 0.9.3
+      '@boxlite-ai/boxlite-linux-arm64-gnu': 0.9.3
+      '@boxlite-ai/boxlite-linux-x64-gnu': 0.9.3
       playwright-core: 1.59.1
 
   '@bufbuild/protobuf@2.12.0': {}
@@ -8535,6 +8587,9 @@ snapshots:
     optional: true
 
   '@pagefind/default-ui@1.5.2': {}
+
+  '@pagefind/freebsd-x64@1.5.2':
+    optional: true
 
   '@pagefind/linux-arm64@1.5.2':
     optional: true
@@ -12075,6 +12130,7 @@ snapshots:
     optionalDependencies:
       '@pagefind/darwin-arm64': 1.5.2
       '@pagefind/darwin-x64': 1.5.2
+      '@pagefind/freebsd-x64': 1.5.2
       '@pagefind/linux-arm64': 1.5.2
       '@pagefind/linux-x64': 1.5.2
       '@pagefind/windows-arm64': 1.5.2

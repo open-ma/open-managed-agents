@@ -121,3 +121,22 @@ export interface IdGenerator {
 export interface Logger {
   warn(msg: string, ctx?: unknown): void;
 }
+
+/**
+ * Symmetric encryption boundary for the `auth` JSON blob at rest.
+ *
+ * Wired at the repo layer (not the service layer) so that the read-merge-write
+ * semantics in CredentialService.update / refreshAuth stay transparent — the
+ * service sees plaintext-typed CredentialRow regardless of on-disk format.
+ *
+ * Default repo wiring uses an identity (passthrough) crypto so existing
+ * in-memory tests keep working. Production callers MUST pass a real
+ * implementation (e.g. WebCryptoAesGcm).
+ *
+ * The hot-path columns (auth_type, mcp_server_url, provider) stay plaintext —
+ * they're SQL index keys, not secrets. Only the `auth` JSON blob is encrypted.
+ */
+export interface Crypto {
+  encrypt(plaintext: string): Promise<string>;
+  decrypt(ciphertext: string): Promise<string>;
+}

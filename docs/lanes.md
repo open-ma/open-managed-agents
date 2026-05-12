@@ -111,7 +111,7 @@ Required CI vars/secrets (already used by `deploy.yml`):
 - `vars.CLOUDFLARE_ACCOUNT_ID`
 - `secrets.CLOUDFLARE_API_TOKEN`
 - `secrets.API_KEY`, `secrets.ANTHROPIC_API_KEY`, `secrets.BETTER_AUTH_SECRET`,
-  `secrets.INTEGRATIONS_INTERNAL_SECRET`, `secrets.MCP_SIGNING_KEY`,
+  `secrets.INTEGRATIONS_INTERNAL_SECRET`, `secrets.PLATFORM_ROOT_SECRET`,
   `secrets.INTERNAL_TOKEN`
 - Optional: `secrets.ANTHROPIC_BASE_URL`, `secrets.TAVILY_API_KEY`
 

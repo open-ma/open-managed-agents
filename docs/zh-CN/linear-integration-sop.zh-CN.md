@@ -38,11 +38,11 @@ export GATEWAY="https://managed-agents-integrations.acme.workers.dev"
 
 ```bash
 # 32 字节随机，base64。**跑两次——两次的值必须不同**。
-openssl rand -base64 32   # MCP_SIGNING_KEY
+openssl rand -base64 32   # PLATFORM_ROOT_SECRET
 openssl rand -base64 32   # INTEGRATIONS_INTERNAL_SECRET
 ```
 
-两个都存进密码管理器。同样的 `MCP_SIGNING_KEY` 和 `INTEGRATIONS_INTERNAL_SECRET` 要在 **gateway worker 和 main worker 双方**都配。**两边不一致就会报「401 unauthorized」或「invalid token」。**
+两个都存进密码管理器。同样的 `PLATFORM_ROOT_SECRET` 和 `INTEGRATIONS_INTERNAL_SECRET` 要在 **gateway worker 和 main worker 双方**都配。**两边不一致就会报「401 unauthorized」或「invalid token」。**
 
 ---
 
@@ -87,7 +87,7 @@ Linear 只会展示 `client_id` + `client_secret` **一次**。把它们贴回 C
 cd apps/integrations
 
 # 设置 2 个 secret（提示输入时贴值进去）
-wrangler secret put MCP_SIGNING_KEY                # 第 2 步生成
+wrangler secret put PLATFORM_ROOT_SECRET                # 第 2 步生成
 wrangler secret put INTEGRATIONS_INTERNAL_SECRET   # 第 2 步生成
 
 # 部署
@@ -111,7 +111,7 @@ curl $GATEWAY/health
 cd apps/main
 
 # 同样的两个 secret —— 必须与第 2 步的值**完全一致**
-wrangler secret put MCP_SIGNING_KEY
+wrangler secret put PLATFORM_ROOT_SECRET
 wrangler secret put INTEGRATIONS_INTERNAL_SECRET
 
 wrangler deploy
@@ -222,18 +222,18 @@ curl -b 'session=...' https://<MAIN>/v1/integrations/linear/installations
 
 ### 轮换 per-app 的 `client_secret` 或 `webhook_secret`
 
-这些 per-app secret 存在 D1（`linear_apps.client_secret_cipher` / `webhook_secret_cipher`），用 `MCP_SIGNING_KEY` 加密。要轮换某一个 publication 的 secret 而不动 `MCP_SIGNING_KEY`：
+这些 per-app secret 存在 D1（`linear_apps.client_secret_cipher` / `webhook_secret_cipher`），用 `PLATFORM_ROOT_SECRET` 加密。要轮换某一个 publication 的 secret 而不动 `PLATFORM_ROOT_SECRET`：
 
 1. 在 Linear app 设置里，对该 secret 点「Regenerate」。
 2. 在 Console 重新走一次 publish（向导会用新值重新加密并写入）。
 
-### 轮换 `MCP_SIGNING_KEY`
+### 轮换 `PLATFORM_ROOT_SECRET`
 
 ⚠️ **破坏性**：轮换它会让所有静态加密的 token 全部成「孤儿」（`linear_installations.access_token_cipher`、`linear_apps.client_secret_cipher` 等）。已有的 publication 都会因「missing client secret」失败，直到重新安装。
 
 流程：
 
-1. 在**两个 worker**上 `wrangler secret put MCP_SIGNING_KEY`。
+1. 在**两个 worker**上 `wrangler secret put PLATFORM_ROOT_SECRET`。
 2. 两个 worker 都 `wrangler deploy`。
 3. 通知用户从 Console 重新发布 Linear 集成。
 
@@ -263,13 +263,13 @@ curl -b 'session=...' https://<MAIN>/v1/integrations/linear/installations
 # 终端 1 —— gateway
 cd apps/integrations
 echo 'GATEWAY_ORIGIN = "http://localhost:8788"' > .dev.vars
-echo 'MCP_SIGNING_KEY = "..."' >> .dev.vars
+echo 'PLATFORM_ROOT_SECRET = "..."' >> .dev.vars
 echo 'INTEGRATIONS_INTERNAL_SECRET = "..."' >> .dev.vars
 wrangler dev --port 8788
 
 # 终端 2 —— main
 cd apps/main
-echo 'MCP_SIGNING_KEY = "..."' > .dev.vars
+echo 'PLATFORM_ROOT_SECRET = "..."' > .dev.vars
 echo 'INTEGRATIONS_INTERNAL_SECRET = "..."' >> .dev.vars
 wrangler dev --port 8787
 ```

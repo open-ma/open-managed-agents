@@ -250,6 +250,12 @@ CREATE INDEX IF NOT EXISTS "idx_vaults_tenant"
 -- Three auth types: mcp_oauth | static_bearer | command_secret.
 -- Hot fields denormalized to dedicated columns for indexing; full
 -- CredentialAuth as JSON in `auth`. Writers MUST keep them in sync.
+--
+-- `auth` is encrypted at rest via AES-256-GCM (WebCryptoAesGcm with the
+-- `credentials.auth` HKDF label). Format: base64url(iv || ciphertext).
+-- Wired in packages/services/src/index.ts. Hot-path columns (auth_type,
+-- mcp_server_url, provider) stay plaintext — they're SQL index keys, not
+-- secrets.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS "credentials" (
@@ -459,9 +465,9 @@ CREATE INDEX IF NOT EXISTS "idx_eval_runs_status_active"
 -- ============================================================
 -- MODEL CARDS (packages/model-cards-store)
 -- Replaces t:{tenant}:modelcard:{id} + t:{tenant}:modelcard:{id}:key KV.
--- api_key_cipher is opaque (Crypto port output). Default service factory
--- uses identity Crypto so values match legacy KV cleartext until a real
--- AES-GCM impl is wired (see model-cards-store INTEGRATION_GUIDE.md).
+-- api_key_cipher is AES-256-GCM (WebCryptoAesGcm with the
+-- `model.cards.keys` HKDF label). Format: base64url(iv || ciphertext).
+-- Wired in packages/services/src/index.ts.
 -- ============================================================
 
 CREATE TABLE IF NOT EXISTS "model_cards" (

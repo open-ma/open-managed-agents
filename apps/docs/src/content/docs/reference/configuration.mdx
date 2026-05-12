@@ -158,7 +158,7 @@ Required for self-host. Set as Worker secrets via `npx wrangler secret put NAME`
 | `BETTER_AUTH_SECRET` | main | better-auth session signing key |
 | `API_KEY` | main | Initial dev API key for the REST API |
 | `INTEGRATIONS_INTERNAL_SECRET` | main, integrations | Shared secret between main and integrations workers |
-| `MCP_SIGNING_KEY` | integrations | Signs outbound MCP tokens |
+| `PLATFORM_ROOT_SECRET` | main, integrations | Root secret for at-rest encryption (credentials, model card keys, integration tokens) and outbound MCP token signing |
 
 ### Optional integrations
 
