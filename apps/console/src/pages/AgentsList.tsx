@@ -5,6 +5,7 @@ import { useCursorList } from "../lib/useCursorList";
 import { ListPage } from "../components/ListPage";
 import { Select, SelectOption, SelectGroup, SelectGroupLabel } from "../components/Select";
 import { Combobox } from "../components/Combobox";
+import { McpServerPickerModal } from "../components/McpServerPickerModal";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../data/templates";
 import yaml from "js-yaml";
 import type { ModelCard } from "@open-managed-agents/api-types";
@@ -110,6 +111,7 @@ export function AgentsList() {
   const [tab, setTab] = useState<"basic" | "tools" | "skills" | "mcp" | "agents">("basic");
   const [createMode, setCreateMode] = useState<"form" | "yaml" | "json">("form");
   const [codeValue, setCodeValue] = useState("");
+  const [showMcpPicker, setShowMcpPicker] = useState(false);
 
   // Main agents table — cursor-paginated. Filter changes (showArchived)
   // reset to page 1 automatically.
@@ -246,6 +248,13 @@ export function AgentsList() {
   const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : m?.id || "";
 
   const addMcp = () => setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "sse", url: "" }] });
+  const addMcpFromRegistry = (entry: { id: string; name: string; url: string }) => {
+    if (form.mcpServers.some((m) => m.url === entry.url)) return;
+    setForm({
+      ...form,
+      mcpServers: [...form.mcpServers, { name: entry.id, type: "sse", url: entry.url }],
+    });
+  };
   const updateMcp = (i: number, field: keyof McpEntry, val: string) => {
     const updated = [...form.mcpServers];
     updated[i] = { ...updated[i], [field]: val };
@@ -989,7 +998,10 @@ export function AgentsList() {
                 <div className="space-y-3">
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-sm font-medium text-fg">MCP Servers</label>
-                    <button onClick={addMcp} className="text-xs text-fg-muted hover:text-fg transition-colors">+ Add server</button>
+                    <div className="flex items-center gap-3">
+                      <button onClick={() => setShowMcpPicker(true)} className="text-xs text-fg-muted hover:text-fg transition-colors">+ Pick known</button>
+                      <button onClick={addMcp} className="text-xs text-fg-muted hover:text-fg transition-colors">+ Custom URL</button>
+                    </div>
                   </div>
                   {form.mcpServers.map((mcp, i) => (
                     <div key={i} className="border border-border rounded-lg p-3 space-y-2">
@@ -1117,6 +1129,14 @@ export function AgentsList() {
           </div>
         </div>
       )}
+
+      {/* MCP server registry picker — same MCP_REGISTRY the vault page uses */}
+      <McpServerPickerModal
+        open={showMcpPicker}
+        onClose={() => setShowMcpPicker(false)}
+        alreadyAddedUrls={form.mcpServers.map((m) => m.url)}
+        onPick={addMcpFromRegistry}
+      />
     </ListPage>
   );
 }

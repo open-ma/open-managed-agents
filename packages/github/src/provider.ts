@@ -329,8 +329,9 @@ export class GitHubProvider implements IntegrationProvider {
     //
     //   1. static_bearer credential — outbound proxy injects on calls to the
     //      hosted GitHub MCP server (api.githubcopilot.com/mcp/).
-    //   2. command_secret credential — sandbox injects GITHUB_TOKEN env var
-    //      on `gh` and `git` subprocess calls.
+    //   2. cap_cli credential (cli_id="gh") — cap proxy injects Bearer on
+    //      sandbox HTTPS to api.github.com / uploads.github.com when the
+    //      agent runs `gh` / `git`. Token never enters sandbox process env.
     //
     // Both credentials hold the SAME installation token; rotating one means
     // rotating the other. Sharing one vault keeps them lifecycle-coupled.
@@ -342,13 +343,12 @@ export class GitHubProvider implements IntegrationProvider {
       bearerToken: token.token,
       provider: "github",
     });
-    await this.container.vaults.addCommandSecretCredential({
+    await this.container.vaults.addCapCliCredential({
       userId: state.userId,
       vaultId,
       vaultName: `GitHub · ${installDetail.account.login} · ${state.persona.name}`,
       displayName: `GitHub CLI token (${state.persona.name})`,
-      commandPrefixes: ["gh", "git"],
-      envVar: "GITHUB_TOKEN",
+      cliId: "gh",
       token: token.token,
       provider: "github",
     });
@@ -807,8 +807,8 @@ export class GitHubProvider implements IntegrationProvider {
   /**
    * Mint a fresh installation_token via GitHub's `/app/installations/<id>/access_tokens`
    * endpoint and rotate both vault credentials (static_bearer for MCP path,
-   * command_secret for sandbox `gh`/`git`). Throws on any HTTP failure;
-   * caller decides whether to swallow.
+   * cap_cli (cli_id="gh") for sandbox `gh`/`git`). Throws on any HTTP
+   * failure; caller decides whether to swallow.
    */
   private async refreshInstallationToken(installation: {
     id: string;
@@ -846,10 +846,10 @@ export class GitHubProvider implements IntegrationProvider {
       vaultId: installation.vaultId,
       newBearerToken: fresh.token,
     });
-    await this.container.vaults.rotateCommandSecretToken({
+    await this.container.vaults.rotateCapCliToken({
       userId: installation.userId,
       vaultId: installation.vaultId,
-      envVar: "GITHUB_TOKEN",
+      cliId: "gh",
       newToken: fresh.token,
     });
   }

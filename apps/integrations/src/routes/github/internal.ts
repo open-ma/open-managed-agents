@@ -79,10 +79,10 @@ app.post("/refresh-by-vault", async (c) => {
     vaultId: body.vaultId,
     newBearerToken: fresh.token,
   });
-  await container.vaults.rotateCommandSecretToken({
+  await container.vaults.rotateCapCliToken({
     userId: body.userId,
     vaultId: body.vaultId,
-    envVar: "GITHUB_TOKEN",
+    cliId: "gh",
     newToken: fresh.token,
   });
 

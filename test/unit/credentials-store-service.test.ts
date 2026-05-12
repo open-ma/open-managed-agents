@@ -72,7 +72,7 @@ describe("CredentialService — limits + uniqueness", () => {
         tenantId: TENANT,
         vaultId: VAULT,
         displayName: `c${i}`,
-        auth: { type: "command_secret", env_var: `E_${i}` },
+        auth: { type: "cap_cli", cli_id: `cli_${i}`, token: `t${i}` },
       });
     }
     await expect(
@@ -80,7 +80,7 @@ describe("CredentialService — limits + uniqueness", () => {
         tenantId: TENANT,
         vaultId: VAULT,
         displayName: "overflow",
-        auth: { type: "command_secret", env_var: "E_21" },
+        auth: { type: "cap_cli", cli_id: "cli_21", token: "t21" },
       }),
     ).rejects.toBeInstanceOf(CredentialMaxExceededError);
   });
@@ -139,14 +139,14 @@ describe("CredentialService — limits + uniqueness", () => {
     expect(b.archived_at).toBeNull();
   });
 
-  it("allows multiple command_secret credentials (no mcp_server_url) in one vault", async () => {
+  it("allows multiple cap_cli credentials (no mcp_server_url) in one vault", async () => {
     const { service } = createInMemoryCredentialService();
     for (let i = 0; i < 3; i++) {
       await service.create({
         tenantId: TENANT,
         vaultId: VAULT,
         displayName: `c${i}`,
-        auth: { type: "command_secret", env_var: `E_${i}` },
+        auth: { type: "cap_cli", cli_id: `cli_${i}`, token: `t${i}` },
       });
     }
     const list = await service.list({ tenantId: TENANT, vaultId: VAULT });

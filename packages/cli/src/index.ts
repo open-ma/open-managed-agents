@@ -1003,20 +1003,20 @@ const commands: Cmd[] = [
     usage: "oma creds list <vault-id>", desc: "List credentials",
     http: "GET    /v1/vaults/:id/credentials",
     async run(config, args) {
-      const { data } = await apiFetch<{ data: Array<{ id: string; display_name: string; auth: { type: string; mcp_server_url?: string; command_prefixes?: string[] } }> }>(config, `/v1/vaults/${args[0]}/credentials`);
+      const { data } = await apiFetch<{ data: Array<{ id: string; display_name: string; auth: { type: string; mcp_server_url?: string; cli_id?: string } }> }>(config, `/v1/vaults/${args[0]}/credentials`);
       if (!data.length) { console.log("No credentials in this vault."); return; }
-      table([["NAME", "TYPE", "DETAIL"], ...data.map(c => [c.display_name, c.auth.type, c.auth.mcp_server_url || c.auth.command_prefixes?.join(", ") || ""])]);
+      table([["NAME", "TYPE", "DETAIL"], ...data.map(c => [c.display_name, c.auth.type, c.auth.mcp_server_url || c.auth.cli_id || ""])]);
     },
   },
   {
-    group: "Vaults", match: ["secret", "add"],
-    usage: "oma secret add --vault <id> --name <n> --cmd <pfx> --env <var> --token <t>", desc: "Add secret credential",
-    http: "POST   /v1/vaults/:id/credentials {display_name, auth:{type, command_prefixes, env_var, token}}",
+    group: "Vaults", match: ["cli", "add"],
+    usage: "oma cli add --vault <id> --name <n> --cli-id <gh|aws|...> --token <t>", desc: "Add cap CLI credential",
+    http: "POST   /v1/vaults/:id/credentials {display_name, auth:{type:cap_cli, cli_id, token}}",
     async run(config, args) {
-      const vaultId = flag(args, "--vault"); const name = flag(args, "--name"); const cmd = flag(args, "--cmd"); const envVar = flag(args, "--env"); const token = flag(args, "--token");
-      if (!vaultId || !name || !cmd || !envVar || !token) { console.error("Usage: oma secret add --vault <id> --name <name> --cmd <prefixes> --env <var> --token <token>"); process.exit(1); }
-      const cred = await apiFetch<{ id: string }>(config, `/v1/vaults/${vaultId}/credentials`, { method: "POST", body: JSON.stringify({ display_name: name, auth: { type: "command_secret", command_prefixes: cmd.split(",").map(s => s.trim()), env_var: envVar, token } }) });
-      console.log(`Secret added: ${name} (${cred.id})`);
+      const vaultId = flag(args, "--vault"); const name = flag(args, "--name"); const cliId = flag(args, "--cli-id"); const token = flag(args, "--token");
+      if (!vaultId || !name || !cliId || !token) { console.error("Usage: oma cli add --vault <id> --name <name> --cli-id <gh|aws|kubectl|...> --token <token>"); process.exit(1); }
+      const cred = await apiFetch<{ id: string }>(config, `/v1/vaults/${vaultId}/credentials`, { method: "POST", body: JSON.stringify({ display_name: name, auth: { type: "cap_cli", cli_id: cliId, token } }) });
+      console.log(`CLI credential added: ${name} (${cred.id})`);
     },
   },
 

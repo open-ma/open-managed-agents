@@ -181,9 +181,15 @@ function authToHeader(auth: CredentialAuth): { name: string; value: string } | n
   switch (auth.type) {
     case "static_bearer":
       return { name: "authorization", value: `Bearer ${auth.token}` };
-    case "command_secret":
-      // command_secret is an env-var injection mechanism for CLI tools, not
-      // an HTTP header. Skip it on the proxy side.
+    case "cap_cli":
+      // cap_cli credentials are injected via cap's spec-driven enforcement
+      // (header_inject mode for most CLIs). The simple Bearer fallback
+      // here works for header-mode CLIs whose spec just sets Authorization;
+      // metadata_ep / exec_helper CLIs need richer routing — handled when
+      // self-host oma-vault adopts cap.handleHttp directly (follow-up PR).
+      if (typeof auth.token === "string" && auth.token.length > 0) {
+        return { name: "authorization", value: `Bearer ${auth.token}` };
+      }
       return null;
     case "mcp_oauth":
       // OAuth would need refresh-token handling; not in PoC scope. Skip
