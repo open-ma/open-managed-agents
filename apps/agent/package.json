@@ -16,9 +16,9 @@
   "dependencies": {
     "@ai-sdk/anthropic": "^3.0.69",
     "@ai-sdk/mcp": "1.0.37",
-    "@cloudflare/containers": "^0.3.0",
+    "@cloudflare/containers": "^0.3.4",
     "@cloudflare/playwright": "^1.3.0",
-    "@cloudflare/sandbox": "^0.9.1",
+    "@cloudflare/sandbox": "^0.10.1",
     "@open-managed-agents/agents-store": "workspace:*",
     "@open-managed-agents/credentials-store": "workspace:*",
     "@open-managed-agents/environments-store": "workspace:*",
