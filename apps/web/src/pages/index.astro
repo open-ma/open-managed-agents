@@ -1,0 +1,163 @@
+---
+import Base from "../layouts/Base.astro";
+import { getCollection } from "astro:content";
+
+const posts = (await getCollection("blog", ({ data }) => !data.draft))
+  .sort((a, b) => b.data.publishedAt.valueOf() - a.data.publishedAt.valueOf())
+  .slice(0, 3);
+
+function formatDate(d: Date) {
+  return d.toLocaleDateString("en-US", { year: "numeric", month: "short", day: "numeric" });
+}
+---
+
+<Base
+  title="openma — open-source meta-harness for AI agents"
+  description="openma runs your AI agent loop with sessions, sandboxes, memory, vaults, and crash recovery — managed for you. BYOK so you control LLM spend. Cloud or self-host. Make agents real members of Linear, Slack, GitHub."
+  canonical="/"
+  keywords="AI agents, agent platform, BYOK, Cloudflare agents, Anthropic, OpenAI, agent harness, managed agents, agent SDK, AI infrastructure, sandbox, MCP"
+>
+  <!-- Hero -->
+  <section class="border-b border-[var(--color-border)]">
+    <div class="max-w-5xl mx-auto px-4 py-20 md:py-28 text-center">
+      <p class="text-sm font-mono uppercase tracking-wider text-[var(--color-fg-subtle)] mb-4">
+        AI agent platform · BYOK · Cloudflare-native
+      </p>
+      <h1 class="font-display text-4xl md:text-6xl font-bold tracking-tight">
+        Run AI agents.<br />
+        <span class="text-[var(--color-brand)]">Bring your own key.</span>
+      </h1>
+      <p class="mt-6 text-lg md:text-xl text-[var(--color-fg-muted)] max-w-2xl mx-auto">
+        An open-source meta-harness for managed AI agents. Sessions, sandboxes,
+        memory, integrations, crash recovery — out of the box. Cloud or self-host.
+      </p>
+      <div class="mt-8 flex items-center justify-center gap-3 flex-wrap">
+        <a
+          href="https://openma.dev/login"
+          class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
+          >Get started</a
+        >
+        <a
+          href="https://github.com/open-ma/open-managed-agents"
+          target="_blank" rel="noopener"
+          class="px-5 py-3 rounded-md border border-[var(--color-border)] font-medium"
+          >★ on GitHub</a
+        >
+      </div>
+      <p class="mt-3 text-xs text-[var(--color-fg-subtle)]">
+        Free tier: $1 trial credit, localRuntime unlimited
+      </p>
+    </div>
+  </section>
+
+  <!-- Value pillars -->
+  <section class="max-w-5xl mx-auto px-4 py-16 grid md:grid-cols-3 gap-8">
+    {[
+      {
+        h: "BYOK, no token markup",
+        p: "We don't touch your Anthropic / OpenAI bill. You own the keys, you control the spend. We charge for sandbox compute.",
+      },
+      {
+        h: "Cloud or self-host",
+        p: "Same harness, same API, same Console. Cloudflare Workers + Containers for zero-ops, or fork + deploy your own copy.",
+      },
+      {
+        h: "Real integrations",
+        p: "Make an agent a member of your Linear / Slack / GitHub workspace. Assigned, mentioned, replied to like any other user.",
+      },
+    ].map((card) => (
+      <div class="border border-[var(--color-border)] rounded-lg p-6">
+        <h3 class="font-semibold text-lg mb-2">{card.h}</h3>
+        <p class="text-[var(--color-fg-muted)] text-sm leading-relaxed">{card.p}</p>
+      </div>
+    ))}
+  </section>
+
+  <!-- Pricing teaser -->
+  <section class="border-y border-[var(--color-border)] bg-[var(--color-bg-surface)]">
+    <div class="max-w-5xl mx-auto px-4 py-16">
+      <h2 class="font-display text-3xl font-bold text-center mb-2">Simple, predictable pricing</h2>
+      <p class="text-center text-[var(--color-fg-muted)] mb-12">
+        Subscription credits roll into one wallet. Pay only for cloud sandbox time.
+      </p>
+      <div class="grid md:grid-cols-3 gap-6">
+        <div class="border border-[var(--color-border)] rounded-lg bg-[var(--color-bg)] p-6">
+          <div class="text-sm uppercase tracking-wider text-[var(--color-fg-subtle)]">Free</div>
+          <div class="mt-1 text-3xl font-bold">$0<span class="text-base font-normal text-[var(--color-fg-muted)]">/mo</span></div>
+          <ul class="mt-5 space-y-2 text-sm text-[var(--color-fg-muted)]">
+            <li>$1 one-time trial credit</li>
+            <li>localRuntime unlimited</li>
+            <li>All integrations included</li>
+          </ul>
+        </div>
+        <div class="border-2 border-[var(--color-brand)] rounded-lg bg-[var(--color-bg)] p-6 relative">
+          <span class="absolute -top-3 left-6 px-2 py-0.5 text-xs font-medium rounded bg-[var(--color-brand)] text-white">Most popular</span>
+          <div class="text-sm uppercase tracking-wider text-[var(--color-fg-subtle)]">Pro</div>
+          <div class="mt-1 text-3xl font-bold">$20<span class="text-base font-normal text-[var(--color-fg-muted)]">/mo</span></div>
+          <ul class="mt-5 space-y-2 text-sm text-[var(--color-fg-muted)]">
+            <li><strong class="text-[var(--color-fg)]">$22</strong> credit (10% bonus)</li>
+            <li>~73 hours cloud sandbox</li>
+            <li>Auto-renewing wallet top-up</li>
+          </ul>
+        </div>
+        <div class="border border-[var(--color-border)] rounded-lg bg-[var(--color-bg)] p-6">
+          <div class="text-sm uppercase tracking-wider text-[var(--color-fg-subtle)]">Max</div>
+          <div class="mt-1 text-3xl font-bold">$100<span class="text-base font-normal text-[var(--color-fg-muted)]">/mo</span></div>
+          <ul class="mt-5 space-y-2 text-sm text-[var(--color-fg-muted)]">
+            <li><strong class="text-[var(--color-fg)]">$120</strong> credit (20% bonus)</li>
+            <li>~400 hours cloud sandbox</li>
+            <li>Priority email support</li>
+          </ul>
+        </div>
+      </div>
+      <p class="text-center text-xs text-[var(--color-fg-subtle)] mt-8">
+        Top up any time at $0.005 / minute. Credits never expire (top-ups);
+        subscription credits expire 90 days from grant.
+      </p>
+    </div>
+  </section>
+
+  <!-- Recent blog -->
+  {posts.length > 0 && (
+    <section class="max-w-5xl mx-auto px-4 py-16">
+      <div class="flex items-end justify-between mb-8">
+        <h2 class="font-display text-2xl font-bold">From the blog</h2>
+        <a href="/blog" class="text-sm">All posts →</a>
+      </div>
+      <div class="grid md:grid-cols-3 gap-6">
+        {posts.map((post) => (
+          <a href={`/blog/${post.id}`} class="block border border-[var(--color-border)] rounded-lg p-5 hover:border-[var(--color-brand)] transition-colors no-underline">
+            <div class="text-xs text-[var(--color-fg-subtle)] mb-2">
+              {formatDate(post.data.publishedAt)}
+            </div>
+            <h3 class="font-semibold text-base mb-2 text-[var(--color-fg)]">{post.data.title}</h3>
+            <p class="text-sm text-[var(--color-fg-muted)] line-clamp-3">{post.data.description}</p>
+          </a>
+        ))}
+      </div>
+    </section>
+  )}
+
+  <!-- CTA -->
+  <section class="border-t border-[var(--color-border)]">
+    <div class="max-w-3xl mx-auto px-4 py-16 text-center">
+      <h2 class="font-display text-3xl font-bold mb-3">Ship your first agent in 5 minutes.</h2>
+      <p class="text-[var(--color-fg-muted)] mb-6">
+        Sign in with your Anthropic key, define a harness, hit /v1/sessions.
+        Local dev needs no Cloudflare account.
+      </p>
+      <div class="flex items-center justify-center gap-3 flex-wrap">
+        <a
+          href="https://openma.dev/login"
+          class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
+          >Try it free</a
+        >
+        <a
+          href="https://docs.openma.dev"
+          class="px-5 py-3 rounded-md border border-[var(--color-border)] font-medium"
+          >Read the docs</a
+        >
+      </div>
+    </div>
+  </section>
+</Base>
