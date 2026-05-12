@@ -11,3 +11,4 @@ export * from "./domain";
 export * from "./ports";
 export * from "./persistence";
 export * from "./provider";
+export * from "./avatars";
