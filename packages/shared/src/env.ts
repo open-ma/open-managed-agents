@@ -86,6 +86,15 @@ export interface Env {
   AUTH_COOKIE_NAME?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
+  // Pre-registered OAuth client_id/secret per provider, for MCP servers
+  // whose authorization server doesn't expose a working DCR endpoint.
+  // Operator workflow: register an OAuth App with the provider, set
+  // callback URL to ${baseUrl}/v1/oauth/callback, copy the credentials
+  // here. Without these, /v1/oauth/authorize returns 501 with a remediation.
+  GITHUB_OAUTH_CLIENT_ID?: string;
+  GITHUB_OAUTH_CLIENT_SECRET?: string;
+  FEISHU_OAUTH_CLIENT_ID?: string;
+  FEISHU_OAUTH_CLIENT_SECRET?: string;
   ANTHROPIC_API_KEY: string;
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_MODEL?: string;

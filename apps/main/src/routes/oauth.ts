@@ -252,8 +252,8 @@ app.get("/authorize", async (c) => {
     return c.json({ error: `OAuth discovery failed: ${(err as Error).message}` }, 502);
   }
 
-  // Dynamic Client Registration if supported
-  let clientId = "open-managed-agents";
+  // Dynamic Client Registration if supported.
+  let clientId: string | null = null;
   let clientSecret: string | undefined;
   if (meta.authServer.registration_endpoint) {
     const reg = await dynamicClientRegistration(
@@ -265,6 +265,58 @@ app.get("/authorize", async (c) => {
       clientId = reg.client_id;
       clientSecret = reg.client_secret;
     }
+  }
+
+  // Known-provider preset: GitHub OAuth doesn't support DCR. Operator
+  // must pre-register an OAuth App at https://github.com/settings/developers
+  // (Authorization callback URL = ${baseUrl}/v1/oauth/callback) and set
+  // GITHUB_OAUTH_CLIENT_ID + GITHUB_OAUTH_CLIENT_SECRET env vars on the
+  // main worker. Without them this MCP server can't onboard.
+  if (!clientId && /^https:\/\/github\.com\/login\/oauth\/?$/.test(meta.authServer.issuer)) {
+    if (c.env.GITHUB_OAUTH_CLIENT_ID && c.env.GITHUB_OAUTH_CLIENT_SECRET) {
+      clientId = c.env.GITHUB_OAUTH_CLIENT_ID;
+      clientSecret = c.env.GITHUB_OAUTH_CLIENT_SECRET;
+    } else {
+      return c.json(
+        {
+          error:
+            "GitHub OAuth requires a pre-registered OAuth App: visit https://github.com/settings/developers, create an App with callback " +
+            `${callbackUri}, then set GITHUB_OAUTH_CLIENT_ID + GITHUB_OAUTH_CLIENT_SECRET on the main worker.`,
+        },
+        501,
+      );
+    }
+  }
+
+  // Known-provider preset: Feishu MCP exposes a DCR endpoint but rejects
+  // arbitrary redirect_uris (returns invalid_redirect_uri unless the
+  // domain is on their partner-portal allowlist). Operator workflow:
+  // register an app at https://open.feishu.cn (Web App, redirect URL =
+  // ${baseUrl}/v1/oauth/callback), then set FEISHU_OAUTH_CLIENT_ID +
+  // FEISHU_OAUTH_CLIENT_SECRET on the main worker.
+  if (!clientId && /^https:\/\/accounts\.feishu\.cn\//.test(meta.authServer.issuer)) {
+    if (c.env.FEISHU_OAUTH_CLIENT_ID && c.env.FEISHU_OAUTH_CLIENT_SECRET) {
+      clientId = c.env.FEISHU_OAUTH_CLIENT_ID;
+      clientSecret = c.env.FEISHU_OAUTH_CLIENT_SECRET;
+    } else {
+      return c.json(
+        {
+          error:
+            "Feishu MCP OAuth requires a pre-registered Feishu app: visit https://open.feishu.cn, create a Web App with redirect URL " +
+            `${callbackUri}, then set FEISHU_OAUTH_CLIENT_ID + FEISHU_OAUTH_CLIENT_SECRET on the main worker.`,
+        },
+        501,
+      );
+    }
+  }
+
+  if (!clientId) {
+    return c.json(
+      {
+        error: `MCP server ${mcpServerUrl} does not support Dynamic Client Registration and no preset client_id is configured for issuer ${meta.authServer.issuer}.`,
+      },
+      501,
+    );
   }
 
   // Generate PKCE pair
