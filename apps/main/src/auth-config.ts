@@ -109,6 +109,13 @@ export function createAuth(env: Env) {
     // sent on requests to openma.dev (apex landing) — lets the marketing
     // site show "logged in as X" without re-auth. Self-hosters leaving
     // the var unset get default per-host scoping.
+    //
+    // AUTH_COOKIE_NAME (optional, recommended for non-prod envs that
+    // share the openma.dev parent domain): override the session-token
+    // cookie name so a browser used against both prod (.openma.dev) and
+    // staging (.staging.openma.dev) doesn't end up with two same-named
+    // cookies — browsers send both, server reads the first, and the
+    // wrong-env token defeats sign-in.
     ...(env.AUTH_COOKIE_DOMAIN
       ? {
           advanced: {
@@ -121,6 +128,13 @@ export function createAuth(env: Env) {
               sameSite: "lax" as const,
               secure: true,
             },
+            ...(env.AUTH_COOKIE_NAME
+              ? {
+                  cookies: {
+                    session_token: { name: env.AUTH_COOKIE_NAME },
+                  },
+                }
+              : {}),
           },
         }
       : {}),

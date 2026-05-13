@@ -83,6 +83,7 @@ export interface Env {
    *  the apex landing site. Self-hosters can leave unset for default
    *  per-host scoping. */
   AUTH_COOKIE_DOMAIN?: string;
+  AUTH_COOKIE_NAME?: string;
   GOOGLE_CLIENT_ID?: string;
   GOOGLE_CLIENT_SECRET?: string;
   ANTHROPIC_API_KEY: string;
