@@ -23,8 +23,19 @@
 import type { SessionEvent } from "@open-managed-agents/shared";
 
 export interface EventLogRepo {
-  /** Append a SessionEvent. Implementation MUST stamp seq + ts. */
+  /** Append a SessionEvent. Implementation MUST stamp seq + ts.
+   *  user.message / user.tool_confirmation / user.custom_tool_result are
+   *  routed to the pending queue (see PendingQueueRepo); other types go
+   *  to the canonical events log. */
   append(event: SessionEvent): void;
+
+  /** Insert a pre-formed event directly into the events log with a fresh
+   *  seq, bypassing the queue routing in `append()`. Used by the drain
+   *  path when promoting a pending row into the log. The
+   *  `processed_at_ms` is the wall-clock the agent actually picked the
+   *  event up; AMA-spec consumers read this as the authoritative
+   *  ingestion time. Returns the assigned `seq`. */
+  appendPromoted?(event: SessionEvent, processedAtMs: number): number;
 
   /** All events strictly after `afterSeq` in seq order. Omit for full log. */
   getEvents(afterSeq?: number): SessionEvent[];
@@ -76,4 +87,44 @@ export interface StreamRepo {
    *  with 'streaming' on cold start to find streams the previous runtime
    *  was in the middle of when it died. */
   listByStatus(status: StreamRow["status"]): Promise<StreamRow[]>;
+}
+
+/**
+ * One row of the AMA-spec pending queue. Carries everything the
+ * promotion broadcast needs to correlate the pending bubble (rendered
+ * client-side from `system.user_message_pending`) with the event-log
+ * row that lands at drain time.
+ *
+ *   pending_seq:        FIFO order within the queue. NOT the seq of the
+ *                       eventual events-table row (that's assigned at
+ *                       INSERT-into-events time, hence the rename).
+ *   event_id:           === parsed(data).id. Client matches by this on
+ *                       both pending broadcasts and event-log rows.
+ *   cancelled_at:       set by user.interrupt; cancelled rows never
+ *                       promote.
+ */
+export interface PendingRow {
+  pending_seq: number;
+  enqueued_at: number;
+  session_thread_id: string;
+  type: string;
+  event_id: string;
+  data: string;
+  cancelled_at: number | null;
+}
+
+export interface PendingQueueRepo {
+  /** Pop the next active (non-cancelled) row for a thread. The row is
+   *  removed from the queue. Caller is responsible for inserting the
+   *  matching event into the events log via EventLogRepo.appendPromoted. */
+  popNext(threadId: string): PendingRow | null;
+  /** Cancel every active row for a thread. Returns the cancelled rows
+   *  so the caller can broadcast per-row notifications. */
+  cancelAllForThread(threadId: string, cancelledAtMs: number): PendingRow[];
+  /** List rows for a thread (active by default). */
+  list(threadId: string, includeCancelled?: boolean): PendingRow[];
+  /** Cross-thread count of active rows. */
+  countActive(): number;
+  /** Distinct thread ids with at least one active row. */
+  threadsWithPending(): string[];
 }

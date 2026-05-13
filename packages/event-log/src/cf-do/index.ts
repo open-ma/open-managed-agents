@@ -7,7 +7,13 @@
 // for tests) plug in alternative impls.
 
 import type { SessionEvent } from "@open-managed-agents/shared";
-import type { EventLogRepo, StreamRepo, StreamRow } from "../ports";
+import type {
+  EventLogRepo,
+  PendingQueueRepo,
+  PendingRow,
+  StreamRepo,
+  StreamRow,
+} from "../ports";
 
 /**
  * Caller is responsible for ensuring the schema exists before
@@ -38,27 +44,50 @@ export class CfDoEventLog implements EventLogRepo {
   append(event: SessionEvent): void {
     this.stamp(event);
     const fullData = JSON.stringify(event);
-    // Pending bookkeeping for AMA-shaped event lifecycle.
-    //   user.* : drainEventQueue picks these up and stamps processed_at
-    //            when the turn ingests them. Until then they stay pending
-    //            (NULL processed_at). user.interrupt itself is processed
-    //            inline by the POST handler — no drain step — so we stamp
-    //            it immediately too, otherwise the partial index would
-    //            see "pending interrupt" forever.
-    //   else   : agent.* / session.* / span.* are written-then-done; no
-    //            "process" step, stamp processed_at = ts at write time so
-    //            the partial pending-index doesn't see them.
-    const isPending =
+    // Per AMA spec, the three user.* turn-input event types are queued in
+    // a separate `pending_events` table. drainEventQueue dequeues them
+    // (DELETE from pending_events, INSERT into events with the new
+    // processed_at + a freshly-assigned seq), so `events.seq` order is
+    // monotonic with what the model actually saw.
+    //
+    // user.interrupt + user.define_outcome are control events, not turn
+    // inputs — they go into `events` directly (with processed_at stamped
+    // at append time, same as agent.* / span.* / session.*).
+    const isQueueInput =
       event.type === "user.message" ||
       event.type === "user.tool_confirmation" ||
       event.type === "user.custom_tool_result";
-    const processedAt = isPending ? null : Date.now();
     // session_thread_id lives on the wire (per AMA spec, EventBase optionally
     // carries it). Default to primary so legacy emitters that don't set it
     // still land in the primary thread's queue.
     const threadId =
       (event as unknown as { session_thread_id?: string }).session_thread_id ??
       "sthr_primary";
+
+    if (isQueueInput) {
+      // Queue-bound: stamp goes to `pending_events`. event.id is set by
+      // `stamp()` above; carry it on the row so the promotion broadcast
+      // can correlate the pending bubble with the event-log row.
+      const eventId = (event as unknown as { id?: string }).id ?? "";
+      // Pending payloads are usually tiny — no spill path. If a tool
+      // confirmation ever carries a huge payload (it shouldn't), it
+      // still goes into `pending_events.data` directly; the spill cap
+      // only matters for the eventual `events`-table write at promotion.
+      this.sql.exec(
+        `INSERT INTO pending_events
+           (enqueued_at, session_thread_id, type, event_id, data)
+         VALUES (?, ?, ?, ?, ?)`,
+        Date.now(),
+        threadId,
+        event.type,
+        eventId,
+        fullData,
+      );
+      return;
+    }
+
+    // Non-queue events go into `events` with processed_at stamped now.
+    const processedAt = Date.now();
 
     if (fullData.length <= SPILL_THRESHOLD_BYTES || !this.r2) {
       // Small enough OR no R2 binding (in-memory tests, non-CF deploys).
@@ -94,6 +123,57 @@ export class CfDoEventLog implements EventLogRepo {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[event-log] R2 spill PUT failed (${r2Key}): ${msg}`);
     });
+  }
+
+  /**
+   * Insert a pre-formed event into the `events` table directly with a
+   * freshly-assigned seq, used by `drainEventQueue` to promote a row
+   * out of `pending_events` (the user.* event has already been picked
+   * up and the harness is about to ingest it). Bypasses the
+   * `isQueueInput` routing in `append()`.
+   *
+   * Returns the assigned `seq` so the promotion broadcast can carry it.
+   */
+  appendPromoted(event: SessionEvent, processedAtMs: number): number {
+    this.stamp(event);
+    const fullData = JSON.stringify(event);
+    const threadId =
+      (event as unknown as { session_thread_id?: string }).session_thread_id ??
+      "sthr_primary";
+
+    const insertCursor = (() => {
+      if (fullData.length <= SPILL_THRESHOLD_BYTES || !this.r2) {
+        return this.sql.exec(
+          "INSERT INTO events (type, data, processed_at, session_thread_id) VALUES (?, ?, ?, ?) RETURNING seq",
+          event.type,
+          fullData,
+          processedAtMs,
+          threadId,
+        );
+      }
+      const r2Key = `${this.r2KeyPrefix}/events/${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
+      const cur = this.sql.exec(
+        "INSERT INTO events (type, data, processed_at, session_thread_id) VALUES (?, ?, ?, ?) RETURNING seq",
+        event.type,
+        JSON.stringify({
+          type: event.type,
+          _spilled: { r2_key: r2Key, original_bytes: fullData.length },
+        }),
+        processedAtMs,
+        threadId,
+      );
+      void this.r2.put(r2Key, fullData).catch((err) => {
+        const msg = err instanceof Error ? err.message : String(err);
+        console.error(`[event-log] R2 spill PUT failed (${r2Key}): ${msg}`);
+      });
+      return cur;
+    })();
+
+    let seq = -1;
+    for (const row of insertCursor) {
+      seq = row.seq as number;
+    }
+    return seq;
   }
 
   /**
@@ -277,6 +357,167 @@ export class CfDoStreamRepo implements StreamRepo {
   }
 }
 
+// ─── Pending queue repo ───────────────────────────────────────────────────
+//
+// The AMA-spec "pending" queue. Holds the three turn-input event types
+// (user.message / user.tool_confirmation / user.custom_tool_result) until
+// drainEventQueue picks them up and promotes them into the events log
+// (DELETE here + INSERT into events with a fresh seq + processed_at = now).
+//
+// Separating the queue from the event log gives us:
+//   - Monotonic seq order in `events` that mirrors what the model actually
+//     saw (drain order). Today we sort the timeline by `seq` and get the
+//     right shape without a client-side processed_at sort.
+//   - A clean `/v1/sessions/:id/pending` surface so SDK / console can
+//     observe what's queued vs what's been ingested.
+//   - user.interrupt cancellation lives on a separate column from the
+//     processed bit; cancelled rows stay for audit but never promote.
+
+export class CfDoPendingQueue implements PendingQueueRepo {
+  constructor(private sql: SqlStorage) {}
+
+  /**
+   * Pop the next active (uncancelled) pending row for a thread. Returns
+   * null when nothing's queued. Caller is responsible for inserting the
+   * matching event into the `events` table — this method just removes
+   * the row from the queue and returns its data.
+   *
+   * Non-transactional: drainEventQueue's per-thread mutex (`_draining`)
+   * guarantees only one drainer runs per thread at a time, so SELECT +
+   * DELETE can't race within the same thread. Cross-thread drains can
+   * run in parallel — they touch different `session_thread_id` rows.
+   */
+  popNext(threadId: string): PendingRow | null {
+    let row: PendingRow | null = null;
+    for (const r of this.sql.exec(
+      `SELECT pending_seq, enqueued_at, session_thread_id, type, event_id, data
+         FROM pending_events
+         WHERE session_thread_id = ? AND cancelled_at IS NULL
+         ORDER BY pending_seq ASC LIMIT 1`,
+      threadId,
+    )) {
+      row = {
+        pending_seq: r.pending_seq as number,
+        enqueued_at: r.enqueued_at as number,
+        session_thread_id: r.session_thread_id as string,
+        type: r.type as string,
+        event_id: r.event_id as string,
+        data: r.data as string,
+        cancelled_at: null,
+      };
+    }
+    if (row) {
+      this.sql.exec(`DELETE FROM pending_events WHERE pending_seq = ?`, row.pending_seq);
+    }
+    return row;
+  }
+
+  /**
+   * Mark every active pending row for a thread as cancelled. Used by
+   * user.interrupt. Returns the cancelled rows so the caller can
+   * broadcast `system.user_message_cancelled` per row (clients use
+   * the broadcast to strike-through the outbox bubble).
+   */
+  cancelAllForThread(threadId: string, cancelledAtMs: number): PendingRow[] {
+    const rows: PendingRow[] = [];
+    for (const r of this.sql.exec(
+      `SELECT pending_seq, enqueued_at, session_thread_id, type, event_id, data
+         FROM pending_events
+         WHERE session_thread_id = ? AND cancelled_at IS NULL
+         ORDER BY pending_seq ASC`,
+      threadId,
+    )) {
+      rows.push({
+        pending_seq: r.pending_seq as number,
+        enqueued_at: r.enqueued_at as number,
+        session_thread_id: r.session_thread_id as string,
+        type: r.type as string,
+        event_id: r.event_id as string,
+        data: r.data as string,
+        cancelled_at: cancelledAtMs,
+      });
+    }
+    if (rows.length > 0) {
+      this.sql.exec(
+        `UPDATE pending_events SET cancelled_at = ?
+           WHERE session_thread_id = ? AND cancelled_at IS NULL`,
+        cancelledAtMs,
+        threadId,
+      );
+    }
+    return rows;
+  }
+
+  /**
+   * List pending rows for a thread. Default: only active (non-cancelled).
+   * Pass `includeCancelled = true` to include cancelled-but-not-yet-pruned
+   * rows. Used by GET /v1/sessions/:id/pending.
+   */
+  list(threadId: string, includeCancelled = false): PendingRow[] {
+    const cursor = includeCancelled
+      ? this.sql.exec(
+          `SELECT pending_seq, enqueued_at, session_thread_id, type,
+                  event_id, data, cancelled_at
+             FROM pending_events
+             WHERE session_thread_id = ?
+             ORDER BY pending_seq ASC`,
+          threadId,
+        )
+      : this.sql.exec(
+          `SELECT pending_seq, enqueued_at, session_thread_id, type,
+                  event_id, data, cancelled_at
+             FROM pending_events
+             WHERE session_thread_id = ? AND cancelled_at IS NULL
+             ORDER BY pending_seq ASC`,
+          threadId,
+        );
+    const out: PendingRow[] = [];
+    for (const r of cursor) {
+      out.push({
+        pending_seq: r.pending_seq as number,
+        enqueued_at: r.enqueued_at as number,
+        session_thread_id: r.session_thread_id as string,
+        type: r.type as string,
+        event_id: r.event_id as string,
+        data: r.data as string,
+        cancelled_at: (r.cancelled_at as number | null) ?? null,
+      });
+    }
+    return out;
+  }
+
+  /**
+   * Total count of active pending rows across all threads. Used by
+   * deriveStatus / orphan recovery to detect "session has work left to
+   * do" conditions.
+   */
+  countActive(): number {
+    for (const r of this.sql.exec(
+      `SELECT COUNT(*) AS n FROM pending_events WHERE cancelled_at IS NULL`,
+    )) {
+      return r.n as number;
+    }
+    return 0;
+  }
+
+  /**
+   * Distinct thread ids with active (non-cancelled) pending rows.
+   * Used on cold-start to re-fire drainEventQueue for every thread that
+   * has work queued. Without this, queued events from before the
+   * eviction would sit forever until something else triggered drain.
+   */
+  threadsWithPending(): string[] {
+    const out: string[] = [];
+    for (const r of this.sql.exec(
+      `SELECT DISTINCT session_thread_id FROM pending_events
+         WHERE cancelled_at IS NULL`,
+    )) {
+      out.push(r.session_thread_id as string);
+    }
+    return out;
+  }
+}
+
 /**
  * Idempotent schema bootstrap. Call once from the consumer's
  * `ensureSchema()` — typically the SessionDO's. Safe to call repeatedly.
@@ -356,4 +597,42 @@ export function ensureSchema(sql: SqlStorage): void {
   // that the prior StreamBufferRepo adapter created. Safe no-op when the
   // DO never had it.
   sql.exec(`DROP TABLE IF EXISTS stream_buffer`);
+
+  // ─── pending_events table — AMA-spec turn-input queue ────────────────
+  //
+  // Holds user.message / user.tool_confirmation / user.custom_tool_result
+  // events between events.send() and drainEventQueue picking them up.
+  // On promotion: DELETE here + INSERT into events with a freshly-assigned
+  // seq, so events.seq order = drain order = what the model actually saw.
+  //
+  //   pending_seq:        AUTOINCREMENT, FIFO order within the queue
+  //   enqueued_at:        wall-clock ms when events.send() landed
+  //   session_thread_id:  'sthr_primary' or sub-agent 'sthr_*'
+  //   type:               only the three turn-input types
+  //   event_id:           === data.id, lets the client correlate the
+  //                       pending bubble with the event-log row at
+  //                       promotion time
+  //   cancelled_at:       set by user.interrupt — cancelled rows are
+  //                       kept for audit but never promoted
+  //   data:               full event JSON
+  sql.exec(`
+    CREATE TABLE IF NOT EXISTS pending_events (
+      pending_seq INTEGER PRIMARY KEY AUTOINCREMENT,
+      enqueued_at INTEGER NOT NULL,
+      session_thread_id TEXT NOT NULL,
+      type TEXT NOT NULL,
+      event_id TEXT NOT NULL,
+      cancelled_at INTEGER,
+      data TEXT NOT NULL
+    )
+  `);
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_thread_seq
+      ON pending_events(session_thread_id, pending_seq)
+  `);
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS idx_pending_active
+      ON pending_events(session_thread_id, pending_seq)
+      WHERE cancelled_at IS NULL
+  `);
 }

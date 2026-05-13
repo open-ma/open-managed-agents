@@ -26,9 +26,15 @@ import {
 import {
   CfDoStreamRepo,
   CfDoEventLog,
+  CfDoPendingQueue,
   ensureSchema as ensureEventLogSchema,
 } from "@open-managed-agents/event-log/cf-do";
-import type { EventLogRepo, StreamRepo } from "@open-managed-agents/event-log";
+import type {
+  EventLogRepo,
+  PendingQueueRepo,
+  PendingRow,
+  StreamRepo,
+} from "@open-managed-agents/event-log";
 import { recoverInterruptedState as runRecovery } from "./recovery";
 import {
   RuntimeAdapterImpl,
@@ -498,6 +504,10 @@ export class SessionDO extends DurableObject<Env> {
    *  deltas don't pollute history (the eventual `agent.message` is the
    *  source of truth). Lazy-initialized in ensureSchema(). */
   private streams: StreamRepo | null = null;
+  /** AMA-spec pending queue. Holds user.message / user.tool_confirmation /
+   *  user.custom_tool_result events between events.send() and drain
+   *  picking them up. Lazy-initialized in ensureSchema(). */
+  private pending: PendingQueueRepo | null = null;
 
   private ensureSchema() {
     if (this.initialized) return;
@@ -506,12 +516,28 @@ export class SessionDO extends DurableObject<Env> {
     // EXISTS — so calling on every fetch hot path is fine.
     ensureEventLogSchema(this.ctx.storage.sql);
     this.streams = new CfDoStreamRepo(this.ctx.storage.sql);
+    this.pending = new CfDoPendingQueue(this.ctx.storage.sql);
     this.initialized = true;
     // Recovery scan: any in-flight state from before this cold start is
     // stale by definition (the runtime that owned it is gone). Reconcile
     // both kinds of orphans now so the events log is consistent before
     // drainEventQueue runs and the harness rebuilds messages.
     void this.recoverInterruptedState();
+    // Pending-queue cold start: any thread that had queued events when
+    // the previous incarnation died still has them in pending_events.
+    // Re-fire drainEventQueue per affected thread so they don't sit
+    // forever waiting for a fresh user.message to retrigger drain.
+    try {
+      const threads = this.pending!.threadsWithPending();
+      if (threads.length > 0) {
+        console.log(`[ensureSchema] cold-start drain for threads: ${threads.join(",")}`);
+        for (const t of threads) {
+          void this.drainEventQueue(t);
+        }
+      }
+    } catch (err) {
+      console.warn(`[ensureSchema] threadsWithPending failed: ${err instanceof Error ? err.message : String(err)}`);
+    }
   }
 
   /**
@@ -659,22 +685,28 @@ export class SessionDO extends DurableObject<Env> {
    */
   async recoverEventQueue(): Promise<void> {
     this.ensureSchema();
-    const cursor = this.ctx.storage.sql.exec(
+    // New canonical source of pending state: the pending_events table.
+    const newThreads = new Set<string>(this.pending!.threadsWithPending());
+    // Legacy back-compat: any pre-refactor rows still sitting in `events`
+    // with processed_at IS NULL belong to a thread that needs draining.
+    // After the deploy these are zero in steady state, but the first
+    // drain after rolling out may pick them up.
+    const legacyCursor = this.ctx.storage.sql.exec(
       `SELECT DISTINCT session_thread_id FROM events
          WHERE processed_at IS NULL AND cancelled_at IS NULL
            AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
     );
-    const threadIds: string[] = [];
-    for (const row of cursor) {
-      threadIds.push((row.session_thread_id as string) ?? "sthr_primary");
+    for (const row of legacyCursor) {
+      newThreads.add((row.session_thread_id as string) ?? "sthr_primary");
     }
-    if (threadIds.length === 0) {
+    if (newThreads.size === 0) {
       // Nothing pending anywhere; defensive primary drain (cheap, returns
-      // immediately when the partial index is empty).
+      // immediately when both pending_events and the legacy partial index
+      // are empty).
       await this.drainEventQueue("sthr_primary");
       return;
     }
-    await Promise.all(threadIds.map((t) => this.drainEventQueue(t)));
+    await Promise.all([...newThreads].map((t) => this.drainEventQueue(t)));
   }
 
   /**
