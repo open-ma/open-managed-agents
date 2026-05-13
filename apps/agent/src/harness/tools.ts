@@ -5,7 +5,6 @@ import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
 import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from "@open-managed-agents/shared";
 import type { ToMarkdownProvider } from "@open-managed-agents/markdown";
-import { BindingMCPTransport } from "../runtime/binding-mcp-transport";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
 // Browser tools are lazy-imported below — they pull in @cloudflare/playwright
@@ -357,21 +356,20 @@ export async function buildTools(
     toMarkdown?: ToMarkdownProvider;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
-    /** MCP routing context — wired from SessionDO. The transport opened
-     *  per declared mcp_server forwards via the binding instead of fetching
-     *  upstream directly. Vault credentials never enter this Worker; main
-     *  resolves and injects them inside `mcpForward`. Omitting any of the
-     *  three (binding, tenantId, sessionId) silently disables MCP tool
-     *  registration — the loop below logs nothing because in legacy
-     *  callsites this is the expected "no MCP" path. */
-    mcpBinding?: { mcpForward: (opts: {
-      tenantId: string;
-      sessionId: string;
-      serverName: string;
-      method: string;
-      headers: Record<string, string>;
-      body: string | null;
-    }) => Promise<{ status: number; headers: Record<string, string>; body: string }> };
+    /** MCP routing context — wired from SessionDO. AI SDK's MCP HTTP
+     *  transport gets a custom `fetch` that calls
+     *  `env.mcpBinding.fetch(req)` with three metadata headers stamped
+     *  (`x-oma-tenant`, `x-oma-session`, `x-oma-mcp-server`); main worker
+     *  resolves the vault credential, swaps Authorization, and forwards
+     *  to the upstream URL the SDK already knew. Body, response status,
+     *  response headers (incl. rotated `Mcp-Session-Id`) all stream
+     *  through unchanged so the SDK owns the protocol details. Vault
+     *  credentials remain main-only — agent worker sees only the
+     *  Response. Omitting any of the three (binding, tenantId, sessionId)
+     *  silently disables MCP tool registration — the loop below logs
+     *  nothing because in legacy callsites this is the expected "no MCP"
+     *  path. */
+    mcpBinding?: { fetch: (request: Request) => Promise<Response> };
     tenantId?: string;
     sessionId?: string;
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
@@ -1130,31 +1128,31 @@ export async function buildTools(
     }
   }
 
-  // MCP tools — first-class via AI SDK MCP client routed through the main
-  // worker's mcp-proxy via a CF service-binding RPC. Each declared mcp_server
-  // gets one MCPClient (warmup-time + per-buildTools call); the client is
-  // held by the returned `tool({execute})` closures and released when the
-  // tools object is GC'd at end of turn. Each remote tool surfaces as a
-  // fully-typed `mcp__<server>__<tool>` entry — model sees real schemas
-  // instead of stringly-typed arguments, single tool call covers what the
-  // old curl-double-hop (mcp_<name>_list_tools then mcp_<name>_call) needed
-  // two turns + ~5K tokens of dumped schemas to do.
+  // MCP tools — first-class via AI SDK MCP client. The agent worker hands
+  // the SDK's built-in HTTP transport a custom `fetch` that calls
+  // `env.mcpBinding.fetch(req)` after stamping three metadata headers
+  // (`x-oma-tenant`, `x-oma-session`, `x-oma-mcp-server`). Main worker
+  // resolves the vault credential by serverName, swaps in the upstream
+  // bearer, and forwards to the URL the SDK already targeted. Body /
+  // status / response headers (incl. rotated `Mcp-Session-Id`) stream
+  // through both ways unchanged, so the SDK owns the Streamable-HTTP
+  // protocol — session ids, SSE response framing, retries — and a
+  // server-side spec change can't silently break us the way the prior
+  // hand-rolled BindingMCPTransport did (Notion's tools/list never
+  // returned, hanging the whole turn until our 15s setup-timeout fired).
+  // Each remote tool surfaces as `mcp__<server>__<tool>` — same prefix
+  // the local-runtime ACP path produces.
   //
-  // Auth + vault injection happen **inside main, not here**. The transport
-  // (BindingMCPTransport) just forwards `(tenantId, sessionId, serverName)`
-  // + the JSON-RPC body to `env.MAIN_MCP.mcpForward`; main looks up the
-  // vault credential live (no DO-side snapshot, so no staleness on cred
-  // rotation), injects the upstream bearer, and forwards. The agent's DO
-  // never holds plaintext credentials — mirrors Anthropic Managed Agents'
-  // "credential proxy outside the harness" design and matches what the
-  // local-runtime ACP path already does (claude-agent-acp connects to the
-  // same /v1/mcp-proxy endpoint via Bearer apiKey).
+  // Auth + vault injection happen **inside main, not here**. Agent worker
+  // never sees the credential — the request leaves with no Authorization
+  // header (or a placeholder) and main rewrites it. Mirrors the original
+  // mcpForward design's "credentials only in main" property; only the
+  // wire-format moved from a structured RPC body-buffered call to a
+  // streaming Request/Response service-binding call.
   //
   // Network policy ("model can only call declared mcp_servers"): enforced
   // at the tool-registration layer below — only declared servers get
-  // registered, and the model has no other tool that takes an arbitrary
-  // URL. The old sandbox `allow_mcp_servers` iptables-style gate was
-  // belt-and-suspenders; this is the suspenders.
+  // registered, and the model has no other tool that takes an arbitrary URL.
   if (agentConfig.mcp_servers?.length) {
     if (!env?.mcpBinding || !env?.tenantId || !env?.sessionId) {
       // Wiring missing — buildTools called from a context that didn't
@@ -1164,6 +1162,9 @@ export async function buildTools(
       // are responsible for surfacing this misconfiguration in real
       // deployments — see SessionDO callsites which always thread it.
     } else {
+      const mcpBinding = env.mcpBinding;
+      const tenantId = env.tenantId;
+      const sessionId = env.sessionId;
       for (const server of agentConfig.mcp_servers) {
         if (!server.url) {
           // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
@@ -1171,52 +1172,55 @@ export async function buildTools(
           // when the next buildTools fires after warmup.
           continue;
         }
+        const serverName = server.name;
+        let timeoutHandle!: ReturnType<typeof setTimeout>;
+        const timeoutPromise = new Promise<never>((_, reject) => {
+          timeoutHandle = setTimeout(
+            () => reject(new Error(`MCP setup timed out after ${MCP_SETUP_TIMEOUT_MS}ms`)),
+            MCP_SETUP_TIMEOUT_MS,
+          );
+        });
+        // Custom fetch the SDK calls for every MCP request. We stamp
+        // routing metadata and hand the Request to main; main does the
+        // credential injection + upstream fetch and returns the Response
+        // verbatim (streaming).
+        const proxyFetch: typeof globalThis.fetch = (input, init) => {
+          const req = new Request(input, init);
+          req.headers.set("x-oma-tenant", tenantId);
+          req.headers.set("x-oma-session", sessionId);
+          req.headers.set("x-oma-mcp-server", serverName);
+          return mcpBinding.fetch(req);
+        };
         try {
-          const transport = new BindingMCPTransport({
-            binding: env.mcpBinding,
-            tenantId: env.tenantId,
-            sessionId: env.sessionId,
-            serverName: server.name,
-          });
-          let timeoutHandle!: ReturnType<typeof setTimeout>;
-          const timeoutPromise = new Promise<never>((_, reject) => {
-            timeoutHandle = setTimeout(
-              () => reject(new Error(`MCP setup timed out after ${MCP_SETUP_TIMEOUT_MS}ms`)),
-              MCP_SETUP_TIMEOUT_MS,
-            );
-          });
-          try {
-            const mcpClient = await Promise.race([
-              experimental_createMCPClient({
-                transport: transport as never,
-                name: "oma-cloud-agent",
-              }),
-              timeoutPromise,
-            ]);
-            const remoteTools = await Promise.race([
-              mcpClient.tools(),
-              timeoutPromise,
-            ]);
-            for (const [toolName, t] of Object.entries(remoteTools)) {
-              // Prefix matches what the local-runtime ACP path produces
-              // (`mcp__<server>__<tool>`), so transcripts from cloud and
-              // local sessions are visually identical.
-              tools[`mcp__${server.name}__${toolName}`] = t;
-            }
-          } finally {
-            clearTimeout(timeoutHandle);
+          const mcpClient = await Promise.race([
+            experimental_createMCPClient({
+              transport: {
+                type: "http",
+                url: server.url,
+                fetch: proxyFetch,
+              },
+              name: "oma-cloud-agent",
+            }),
+            timeoutPromise,
+          ]);
+          const remoteTools = await Promise.race([
+            mcpClient.tools(),
+            timeoutPromise,
+          ]);
+          for (const [toolName, t] of Object.entries(remoteTools)) {
+            tools[`mcp__${server.name}__${toolName}`] = t;
           }
         } catch (err) {
           // Connection / handshake / tools/list failure for one server
           // (e.g. main worker unreachable, vault credential missing,
-          // upstream MCP server down). Log + skip so a single
-          // misconfiguration doesn't take the whole turn down — the model
-          // just doesn't see this server's tools and reports "MCP server
-          // X unavailable" if asked.
+          // upstream MCP server down, our timeout fired). Log + skip so
+          // a single misconfiguration doesn't take the whole turn down.
           const msg = err instanceof Error ? err.message : String(err);
           console.error(
             `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
           );
+        } finally {
+          clearTimeout(timeoutHandle);
         }
       }
     }

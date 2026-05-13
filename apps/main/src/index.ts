@@ -463,6 +463,72 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
   }
 
   /**
+   * Transparent HTTP proxy for cloud agent MCP traffic. Agent's tools.ts
+   * gives AI SDK's MCP HTTP transport a custom fetch that calls
+   * `env.MAIN_MCP.fetch(req)` after stamping three metadata headers:
+   *   - `x-oma-tenant`
+   *   - `x-oma-session`
+   *   - `x-oma-mcp-server`
+   * We resolve the vault credential by `serverName` (mirrors the legacy
+   * `mcpForward` path so inline `authorization_token` still works),
+   * strip the metadata, replace the `authorization` header with the
+   * upstream bearer, and forward to the URL the agent's transport
+   * already knew (request URL is the upstream URL). Body / response
+   * status / response headers (including rotated `Mcp-Session-Id`)
+   * stream through unchanged.
+   *
+   * Vault credentials remain main-only — agent worker only sees the
+   * Response. The SDK's HTTP transport handles Streamable-HTTP session
+   * id rotation, SSE response framing, retries — none of that lives
+   * in this Worker anymore. The hand-rolled BindingMCPTransport that
+   * preceded this dropped session ids and broke session-ful servers
+   * (Notion's tools/list never returned, hanging the whole turn).
+   *
+   * 401-refresh-and-retry that `forwardWithRefresh` does for the legacy
+   * mcpForward path is NOT wired here yet. On a stale OAuth token the
+   * tool call fails this turn; the next turn re-resolves and picks up
+   * whatever the vault holds. Add it here if/when an MCP server's
+   * access_token TTL is short enough to matter.
+   */
+  async fetch(request: Request): Promise<Response> {
+    const tenantId = request.headers.get("x-oma-tenant");
+    const sessionId = request.headers.get("x-oma-session");
+    const serverName = request.headers.get("x-oma-mcp-server");
+    if (!tenantId || !sessionId || !serverName) {
+      return new Response(
+        '{"error":"missing x-oma-tenant / x-oma-session / x-oma-mcp-server header"}',
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    const services = await getCfServicesForTenant(this.env, tenantId);
+    const target = await resolveProxyTargetByTenant(
+      this.env,
+      services,
+      tenantId,
+      sessionId,
+      serverName,
+    );
+    if (!target) {
+      return new Response('{"error":"forbidden"}', {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    // Strip metadata + replace Authorization. Everything else
+    // (Mcp-Session-Id, content-type, accept, …) flows through.
+    const upstreamHeaders = new Headers(request.headers);
+    upstreamHeaders.delete("x-oma-tenant");
+    upstreamHeaders.delete("x-oma-session");
+    upstreamHeaders.delete("x-oma-mcp-server");
+    upstreamHeaders.set("authorization", `Bearer ${target.upstreamToken}`);
+    return fetch(target.upstreamUrl, {
+      method: request.method,
+      headers: upstreamHeaders,
+      body: request.body,
+    });
+  }
+
+  /**
    * Outbound counterpart to `mcpForward` for sandbox-side HTTPS calls
    * (anything the cloud agent's container does via fetch / curl). The
    * agent worker's outbound interceptor (apps/agent/src/oma-sandbox.ts)
