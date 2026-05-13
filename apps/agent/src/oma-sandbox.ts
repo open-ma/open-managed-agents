@@ -364,16 +364,6 @@ export class OmaSandbox extends Sandbox {
   }
 }
 
-// Assign via the inherited static setter (Sandbox/Container expose
-// outboundHandlers as a get/set accessor, not a plain field — class field
-// syntax `static outboundHandlers = {...}` would shadow without triggering
-// the setter, leaving the SDK unable to find the handler at runtime).
-(OmaSandbox as unknown as {
-  outboundHandlers: Record<string, typeof injectVaultCredsHandler>;
-}).outboundHandlers = {
-  inject_vault_creds: injectVaultCredsHandler,
-};
-
 // Per-host bypass for R2 — createBackup / restoreBackup do raw S3-style
 // PUT/GET/HEAD against `*.r2.cloudflarestorage.com` from inside the
 // container, and so do agent-driven presigned PUTs from the
@@ -530,10 +520,42 @@ const githubAuthHandler = async (
   return fetch(upstreamReq);
 };
 
+// Static handler-to-method-name registrations. Both maps are inherited
+// get/set accessors on Sandbox/Container; class field syntax `static
+// outboundHandlers = {...}` would shadow without triggering the setter,
+// leaving the SDK unable to find the handler at runtime.
+//
+// inject_vault_creds: catch-all, params bound at runtime via
+//   sandbox.setOutboundHandler("inject_vault_creds", { tenantId, sessionId })
+//   in session-do.ts:setOutboundContext.
+//
+// github_auth: per-host, params bound at runtime via
+//   sandbox.setOutboundByHost("api.github.com", "github_auth", ...)
+//   (and same for "github.com") in session-do.ts:setOutboundContext.
+//   Pre-fix the github handler was registered directly in static
+//   `outboundByHost` as a function reference; per CF Containers SDK,
+//   handlers in the static map are invoked with `ctx.params = undefined`
+//   — so the handler's `params.tenantId && params.sessionId` guard
+//   always failed, MAIN_MCP credential lookups never fired, and gh /
+//   git push attempts silently sent the `__cap_managed__` sentinel
+//   through unauthenticated. Caught 2026-05-13 testing `gh repo list`.
+//
+// r2OutboundPassthrough doesn't need params (purely streams the request
+// to R2 unchanged), so it stays as a direct function reference in
+// outboundByHost below.
+(OmaSandbox as unknown as {
+  outboundHandlers: Record<string, typeof injectVaultCredsHandler>;
+}).outboundHandlers = {
+  inject_vault_creds: injectVaultCredsHandler,
+  github_auth: githubAuthHandler,
+};
+
 (OmaSandbox as unknown as {
   outboundByHost: Record<string, (req: Request, env: unknown, ctx: SdkContext<OutboundContextParams>) => Promise<Response>>;
 }).outboundByHost = {
   "*.r2.cloudflarestorage.com": r2OutboundPassthrough,
-  "github.com": githubAuthHandler,
-  "api.github.com": githubAuthHandler,
+  // github.com / api.github.com handled at runtime via
+  // sandbox.setOutboundByHost("...", "github_auth", { tenantId, sessionId })
+  // from session-do.ts:setOutboundContext — see comment on outboundHandlers
+  // above for why the static-map shape can't carry the params we need.
 };

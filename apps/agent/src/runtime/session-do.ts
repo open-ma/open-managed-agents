@@ -2793,6 +2793,31 @@ export class SessionDO extends DurableObject<Env> {
         });
       }
 
+      // Per-host github handler binding. Without this, the static
+      // `outboundByHost` map only carries the function reference — CF
+      // Containers SDK invokes it with `ctx.params = undefined`, so
+      // githubAuthHandler's `if (params.tenantId && ...)` guard always
+      // fails, MAIN_MCP credential lookups never fire, and gh / git
+      // requests sail past unauthenticated. setOutboundByHost binds the
+      // params for this specific (host, methodName) pair at runtime.
+      // Wrapped in optional check because older sandbox SDK versions
+      // don't expose this method (self-host running 0.8.x). On those,
+      // github cap_cli still won't work, but neither did it before.
+      const sandboxHost = sandbox as unknown as {
+        setOutboundByHost?: (
+          hostname: string,
+          methodName: string,
+          params: { tenantId: string; sessionId: string },
+        ) => Promise<void>;
+      };
+      if (sandboxHost.setOutboundByHost && this.state.session_id && this.state.tenant_id) {
+        const ctx = { tenantId: this.state.tenant_id, sessionId: this.state.session_id };
+        await Promise.all([
+          sandboxHost.setOutboundByHost("api.github.com", "github_auth", ctx),
+          sandboxHost.setOutboundByHost("github.com", "github_auth", ctx),
+        ]);
+      }
+
       // Hand backup context to OmaSandbox so its onActivityExpired hook
       // (sleepAfter teardown) writes the final /workspace snapshot scoped
       // to this (tenant, env, session). Container DO is keyed by sessionId,
