@@ -78,9 +78,15 @@ export interface IntegrationsRoutesDeps {
   /** Per-request repo bag resolver. CF reads c.env on demand; Node returns
    *  the same singleton bags every call. */
   bags: (c: import("hono").Context) => IntegrationsBags;
-  /** Forwarder for install-proxy endpoints. Null disables those endpoints
-   *  (returns 503). */
-  installProxy: InstallProxyForwarder | null;
+  /** Install-proxy forwarder. Either a static instance (Node — bridge is a
+   *  long-lived singleton) or a per-request resolver (CF — needs c.env +
+   *  c.executionCtx for the service-binding fetch). Null disables the
+   *  install-proxy endpoints (they return 503).
+   */
+  installProxy:
+    | InstallProxyForwarder
+    | ((c: import("hono").Context) => InstallProxyForwarder | null)
+    | null;
 }
 
 export function buildIntegrationsRoutes(deps: IntegrationsRoutesDeps) {
@@ -210,12 +216,12 @@ export function buildIntegrationsRoutes(deps: IntegrationsRoutesDeps) {
 
     // ─── Install proxy endpoints ─────────────────────────────────────
     sub.post("/start-a1", async (c) => {
-      if (!deps.installProxy) {
+      const proxy = typeof deps.installProxy === "function" ? deps.installProxy(c) : deps.installProxy; if (!proxy) {
         return c.json({ error: "install proxy not configured" }, 503);
       }
       const userId = c.get("user_id")!;
       const body = (await c.req.json()) as Record<string, unknown>;
-      return deps.installProxy.forward({
+      return proxy.forward({
         subpath: `${provider}/publications/start-a1`,
         body: { ...body, userId },
         needsInternalSecret: true,
@@ -223,12 +229,12 @@ export function buildIntegrationsRoutes(deps: IntegrationsRoutesDeps) {
     });
 
     sub.post("/credentials", async (c) => {
-      if (!deps.installProxy) {
+      const proxy = typeof deps.installProxy === "function" ? deps.installProxy(c) : deps.installProxy; if (!proxy) {
         return c.json({ error: "install proxy not configured" }, 503);
       }
       const body = (await c.req.json()) as Record<string, unknown>;
       // /credentials uses formToken JWT auth — no internal secret needed.
-      return deps.installProxy.forward({
+      return proxy.forward({
         subpath: `${provider}/publications/credentials`,
         body,
         needsInternalSecret: false,
@@ -236,11 +242,11 @@ export function buildIntegrationsRoutes(deps: IntegrationsRoutesDeps) {
     });
 
     sub.post("/handoff-link", async (c) => {
-      if (!deps.installProxy) {
+      const proxy = typeof deps.installProxy === "function" ? deps.installProxy(c) : deps.installProxy; if (!proxy) {
         return c.json({ error: "install proxy not configured" }, 503);
       }
       const body = (await c.req.json()) as Record<string, unknown>;
-      return deps.installProxy.forward({
+      return proxy.forward({
         subpath: `${provider}/publications/handoff-link`,
         body,
         needsInternalSecret: true,
@@ -249,12 +255,12 @@ export function buildIntegrationsRoutes(deps: IntegrationsRoutesDeps) {
 
     if (provider === "linear") {
       sub.post("/personal-token", async (c) => {
-        if (!deps.installProxy) {
+        const proxy = typeof deps.installProxy === "function" ? deps.installProxy(c) : deps.installProxy; if (!proxy) {
           return c.json({ error: "install proxy not configured" }, 503);
         }
         const userId = c.get("user_id")!;
         const body = (await c.req.json()) as Record<string, unknown>;
-        return deps.installProxy.forward({
+        return proxy.forward({
           subpath: "linear/publications/personal-token",
           body: { ...body, userId },
           needsInternalSecret: true,

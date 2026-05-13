@@ -90,12 +90,20 @@ function installProxyFor(c: import("hono").Context<{ Bindings: Env } & Vars>): I
 
 const wrapper = new Hono<{ Bindings: Env } & Vars>();
 
-wrapper.all("*", async (c) => {
-  const inner = buildIntegrationsRoutes({
-    bags: (ctx) => bagsFor(ctx as import("hono").Context<{ Bindings: Env } & Vars>),
-    installProxy: installProxyFor(c),
-  });
-  return inner.fetch(c.req.raw, c.env, c.executionCtx);
+// Mount the package routes onto our wrapper's Hono so the outer auth
+// middleware's `tenant_id` / `user_id` Variables flow through to the
+// per-route user-scoped guard inside `buildIntegrationsRoutes`.
+//
+// Earlier this used `inner.fetch(c.req.raw, c.env, c.executionCtx)`,
+// which creates a brand-new context inside the inner Hono app — the
+// outer Variables were dropped, so the guard read `user_id` as
+// undefined and returned 403 even for cookie-authenticated Console
+// users.
+const inner = buildIntegrationsRoutes({
+  bags: (ctx) => bagsFor(ctx as import("hono").Context<{ Bindings: Env } & Vars>),
+  installProxy: (ctx) =>
+    installProxyFor(ctx as import("hono").Context<{ Bindings: Env } & Vars>),
 });
+wrapper.route("/", inner);
 
 export default wrapper;
