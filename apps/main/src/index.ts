@@ -484,11 +484,13 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
    * preceded this dropped session ids and broke session-ful servers
    * (Notion's tools/list never returned, hanging the whole turn).
    *
-   * 401-refresh-and-retry that `forwardWithRefresh` does for the legacy
-   * mcpForward path is NOT wired here yet. On a stale OAuth token the
-   * tool call fails this turn; the next turn re-resolves and picks up
-   * whatever the vault holds. Add it here if/when an MCP server's
-   * access_token TTL is short enough to matter.
+   * 401-refresh-and-retry: handled by `forwardWithRefresh` (shared with
+   * the legacy mcpForward + HTTP /v1/mcp-proxy paths). When the first
+   * upstream response is 401 AND the resolved credential carries
+   * `mcp_oauth` refresh metadata (refresh_token + token_endpoint), we
+   * hit the token_endpoint, persist the rotated tokens back to D1, and
+   * retry the upstream call once with the fresh bearer. Request body
+   * is buffered up-front so the retry can replay it.
    */
   async fetch(request: Request): Promise<Response> {
     const tenantId = request.headers.get("x-oma-tenant");
@@ -514,18 +516,29 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
         headers: { "content-type": "application/json" },
       });
     }
-    // Strip metadata + replace Authorization. Everything else
+    // Strip routing metadata before forwarding upstream. Everything else
     // (Mcp-Session-Id, content-type, accept, …) flows through.
-    const upstreamHeaders = new Headers(request.headers);
-    upstreamHeaders.delete("x-oma-tenant");
-    upstreamHeaders.delete("x-oma-session");
-    upstreamHeaders.delete("x-oma-mcp-server");
-    upstreamHeaders.set("authorization", `Bearer ${target.upstreamToken}`);
-    return fetch(target.upstreamUrl, {
-      method: request.method,
-      headers: upstreamHeaders,
-      body: request.body,
-    });
+    // forwardWithRefresh injects/replaces Authorization itself.
+    const inboundHeaders = new Headers(request.headers);
+    inboundHeaders.delete("x-oma-tenant");
+    inboundHeaders.delete("x-oma-session");
+    inboundHeaders.delete("x-oma-mcp-server");
+    // Buffer body so forwardWithRefresh can replay on a 401-then-refresh
+    // retry. MCP request bodies are JSON-RPC envelopes — sub-KB in
+    // practice — so the buffering cost is negligible. Response body is
+    // unaffected and still streams back.
+    const body = ["GET", "HEAD"].includes(request.method)
+      ? null
+      : await request.arrayBuffer();
+    return forwardWithRefresh(
+      services,
+      tenantId,
+      target,
+      request.method,
+      inboundHeaders,
+      body,
+      { sessionId, serverName, callerKind: "rpc-mcp" },
+    );
   }
 
   /**
