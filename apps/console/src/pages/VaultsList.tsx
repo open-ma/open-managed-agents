@@ -45,13 +45,18 @@ export function VaultsList() {
   const [credsLoading, setCredsLoading] = useState(false);
 
   const [showAddCred, setShowAddCred] = useState(false);
+  // Top-level tab inside the Add-credential modal: MCP server vs CLI.
+  // Folds the previously separate "+ Connect service" + "+ Add CLI" entry
+  // points into one modal; matches Anthropic's UI shape.
+  const [addTab, setAddTab] = useState<"mcp" | "cli">("mcp");
   const [mcpSearch, setMcpSearch] = useState("");
   const [connecting, setConnecting] = useState<string | null>(null);
+  // Bottom URL input on the MCP tab (separate from the search box above).
+  const [customUrlInput, setCustomUrlInput] = useState("");
 
-  // Custom MCP server form — opened from the "Custom Server" row at the
-  // bottom of the registry list. Lets the user attach a server that's not
-  // in Anthropic's registry: name, OAuth or static-bearer, URL, optional
-  // token (bearer only).
+  // Custom MCP server form — opened from the bottom URL input on the MCP
+  // tab. Lets the user attach a server that's not in Anthropic's registry:
+  // name, OAuth or static-bearer, URL, optional token (bearer only).
   const [customMode, setCustomMode] = useState(false);
   const [customForm, setCustomForm] = useState({
     name: "",
@@ -60,8 +65,8 @@ export function VaultsList() {
     token: "",
   });
 
-  // Add-CLI form (cap_cli credentials).
-  const [showAddCli, setShowAddCli] = useState(false);
+  // Add-CLI form (cap_cli credentials). Visible inside the unified
+  // Add-credential modal under the "CLI" tab.
   const [cliForm, setCliForm] = useState({
     cli_id: "gh", display_name: "", token: "",
   });
@@ -173,7 +178,7 @@ export function VaultsList() {
         },
       }),
     });
-    setShowAddCli(false);
+    setShowAddCred(false);
     setCliForm({ cli_id: "gh", display_name: "", token: "" });
     openVault(selectedVault);
   };
@@ -237,7 +242,7 @@ export function VaultsList() {
           setDeviceFlow((prev) => (prev ? { ...prev, status: "ready" } : null));
           if (selectedVault) openVault(selectedVault);
           setTimeout(() => {
-            setShowAddCli(false);
+            setShowAddCred(false);
             setDeviceFlow(null);
           }, 1500);
           return;
@@ -357,8 +362,7 @@ export function VaultsList() {
         maxWidth="max-w-2xl"
         footer={
           <div className="flex gap-2">
-            <Button variant="secondary" size="sm" onClick={() => setShowAddCred(true)}>+ Connect service</Button>
-            <Button variant="ghost" size="sm" onClick={() => setShowAddCli(true)}>+ Add CLI</Button>
+            <Button variant="secondary" size="sm" onClick={() => { setAddTab("mcp"); setShowAddCred(true); }}>+ Add credential</Button>
             <div className="flex-1" />
             <Button variant="ghost" onClick={() => setSelectedVault(null)}>Close</Button>
           </div>
@@ -401,32 +405,78 @@ export function VaultsList() {
         )}
       </Modal>
 
-      {/* Connect MCP Server — Registry Search (Anthropic-style) */}
+      {/* Add credential — unified MCP / CLI modal (Anthropic-style). */}
       <Modal
         open={showAddCred && !!selectedVault}
         onClose={() => {
           setShowAddCred(false);
           setMcpSearch("");
           setCustomMode(false);
+          setCustomUrlInput("");
           setCustomForm({ name: "", type: "oauth", url: "", token: "" });
+          setDeviceFlow(null);
         }}
-        title={customMode ? "Add credential" : "Connect a service"}
+        title={customMode ? "Add credential" : "Add credential"}
         maxWidth="max-w-lg"
         footer={
-          customMode ? (
+          // CLI tab footer reuses cap_cli flow.
+          addTab === "cli" ? (
+            deviceFlow?.status === "polling" ? (
+              <Button variant="ghost" onClick={() => setDeviceFlow(null)}>Cancel</Button>
+            ) : (
+              <>
+                <Button variant="ghost" onClick={() => setShowAddCred(false)}>Cancel</Button>
+                <Button onClick={createCapCliCred} disabled={!cliForm.token}>Create</Button>
+              </>
+            )
+          ) : customMode ? (
             <Button
               onClick={submitCustom}
               disabled={!customForm.url || (customForm.type === "bearer" && !customForm.token) || !!connecting}
             >
               Connect
             </Button>
-          ) : isCustomUrl ? (
-            <Button onClick={() => connectMcp({ name: mcpSearch, url: mcpSearch })} disabled={!!connecting}>Connect</Button>
+          ) : customUrlInput ? (
+            <Button
+              onClick={() => {
+                setCustomMode(true);
+                setCustomForm({ name: "", type: "oauth", url: customUrlInput, token: "" });
+              }}
+              disabled={!!connecting}
+            >
+              Connect
+            </Button>
           ) : undefined
         }
       >
-        {customMode ? (
+        {/* Top-level tab. Hidden when in custom-form view (drilling into
+            MCP detail) — clicking the title acts as a return. */}
+        {!customMode && (
+          <div className="flex gap-1 mb-3 border-b border-border-subtle">
+            {(["mcp", "cli"] as const).map((t) => (
+              <button
+                key={t}
+                onClick={() => { setAddTab(t); setMcpSearch(""); setCustomUrlInput(""); }}
+                className={`px-3 py-2 text-sm border-b-2 -mb-px ${
+                  addTab === t
+                    ? "border-fg text-fg font-medium"
+                    : "border-transparent text-fg-muted hover:text-fg"
+                }`}
+              >
+                {t === "mcp" ? "MCP server" : "CLI"}
+              </button>
+            ))}
+          </div>
+        )}
+
+        {addTab === "mcp" && customMode && (
           <div className="space-y-4">
+            <button
+              onClick={() => setCustomMode(false)}
+              className="text-xs text-fg-muted hover:text-fg flex items-center gap-1"
+            >
+              ← Back
+            </button>
             <div className="text-sm text-fg-muted">Authorize an MCP server for delegated user authentication.</div>
             <div>
               <label className="text-sm font-medium text-fg">Name <span className="text-xs text-fg-muted ml-1">Optional</span></label>
@@ -474,7 +524,9 @@ export function VaultsList() {
               </div>
             )}
           </div>
-        ) : (
+        )}
+
+        {addTab === "mcp" && !customMode && (
         <div className="space-y-3">
           <input
             value={mcpSearch}
@@ -484,7 +536,7 @@ export function VaultsList() {
             autoFocus
           />
 
-          <div className="max-h-80 overflow-y-auto -mx-1">
+          <div className="max-h-72 overflow-y-auto -mx-1">
             {filteredRegistry.map((entry) => {
               const isConnected = connectedUrls.has(entry.url);
               return (
@@ -513,130 +565,97 @@ export function VaultsList() {
                 </button>
               );
             })}
-            {filteredRegistry.length === 0 && !isCustomUrl && (
-              <div className="text-center py-6 text-fg-subtle text-sm">No matches. Use Custom Server below.</div>
+            {filteredRegistry.length === 0 && (
+              <div className="text-center py-6 text-fg-subtle text-sm">No matches. Use the URL field below to connect a custom server.</div>
             )}
-            {isCustomUrl && (
-              <div className="px-3 py-2.5 text-sm text-fg-muted">
-                Custom URL: <span className="font-mono text-fg">{mcpSearch}</span>
-              </div>
-            )}
+          </div>
 
-            {/* Always-visible Custom Server entry — Anthropic-style. Opens
-                the Add credential form (Name + Type + URL + optional token). */}
-            <div className="border-t border-border-subtle mt-2 pt-2">
-              <button
-                onClick={() => {
-                  setCustomMode(true);
-                  setCustomForm({ name: "", type: "oauth", url: mcpSearch.startsWith("http") ? mcpSearch : "", token: "" });
-                }}
-                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left hover:bg-bg-surface cursor-pointer"
-              >
-                <div className="w-5 h-5 rounded bg-bg-surface shrink-0 flex items-center justify-center text-fg-muted">
-                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                    <circle cx="12" cy="12" r="10" />
-                    <line x1="2" y1="12" x2="22" y2="12" />
-                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
-                  </svg>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <div className="text-sm font-medium text-fg">Custom Server</div>
-                  <div className="text-xs text-fg-muted">Connect a server that's not in the registry</div>
-                </div>
-              </button>
-            </div>
+          {/* Bottom URL input (Anthropic-style). Submits via the modal
+              footer Connect button → opens the detailed Add-credential
+              form view (Name + Type + URL + optional token). */}
+          <div className="border-t border-border-subtle pt-3">
+            <input
+              value={customUrlInput}
+              onChange={(e) => setCustomUrlInput(e.target.value)}
+              placeholder="https://mcp.example.com"
+              className={inputCls}
+            />
           </div>
         </div>
         )}
-      </Modal>
 
-      {/* Add CLI credential (cap_cli) */}
-      <Modal
-        open={showAddCli && !!selectedVault}
-        onClose={() => { setShowAddCli(false); setDeviceFlow(null); }}
-        title="Add a CLI"
-        subtitle="cap injects the token at HTTPS time. Sandbox process never sees the secret."
-        footer={
-          deviceFlow?.status === "polling" ? (
-            <Button variant="ghost" onClick={() => { setDeviceFlow(null); }}>Cancel</Button>
-          ) : (
-            <>
-              <Button variant="ghost" onClick={() => setShowAddCli(false)}>Cancel</Button>
-              <Button onClick={createCapCliCred} disabled={!cliForm.token}>Create</Button>
-            </>
-          )
-        }
-      >
-        <div className="space-y-3">
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">CLI</label>
-            <select
-              value={cliForm.cli_id}
-              onChange={(e) => { setCliForm({ ...cliForm, cli_id: e.target.value }); setDeviceFlow(null); }}
-              className={inputCls}
-              disabled={deviceFlow?.status === "polling"}
-            >
-              {CAP_CLIS.map((c) => (
-                <option key={c.cli_id} value={c.cli_id}>{c.label}{c.oauth ? " (OAuth supported)" : ""}</option>
-              ))}
-            </select>
-            <div className="text-xs text-fg-subtle mt-1">
-              {CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.helper}
+        {addTab === "cli" && (
+          <div className="space-y-3">
+            <div>
+              <label className="text-sm text-fg-muted block mb-1">CLI</label>
+              <select
+                value={cliForm.cli_id}
+                onChange={(e) => { setCliForm({ ...cliForm, cli_id: e.target.value }); setDeviceFlow(null); }}
+                className={inputCls}
+                disabled={deviceFlow?.status === "polling"}
+              >
+                {CAP_CLIS.map((c) => (
+                  <option key={c.cli_id} value={c.cli_id}>{c.label}{c.oauth ? " (OAuth supported)" : ""}</option>
+                ))}
+              </select>
+              <div className="text-xs text-fg-subtle mt-1">
+                {CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.helper}
+              </div>
+            </div>
+
+            {CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.oauth && (
+              <div className="border border-border rounded-md p-3 bg-bg-surface">
+                {!deviceFlow && (
+                  <Button variant="secondary" size="sm" onClick={startDeviceFlow}>
+                    Sign in via {cliForm.cli_id} OAuth
+                  </Button>
+                )}
+                {deviceFlow?.status === "polling" && (
+                  <div className="space-y-2 text-sm">
+                    <div className="text-fg-muted">
+                      Open <a href={deviceFlow.verification_uri_complete ?? deviceFlow.verification_uri} target="_blank" rel="noreferrer" className="text-brand underline">{deviceFlow.verification_uri_complete ?? deviceFlow.verification_uri}</a> and enter:
+                    </div>
+                    <div className="font-mono text-2xl text-center tracking-widest text-fg py-2 select-all">
+                      {deviceFlow.user_code}
+                    </div>
+                    <div className="text-xs text-fg-subtle text-center">Waiting for confirmation… (polls every {deviceFlow.interval_seconds}s)</div>
+                  </div>
+                )}
+                {deviceFlow?.status === "ready" && (
+                  <div className="text-sm text-success">✓ Token acquired and stored.</div>
+                )}
+                {(deviceFlow?.status === "expired" || deviceFlow?.status === "denied" || deviceFlow?.status === "error") && (
+                  <div className="text-sm text-danger">
+                    {deviceFlow.status === "denied" ? "Access denied by user." : deviceFlow.status === "expired" ? "Code expired — try again." : `OAuth error: ${deviceFlow.error ?? "unknown"}`}
+                  </div>
+                )}
+              </div>
+            )}
+
+            <div>
+              <label className="text-sm text-fg-muted block mb-1">Display Name <span className="text-fg-subtle">(optional)</span></label>
+              <TextInput
+                value={cliForm.display_name}
+                onChange={(e) => setCliForm({ ...cliForm, display_name: e.target.value })}
+                className={inputCls}
+                placeholder={CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.label ?? cliForm.cli_id}
+                disabled={deviceFlow?.status === "polling"}
+              />
+            </div>
+            <div>
+              <label className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only — leave blank to use OAuth above)</span></label>
+              <SecretInput
+                value={cliForm.token}
+                onChange={(e) => setCliForm({ ...cliForm, token: e.target.value })}
+                className={inputCls}
+                placeholder="••••••••"
+                disabled={deviceFlow?.status === "polling"}
+              />
             </div>
           </div>
-
-          {/* Device flow panel */}
-          {CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.oauth && (
-            <div className="border border-border rounded-md p-3 bg-bg-surface">
-              {!deviceFlow && (
-                <Button variant="secondary" size="sm" onClick={startDeviceFlow}>
-                  Sign in via {cliForm.cli_id} OAuth
-                </Button>
-              )}
-              {deviceFlow?.status === "polling" && (
-                <div className="space-y-2 text-sm">
-                  <div className="text-fg-muted">
-                    Open <a href={deviceFlow.verification_uri_complete ?? deviceFlow.verification_uri} target="_blank" rel="noreferrer" className="text-brand underline">{deviceFlow.verification_uri_complete ?? deviceFlow.verification_uri}</a> and enter:
-                  </div>
-                  <div className="font-mono text-2xl text-center tracking-widest text-fg py-2 select-all">
-                    {deviceFlow.user_code}
-                  </div>
-                  <div className="text-xs text-fg-subtle text-center">Waiting for confirmation… (polls every {deviceFlow.interval_seconds}s)</div>
-                </div>
-              )}
-              {deviceFlow?.status === "ready" && (
-                <div className="text-sm text-success">✓ Token acquired and stored.</div>
-              )}
-              {(deviceFlow?.status === "expired" || deviceFlow?.status === "denied" || deviceFlow?.status === "error") && (
-                <div className="text-sm text-danger">
-                  {deviceFlow.status === "denied" ? "Access denied by user." : deviceFlow.status === "expired" ? "Code expired — try again." : `OAuth error: ${deviceFlow.error ?? "unknown"}`}
-                </div>
-              )}
-            </div>
-          )}
-
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">Display Name <span className="text-fg-subtle">(optional)</span></label>
-            <TextInput
-              value={cliForm.display_name}
-              onChange={(e) => setCliForm({ ...cliForm, display_name: e.target.value })}
-              className={inputCls}
-              placeholder={CAP_CLIS.find((c) => c.cli_id === cliForm.cli_id)?.label ?? cliForm.cli_id}
-              disabled={deviceFlow?.status === "polling"}
-            />
-          </div>
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only — leave blank to use OAuth above)</span></label>
-            <SecretInput
-              value={cliForm.token}
-              onChange={(e) => setCliForm({ ...cliForm, token: e.target.value })}
-              className={inputCls}
-              placeholder="••••••••"
-              disabled={deviceFlow?.status === "polling"}
-            />
-          </div>
-        </div>
+        )}
       </Modal>
+
     </ListPage>
   );
 }
