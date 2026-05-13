@@ -93,10 +93,17 @@ export const errorEnvelopeMiddleware: MiddlewareHandler = async (c, next) => {
     !Array.isArray(body.error) &&
     typeof (body.error as { type?: unknown }).type === "string"
   ) {
-    if (body.type === "error" && body.request_id) return;
+    if (body.type === "error" && body.request_id && body.message) return;
+    const inner = body.error as { type?: string; message?: string };
     const enriched = {
       ...body,
       type: "error" as const,
+      // Mirror inner.message + inner.type at the top level so non-Anthropic
+      // clients (better-auth's auth-client, generic fetch wrappers) that
+      // read `body.message` / `body.code` also surface a real string
+      // instead of undefined → "Authentication failed" generic fallback.
+      message: body.message ?? inner.message ?? "",
+      code: body.code ?? inner.type ?? "",
       request_id: body.request_id ?? requestIdFor(c),
     };
     c.res = new Response(JSON.stringify(enriched), {
@@ -108,12 +115,16 @@ export const errorEnvelopeMiddleware: MiddlewareHandler = async (c, next) => {
 
   // Legacy `{error: "<string>"}` shape — wrap it.
   if (typeof body.error === "string") {
+    const errType = deriveErrorType(status);
     const wrapped = {
       type: "error" as const,
       error: {
-        type: deriveErrorType(status),
+        type: errType,
         message: body.error,
       },
+      // Top-level mirror for better-auth-style clients (see comment above).
+      message: body.error,
+      code: errType,
       request_id: requestIdFor(c),
     };
     c.res = new Response(JSON.stringify(wrapped), {

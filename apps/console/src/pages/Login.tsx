@@ -271,7 +271,16 @@ export function Login() {
         toast("Password reset successfully. Please sign in.", "success");
       }
     } catch (err: any) {
-      setError(err.message || "Authentication failed");
+      // Surface real cause when present. Anthropic-style envelope nests as
+      // `{error:{type,message}}`; better-auth surfaces top-level `message`.
+      // Some upstream limiters (CF Rate Limiting binding) only set the
+      // nested form — read both before falling back to a generic string.
+      const msg =
+        err?.message ||
+        err?.error?.message ||
+        err?.body?.error?.message ||
+        "Authentication failed";
+      setError(msg);
     } finally {
       // Always reset the Turnstile token after a submit attempt — tokens
       // are single-use, so we'd 401 on the next try otherwise.
