@@ -72,10 +72,17 @@ export function VaultsList() {
     refreshToken: "",
     tokenEndpoint: "",
     authMethod: "client_secret_post" as "client_secret_basic" | "client_secret_post" | "none",
+    // OAuth client credentials (Optional). Used when the provider doesn't
+    // support DCR (GitHub, Feishu) and the operator hasn't preset client
+    // creds at the worker env level — passed via query param to
+    // /v1/oauth/authorize to override the server's lookup.
+    clientId: "",
+    clientSecret: "",
   });
   const [pickerOpen, setPickerOpen] = useState(false);
   const [tokenSectionOpen, setTokenSectionOpen] = useState(false);
   const [refreshSectionOpen, setRefreshSectionOpen] = useState(false);
+  const [clientCredsSectionOpen, setClientCredsSectionOpen] = useState(false);
 
   // Add-CLI form (cap_cli credentials). Visible inside the unified
   // Add-credential modal under the "CLI" tab.
@@ -136,15 +143,21 @@ export function VaultsList() {
     setCredsLoading(false);
   };
 
-  const connectMcp = (entry: McpRegistryEntry | { name: string; url: string }) => {
+  const connectMcp = (entry: McpRegistryEntry | { name: string; url: string }, opts?: { clientId?: string; clientSecret?: string }) => {
     // Used by the unified MCP form's submit path. We never auto-connect
     // when the user clicks a registry row — clicking only fills the
     // MCP Server field; the user must hit Connect to actually start the
     // OAuth handshake.
     if (!selectedVault) return;
     setConnecting(entry.name);
-    const authUrl = `/v1/oauth/authorize?mcp_server_url=${encodeURIComponent(entry.url)}&vault_id=${encodeURIComponent(selectedVault.id)}&redirect_uri=${encodeURIComponent(window.location.href)}`;
-    window.open(authUrl, "oauth", "width=600,height=700,popup=yes");
+    const params = new URLSearchParams({
+      mcp_server_url: entry.url,
+      vault_id: selectedVault.id,
+      redirect_uri: window.location.href,
+    });
+    if (opts?.clientId) params.set("client_id", opts.clientId);
+    if (opts?.clientSecret) params.set("client_secret", opts.clientSecret);
+    window.open(`/v1/oauth/authorize?${params.toString()}`, "oauth", "width=600,height=700,popup=yes");
   };
 
   const createBearerCred = async () => {
@@ -182,6 +195,7 @@ export function VaultsList() {
         name: "", type: "oauth", url: "",
         pickedName: "", pickedIcon: "",
         token: "", refreshToken: "", tokenEndpoint: "", authMethod: "client_secret_post",
+        clientId: "", clientSecret: "",
       });
       openVault(selectedVault);
     } finally {
@@ -201,7 +215,10 @@ export function VaultsList() {
     if (customForm.type === "bearer" || customForm.token) {
       void createBearerCred();
     } else {
-      connectMcp({ name: customForm.name || customForm.pickedName || customForm.url, url: customForm.url });
+      connectMcp(
+        { name: customForm.name || customForm.pickedName || customForm.url, url: customForm.url },
+        { clientId: customForm.clientId, clientSecret: customForm.clientSecret },
+      );
     }
   };
 
@@ -459,6 +476,7 @@ export function VaultsList() {
             name: "", type: "oauth", url: "",
             pickedName: "", pickedIcon: "",
             token: "", refreshToken: "", tokenEndpoint: "", authMethod: "client_secret_post",
+            clientId: "", clientSecret: "",
           });
           setDeviceFlow(null);
         }}
@@ -696,10 +714,43 @@ export function VaultsList() {
                 )}
               </div>
             )}
+            {/* OAuth client credentials (Optional) — only shown for the
+                OAuth flow. Lets the user override the server's preset
+                client_id/secret on a per-credential basis (GitHub /
+                Feishu / any provider that doesn't support DCR). */}
+            {customForm.type === "oauth" && !customForm.token && (
+              <div className="border border-border-subtle rounded-md">
+                <button
+                  type="button"
+                  onClick={() => setClientCredsSectionOpen((v) => !v)}
+                  className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
+                >
+                  <span className={`text-fg-muted transition-transform ${clientCredsSectionOpen ? "rotate-90" : ""}`}>›</span>
+                  <span className="text-sm font-medium text-fg">OAuth client credentials</span>
+                  <span className="text-xs text-fg-muted px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
+                </button>
+                {clientCredsSectionOpen && (
+                  <div className="px-3 pb-3 space-y-2">
+                    <input
+                      value={customForm.clientId}
+                      onChange={(e) => setCustomForm({ ...customForm, clientId: e.target.value })}
+                      placeholder="Client ID"
+                      className={inputCls}
+                    />
+                    <input
+                      value={customForm.clientSecret}
+                      onChange={(e) => setCustomForm({ ...customForm, clientSecret: e.target.value })}
+                      type="password"
+                      placeholder="Client secret"
+                      className={inputCls}
+                    />
+                    <div className="text-xs text-fg-subtle">For OAuth providers that don't support Dynamic Client Registration (GitHub, Feishu) — supply a client_id/secret from a pre-registered app.</div>
+                  </div>
+                )}
+              </div>
+            )}
           </div>
         )}
-
-        {addTab === "cli" && (
           <div className="space-y-3">
             <div>
               <label className="text-sm text-fg-muted block mb-1">CLI</label>

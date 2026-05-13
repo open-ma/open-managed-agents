@@ -252,10 +252,18 @@ app.get("/authorize", async (c) => {
     return c.json({ error: `OAuth discovery failed: ${(err as Error).message}` }, 502);
   }
 
-  // Dynamic Client Registration if supported.
-  let clientId: string | null = null;
-  let clientSecret: string | undefined;
-  if (meta.authServer.registration_endpoint) {
+  // Caller-supplied OAuth client credentials. Highest priority — when
+  // present, skip DCR and the env-preset fallback. Lets the user pin a
+  // specific OAuth App per credential (e.g. their own GitHub OAuth App
+  // when the worker doesn't have GITHUB_OAUTH_CLIENT_ID set, or when they
+  // want to use different scopes than the worker default).
+  const callerClientId = c.req.query("client_id");
+  const callerClientSecret = c.req.query("client_secret");
+
+  // Dynamic Client Registration if supported (skipped when caller supplied creds).
+  let clientId: string | null = callerClientId || null;
+  let clientSecret: string | undefined = callerClientSecret || undefined;
+  if (!clientId && meta.authServer.registration_endpoint) {
     const reg = await dynamicClientRegistration(
       meta.authServer.registration_endpoint,
       callbackUri,
