@@ -169,6 +169,15 @@ export class CloudflareSandbox implements SandboxExecutor {
     const fuse = this.fuseR2ConfigOrNull();
     const bucketName = this.env.MEMORY_BUCKET_NAME;
 
+    // Defensive cleanup: SDK keeps a per-isolate mount table that survives
+    // container restarts. If a previous mount at the same path is still
+    // registered (container went onStop without an explicit unmount —
+    // happens on sleepAfter teardown + every Container DO restart), the
+    // mountBucket below throws InvalidMountConfigError "already in use".
+    // Idempotent unmount first; ignore errors (path wasn't mounted —
+    // that's the happy case for a fresh isolate).
+    await sandbox.unmountBucket(mountPath).catch(() => {});
+
     if (fuse && bucketName) {
       await sandbox.mountBucket(bucketName, mountPath, {
         endpoint: fuse.endpoint,
@@ -225,6 +234,13 @@ export class CloudflareSandbox implements SandboxExecutor {
     const prefix = `/${sessionOutputsPrefix(opts.tenantId, opts.sessionId)}`;
     const fuse = this.fuseR2ConfigOrNull();
     const bucketName = "managed-agents-files";
+
+    // Defensive cleanup before mount — see mountMemoryStore for details.
+    // Real prod symptom: container restart after sleepAfter teardown
+    // throws InvalidMountConfigError "Mount path already in use" because
+    // the SDK's per-isolate mount table still has the old entry. Caught
+    // in sess-fa7j85x / sess-pkgiwl7 (2026-05-13 incident).
+    await sandbox.unmountBucket(mountPath).catch(() => {});
 
     try {
       if (fuse) {

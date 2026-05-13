@@ -70,24 +70,26 @@ If the page is an error/404/login wall/empty result, output exactly one line sta
 
 
 /**
- * Poll a started process with CC-aligned timeout strategies:
- * - Completes before timeout → return result
- * - Timeout + auto-backgroundable → keep running, redirect output to file, return path
- * - Timeout + not auto-backgroundable → SIGTERM kill, return partial + "timed out"
+ * Poll a started process. SIGTERM on timeout, return partial output.
+ *
+ * Auto-background-on-timeout was REMOVED 2026-05-13 — see commit msg.
+ * The bash tool no longer surfaces a `run_in_background` flag either.
+ * Net effect: every bash call has bounded duration; agent always sees
+ * either a clean exit or a "timed out, here's partial" string. No
+ * synthetic notifications ever inject into the conversation.
+ *
+ * If/when we re-enable backgrounding, the missing piece is robust
+ * cleanup of completion notifications + R2 mount lifecycle (the two
+ * bugs that motivated this disable).
  */
 async function pollWithStrategies(
   proc: ProcessHandle,
   command: string,
   timeoutMs: number,
-  isAutoBackgroundable: (cmd: string) => boolean,
-  sandbox: SandboxExecutor,
-  tasksDir: string,
-  env?: { watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void },
 ): Promise<string> {
   return new Promise<string>((resolve) => {
     let settled = false;
 
-    // Timeout handler — decides strategy 2 vs 3
     const timer = setTimeout(async () => {
       if (settled) return;
       settled = true;
@@ -98,41 +100,10 @@ async function pollWithStrategies(
         partial = (logs.stdout || "") + (logs.stderr ? "\nstderr: " + logs.stderr : "");
       } catch {}
 
-      if (isAutoBackgroundable(command)) {
-        // Strategy 2: auto-background — process keeps running
-        // Write partial output to file so agent can read it with read tool
-        const taskId = `task_${nanoid(12)}`;
-        const outFile = `${tasksDir}/${taskId}.out`;
-        try {
-          await sandbox.exec(`mkdir -p ${tasksDir}`, 5000);
-          await sandbox.writeFile(outFile, partial);
-        } catch {}
-        // Register watcher for completion notification
-        env?.watchBackgroundTask?.(taskId, String(proc.pid), outFile, proc);
-        const seconds = Math.round(timeoutMs / 1000);
-        resolve(truncateResult(
-          [
-            `Command exceeded the ${seconds}s timeout and was moved to the background.`,
-            `  task_id: ${taskId}`,
-            `  pid: ${proc.pid}`,
-            `  output_path: ${outFile}`,
-            ``,
-            `Next steps:`,
-            `  - Check progress: read(file_path="${outFile}")`,
-            `  - Wait longer next time: re-invoke bash with timeout=<ms, max ${MAX_BASH_TIMEOUT}>`,
-            `  - Stop it: bash(command="kill ${proc.pid}")`,
-            ``,
-            `Partial output so far:`,
-            partial || "(no output yet)",
-          ].join("\n").trim()
-        ));
-      } else {
-        // Strategy 3: kill — SIGTERM
-        try { await proc.kill("SIGTERM"); } catch {}
-        resolve(truncateResult(
-          `exit=143\nCommand timed out after ${Math.round(timeoutMs / 1000)}s\n${partial}`.trim()
-        ));
-      }
+      try { await proc.kill("SIGTERM"); } catch {}
+      resolve(truncateResult(
+        `exit=143\nCommand timed out after ${Math.round(timeoutMs / 1000)}s\n${partial}`.trim()
+      ));
     }, timeoutMs);
 
     // Poll for normal completion
@@ -421,80 +392,37 @@ export async function buildTools(
   }
 
   if (enabled.has("bash")) {
-    // CC-aligned: only "sleep" is disallowed for auto-backgrounding
-    const DISALLOWED_AUTO_BACKGROUND = ["sleep"];
-    const isAutoBackgroundable = (cmd: string) => {
-      const base = cmd.trim().split(/\s/)[0] || "";
-      return !DISALLOWED_AUTO_BACKGROUND.includes(base);
-    };
-    const TASKS_DIR = "/tmp/tasks";
-
     tools.bash = tool({
       description:
         "Execute a bash command in the sandbox. Returns exit code + stdout/stderr. " +
-        "For long-running commands (builds, installs, servers), set run_in_background=true " +
-        "to get a task ID immediately. Output is written to a file — use the read tool to check progress.",
+        "Bounded by `timeout` (default 120s, max 600s) — on timeout the process is " +
+        "SIGTERM'd and any partial output is returned. For long-running work, run the " +
+        "command yourself with `nohup ... &` writing to a file, then poll the file with " +
+        "the read tool across turns.",
       inputSchema: z.object({
         command: z.string().describe("The bash command to execute"),
         timeout: z
           .number()
           .optional()
           .describe("Timeout in milliseconds (default 120000, max 600000)"),
-        run_in_background: z
-          .boolean()
-          .optional()
-          .describe("Run in background, returns immediately. Output written to file. Use read tool to check progress."),
       }),
-      execute: safe(async ({ command, timeout, run_in_background }) => {
+      execute: safe(async ({ command, timeout }) => {
         const timeoutMs = Math.min(timeout || DEFAULT_BASH_TIMEOUT, MAX_BASH_TIMEOUT);
 
-        // Strategy 1: agent explicitly backgrounds
-        if (run_in_background) {
-          const taskId = `task_${nanoid(12)}`;
-          const outFile = `${TASKS_DIR}/${taskId}.out`;
-
-          // Use startProcess for proper lifecycle management (no orphan kills)
-          if (sandbox.startProcess) {
-            await sandbox.exec(`mkdir -p ${TASKS_DIR}`, 5000);
-            const proc = await sandbox.startProcess(`bash -c '(${command.replace(/'/g, "'\\''")}) > ${outFile} 2>&1'`);
-            if (proc) {
-              env?.watchBackgroundTask?.(taskId, String(proc.pid), outFile, proc);
-              return [
-                `Background task started.`,
-                `  task_id: ${taskId}`,
-                `  pid: ${proc.pid}`,
-                `  output_path: ${outFile}`,
-                ``,
-                `Next steps:`,
-                `  - Check progress: read(file_path="${outFile}")`,
-                `  - Stop it: bash(command="kill ${proc.pid}")`,
-              ].join("\n");
-            }
-          }
-
-          // Fallback: exec + & (test env without startProcess)
-          const wrapped = `mkdir -p ${TASKS_DIR} && ${command} > ${outFile} 2>&1 &\necho "pid=$!"`;
-          const result = await sandbox.exec(wrapped, 10000);
-          const pidMatch = result.match(/pid=(\d+)/);
-          const pid = pidMatch ? pidMatch[1] : "unknown";
-          env?.watchBackgroundTask?.(taskId, pid, outFile, null);
-          return [
-            `Background task started.`,
-            `  task_id: ${taskId}`,
-            `  pid: ${pid}`,
-            `  output_path: ${outFile}`,
-            ``,
-            `Next steps:`,
-            `  - Check progress: read(file_path="${outFile}")`,
-            `  - Stop it: bash(command="kill ${pid}")`,
-          ].join("\n");
-        }
-
-        // If startProcess available, use it for strategies 2/3
+        // Auto-background-on-timeout was REMOVED 2026-05-13. The
+        // explicit `run_in_background` flag is gone too. Both surfaced
+        // a synthetic <task_notification> as user.message via
+        // pollBackgroundTasks → drainEventQueue, which (a) duplicated
+        // the agent's prior reply when the model treated the
+        // notification as a new user turn, (b) rendered as a confusing
+        // red "You" bubble in console, and (c) returned stale partial
+        // output because the snapshot was taken at backgrounding time
+        // and never refreshed. Hard SIGTERM is the universal contract
+        // now — bounded duration, no notification surface.
         if (sandbox.startProcess) {
           const proc = await sandbox.startProcess(command);
           if (proc) {
-            return await pollWithStrategies(proc, command, timeoutMs, isAutoBackgroundable, sandbox, TASKS_DIR, env);
+            return await pollWithStrategies(proc, command, timeoutMs);
           }
         }
 
