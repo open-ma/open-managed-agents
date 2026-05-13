@@ -59,14 +59,37 @@ async function discoverOAuthMeta(mcpServerUrl: string): Promise<{
 }> {
   const url = new URL(mcpServerUrl);
   const origin = url.origin;
+  // RFC 9728 path-based discovery: a resource at https://api.example.com/mcp
+  // publishes its PRM at https://api.example.com/.well-known/oauth-protected-resource/mcp.
+  // The MCP server URL's path is treated as part of the resource identifier.
+  // Strip a single trailing slash so /mcp/ and /mcp produce the same probe.
+  const path = url.pathname.replace(/\/+$/, "");
 
-  // Step 1: Protected Resource Metadata
-  const prmUrl = `${origin}/.well-known/oauth-protected-resource`;
-  const prmRes = await fetch(prmUrl);
-  if (!prmRes.ok) {
-    throw new Error(`Failed to fetch Protected Resource Metadata from ${prmUrl}: ${prmRes.status}`);
+  // Step 1: Protected Resource Metadata.
+  // Probe order:
+  //   a. path-based  ${origin}/.well-known/oauth-protected-resource${path}
+  //      — RFC 9728 §3.1, what GitHub Copilot MCP and Feishu MCP serve.
+  //   b. origin-only ${origin}/.well-known/oauth-protected-resource
+  //      — fallback for resources whose origin and path coincide.
+  // Both are GET; first 200 wins. 404 on (a) is normal — many resources
+  // only publish (b). Network errors abort the chain.
+  const candidates: string[] = [];
+  if (path) candidates.push(`${origin}/.well-known/oauth-protected-resource${path}`);
+  candidates.push(`${origin}/.well-known/oauth-protected-resource`);
+
+  let resource: ProtectedResourceMeta | null = null;
+  let lastErr = "";
+  for (const candidateUrl of candidates) {
+    const res = await fetch(candidateUrl);
+    if (res.ok) {
+      resource = (await res.json()) as ProtectedResourceMeta;
+      break;
+    }
+    lastErr = `${candidateUrl}: ${res.status}`;
   }
-  const resource = (await prmRes.json()) as ProtectedResourceMeta;
+  if (!resource) {
+    throw new Error(`Failed to fetch Protected Resource Metadata (tried ${candidates.length}): ${lastErr}`);
+  }
 
   if (!resource.authorization_servers?.length) {
     throw new Error("No authorization_servers in Protected Resource Metadata");
