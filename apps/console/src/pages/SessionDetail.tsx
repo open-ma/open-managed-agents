@@ -293,10 +293,27 @@ export function SessionDetail() {
 
   useEffect(() => {
     if (!id) return;
+    // Full per-session state reset before loading the new id. The
+    // canonical bug this fixes: clicking from /sessions/A to /sessions/B
+    // re-runs this effect with a new id, but `events` (and the other
+    // session-scoped state below) was retained from session A. Same
+    // SessionDetail component instance handles both routes — React only
+    // re-runs the effect, doesn't unmount/remount — so without an
+    // explicit reset the user sees session A's content under session B's
+    // URL until the SSE refill catches up. Hard refresh works because
+    // it re-mounts the whole tree from a fresh state. Reported 2026-05-13.
     seenKeys.current.clear();
+    setEvents([]);
     setStreams(new Map());
     setThinkingStreams(new Map());
     setToolInputStreams(new Map());
+    setTitle("");
+    setAgentId("");
+    setSessionMeta({});
+    setStatus("idle");
+    setTrajectory(undefined);
+    setThreads([]);
+    setActiveThreadId("sthr_primary");
 
     // Load session info
     api<{
