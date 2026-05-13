@@ -203,10 +203,14 @@ export function Login() {
           fetchOptions: turnstileFetchOpts,
         });
         if (error) {
-          if (
-            error.message?.toLowerCase().includes("verify") ||
-            error.message?.toLowerCase().includes("verification")
-          ) {
+          // better-auth signals "needs to verify email" via code=EMAIL_NOT_VERIFIED
+          // (message is "Email not verified" — note `verifIED`, which is why
+          // includes("verify")/("verification") both miss it). Match the code
+          // first, fall back to broader substring for non-better-auth backends.
+          const needsVerify =
+            (error as { code?: string }).code === "EMAIL_NOT_VERIFIED" ||
+            error.message?.toLowerCase().includes("verif");
+          if (needsVerify) {
             // Need a fresh token — the previous one was consumed by signIn.email.
             const reSendOpts = await buildTurnstileOpts();
             await authClient.emailOtp.sendVerificationOtp({
