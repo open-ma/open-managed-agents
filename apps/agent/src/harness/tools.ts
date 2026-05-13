@@ -40,6 +40,12 @@ export const ALL_TOOLS = [...DEFAULT_TOOLS, ...OPT_IN_TOOLS];
 const MAX_TOOL_RESULT_CHARS = 50000;
 const DEFAULT_BASH_TIMEOUT = 120000;  // 2 minutes (CC default)
 const MAX_BASH_TIMEOUT = 600000;      // 10 minutes (CC max)
+// Cap MCP client init + tools/list. Without this, a hung upstream
+// (server reachable but never replies to tools/list) blocks buildTools
+// for the whole turn, and finalize-stale eventually clears the turn
+// with `flushed 0 tool_uses` and no error log — opaque to debug.
+// 15s is generous: a healthy server replies in <1s.
+const MCP_SETUP_TIMEOUT_MS = 15_000;
 
 // System prompt for the auxiliary model when summarizing web pages fetched
 // by web_fetch. Designed for the OMA agent loop: the summary lands directly
@@ -1172,16 +1178,33 @@ export async function buildTools(
             sessionId: env.sessionId,
             serverName: server.name,
           });
-          const mcpClient = await experimental_createMCPClient({
-            transport: transport as never,
-            name: "oma-cloud-agent",
+          let timeoutHandle!: ReturnType<typeof setTimeout>;
+          const timeoutPromise = new Promise<never>((_, reject) => {
+            timeoutHandle = setTimeout(
+              () => reject(new Error(`MCP setup timed out after ${MCP_SETUP_TIMEOUT_MS}ms`)),
+              MCP_SETUP_TIMEOUT_MS,
+            );
           });
-          const remoteTools = await mcpClient.tools();
-          for (const [toolName, t] of Object.entries(remoteTools)) {
-            // Prefix matches what the local-runtime ACP path produces
-            // (`mcp__<server>__<tool>`), so transcripts from cloud and
-            // local sessions are visually identical.
-            tools[`mcp__${server.name}__${toolName}`] = t;
+          try {
+            const mcpClient = await Promise.race([
+              experimental_createMCPClient({
+                transport: transport as never,
+                name: "oma-cloud-agent",
+              }),
+              timeoutPromise,
+            ]);
+            const remoteTools = await Promise.race([
+              mcpClient.tools(),
+              timeoutPromise,
+            ]);
+            for (const [toolName, t] of Object.entries(remoteTools)) {
+              // Prefix matches what the local-runtime ACP path produces
+              // (`mcp__<server>__<tool>`), so transcripts from cloud and
+              // local sessions are visually identical.
+              tools[`mcp__${server.name}__${toolName}`] = t;
+            }
+          } finally {
+            clearTimeout(timeoutHandle);
           }
         } catch (err) {
           // Connection / handshake / tools/list failure for one server
