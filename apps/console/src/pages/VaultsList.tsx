@@ -591,7 +591,7 @@ export function VaultsList() {
                   )}
                 </div>
                 {pickerOpen && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-bg border border-border rounded-md shadow-lg z-10 max-h-72 overflow-y-auto">
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-bg border border-border rounded-md shadow-lg z-[100] max-h-72 overflow-y-auto">
                     <div className="p-2 border-b border-border-subtle">
                       <input
                         value={mcpSearch}
@@ -751,6 +751,8 @@ export function VaultsList() {
             )}
           </div>
         )}
+
+        {addTab === "cli" && (
           <div className="space-y-3">
             <div>
               <label className="text-sm text-fg-muted block mb-1">CLI</label>
