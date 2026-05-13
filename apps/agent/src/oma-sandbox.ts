@@ -280,12 +280,50 @@ export class OmaSandbox extends Sandbox {
 
   /**
    * Pre-stop hook: SDK calls this when sleepAfter elapses, default impl
-   * just calls this.stop(). We override to snapshot first, then defer
-   * to default so the container actually shuts down.
+   * just calls this.stop(). We override to:
+   *   1. snapshotWorkspaceNow() — preserve /workspace state to R2
+   *   2. unmount every active bucket — keep the SDK's `activeMounts`
+   *      table consistent with actual container state. Without this,
+   *      the SDK's bookkeeping survives container teardown but the
+   *      fuse mounts inside the container do not; the next warmup's
+   *      `mountBucket(...)` call hits InvalidMountConfigError("already
+   *      in use") because `activeMounts.has(path)` is true while the
+   *      new container has nothing mounted. Calling unmountBucket WHILE
+   *      the container is still alive lets fusermount succeed and the
+   *      SDK properly clears the table. Caught 2026-05-13 — every
+   *      sleepAfter recycle bricked /mnt/session/outputs for the rest
+   *      of the session.
+   *   3. defer to default super impl so the container actually shuts down
    */
   override async onActivityExpired(): Promise<void> {
     await this.snapshotWorkspaceNow();
+    await this.unmountAllBuckets();
     await super.onActivityExpired();
+  }
+
+  /**
+   * Best-effort: unmount every entry in the SDK's `activeMounts` table.
+   * Idempotent + per-path failures swallowed — we run this from
+   * onActivityExpired right before container shutdown, so even if
+   * fusermount on one path fails the container's about to die anyway
+   * and the SDK table will be effectively reset on next warmup (the
+   * container won't have those mounts to conflict with the entries we
+   * couldn't clear). Logs failures so a recurring leak shows up in
+   * observability.
+   */
+  private async unmountAllBuckets(): Promise<void> {
+    const self = this as unknown as { activeMounts?: Map<string, unknown> };
+    const paths = Array.from(self.activeMounts?.keys() ?? []);
+    if (!paths.length) return;
+    await Promise.all(
+      paths.map((p) =>
+        this.unmountBucket(p).catch((err: Error) =>
+          console.warn(
+            `[oma-sandbox] pre-stop unmount ${p} failed: ${err?.message ?? err}`,
+          ),
+        ),
+      ),
+    );
   }
 
   // Lightweight visibility: log every container exit so we can see why

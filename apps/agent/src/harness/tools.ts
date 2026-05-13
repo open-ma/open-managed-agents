@@ -111,14 +111,41 @@ async function pollWithStrategies(
       while (!settled) {
         try {
           const status = await proc.getStatus();
-          if (status === "completed" || status === "error" || status === "killed") {
+          // SDK ProcessStatus union (sandbox-Bb3n0SeC.d.ts:655):
+          //   'starting' | 'running' | 'completed' | 'failed' | 'killed' | 'error'
+          // All four non-{starting, running} states are terminal — proc.getLogs()
+          // has the final output and exitCode is set.
+          //
+          // Pre-fix this only checked completed/error/killed; 'failed' (any
+          // non-zero exit, e.g. `git commit` with no identity → exit 128,
+          // npm install missing pkg → exit 1) was NOT in the set, so the
+          // poll loop kept looping until the bash timeout fired. Result:
+          // every error case returned `exit=143 / Command timed out after
+          // 120s` after a 2-minute hang, even when the underlying command
+          // had exited cleanly within milliseconds. Caught 2026-05-13
+          // testing `git commit` (Author identity unknown).
+          if (
+            status === "completed"
+            || status === "failed"
+            || status === "killed"
+            || status === "error"
+          ) {
             if (settled) return;
             settled = true;
             clearTimeout(timer);
             const logs = await proc.getLogs();
             let out = logs.stdout || "";
             if (logs.stderr) out += (out ? "\n" : "") + "stderr: " + logs.stderr;
-            const exitCode = status === "error" ? 1 : status === "killed" ? 137 : 0;
+            // Prefer SDK-reported exitCode (carries the real signal — 1
+            // for npm error, 128 for git, etc.). Fall back to status-based
+            // shorthand only when the SDK didn't surface a code.
+            const sdkExit = (proc as { exitCode?: number }).exitCode;
+            const exitCode =
+              typeof sdkExit === "number"
+                ? sdkExit
+                : status === "killed" ? 137
+                : (status === "error" || status === "failed") ? 1
+                : 0;
             resolve(truncateResult(`exit=${exitCode}\n${out}`));
             return;
           }
