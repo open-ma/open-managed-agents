@@ -48,6 +48,18 @@ export function VaultsList() {
   const [mcpSearch, setMcpSearch] = useState("");
   const [connecting, setConnecting] = useState<string | null>(null);
 
+  // Custom MCP server form — opened from the "Custom Server" row at the
+  // bottom of the registry list. Lets the user attach a server that's not
+  // in Anthropic's registry: name, OAuth or static-bearer, URL, optional
+  // token (bearer only).
+  const [customMode, setCustomMode] = useState(false);
+  const [customForm, setCustomForm] = useState({
+    name: "",
+    type: "oauth" as "oauth" | "bearer",
+    url: "",
+    token: "",
+  });
+
   // Add-CLI form (cap_cli credentials).
   const [showAddCli, setShowAddCli] = useState(false);
   const [cliForm, setCliForm] = useState({
@@ -112,6 +124,39 @@ export function VaultsList() {
     setConnecting(entry.name);
     const authUrl = `/v1/oauth/authorize?mcp_server_url=${encodeURIComponent(entry.url)}&vault_id=${encodeURIComponent(selectedVault.id)}&redirect_uri=${encodeURIComponent(window.location.href)}`;
     window.open(authUrl, "oauth", "width=600,height=700,popup=yes");
+  };
+
+  const createBearerCred = async () => {
+    if (!selectedVault) return;
+    setConnecting("custom");
+    try {
+      await api(`/v1/vaults/${selectedVault.id}/credentials`, {
+        method: "POST",
+        body: JSON.stringify({
+          display_name: customForm.name || "Custom MCP",
+          auth: {
+            type: "static_bearer",
+            token: customForm.token,
+            mcp_server_url: customForm.url,
+          },
+        }),
+      });
+      setShowAddCred(false);
+      setCustomMode(false);
+      setCustomForm({ name: "", type: "oauth", url: "", token: "" });
+      openVault(selectedVault);
+    } finally {
+      setConnecting(null);
+    }
+  };
+
+  const submitCustom = () => {
+    if (!customForm.url) return;
+    if (customForm.type === "oauth") {
+      connectMcp({ name: customForm.name || customForm.url, url: customForm.url });
+    } else {
+      void createBearerCred();
+    }
   };
 
   const createCapCliCred = async () => {
@@ -359,17 +404,83 @@ export function VaultsList() {
       {/* Connect MCP Server — Registry Search (Anthropic-style) */}
       <Modal
         open={showAddCred && !!selectedVault}
-        onClose={() => { setShowAddCred(false); setMcpSearch(""); }}
-        title="Connect a service"
+        onClose={() => {
+          setShowAddCred(false);
+          setMcpSearch("");
+          setCustomMode(false);
+          setCustomForm({ name: "", type: "oauth", url: "", token: "" });
+        }}
+        title={customMode ? "Add credential" : "Connect a service"}
         maxWidth="max-w-lg"
-        footer={isCustomUrl ? <Button onClick={() => connectMcp({ name: mcpSearch, url: mcpSearch })} disabled={!!connecting}>Connect</Button> : undefined}
+        footer={
+          customMode ? (
+            <Button
+              onClick={submitCustom}
+              disabled={!customForm.url || (customForm.type === "bearer" && !customForm.token) || !!connecting}
+            >
+              Connect
+            </Button>
+          ) : isCustomUrl ? (
+            <Button onClick={() => connectMcp({ name: mcpSearch, url: mcpSearch })} disabled={!!connecting}>Connect</Button>
+          ) : undefined
+        }
       >
+        {customMode ? (
+          <div className="space-y-4">
+            <div className="text-sm text-fg-muted">Authorize an MCP server for delegated user authentication.</div>
+            <div>
+              <label className="text-sm font-medium text-fg">Name <span className="text-xs text-fg-muted ml-1">Optional</span></label>
+              <input
+                value={customForm.name}
+                onChange={(e) => setCustomForm({ ...customForm, name: e.target.value })}
+                placeholder="Example MCP"
+                className={inputCls}
+              />
+            </div>
+            <div>
+              <label className="text-sm font-medium text-fg">Type</label>
+              <div className="inline-flex rounded-md border border-border-subtle p-0.5 mt-1">
+                {(["oauth", "bearer"] as const).map((t) => (
+                  <button
+                    key={t}
+                    type="button"
+                    onClick={() => setCustomForm({ ...customForm, type: t })}
+                    className={`px-3 py-1 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg" : "text-fg-muted"}`}
+                  >
+                    {t === "oauth" ? "OAuth" : "Bearer token"}
+                  </button>
+                ))}
+              </div>
+            </div>
+            <div>
+              <label className="text-sm font-medium text-fg">MCP Server</label>
+              <input
+                value={customForm.url}
+                onChange={(e) => setCustomForm({ ...customForm, url: e.target.value })}
+                placeholder="https://mcp.example.com"
+                className={inputCls}
+              />
+            </div>
+            {customForm.type === "bearer" && (
+              <div>
+                <label className="text-sm font-medium text-fg">Bearer token</label>
+                <input
+                  value={customForm.token}
+                  onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })}
+                  type="password"
+                  placeholder="••••••••"
+                  className={inputCls}
+                />
+              </div>
+            )}
+          </div>
+        ) : (
         <div className="space-y-3">
           <input
             value={mcpSearch}
             onChange={(e) => setMcpSearch(e.target.value)}
             className={inputCls}
-            placeholder="Search services or enter a custom URL"
+            placeholder="Search Anthropic's MCP registry or enter a custom URL"
             autoFocus
           />
 
@@ -403,15 +514,40 @@ export function VaultsList() {
               );
             })}
             {filteredRegistry.length === 0 && !isCustomUrl && (
-              <div className="text-center py-6 text-fg-subtle text-sm">No matches. Enter a full URL to connect a custom MCP server.</div>
+              <div className="text-center py-6 text-fg-subtle text-sm">No matches. Use Custom Server below.</div>
             )}
             {isCustomUrl && (
               <div className="px-3 py-2.5 text-sm text-fg-muted">
                 Custom URL: <span className="font-mono text-fg">{mcpSearch}</span>
               </div>
             )}
+
+            {/* Always-visible Custom Server entry — Anthropic-style. Opens
+                the Add credential form (Name + Type + URL + optional token). */}
+            <div className="border-t border-border-subtle mt-2 pt-2">
+              <button
+                onClick={() => {
+                  setCustomMode(true);
+                  setCustomForm({ name: "", type: "oauth", url: mcpSearch.startsWith("http") ? mcpSearch : "", token: "" });
+                }}
+                className="w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left hover:bg-bg-surface cursor-pointer"
+              >
+                <div className="w-5 h-5 rounded bg-bg-surface shrink-0 flex items-center justify-center text-fg-muted">
+                  <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="12" cy="12" r="10" />
+                    <line x1="2" y1="12" x2="22" y2="12" />
+                    <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" />
+                  </svg>
+                </div>
+                <div className="min-w-0 flex-1">
+                  <div className="text-sm font-medium text-fg">Custom Server</div>
+                  <div className="text-xs text-fg-muted">Connect a server that's not in the registry</div>
+                </div>
+              </button>
+            </div>
           </div>
         </div>
+        )}
       </Modal>
 
       {/* Add CLI credential (cap_cli) */}
