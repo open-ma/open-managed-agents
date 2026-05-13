@@ -177,6 +177,38 @@ app.post("/poll", async (c) => {
       // Write cap_cli credential into the vault. This is the only place
       // the access_token + refresh_token actually land in OMA storage.
       const auth = capCliAuthFromToken(session.cli_id, result.token);
+      // Archive any existing non-archived cap_cli credentials in the same
+      // vault that share the same cli_id. Without this, repeated re-auth
+      // (user re-running the OAuth flow when a token went stale)
+      // accumulates parallel rows; the proxy's resolver returned the
+      // OLDEST match (created_at ASC) and silently kept injecting the
+      // dead token. One non-archived row per (vault, cli_id) means the
+      // resolver always sees the just-written one.
+      try {
+        const existing = await c.var.services.credentials.list({
+          tenantId,
+          vaultId: session.vault_id,
+        });
+        for (const ec of existing) {
+          if (ec.archived_at) continue;
+          const ea = (ec as unknown as { auth?: { type?: string; cli_id?: string } }).auth;
+          if (ea?.type !== "cap_cli") continue;
+          if (ea.cli_id !== session.cli_id) continue;
+          await c.var.services.credentials.archive({
+            tenantId,
+            vaultId: session.vault_id,
+            credentialId: (ec as { id: string }).id,
+          });
+        }
+      } catch (err) {
+        // Best-effort: don't fail the OAuth completion if the cleanup
+        // sweep errors. Worst case the resolver fix below still picks
+        // the newest non-archived match, so behavior stays correct.
+        logWarn(
+          { err: (err as Error).message, vault_id: session.vault_id, cli_id: session.cli_id },
+          "cap-cli-oauth: archive prior cap_cli sweep failed; continuing",
+        );
+      }
       const cred = await c.var.services.credentials.create({
         tenantId,
         vaultId: session.vault_id,
