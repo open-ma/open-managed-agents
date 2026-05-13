@@ -692,6 +692,49 @@ export function SessionDetail() {
                 const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
                 return tid === activeThreadId;
               });
+              // Re-sort by `processed_at` so the visual timeline reflects
+              // *agent processing order*, not *append order*. Background:
+              //   1. Server returns events ORDER BY seq (= append order).
+              //   2. If the user types while the agent is still streaming
+              //      a previous turn, the user.message gets appended at
+              //      seq=N during the prior turn → seq-sorted timeline
+              //      shows user.message INSIDE the prior turn's output,
+              //      visually "before" agent text it actually triggered.
+              //   3. drainEventQueue stamps processed_at when it picks
+              //      the user.message up (= when the new turn starts), so
+              //      processed_at order = logical chat order.
+              // Source of truth precedence:
+              //   • `processed_at_ms` (number) — injected by the cf-do
+              //     event-log adapter from the DB column on REST loads;
+              //     correct even for sessions created before the
+              //     stamp-JSON fix landed (DB column was always right).
+              //   • `processed_at`  (ISO string) — present on SSE-arrived
+              //     events (no adapter on the broadcast path).
+              //   • Both null → sort to end. This is the "still pending"
+              //     case: a freshly-sent user.message in live view sits
+              //     at the bottom until drain stamps it (no re-broadcast
+              //     today, so it stays at the bottom until next reload —
+              //     OK because "at the bottom" reads as "just sent").
+              // Tiebreaker: seq. Two events with the same processed_at
+              // (drain bursts, or sub-ms agent chunks) keep append order.
+              const sortKey = (e: typeof filtered[number]): number => {
+                const ms = (e as { processed_at_ms?: number | null }).processed_at_ms;
+                if (typeof ms === "number") return ms;
+                const iso = (e as { processed_at?: string | null }).processed_at;
+                if (typeof iso === "string") {
+                  const t = new Date(iso).getTime();
+                  if (Number.isFinite(t)) return t;
+                }
+                return Number.POSITIVE_INFINITY;
+              };
+              filtered.sort((a, b) => {
+                const ka = sortKey(a);
+                const kb = sortKey(b);
+                if (ka !== kb) return ka - kb;
+                const sa = (a as { seq?: number }).seq ?? 0;
+                const sb = (b as { seq?: number }).seq ?? 0;
+                return sa - sb;
+              });
               // For each user.* event index, find whether any later
               // index in the same filtered array is a non-user event.
               // O(n) — single right-to-left pass tracking "have we
