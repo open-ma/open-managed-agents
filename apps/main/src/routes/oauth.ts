@@ -95,14 +95,59 @@ async function discoverOAuthMeta(mcpServerUrl: string): Promise<{
     throw new Error("No authorization_servers in Protected Resource Metadata");
   }
 
-  // Step 2: Auth Server Metadata
+  // Step 2: Auth Server Metadata.
+  // RFC 8414 §3: the well-known segment is inserted between origin and
+  // path of the issuer URL — NOT appended to the issuer URL. So issuer
+  // `https://accounts.feishu.cn/mcp` → ASM at
+  // `https://accounts.feishu.cn/.well-known/oauth-authorization-server/mcp`.
+  // Probe order:
+  //   a. RFC 8414 path-based ${origin}/.well-known/oauth-authorization-server${path}
+  //   b. OpenID Connect path-based ${origin}/.well-known/openid-configuration${path}
+  //      (some providers serve OIDC discovery instead of OAuth ASM)
+  //   c. RFC 8414 origin-only fallback
+  //   d. OIDC origin-only fallback
+  //   e. Naive issuer-suffix (legacy ${issuer}/.well-known/...) — what older
+  //      MCP clients used; some servers still serve this for backward compat.
+  // Plus a hard-coded fallback for known providers that don't publish any
+  // ASM at all (GitHub).
   const authServerUrl = resource.authorization_servers[0];
-  const asmUrl = `${authServerUrl}/.well-known/oauth-authorization-server`;
-  const asmRes = await fetch(asmUrl);
-  if (!asmRes.ok) {
-    throw new Error(`Failed to fetch Auth Server Metadata from ${asmUrl}: ${asmRes.status}`);
+  const asmIssuer = new URL(authServerUrl);
+  const asmOrigin = asmIssuer.origin;
+  const asmPath = asmIssuer.pathname.replace(/\/+$/, "");
+  const asmCandidates: string[] = [];
+  if (asmPath) {
+    asmCandidates.push(`${asmOrigin}/.well-known/oauth-authorization-server${asmPath}`);
+    asmCandidates.push(`${asmOrigin}/.well-known/openid-configuration${asmPath}`);
   }
-  const authServer = (await asmRes.json()) as AuthServerMeta;
+  asmCandidates.push(`${asmOrigin}/.well-known/oauth-authorization-server`);
+  asmCandidates.push(`${asmOrigin}/.well-known/openid-configuration`);
+  asmCandidates.push(`${authServerUrl}/.well-known/oauth-authorization-server`);
+
+  let authServer: AuthServerMeta | null = null;
+  let asmLastErr = "";
+  for (const candidateUrl of asmCandidates) {
+    const res = await fetch(candidateUrl);
+    if (res.ok) {
+      authServer = (await res.json()) as AuthServerMeta;
+      break;
+    }
+    asmLastErr = `${candidateUrl}: ${res.status}`;
+  }
+
+  // Hard-coded fallback for known providers that don't publish an ASM.
+  // GitHub OAuth (issuer `https://github.com/login/oauth`) returns 404
+  // on every well-known probe — but the endpoints are stable + public.
+  if (!authServer && /^https:\/\/github\.com\/login\/oauth\/?$/.test(authServerUrl)) {
+    authServer = {
+      issuer: "https://github.com/login/oauth",
+      authorization_endpoint: "https://github.com/login/oauth/authorize",
+      token_endpoint: "https://github.com/login/oauth/access_token",
+    };
+  }
+
+  if (!authServer) {
+    throw new Error(`Failed to fetch Auth Server Metadata (tried ${asmCandidates.length}): ${asmLastErr}`);
+  }
 
   if (!authServer.authorization_endpoint || !authServer.token_endpoint) {
     throw new Error("Auth Server Metadata missing authorization_endpoint or token_endpoint");
