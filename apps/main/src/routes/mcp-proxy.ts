@@ -63,11 +63,11 @@ export interface ProxyTarget {
   upstreamUrl: string;
   /** Bearer token to inject on the upstream request. */
   upstreamToken: string;
-  /** Set when the matched credential is `mcp_oauth` and has the bits
-   *  needed to refresh on 401 (refresh_token + token_endpoint). Used by
-   *  `forwardWithRefresh` to retry once with a fresh token if the upstream
-   *  rejects the bearer. Stays internal to main — never leaves through
-   *  any RPC return value or HTTP response body. */
+  /** Set when the matched credential has the bits needed to refresh on
+   *  401 (refresh_token + token_endpoint). Used by `forwardWithRefresh`
+   *  to retry once with a fresh token if the upstream rejects the
+   *  bearer. Stays internal to main — never leaves through any RPC
+   *  return value or HTTP response body. */
   refresh?: {
     refreshToken: string;
     tokenEndpoint: string;
@@ -75,6 +75,11 @@ export interface ProxyTarget {
     clientSecret?: string;
     credentialId: string;
     vaultId: string;
+    /** Where in the credential's `auth` blob the rotated access token
+     *  is read from + written back to. mcp_oauth uses `access_token`;
+     *  cap_cli uses `token`. Defaults to `access_token` to keep
+     *  pre-cap callers working unchanged. */
+    tokenField?: "access_token" | "token";
   };
 }
 
@@ -227,7 +232,12 @@ export async function resolveOutboundCredentialByHost(
     for (const g of grouped) {
       for (const c of g.credentials) {
         const auth = (c as unknown as CredentialConfig).auth as
-          | { type?: string; cli_id?: string; token?: string }
+          | {
+              type?: string;
+              cli_id?: string;
+              token?: string;
+              refresh_token?: string;
+            }
           | undefined;
         if (auth?.type !== "cap_cli") continue;
         if (auth.cli_id !== capSpec.cli_id) continue;
@@ -237,7 +247,29 @@ export async function resolveOutboundCredentialByHost(
         // emit `Authorization: Bearer <token>` which matches existing
         // forwardWithRefresh behaviour. metadata_ep / exec_helper modes
         // need the full cap.handleHttp pipeline — wired in PR 2.
-        return { upstreamUrl: `https://${hostname}/`, upstreamToken: auth.token };
+        const target: ProxyTarget = {
+          upstreamUrl: `https://${hostname}/`,
+          upstreamToken: auth.token,
+        };
+        // Wire OAuth refresh for cap_cli when the spec declares a
+        // device_flow (so we know the token_endpoint + client_id) AND
+        // the credential carries a refresh_token. Without this, an
+        // expired cap_cli token returns 401 every turn and the user
+        // has to manually re-run `cap login` — same problem
+        // mcp_oauth had pre-fix. Persistence writes back to
+        // `auth.token` (cap_cli's field name), not `auth.access_token`.
+        const deviceFlow = capSpec.oauth?.device_flow;
+        if (auth.refresh_token && deviceFlow?.token_url) {
+          target.refresh = {
+            refreshToken: auth.refresh_token,
+            tokenEndpoint: deviceFlow.token_url,
+            clientId: deviceFlow.client_id,
+            credentialId: (c as { id: string }).id,
+            vaultId: g.vault_id,
+            tokenField: "token",
+          };
+        }
+        return target;
       }
     }
   }
@@ -455,6 +487,7 @@ async function tryRefreshOauth(
   refresh: NonNullable<ProxyTarget["refresh"]>,
   staleAccessToken: string,
 ): Promise<string | null> {
+  const tokenField = refresh.tokenField ?? "access_token";
   // Double-checked locking against concurrent refresh: if N parallel
   // calls all 401 at the same instant (typical when access_token TTL
   // hits boundary mid-multi-tool-call), they'll all enter this path.
@@ -471,8 +504,9 @@ async function tryRefreshOauth(
     const fresh = await services.credentials
       .get({ tenantId, vaultId: refresh.vaultId, credentialId: refresh.credentialId })
       .catch(() => null);
-    const liveAccessToken = (fresh as { auth?: { access_token?: string } } | null)?.auth?.access_token;
-    if (liveAccessToken && liveAccessToken !== staleAccessToken) {
+    const liveAuth = (fresh as { auth?: Record<string, unknown> } | null)?.auth;
+    const liveAccessToken = liveAuth?.[tokenField];
+    if (typeof liveAccessToken === "string" && liveAccessToken !== staleAccessToken) {
       // Someone (another in-flight call, or a manual refresh via
       // /v1/oauth/refresh) already rotated. Use the fresh token; don't
       // burn another token_endpoint roundtrip.
@@ -511,19 +545,21 @@ async function tryRefreshOauth(
 
   // Best-effort persist back to D1. If the write fails we still return
   // the new access_token — the current request gets through, future
-  // sessions just may take one extra refresh hop.
+  // sessions just may take one extra refresh hop. Field name is
+  // credential-type-specific (cap_cli stores under `token`, mcp_oauth
+  // under `access_token`) — `tokenField` carries which one.
   try {
     await services.credentials.refreshAuth({
       tenantId,
       vaultId: refresh.vaultId,
       credentialId: refresh.credentialId,
       auth: {
-        access_token: tokens.access_token,
+        [tokenField]: tokens.access_token,
         refresh_token: tokens.refresh_token ?? refresh.refreshToken,
         expires_at: tokens.expires_in
           ? new Date(Date.now() + tokens.expires_in * 1000).toISOString()
           : undefined,
-      },
+      } as Partial<import("@open-managed-agents/shared").CredentialAuth>,
     });
   } catch {
     /* best-effort */
