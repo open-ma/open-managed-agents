@@ -70,9 +70,8 @@ export interface MemoryStoreServiceDeps {
  *     a new version first (or delete the memory) before redacting prior history.
  *
  * Out of scope (vs. the previous implementation):
- *   - No semantic search / embeddings / Vectorize. Anthropic's spec does not
- *     ship one and the prior gold-plated layer is removed in this rewrite.
- *   - No reconciler. Vector sync is no longer a concept.
+ *   - No semantic search / embeddings. Anthropic's spec does not ship one
+ *     and the prior gold-plated layer is removed in this rewrite.
  */
 export class MemoryStoreService {
   private readonly storeRepo: MemoryStoreRepo;

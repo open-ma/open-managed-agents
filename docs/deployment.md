@@ -61,7 +61,7 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 | SQL store | `better-sqlite3` (default, `./data/oma.db`) OR `postgres.js` (set `DATABASE_URL=postgres://...`) |
 | KV | not used at the API layer — agents/env config lives in the SQL `agents`/`environments` tables |
 | Blob store | `LocalFsBlobStore` (`./data/memory-blobs/<storeId>/<path>`); operator can swap in an S3 adapter when scaling |
-| Event log | `SqlEventLog` (per-session events in shared `session_events` table) + `InProcessEventStreamHub` for SSE fan-out |
+| Event log | `SqlEventLog` (per-session events in shared `session_events` table) + `InProcessEventStreamHub` (sqlite mode) or `PgEventStreamHub` (pg mode, LISTEN/NOTIFY-backed) for SSE fan-out |
 | Sandbox | `SANDBOX_PROVIDER=subprocess` (default, no isolation), `litebox` (Firecracker μVM), `daytona`, `e2b` |
 | Auth | `better-auth` on a separate `./data/auth.db` (sqlite). Email + password by default; Google OAuth optional. `AUTH_DISABLED=1` bypasses for single-user demos |
 | Vault credential injection | `apps/oma-vault` sidecar — mockttp HTTPS MITM proxy with self-signed CA. Reads vault credentials from the same sqlite db |
@@ -114,10 +114,13 @@ ANTHROPIC_API_KEY=sk-... BETTER_AUTH_SECRET=$(openssl rand -hex 32) \
 
 ### Hard limits
 
-- Single process — no horizontal scale. For multi-instance, swap the
-  `InProcessEventStreamHub` for a fanout impl (e.g. pg LISTEN/NOTIFY) and
-  add `SELECT ... FOR UPDATE SKIP LOCKED` ownership on session rows.
-- Sqlite is single-writer cross-process — multi-instance forces postgres.
+- SQLite mode: single process, single writer. To horizontally scale,
+  switch to PG mode (`DATABASE_URL=postgres://...`).
+- PG mode: `oma-server` itself is replica-safe (PG LISTEN/NOTIFY hub
+  fans events out across replicas; `upsertFromEvent` is idempotent on
+  sha256 etag). Caveats: `MEMORY_BLOB_DIR` must be on shared storage
+  (NFS/EFS/shared docker volume); `auth.db` and `oma-vault` are still
+  single-process (deferred). See `docs/self-host.md#running-multiple-oma-server-replicas-pg-mode-only`.
 - `LocalSubprocessSandbox` has zero isolation — `rm -rf /` from a
   prompt-injected agent hits the host. Switch to `litebox` or `daytona`
   for untrusted code.
@@ -221,7 +224,6 @@ each with its own bindings, deployed via `wrangler deploy`.
                          │  • DO: SessionDO + Sandbox   │
                          │  • Container per session     │
                          │  • Browser binding           │
-                         │  • Vectorize index           │
                          │  • Cross-script DO →         │
                          │     RuntimeRoom (in main)    │
                          │  • Service binding →         │
@@ -246,7 +248,6 @@ each with its own bindings, deployed via `wrangler deploy`.
 | Queue | `managed-agents-memory-events` + DLQ; queue consumer in main worker reflects R2 events to D1 |
 | Console UI | static assets served by main worker's `ASSETS` binding (`apps/console/dist`); SPA fallback for client-side routing |
 | Browser tool | `@cloudflare/playwright` against the agent worker's `BROWSER` binding |
-| Vector search | `VECTORIZE` index `memory-search` |
 | Observability | Analytics Engine — `oma_events` dataset; `pino` JSON logs to `wrangler tail` |
 | Rate limiting | CF Workers Rate Limiting binding (`ratelimits`) — OTP / auth abuse |
 
@@ -290,7 +291,7 @@ pnpm deploy
 | KV / cache | none — SQL covers it | wrangler KV sim | CONFIG_KV |
 | Blob | LocalFsBlobStore (`./data`) | R2 local sim | R2 buckets |
 | Event log | SqlEventLog (shared SQL) | DO sqlite | DO sqlite |
-| Stream broadcast | InProcessEventStreamHub (SSE) | DO WS hibernation → SSE bridge | DO WS hibernation → SSE bridge |
+| Stream broadcast | InProcessEventStreamHub (sqlite) or PgEventStreamHub (pg, LISTEN/NOTIFY) for SSE | DO WS hibernation → SSE bridge | DO WS hibernation → SSE bridge |
 | Sandbox | subprocess / litebox / daytona / e2b | Container DO via Docker | Container DO on CF Containers |
 | Auth | better-auth + sqlite (own file) | better-auth + D1 local sim | better-auth + D1 + Email Workers + OAuth |
 | Vault inject | oma-vault sidecar (mockttp MITM) | MAIN_MCP.outboundForward RPC | MAIN_MCP.outboundForward RPC |
@@ -298,15 +299,15 @@ pnpm deploy
 | Cron | TODO (node-cron) | wrangler dev `--test-scheduled` | CF cron `* * * * *` |
 | Queue | none (chokidar replaces it) | wrangler queue sim | CF Queues + DLQ |
 | Browser tool | not supported | wrangler dev BROWSER sim (limited) | @cloudflare/playwright |
-| Vector search | not supported | not supported | Vectorize |
-| Email | TODO (Resend / SES) | wrangler dev SEND_EMAIL sim | CF Email Workers |
+| Email | nodemailer (set SMTP_HOST/PORT/USER/PASS) — null sender mounts no email-bearing better-auth flows | wrangler dev SEND_EMAIL sim | CF Email Workers |
 | Console | embedded in main-node image, served by `serveStatic` on `:8787` (or `vite dev` proxy mode for live-reload) | served by main worker ASSETS | served by main worker ASSETS |
-| Rate limit | TODO (rate-limiter-flexible) | wrangler dev ratelimits sim | CF Rate Limiting binding |
+| Rate limit | in-process token bucket via `@open-managed-agents/rate-limit/adapters/memory` (5-bucket bundle) | wrangler dev ratelimits sim | CF Rate Limiting binding |
+| HTTP routes (CRUD) | `@open-managed-agents/http-routes` mount factories | (CF mounts existing per-app files; package mount migration is staged) | (same) |
 | Observability | stdout (pino) | wrangler tail stdout | Analytics Engine + wrangler tail |
 | Start cmd | `docker compose up` | `pnpm dev` | n/a (run-as-deployed) |
 | Deploy cmd | `docker compose up -d` | n/a (dev only) | `pnpm deploy` |
 | Multi-tenant | better-auth + tenant/membership tables | better-auth + tenant/membership tables | better-auth + tenant/membership tables + shard router |
-| Multi-instance | swap hub for fanout (PG NOTIFY/Redis) | n/a | scales by default |
+| Multi-instance | sqlite: no — single writer. pg: yes — LISTEN/NOTIFY fanout (shared `MEMORY_BLOB_DIR` required; auth.db + oma-vault still 1-proc) | n/a | scales by default |
 
 ## Picking a topology
 

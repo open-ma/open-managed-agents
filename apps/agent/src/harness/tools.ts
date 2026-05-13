@@ -7,9 +7,10 @@ import type { AgentConfig, ToolsetConfig, CustomToolConfig, SessionEvent } from 
 import type { ToMarkdownProvider } from "@open-managed-agents/markdown";
 import type { SandboxExecutor, ProcessHandle } from "./interface";
 import { nanoid } from "nanoid";
-// Browser tools are lazy-imported below — they pull in @cloudflare/playwright
-// which is workerd-only. Type-only import is fine (erased at runtime).
-import type { BrowserSession } from "./browser-tools";
+// Browser tools depend on the runtime-agnostic BrowserHarness interface.
+// Concrete adapters (CF / Node / CDP / Disabled) live in the package and
+// dynamic-import their workerd / Node peers only at first launch().
+import type { BrowserHarness, BrowserBillingHook } from "@open-managed-agents/browser-harness";
 
 // Source of truth for which tool names are part of the agent_toolset_20260401
 // built-in suite. Used by buildTools() below to decide which tool entries to
@@ -371,7 +372,13 @@ export async function buildTools(
     tenantId?: string;
     sessionId?: string;
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;
-    browser?: BrowserSession;
+    /** Browser tool factory. CF wires the @cloudflare/playwright adapter,
+     *  Node self-host wires the playwright-core adapter (or CDP, or the
+     *  throw-on-call Disabled adapter). */
+    browser?: BrowserHarness;
+    /** Optional billing hook fired once on browser_close — CF sets this
+     *  to attribute browser_active_seconds to the tenant/session. */
+    browserBillingHook?: BrowserBillingHook | null;
     /** Pre-resolved auxiliary model — when present, web_fetch summarizes
      *  large pages and offloads raw markdown to /workspace/.web/.
      *  Falsy (default) = no aux work; web_fetch returns raw markdown. */
@@ -408,14 +415,14 @@ export async function buildTools(
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const tools: Record<string, any> = {};
 
-  // Browser tools (Cloudflare Browser Rendering binding). Requires both an
-  // active session passed in AND the agent to opt in to "browser" in its toolset.
-  // Lazy-imported because @cloudflare/playwright is workerd-only and pulling
-  // it at module-load time would block Node consumers from importing
-  // this file at all.
+  // Browser tools. Wire the BrowserHarness from the platform bundle —
+  // CF passes the @cloudflare/playwright adapter, Node passes
+  // playwright-core / CDP / Disabled. The agent must opt in to "browser"
+  // in its toolset; the Disabled adapter throws at first launch() with
+  // an LLM-readable install-instructions message.
   if (env?.browser && enabled.has("browser")) {
-    const { buildBrowserTools } = await import("./browser-tools");
-    Object.assign(tools, buildBrowserTools(env.browser));
+    const { buildBrowserTools } = await import("@open-managed-agents/browser-harness");
+    Object.assign(tools, buildBrowserTools(env.browser, env.browserBillingHook ?? null));
   }
 
   if (enabled.has("bash")) {

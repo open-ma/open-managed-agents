@@ -21,3 +21,16 @@ export {
   type HarnessRunFn,
 } from "./machine";
 
+export type {
+  SessionRouter,
+  SessionInitParams,
+  SessionEventsQuery,
+  SessionEventsPage,
+  SessionFullStatus,
+  SessionExecResult,
+  SessionAppendResult,
+  SessionStreamFrame,
+  SessionStreamHandle,
+  FileIdResolver,
+} from "./router";
+

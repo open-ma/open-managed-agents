@@ -32,8 +32,9 @@ backends](#migrating-between-backends) below).
 **Same Docker image either way** (`openma/main-node:dev` built from
 `apps/main-node/Dockerfile`) — `DATABASE_URL` env at runtime decides.
 SQLite needs only `DATABASE_PATH`; Postgres needs `DATABASE_URL=
-postgres://…`. better-auth's tiny `auth.db` stays SQLite on both
-backends — see "auth still on SQLite" note in the Postgres section.
+postgres://…`. In Postgres mode better-auth's tables live in the same
+PG database (no separate `auth.db` file); in SQLite mode they live in
+`./data/auth.db`.
 
 ## Quick start (Docker, SQLite)
 
@@ -125,11 +126,83 @@ What changes vs the SQLite stack:
   named volume `oma-pgdata`. No host port published; only `oma-server`
   reaches it on the bridge network. Add `ports: ["5432:5432"]` if you
   want `psql` access from the host.
-- **better-auth still sits on its own SQLite file** at `/app/data/auth.db`
-  — the kysely-adapter wants a node-postgres `Pool`, not the
-  `postgres.js` driver this codebase uses for the main store. It's a
-  small file (<1k rows) and the `./data` bind-mount keeps it co-located
-  with backups. Plan ~50KB / 1000 users.
+- **better-auth runs on the same Postgres database.** No separate
+  `auth.db` file; the `user` / `session` / `account` / `verification`
+  tables sit alongside `agents`, `sessions`, `tenant`, etc. and are
+  bootstrapped at first start (idempotent `CREATE TABLE IF NOT EXISTS`
+  with PG-native `boolean` / `timestamptz` types). Internally we open
+  a small `pg.Pool` (max 10) for better-auth's kysely PostgresDialect
+  — the main store stays on `postgres.js`. `AUTH_DATABASE_PATH` is
+  ignored in PG mode.
+
+### Running multiple oma-server replicas (PG mode only)
+
+PG mode supports >1 `oma-server` process behind a load balancer. SSE
+fanout works across replicas: every `append` issues `NOTIFY
+oma_session_events '{sid,seq}'` on a shared PG channel, and every
+replica `LISTEN`s on the same channel. When replica B receives a NOTIFY
+for a session it has a local SSE writer for, it fetches `seq >
+lastForwarded` from the SQL log and pushes the new events to its
+writer. Local round-trip latency is typically <100 ms; we measure ~2 ms
+on a same-host PG and ~80 ms via curl through two `pnpm start`
+processes.
+
+**`/auth/*` is also replica-safe** in PG mode: better-auth's tables
+live in the shared Postgres, so any replica can serve any auth
+request. No sticky sessions required.
+
+Hard requirements before you scale out:
+
+1. **Memory blob storage MUST be shared across replicas.** Two paths
+   work:
+   - **Local NFS / EFS / shared docker volume + chokidar** — bind the
+     same `MEMORY_BLOB_DIR` into every replica. Each replica runs its
+     own chokidar watcher; concurrent watchers firing for the same
+     write are no-ops past the first because `upsertFromEvent` is
+     idempotent on `(store_id, path)` + sha256 etag.
+   - **S3 / S3-compatible bucket** — set `MEMORY_S3_*` env vars (see
+     "S3-backed memory store" below). main-node switches to the
+     `S3BlobStore` adapter and a per-store-leased `S3PollAdapter`
+     replaces chokidar. Multi-replica safe by construction (only the
+     lease holder polls a given store at a time).
+2. **`oma-vault` is stateless and can also replicate.** It's a
+   per-request DB lookup + header inject — no caches, no per-process
+   state beyond the on-disk CA. To run N copies, mount the same
+   `OMA_VAULT_CA_DIR` into every replica (the first one to boot
+   generates `ca.{crt,key}` under an O_EXCL `ca.lock`; the others
+   wait+read), put a Service / LB in front, and set
+   `OMA_VAULT_PROXY_URL=http://oma-vault:14322` (or your LB DNS) on
+   sandboxes. **Constraint:** all vault replicas MUST share the same
+   CA key — sandboxes that trust one CA but get TLS-terminated by a
+   replica with a different CA will see cert errors. The shared
+   `./data/oma-vault-ca` volume + lock-on-create handles this.
+   `docker-compose.postgres.yml` ships with a commented
+   `deploy.replicas: 3` example on the `oma-vault` service.
+
+Sticky cookies are NOT required for `/v1/*`, `/auth/*`, or outbound
+sandbox traffic — the SSE fanout is replica-agnostic, better-auth is
+on the shared PG, and the vault is stateless.
+
+### S3-backed memory store (multi-replica friendly)
+
+When `MEMORY_S3_ENDPOINT` + `MEMORY_S3_BUCKET` + `MEMORY_S3_ACCESS_KEY`
++ `MEMORY_S3_SECRET_KEY` are all set, main-node swaps the
+`LocalFsBlobStore` for an S3-compatible `S3BlobStore` (works against
+AWS S3, MinIO, Tigris, Wasabi, Cloudflare R2's S3 API, etc.) and
+starts an `S3PollAdapter` that lists the bucket every
+`MEMORY_S3_POLL_INTERVAL_SEC` (default 30) for new/changed objects.
+Sandbox sides (Daytona / E2B) already mount the bucket via s3fs using
+the same env vars; the loop "agent writes via FUSE → S3 PUT → poller
+upserts SQL index" is the multi-replica analog of the chokidar path.
+
+Limitation: `local-subprocess` sandboxes still need
+`MEMORY_BLOB_DIR` for their `/mnt/memory` symlinks — the local subprocess
+adapter doesn't speak s3fs. Use S3 mode together with a remote sandbox
+provider. Inside the `openma/main-node` container the adapter creates a
+real `/mnt/memory/<storeName>` symlink (visible to bash that hardcodes
+the path); on hosts without a writable `/mnt`, it transparently rewrites
+`/mnt/memory/...` to the workdir-relative `.mnt/memory/...` so harness
+read/write/edit/glob/grep tools still land on the right files.
 
 ### Pointing at an existing Postgres cluster
 
@@ -254,10 +327,14 @@ The same demo works on the Postgres compose unchanged.
 
 | Feature | Status |
 |---|---|
-| `/v1/agents` CRUD (create / get / list / update / version) | ✓ SQLite via SqlAgentRepo |
-| `/v1/sessions` create + bind to agent | ✓ |
-| `POST /v1/sessions/:id/events` (user.message → harness loop) | ✓ |
-| `GET /v1/sessions/:id/events/stream` SSE w/ Last-Event-ID resume | ✓ |
+| `/v1/agents` full CRUD with AMA `_oma:` envelope, versions, archive, delete | ✓ via `@open-managed-agents/http-routes` |
+| `/v1/sessions` create + list + get + archive + delete + threads | ✓ via `@open-managed-agents/http-routes` (NodeSessionRouter wraps SessionRegistry + SqlEventLog) |
+| `POST /v1/sessions/:id/events` (5-type whitelist + harness dispatch) | ✓ via SessionRouter.appendEvent |
+| `POST /v1/sessions/:id/messages` one-shot user.message | ✓ |
+| `GET /v1/sessions/:id/events/stream` SSE w/ Last-Event-ID resume | ✓ via SessionRouter.streamEvents |
+| `GET /v1/sessions/:id/trajectory` | ✓ via SessionRouter.getTrajectory |
+| `POST /v1/sessions/:id/__debug_recovery__` (token-gated) | ✓ via SessionRouter.triggerDebugRecovery |
+| `user.interrupt` aborts in-flight harness | ✓ via SessionRouter.interrupt → SessionRegistry abort |
 | Real LLM token streaming (any Anthropic-compatible endpoint) | ✓ |
 | Crash recovery on process restart | ✓ |
 | `bash` tool via host subprocess | ✓ |
@@ -266,10 +343,21 @@ The same demo works on the Postgres compose unchanged.
 | `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
 | `browser` tool | ✗  CF-only (uses @cloudflare/playwright) |
 | Memory stores (mount + agent fs writes → SQL index) | ✓ symlink + chokidar watcher |
-| Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar |
+| `/v1/vaults` + `/v1/vaults/:id/credentials` full CRUD + `mcp_oauth_validate` | ✓ via package |
+| Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar (uses `@open-managed-agents/vault-forward`) |
+| `/v1/api_keys` mint / list / revoke (SHA-256 hashed in `api_keys` table) | ✓ |
+| `/v1/me` + `/v1/me/tenants` + `/v1/me/cli-tokens` | ✓ |
+| `/v1/tenants` create workspace + membership | ✓ (no shard assign — CF-only) |
+| `/v1/oma/*` mirror namespace | ✓ |
 | Postgres backend (DATABASE_URL=postgres://...) | ✓ same code path as SQLite |
+| Multi-instance oma-server (PG mode) | ✓ PG `LISTEN/NOTIFY`-backed SSE fanout; better-auth on shared PG; `oma-vault` is stateless and replicable; needs shared `MEMORY_BLOB_DIR` or `MEMORY_S3_*` |
 | Multi-tenant authentication (better-auth) | ✓ email+password + OTP, AUTH_DISABLED=1 escape |
 | Console UI (vite dev or built `dist`) | ✓ talks to main-node via `/auth/*` + `/v1/*` |
+| Integrations (linear / github / slack) — read-side CRUD on publications, installations, dispatch rules | ✓ wired via `@open-managed-agents/integrations-adapters-node` (set `PLATFORM_ROOT_SECRET`). |
+| Integrations write-side OAuth callbacks + setup pages + webhook ingest + publication-create | ✓ wired via `@open-managed-agents/http-routes` `buildIntegrationsGatewayRoutes` + `NodeInstallBridge`. Linear / GitHub / Slack OAuth callbacks land on main-node directly. Webhook receivers (with synthesized `user.message` resume into the bound session), GitHub `refresh-by-vault`, the Linear MCP `/linear/mcp/:sessionId` route, and publication-create endpoints (`start-a1` / `credentials` / `handoff-link` / `personal-token`) all run in-process. |
+| `/billing-api/*`, `/v1/internal/usage_events` | ✗  CF-only by design. Talks to a `USAGE_METER` worker not in this repo. Self-host operators bring their own metering or skip. |
+| `/v1/runtimes` (RuntimeRoom DO) | ✗  CF-only (DO + WebSocket-backed) |
+| Cron / queue handlers | ✗  CF-only (P3 will land scheduler abstraction) |
 
 ## Sandbox isolation modes
 
@@ -278,8 +366,22 @@ The same demo works on the Postgres compose unchanged.
 | `LocalSubprocessSandbox` (default) | Local dev, trusted agent code | Nothing — host subprocess in `./data/sandboxes/<sessionId>/`. `SANDBOX_PROVIDER=subprocess` (the default). |
 | `DaytonaSandbox` | Production / untrusted code with managed VMs | `SANDBOX_PROVIDER=daytona`, `DAYTONA_API_KEY=...`, optional `DAYTONA_API_URL` (self-hosted) and `SANDBOX_IMAGE=node:22-slim`. Vault CA uploaded into the box on first exec; memory mount via `MEMORY_S3_*` env vars (s3fs installed by the adapter). |
 | `LiteBoxSandbox` | Local hardware isolation without docker | `SANDBOX_PROVIDER=litebox`, optional `LITEBOX_MEMORY_MIB`, `LITEBOX_CPUS`, `SANDBOX_IMAGE`. BoxLite ships its own Firecracker runtime (no daemon). Memory mounts work via host bind-mount; vault CA copied into VM on first exec. |
-| `E2BSandbox` | Firecracker microVM SaaS | `SANDBOX_PROVIDER=e2b`, `E2B_API_KEY=...`, optional `SANDBOX_IMAGE` (template id). Memory via `MEMORY_S3_*` env vars (same s3fs setup as Daytona). |
+| `E2BSandbox` | Firecracker microVM SaaS | `SANDBOX_PROVIDER=e2b`, `E2B_API_KEY=...`, optional `SANDBOX_IMAGE` (template id). Memory via `MEMORY_S3_*` env vars (same s3fs setup as Daytona). Outbound vault CA upload requires a template that allows `sudo` writes to `/etc/ssl/`. |
+| `BoxRunSandbox` | Remote BoxLite REST endpoint (no KVM on the OMA host) | `SANDBOX_PROVIDER=boxrun`, `BOXRUN_URL=http://host:8100/v1/default`, optional `BOXRUN_TOKEN`. No mount primitive — bake a custom image with s3fs preinstalled if you need `/mnt/memory`. |
 | `CloudflareSandbox` | If you happen to deploy on CF Workers + Containers | Use the regular `apps/agent` worker, not main-node. |
+
+### Per-provider capability matrix
+
+| Provider | bash | fs | net | `/mnt/memory` | `/mnt/outputs` | vault CA | workspace backup |
+|---|---|---|---|---|---|---|---|
+| `LocalSubprocess` | ✓ | ✓ | ✓ | ✓ (real symlink at /mnt/memory inside the container; falls back to workdir-relative `.mnt/memory` when /mnt isn't writable) | ✓ (same pattern) | ✓ | ✓ (tar+upload to BlobStore) |
+| `LiteBox` | ✓ | ✓ | ✓ | ✓ (host bind-mount via SimpleBox volumes) | ✓ | ✓ (CA copyIn on first exec) | ✓ (tar via exec + readFileBytes) |
+| `Daytona` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*`) | ✓ (single-bucket layout: outputs under `session-outputs/<tenant>/<session>/`) | ✓ (CA upload on box create) | ✓ (tar via exec + readFileBytes) |
+| `E2B` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*` + template with s3fs) | ✓ (same bucket, session-outputs prefix) | ⚠ (template must allow sudo writes to /etc/ssl/) | ✓ (tar via exec + readFileBytes) |
+| `BoxRun` | ✓ | ✓ | ✓ | ✗ (HTTP API has no mount primitive — use a custom image with s3fs preinstalled) | ✗ (same — no host-bind primitive) | ✓ (CA upload via tar PUT) | ⚠ (best-effort tar via exec) |
+| `CloudflareSandbox` | ✓ | ✓ | ✓ | ✓ (R2 + FUSE) | ✓ | ✓ (interceptHttps + outboundHandlers) | ✓ (squashfs to R2 backup bucket) |
+
+Read-only memory mounts: enforced via `chmod -R a-w` on the mount target where supported (LocalSubprocess, Daytona, E2B). LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
 
 ## Vault credential injection (oma-vault sidecar)
 
@@ -348,7 +450,8 @@ start and persisted across restarts. Sandboxes mounted with the shared
               │  • Hono routes           │
               │  • SessionRegistry       │
               │  • SqlEventLog           │
-              │  • InProcessEventStreamHub│
+              │  • InProcessEventStreamHub (sqlite mode)│
+              │  • PgEventStreamHub      (pg mode, LISTEN/NOTIFY)│
               │  • DefaultHarness ──┐    │
               │                     │    │
               │  Sandbox: ▼         │    │
@@ -440,14 +543,59 @@ Endpoints main-node implements for the console:
 - `/v1/memory_stores` + `/memories` + per-session bindings
 - `/v1/vaults` + `/credentials`
 - `/v1/models/list`
+- `/v1/integrations/{linear,github,slack}/{installations,publications,...}` — read + persona/capability PATCH + dispatch-rule CRUD. Active when `PLATFORM_ROOT_SECRET` env var is set. Publication-create endpoints (`start-a1`, `credentials`, `handoff-link`, `personal-token`) now run in-process via `NodeInstallBridge.startInstallation` — wire shape matches the CF gateway verbatim. The OAuth callback / setup-page / webhook / Linear MCP / GitHub refresh-by-vault routes are all in-process via `buildIntegrationsGatewayRoutes`.
 
 Endpoints stubbed (return empty `data: []` so the UI degrades gracefully):
 - `/v1/environments`, `/v1/api_keys`, `/v1/me/cli-tokens`,
   `/v1/runtimes`, `/v1/skills`, `/v1/model_cards`
-- `/v1/integrations/{github,linear,slack}/*`
 
 These pages render an "empty" state in the console; their CF counterparts
 will land in main-node as follow-up work.
+
+### Integrations on self-host
+
+The Node read + write side comes online automatically when
+`PLATFORM_ROOT_SECRET` is set. The schema (linear_*, github_*, slack_*
+tables) is created on boot via `applyIntegrationsSchema`. Webhook-events
+retention sweep also runs every minute (cron-gated to 04:00 UTC) when
+the schema is present.
+
+What this gets you:
+- Console can list / patch / unpublish existing publications and dispatch
+  rules.
+- Linear / GitHub / Slack OAuth callbacks land directly on main-node
+  (`/linear/oauth/...`, `/github/install/...`, `/slack/oauth/...`,
+  `/<provider>-setup/<token>`). The provider implementations from
+  `packages/{linear,github,slack}` run in-process via `NodeInstallBridge`.
+- Webhook receivers (`/linear/webhook/...`, `/github/webhook/...`,
+  `/slack/webhook/...`) verify HMAC signatures via the same provider
+  code path the CF gateway uses. When a verified webhook lands on a
+  session bound to the publication (Linear comment-reply, GitHub
+  per_issue PR comment, Slack thread reply), `NodeInstallBridge`'s
+  in-process `SessionCreator.resume` synthesizes a `user.message`
+  event and appends it to the session via the same `NodeSessionRouter`
+  the public `POST /v1/sessions/:id/events` route uses — the harness
+  wakes up automatically.
+- The Linear MCP escape-hatch route (`POST /linear/mcp/:sessionId`)
+  proxies `linear_graphql` calls with the per-session bearer.
+- GitHub `refresh-by-vault` (`POST /github/internal/refresh-by-vault`)
+  mints fresh installation tokens via App-JWT and rotates the static_bearer
+  + cap_cli vault credentials in place.
+- Linear cron dispatch (auto-pickup of issues) is exposed to the Node
+  scheduler via `linearDispatchTick` from
+  `@open-managed-agents/scheduler/jobs/linear-dispatch`.
+
+Required env on the Node side: `PLATFORM_ROOT_SECRET` (at-rest encryption
+for OAuth tokens), `INTEGRATIONS_INTERNAL_TOKEN` (gates
+`/github/internal/*`), `GATEWAY_ORIGIN` (public origin handed to providers
+as redirect_uri / webhook URL — defaults to `PUBLIC_BASE_URL`). Provider
+client_id / client_secret pairs go on the App row at install time, not in
+env. CF stays unchanged: same gateway worker, same INTEGRATIONS service
+binding, same shared INTEGRATIONS_DB.
+
+`/billing-api/*` and `/v1/internal/usage_events` are CF-only by design
+(both call out to a `USAGE_METER` worker that lives in a separate repo).
+Self-host operators run their own metering or skip the billing pipeline.
 
 ## Production hardening (what's NOT in the PoC)
 

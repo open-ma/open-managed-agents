@@ -7,8 +7,10 @@
 // load-bearing piece since it owns the mapping logic.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-// Pull through the route module's test namespace.
-import sessionsRoute, { __test__ } from "../../apps/main/src/routes/sessions";
+// Pull through the route module's test namespace. Helper moved
+// from routes/sessions.ts → lib/cf-session-lifecycle.ts during the
+// sessions extraction (P2-followup).
+import { __test__ } from "../../apps/main/src/lib/cf-session-lifecycle";
 
 const { refreshResultToInitEvents } = __test__;
 
@@ -109,9 +111,9 @@ describe("refreshResultToInitEvents — silent failures eliminated", () => {
     expect(event.details?.http_status).toBeUndefined();
     expect(event.details?.error).toBe("ECONNREFUSED");
   });
-
-  it("ensures sessions.ts default export is unchanged (route surface guard)", () => {
-    // If someone accidentally drops `export default app`, this test fails fast.
-    expect(sessionsRoute).toBeDefined();
-  });
+  // The legacy `it("ensures sessions.ts default export is unchanged")` test
+  // was deleted alongside apps/main/src/routes/sessions.ts in the P2-B
+  // sessions extraction — the route surface is now mounted from
+  // @open-managed-agents/http-routes and exercised by the integration
+  // suite.
 });

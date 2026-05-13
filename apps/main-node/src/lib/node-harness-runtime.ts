@@ -16,7 +16,10 @@ import type {
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type { SqlEventLog } from "@open-managed-agents/event-log/sql";
 import { eventsToMessages } from "@open-managed-agents/agent/runtime/history";
-import type { InProcessEventStreamHub } from "./event-stream-hub";
+import { getLogger } from "@open-managed-agents/observability";
+import type { EventStreamHub } from "./event-stream-hub";
+
+const log = getLogger("node-harness");
 
 /**
  * HistoryStore backed by a SqlEventLog. The interface is sync (matches the
@@ -54,7 +57,7 @@ class SqlHistoryStore implements HistoryStore {
 export interface NodeHarnessRuntimeOptions {
   sessionId: string;
   log: SqlEventLog;
-  hub: InProcessEventStreamHub;
+  hub: EventStreamHub;
   /** Sandbox to use for tool execution. Caller picks the implementation:
    *  LocalSubprocessSandbox for local dev, E2BSandbox / CloudflareSandbox
    *  in production. */
@@ -110,7 +113,7 @@ export class NodeHarnessRuntime implements HarnessRuntime {
         if (last) this.opts.hub.publish(this.opts.sessionId, last);
       })
       .catch((err) => {
-        console.warn("[node-harness] broadcast persist failed", err);
+        log.warn({ err, op: "node_harness.broadcast_persist_failed" }, "broadcast persist failed");
         // Reset the chain so a single failure doesn't poison every
         // subsequent broadcast (the SQL adapter typically recovers on
         // the next attempt — connection wasn't lost, just a constraint

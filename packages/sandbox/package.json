@@ -9,18 +9,20 @@
     "./adapters/e2b": "./src/adapters/e2b.ts",
     "./adapters/daytona": "./src/adapters/daytona.ts",
     "./adapters/litebox": "./src/adapters/litebox.ts",
-    "./adapters/boxrun": "./src/adapters/boxrun.ts"
+    "./adapters/boxrun": "./src/adapters/boxrun.ts",
+    "./orchestrator": "./src/orchestrator.ts"
   },
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@open-managed-agents/observability": "workspace:*",
     "@open-managed-agents/shared": "workspace:*"
   },
   "peerDependencies": {
     "e2b": "^1.0.0",
     "@daytonaio/sdk": "^0.171.0",
-    "@boxlite-ai/boxlite": "^0.8.0"
+    "@boxlite-ai/boxlite": "^0.9.0"
   },
   "peerDependenciesMeta": {
     "e2b": {

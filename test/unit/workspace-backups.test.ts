@@ -27,7 +27,8 @@ beforeAll(async () => {
   // Trigger the test-worker's ensureMigrations() once so the workspace_backups
   // table exists. Hitting any HTTP route does it (see test/test-worker.ts).
   await (exports as any).default.fetch(new Request("http://localhost/health"));
-});
+}, 30_000); // 30s — concurrent file load + miniflare warmup blows past the
+            // default 10s on cold runs.
 
 beforeEach(async () => {
   // Each test gets a clean slate so ordering doesn't bleed.

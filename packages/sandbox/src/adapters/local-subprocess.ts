@@ -6,18 +6,37 @@
 // (so the harness's existing /workspace/foo conventions still land
 // somewhere — we transparently rewrite /workspace → workdir).
 //
-// SECURITY: this adapter has zero isolation. An agent that runs `rm -rf /`
-// will hit the host. ONLY use for trusted local development. Production /
-// untrusted agents must use the E2B or CloudflareSandbox adapters.
+// /mnt/memory and /mnt/session/outputs: when running inside the
+// `openma/main-node` container, we create real symlinks at those root
+// paths pointing into the workdir's `.mnt/...` tree. Bash that does
+// `cat /mnt/memory/foo` then resolves the same dir as harness tools.
+// Outside a container the host's `/mnt` is usually not writable as the
+// `node` user — we fall back to the workdir-relative `.mnt/...` path
+// rewriter so dev workflows still work; bash hardcoding `/mnt/memory/...`
+// will see ENOENT in that mode (documented in self-host.md).
+//
+// SECURITY: this adapter has zero process isolation. An agent that runs
+// `rm -rf /` will hit the host. ONLY use for trusted local development.
+// Production / untrusted agents must use E2B / Daytona / LiteBox / BoxRun
+// or CloudflareSandbox.
 
 import {
   spawn,
   type ChildProcess,
 } from "node:child_process";
 import { promises as fs } from "node:fs";
-import { mkdirSync, rmSync, symlinkSync } from "node:fs";
+import {
+  chmodSync,
+  mkdirSync,
+  rmSync,
+  statSync,
+  symlinkSync,
+} from "node:fs";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
+import { getLogger } from "@open-managed-agents/observability";
+
+const moduleLogger = getLogger("local-sandbox");
 
 export interface LocalSubprocessSandboxOptions {
   /** Per-session working directory. Created if missing. */
@@ -87,8 +106,8 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     this.memoryRoot = opts.memoryRoot ? resolve(opts.memoryRoot) : null;
     this.outputsRoot = opts.outputsRoot ? resolve(opts.outputsRoot) : null;
     this.logger = opts.logger ?? {
-      warn: (msg, ctx) => console.warn(`[local-sandbox] ${msg}`, ctx ?? ""),
-      log: (msg) => console.log(`[local-sandbox] ${msg}`),
+      warn: (msg, ctx) => moduleLogger.warn({ ...(ctx as Record<string, unknown> ?? {}) }, msg),
+      log: (msg) => moduleLogger.info(msg),
     };
     mkdirSync(this.workdir, { recursive: true });
   }
@@ -200,24 +219,26 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
   /**
    * Bind a memory store into the sandbox at /mnt/memory/<storeName>.
    *
-   * Implementation: symlinks <workdir>/.mnt/memory/<storeName> →
-   * <memoryRoot>/<storeId>/. The path resolver rewrites
-   * /mnt/memory/<storeName>/<rest> → <workdir>/.mnt/memory/<storeName>/<rest>
-   * so the harness's read/write/edit/glob/grep tools land directly on the
-   * BlobStore's on-disk layout — no copy, no sync-back.
+   * Two-tier mount strategy:
+   *   1. Always: workdir-relative `.mnt/memory/<storeName>` symlink to
+   *      `<memoryRoot>/<storeId>/`. The path resolver rewrites
+   *      `/mnt/memory/<storeName>/...` → `.mnt/memory/<storeName>/...` so
+   *      harness read/write/edit/glob/grep tools land directly on the
+   *      BlobStore's on-disk layout — no copy, no sync-back.
+   *   2. Best-effort: a real symlink at the root `/mnt/memory/<storeName>`
+   *      → the workdir target. Created only when `/mnt/memory` is
+   *      writable to this process (typical inside the
+   *      `openma/main-node` container running as the `node` user).
+   *      Bash that hard-codes `/mnt/memory/foo` then sees the same dir
+   *      as the harness. Outside a container the root path usually isn't
+   *      writable — bash that hard-codes `/mnt/memory/...` will hit
+   *      ENOENT and the workdir-relative + `$OMA_MEMORY_DIR` paths
+   *      remain the supported access pattern.
    *
-   * For bash subprocess access, we set OMA_MEMORY_DIR=<workdir abs>/.mnt/memory
-   * so the agent can do `cat $OMA_MEMORY_DIR/<storeName>/foo.md`. The
-   * canonical /mnt/memory/ path is NOT created on the host filesystem
-   * (would require root + a writable /mnt) — bash that hard-codes
-   * /mnt/memory/ paths won't see the mount; tools and $OMA_MEMORY_DIR-aware
-   * bash will. This matches the spirit of CF's mount but with weaker
-   * compat — documented in docs/self-host.md.
-   *
-   * read_only mode is best-effort: we record the flag so the read/write
-   * tools can refuse writes via path resolver, but the on-disk dir remains
-   * writable (chmod-ing the symlink target would block legitimate
-   * /v1/memories writes from main-node, which writes to the same dir).
+   * read_only enforcement: chmod -w on the target dir's contents at
+   * mount time (best effort — root-equivalent in container can still
+   * write; documented in docs/self-host.md). The harness write tool also
+   * checks `assertWritable` for a clearer error.
    */
   async mountMemoryStore(opts: {
     storeName: string;
@@ -236,18 +257,44 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     const mountParent = join(this.workdir, ".mnt", "memory");
     mkdirSync(mountParent, { recursive: true });
 
-    const symlinkPath = join(mountParent, opts.storeName);
-    // Replace any stale symlink/dir from a prior session in this workdir.
+    const workdirSymlink = join(mountParent, opts.storeName);
     try {
-      rmSync(symlinkPath, { recursive: true, force: true });
+      rmSync(workdirSymlink, { recursive: true, force: true });
     } catch { /* best-effort */ }
     try {
-      symlinkSync(targetDir, symlinkPath, "dir");
+      symlinkSync(targetDir, workdirSymlink, "dir");
     } catch (err) {
       throw new Error(
-        `mountMemoryStore: symlink ${symlinkPath} → ${targetDir} failed: ` +
+        `mountMemoryStore: symlink ${workdirSymlink} → ${targetDir} failed: ` +
         (err as Error).message,
       );
+    }
+
+    // Best-effort: real /mnt/memory/<storeName> root symlink — works inside
+    // the docker image; silently no-ops on a host that hasn't pre-created
+    // a writable /mnt/memory.
+    const rootSymlink = `/mnt/memory/${opts.storeName}`;
+    if (this.tryEnsureRootMountDir("/mnt/memory")) {
+      try {
+        rmSync(rootSymlink, { recursive: true, force: true });
+      } catch { /* best-effort */ }
+      try {
+        symlinkSync(targetDir, rootSymlink, "dir");
+      } catch (err) {
+        this.logger.warn(
+          `root symlink /mnt/memory/${opts.storeName} skipped: ${(err as Error).message}`,
+        );
+      }
+    }
+
+    if (opts.readOnly) {
+      // Best-effort chmod -w. Bash root-equivalent inside the container
+      // can still chmod +w, but normal agent processes get a clear
+      // EACCES on writes — matches the harness assertWritable error
+      // shape.
+      try {
+        chmodSync(targetDir, 0o555);
+      } catch { /* best-effort */ }
     }
 
     this.mounts.set(opts.storeName, {
@@ -262,7 +309,7 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     // wants the absolute path without parsing.
     await this.setEnvVars({
       OMA_MEMORY_DIR: mountParent,
-      [`OMA_MEMORY_${opts.storeName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]: symlinkPath,
+      [`OMA_MEMORY_${opts.storeName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]: workdirSymlink,
     });
   }
 
@@ -282,17 +329,31 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
     const mountParent = join(this.workdir, ".mnt", "session");
     mkdirSync(mountParent, { recursive: true });
 
-    const symlinkPath = join(mountParent, "outputs");
+    const workdirSymlink = join(mountParent, "outputs");
     try {
-      rmSync(symlinkPath, { recursive: true, force: true });
+      rmSync(workdirSymlink, { recursive: true, force: true });
     } catch { /* best-effort */ }
     try {
-      symlinkSync(targetDir, symlinkPath, "dir");
+      symlinkSync(targetDir, workdirSymlink, "dir");
     } catch (err) {
       throw new Error(
-        `mountSessionOutputs: symlink ${symlinkPath} → ${targetDir} failed: ` +
+        `mountSessionOutputs: symlink ${workdirSymlink} → ${targetDir} failed: ` +
         (err as Error).message,
       );
+    }
+
+    const rootSymlink = `/mnt/session/outputs`;
+    if (this.tryEnsureRootMountDir("/mnt/session")) {
+      try {
+        rmSync(rootSymlink, { recursive: true, force: true });
+      } catch { /* best-effort */ }
+      try {
+        symlinkSync(targetDir, rootSymlink, "dir");
+      } catch (err) {
+        this.logger.warn(
+          `root symlink /mnt/session/outputs skipped: ${(err as Error).message}`,
+        );
+      }
     }
 
     this.outputsMount = {
@@ -302,11 +363,16 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
       mountRel: join(".mnt", "session", "outputs"),
     };
 
-    await this.setEnvVars({ OMA_OUTPUTS_DIR: symlinkPath });
+    await this.setEnvVars({ OMA_OUTPUTS_DIR: workdirSymlink });
   }
 
   async readFile(path: string): Promise<string> {
     return fs.readFile(this.resolvePath(path), "utf8");
+  }
+
+  async readFileBytes(path: string): Promise<Uint8Array> {
+    const buf = await fs.readFile(this.resolvePath(path));
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
   }
 
   async writeFile(path: string, content: string): Promise<string> {
@@ -344,23 +410,71 @@ export class LocalSubprocessSandbox implements SandboxExecutor {
    * The harness emits /workspace/foo conventions assuming a real container
    * mount; we transparently rewrite /workspace → workdir so existing tools
    * keep working without changes.
+   *
+   * /mnt/memory and /mnt/session/outputs paths: when the root symlinks
+   * exist on disk (container case) they resolve naturally as absolute
+   * paths; when they don't, we fall back to the workdir-relative
+   * `.mnt/...` mirror so harness tools still land on the right files.
    */
   private resolvePath(p: string): string {
     let normalised = p;
     // Memory mount: /mnt/memory/<storeName>/<rest> → <workdir>/.mnt/memory/...
-    if (normalised.startsWith("/mnt/memory/")) {
-      normalised = ".mnt/memory/" + normalised.slice("/mnt/memory/".length);
-    } else if (normalised === "/mnt/memory") {
-      normalised = ".mnt/memory";
-    } else if (normalised.startsWith("/mnt/session/outputs/")) {
-      normalised = ".mnt/session/outputs/" + normalised.slice("/mnt/session/outputs/".length);
-    } else if (normalised === "/mnt/session/outputs") {
-      normalised = ".mnt/session/outputs";
+    if (normalised.startsWith("/mnt/memory/") || normalised === "/mnt/memory") {
+      // When the real /mnt/memory symlink exists, prefer it — bash and
+      // tools see the same path.
+      if (this.rootMountExists("/mnt/memory")) return normalised;
+      normalised = normalised === "/mnt/memory"
+        ? ".mnt/memory"
+        : ".mnt/memory/" + normalised.slice("/mnt/memory/".length);
+    } else if (
+      normalised.startsWith("/mnt/session/outputs/") ||
+      normalised === "/mnt/session/outputs"
+    ) {
+      if (this.rootMountExists("/mnt/session/outputs")) return normalised;
+      normalised = normalised === "/mnt/session/outputs"
+        ? ".mnt/session/outputs"
+        : ".mnt/session/outputs/" + normalised.slice("/mnt/session/outputs/".length);
     } else if (normalised.startsWith("/workspace/")) normalised = normalised.slice("/workspace/".length);
     else if (normalised === "/workspace") normalised = "";
     else if (normalised.startsWith("/")) normalised = normalised.slice(1);
     if (isAbsolute(normalised)) return normalised; // explicit absolute escape — caller's responsibility
     return join(this.workdir, normalised);
+  }
+
+  /** True if a path exists on the host filesystem (symlink-followed). */
+  private rootMountExists(p: string): boolean {
+    if (this.rootMountCache.has(p)) return this.rootMountCache.get(p)!;
+    let ok = false;
+    try {
+      statSync(p);
+      ok = true;
+    } catch {
+      ok = false;
+    }
+    this.rootMountCache.set(p, ok);
+    return ok;
+  }
+  private rootMountCache = new Map<string, boolean>();
+
+  /**
+   * Best-effort: ensure `/mnt/<x>` exists and is writable so we can
+   * symlink children into it. Returns false (no throw) when the
+   * filesystem refuses — caller falls back to the workdir-relative
+   * `.mnt/...` path. This is the typical state outside the container.
+   */
+  private tryEnsureRootMountDir(parent: string): boolean {
+    try {
+      mkdirSync(parent, { recursive: true });
+      // Touch — if mkdir succeeded but writes are blocked (e.g. read-only
+      // tmpfs), the symlink call below would also fail.
+      this.rootMountCache.set(parent, true);
+      return true;
+    } catch (err) {
+      this.logger.warn(
+        `mkdir ${parent} not allowed (${(err as Error).message}); falling back to workdir-relative mounts`,
+      );
+      return false;
+    }
   }
 
   /**

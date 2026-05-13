@@ -1,0 +1,19 @@
+{
+  "name": "@open-managed-agents/queue",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cf": "./src/adapters/cf.ts",
+    "./pg": "./src/adapters/pg.ts",
+    "./in-memory": "./src/adapters/in-memory.ts",
+    "./handlers/memory-events": "./src/handlers/memory-events.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "@open-managed-agents/memory-store": "workspace:*",
+    "nanoid": "^5.1.0"
+  }
+}

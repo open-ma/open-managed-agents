@@ -78,7 +78,8 @@ import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { ensureSetupApplied } from "./setup-on-warmup";
 import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
-import { createBrowserSession, type BrowserSession } from "../harness/browser-tools";
+import { createCfBrowserHarness } from "@open-managed-agents/browser-harness/cf";
+import type { BrowserHarness, BrowserBillingHook, BrowserSession } from "@open-managed-agents/browser-harness";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox, CloudflareSandbox } from "./sandbox";
 import { mountResources } from "./resource-mounter";
@@ -495,6 +496,12 @@ export class SessionDO extends DurableObject<Env> {
    * Closed on /destroy.
    */
   private browserSession: BrowserSession | null = null;
+  /**
+   * Per-DO BrowserHarness wrapper. Caches the BrowserSession across turns
+   * so cookies/state persist within the DO lifetime (until hibernate or
+   * /destroy). Built lazily on first getBrowserHarness() call.
+   */
+  private browserHarness: BrowserHarness | null = null;
   /**
    * Localhost URLs of stdio MCP servers spawned in the sandbox during warmup.
    * Indexed by mcp_servers[].name. Used to fix up the agent.mcp_servers entry
@@ -1257,7 +1264,7 @@ export class SessionDO extends DurableObject<Env> {
         // 403 forbidden — Anthropic returns these when an org is out of
         // credit / over spend cap; retrying the same key won't succeed).
         // Other terminal sources (MCP auth refresh failure) live in the
-        // tools.ts / binding-mcp-transport path and are not visible here.
+        // tools.ts / main proxy path and are not visible here.
         if (
           err instanceof TurnAborted &&
           err.cause.kind === "model_error" &&
@@ -1589,6 +1596,7 @@ export class SessionDO extends DurableObject<Env> {
         }
         this.browserSession = null;
       }
+      this.browserHarness = null;
       // Outbound snapshot delete — DROPPED. The publish at session init
       // is gone too (see comment above), so there's nothing here to clean
       // up. The outbound interceptor RPCs into main on each call and main
@@ -2566,12 +2574,15 @@ export class SessionDO extends DurableObject<Env> {
   }
 
   /**
-   * Lazy-create a single BrowserSession for this DO. Returns null if the
-   * BROWSER binding isn't configured (no-op for non-browser environments).
+   * Lazy-build a per-DO BrowserHarness. Wraps the package's
+   * createCfBrowserHarness with caching so launch() always returns the
+   * same BrowserSession across turns within the DO lifetime — preserving
+   * the cross-turn cookie/state behaviour from before the package split.
+   * Returns null if the BROWSER binding isn't configured.
    */
-  private getBrowserSession(): BrowserSession | null {
+  private getBrowserHarness(): BrowserHarness | null {
     if (!this.env.BROWSER) return null;
-    if (!this.browserSession) {
+    if (!this.browserHarness) {
       const tenantId = this.state.tenant_id;
       const sessionId = this.state.session_id;
       const agentId = this.state.agent_id || null;
@@ -2579,7 +2590,7 @@ export class SessionDO extends DurableObject<Env> {
       // BrowserSession closes (DELETE /destroy path or hibernation
       // teardown). Skipped when tenant/session aren't set yet (early-init
       // edge — no usage to attribute).
-      const hook = tenantId && sessionId
+      const hook: BrowserBillingHook | null = tenantId && sessionId
         ? {
             tenantId,
             sessionId,
@@ -2606,12 +2617,19 @@ export class SessionDO extends DurableObject<Env> {
             },
           }
         : null;
-      this.browserSession = createBrowserSession(
+      const inner = createCfBrowserHarness(
         this.env.BROWSER as unknown as { fetch: typeof fetch },
-        hook,
       );
+      this.browserHarness = {
+        launch: async () => {
+          if (!this.browserSession) {
+            this.browserSession = await inner.launch({ hook });
+          }
+          return this.browserSession;
+        },
+      };
     }
-    return this.browserSession;
+    return this.browserHarness;
   }
 
   /**
@@ -3409,7 +3427,7 @@ export class SessionDO extends DurableObject<Env> {
           mcpBinding: this.env.MAIN_MCP,
           tenantId: this.state.tenant_id,
           sessionId: this.state.session_id,
-          browser: this.getBrowserSession() ?? undefined,
+          browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
           broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
@@ -3819,7 +3837,7 @@ export class SessionDO extends DurableObject<Env> {
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
       sessionId: this.state.session_id,
-      browser: this.getBrowserSession() ?? undefined,
+      browser: this.getBrowserHarness() ?? undefined,
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
@@ -4065,7 +4083,7 @@ export class SessionDO extends DurableObject<Env> {
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
       sessionId: this.state.session_id,
-      browser: this.getBrowserSession() ?? undefined,
+      browser: this.getBrowserHarness() ?? undefined,
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event),
@@ -4717,7 +4735,7 @@ export class SessionDO extends DurableObject<Env> {
    *
    * Follow-up sources to wire (see AMA RetryStatusTerminal):
    *   - "mcp_auth"  — MCP server permanent-auth-failure path lives in
-   *                   tools.ts / binding-mcp-transport, separate from
+   *                   tools.ts / main proxy, separate from
    *                   the drainEventQueue catch
    *   - "completed" — explicit "session done" signal (no concept in
    *                   OMA today)

@@ -6,9 +6,17 @@
   "exports": {
     ".": "./src/index.ts",
     "./adapters/cf-r2": "./src/adapters/cf-r2.ts",
-    "./adapters/in-memory": "./src/adapters/in-memory.ts"
+    "./adapters/in-memory": "./src/adapters/in-memory.ts",
+    "./adapters/s3": "./src/adapters/s3.ts",
+    "./adapters/local-fs": "./src/adapters/local-fs.ts"
   },
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": { "optional": true }
   }
 }

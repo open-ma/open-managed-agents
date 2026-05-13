@@ -1,110 +1,165 @@
 /**
  * apps/main-node — self-host Node entry for the Open Managed Agents API.
  *
- * Phase B-resume milestone: persistent sessions + event log + SSE with
- * Last-Event-ID resume + crash recovery on restart. Proves the storage
- * abstraction supports `kill -9 <node-pid>` and the client picks up
- * exactly where it left off — the key property the original SessionDO
- * implementation gave us via DO durability.
- *
- *   pnpm --filter @open-managed-agents/main-node start
- *
- *   # 1. Create a session
- *   SID=$(curl -s -X POST localhost:8787/v1/sessions \
- *     -H 'content-type: application/json' -d '{}' | jq -r .id)
- *
- *   # 2. Open an SSE stream
- *   curl -N localhost:8787/v1/sessions/$SID/events/stream &
- *
- *   # 3. Inject an event from another shell
- *   curl -X POST localhost:8787/v1/sessions/$SID/_test_emit \
- *     -H 'content-type: application/json' -d '{"text":"hello"}'
- *
- *   # 4. kill -9 the node process. SSE drops.
- *   # 5. Restart node.
- *   # 6. Reconnect SSE — pass the last seen seq to resume:
- *   curl -N -H 'Last-Event-ID: 0' localhost:8787/v1/sessions/$SID/events/stream
- *   # → replays everything from seq 1 onward + listens for new events
- *
- * What's NOT here yet:
- *   - Real harness loop (no LLM call, no tool execution) — `_test_emit`
- *     is the placeholder for what a Phase D NodeSessionRuntime would do
- *     when a turn produces an agent.message
- *   - Auth: every request still treated as tenant_id="default"
- *   - Sandbox / E2B / sub-agents / vault / memory / files
+ * Wiring file. ~280 lines: build services → mount route bundles from
+ * @open-managed-agents/http-routes → start server. All route bodies live
+ * in packages/http-routes; storage adapters in their respective packages
+ * (agents-store, vaults-store, memory-store, etc.).
  */
 
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
 import {
+  createNodeLogger,
+} from "@open-managed-agents/observability/logger/node";
+import {
+  createNodeMetricsRecorder,
+  type NodeMetricsHandle,
+} from "@open-managed-agents/observability/metrics/node";
+import {
+  createNodeTracer,
+  type NodeTracerHandle,
+} from "@open-managed-agents/observability/tracer/node";
+import {
+  requestMetrics,
+  tracerMiddleware,
+  setRootLogger,
+  type Logger,
+} from "@open-managed-agents/observability";
+import {
   createBetterSqlite3SqlClient,
   createPostgresSqlClient,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
-import {
-  AgentNotFoundError,
-  AgentVersionMismatchError,
-  createSqliteAgentService,
-  type AgentService,
-} from "@open-managed-agents/agents-store";
+import { createSqliteAgentService } from "@open-managed-agents/agents-store";
 import {
   createSqliteMemoryStoreService,
   SqlMemoryRepo,
-  type MemoryStoreService,
 } from "@open-managed-agents/memory-store";
-import { LocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
+import { LocalFsBlobStore as MemoryLocalFsBlobStore } from "@open-managed-agents/memory-store/adapters/local-fs-blob";
 import {
-  createSqliteVaultService,
-  type VaultService,
-} from "@open-managed-agents/vaults-store";
-import {
-  createSqliteCredentialService,
-  stripSecrets,
-  type CredentialService,
-} from "@open-managed-agents/credentials-store";
-import { SqlEventLog, ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
-import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
-import { generateEventId, guessSessionOutputMime } from "@open-managed-agents/shared";
+  S3BlobStore as FilesS3BlobStore,
+  type BlobStore,
+} from "@open-managed-agents/blob-store";
+import { LocalFsBlobStore as FilesLocalFsBlobStore } from "@open-managed-agents/blob-store/adapters/local-fs";
+import { createSqliteVaultService } from "@open-managed-agents/vaults-store";
+import { createSqliteCredentialService } from "@open-managed-agents/credentials-store";
+import { createSqliteSessionService } from "@open-managed-agents/sessions-store";
+import { createSqliteFileService } from "@open-managed-agents/files-store";
+import { createSqliteEvalRunService } from "@open-managed-agents/evals-store";
+import { createSqliteEnvironmentService } from "@open-managed-agents/environments-store";
+import { toFileRecord } from "@open-managed-agents/files-store";
+import { SqlEventLog } from "@open-managed-agents/event-log/sql";
+import type { SessionEvent } from "@open-managed-agents/shared";
+import { generateEventId } from "@open-managed-agents/shared";
 import { DefaultHarness } from "@open-managed-agents/agent/harness/default-loop";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { resolveModel } from "@open-managed-agents/agent/harness/provider";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
-import { cfWorkersAiToMarkdown as _cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
-import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
-import { mkdirSync, createReadStream } from "node:fs";
-import { stat as fsStat, readdir as fsReaddir } from "node:fs/promises";
-import { dirname, join, relative, resolve as resolvePath } from "node:path";
-import { Readable } from "node:stream";
+import {
+  applySchema,
+  applyBetterAuthSchema,
+  applyTenantSchema,
+  applyMemoryPollerSchema,
+  applyIntegrationsSchema,
+} from "@open-managed-agents/schema";
+import {
+  buildAgentRoutes,
+  buildVaultRoutes,
+  buildSessionRoutes,
+  buildMemoryRoutes,
+  buildTenantRoutes,
+  buildMeRoutes,
+  buildApiKeyRoutes,
+  buildEvalRoutes,
+  buildIntegrationsRoutes,
+  buildIntegrationsGatewayRoutes,
+  type RouteServices,
+  type ApiKeyStorage,
+  type ApiKeyMeta,
+  type ApiKeyRecord,
+  type InstallProxyForwarder,
+  mintApiKeyOnStorage,
+  sha256Hex,
+} from "@open-managed-agents/http-routes";
+import {
+  buildNodeRepos,
+  SqlSlackInstallationRepo,
+  SqlSlackPublicationRepo,
+  SqlSlackAppRepo,
+  WebCryptoAesGcm,
+  CryptoIdGenerator,
+  type NodeReposEnv,
+} from "@open-managed-agents/integrations-adapters-node";
+import {
+  NodeInstallBridge,
+  buildNodeProvidersForRequest,
+} from "./lib/node-install-bridge.js";
+import { OmaVaultResolver } from "@open-managed-agents/oma-cap-adapter";
+import { NodeSessionRouter } from "./lib/node-session-router.js";
+import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
+import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
+import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
+import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
+import { createAuthMiddleware as buildAuthMw } from "@open-managed-agents/auth";
+import {
+  buildBetterAuth,
+  ensureTenantSqlite,
+} from "@open-managed-agents/auth-config";
+import { senderFromEnv } from "@open-managed-agents/email/adapters/nodemailer";
+import { SqlKvStore } from "@open-managed-agents/kv-store/adapters/sql";
+import {
+  selectBrowserHarness,
+  buildSelectedBrowserHarness,
+} from "@open-managed-agents/browser-harness/select";
+import type { BrowserHarness } from "@open-managed-agents/browser-harness";
+import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
+import { buildNodeScheduler } from "./lib/node-scheduler-jobs.js";
+import { startNodeMemoryQueue } from "./lib/node-memory-queue.js";
+import { mkdirSync } from "node:fs";
+import { dirname, relative } from "node:path";
 import { nanoid } from "nanoid";
-import { InProcessEventStreamHub, type EventWriter } from "./lib/event-stream-hub";
+import {
+  InProcessEventStreamHub,
+  type EventStreamHub,
+} from "./lib/event-stream-hub";
+import { PgEventStreamHub } from "./lib/pg-event-stream-hub";
 import { NodeHarnessRuntime } from "./lib/node-harness-runtime";
 import { SessionRegistry } from "./registry.js";
-import { createAuth } from "./auth/config.js";
-import { createAuthMiddleware } from "./auth/middleware.js";
-import { ensureTenantSchema } from "./auth/tenants.js";
 
-// Single ToMarkdownProvider instance — turndown is heavy enough that
-// instantiating per turn would be wasteful. Lazy-loads on first use.
 const toMarkdownProvider = nodeToMarkdown();
+
+// ─── Observability bootstrap ─────────────────────────────────────────────
+//
+// Logger is constructed first so every later step can use it instead of
+// raw console.*. Metrics + tracer follow; both are no-ops by default and
+// only spin up real backends when the env opts in.
+//   - Prometheus metrics: always-on in-process registry; /metrics text
+//     endpoint mounted below.
+//   - OTel tracing: starts only when OTEL_EXPORTER_OTLP_ENDPOINT is set.
+const logger: Logger = await createNodeLogger({
+  bindings: { service: "main-node", pid: process.pid },
+});
+setRootLogger(logger);
+
+const metrics: NodeMetricsHandle = await createNodeMetricsRecorder();
+const tracer: NodeTracerHandle = await createNodeTracer({
+  serviceName: "oma-main-node",
+});
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
-// Backend selection. DATABASE_URL takes precedence (postgres:// or
-// postgresql:// scheme); otherwise we fall back to better-sqlite3 with the
-// DATABASE_PATH env var (or ./data/oma.db). Both backends speak the same
-// SqlClient port — every store package + the event log work identically on
-// both.
 const dbUrl = process.env.DATABASE_URL ?? "";
 const usePostgres = dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://");
+const dialect = usePostgres ? "postgres" : "sqlite";
 
 let sql: SqlClient;
 let backendDescription: string;
 if (usePostgres) {
   sql = await createPostgresSqlClient(dbUrl);
-  // Don't print the dsn — it usually carries the password.
   const u = new URL(dbUrl);
   backendDescription = `postgres ${u.hostname}:${u.port || 5432}${u.pathname}`;
 } else {
@@ -114,302 +169,206 @@ if (usePostgres) {
   backendDescription = `sqlite ${dbPath}`;
 }
 
-// Apply schemas. Idempotent. self-host deploys eventually replace this with a
-// proper migrations runner.
-await sql.exec(`
-  CREATE TABLE IF NOT EXISTS "agents" (
-    "id"           TEXT PRIMARY KEY NOT NULL,
-    "tenant_id"    TEXT NOT NULL,
-    "config"       TEXT NOT NULL,
-    "version"   BIGINT NOT NULL,
-    "created_at"   BIGINT NOT NULL,
-    "updated_at"   BIGINT,
-    "archived_at"  BIGINT
-  );
-  CREATE INDEX IF NOT EXISTS "idx_agents_tenant"
-    ON "agents" ("tenant_id", "archived_at");
-
-  CREATE TABLE IF NOT EXISTS "agent_versions" (
-    "agent_id"    TEXT NOT NULL,
-    "tenant_id"   TEXT NOT NULL,
-    "version"   BIGINT NOT NULL,
-    "snapshot"    TEXT NOT NULL,
-    "created_at"   BIGINT NOT NULL,
-    PRIMARY KEY ("agent_id", "version")
-  );
-
-  CREATE TABLE IF NOT EXISTS "sessions" (
-    "id"              TEXT PRIMARY KEY NOT NULL,
-    "tenant_id"       TEXT NOT NULL,
-    "agent_id"        TEXT,
-    "status"          TEXT NOT NULL,
-    "title"           TEXT,
-    -- turn_id + turn_started_at: unified-runtime turn marker. Set on
-    -- beginTurn(), cleared on endTurn(). orphan detection scans
-    -- WHERE status='running'. Mirrors apps/main/migrations/0014.
-    "turn_id"         TEXT,
-    "turn_started_at" BIGINT,
-    "created_at"      BIGINT NOT NULL,
-    "updated_at"      BIGINT NOT NULL
-  );
-  CREATE INDEX IF NOT EXISTS "idx_sessions_status"
-    ON "sessions" ("status", "tenant_id");
-
-  CREATE TABLE IF NOT EXISTS "memory_stores" (
-    "id"           TEXT PRIMARY KEY NOT NULL,
-    "tenant_id"    TEXT NOT NULL,
-    "name"         TEXT NOT NULL,
-    "description"  TEXT,
-    "created_at"   BIGINT NOT NULL,
-    "updated_at"   BIGINT,
-    "archived_at"  BIGINT
-  );
-  CREATE INDEX IF NOT EXISTS "idx_memory_stores_tenant"
-    ON "memory_stores" ("tenant_id", "archived_at");
-
-  CREATE TABLE IF NOT EXISTS "memories" (
-    "id"               TEXT PRIMARY KEY NOT NULL,
-    "store_id"         TEXT NOT NULL,
-    "path"             TEXT NOT NULL,
-    "content_sha256"   TEXT NOT NULL,
-    "etag"             TEXT NOT NULL,
-    "size_bytes"   BIGINT NOT NULL,
-    "created_at"   BIGINT NOT NULL,
-    "updated_at"   BIGINT NOT NULL
-  );
-  CREATE UNIQUE INDEX IF NOT EXISTS "idx_memories_store_path"
-    ON "memories" ("store_id", "path");
-
-  CREATE TABLE IF NOT EXISTS "memory_versions" (
-    "id"               TEXT PRIMARY KEY NOT NULL,
-    "memory_id"        TEXT NOT NULL,
-    "store_id"         TEXT NOT NULL,
-    "operation"        TEXT NOT NULL,
-    "path"             TEXT NOT NULL,
-    "content"          TEXT NOT NULL,
-    "content_sha256"   TEXT NOT NULL,
-    "size_bytes"   BIGINT NOT NULL,
-    "actor_type"       TEXT NOT NULL,
-    "actor_id"         TEXT NOT NULL,
-    "created_at"   BIGINT NOT NULL,
-    "redacted"         INTEGER NOT NULL DEFAULT 0
-  );
-  CREATE INDEX IF NOT EXISTS "idx_memory_versions_store"
-    ON "memory_versions" ("store_id", "created_at" DESC);
-  CREATE INDEX IF NOT EXISTS "idx_memory_versions_memory"
-    ON "memory_versions" ("memory_id", "created_at" DESC);
-
-  CREATE TABLE IF NOT EXISTS "vaults" (
-    "id"          TEXT PRIMARY KEY NOT NULL,
-    "tenant_id"   TEXT NOT NULL,
-    "name"        TEXT NOT NULL,
-    "created_at"   BIGINT NOT NULL,
-    "updated_at"   BIGINT,
-    "archived_at"  BIGINT
-  );
-  CREATE INDEX IF NOT EXISTS "idx_vaults_tenant"
-    ON "vaults" ("tenant_id", "archived_at");
-
-  CREATE TABLE IF NOT EXISTS "credentials" (
-    "id"             TEXT PRIMARY KEY NOT NULL,
-    "tenant_id"      TEXT NOT NULL,
-    "vault_id"       TEXT NOT NULL,
-    "display_name"   TEXT NOT NULL,
-    "auth_type"      TEXT NOT NULL,
-    "mcp_server_url" TEXT,
-    "provider"       TEXT,
-    "auth"           TEXT NOT NULL,
-    "created_at"   BIGINT NOT NULL,
-    "updated_at"   BIGINT,
-    "archived_at"  BIGINT
-  );
-  CREATE INDEX IF NOT EXISTS "idx_credentials_vault"
-    ON "credentials" ("tenant_id", "vault_id", "archived_at");
-  CREATE UNIQUE INDEX IF NOT EXISTS "idx_credentials_mcp_url_active"
-    ON "credentials" ("tenant_id", "vault_id", "mcp_server_url")
-    WHERE "mcp_server_url" IS NOT NULL AND "archived_at" IS NULL;
-
-  -- session ↔ memory_store binding. The CF version stores these in
-  -- session_resources with type="memory_store"; here we keep a thinner
-  -- table since session_resources isn't wired in this build yet.
-  CREATE TABLE IF NOT EXISTS "session_memory_stores" (
-    "session_id" TEXT NOT NULL,
-    "store_id"   TEXT NOT NULL,
-    "access"     TEXT NOT NULL DEFAULT 'read_write',
-    "created_at"   BIGINT NOT NULL,
-    PRIMARY KEY ("session_id", "store_id")
-  );
-`);
-await ensureEventLogSchema(sql);
-await ensureTenantSchema(sql);
-
-// ── In-place migrations for upgrades ──────────────────────────────────
-//
-// CREATE TABLE IF NOT EXISTS leaves an existing-but-older `sessions`
-// table alone, so a self-host upgrading from a pre-Phase 1 image
-// won't get the new turn_id columns automatically. Apply ALTER TABLE
-// idempotently here. SQLite has no ADD COLUMN IF NOT EXISTS — wrap
-// in try/catch and tolerate "duplicate column" / "column ... already
-// exists" (PG) errors.
-async function addColumnIfMissing(table: string, column: string, type: string) {
-  try {
-    await sql.exec(`ALTER TABLE "${table}" ADD COLUMN "${column}" ${type}`);
-  } catch (err) {
-    const msg = (err as Error).message ?? "";
-    if (!/duplicate column name|already exists/i.test(msg)) throw err;
-  }
+await applySchema({ sql, dialect });
+await applyTenantSchema(sql);
+// Integration tables — Linear/GitHub/Slack publications, installs, dispatch
+// rules, webhook event log. Self-host runs them on the same SqlClient as
+// agents/sessions/etc; CF stays on D1 migrations.
+const platformRootSecret = process.env.PLATFORM_ROOT_SECRET;
+if (platformRootSecret) {
+  await applyIntegrationsSchema({ sql, dialect });
 }
-await addColumnIfMissing("sessions", "turn_id", "TEXT");
-await addColumnIfMissing(
-  "sessions",
-  "turn_started_at",
-  usePostgres ? "BIGINT" : "BIGINT",
-);
 
 // ─── Auth ───────────────────────────────────────────────────────────────
-//
-// better-auth on a separate sqlite file. PG-backed auth is a future-work
-// item (the kysely-adapter detection wants `pg.Pool` not `postgres.js`'s
-// Sql); for now main store can be PG while auth stays sqlite — the auth
-// file is small (<1k rows in practice) and the cost is one extra backup
-// target. AUTH_DISABLED=1 escapes back to tenant_id="default" for demos
-// that don't want to set up a user first.
 
 const authDisabled = process.env.AUTH_DISABLED === "1";
 const authDbPath = process.env.AUTH_DATABASE_PATH ?? "./data/auth.db";
-let auth: ReturnType<typeof createAuth> | null = null;
+const sender = senderFromEnv(process.env);
+
+let auth: ReturnType<typeof buildBetterAuth> | null = null;
+let authShutdown: (() => Promise<void>) | null = null;
+
 if (!authDisabled) {
-  // better-auth's kysely-adapter detects better-sqlite3 via `aggregate in db`.
-  // Lazy-import the driver so AUTH_DISABLED=1 paths don't pull it in.
-  mkdirSync(dirname(authDbPath), { recursive: true });
-  const BetterSqlite3 = (await import("better-sqlite3")).default;
-  const authDb = new BetterSqlite3(authDbPath);
-
-  // Bootstrap better-auth's schema. Mirrors what `npx @better-auth/cli
-  // generate` produces for sqlite + emailAndPassword + additionalFields
-  // (tenantId, role). Idempotent — IF NOT EXISTS on every table.
-  authDb.exec(`
-    CREATE TABLE IF NOT EXISTS "user" (
-      "id" TEXT PRIMARY KEY NOT NULL,
-      "email" TEXT NOT NULL UNIQUE,
-      "emailVerified" INTEGER NOT NULL DEFAULT 0,
-      "name" TEXT NOT NULL,
-      "image" TEXT,
-      "tenantId" TEXT,
-      "role" TEXT,
-      "createdAt" INTEGER NOT NULL,
-      "updatedAt" INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS "session" (
-      "id" TEXT PRIMARY KEY NOT NULL,
-      "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
-      "token" TEXT NOT NULL UNIQUE,
-      "expiresAt" INTEGER NOT NULL,
-      "ipAddress" TEXT,
-      "userAgent" TEXT,
-      "createdAt" INTEGER NOT NULL,
-      "updatedAt" INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS "account" (
-      "id" TEXT PRIMARY KEY NOT NULL,
-      "userId" TEXT NOT NULL REFERENCES "user"("id") ON DELETE CASCADE,
-      "accountId" TEXT NOT NULL,
-      "providerId" TEXT NOT NULL,
-      "accessToken" TEXT,
-      "refreshToken" TEXT,
-      "idToken" TEXT,
-      "accessTokenExpiresAt" INTEGER,
-      "refreshTokenExpiresAt" INTEGER,
-      "scope" TEXT,
-      "password" TEXT,
-      "createdAt" INTEGER NOT NULL,
-      "updatedAt" INTEGER NOT NULL
-    );
-    CREATE TABLE IF NOT EXISTS "verification" (
-      "id" TEXT PRIMARY KEY NOT NULL,
-      "identifier" TEXT NOT NULL,
-      "value" TEXT NOT NULL,
-      "expiresAt" INTEGER NOT NULL,
-      "createdAt" INTEGER,
-      "updatedAt" INTEGER
-    );
-  `);
-
-  auth = createAuth({
-    authDb,
-    mainSql: sql,
-    secret: process.env.BETTER_AUTH_SECRET,
-    baseURL: process.env.PUBLIC_BASE_URL,
-    google:
-      process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
-        ? {
-            clientId: process.env.GOOGLE_CLIENT_ID,
-            clientSecret: process.env.GOOGLE_CLIENT_SECRET,
-          }
-        : undefined,
-  });
+  if (usePostgres) {
+    const { Pool } = (await import("pg")) as typeof import("pg");
+    const pgPool = new Pool({ connectionString: dbUrl });
+    await applyBetterAuthSchema({ sql, dialect: "postgres" });
+    auth = buildBetterAuth({
+      database: pgPool,
+      sender,
+      secret: process.env.BETTER_AUTH_SECRET ?? randomFallback(),
+      baseURL: process.env.PUBLIC_BASE_URL,
+      googleClientId: process.env.GOOGLE_CLIENT_ID,
+      googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      requireEmailVerify: process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
+      cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
+      ensureTenant: (u) => ensureTenantSqlite(sql, u.id, u.name, u.email),
+    });
+    authShutdown = async () => {
+      await pgPool.end();
+    };
+  } else {
+    mkdirSync(dirname(authDbPath), { recursive: true });
+    const BetterSqlite3 = (await import("better-sqlite3")).default;
+    const authDb = new BetterSqlite3(authDbPath);
+    // Run the better-auth schema on the auth db via a thin SqlClient shim —
+    // applyBetterAuthSchema only uses sql.exec which maps cleanly.
+    await applyBetterAuthSchema({
+      sql: betterSqliteAsSqlClient(authDb),
+      dialect: "sqlite",
+    });
+    auth = buildBetterAuth({
+      database: authDb,
+      sender,
+      secret: process.env.BETTER_AUTH_SECRET ?? randomFallback(),
+      baseURL: process.env.PUBLIC_BASE_URL,
+      googleClientId: process.env.GOOGLE_CLIENT_ID,
+      googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      requireEmailVerify: process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
+      cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
+      ensureTenant: (u) => ensureTenantSqlite(sql, u.id, u.name, u.email),
+    });
+    authShutdown = async () => {
+      authDb.close();
+    };
+  }
 }
 
-const agentsService: AgentService = createSqliteAgentService({ client: sql });
+// ─── Stores ─────────────────────────────────────────────────────────────
 
-// Memory store: SQLite for index/audit + local filesystem for content blobs.
-// Production self-host can swap LocalFsBlobStore for an S3-compatible adapter
-// (Tigris / MinIO / etc.) — same BlobStore port.
-const memoryBlobs = new LocalFsBlobStore({
-  baseDir: process.env.MEMORY_BLOB_DIR ?? "./data/memory-blobs",
-});
-const memoryService: MemoryStoreService = createSqliteMemoryStoreService({
+const agentsService = createSqliteAgentService({ client: sql });
+const vaultService = createSqliteVaultService({ client: sql });
+const credentialService = createSqliteCredentialService({ client: sql });
+const sessionsService = createSqliteSessionService({ client: sql });
+const filesService = createSqliteFileService({ client: sql });
+const evalsService = createSqliteEvalRunService({ client: sql });
+const environmentsService = createSqliteEnvironmentService({ client: sql });
+
+let memoryBlobs: import("@open-managed-agents/memory-store").BlobStore;
+let memoryBlobDescription: string;
+let memoryBlobLocalDir: string | null = null;
+let s3MemoryConfig: {
+  endpoint: string;
+  bucket: string;
+  accessKey: string;
+  secretKey: string;
+  region: string;
+} | null = null;
+
+if (
+  process.env.MEMORY_S3_ENDPOINT &&
+  process.env.MEMORY_S3_BUCKET &&
+  process.env.MEMORY_S3_ACCESS_KEY &&
+  process.env.MEMORY_S3_SECRET_KEY
+) {
+  const { S3BlobStore } = await import(
+    "@open-managed-agents/memory-store/adapters/s3-blob"
+  );
+  s3MemoryConfig = {
+    endpoint: process.env.MEMORY_S3_ENDPOINT,
+    bucket: process.env.MEMORY_S3_BUCKET,
+    accessKey: process.env.MEMORY_S3_ACCESS_KEY,
+    secretKey: process.env.MEMORY_S3_SECRET_KEY,
+    region: process.env.MEMORY_S3_REGION ?? "us-east-1",
+  };
+  memoryBlobs = new S3BlobStore({
+    endpoint: s3MemoryConfig.endpoint,
+    bucket: s3MemoryConfig.bucket,
+    accessKeyId: s3MemoryConfig.accessKey,
+    secretAccessKey: s3MemoryConfig.secretKey,
+    region: s3MemoryConfig.region,
+  });
+  memoryBlobDescription = `s3 ${s3MemoryConfig.endpoint}/${s3MemoryConfig.bucket}`;
+} else {
+  memoryBlobLocalDir = process.env.MEMORY_BLOB_DIR ?? "./data/memory-blobs";
+  memoryBlobs = new MemoryLocalFsBlobStore({ baseDir: memoryBlobLocalDir });
+  memoryBlobDescription = `localfs ${memoryBlobLocalDir}`;
+}
+
+const memoryService = createSqliteMemoryStoreService({
   client: sql,
   blobs: memoryBlobs,
 });
+const memoryRepo = new SqlMemoryRepo(sql);
+// Memory blob watcher — wires chokidar fs events through
+// packages/queue's processMemoryEvent so CF + Node share one upsert
+// code path. PG mode uses the multi-replica-safe PG queue table; SQLite
+// single-instance uses an in-memory queue. Set MEMORY_QUEUE=disabled to
+// skip wiring and fall back to the legacy direct-call watcher.
+const useQueue = (process.env.MEMORY_QUEUE ?? "auto") !== "disabled";
+const memoryWatcher = memoryBlobLocalDir && useQueue
+  ? await startNodeMemoryQueue({
+      mode: usePostgres ? "pg" : "in-memory",
+      sql: usePostgres ? sql : undefined,
+      memoryRepo,
+      memoryBlobs,
+      memoryRoot: memoryBlobLocalDir,
+    })
+  : memoryBlobLocalDir
+    ? startMemoryBlobWatcher({ memoryRoot: memoryBlobLocalDir, memoryRepo })
+    : { stop: async () => {} };
 
-// Bridge agent fs writes (LocalSubprocessSandbox writes through symlinked
-// /mnt/memory/<storeName>/) → SQL memories index. Plays the same role as
-// the CF R2 event → Queue → memory-events consumer pipeline. Uses the
-// same memoryRepo.upsertFromEvent / deleteFromEvent entry points.
-const memoryWatcher = startMemoryBlobWatcher({
-  memoryRoot: memoryBlobs.baseDir,
-  memoryRepo: new SqlMemoryRepo(sql),
-});
+let s3Poller: { stop: () => Promise<void> } | null = null;
+if (s3MemoryConfig) {
+  await applyMemoryPollerSchema({ sql, dialect });
+  const replicaId = `replica_${process.pid}_${Math.floor(Math.random() * 1e9).toString(36)}`;
+  const intervalSec = Number(process.env.MEMORY_S3_POLL_INTERVAL_SEC ?? 30);
+  const { startS3MemoryPoller } = await import("./lib/s3-memory-poller.js");
+  s3Poller = await startS3MemoryPoller({
+    sql,
+    sqlDialect: dialect,
+    memoryRepo,
+    replicaId,
+    intervalMs: Math.max(5_000, intervalSec * 1000),
+    s3: s3MemoryConfig,
+  });
+}
 
-// Session outputs root: backing store for /mnt/session/outputs/ — the
-// AMA-aligned magic dir an agent writes deliverable artefacts into.
-// LocalSubprocessSandbox symlinks <workdir>/.mnt/session/outputs →
-// <outputsRoot>/<tenant>/<session>/; GET /v1/sessions/:id/outputs serves
-// from the same root.
 const outputsRoot = process.env.SESSION_OUTPUTS_DIR ?? "./data/session-outputs";
 mkdirSync(outputsRoot, { recursive: true });
 
-// Vaults: per-tenant credential containers. Created via REST, consumed by
-// the oma-vault sidecar (apps/oma-vault) which reads the same sqlite file.
-const vaultService: VaultService = createSqliteVaultService({ client: sql });
-const credentialService: CredentialService = createSqliteCredentialService({ client: sql });
-
-const hub = new InProcessEventStreamHub();
-
-// ─── Crash-recovery scan ─────────────────────────────────────────────────
+// ─── Files-store blob backend ────────────────────────────────────────
 //
-// Mirrors what SessionDO does inside ensureSchema(): on cold start, find
-// orphan in-flight state from before the last process death and reconcile.
-// Two categories:
-//   - sessions with status='running': the process that owned them is gone;
-//     append a session.error event so SSE clients learn what happened, then
-//     flip status to 'idle'.
-//   - streams with status='streaming': finalize as 'interrupted' so the
-//     events log stays consistent (mirrors recovery.ts on the CF side).
+// Keyed off FILES_S3_* env vars; falls back to a local-FS adapter under
+// FILES_BLOB_DIR (default ./data/files-blobs). The blob store backs both
+// the files-store table content AND workspace_backups tar archives —
+// same single store, two key prefixes.
 
-// Orphan-session recovery now lives in SessionRegistry.bootstrap()
-// (constructed below, after buildSandbox / buildTools / etc are
-// defined). It calls SessionStateMachine.onWake on every session whose
-// row was left status='running' by a prior process — same code path
-// that CF SessionDO will run on alarm() in Phase 3, sourced from
-// @open-managed-agents/session-runtime.
+let filesBlob: BlobStore;
+let filesBlobDescription: string;
+if (
+  process.env.FILES_S3_ENDPOINT &&
+  process.env.FILES_S3_BUCKET &&
+  process.env.FILES_S3_ACCESS_KEY &&
+  process.env.FILES_S3_SECRET_KEY
+) {
+  filesBlob = new FilesS3BlobStore({
+    endpoint: process.env.FILES_S3_ENDPOINT,
+    bucket: process.env.FILES_S3_BUCKET,
+    accessKeyId: process.env.FILES_S3_ACCESS_KEY,
+    secretAccessKey: process.env.FILES_S3_SECRET_KEY,
+    region: process.env.FILES_S3_REGION ?? "us-east-1",
+  });
+  filesBlobDescription = `s3 ${process.env.FILES_S3_ENDPOINT}/${process.env.FILES_S3_BUCKET}`;
+} else {
+  const filesBlobDir = process.env.FILES_BLOB_DIR ?? "./data/files-blobs";
+  mkdirSync(filesBlobDir, { recursive: true });
+  filesBlob = new FilesLocalFsBlobStore({ baseDir: filesBlobDir });
+  filesBlobDescription = `localfs ${filesBlobDir}`;
+}
 
-// ─── Helpers ─────────────────────────────────────────────────────────────
+const workspaceBackups = new NodeWorkspaceBackupService({
+  sql,
+  blobs: filesBlob,
+});
+
+const sandboxOrchestrator = new DefaultSandboxOrchestrator({
+  backups: workspaceBackups,
+});
+
+// ─── Hub + event log ────────────────────────────────────────────────────
 
 function newEventLog(sessionId: string): SqlEventLog {
-  // stamp closure mirrors SessionDO's inline stamp: fill id + processed_at
-  // on every appended event so SSE consumers can dedupe and order safely.
   return new SqlEventLog(sql, sessionId, (e) => {
     const ev = e as SessionEvent & { id?: string; processed_at?: string };
     if (!ev.id) ev.id = `sevt_${generateEventId()}`;
@@ -417,265 +376,18 @@ function newEventLog(sessionId: string): SqlEventLog {
   });
 }
 
-// ─── HTTP ────────────────────────────────────────────────────────────────
-
-const app = new Hono<{
-  Variables: { tenant_id: string; user_id?: string };
-}>();
-
-app.get("/health", (c) =>
-  c.json({
-    status: "ok",
-    runtime: "node",
-    pid: process.pid,
-    uptime_s: Math.round(process.uptime()),
-    auth: authDisabled ? "disabled" : "better-auth",
-    backends: {
-      agents: usePostgres ? "postgres" : "sqlite",
-      events: usePostgres ? "postgres" : "sqlite",
-      hub: "in-process",
-      db: backendDescription,
-    },
-  }),
-);
-
-// /auth-info — public endpoint the console hits on every page load to
-// decide which auth providers to render. Mirrors apps/main/src/index.ts.
-app.get("/auth-info", (c) =>
-  c.json({
-    providers: authDisabled
-      ? []
-      : [
-          "email",
-          // Only advertise email-otp when the operator opted into a real
-          // verification gate. Default self-host (no SMTP) skips OTP so
-          // Console takes the user straight from sign-up → app, avoiding
-          // a verify screen with no way to receive the code.
-          ...(process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1"
-            ? ["email-otp"]
-            : []),
-          ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
-            ? ["google"]
-            : []),
-        ],
-    // Turnstile not wired on the self-host side. Console renders without
-    // captcha when this is null.
-    turnstile_site_key: null,
-  }),
-);
-
-// Mount better-auth's request handler. Catches /auth/sign-up/email,
-// /auth/sign-in/email, /auth/sign-out, /auth/get-session, etc.
-// Auth-disabled mode exposes nothing here — any request to /auth/* will
-// 404, which is the correct signal: there's no auth to interact with.
-// Path matches apps/main (CF) so the same console build can hit either.
-if (auth) {
-  app.on(["GET", "POST"], "/auth/*", (c) => auth!.handler(c.req.raw));
+let hub: EventStreamHub;
+if (usePostgres) {
+  hub = await PgEventStreamHub.create({
+    dsn: dbUrl,
+    fetchEventsAfter: (sid, afterSeq) => newEventLog(sid).getEventsAsync(afterSeq),
+  });
+} else {
+  hub = new InProcessEventStreamHub();
 }
 
-// Auth gate for the data-plane routes.
-const authMw = createAuthMiddleware({
-  auth: auth ?? ({} as ReturnType<typeof createAuth>),
-  mainSql: sql,
-  disabled: authDisabled,
-});
+// ─── Sandbox factory ────────────────────────────────────────────────────
 
-const v1 = new Hono<{
-  Variables: { tenant_id: string; user_id?: string };
-}>();
-v1.use("*", authMw);
-
-// ── Agents (Phase B2 — unchanged) ────────────────────────────────────────
-
-v1.post("/agents", async (c) => {
-  const body = await c.req.json<{
-    name: string;
-    model: string | { id: string; speed?: "standard" | "fast" };
-    system?: string;
-    tools?: AgentConfig["tools"];
-    description?: string;
-  }>();
-  if (!body.name) return c.json({ error: "name is required" }, 400);
-  if (!body.model) return c.json({ error: "model is required" }, 400);
-  const row = await agentsService.create({
-    tenantId: c.var.tenant_id,
-    input: {
-      name: body.name,
-      model: body.model,
-      system: body.system,
-      tools: body.tools,
-      description: body.description,
-    },
-  });
-  return c.json(toApiAgent(row), 201);
-});
-
-v1.get("/agents", async (c) => {
-  const rows = await agentsService.list({ tenantId: c.var.tenant_id });
-  return c.json({ data: rows.map(toApiAgent) });
-});
-
-v1.get("/agents/:id", async (c) => {
-  const row = await agentsService.get({ tenantId: c.var.tenant_id, agentId: c.req.param("id") });
-  if (!row) return c.json({ error: "Agent not found" }, 404);
-  return c.json(toApiAgent(row));
-});
-
-v1.put("/agents/:id", async (c) => {
-  const body = await c.req.json<{
-    name?: string;
-    system?: string | null;
-    description?: string | null;
-    version?: number;
-  }>();
-  try {
-    const row = await agentsService.update({
-      tenantId: c.var.tenant_id,
-      agentId: c.req.param("id"),
-      expectedVersion: body.version,
-      input: { name: body.name, system: body.system, description: body.description },
-    });
-    return c.json(toApiAgent(row));
-  } catch (err) {
-    if (err instanceof AgentVersionMismatchError) {
-      return c.json({ error: "Version mismatch" }, 409);
-    }
-    if (err instanceof AgentNotFoundError) {
-      return c.json({ error: "Agent not found" }, 404);
-    }
-    throw err;
-  }
-});
-
-// ── Sessions (Phase B-resume) ────────────────────────────────────────────
-
-v1.post("/sessions", async (c) => {
-  const body = await c.req
-    .json<{ agent_id?: string; title?: string }>()
-    .catch(() => ({}) as { agent_id?: string; title?: string });
-  // Validate agent if provided. Sessions without an agent only support
-  // _test_emit injection — they can't run a harness loop.
-  if (body.agent_id) {
-    const agent = await agentsService.get({ tenantId: c.var.tenant_id, agentId: body.agent_id });
-    if (!agent) return c.json({ error: "Agent not found" }, 404);
-  }
-  const id = `sess_${nanoid(20)}`;
-  const now = Date.now();
-  await sql
-    .prepare(
-      `INSERT INTO sessions (id, tenant_id, agent_id, status, title, created_at, updated_at)
-       VALUES (?, ?, ?, 'idle', ?, ?, ?)`,
-    )
-    .bind(id, c.var.tenant_id, body.agent_id ?? null, body.title ?? null, now, now)
-    .run();
-  return c.json({ id, agent_id: body.agent_id ?? null, status: "idle", title: body.title ?? null }, 201);
-});
-
-// List sessions for the current tenant. Console renders this on the
-// Sessions page; agent-specific filtering via ?agent_id=... matches the
-// CF route's query params.
-v1.get("/sessions", async (c) => {
-  const agentFilter = c.req.query("agent_id");
-  const limit = Math.min(Number(c.req.query("limit") ?? 50), 200);
-  const where = agentFilter
-    ? `WHERE tenant_id = ? AND agent_id = ?`
-    : `WHERE tenant_id = ?`;
-  const binds = agentFilter ? [c.var.tenant_id, agentFilter] : [c.var.tenant_id];
-  const rows = await sql
-    .prepare(
-      `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
-       ${where} ORDER BY created_at DESC LIMIT ?`,
-    )
-    .bind(...binds, limit)
-    .all<{
-      id: string;
-      agent_id: string | null;
-      status: string;
-      title: string | null;
-      created_at: number;
-      updated_at: number;
-    }>();
-  return c.json({ data: rows.results ?? [] });
-});
-
-v1.get("/sessions/:id", async (c) => {
-  const row = await sql
-    .prepare(
-      `SELECT id, agent_id, status, title, created_at, updated_at FROM sessions
-       WHERE tenant_id = ? AND id = ?`,
-    )
-    .bind(c.var.tenant_id, c.req.param("id"))
-    .first<{
-      id: string;
-      agent_id: string | null;
-      status: string;
-      title: string | null;
-      created_at: number;
-      updated_at: number;
-    }>();
-  if (!row) return c.json({ error: "Session not found" }, 404);
-  return c.json(row);
-});
-
-// POST /v1/sessions/:id/events — append events to the log and (if a
-// user.message is among them and the session is bound to an agent) drive
-// one harness turn. Mirrors apps/main's /v1/sessions/:id/events route +
-// SessionDO's onUserMessage path, condensed onto the Node side.
-v1.post("/sessions/:id/events", async (c) => {
-  const sid = c.req.param("id");
-  const session = await sql
-    .prepare(`SELECT id, agent_id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first<{ id: string; agent_id: string | null }>();
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const body = await c.req.json<{ events: SessionEvent[] }>();
-  if (!Array.isArray(body.events)) return c.json({ error: "events array required" }, 400);
-
-  const log = newEventLog(sid);
-  for (const ev of body.events) await log.appendAsync(ev);
-  // Re-read so we can deliver hub publishes with their assigned seq.
-  const stored = await log.getEventsAsync();
-  const newOnes = stored.slice(-body.events.length);
-  for (const ev of newOnes) hub.publish(sid, ev);
-
-  // If any of the new events is a user.message and the session has an
-  // agent bound, kick a harness turn through the registry. Fire-and-forget
-  // — the SSE client gets streamed agent.message_chunk events as the LLM
-  // runs.
-  const hasUserMessage = body.events.some((e) => e.type === "user.message");
-  if (hasUserMessage && session.agent_id) {
-    const userMessage = body.events.find(
-      (e) => e.type === "user.message",
-    ) as UserMessageEvent;
-    const agentId = session.agent_id;
-    void sessionRegistry
-      .getOrCreate(sid, c.var.tenant_id)
-      .then((entry) => entry.machine.runHarnessTurn(agentId, userMessage))
-      .catch((err) => {
-        console.error("[main-node] harness turn failed", err);
-        // Surface as session.error so SSE clients learn the turn died.
-        void log.appendAsync({
-          type: "session.error",
-          error: "harness_turn_failed",
-          message: err instanceof Error ? err.message : String(err),
-        } as unknown as SessionEvent);
-      });
-  }
-
-  return c.json({ accepted: body.events.length, harness_triggered: hasUserMessage && !!session.agent_id }, 202);
-});
-
-/**
- * Pick a sandbox backend per env. Defaults to LocalSubprocessSandbox for
- * trusted-dev usage; remote/isolated backends opt in via SANDBOX_PROVIDER.
- *
- * Dependency-inverted: this function knows ONLY a name → import-path
- * map. Each adapter exports a `sandboxFactory: SandboxFactory` (defined
- * in `packages/sandbox/src/ports.ts`) that reads its own env vars
- * (DAYTONA_API_KEY, BOXRUN_URL, etc.) inside its own file. Adding a 7th
- * sandbox = create the file + register a name here. main-node never
- * grows an `if` chain.
- */
 const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
   subprocess: "@open-managed-agents/sandbox/adapters/local-subprocess",
   litebox: "@open-managed-agents/sandbox/adapters/litebox",
@@ -693,13 +405,9 @@ async function buildSandbox(
   const path = SANDBOX_PROVIDER_PATHS[provider];
   if (!path) {
     throw new Error(
-      `SANDBOX_PROVIDER=${provider} not recognized; valid values: ${Object.keys(
-        SANDBOX_PROVIDER_PATHS,
-      ).join(", ")}`,
+      `SANDBOX_PROVIDER=${provider} not recognized; valid: ${Object.keys(SANDBOX_PROVIDER_PATHS).join(", ")}`,
     );
   }
-  // Dynamic import so deps the operator hasn't installed (e.g.
-  // @daytonaio/sdk in a litebox-only deploy) don't crash startup.
   const mod = (await import(path)) as {
     sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
   };
@@ -707,64 +415,25 @@ async function buildSandbox(
     {
       sessionId,
       workdir,
-      // Memory blob root — adapters that mount via host-fs (LocalSubprocess)
-      // read this; remote ones (Daytona/E2B) ignore it and use s3fs.
-      memoryRoot: memoryBlobs.baseDir,
-      // Session outputs root — same shape as memoryRoot. LocalSubprocess
-      // symlinks per-(tenant,session) dirs under here when
-      // mountSessionOutputs is called.
+      memoryRoot: memoryBlobLocalDir ?? "",
       outputsRoot,
     },
     process.env,
   );
 }
 
-/**
- * SessionRegistry — single source of session lifecycle, shared by the
- * /v1/sessions/:id/events route, the bootstrap recovery sweep, and any
- * future reconciliation callers. The registry holds the per-process
- * deps in its closure and lazily builds a SessionStateMachine per
- * active session.
- *
- * What used to live as the inline `runHarnessTurn` function below is
- * now SessionStateMachine.runHarnessTurn (in the @open-managed-agents/
- * session-runtime package). Same body, different home.
- */
+// ─── Session registry ───────────────────────────────────────────────────
+
 const sessionRegistry = new SessionRegistry({
   sql,
   hub,
   agentsService,
   memoryService,
+  sandboxOrchestrator,
   newEventLog,
   buildSandbox,
   sandboxWorkdirRoot: process.env.SANDBOX_WORKDIR ?? "./data/sandboxes",
-  buildMemoryMounter: (sessionId, tenantId) => async ({ sandbox }) => {
-    const memoryBindings = await sql
-      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
-      .bind(sessionId)
-      .all<{ store_id: string; access: string }>();
-    for (const binding of memoryBindings.results ?? []) {
-      const store = await memoryService.getStore({ tenantId, storeId: binding.store_id });
-      if (!store) continue;
-      if (!sandbox.mountMemoryStore) continue;
-      await sandbox.mountMemoryStore({
-        storeName: store.name,
-        storeId: binding.store_id,
-        readOnly: binding.access === "read_only",
-      });
-    }
-  },
-  buildSessionOutputsMounter: (sessionId, tenantId) => async ({ sandbox }) => {
-    if (!sandbox.mountSessionOutputs) return;
-    try {
-      await sandbox.mountSessionOutputs({ tenantId, sessionId });
-    } catch (err) {
-      console.warn(
-        `[main-node] mountSessionOutputs failed session=${sessionId.slice(0, 12)}:`,
-        err,
-      );
-    }
-  },
+  sqlDialect: dialect,
   buildModel: (agent) => {
     const apiKey = process.env.ANTHROPIC_API_KEY;
     if (!apiKey) throw new Error("ANTHROPIC_API_KEY env var required for harness turns");
@@ -782,14 +451,10 @@ const sessionRegistry = new SessionRegistry({
     return buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: apiKey,
       ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
-      // toMarkdown wired via @open-managed-agents/markdown's Node adapter.
       toMarkdown: toMarkdownProvider,
     });
   },
   buildHarness: () => {
-    // Wrap DefaultHarness to satisfy the machine's looser ctx type;
-    // we hand it a HarnessContext we built ourselves in
-    // buildHarnessContext, so the cast is safe.
     const h = new DefaultHarness();
     return { run: (ctx: unknown) => h.run(ctx as HarnessContext) };
   },
@@ -802,12 +467,9 @@ const sessionRegistry = new SessionRegistry({
       hub,
       sandbox: input.sandbox,
     });
-    // Read the event log into the runtime's SqlHistoryStore cache so
-    // default-loop's eventsToMessages projection sees the conversation
-    // context BEFORE harness.run reads from it.
     await runtime.refreshHistory();
     const rawSystemPrompt = input.agent.system ?? "";
-    const ctx: HarnessContext = {
+    return {
       agent: input.agent,
       userMessage: input.userMessage,
       session_id: input.sessionId,
@@ -820,465 +482,322 @@ const sessionRegistry = new SessionRegistry({
         ANTHROPIC_BASE_URL: process.env.ANTHROPIC_BASE_URL,
       },
       runtime,
-    };
-    return ctx;
+    } satisfies HarnessContext;
   },
 });
 
-// Bootstrap orphan recovery: replaces the inline restoreInterruptedSessions
-// pre-loop with the unified machine.onWake path. Anything left status='running'
-// from a prior process gets reconciled (placeholder events injected,
-// status flipped to 'idle') the same way CF will after Phase 3.
 await sessionRegistry.bootstrap();
 
-// POST /v1/sessions/:id/_test_emit — manual event injector. Stand-in for
-// what a real harness loop does when an LLM produces an agent.message.
-// Lets the PoC demo crash-recovery without wiring a full agent loop.
-v1.post("/sessions/:id/_test_emit", async (c) => {
-  const sid = c.req.param("id");
-  const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first();
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const body = await c.req
-    .json<{ text?: string }>()
-    .catch(() => ({}) as { text?: string });
-  const ev: SessionEvent = {
-    type: "agent.message",
-    content: [{ type: "text", text: body.text ?? `tick at ${new Date().toISOString()}` }],
-  } as unknown as SessionEvent;
-  const log = newEventLog(sid);
-  await log.appendAsync(ev);
-  const stored = await log.getEventsAsync();
-  const last = stored[stored.length - 1];
-  hub.publish(sid, last);
-  return c.json({ emitted: last }, 202);
-});
+// ─── Services bundle ────────────────────────────────────────────────────
 
-// GET /v1/sessions/:id/events/stream — SSE with crash-recovery via
-// Last-Event-ID. The browser's EventSource API auto-reconnects with the
-// last received id; curl can pass `-H 'Last-Event-ID: <seq>'` to resume.
-v1.get("/sessions/:id/events/stream", async (c) => {
-  const sid = c.req.param("id");
-  const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first();
-  if (!session) return c.json({ error: "Session not found" }, 404);
+const kv = new SqlKvStore({ sql, tenantId: "default" });
 
-  const lastSeen = parseLastEventId(c.req.header("Last-Event-ID"));
-  const log = newEventLog(sid);
-
-  // Replay history from after the client's last seen event. EventSource
-  // will pick this up as a normal stream.
-  const history = await log.getEventsAsync(lastSeen);
-
-  let writer: EventWriter | null = null;
-  let off: (() => void) | null = null;
-
-  const stream = new ReadableStream<Uint8Array>({
-    start(controller) {
-      const enc = new TextEncoder();
-      writer = {
-        closed: false,
-        write(ev) {
-          const seq = (ev as { seq?: number }).seq;
-          const id = seq !== undefined ? `id: ${seq}\n` : "";
-          try {
-            controller.enqueue(enc.encode(`${id}data: ${JSON.stringify(ev)}\n\n`));
-          } catch {
-            this.closed = true;
-          }
-        },
-        close() {
-          if (this.closed) return;
-          this.closed = true;
-          try {
-            controller.close();
-          } catch {
-            // already closed
-          }
-        },
-      };
-
-      // Send the SSE retry hint so EventSource reconnects fast (default
-      // browser is 3s; we lower to 1s for snappier recovery in the demo).
-      controller.enqueue(enc.encode("retry: 1000\n\n"));
-
-      // Replay first, then subscribe so live events that landed during
-      // replay also reach the client.
-      for (const ev of history) writer.write(ev);
-
-      off = hub.attach(sid, writer);
+const services: RouteServices = {
+  sql,
+  agents: agentsService,
+  vaults: vaultService,
+  credentials: credentialService,
+  memory: memoryService,
+  sessions: sessionsService,
+  kv,
+  newEventLog,
+  hub: {
+    publish: (sid, ev) => hub.publish(sid, ev as SessionEvent),
+    attach: (sid, writer) => hub.attach(sid, writer),
+  },
+  sessionRegistry: {
+    enqueueUserMessage: (sid, tenantId, agentId, ev) => {
+      void sessionRegistry
+        .getOrCreate(sid, tenantId)
+        .then((entry) =>
+          entry.machine.runHarnessTurn(agentId, ev as import("@open-managed-agents/shared").UserMessageEvent),
+        )
+        .catch((err) => {
+          logger.error(
+            { err, op: "session.harness_turn.failed", session_id: sid, agent_id: agentId },
+            "harness turn failed",
+          );
+          void newEventLog(sid).appendAsync({
+            type: "session.error",
+            error: "harness_turn_failed",
+            message: err instanceof Error ? err.message : String(err),
+          } as unknown as SessionEvent);
+        });
     },
-    cancel() {
-      // Client disconnected.
-      off?.();
-      writer?.close();
+    interrupt: (sid) => {
+      sessionRegistry.interrupt?.(sid);
     },
-  });
-
-  // Some Hono+Node combos drop the cancel signal silently if the request
-  // is aborted mid-flight; piggyback on the abort signal too.
-  c.req.raw.signal.addEventListener("abort", () => {
-    off?.();
-    writer?.close();
-  });
-
-  return new Response(stream, {
-    headers: {
-      "content-type": "text/event-stream",
-      "cache-control": "no-cache, no-transform",
-      "x-accel-buffering": "no",
+  },
+  background: {
+    run: (p) => {
+      void p.catch((err) =>
+        logger.error({ err, op: "main-node.background.failed" }, "background task failed"),
+      );
     },
+  },
+  outputsRoot,
+  logger,
+  metrics,
+  tracer,
+};
+
+// ─── API key storage (SQL) ──────────────────────────────────────────────
+
+const apiKeyStorage: ApiKeyStorage = {
+  async insert({ id, hash, prefix, record }) {
+    await sql
+      .prepare(
+        `INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, hash, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        id,
+        record.tenant_id,
+        record.user_id ?? null,
+        record.name,
+        prefix,
+        hash,
+        Date.parse(record.created_at),
+      )
+      .run();
+  },
+  async listByTenant(tenantId) {
+    const r = await sql
+      .prepare(
+        `SELECT id, name, prefix, created_at FROM api_keys
+          WHERE tenant_id = ? AND revoked_at IS NULL
+          ORDER BY created_at DESC`,
+      )
+      .bind(tenantId)
+      .all<{ id: string; name: string; prefix: string; created_at: number }>();
+    return (r.results ?? []).map<ApiKeyMeta>((row) => ({
+      id: row.id,
+      name: row.name,
+      prefix: row.prefix,
+      created_at: new Date(row.created_at).toISOString(),
+    }));
+  },
+  async findByHash(hash) {
+    const row = await sql
+      .prepare(
+        `SELECT id, tenant_id, user_id, name, created_at FROM api_keys
+          WHERE hash = ? AND revoked_at IS NULL`,
+      )
+      .bind(hash)
+      .first<{
+        id: string;
+        tenant_id: string;
+        user_id: string | null;
+        name: string;
+        created_at: number;
+      }>();
+    if (!row) return null;
+    const rec: ApiKeyRecord = {
+      id: row.id,
+      tenant_id: row.tenant_id,
+      ...(row.user_id ? { user_id: row.user_id } : {}),
+      name: row.name,
+      created_at: new Date(row.created_at).toISOString(),
+    };
+    return rec;
+  },
+  async deleteById(tenantId, id) {
+    const r = await sql
+      .prepare(
+        `UPDATE api_keys SET revoked_at = ? WHERE tenant_id = ? AND id = ? AND revoked_at IS NULL`,
+      )
+      .bind(Date.now(), tenantId, id)
+      .run();
+    return (r.meta?.changes ?? 0) > 0;
+  },
+};
+
+// ─── HTTP ───────────────────────────────────────────────────────────────
+
+const app = new Hono<{
+  Variables: { tenant_id: string; user_id?: string };
+}>();
+
+// Observability middleware first so it captures auth failures, rate-limit
+// rejects, and unhandled exceptions. Mirrors apps/main's CF wiring.
+app.use("*", requestMetrics({ recorder: metrics }));
+app.use("*", tracerMiddleware({ tracer }));
+
+// Prometheus scrape endpoint. When METRICS_BIND_TOKEN is set, callers must
+// pass it in `x-metrics-token`; absent, the endpoint is open on the same
+// port (acceptable for self-host single-operator deploys, documented in
+// .env.example). For prod, ops should either set the token or front the
+// app with a reverse proxy that filters /metrics.
+const metricsToken = process.env.METRICS_BIND_TOKEN;
+app.get("/metrics", async (c) => {
+  if (metricsToken && c.req.header("x-metrics-token") !== metricsToken) {
+    return c.text("forbidden", 403);
+  }
+  const text = await metrics.getPromText();
+  return new Response(text, {
+    headers: { "Content-Type": metrics.promContentType() },
   });
 });
 
-// ── Memory stores (Phase B-memory) ───────────────────────────────────────
-//
-// REST API for the Anthropic-aligned managed memory contract. Inside the
-// sandbox, agents access memory stores as filesystem mounts at
-// `/mnt/memory/<store_name>/` using the standard file tools — no bespoke
-// memory_* tools. The Node-side LocalSubprocessSandbox doesn't support
-// real FUSE mounts so the agent path is currently REST-only; mount support
-// lands when the sandbox grows it (E2B already supports it via s3fs).
-
-v1.post("/memory_stores", async (c) => {
-  const body = await c.req.json<{ name: string; description?: string }>();
-  if (!body.name) return c.json({ error: "name is required" }, 400);
-  const row = await memoryService.createStore({
-    tenantId: c.var.tenant_id,
-    name: body.name,
-    description: body.description,
-  });
-  return c.json(row, 201);
-});
-
-v1.get("/memory_stores", async (c) => {
-  const rows = await memoryService.listStores({
-    tenantId: c.var.tenant_id,
-    includeArchived: c.req.query("include_archived") === "true",
-  });
-  return c.json({ data: rows });
-});
-
-v1.get("/memory_stores/:id", async (c) => {
-  const row = await memoryService.getStore({
-    tenantId: c.var.tenant_id,
-    storeId: c.req.param("id"),
-  });
-  if (!row) return c.json({ error: "Memory store not found" }, 404);
-  return c.json(row);
-});
-
-v1.post("/memory_stores/:id/memories", async (c) => {
-  const body = await c.req.json<{
-    path: string;
-    content: string;
-    precondition?: { type: "content_sha256"; content_sha256: string } | { type: "not_exists" };
-  }>();
-  if (!body.path || body.content === undefined) {
-    return c.json({ error: "path and content are required" }, 400);
-  }
-  try {
-    const row = await memoryService.writeByPath({
-      tenantId: c.var.tenant_id,
-      storeId: c.req.param("id"),
-      path: body.path,
-      content: body.content,
-      precondition: body.precondition,
-      actor: { type: "user", id: c.var.user_id ?? c.var.tenant_id },
-    });
-    return c.json(row, 201);
-  } catch (err) {
-    return c.json({ error: (err as Error).message }, 400);
-  }
-});
-
-v1.get("/memory_stores/:id/memories", async (c) => {
-  const rows = await memoryService.listMemories({
-    tenantId: c.var.tenant_id,
-    storeId: c.req.param("id"),
-    pathPrefix: c.req.query("path_prefix") ?? undefined,
-  });
-  return c.json({ data: rows });
-});
-
-v1.get("/memory_stores/:id/memories/:mid", async (c) => {
-  const row = await memoryService.readById({
-    tenantId: c.var.tenant_id,
-    storeId: c.req.param("id"),
-    memoryId: c.req.param("mid"),
-  });
-  if (!row) return c.json({ error: "Memory not found" }, 404);
-  return c.json(row);
-});
-
-// ── Session ↔ memory_store bindings ───────────────────────────────────────
-//
-// On CF the binding lives in session_resources(type="memory_store"); here we
-// keep a thin session_memory_stores table — same row shape (session_id,
-// store_id, access). When the harness runs we look these up and call
-// sandbox.mountMemoryStore for each, which symlinks /mnt/memory/<storeName>
-// into the BlobStore's on-disk dir. The agent reads/writes through normal
-// file tools.
-
-v1.post("/sessions/:id/memory_stores", async (c) => {
-  const sid = c.req.param("id");
-  const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first();
-  if (!session) return c.json({ error: "Session not found" }, 404);
-  const body = await c.req.json<{ store_id: string; access?: string }>();
-  if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
-  const store = await memoryService.getStore({ tenantId: c.var.tenant_id, storeId: body.store_id });
-  if (!store) return c.json({ error: "Memory store not found" }, 404);
-  const access = body.access === "read_only" ? "read_only" : "read_write";
-  await sql
-    .prepare(
-      `INSERT INTO session_memory_stores (session_id, store_id, access, created_at)
-       VALUES (?, ?, ?, ?)
-       ON CONFLICT(session_id, store_id) DO UPDATE SET access = excluded.access`,
-    )
-    .bind(sid, body.store_id, access, Date.now())
-    .run();
-  return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
-});
-
-v1.get("/sessions/:id/memory_stores", async (c) => {
-  const sid = c.req.param("id");
-  const rows = await sql
-    .prepare(`SELECT store_id, access, created_at FROM session_memory_stores WHERE session_id = ?`)
-    .bind(sid)
-    .all<{ store_id: string; access: string; created_at: number }>();
-  return c.json({ data: rows.results ?? [] });
-});
-
-// ── Session outputs (/mnt/session/outputs/) ──────────────────────────────
-//
-// Mirrors apps/main's GET /v1/sessions/:id/outputs[/:filename] (R2-backed
-// on CF, host-fs-backed here). The sandbox writes to /mnt/session/outputs/
-// which is symlinked to <outputsRoot>/<tenant>/<session>/; the routes below
-// read from the same dir.
-
-const sessionOutputsDir = (tenantId: string, sessionId: string): string =>
-  resolvePath(outputsRoot, tenantId, sessionId);
-
-v1.get("/sessions/:id/outputs", async (c) => {
-  const sid = c.req.param("id");
-  const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first();
-  if (!session) return c.json({ error: "Session not found" }, 404);
-
-  const dir = sessionOutputsDir(c.var.tenant_id, sid);
-  let entries: string[];
-  try {
-    entries = await fsReaddir(dir);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return c.json({ data: [], has_more: false });
-    }
-    throw err;
-  }
-
-  const data: Array<{
-    filename: string;
-    size_bytes: number;
-    uploaded_at: string;
-    media_type: string;
-  }> = [];
-  for (const filename of entries) {
-    try {
-      const st = await fsStat(join(dir, filename));
-      if (!st.isFile()) continue;
-      data.push({
-        filename,
-        size_bytes: st.size,
-        uploaded_at: new Date(st.mtimeMs).toISOString(),
-        media_type: guessSessionOutputMime(filename),
-      });
-    } catch {
-      // skip unreadable entries
-    }
-  }
-  return c.json({ data, has_more: false });
-});
-
-v1.get("/sessions/:id/outputs/:filename", async (c) => {
-  const sid = c.req.param("id");
-  const filename = c.req.param("filename");
-  // Path traversal guard — filename must be a single component.
-  if (filename.includes("..") || filename.includes("/") || filename.includes("\\")) {
-    return c.json({ error: "Invalid filename" }, 400);
-  }
-
-  const session = await sql
-    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
-    .bind(c.var.tenant_id, sid)
-    .first();
-  if (!session) return c.json({ error: "Session not found" }, 404);
-
-  const full = join(sessionOutputsDir(c.var.tenant_id, sid), filename);
-  let st;
-  try {
-    st = await fsStat(full);
-    if (!st.isFile()) return c.json({ error: "Output file not found" }, 404);
-  } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-      return c.json({ error: "Output file not found" }, 404);
-    }
-    throw err;
-  }
-
-  const nodeStream = createReadStream(full);
-  // Convert the node Readable into a Web ReadableStream for Hono.
-  const webStream = Readable.toWeb(nodeStream) as unknown as ReadableStream<Uint8Array>;
-  return new Response(webStream, {
-    headers: {
-      "Content-Type": guessSessionOutputMime(filename),
-      "Content-Length": String(st.size),
-      "Content-Disposition": `attachment; filename="${filename}"`,
+app.get("/health", (c) =>
+  c.json({
+    status: "ok",
+    runtime: "node",
+    pid: process.pid,
+    uptime_s: Math.round(process.uptime()),
+    auth: authDisabled
+      ? "disabled"
+      : usePostgres
+        ? "better-auth-pg"
+        : "better-auth-sqlite",
+    backends: {
+      agents: dialect,
+      events: dialect,
+      hub: usePostgres ? "pg-notify" : "in-process",
+      memory_blobs: memoryBlobDescription,
+      db: backendDescription,
     },
-  });
+  }),
+);
+
+app.get("/auth-info", (c) =>
+  c.json({
+    providers: authDisabled
+      ? []
+      : [
+          "email",
+          ...(process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1" ? ["email-otp"] : []),
+          ...(process.env.GOOGLE_CLIENT_ID && process.env.GOOGLE_CLIENT_SECRET
+            ? ["google"]
+            : []),
+        ],
+    turnstile_site_key: null,
+  }),
+);
+
+if (auth) {
+  app.on(["GET", "POST"], "/auth/*", (c) => auth!.handler(c.req.raw));
+}
+
+// Auth middleware via packages/auth — same five-priority resolution as
+// apps/main on CF.
+const authMw = buildAuthMw({
+  disabled: authDisabled,
+  bypassPath: (path) => path === "/health" || path.startsWith("/auth/"),
+  resolveSession: async (headers) => {
+    if (!auth) return null;
+    const session = (await auth.api.getSession({ headers })) as
+      | { user?: { id: string; email?: string | null; name?: string | null } }
+      | null;
+    if (!session?.user) return null;
+    return {
+      userId: session.user.id,
+      email: session.user.email ?? null,
+      name: session.user.name ?? null,
+    };
+  },
+  resolveApiKey: async (apiKey) => {
+    const hash = await sha256Hex(apiKey);
+    const rec = await apiKeyStorage.findByHash(hash);
+    if (!rec) return null;
+    return { tenantId: rec.tenant_id, userId: rec.user_id };
+  },
+  defaultTenantForUser: async (userId) => {
+    const row = await sql
+      .prepare(
+        `SELECT tenant_id FROM membership WHERE user_id = ? ORDER BY created_at ASC, tenant_id ASC LIMIT 1`,
+      )
+      .bind(userId)
+      .first<{ tenant_id: string }>();
+    return row?.tenant_id ?? null;
+  },
+  hasMembership: async (userId, tenantId) => {
+    const row = await sql
+      .prepare(
+        `SELECT 1 AS one FROM membership WHERE user_id = ? AND tenant_id = ? LIMIT 1`,
+      )
+      .bind(userId, tenantId)
+      .first<{ one: number }>();
+    return row !== null;
+  },
+  ensureTenantForUser: (s) => ensureTenantSqlite(sql, s.userId, s.name, s.email),
 });
 
-// ── Vaults + credentials (Phase B-vault) ──────────────────────────────────
-//
-// REST CRUD for vaults and credentials. The actual credential injection
-// happens in apps/oma-vault (separate process) which reads the same sqlite
-// db. apps/oma-vault sits in front of the agent's outbound HTTPS traffic
-// as a MITM proxy, matches the destination URL against active credentials,
-// and rewrites the Authorization header. Sandboxes run with HTTPS_PROXY +
-// NODE_EXTRA_CA_CERTS pointing at it — the agent never sees secrets.
+const v1 = new Hono<{
+  Variables: { tenant_id: string; user_id?: string };
+}>();
+v1.use("*", authMw);
 
-v1.post("/vaults", async (c) => {
-  const body = await c.req.json<{ name: string }>();
-  if (!body.name) return c.json({ error: "name is required" }, 400);
-  const row = await vaultService.create({
-    tenantId: c.var.tenant_id,
-    name: body.name,
-  });
-  return c.json(row, 201);
+// Mount route bundles. Same paths CF uses; behavior preserved.
+v1.route("/agents", buildAgentRoutes({ services }));
+const sessionRouter = new NodeSessionRouter({
+  sql,
+  hub,
+  registry: sessionRegistry,
+  newEventLog,
 });
+v1.route("/sessions", buildSessionRoutes({
+  services,
+  router: sessionRouter,
+  outputs: nodeOutputsAdapter(outputsRoot),
+  lifecycle: nodeSessionLifecycle({ files: filesService, filesBlob }),
+  // Node has no per-tenant cloud environments yet — every agent is treated
+  // as a local runtime. The package's loadEnvironment hook returns a
+  // synthetic snapshot so session create doesn't 404 on missing env_id.
+  localRuntimeEnvId: "env-local-runtime",
+  loadEnvironment: async ({ environmentId }) => {
+    return {
+      id: environmentId,
+      runtime: "local",
+      sandbox_template: null,
+    } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
+  },
+}));
+v1.route("/vaults", buildVaultRoutes({ services }));
+v1.route("/memory_stores", buildMemoryRoutes({ services }));
+v1.route("/me", buildMeRoutes({
+  services,
+  authDisabled,
+  loadTenant: async (tenantId) => {
+    const r = await sql
+      .prepare(`SELECT id, name FROM "tenant" WHERE id = ?`)
+      .bind(tenantId)
+      .first<{ id: string; name: string }>();
+    return r ?? null;
+  },
+  listMemberships: async (userId) => {
+    const r = await sql
+      .prepare(
+        `SELECT t.id AS id, t.name AS name, m.role AS role, m.created_at AS created_at
+           FROM "membership" m JOIN "tenant" t ON t.id = m.tenant_id
+          WHERE m.user_id = ? ORDER BY m.created_at ASC, t.id ASC`,
+      )
+      .bind(userId)
+      .all<{ id: string; name: string; role: string; created_at: number }>();
+    return r.results ?? [];
+  },
+  hasMembership: async (userId, tenantId) => {
+    const row = await sql
+      .prepare(
+        `SELECT 1 AS one FROM membership WHERE user_id = ? AND tenant_id = ? LIMIT 1`,
+      )
+      .bind(userId, tenantId)
+      .first<{ one: number }>();
+    return row !== null;
+  },
+  mintApiKey: (input) => mintApiKeyOnStorage(apiKeyStorage, input),
+}));
+v1.route("/tenants", buildTenantRoutes({ services }));
+v1.route("/api_keys", buildApiKeyRoutes({ storage: apiKeyStorage }));
+v1.route("/evals", buildEvalRoutes({
+  evals: evalsService,
+  agents: agentsService,
+  // Node has no per-tenant cloud environments yet — leave the optional
+  // dep undefined so the route accepts any environment_id without 404ing.
+}));
 
-v1.get("/vaults", async (c) => {
-  const rows = await vaultService.list({
-    tenantId: c.var.tenant_id,
-    includeArchived: c.req.query("include_archived") === "true",
-  });
-  return c.json({ data: rows });
-});
-
-v1.get("/vaults/:id", async (c) => {
-  const row = await vaultService.get({
-    tenantId: c.var.tenant_id,
-    vaultId: c.req.param("id"),
-  });
-  if (!row) return c.json({ error: "Vault not found" }, 404);
-  return c.json(row);
-});
-
-v1.post("/vaults/:id/credentials", async (c) => {
-  const body = await c.req.json<{
-    display_name: string;
-    auth: import("@open-managed-agents/shared").CredentialAuth;
-  }>();
-  if (!body.display_name || !body.auth) {
-    return c.json({ error: "display_name and auth are required" }, 400);
-  }
-  const row = await credentialService.create({
-    tenantId: c.var.tenant_id,
-    vaultId: c.req.param("id"),
-    displayName: body.display_name,
-    auth: body.auth,
-  });
-  // Always strip secret fields before returning over the wire.
-  return c.json(stripSecrets(row), 201);
-});
-
-v1.get("/vaults/:id/credentials", async (c) => {
-  const rows = await credentialService.list({
-    tenantId: c.var.tenant_id,
-    vaultId: c.req.param("id"),
-    includeArchived: c.req.query("include_archived") === "true",
-  });
-  return c.json({ data: rows.map(stripSecrets) });
-});
-
-// ── /v1/me — current user + tenant + memberships ─────────────────────────
-//
-// Console hits this on bootstrap to (a) decide whether to render the
-// sidebar, (b) populate the workspace switcher when the user has > 1
-// membership. Mirrors apps/main/src/routes/me.ts at the data shape level.
-
-v1.get("/me", async (c) => {
-  if (authDisabled) {
-    return c.json({
-      user: { id: "default", email: "default@local", name: "Default User", role: "owner" },
-      tenant: { id: "default", name: "Default" },
-      tenants: [{ id: "default", name: "Default", role: "owner" }],
-    });
-  }
-  const userId = c.var.user_id;
-  const tenantId = c.var.tenant_id;
-  if (!userId) return c.json({ error: "Unauthorized" }, 401);
-  // user row lives in the auth db (separate sqlite); no need to fetch
-  // again — we have what we need from the session.
-  const tenantRow = await sql
-    .prepare(`SELECT id, name FROM "tenant" WHERE id = ?`)
-    .bind(tenantId)
-    .first<{ id: string; name: string }>();
-  const memberRows = await sql
-    .prepare(
-      `SELECT t.id AS id, t.name AS name, m.role AS role
-         FROM "membership" m
-         JOIN "tenant" t ON t.id = m.tenant_id
-        WHERE m.user_id = ?
-        ORDER BY m.created_at ASC, t.id ASC`,
-    )
-    .bind(userId)
-    .all<{ id: string; name: string; role: string }>();
-  return c.json({
-    user: { id: userId, email: "", name: "", role: "owner" },
-    tenant: tenantRow ?? { id: tenantId, name: "" },
-    tenants: memberRows.results ?? [],
-  });
-});
-
-v1.get("/me/tenants", async (c) => {
-  if (authDisabled) {
-    return c.json({ data: [{ id: "default", name: "Default", role: "owner" }] });
-  }
-  const userId = c.var.user_id;
-  if (!userId) return c.json({ error: "Unauthorized" }, 401);
-  const rows = await sql
-    .prepare(
-      `SELECT t.id AS id, t.name AS name, m.role AS role, m.created_at
-         FROM "membership" m
-         JOIN "tenant" t ON t.id = m.tenant_id
-        WHERE m.user_id = ?
-        ORDER BY m.created_at ASC, t.id ASC`,
-    )
-    .bind(userId)
-    .all<{ id: string; name: string; role: string; created_at: number }>();
-  return c.json({ data: rows.results ?? [] });
-});
-
-// ── Stubs for routes the console hits but main-node doesn't implement ────
-//
-// Console bootstrap pings several endpoints (integrations, skills, model
-// cards, runtimes, environments, api keys). Without these the dashboard
-// throws on first render. We return empty arrays / 404s so the UI degrades
-// gracefully — the user sees an empty integrations list rather than a
-// crash. Real implementations land in follow-up work.
-
+// Stubs for routes the console hits but main-node doesn't yet implement.
 v1.get("/environments", (c) => c.json({ data: [] }));
-v1.get("/api_keys", (c) => c.json({ data: [] }));
-v1.get("/me/cli-tokens", (c) => c.json({ data: [] }));
 v1.get("/runtimes", (c) => c.json({ data: [] }));
 v1.get("/skills", (c) => c.json({ data: [] }));
 v1.get("/model_cards", (c) => c.json({ data: [] }));
@@ -1291,82 +810,377 @@ v1.get("/models/list", (c) =>
     ],
   }),
 );
-
-// Integrations not implemented in main-node — return shape compatible
-// "not connected" responses so the integrations page renders an empty
-// state instead of an error.
-v1.get("/integrations/github/installations", (c) => c.json({ data: [] }));
 v1.get("/integrations/github/credentials", (c) => c.json({ data: [] }));
-v1.get("/integrations/linear/installations", (c) => c.json({ data: [] }));
 v1.get("/integrations/linear/credentials", (c) => c.json({ data: [] }));
-v1.get("/integrations/slack/installations", (c) => c.json({ data: [] }));
 v1.get("/integrations/slack/credentials", (c) => c.json({ data: [] }));
+
+// Real integration CRUD + lookup (linear/github/slack publications,
+// installations, dispatch rules). Active only when PLATFORM_ROOT_SECRET is
+// set — otherwise the routes 503 with a remediation message. Install-proxy
+// endpoints (start-a1 / credentials / handoff-link / personal-token) return
+// 503 because the OAuth/install gateway is not yet ported to Node (P4
+// follow-up); the read endpoints work standalone.
+// Real integration CRUD + lookup (linear/github/slack publications,
+// installations, dispatch rules). Active only when PLATFORM_ROOT_SECRET is
+// set — otherwise the routes 503 with a remediation message. The
+// install-proxy endpoints (start-a1 / credentials / handoff-link /
+// personal-token) call into the in-process InstallBridge, mirroring the
+// CF /linear/publications/* etc. wire shapes verbatim.
+const integrationsInternalToken = process.env.INTEGRATIONS_INTERNAL_TOKEN ?? null;
+const gatewayOrigin = process.env.GATEWAY_ORIGIN ?? process.env.PUBLIC_BASE_URL ?? "http://localhost:8787";
+let installBridge: NodeInstallBridge | null = null;
+if (platformRootSecret) {
+  installBridge = new NodeInstallBridge({
+    sql,
+    platformRootSecret,
+    gatewayOrigin: gatewayOrigin.replace(/\/+$/, ""),
+    vaults: vaultService,
+    credentials: credentialService,
+    sessions: sessionsService,
+    agents: agentsService,
+    resolveTenantId: async (userId) => {
+      const row = await sql
+        .prepare(
+          `SELECT tenant_id FROM membership WHERE user_id = ? ORDER BY created_at ASC, tenant_id ASC LIMIT 1`,
+        )
+        .bind(userId)
+        .first<{ tenant_id: string }>();
+      return row?.tenant_id ?? null;
+    },
+    appendUserEvent: async (sessionId, _tenantId, _agentId, event) => {
+      // Webhook → session-resume drives the same NodeSessionRouter the
+      // public POST /v1/sessions/:id/events route uses, so the harness
+      // wakes up via the existing event-driven runtime.
+      await sessionRouter.appendEvent(sessionId, event);
+    },
+  });
+}
+
+if (platformRootSecret) {
+  const integrationsRepoEnv: NodeReposEnv = {
+    sql,
+    PLATFORM_ROOT_SECRET: platformRootSecret,
+  };
+  v1.route(
+    "/integrations",
+    buildIntegrationsRoutes({
+      bags: () => {
+        const repos = buildNodeRepos(integrationsRepoEnv);
+        const slackCrypto = new WebCryptoAesGcm(platformRootSecret, "integrations.tokens");
+        const slackIds = new CryptoIdGenerator();
+        return {
+          linear: {
+            installations: repos.linearInstallations,
+            publications: repos.linearPublications,
+            apps: repos.apps,
+            dispatchRules: repos.dispatchRules,
+          },
+          github: {
+            installations: repos.githubInstallations,
+            publications: repos.githubPublications,
+            githubApps: repos.githubApps,
+          },
+          slack: {
+            installations: new SqlSlackInstallationRepo(sql, slackCrypto, slackIds),
+            publications: new SqlSlackPublicationRepo(sql, slackIds),
+            apps: new SqlSlackAppRepo(sql, slackCrypto, slackIds),
+          },
+        };
+      },
+      installProxy: installBridge ? bridgeAsInstallProxy(installBridge) : null,
+    }),
+  );
+}
+
+// ── Files API (subset of apps/main/src/routes/files.ts) ──
+//
+// CF mounts a richer files surface with synthesized session-output ids
+// and multipart upload; Node ships the read-side equivalent so the SDK
+// + console can list, download, and delete files. Uploads still go via
+// POST /v1/sessions/:id/files (lifecycle.promoteSandboxFile) and the
+// CF-only POST /v1/files (multipart upload from the browser) — that
+// route can be ported when console upload UX needs it.
+v1.get("/files", async (c) => {
+  const t = c.var.tenant_id;
+  const scopeId = c.req.query("scope_id") ?? undefined;
+  const limitParam = c.req.query("limit");
+  let requested = limitParam ? parseInt(limitParam, 10) : 100;
+  if (isNaN(requested) || requested < 1) requested = 100;
+  if (requested > 1000) requested = 1000;
+  const rows = await filesService.list({
+    tenantId: t,
+    sessionId: scopeId,
+    limit: requested,
+  });
+  return c.json({ data: rows.map(toFileRecord), has_more: false });
+});
+v1.get("/files/:id/content", async (c) => {
+  const id = c.req.param("id");
+  const t = c.var.tenant_id;
+  const row = await filesService.get({ tenantId: t, fileId: id });
+  if (!row) return c.json({ error: "File not found" }, 404);
+  if (!row.downloadable) return c.json({ error: "This file is not downloadable" }, 403);
+  const obj = await filesBlob.get(row.r2_key);
+  if (!obj) return c.json({ error: "File content not found" }, 404);
+  return new Response(obj.body, {
+    headers: { "Content-Type": row.media_type },
+  });
+});
+v1.get("/files/:id", async (c) => {
+  const id = c.req.param("id");
+  const t = c.var.tenant_id;
+  const row = await filesService.get({ tenantId: t, fileId: id });
+  if (!row) return c.json({ error: "File not found" }, 404);
+  return c.json(toFileRecord(row));
+});
+v1.delete("/files/:id", async (c) => {
+  try {
+    const deleted = await filesService.delete({
+      tenantId: c.var.tenant_id,
+      fileId: c.req.param("id"),
+    });
+    await filesBlob.delete(deleted.r2_key).catch(() => undefined);
+    return c.json({ type: "file_deleted", id: deleted.id });
+  } catch (err) {
+    if ((err as { code?: string }).code === "file_not_found") {
+      return c.json({ error: "File not found" }, 404);
+    }
+    throw err;
+  }
+});
 
 app.route("/v1", v1);
 
-// ── Console UI ─────────────────────────────────────────────────────────
-//
-// When CONSOLE_DIR is set (and points at an apps/console build output),
-// serve the SPA from there. Two passes:
-//
-//   1. serveStatic at "*" picks up real asset files (/assets/index.js,
-//      /favicon.ico, etc).
-//   2. SPA fallback at "*" returns index.html for anything else — so
-//      client-side routes like /agents/abc render the app shell, then the
-//      client router takes over.
-//
-// API and auth paths are mounted earlier in the chain, so they win the
-// route match before serveStatic gets a look. /auth-info, /auth/*, /v1/*
-// are untouched.
-//
-// self-host deployments that don't ship the console (e.g. SDK-only) just
-// leave CONSOLE_DIR unset; the SPA fallback short-circuits and the
-// normal 404 handler runs.
-//
-// CF prod has the equivalent via the ASSETS binding (apps/main wrangler
-// `assets.directory: ../console/dist` + `not_found_handling: SPA`).
-// Same UX, different mechanism.
+// /v1/oma/* mirror — same Hono sub-app mounted twice. New OMA-only
+// endpoints should be added here only; the bare /v1/<resource> mounts
+// stay live for back-compat with Console + CLI.
+app.route("/v1/oma/me", buildMeRoutes({
+  services,
+  authDisabled,
+  loadTenant: async (tenantId) => {
+    const r = await sql
+      .prepare(`SELECT id, name FROM "tenant" WHERE id = ?`)
+      .bind(tenantId)
+      .first<{ id: string; name: string }>();
+    return r ?? null;
+  },
+  listMemberships: async (userId) => {
+    const r = await sql
+      .prepare(
+        `SELECT t.id AS id, t.name AS name, m.role AS role, m.created_at AS created_at
+           FROM "membership" m JOIN "tenant" t ON t.id = m.tenant_id
+          WHERE m.user_id = ? ORDER BY m.created_at ASC, t.id ASC`,
+      )
+      .bind(userId)
+      .all<{ id: string; name: string; role: string; created_at: number }>();
+    return r.results ?? [];
+  },
+  hasMembership: async (userId, tenantId) => {
+    const row = await sql
+      .prepare(
+        `SELECT 1 AS one FROM membership WHERE user_id = ? AND tenant_id = ? LIMIT 1`,
+      )
+      .bind(userId, tenantId)
+      .first<{ one: number }>();
+    return row !== null;
+  },
+  mintApiKey: (input) => mintApiKeyOnStorage(apiKeyStorage, input),
+}));
+app.route("/v1/oma/tenants", buildTenantRoutes({ services }));
+app.route("/v1/oma/api_keys", buildApiKeyRoutes({ storage: apiKeyStorage }));
+app.route("/v1/oma/evals", buildEvalRoutes({
+  evals: evalsService,
+  agents: agentsService,
+}));
+
+// /v1/oma/integrations mirror — same factory used twice. New OMA-only
+// endpoints (if any) get added in the package, not here.
+if (platformRootSecret) {
+  const integrationsRepoEnvOma: NodeReposEnv = {
+    sql,
+    PLATFORM_ROOT_SECRET: platformRootSecret,
+  };
+  app.route(
+    "/v1/oma/integrations",
+    buildIntegrationsRoutes({
+      bags: () => {
+        const repos = buildNodeRepos(integrationsRepoEnvOma);
+        const slackCrypto = new WebCryptoAesGcm(platformRootSecret, "integrations.tokens");
+        const slackIds = new CryptoIdGenerator();
+        return {
+          linear: {
+            installations: repos.linearInstallations,
+            publications: repos.linearPublications,
+            apps: repos.apps,
+            dispatchRules: repos.dispatchRules,
+          },
+          github: {
+            installations: repos.githubInstallations,
+            publications: repos.githubPublications,
+            githubApps: repos.githubApps,
+          },
+          slack: {
+            installations: new SqlSlackInstallationRepo(sql, slackCrypto, slackIds),
+            publications: new SqlSlackPublicationRepo(sql, slackIds),
+            apps: new SqlSlackAppRepo(sql, slackCrypto, slackIds),
+          },
+        };
+      },
+      installProxy: installBridge ? bridgeAsInstallProxy(installBridge) : null,
+    }),
+  );
+}
+
+// ─── Integrations gateway (OAuth callbacks, setup pages, Linear MCP,
+// GitHub internal refresh, webhooks) — mounted on `app` (NOT under /v1)
+// because the upstream OAuth/webhook URLs are at /linear/oauth/...,
+// /linear-setup/..., /linear/webhook/..., etc. Active only when
+// PLATFORM_ROOT_SECRET is set (encryption requires it). The bridge
+// constructs providers per-request off the same Container builder used
+// by the read-side routes, so a write hits the same underlying tables.
+if (installBridge) {
+  const containers = installBridge.buildContainers();
+  app.route(
+    "/",
+    buildIntegrationsGatewayRoutes({
+      installBridge,
+      jwt: containers.linear.jwt,
+      webhooks: {
+        linear: (req) => buildNodeProvidersForRequest(installBridge!, gatewayOrigin).linear.handleWebhook(req),
+        github: (req) => buildNodeProvidersForRequest(installBridge!, gatewayOrigin).github.handleWebhook(req),
+        slack: (req) => buildNodeProvidersForRequest(installBridge!, gatewayOrigin).slack.handleWebhook(req),
+      },
+      internalSecret: integrationsInternalToken,
+      // Node has no per-tenant rate-limit binding by default; soft-pass.
+      rateLimit: undefined,
+    }),
+  );
+}
+
+// oma-cap-adapter wire — exposes a Resolver against the in-process vault
+// services so a future Node outbound proxy (mirroring CF's mcp-proxy) can
+// inject cap_cli credentials into sandbox traffic. Wired here at the
+// services construction site so the resolver is available even before
+// the outbound surface lands.
+const _capResolver = new OmaVaultResolver({
+  sessions: {
+    get: ({ tenantId, sessionId }) => sessionsService.get({ tenantId, sessionId }) as never,
+  },
+  credentials: {
+    listByVaults: ({ tenantId, vaultIds }) =>
+      credentialService.listByVaults({ tenantId, vaultIds }) as never,
+    update: ({ tenantId, vaultId, credentialId, auth }) =>
+      credentialService.update({ tenantId, vaultId, credentialId, auth }) as never,
+    create: ({ tenantId, vaultId, displayName, auth }) =>
+      credentialService.create({ tenantId, vaultId, displayName, auth }) as never,
+  },
+});
+void _capResolver;
+
+// ── Session ↔ memory_store binding (Node-specific; not in package yet) ──
+v1.post("/sessions/:id/memory_stores", async (c) => {
+  const sid = c.req.param("id");
+  const session = await sql
+    .prepare(`SELECT id FROM sessions WHERE tenant_id = ? AND id = ?`)
+    .bind(c.var.tenant_id, sid)
+    .first();
+  if (!session) return c.json({ error: "Session not found" }, 404);
+  const body = await c.req.json<{ store_id: string; access?: string }>();
+  if (!body.store_id) return c.json({ error: "store_id is required" }, 400);
+  const store = await memoryService.getStore({
+    tenantId: c.var.tenant_id,
+    storeId: body.store_id,
+  });
+  if (!store) return c.json({ error: "Memory store not found" }, 404);
+  const access = body.access === "read_only" ? "read_only" : "read_write";
+  await sql
+    .prepare(
+      `INSERT INTO session_memory_stores (session_id, store_id, access, created_at)
+       VALUES (?, ?, ?, ?)
+       ON CONFLICT(session_id, store_id) DO UPDATE SET access = excluded.access`,
+    )
+    .bind(sid, body.store_id, access, Date.now())
+    .run();
+  return c.json({ session_id: sid, store_id: body.store_id, access }, 201);
+});
+v1.get("/sessions/:id/memory_stores", async (c) => {
+  const r = await sql
+    .prepare(
+      `SELECT store_id, access, created_at FROM session_memory_stores WHERE session_id = ?`,
+    )
+    .bind(c.req.param("id"))
+    .all<{ store_id: string; access: string; created_at: number }>();
+  return c.json({ data: r.results ?? [] });
+});
+
+// ── Console UI (optional) ──
 const consoleDir = process.env.CONSOLE_DIR;
 if (consoleDir) {
-  // serveStatic uses fs.statSync against `${root}/${path}`; root is
-  // resolved relative to process.cwd(). main-node's cwd inside docker
-  // is /app/apps/main-node — passing the absolute /app/apps/console/dist
-  // wouldn't work since serveStatic strips leading `/` from root. We
-  // pass it relative-to-cwd by computing here.
   const cwd = process.cwd();
   const rootRel = consoleDir.startsWith("/")
     ? relative(cwd, consoleDir)
     : consoleDir;
-  app.use(
-    "/*",
-    serveStatic({
-      root: rootRel,
-      // SPA fallback — serveStatic returns null on miss; our explicit
-      // get("*") below catches and returns index.html for the SPA shell.
-    }),
-  );
+  app.use("/*", serveStatic({ root: rootRel }));
   app.get("/*", serveStatic({ root: rootRel, path: "index.html" }));
-  console.log(`[main-node] console UI served from ${consoleDir} (cwd-rel: ${rootRel})`);
+  logger.info({ op: "main-node.console_ui", dir: consoleDir, cwd_rel: rootRel }, "console UI served");
 }
 
 app.notFound((c) => c.json({ error: "not found" }, 404));
 app.onError((err, c) => {
-  console.error("[main-node] unhandled", err);
+  logger.error({ err, op: "main-node.unhandled" }, "unhandled error");
   return c.json({ error: "internal_error", message: err.message }, 500);
 });
 
+// ─── Listen ──────────────────────────────────────────────────────────────
+
+const port = Number(process.env.PORT ?? 8787);
+const host = process.env.HOST ?? "0.0.0.0";
+serve({ fetch: app.fetch, port, hostname: host }, (info) => {
+  logger.info(
+    { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },
+    `listening on http://${info.address}:${info.port}`,
+  );
+});
+
+// Cron — eval-tick + memory retention sweep + (when integrations schema is
+// applied) webhook-events retention. Linear dispatch is left un-wired here
+// because main-node doesn't construct a LinearProvider; pass `linearSweeper`
+// when an in-process gateway lands.
+const scheduler = buildNodeScheduler({
+  evalServices: {
+    agents: agentsService,
+    environments: environmentsService,
+    sessions: sessionsService,
+    evals: evalsService,
+    kv,
+  },
+  memory: memoryService,
+  integrationsSql: platformRootSecret ? sql : null,
+});
+await scheduler.start();
+logger.info({ op: "main-node.scheduler.started" }, "scheduler started");
+
+const shutdown = async (signal: string) => {
+  logger.info({ op: "main-node.shutdown", signal }, `received ${signal}, shutting down`);
+  try { await scheduler.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.scheduler_stop_failed" }, "scheduler stop failed"); }
+  try { await memoryWatcher.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.watcher_stop_failed" }, "memory watcher stop failed"); }
+  if (s3Poller) {
+    try { await s3Poller.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.s3_poller_stop_failed" }, "s3-poller stop failed"); }
+  }
+  if (hub instanceof PgEventStreamHub) {
+    try { await hub.stop(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.pg_hub_stop_failed" }, "pg-hub stop failed"); }
+  }
+  if (authShutdown) {
+    try { await authShutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.auth_failed" }, "auth shutdown failed"); }
+  }
+  try { await tracer.shutdown(); } catch { /* tracer shutdown is best-effort */ }
+  process.exit(0);
+};
+process.on("SIGTERM", () => void shutdown("SIGTERM"));
+process.on("SIGINT", () => void shutdown("SIGINT"));
+
 // ─── Helpers ─────────────────────────────────────────────────────────────
 
-function parseLastEventId(raw: string | undefined): number | undefined {
-  if (!raw) return undefined;
-  const n = Number.parseInt(raw, 10);
-  return Number.isFinite(n) && n >= 0 ? n : undefined;
-}
-
-/** Parse `Header-Name: value, Header-2: value2` into a Record. Best-effort —
- *  malformed entries silently dropped. Used to thread custom headers
- *  (X-Sub-Module etc.) into the model API call when ANTHROPIC_BASE_URL
- *  points at a proxy that requires them. */
 function parseCustomHeaders(raw: string | undefined): Record<string, string> | undefined {
   if (!raw) return undefined;
   const out: Record<string, string> = {};
@@ -1378,39 +1192,66 @@ function parseCustomHeaders(raw: string | undefined): Record<string, string> | u
   return Object.keys(out).length > 0 ? out : undefined;
 }
 
-function toApiAgent(row: AgentConfig & { tenant_id?: string }) {
-  const { tenant_id: _t, ...agent } = row;
-  const model =
-    !agent.model || typeof agent.model === "string"
-      ? { id: agent.model || "", speed: "standard" as const }
-      : { id: agent.model.id, speed: agent.model.speed || ("standard" as const) };
+function randomFallback(): string {
+  // Pre-bootstrap fallback — logger is built before BetterAuth in the
+  // current ordering, so this can use the structured logger.
+  logger.warn(
+    { op: "main-node.auth_secret_missing" },
+    "BETTER_AUTH_SECRET not set — generating per-process random secret. Sessions will not survive restart.",
+  );
+  return Array.from(crypto.getRandomValues(new Uint8Array(32)))
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * In-process forwarder for the package's `installProxy` deps. Each subpath
+ * (e.g. "linear/publications/start-a1") routes to bridge.startInstallation.
+ * Mirrors apps/main/src/routes/integrations.ts but skips the
+ * INTEGRATIONS.fetch hop.
+ */
+function bridgeAsInstallProxy(bridge: NodeInstallBridge): InstallProxyForwarder {
   return {
-    type: "agent" as const,
-    ...agent,
-    model,
-    system: agent.system || null,
-    description: agent.description || null,
+    async forward({ subpath, body }) {
+      const m = /^([^/]+)\/publications\/(start-a1|credentials|handoff-link|personal-token)$/.exec(
+        subpath,
+      );
+      if (!m) {
+        return new Response(
+          JSON.stringify({ error: `unsupported install proxy subpath: ${subpath}` }),
+          { status: 400, headers: { "content-type": "application/json" } },
+        );
+      }
+      const [, provider, mode] = m;
+      const result = await bridge.startInstallation!({
+        provider: provider as "linear" | "github" | "slack",
+        mode: mode as "start-a1" | "credentials" | "handoff-link" | "personal-token",
+        body: (body ?? {}) as Record<string, unknown>,
+      });
+      return new Response(JSON.stringify(result.body), {
+        status: result.status,
+        headers: { "content-type": "application/json" },
+      });
+    },
   };
 }
 
-// ─── Listen ──────────────────────────────────────────────────────────────
-
-const port = Number(process.env.PORT ?? 8787);
-const host = process.env.HOST ?? "0.0.0.0";
-
-serve({ fetch: app.fetch, port, hostname: host }, (info) => {
-  console.log(`[main-node] listening on http://${info.address}:${info.port}`);
-  console.log(`[main-node] db: ${backendDescription}`);
-});
-
-const shutdown = async (signal: string) => {
-  console.log(`[main-node] received ${signal}, shutting down`);
-  try {
-    await memoryWatcher.stop();
-  } catch (err) {
-    console.warn("[main-node] memory watcher stop failed:", err);
-  }
-  process.exit(0);
-};
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
+/**
+ * Lightweight SqlClient shim around a better-sqlite3 Database. Used only
+ * to run the better-auth schema apply against the auth db (separate
+ * connection from the main SqlClient). We don't ship a full adapter — only
+ * .exec() is needed.
+ */
+function betterSqliteAsSqlClient(
+  db: import("better-sqlite3").Database,
+): SqlClient {
+  return {
+    exec: async (s: string) => {
+      db.exec(s);
+    },
+    prepare: () => {
+      throw new Error("not implemented");
+    },
+    batch: async () => [],
+  } as SqlClient;
+}

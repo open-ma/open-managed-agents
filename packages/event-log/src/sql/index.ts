@@ -1,6 +1,7 @@
 // SqlClient-backed adapter for EventLogRepo + StreamRepo. Works with any
-// SqlClient (D1 / better-sqlite3 / postgres.js when wired) — schema is plain
-// SQLite-flavoured DDL with portable types.
+// SqlClient (D1 / better-sqlite3 / postgres.js) — schema is plain SQLite-
+// flavoured DDL with portable types, with two narrow PG branches noted
+// below (json_insert vs jsonb concat, PRAGMA vs information_schema).
 //
 // This is the self-host cousin of cf-do/index.ts, which scopes everything to a
 // per-DO SQLite namespace. Here we share one SqlClient across all sessions
@@ -11,6 +12,8 @@
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { EventLogRepo, StreamRepo, StreamRow } from "../ports";
+
+export type SqlDialect = "sqlite" | "postgres";
 
 /**
  * Per-session event log backed by a shared SQL store.
@@ -176,30 +179,42 @@ export class SqlStreamRepo implements StreamRepo {
   constructor(
     private sql: SqlClient,
     private sessionId: string,
+    /** Set to "postgres" when the underlying SqlClient is postgres.js;
+     *  controls the json-array append SQL (no portable equivalent of
+     *  json_insert across SQLite + PG). Defaults to "sqlite". */
+    private dialect: SqlDialect = "sqlite",
   ) {}
 
   async start(messageId: string, startedAt: number): Promise<void> {
+    // ON CONFLICT … DO NOTHING is the portable upsert no-op; both
+    // SQLite and PG accept it (replaces the prior INSERT OR IGNORE).
     await this.sql
       .prepare(
-        `INSERT OR IGNORE INTO session_streams
+        `INSERT INTO session_streams
            (session_id, message_id, status, chunks_json, started_at)
-         VALUES (?, ?, 'streaming', '[]', ?)`,
+         VALUES (?, ?, 'streaming', '[]', ?)
+         ON CONFLICT (session_id, message_id) DO NOTHING`,
       )
       .bind(this.sessionId, messageId, startedAt)
       .run();
   }
 
   async appendChunk(messageId: string, delta: string): Promise<void> {
-    // SQLite supports json_insert / json_array_append (in newer versions).
-    // For broad compatibility (and because better-sqlite3 ships its own
-    // SQLite which always has JSON1), we use json_insert with the '$[#]'
-    // selector to atomically append.
+    // Atomic JSON-array append. SQLite has json_insert with the '$[#]'
+    // selector; PG has no equivalent on TEXT columns, so we round-trip
+    // through jsonb. The harness already serialises broadcasts per
+    // session via writeChain, so concurrent writers on the same row
+    // aren't an issue in practice.
+    const updateSql =
+      this.dialect === "postgres"
+        ? `UPDATE session_streams
+             SET chunks_json = ((chunks_json::jsonb) || jsonb_build_array(?::text))::text
+           WHERE session_id = ? AND message_id = ? AND status = 'streaming'`
+        : `UPDATE session_streams
+             SET chunks_json = json_insert(chunks_json, '$[#]', ?)
+           WHERE session_id = ? AND message_id = ? AND status = 'streaming'`;
     await this.sql
-      .prepare(
-        `UPDATE session_streams
-           SET chunks_json = json_insert(chunks_json, '$[#]', ?)
-         WHERE session_id = ? AND message_id = ? AND status = 'streaming'`,
-      )
+      .prepare(updateSql)
       .bind(delta, this.sessionId, messageId)
       .run();
   }
@@ -277,7 +292,10 @@ function toStreamRow(r: DbStream): StreamRow {
  *    with JSON1 enabled, D1 also has JSON1, and Postgres has native JSONB
  *    so a future PG flavour will swap to that.
  */
-export async function ensureSchema(sql: SqlClient): Promise<void> {
+export async function ensureSchema(
+  sql: SqlClient,
+  dialect: SqlDialect = "sqlite",
+): Promise<void> {
   await sql.exec(`
     CREATE TABLE IF NOT EXISTS session_events (
       session_id TEXT NOT NULL,
@@ -297,14 +315,11 @@ export async function ensureSchema(sql: SqlClient): Promise<void> {
       PRIMARY KEY (session_id, seq)
     );
   `);
-  // Idempotent ALTER for pre-existing schemas. SQLite has no
-  // `ADD COLUMN IF NOT EXISTS` syntax — probe with PRAGMA table_info
-  // and add only what's missing. PG users wire a PG SqlClient; this
-  // path uses better-sqlite3's own SQLite. PG would substitute its own
-  // information_schema lookup but that ships when the PG adapter does.
-  const cols = new Set<string>();
-  const info = await sql.prepare(`PRAGMA table_info(session_events)`).all<{ name: string }>();
-  for (const row of info.results ?? []) cols.add(row.name);
+  // Idempotent ALTER for pre-existing schemas. Neither SQLite nor PG has
+  // ADD COLUMN IF NOT EXISTS in our supported versions; probe with the
+  // dialect-appropriate catalog query (PRAGMA on sqlite,
+  // information_schema on postgres) and add only what's missing.
+  const cols = await readSessionEventColumns(sql, dialect);
   if (!cols.has("processed_at")) {
     await sql.exec(`ALTER TABLE session_events ADD COLUMN processed_at BIGINT`);
     await sql.exec(`UPDATE session_events SET processed_at = ts WHERE processed_at IS NULL`);
@@ -344,4 +359,26 @@ export async function ensureSchema(sql: SqlClient): Promise<void> {
     CREATE INDEX IF NOT EXISTS idx_session_streams_status
       ON session_streams (session_id, status);
   `);
+}
+
+async function readSessionEventColumns(
+  sql: SqlClient,
+  dialect: SqlDialect,
+): Promise<Set<string>> {
+  const cols = new Set<string>();
+  if (dialect === "postgres") {
+    const r = await sql
+      .prepare(
+        `SELECT column_name AS name FROM information_schema.columns
+         WHERE table_name = 'session_events'`,
+      )
+      .all<{ name: string }>();
+    for (const row of r.results ?? []) cols.add(row.name);
+  } else {
+    const r = await sql
+      .prepare(`PRAGMA table_info(session_events)`)
+      .all<{ name: string }>();
+    for (const row of r.results ?? []) cols.add(row.name);
+  }
+  return cols;
 }

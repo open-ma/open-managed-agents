@@ -7,7 +7,6 @@
     ".": "./src/index.ts",
     "./cf-do": "./src/cf-do/index.ts",
     "./memory": "./src/memory/index.ts",
-    "./pg": "./src/pg/index.ts",
     "./sql": "./src/sql/index.ts"
   },
   "dependencies": {

@@ -12,3 +12,4 @@ export * from "./ports";
 export * from "./persistence";
 export * from "./provider";
 export * from "./avatars";
+export * from "./install-bridge";

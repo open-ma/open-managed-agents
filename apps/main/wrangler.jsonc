@@ -71,11 +71,6 @@
   // Workers AI for generating embeddings
   "ai": { "binding": "AI" },
 
-  // Vectorize for semantic memory search
-  "vectorize": [
-    { "binding": "VECTORIZE", "index_name": "memory-search" }
-  ],
-
   // Service bindings to agent workers + hosted-only meter.
   // USAGE_METER points at packages/billing/ (entrypoint UsageMeter); the
   // OSS Env declares the duck-typed contract so this binding is purely
@@ -208,9 +203,6 @@
         { "name": "SEND_EMAIL" }
       ],
       "ai": { "binding": "AI" },
-      "vectorize": [
-        { "binding": "VECTORIZE", "index_name": "memory-search" }
-      ],
       "services": [
         { "binding": "SANDBOX_sandbox_default", "service": "sandbox-default-staging" },
         { "binding": "INTEGRATIONS", "service": "managed-agents-integrations-staging" }

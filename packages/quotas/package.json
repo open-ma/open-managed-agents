@@ -1,0 +1,13 @@
+{
+  "name": "@open-managed-agents/quotas",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/kv-store": "workspace:*",
+    "@open-managed-agents/rate-limit": "workspace:*"
+  }
+}

@@ -6,10 +6,17 @@
   "exports": {
     ".": "./src/index.ts",
     "./adapters/local-fs-blob": "./src/adapters/local-fs-blob.ts",
+    "./adapters/s3-blob": "./src/adapters/s3-blob.ts",
     "./test-fakes": "./src/test-fakes.ts"
   },
   "dependencies": {
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*"
+  },
+  "peerDependencies": {
+    "@aws-sdk/client-s3": "^3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "@aws-sdk/client-s3": { "optional": true }
   }
 }

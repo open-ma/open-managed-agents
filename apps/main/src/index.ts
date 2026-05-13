@@ -2,12 +2,34 @@ import { Hono } from "hono";
 import { WorkerEntrypoint } from "cloudflare:workers";
 import type { Env } from "@open-managed-agents/shared";
 import { servicesMiddleware, tenantDbMiddleware, getCfServicesForTenant } from "@open-managed-agents/services";
+import {
+  buildAgentRoutes,
+  buildVaultRoutes,
+  buildSessionRoutes,
+  buildApiKeyRoutes,
+  buildMeRoutes,
+  buildTenantRoutes,
+  mintApiKeyOnStorage,
+} from "@open-managed-agents/http-routes";
+import {
+  createCfShardPoolService,
+  createCfTenantShardDirectoryService,
+} from "@open-managed-agents/tenant-dbs-store";
+import { LOCAL_RUNTIME_ENV_ID } from "@open-managed-agents/shared";
+import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { authMiddleware } from "./auth";
 import { rateLimitMiddleware, authRateLimitMiddleware } from "./rate-limit";
-import agentsRoutes from "./routes/agents";
+import { cfRouteServices } from "./lib/cf-route-services";
+import { cfApiKeyStorage } from "./lib/cf-api-key-storage";
+import { CfSessionRouter } from "./lib/cf-session-router";
+import {
+  cfSessionLifecycle,
+  cfOutputsAdapter,
+  fetchVaultCredentials,
+} from "./lib/cf-session-lifecycle";
+import { validateAgentLimits } from "./lib/limits";
+import { listMemberships, hasMembership } from "./auth-config";
 import environmentsRoutes from "./routes/environments";
-import sessionsRoutes from "./routes/sessions";
-import vaultsRoutes from "./routes/vaults";
 import oauthRoutes from "./routes/oauth";
 import capCliOauthRoutes from "./routes/cap-cli-oauth";
 import memoryRoutes from "./routes/memory";
@@ -16,9 +38,6 @@ import skillsRoutes from "./routes/skills";
 import modelCardsRoutes from "./routes/model-cards";
 import modelsRoutes from "./routes/models";
 import clawhubRoutes from "./routes/clawhub";
-import apiKeysRoutes from "./routes/api-keys";
-import meRoutes from "./routes/me";
-import tenantsRoutes from "./routes/tenants";
 import evalsRoutes from "./routes/evals";
 import costReportRoutes from "./routes/cost-report";
 import internalRoutes from "./routes/internal";
@@ -31,12 +50,9 @@ import mcpProxyRoutes, {
   forwardWithRefresh,
 } from "./routes/mcp-proxy";
 import { resolveGithubCredentials } from "./lib/github-creds";
-import { tickEvalRuns } from "./eval-runner";
-import { handleMemoryEvents } from "./queue/memory-events";
-import { handleMemoryEventsDlq } from "./queue/memory-events-dlq";
-import { memoryRetentionTick } from "./cron/memory-retention";
-import { webhookEventsRetentionTick } from "./cron/webhook-events-retention";
-import { log, logError, recordEvent, errFields } from "@open-managed-agents/shared";
+import { buildCfScheduler } from "./lib/cf-scheduler-jobs";
+import { buildCfMemoryQueue, dispatchCfMemoryQueueBatch } from "./lib/cf-queue-handlers";
+import { logError, recordEvent, errFields } from "@open-managed-agents/shared";
 import { globalErrorHandler, requestMetricsMiddleware } from "./lib/observability";
 import { errorEnvelopeMiddleware } from "./lib/error-envelope";
 import type { R2EventMessage } from "@open-managed-agents/shared";
@@ -118,6 +134,240 @@ app.use("/v1/*", tenantDbMiddleware);
 // on c.var.services. Wiring (CF / Postgres / SQLite) lives in
 // packages/services — routes only see the abstract Services interface.
 app.use("/v1/*", servicesMiddleware);
+
+// Build agent / vault / api-keys / me / tenants from
+// `@open-managed-agents/http-routes`. Per-request `RouteServices` is
+// resolved off `c.var.services` so the per-tenant D1 binding flows
+// through; CF-only callbacks (model card validation, field-size limits,
+// shard assignment, KV-backed api-key storage, AUTH_DB membership reads)
+// get plumbed in here. Each mount is a Hono sub-app whose handler builds
+// a one-shot package app per request — cheap (~µs of route registration)
+// and keeps the per-tenant + per-request callbacks correctly scoped
+// without leaking globals.
+
+// Build agent / vault / api-keys / me / tenants / sessions from
+// `@open-managed-agents/http-routes`. Per-request `RouteServices` is
+// resolved off `c.var.services` so the per-tenant D1 binding flows
+// through; CF-only callbacks (model card validation, field-size limits,
+// shard assignment, KV-backed api-key storage, AUTH_DB membership reads,
+// USAGE_METER + refresh + GitHub fast-path lifecycle hooks) get plumbed
+// in via closures over `c` so they always see the per-request services
+// container without leaking globals.
+
+type AppCtx = import("hono").Context<{
+  Bindings: Env;
+  Variables: {
+    tenant_id: string;
+    user_id?: string;
+    services: import("@open-managed-agents/services").Services;
+    tenantDb: D1Database;
+  };
+}>;
+
+const cfRouteServicesFromCtx = (c: AppCtx) =>
+  cfRouteServices(c as never);
+
+const agentsRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string };
+}>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const services = ctx.var.services;
+  const app = buildAgentRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    validateModel: async (tenantId, model) => {
+      const cards = await services.modelCards.list({ tenantId });
+      const active = cards.filter((card) => card.archived_at === null);
+      if (active.length === 0) return { valid: true };
+      const modelId = typeof model === "string" ? model : model.id;
+      const match = active.find((card) => card.model_id === modelId);
+      if (!match) {
+        return {
+          valid: false,
+          error: `No model card with model_id "${modelId}". Create a card with that handle, or set agent.model to an existing card's model_id.`,
+        };
+      }
+      return { valid: true };
+    },
+    validateAgentLimits: (body) =>
+      validateAgentLimits(body as Parameters<typeof validateAgentLimits>[0]),
+    hasActiveSessionsByAgent: (tenantId, agentId) =>
+      services.sessions.hasActiveByAgent({ tenantId, agentId }),
+    hasActiveEvalsByAgent: (tenantId, agentId) =>
+      services.evals.hasActiveByAgent({ tenantId, agentId }),
+  });
+  return invokePackage(c, app);
+});
+
+const vaultsRoutes = new Hono<{ Bindings: Env; Variables: { tenant_id: string } }>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const app = buildVaultRoutes({ services: () => cfRouteServicesFromCtx(ctx) });
+  return invokePackage(c, app);
+});
+
+const apiKeysRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string };
+}>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const services = ctx.var.services;
+  const app = buildApiKeyRoutes({ storage: cfApiKeyStorage(services.kv) });
+  return invokePackage(c, app);
+});
+
+const meRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string };
+}>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const env = ctx.env;
+  const services = ctx.var.services;
+  const app = buildMeRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    authDisabled: false,
+    loadUser: async (userId) => {
+      if (!env.AUTH_DB) return null;
+      const r = await env.AUTH_DB
+        .prepare(`SELECT id, email, name FROM "user" WHERE id = ?`)
+        .bind(userId)
+        .first<{ id: string; email: string; name: string | null }>();
+      return r ?? null;
+    },
+    loadTenant: async (tenantId) => {
+      if (!env.AUTH_DB) return null;
+      const r = await env.AUTH_DB
+        .prepare(`SELECT id, name FROM tenant WHERE id = ?`)
+        .bind(tenantId)
+        .first<{ id: string; name: string }>();
+      return r ?? null;
+    },
+    listMemberships: (userId) => listMemberships(env.AUTH_DB, userId),
+    hasMembership: (userId, tenantId) => hasMembership(env.AUTH_DB, userId, tenantId),
+    mintApiKey: (input) =>
+      mintApiKeyOnStorage(cfApiKeyStorage(services.kv), input),
+  });
+  return invokePackage(c, app);
+});
+
+const tenantsRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string };
+}>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const env = ctx.env;
+  const app = buildTenantRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    createTenantAndMembership: async ({ tenantId, name, userId }) => {
+      const now = Math.floor(Date.now() / 1000);
+      await env.AUTH_DB.batch([
+        env.AUTH_DB
+          .prepare("INSERT INTO tenant (id, name, createdAt, updatedAt) VALUES (?, ?, ?, ?)")
+          .bind(tenantId, name, now, now),
+        env.AUTH_DB
+          .prepare(
+            "INSERT INTO membership (user_id, tenant_id, role, created_at) VALUES (?, ?, 'owner', ?)",
+          )
+          .bind(userId, tenantId, now),
+      ]);
+    },
+    assignShard: async (tenantId) => {
+      const controlPlaneDb = env.ROUTER_DB ?? env.AUTH_DB;
+      const shardPool = createCfShardPoolService({ controlPlaneDb });
+      const tenantShardDirectory = createCfTenantShardDirectoryService({ controlPlaneDb });
+      const pick = await shardPool.pickShardForNewTenant();
+      const bindingName = pick?.bindingName ?? "AUTH_DB_00";
+      await tenantShardDirectory.assign({ tenantId, bindingName });
+      await shardPool.incrementTenantCount(bindingName);
+    },
+  });
+  return invokePackage(c, app);
+});
+
+const sessionsRoutes = new Hono<{
+  Bindings: Env;
+  Variables: { tenant_id: string; user_id?: string };
+}>().all("*", (c) => {
+  const ctx = c as unknown as AppCtx;
+  const env = ctx.env;
+  const services = ctx.var.services;
+  const tenantId = ctx.var.tenant_id;
+  const router = new CfSessionRouter({ env, services, tenantId });
+  const app = buildSessionRoutes({
+    services: () => cfRouteServicesFromCtx(ctx),
+    router,
+    localRuntimeEnvId: LOCAL_RUNTIME_ENV_ID,
+    loadEnvironment: async ({ tenantId, environmentId }) => {
+      if (environmentId === LOCAL_RUNTIME_ENV_ID) return null;
+      const row = await services.environments.get({ tenantId, environmentId });
+      return row ? toEnvironmentConfig(row) : null;
+    },
+    fetchVaultCredentials: ({ tenantId, vaultIds }) =>
+      fetchVaultCredentials(services, tenantId, vaultIds),
+    outputs: cfOutputsAdapter(env),
+    debugRecoveryToken: (env as { DEBUG_TOKEN?: string }).DEBUG_TOKEN,
+    lifecycle: cfSessionLifecycle(c as never),
+  });
+  return invokePackage(c, app);
+});
+
+/**
+ * Forward the outer Hono request into a freshly-built package app while
+ * preserving (a) auth/tenant vars set by middleware (passed via per-call
+ * middleware injected on the inner app), and (b) the relative URL the
+ * package routes expect (`/`, `/:id`, etc.) — Hono's `app.route` only
+ * strips the prefix when matching, not from `req.url`.
+ */
+function invokePackage(
+  c: import("hono").Context,
+  packageApp: { fetch: (req: Request, env?: unknown, ctx?: ExecutionContext) => Response | Promise<Response> },
+): Promise<Response> | Response {
+  const url = new URL(c.req.url);
+  // Strip the outer mount prefix so e.g. `/v1/agents/abc` becomes `/abc`
+  // before the package's `app.get("/:id")` sees it.
+  const knownPrefixes = ["/v1/oma/", "/v1/"];
+  let stripped = url.pathname;
+  for (const p of knownPrefixes) {
+    if (stripped.startsWith(p)) {
+      // Drop the next path segment (resource name like "agents", "sessions").
+      const rest = stripped.slice(p.length);
+      const slashIdx = rest.indexOf("/");
+      stripped = slashIdx === -1 ? "/" : rest.slice(slashIdx);
+      break;
+    }
+  }
+  url.pathname = stripped || "/";
+
+  // Carry the outer auth vars (tenant_id, user_id) over the request via
+  // headers so the inner app's middleware can re-hydrate them. Header
+  // names are namespaced so they can't collide with user-controlled
+  // headers; a stray client-supplied `x-oma-tenant-id` is overwritten.
+  const headers = new Headers(c.req.raw.headers);
+  const tenantId = (c.var as { tenant_id?: string }).tenant_id;
+  const userId = (c.var as { user_id?: string }).user_id;
+  if (tenantId) headers.set("x-oma-internal-tenant-id", tenantId);
+  if (userId) headers.set("x-oma-internal-user-id", userId);
+
+  // One-shot middleware: re-hydrate vars on the inner context.
+  const wrapped = new Hono();
+  wrapped.use("*", async (innerC, next) => {
+    const t = headers.get("x-oma-internal-tenant-id");
+    const u = headers.get("x-oma-internal-user-id");
+    if (t) innerC.set("tenant_id" as never, t as never);
+    if (u) innerC.set("user_id" as never, u as never);
+    await next();
+  });
+  wrapped.route("/", packageApp as Parameters<typeof wrapped.route>[1]);
+
+  return wrapped.fetch(
+    new Request(url, {
+      method: c.req.method,
+      headers,
+      body: ["GET", "HEAD"].includes(c.req.method) ? null : c.req.raw.body,
+    }),
+    c.env,
+    c.executionCtx,
+  );
+}
 app.route("/v1/agents", agentsRoutes);
 app.route("/v1/environments", environmentsRoutes);
 app.route("/v1/sessions", sessionsRoutes);
@@ -263,50 +513,34 @@ app.all("/github-setup/*", async (c) => {
 
 export default {
   fetch: app.fetch,
-  async scheduled(_event: ScheduledEvent, env: Env, ctx: ExecutionContext): Promise<void> {
-    ctx.waitUntil(
-      tickEvalRuns(env).then(
-        (result) =>
-          log(
-            { op: "cron.tick_eval_runs", advanced: result.advanced, total: result.total },
-            "tickEvalRuns ok",
-          ),
-        (err) => {
-          logError({ op: "cron.tick_eval_runs", err }, "tickEvalRuns failed");
+  // Cron entry — wrangler `triggers.crons` ticks every minute (`* * * * *`).
+  // We rebuild the scheduler per tick (CF isolates are short-lived; the
+  // builder is cheap), then dispatch by matching `controller.cron`.
+  // Each registered handler runs under ctx.waitUntil so a slow tick
+  // doesn't block the runtime.
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext): Promise<void> {
+    const scheduler = buildCfScheduler(env);
+    for (const job of scheduler.list()) {
+      if (job.cron !== controller.cron) continue;
+      ctx.waitUntil(
+        Promise.resolve(job.handler()).catch((err) => {
+          logError({ op: `cron.${job.name}`, err }, `cron job ${job.name} failed`);
           recordEvent(env.ANALYTICS, {
-            op: "cron.tick_eval_runs.failed",
+            op: `cron.${job.name}.failed`,
             ...errFields(err),
           });
-        },
-      ),
-    );
-    // Memory versions retention sweep — daily at 03:00 UTC, no-op other minutes.
-    // The cron trigger is `* * * * *` (every minute); the tick gates by hour
-    // + minute internally so we only do work once per day.
-    ctx.waitUntil(memoryRetentionTick(env));
-    // Webhook events retention — daily at 04:00 UTC (offset from 03:00
-    // memory sweep so the two don't collide on D1 budget).
-    ctx.waitUntil(webhookEventsRetentionTick(env));
-    // base_snapshot env-prep tick: REMOVED. Was a cron-driven poll over
-    // building envs feeding the (also-removed) prep-tick endpoint. The
-    // base_snapshot lazy-install path that came after it was reverted
-    // too — dockerfile/CI is now the only build path.
+        }),
+      );
+    }
   },
   // Cloudflare Queue consumer for R2 Event Notifications on MEMORY_BUCKET.
-  // R2 → Queue → here: we reflect agent FUSE writes on /mnt/memory/<store>/
-  // back into D1 (memories index + memory_versions audit) since FUSE writes
-  // bypass the REST service. REST writes also produce events but the consumer
-  // dedupes by (store_id, path, etag) so they're no-ops.
-  //
-  // The same worker is also subscribed to the DLQ so messages that
-  // exhausted retries don't disappear silently — see queue/memory-events-dlq.
-  // batch.queue discriminates which consumer fired.
+  // The runtime-agnostic dispatcher routes to the main consumer or the
+  // DLQ subscriber based on `batch.queue`. Handler bodies live in
+  // packages/queue/handlers/* (main) and lib/cf-queue-handlers.ts (DLQ
+  // notification + AE recording, which is CF-specific plumbing).
   async queue(batch: MessageBatch<R2EventMessage>, env: Env, _ctx: ExecutionContext): Promise<void> {
-    if (batch.queue.endsWith("-dlq")) {
-      await handleMemoryEventsDlq(batch, env);
-      return;
-    }
-    await handleMemoryEvents(batch, env);
+    const q = buildCfMemoryQueue(env);
+    await dispatchCfMemoryQueueBatch(batch, q);
   },
 };
 
@@ -392,6 +626,85 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       headers: respHeaders,
       body: await res.text(),
     };
+  }
+
+  /**
+   * Transparent HTTP proxy for cloud agent MCP traffic. Agent's tools.ts
+   * gives AI SDK's MCP HTTP transport a custom fetch that calls
+   * `env.MAIN_MCP.fetch(req)` after stamping three metadata headers:
+   *   - `x-oma-tenant`
+   *   - `x-oma-session`
+   *   - `x-oma-mcp-server`
+   * We resolve the vault credential by `serverName` (mirrors the legacy
+   * `mcpForward` path so inline `authorization_token` still works),
+   * strip the metadata, replace the `authorization` header with the
+   * upstream bearer, and forward to the URL the agent's transport
+   * already knew (request URL is the upstream URL). Body / response
+   * status / response headers (including rotated `Mcp-Session-Id`)
+   * stream through unchanged.
+   *
+   * Vault credentials remain main-only — agent worker only sees the
+   * Response. The SDK's HTTP transport handles Streamable-HTTP session
+   * id rotation, SSE response framing, retries — none of that lives
+   * in this Worker anymore. The hand-rolled BindingMCPTransport that
+   * preceded this dropped session ids and broke session-ful servers
+   * (Notion's tools/list never returned, hanging the whole turn).
+   *
+   * 401-refresh-and-retry: handled by `forwardWithRefresh` (shared with
+   * the legacy mcpForward + HTTP /v1/mcp-proxy paths). When the first
+   * upstream response is 401 AND the resolved credential carries
+   * `mcp_oauth` refresh metadata (refresh_token + token_endpoint), we
+   * hit the token_endpoint, persist the rotated tokens back to D1, and
+   * retry the upstream call once with the fresh bearer. Request body
+   * is buffered up-front so the retry can replay it.
+   */
+  async fetch(request: Request): Promise<Response> {
+    const tenantId = request.headers.get("x-oma-tenant");
+    const sessionId = request.headers.get("x-oma-session");
+    const serverName = request.headers.get("x-oma-mcp-server");
+    if (!tenantId || !sessionId || !serverName) {
+      return new Response(
+        '{"error":"missing x-oma-tenant / x-oma-session / x-oma-mcp-server header"}',
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    const services = await getCfServicesForTenant(this.env, tenantId);
+    const target = await resolveProxyTargetByTenant(
+      this.env,
+      services,
+      tenantId,
+      sessionId,
+      serverName,
+    );
+    if (!target) {
+      return new Response('{"error":"forbidden"}', {
+        status: 403,
+        headers: { "content-type": "application/json" },
+      });
+    }
+    // Strip routing metadata before forwarding upstream. Everything else
+    // (Mcp-Session-Id, content-type, accept, …) flows through.
+    // forwardWithRefresh injects/replaces Authorization itself.
+    const inboundHeaders = new Headers(request.headers);
+    inboundHeaders.delete("x-oma-tenant");
+    inboundHeaders.delete("x-oma-session");
+    inboundHeaders.delete("x-oma-mcp-server");
+    // Buffer body so forwardWithRefresh can replay on a 401-then-refresh
+    // retry. MCP request bodies are JSON-RPC envelopes — sub-KB in
+    // practice — so the buffering cost is negligible. Response body is
+    // unaffected and still streams back.
+    const body = ["GET", "HEAD"].includes(request.method)
+      ? null
+      : await request.arrayBuffer();
+    return forwardWithRefresh(
+      services,
+      tenantId,
+      target,
+      request.method,
+      inboundHeaders,
+      body,
+      { sessionId, serverName, callerKind: "rpc-mcp" },
+    );
   }
 
   /**

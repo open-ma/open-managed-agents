@@ -6,9 +6,12 @@
   "main": "src/index.ts",
   "dependencies": {
     "@open-managed-agents/github": "workspace:*",
+    "@open-managed-agents/http-routes": "workspace:*",
     "@open-managed-agents/integrations-adapters-cf": "workspace:*",
     "@open-managed-agents/integrations-core": "workspace:*",
     "@open-managed-agents/linear": "workspace:*",
+    "@open-managed-agents/observability": "workspace:*",
+    "@open-managed-agents/scheduler": "workspace:*",
     "@open-managed-agents/shared": "workspace:*",
     "@open-managed-agents/slack": "workspace:*",
     "@open-managed-agents/tenant-db": "workspace:*",

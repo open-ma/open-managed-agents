@@ -33,7 +33,6 @@ gh workflow run teardown-lane.yml \
 | `AUTH_DB` (D1) | shared with staging | Users, agents, environments, sessions metadata (`openma-auth-staging`) |
 | Integrations D1 | shared with staging | OAuth tokens, GitHub installation creds |
 | `FILES_BUCKET` / `WORKSPACE_BUCKET` / `BACKUP_BUCKET` (R2) | shared with staging | (R2 buckets are physically the same as prod's, but lane-side mutations originate from the staging code path) |
-| `VECTORIZE` (memory-search) | shared with staging | Memory store embeddings |
 | `AI`, `BROWSER`, `SEND_EMAIL` | shared (account-scoped CF bindings) | |
 | Rate-limit namespaces | shared with staging | Lane traffic counts against staging RL counters, not prod |
 | Analytics dataset (`oma_events_staging`) | shared with staging | Events from all lanes land here, separated from prod's `oma_events` |
@@ -130,7 +129,7 @@ manually after.
 
 `teardown-lane.yml` runs `wrangler delete --force` on the three lane
 workers in reverse order (main → agent → integrations). DO storage is
-deleted with the worker. Shared resources (KV / D1 / R2 / Vectorize) are
+deleted with the worker. Shared resources (KV / D1 / R2) are
 NOT touched — anything the lane wrote there stays.
 
 ## Limits & follow-ups (not in MVP)

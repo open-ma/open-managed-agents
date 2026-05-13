@@ -1,0 +1,33 @@
+{
+  "name": "@open-managed-agents/browser-harness",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cf": "./src/cf.ts",
+    "./node": "./src/node.ts",
+    "./cdp": "./src/cdp.ts",
+    "./disabled": "./src/disabled.ts",
+    "./select": "./src/select.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "ai": "^6.0.158",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "@cloudflare/playwright": "^1.3.0",
+    "playwright-core": "^1.49.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/playwright": { "optional": true },
+    "playwright-core": { "optional": true }
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
+  }
+}

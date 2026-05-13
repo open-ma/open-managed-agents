@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/rate-limit",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters/cf": "./src/adapters/cf.ts",
+    "./adapters/memory": "./src/adapters/memory.ts"
+  },
+  "dependencies": {
+    "hono": "^4.7.0"
+  }
+}

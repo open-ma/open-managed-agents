@@ -161,14 +161,69 @@ export class E2BSandboxExecutor implements SandboxExecutor {
     this.commandSecrets.push({ prefix: commandPrefix, secrets });
   }
 
-  async setOutboundContext(): Promise<void> {
-    // E2B doesn't expose container outbound interception. Vault credential
-    // injection happens at the application layer (HTTP_PROXY env var
-    // pointing at main-node's /v1/proxy/outbound).
+  async setOutboundContext(_opts?: { tenantId: string; sessionId: string }): Promise<void> {
+    // Wire HTTPS_PROXY → oma-vault sidecar + upload its self-signed CA so
+    // node/curl/python trust the MITM cert. Requires (a) OMA_VAULT_PROXY_URL
+    // reachable from the E2B sandbox network — set to a public URL or a
+    // tunnel host; localhost won't resolve from inside the microVM —
+    // and (b) a sandbox template that lets `sudo` install / write a CA
+    // (most ubuntu-based templates do).
+    const proxyUrl = process.env.OMA_VAULT_PROXY_URL;
+    const caCertPath = process.env.OMA_VAULT_CA_CERT;
+    if (!proxyUrl || !caCertPath) return;
+    if (proxyUrl.startsWith("http://localhost") || proxyUrl.startsWith("http://127.")) {
+      this.logger.warn(
+        `E2B: OMA_VAULT_PROXY_URL points at localhost (${proxyUrl}) — ` +
+        `unreachable from inside the E2B sandbox. Use a public URL or tunnel.`,
+      );
+    }
+    this.pendingCaUpload = { hostPath: caCertPath };
+    const inBoxCaPath = "/etc/ssl/oma-vault-ca.crt";
+    await this.setEnvVars({
+      HTTP_PROXY: proxyUrl,
+      HTTPS_PROXY: proxyUrl,
+      http_proxy: proxyUrl,
+      https_proxy: proxyUrl,
+      NODE_EXTRA_CA_CERTS: inBoxCaPath,
+      SSL_CERT_FILE: inBoxCaPath,
+      CURL_CA_BUNDLE: inBoxCaPath,
+    });
+    // Best-effort: upload now if the sandbox is already created. Otherwise
+    // applyPendingCaUpload runs on the next call that creates the sandbox.
+    try {
+      await this.applyPendingCaUpload();
+    } catch (err) {
+      this.logger.warn(`E2B vault CA upload failed: ${(err as Error).message}`);
+    }
+  }
+
+  private pendingCaUpload: { hostPath: string } | null = null;
+
+  private async applyPendingCaUpload(): Promise<void> {
+    if (!this.pendingCaUpload) return;
+    const { promises: nodeFs } = await import("node:fs");
+    const buf = await nodeFs.readFile(this.pendingCaUpload.hostPath);
+    await this.sandbox.files.write("/etc/ssl/oma-vault-ca.crt", buf);
+    this.pendingCaUpload = null;
   }
 
   async readFile(path: string): Promise<string> {
     return this.sandbox.files.read(path);
+  }
+
+  async readFileBytes(path: string): Promise<Uint8Array> {
+    // E2B's files.read returns string (UTF-8). Use a base64 shell helper
+    // for binary safety — same workaround the CF SessionDO uses.
+    const out = await this.exec(
+      `base64 -w0 -- '${path.replace(/'/g, "'\\''")}'`,
+      30_000,
+    );
+    if (out.includes("[exit ")) {
+      throw new Error(`E2B readFileBytes failed: ${out.slice(0, 200)}`);
+    }
+    const b64 = out.trim();
+    const bin = Buffer.from(b64, "base64");
+    return new Uint8Array(bin.buffer, bin.byteOffset, bin.byteLength);
   }
 
   async writeFile(path: string, content: string): Promise<string> {
@@ -246,6 +301,45 @@ export class E2BSandboxExecutor implements SandboxExecutor {
     const sourcePath = `/mnt/_oma_storage/${opts.storeId}`;
     await this.runOrThrow(`sudo mkdir -p /mnt/memory && sudo rm -rf ${shellEscape(mountPoint)}`);
     await this.runOrThrow(`sudo ln -sfn ${shellEscape(sourcePath)} ${shellEscape(mountPoint)}`);
+    if (opts.readOnly) {
+      // Best-effort chmod -w; s3fs respects FUSE-level read-only via
+      // a remount which the sandbox SDK doesn't expose. Document the
+      // residual gap in docs/self-host.md.
+      await this.runOrThrow(
+        `sudo chmod -R a-w ${shellEscape(sourcePath)} 2>/dev/null || true`,
+      );
+    }
+  }
+
+  async mountSessionOutputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    // Reuses the same s3fs bucket as memory under a session-scoped prefix.
+    const cfg = this.memoryBucketConfig;
+    if (!cfg) {
+      throw new Error(
+        "E2BSandbox.mountSessionOutputs: no memoryBucket config — sessions " +
+        "outputs share the bucket with memory under session-outputs/<tenant>/<session>/",
+      );
+    }
+    if (!this.memoryBucketMounted) {
+      // mountMemoryStore handles mount-once; reuse via a no-op store
+      // mount when the caller hasn't asked for any.
+      await this.mountMemoryStore({
+        storeName: "_outputs_bootstrap",
+        storeId: "_outputs_bootstrap",
+        readOnly: true,
+      });
+    }
+    const mountPoint = `/mnt/session/outputs`;
+    const sourcePath = `/mnt/_oma_storage/session-outputs/${opts.tenantId}/${opts.sessionId}`;
+    await this.runOrThrow(
+      `sudo mkdir -p /mnt/session && sudo rm -rf ${shellEscape(mountPoint)}`,
+    );
+    await this.runOrThrow(
+      `sudo ln -sfn ${shellEscape(sourcePath)} ${shellEscape(mountPoint)}`,
+    );
   }
 
   /** Run a command, throw with combined output on non-zero exit. Used for

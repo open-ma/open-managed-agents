@@ -28,6 +28,9 @@ import { promises as fs, mkdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 import { randomBytes } from "node:crypto";
+import { getLogger } from "@open-managed-agents/observability";
+
+const moduleLogger = getLogger("litebox-sandbox");
 
 export interface LiteBoxSandboxOptions {
   /** Container image. Default: `node:22-slim`. */
@@ -41,6 +44,13 @@ export interface LiteBoxSandboxOptions {
   logger?: { warn: (msg: string, ctx?: unknown) => void; log: (msg: string) => void };
   /** Optional name (must be unique). */
   name?: string;
+  /** Memory blob root on the host — used by mountMemoryStore for the
+   *  per-storeId source dir. Falls back to `process.env.MEMORY_BLOB_DIR`
+   *  when omitted (back-compat for prior deploys). */
+  memoryRoot?: string;
+  /** Per-session outputs root on the host — used by mountSessionOutputs.
+   *  Falls back to `process.env.FILES_BLOB_DIR` when omitted. */
+  outputsRoot?: string;
 }
 
 interface LiteBoxExecResult {
@@ -70,8 +80,8 @@ export class LiteBoxSandbox implements SandboxExecutor {
 
   constructor(private opts: LiteBoxSandboxOptions = {}) {
     this.logger = opts.logger ?? {
-      warn: (msg, ctx) => console.warn(`[litebox-sandbox] ${msg}`, ctx ?? ""),
-      log: (msg) => console.log(`[litebox-sandbox] ${msg}`),
+      warn: (msg, ctx) => moduleLogger.warn({ ...(ctx as Record<string, unknown> ?? {}) }, msg),
+      log: (msg) => moduleLogger.info(msg),
     };
     // Per-instance host scratch dir for copyIn / copyOut staging. Cleaned
     // up on destroy.
@@ -146,13 +156,22 @@ export class LiteBoxSandbox implements SandboxExecutor {
         "be configured before the first exec/readFile/writeFile call",
       );
     }
-    const memoryRoot = process.env.MEMORY_BLOB_DIR
-      ? resolve(process.env.MEMORY_BLOB_DIR)
-      : null;
+    const memoryRoot = this.opts.memoryRoot
+      ? resolve(this.opts.memoryRoot)
+      : process.env.MEMORY_BLOB_DIR
+        ? resolve(process.env.MEMORY_BLOB_DIR)
+        : null;
     if (!memoryRoot) {
       throw new Error(
-        "LiteBoxSandbox.mountMemoryStore: MEMORY_BLOB_DIR env var not set — " +
-        "set it to the LocalFsBlobStore baseDir so mounts can find the on-disk content",
+        "LiteBoxSandbox.mountMemoryStore: memoryRoot not provided (constructor) " +
+        "and MEMORY_BLOB_DIR env var not set — set one of them so mounts can " +
+        "find the on-disk content",
+      );
+    }
+    if (!this.opts.memoryRoot && process.env.MEMORY_BLOB_DIR) {
+      this.logger.warn(
+        "LiteBoxSandbox.mountMemoryStore falling back to MEMORY_BLOB_DIR env var; " +
+        "wire ctx.memoryRoot through SandboxFactoryContext to remove the warning",
       );
     }
     const hostPath = join(memoryRoot, opts.storeId);
@@ -171,14 +190,22 @@ export class LiteBoxSandbox implements SandboxExecutor {
         "be configured before the first exec/readFile/writeFile call",
       );
     }
-    const outputsRoot = process.env.FILES_BLOB_DIR
-      ? resolve(process.env.FILES_BLOB_DIR)
-      : null;
+    const outputsRoot = this.opts.outputsRoot
+      ? resolve(this.opts.outputsRoot)
+      : process.env.FILES_BLOB_DIR
+        ? resolve(process.env.FILES_BLOB_DIR)
+        : null;
     if (!outputsRoot) {
       throw new Error(
-        "LiteBoxSandbox.mountSessionOutputs: FILES_BLOB_DIR env var not set — " +
-        "set it to the host directory backing per-session output deliveries " +
-        "(main-node's GET /v1/sessions/:id/outputs reads from the same dir)",
+        "LiteBoxSandbox.mountSessionOutputs: outputsRoot not provided (constructor) " +
+        "and FILES_BLOB_DIR env var not set — set one of them so mounts have " +
+        "a host directory to bind",
+      );
+    }
+    if (!this.opts.outputsRoot && process.env.FILES_BLOB_DIR) {
+      this.logger.warn(
+        "LiteBoxSandbox.mountSessionOutputs falling back to FILES_BLOB_DIR env var; " +
+        "wire ctx.outputsRoot through SandboxFactoryContext to remove the warning",
       );
     }
     const hostPath = join(outputsRoot, opts.tenantId, opts.sessionId);
@@ -192,6 +219,18 @@ export class LiteBoxSandbox implements SandboxExecutor {
     try {
       await box.copyOut(this.normalise(path), tmp);
       return await fs.readFile(tmp, "utf8");
+    } finally {
+      await fs.rm(tmp, { force: true }).catch(() => {});
+    }
+  }
+
+  async readFileBytes(path: string): Promise<Uint8Array> {
+    const box = await this.ensureBox();
+    const tmp = join(this.tmpRoot, `read-${randomBytes(6).toString("hex")}`);
+    try {
+      await box.copyOut(this.normalise(path), tmp);
+      const buf = await fs.readFile(tmp);
+      return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
     } finally {
       await fs.rm(tmp, { force: true }).catch(() => {});
     }
@@ -315,5 +354,7 @@ export const sandboxFactory: SandboxFactory = async (ctx, env) => {
     memoryMib: env.LITEBOX_MEMORY_MIB ? Number(env.LITEBOX_MEMORY_MIB) : undefined,
     cpus: env.LITEBOX_CPUS ? Number(env.LITEBOX_CPUS) : undefined,
     name: `oma-${ctx.sessionId}`,
+    memoryRoot: ctx.memoryRoot,
+    outputsRoot: ctx.outputsRoot,
   });
 };

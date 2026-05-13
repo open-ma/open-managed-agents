@@ -6,9 +6,11 @@
   "exports": {
     ".": "./src/index.ts",
     "./adapters/cf": "./src/adapters/cf.ts",
-    "./adapters/in-memory": "./src/adapters/in-memory.ts"
+    "./adapters/in-memory": "./src/adapters/in-memory.ts",
+    "./adapters/sql": "./src/adapters/sql.ts"
   },
   "dependencies": {
-    "@open-managed-agents/shared": "workspace:*"
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*"
   }
 }

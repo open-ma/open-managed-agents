@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/email",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapters/cf": "./src/adapters/cf.ts",
+    "./adapters/nodemailer": "./src/adapters/nodemailer.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*"
+  }
+}

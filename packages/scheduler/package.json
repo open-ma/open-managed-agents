@@ -1,0 +1,27 @@
+{
+  "name": "@open-managed-agents/scheduler",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./cf": "./src/adapters/cf.ts",
+    "./node": "./src/adapters/node.ts",
+    "./jobs/memory-retention": "./src/jobs/memory-retention.ts",
+    "./jobs/webhook-events-retention": "./src/jobs/webhook-events-retention.ts",
+    "./jobs/linear-dispatch": "./src/jobs/linear-dispatch.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "@open-managed-agents/memory-store": "workspace:*",
+    "@open-managed-agents/observability": "workspace:*",
+    "@open-managed-agents/services": "workspace:*"
+  },
+  "peerDependencies": {
+    "croner": "^9.0.0"
+  },
+  "peerDependenciesMeta": {
+    "croner": { "optional": true }
+  }
+}

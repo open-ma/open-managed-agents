@@ -14,6 +14,12 @@
 // Mirrors what apps/agent's SessionDO will become in Phase 3 (a thin
 // shell around the same machine, with `alarm()` instead of bootstrap()
 // as the orphan-detection trigger).
+//
+// Sandbox provisioning (memory mounts, /mnt/session/outputs, vault
+// outbound, optional workspace-restore) is delegated to the
+// SandboxOrchestrator from `@open-managed-agents/sandbox/orchestrator`
+// — same interface CF wires for the OmaSandbox path. Per-runtime
+// mounters were removed in P5.
 
 import { join } from "node:path";
 import {
@@ -23,6 +29,10 @@ import {
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import { SqlStreamRepo, type SqlEventLog } from "@open-managed-agents/event-log/sql";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
+import type {
+  OrchestratorMemoryMount,
+  SandboxOrchestrator,
+} from "@open-managed-agents/sandbox/orchestrator";
 import type { AgentService } from "@open-managed-agents/agents-store";
 import type { MemoryStoreService } from "@open-managed-agents/memory-store";
 import type {
@@ -31,13 +41,20 @@ import type {
   UserMessageEvent,
 } from "@open-managed-agents/shared";
 import type { LanguageModel } from "ai";
-import type { InProcessEventStreamHub } from "./lib/event-stream-hub.js";
+import { getLogger } from "@open-managed-agents/observability";
+import type { EventStreamHub } from "./lib/event-stream-hub.js";
+
+const log = getLogger("session-registry");
 
 export interface SessionRegistryDeps {
   sql: SqlClient;
-  hub: InProcessEventStreamHub;
+  hub: EventStreamHub;
   agentsService: AgentService;
   memoryService: MemoryStoreService;
+  /** Sandbox provisioning — vault outbound, mounts, backup-restore.
+   *  Replaces the per-runtime buildMemoryMounter / buildSessionOutputsMounter
+   *  hooks from before P5. */
+  sandboxOrchestrator: SandboxOrchestrator;
 
   /** Build the per-session event log. Mirrors main-node's existing
    *  newEventLog(sid) — keeps the stamp closure local to the shell. */
@@ -46,19 +63,6 @@ export interface SessionRegistryDeps {
   /** Build the per-session sandbox. The shell knows how to assemble a
    *  LocalSubprocess / E2B / Daytona / etc., the machine doesn't. */
   buildSandbox(sessionId: string, workdir: string): Promise<SandboxExecutor>;
-
-  /** Mount session-bound memory stores into the sandbox. */
-  buildMemoryMounter(
-    sessionId: string,
-    tenantId: string,
-  ): (opts: { sandbox: SandboxExecutor }) => Promise<void>;
-
-  /** Mount /mnt/session/outputs/ into the sandbox. Optional — operators
-   *  that don't configure an outputs root may omit it. */
-  buildSessionOutputsMounter?(
-    sessionId: string,
-    tenantId: string,
-  ): (opts: { sandbox: SandboxExecutor }) => Promise<void>;
 
   /** Build the LanguageModel for the agent. Reads env, applies custom
    *  headers, picks the right provider. */
@@ -86,6 +90,11 @@ export interface SessionRegistryDeps {
   /** Sandbox workdir root, e.g. /app/data/sandboxes. Per-session dirs
    *  are joined under it. */
   sandboxWorkdirRoot: string;
+
+  /** SQL dialect under the SqlClient. Threaded through to SqlStreamRepo
+   *  so its appendChunk picks the right JSON-array append (json_insert
+   *  on sqlite, jsonb concat on postgres). */
+  sqlDialect?: "sqlite" | "postgres";
 }
 
 interface SessionEntry {
@@ -132,15 +141,15 @@ export class SessionRegistry {
       .all<{ id: string; tenant_id: string }>();
     const rows = r.results ?? [];
     if (rows.length === 0) return;
-    console.log(`[session-registry] bootstrap: recovering ${rows.length} interrupted session(s)`);
+    log.info({ op: "session_registry.bootstrap", recovering: rows.length }, `bootstrap: recovering ${rows.length} interrupted session(s)`);
     for (const row of rows) {
       const entry = await this.getOrCreate(row.id, row.tenant_id);
       try {
         await entry.machine.onWake();
       } catch (err) {
-        console.error(
-          `[session-registry] bootstrap onWake(${row.id}) failed`,
-          err,
+        log.error(
+          { err, op: "session_registry.bootstrap.on_wake_failed", session_id: row.id },
+          `bootstrap onWake(${row.id}) failed`,
         );
       }
     }
@@ -163,6 +172,31 @@ export class SessionRegistry {
     this.map.clear();
   }
 
+  /**
+   * Abort the in-flight harness for a session. Routed from
+   * POST /v1/sessions/:id/events when the body contains a `user.interrupt`
+   * event. No-op if the session has no machine yet (nothing to interrupt).
+   * The machine's adapter handles emitting the session-side
+   * agent.message_stream_end(status="aborted") event chain.
+   */
+  interrupt(sessionId: string): void {
+    const p = this.map.get(sessionId);
+    if (!p) return;
+    p.then((entry) => {
+      const m = entry.machine as unknown as {
+        interrupt?: () => void;
+        abortInFlight?: () => void;
+      };
+      if (typeof m.interrupt === "function") m.interrupt();
+      else if (typeof m.abortInFlight === "function") m.abortInFlight();
+      // If the machine doesn't expose either method, the user.interrupt
+      // event is appended to the log by the route handler (P3 wires the
+      // actual abort plumbing into SessionStateMachine).
+    }).catch(() => {
+      /* getOrCreate failed — nothing to abort */
+    });
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────
 
   private async build(
@@ -172,12 +206,34 @@ export class SessionRegistry {
     const sandboxWorkdir = join(this.deps.sandboxWorkdirRoot, sessionId);
     const sandbox = await this.deps.buildSandbox(sessionId, sandboxWorkdir);
 
-    // Wire outbound credential injection. setOutboundContext is optional on
-    // the SandboxExecutor port (Daytona doesn't intercept TLS, e.g.).
-    await sandbox.setOutboundContext?.({ tenantId, sessionId });
+    // Resolve the per-session memory bindings + outputs flag, then hand
+    // the whole bundle to the orchestrator. The orchestrator owns
+    // ordering (vault outbound first, restore second, mounts last) so
+    // the registry no longer reasons about it.
+    const memoryBindings = await this.deps.sql
+      .prepare(`SELECT store_id, access FROM session_memory_stores WHERE session_id = ?`)
+      .bind(sessionId)
+      .all<{ store_id: string; access: string }>();
+    const memoryMounts: OrchestratorMemoryMount[] = [];
+    for (const binding of memoryBindings.results ?? []) {
+      const store = await this.deps.memoryService.getStore({ tenantId, storeId: binding.store_id });
+      if (!store) continue;
+      memoryMounts.push({
+        storeName: store.name,
+        storeId: binding.store_id,
+        readOnly: binding.access === "read_only",
+      });
+    }
+    await this.deps.sandboxOrchestrator.provision(sandbox, {
+      sessionId,
+      tenantId,
+      memoryMounts,
+      mountOutputs: true,
+      backup: { restoreOnWarm: true },
+    });
 
     const eventLog = this.deps.newEventLog(sessionId);
-    const streams = new SqlStreamRepo(this.deps.sql, sessionId);
+    const streams = new SqlStreamRepo(this.deps.sql, sessionId, this.deps.sqlDialect ?? "sqlite");
 
     const adapter = new RuntimeAdapterImpl({
       sql: this.deps.sql,
@@ -186,12 +242,6 @@ export class SessionRegistry {
       sandbox,
       // Node has no eviction — leave hintTurnInFlight unset.
     });
-
-    const memoryMounter = this.deps.buildMemoryMounter(sessionId, tenantId);
-    const outputsMounter = this.deps.buildSessionOutputsMounter?.(
-      sessionId,
-      tenantId,
-    );
 
     const machine = new SessionStateMachine({
       sessionId,
@@ -202,8 +252,11 @@ export class SessionRegistry {
         const row = await this.deps.agentsService.get({ tenantId, agentId });
         return row ?? null;
       },
-      mountMemoryStores: memoryMounter,
-      mountSessionOutputs: outputsMounter,
+      // Memory + outputs mounting happens in the orchestrator above.
+      // SessionStateMachine still accepts the hooks for CF parity but
+      // Node passes no-ops since the work has already been done.
+      mountMemoryStores: async () => {},
+      mountSessionOutputs: async () => {},
       buildModel: (agent) => this.deps.buildModel(agent),
       buildTools: (agent, sb) => this.deps.buildTools(agent, sb),
       buildHarness: () => this.deps.buildHarness(),

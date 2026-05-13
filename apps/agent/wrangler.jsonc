@@ -73,11 +73,6 @@
   // Workers AI for generating embeddings
   "ai": { "binding": "AI" },
 
-  // Vectorize for semantic memory search
-  "vectorize": [
-    { "binding": "VECTORIZE", "index_name": "memory-search" }
-  ],
-
   // Resolved bucket names per env — sandbox.ts FUSE mode mounts via the
   // S3 API which takes the actual bucket name (not the binding name).
   // Keep these in sync with r2_buckets[].bucket_name above. Override in
@@ -166,9 +161,6 @@
         { "binding": "AUTH_DB_03", "database_name": "openma-auth-shard-03-staging", "database_id": "8ce8f17d-7527-4a5a-b097-ce73251be55a" }
       ],
       "ai": { "binding": "AI" },
-      "vectorize": [
-        { "binding": "VECTORIZE", "index_name": "memory-search" }
-      ],
       "vars": {
         "MEMORY_BUCKET_NAME": "managed-agents-memory-staging",
         "WORKSPACE_BUCKET_NAME": "managed-agents-workspace",

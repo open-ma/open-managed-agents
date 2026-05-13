@@ -36,6 +36,11 @@ import {
   type SqlClient,
 } from "@open-managed-agents/sql-client";
 import type { CredentialAuth } from "@open-managed-agents/shared";
+import { createNodeLogger } from "@open-managed-agents/observability/logger/node";
+import { setRootLogger, type Logger } from "@open-managed-agents/observability";
+
+const logger: Logger = await createNodeLogger({ bindings: { service: "oma-vault" } });
+setRootLogger(logger);
 
 // ─── Bootstrap ───────────────────────────────────────────────────────────
 
@@ -60,8 +65,9 @@ mkdirSync(resolve(caDir), { recursive: true });
 const sql: SqlClient = usePostgres
   ? await createPostgresSqlClient(dbUrl)
   : await createBetterSqlite3SqlClient(dbPath);
-console.log(
-  `[oma-vault] sql backend: ${usePostgres ? `postgres ${new URL(dbUrl).host}` : `sqlite ${dbPath}`}`,
+logger.info(
+  { op: "oma_vault.sql_backend", backend: usePostgres ? "postgres" : "sqlite", dsn: usePostgres ? new URL(dbUrl).host : dbPath },
+  `sql backend: ${usePostgres ? `postgres ${new URL(dbUrl).host}` : `sqlite ${dbPath}`}`,
 );
 
 // ─── CA management ───────────────────────────────────────────────────────
@@ -70,10 +76,60 @@ console.log(
 // ${OMA_VAULT_CA_DIR}/{ca.crt,ca.key}. Subsequent starts reuse the same CA
 // so sandboxes that already trust it don't need to be updated. Sandboxes
 // install ca.crt at startup via NODE_EXTRA_CA_CERTS / equivalent.
+//
+// Multi-replica safety: when N vault replicas boot against a shared
+// caDir (e.g. NFS / EFS / shared docker volume) we must avoid all N
+// generating different CAs and racing to overwrite ca.key — sandboxes
+// would only trust one of them. Strategy:
+//   1. Try to read existing files (happy path on every start past first).
+//   2. Otherwise, attempt an exclusive create (O_EXCL) on `ca.lock`. The
+//      losing replicas wait+poll for ca.crt to appear, then read it.
+//   3. The winner generates the CA, writes ca.crt + ca.key, then releases
+//      the lock by removing ca.lock.
 
 async function loadOrCreateCA(): Promise<{ cert: string; key: string }> {
   const certPath = resolve(caDir, "ca.crt");
   const keyPath = resolve(caDir, "ca.key");
+  const lockPath = resolve(caDir, "ca.lock");
+
+  // Happy path: cert + key already on disk.
+  const existing = await tryReadCA(certPath, keyPath);
+  if (existing) return existing;
+
+  // Race-safe create. O_EXCL means exactly one replica succeeds; the
+  // others fall through to the wait-and-read path.
+  let lockFd: import("node:fs/promises").FileHandle | null = null;
+  try {
+    lockFd = await fs.open(lockPath, "wx");
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== "EEXIST") throw err;
+    // Another replica is generating; wait for ca.crt to appear.
+    return waitForCA(certPath, keyPath);
+  }
+
+  try {
+    // Re-check inside the lock — a third replica may have generated
+    // between our initial read and our lock acquisition.
+    const inLock = await tryReadCA(certPath, keyPath);
+    if (inLock) return inLock;
+
+    logger.info({ op: "oma_vault.ca_generate", ca_dir: caDir }, `generating new CA at ${caDir}`);
+    const ca = await generateCACertificate({
+      subject: { commonName: "OMA Vault Local CA" },
+    });
+    await fs.writeFile(certPath, ca.cert);
+    await fs.writeFile(keyPath, ca.key, { mode: 0o600 });
+    return ca;
+  } finally {
+    await lockFd.close().catch(() => {});
+    await fs.rm(lockPath, { force: true }).catch(() => {});
+  }
+}
+
+async function tryReadCA(
+  certPath: string,
+  keyPath: string,
+): Promise<{ cert: string; key: string } | null> {
   try {
     const [cert, key] = await Promise.all([
       fs.readFile(certPath, "utf8"),
@@ -81,14 +137,26 @@ async function loadOrCreateCA(): Promise<{ cert: string; key: string }> {
     ]);
     return { cert, key };
   } catch {
-    console.log(`[oma-vault] generating new CA at ${caDir}`);
-    const ca = await generateCACertificate({
-      subject: { commonName: "OMA Vault Local CA" },
-    });
-    await fs.writeFile(certPath, ca.cert);
-    await fs.writeFile(keyPath, ca.key, { mode: 0o600 });
-    return ca;
+    return null;
   }
+}
+
+/** Poll until the winning replica finishes writing ca.crt + ca.key. The
+ *  generator runs in <1s on commodity hardware; bound the wait at 30s
+ *  to avoid wedging a deploy when the lock holder dies mid-generation. */
+async function waitForCA(
+  certPath: string,
+  keyPath: string,
+): Promise<{ cert: string; key: string }> {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    const got = await tryReadCA(certPath, keyPath);
+    if (got) return got;
+    await new Promise((r) => setTimeout(r, 250));
+  }
+  throw new Error(
+    `[oma-vault] timed out waiting for peer to generate CA at ${certPath}`,
+  );
 }
 
 const ca = await loadOrCreateCA();
@@ -249,11 +317,12 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
 
   if (matched) {
     headers[matched.injectHeader.name] = matched.injectHeader.value;
-    console.log(
-      `[oma-vault] inject ${matched.injectHeader.name} for ${url} (cred=${matched.credentialId})`,
+    logger.info(
+      { op: "oma_vault.inject", header: matched.injectHeader.name, url, credential_id: matched.credentialId },
+      `inject ${matched.injectHeader.name} for ${url}`,
     );
   } else {
-    console.log(`[oma-vault] passthrough ${req.method} ${url}`);
+    logger.debug({ op: "oma_vault.passthrough", method: req.method, url }, `passthrough ${req.method} ${url}`);
   }
 
   // Forward to upstream. Read body as buffer to handle binary uploads.
@@ -268,7 +337,7 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
     });
   } catch (err) {
     const msg = (err as Error).message ?? String(err);
-    console.error(`[oma-vault] forward failed for ${url}:`, msg);
+    logger.error({ err, op: "oma_vault.forward_failed", url }, `forward failed for ${url}: ${msg}`);
     return {
       statusCode: 502,
       headers: { "content-type": "text/plain" },
@@ -295,17 +364,22 @@ proxy.forAnyRequest().thenCallback(async (req: CompletedRequest) => {
 
 await proxy.start(port);
 
-console.log(`[oma-vault] listening on http://0.0.0.0:${port}`);
-console.log(`[oma-vault] tenant scope: ${scopeTenantId === "*" ? "all tenants (single-operator deploy)" : scopeTenantId}`);
-console.log(`[oma-vault] CA cert: ${resolve(caDir, "ca.crt")}`);
-console.log(`[oma-vault] sandbox env to set:`);
-console.log(`  HTTPS_PROXY=http://localhost:${port}`);
-console.log(`  HTTP_PROXY=http://localhost:${port}`);
-console.log(`  NODE_EXTRA_CA_CERTS=${resolve(caDir, "ca.crt")}`);
-console.log(`  SSL_CERT_FILE=${resolve(caDir, "ca.crt")}  # for curl/python`);
+logger.info(
+  {
+    op: "oma_vault.listening",
+    port,
+    tenant_scope: scopeTenantId === "*" ? "all" : scopeTenantId,
+    ca_cert: resolve(caDir, "ca.crt"),
+  },
+  `listening on http://0.0.0.0:${port}`,
+);
+// User-facing copy/paste env block — kept on stdout intentionally so first
+// run shows operators what to configure for sandbox processes.
+const caCert = resolve(caDir, "ca.crt");
+process.stdout.write(`\n# OMA vault sandbox env (copy into sandbox process):\nHTTPS_PROXY=http://localhost:${port}\nHTTP_PROXY=http://localhost:${port}\nNODE_EXTRA_CA_CERTS=${caCert}\nSSL_CERT_FILE=${caCert}\n\n`);
 
 const shutdown = (signal: string) => {
-  console.log(`[oma-vault] received ${signal}, stopping proxy`);
+  logger.info({ op: "oma_vault.shutdown", signal }, `received ${signal}, stopping proxy`);
   proxy.stop().then(() => process.exit(0));
 };
 process.on("SIGTERM", () => shutdown("SIGTERM"));

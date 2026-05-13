@@ -32,6 +32,9 @@
 import type { ProcessHandle, SandboxExecutor, SandboxFactory } from "../ports";
 import { readS3MemoryBucket } from "../ports";
 import { promises as fs } from "node:fs";
+import { getLogger } from "@open-managed-agents/observability";
+
+const moduleLogger = getLogger("daytona-sandbox");
 
 export interface DaytonaSandboxOptions {
   /** Per-session identifier — used as the Sandbox label so existing
@@ -189,6 +192,12 @@ export class DaytonaSandbox implements SandboxExecutor {
     return buf.toString("utf8");
   }
 
+  async readFileBytes(path: string): Promise<Uint8Array> {
+    const sb = await this.ensureSandbox();
+    const buf = await sb.fs.downloadFile(this.normalise(path));
+    return new Uint8Array(buf.buffer, buf.byteOffset, buf.byteLength);
+  }
+
   async writeFile(path: string, content: string): Promise<string> {
     const sb = await this.ensureSandbox();
     const target = this.normalise(path);
@@ -227,7 +236,7 @@ export class DaytonaSandbox implements SandboxExecutor {
       throw new Error(
         "DaytonaSandbox.mountMemoryStore: no memoryBucket config — pass " +
         "memoryBucket: { endpoint, accessKey, secretKey, bucketName } to " +
-        "the constructor (or set E2B_MEMORY_S3_* env vars in main-node) " +
+        "the constructor (or set MEMORY_S3_* env vars in main-node) " +
         "so we can mount via s3fs. Without it, /mnt/memory has nowhere to " +
         "land in a remote sandbox.",
       );
@@ -243,13 +252,44 @@ export class DaytonaSandbox implements SandboxExecutor {
     // the prefix lazily.
     const link = `/mnt/memory/${opts.storeName}`;
     const target = `/mnt/_oma_storage/${opts.storeId}`;
+    const setup = opts.readOnly
+      ? `mkdir -p /mnt/memory && rm -rf ${shellEscape(link)} && ln -s ${shellEscape(target)} ${shellEscape(link)} && chmod -R a-w ${shellEscape(target)} 2>/dev/null || true`
+      : `mkdir -p /mnt/memory && rm -rf ${shellEscape(link)} && ln -s ${shellEscape(target)} ${shellEscape(link)}`;
+    await sb.process.executeCommand(setup, undefined, undefined, 30);
+    this.logger.log(`mounted memory store ${opts.storeName} → ${target} ${opts.readOnly ? "(ro)" : ""}`);
+  }
+
+  async mountSessionOutputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void> {
+    // Same s3fs pattern as mountMemoryStore, scoped to a per-(tenant,
+    // session) prefix under the bucket. Operators that don't run with
+    // MEMORY_S3_* config get a clear error explaining the requirement
+    // (Daytona has no host bind option, so a remote bucket is the only
+    // path).
+    const cfg = this.opts.memoryBucket;
+    if (!cfg) {
+      throw new Error(
+        "DaytonaSandbox.mountSessionOutputs: no s3 bucket config — same " +
+        "MEMORY_S3_* env vars are reused for outputs (single-bucket layout: " +
+        "memory under /<storeId>/, outputs under /session-outputs/<tenant>/<session>/)",
+      );
+    }
+    const sb = await this.ensureSandbox();
+    if (!this.memoryBucketMounted) {
+      await this.mountMemoryBucketRoot(sb, cfg);
+      this.memoryBucketMounted = true;
+    }
+    const link = `/mnt/session/outputs`;
+    const target = `/mnt/_oma_storage/session-outputs/${opts.tenantId}/${opts.sessionId}`;
     await sb.process.executeCommand(
-      `mkdir -p /mnt/memory && rm -rf ${shellEscape(link)} && ln -s ${shellEscape(target)} ${shellEscape(link)}`,
+      `mkdir -p /mnt/session && rm -rf ${shellEscape(link)} && ln -s ${shellEscape(target)} ${shellEscape(link)}`,
       undefined,
       undefined,
       30,
     );
-    this.logger.log(`mounted memory store ${opts.storeName} → ${target}`);
+    this.logger.log(`mounted session outputs → ${target}`);
   }
 
   // ── helpers ──────────────────────────────────────────────────────────────

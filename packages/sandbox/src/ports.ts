@@ -60,6 +60,9 @@ export interface SandboxExecutor {
    */
   snapshotWorkspaceNow?(): Promise<void>;
   readFile(path: string): Promise<string>;
+  /** Read raw bytes — required for binary-safe `POST /v1/sessions/:id/files`
+   *  promotion. Optional so adapters that only see text can omit it. */
+  readFileBytes?(path: string): Promise<Uint8Array>;
   writeFile(path: string, content: string): Promise<string>;
   /**
    * Write raw bytes. Use this for binary files (PDFs, images, archives) —

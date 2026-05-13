@@ -6,7 +6,6 @@ export interface CfPricing {
   kv: { read: number; write: number; storage_gb: number };
   r2: { class_a: number; class_b: number; storage_gb: number };
   d1: { read: number; write: number; storage_gb: number };
-  vectorize: { query_dims: number; stored_dims: number };
   workers_ai: { neurons: number };
   browser_rendering: { hour: number };
   containers: { cpu_vcpu_s: number; mem_gib_s: number };
@@ -18,7 +17,6 @@ export interface CfIncluded {
   kv: { read: number; write: number; storage_gb: number };
   r2: { class_a: number; class_b: number; storage_gb: number };
   d1: { read: number; write: number; storage_gb: number };
-  vectorize: { query_dims: number; stored_dims: number };
   browser_rendering: { hours: number };
   containers: { cpu_vcpu_min: number; mem_gib_h: number };
 }
@@ -29,7 +27,6 @@ export const DEFAULT_PRICING: CfPricing = {
   kv: { read: 0.50, write: 5.00, storage_gb: 0.50 },
   r2: { class_a: 4.50, class_b: 0.36, storage_gb: 0.015 },
   d1: { read: 0.001, write: 1.00, storage_gb: 0.75 },
-  vectorize: { query_dims: 0.01, stored_dims: 0.0005 },
   workers_ai: { neurons: 0.011 },
   browser_rendering: { hour: 0.09 },
   containers: { cpu_vcpu_s: 0.000020, mem_gib_s: 0.0000025 },
@@ -41,7 +38,6 @@ export const INCLUDED: CfIncluded = {
   kv: { read: 10_000_000, write: 1_000_000, storage_gb: 1 },
   r2: { class_a: 1_000_000, class_b: 10_000_000, storage_gb: 10 },
   d1: { read: 25_000_000_000, write: 50_000_000, storage_gb: 5 },
-  vectorize: { query_dims: 50_000_000, stored_dims: 5_000_000_000 },
   browser_rendering: { hours: 10 },
   containers: { cpu_vcpu_min: 375, mem_gib_h: 25 },
 };
@@ -229,27 +225,6 @@ async function queryD1(acct: string, token: string, days: number, pricing: CfPri
   };
 }
 
-async function queryVectorize(acct: string, token: string, days: number, pricing: CfPricing): Promise<ServiceCost> {
-  const { start, end } = dateRange(days);
-  const [queries, store] = await Promise.all([
-    gql<{ vectorizeV2QueriesAdaptiveGroups: Array<{ sum: { queryVectorDimensions: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { vectorizeV2QueriesAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:10000) { sum { queryVectorDimensions } } } } }`),
-    gql<{ vectorizeV2StorageAdaptiveGroups: Array<{ max: { storedVectorDimensions: number } }> }>(
-      acct, token, `{ viewer { accounts(filter:{accountTag:"${acct}"}) { vectorizeV2StorageAdaptiveGroups(filter:{date_geq:"${start}",date_leq:"${end}"},limit:100) { max { storedVectorDimensions } } } } }`),
-  ]);
-
-  const queryDims = queries?.vectorizeV2QueriesAdaptiveGroups?.reduce((s, r) => s + r.sum.queryVectorDimensions, 0) ?? 0;
-  const storedDims = Math.max(...(store?.vectorizeV2StorageAdaptiveGroups?.map(r => r.max.storedVectorDimensions) ?? [0]), 0);
-
-  return {
-    usage: { queried_dimensions: queryDims, stored_dimensions: storedDims },
-    included: { queried_dimensions: INCLUDED.vectorize.query_dims, stored_dimensions: INCLUDED.vectorize.stored_dims },
-    cost:
-      overageCostPerM(queryDims, INCLUDED.vectorize.query_dims, pricing.vectorize.query_dims) +
-      (overage(storedDims, INCLUDED.vectorize.stored_dims) / 1_000_000_000) * (pricing.vectorize.stored_dims * 1000),
-  };
-}
-
 async function queryAI(acct: string, token: string, days: number, pricing: CfPricing): Promise<ServiceCost> {
   const { start, end } = dateRange(days);
   const data = await gql<{
@@ -326,20 +301,19 @@ export async function generateCostReport(
 ): Promise<CostReport> {
   const { start, end } = dateRange(days);
 
-  const [workers, durableObjects, kv, r2, d1, vectorize, ai, browser, containers] = await Promise.all([
+  const [workers, durableObjects, kv, r2, d1, ai, browser, containers] = await Promise.all([
     queryWorkers(accountId, token, days, pricing),
     queryDurableObjects(accountId, token, days, pricing),
     queryKV(accountId, token, days, pricing),
     queryR2(accountId, token, days, pricing),
     queryD1(accountId, token, days, pricing),
-    queryVectorize(accountId, token, days, pricing),
     queryAI(accountId, token, days, pricing),
     queryBrowserRendering(accountId, token, days, pricing),
     queryContainers(accountId, token, days, pricing),
   ]);
 
   const services: Record<string, ServiceCost> = {
-    workers, durable_objects: durableObjects, kv, r2, d1, vectorize, workers_ai: ai, browser_rendering: browser, containers,
+    workers, durable_objects: durableObjects, kv, r2, d1, workers_ai: ai, browser_rendering: browser, containers,
   };
 
   const platformFee = 5.00;

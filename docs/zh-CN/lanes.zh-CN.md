@@ -30,7 +30,6 @@ gh workflow run teardown-lane.yml \
 | `AUTH_DB`（D1） | 与 staging 共享 | 用户、agents、environments、sessions 元数据（库名 `openma-auth-staging`） |
 | Integrations D1 | 与 staging 共享 | OAuth token、GitHub 安装凭据 |
 | `FILES_BUCKET` / `WORKSPACE_BUCKET` / `BACKUP_BUCKET`（R2） | 与 staging 共享 | （R2 桶在物理上和 prod 是同一个，但 lane 这边的写入只来自 staging 代码路径） |
-| `VECTORIZE`（memory-search） | 与 staging 共享 | 记忆库的 embedding |
 | `AI`、`BROWSER`、`SEND_EMAIL` | 共享（账号级 CF binding） | |
 | 限流 namespace | 与 staging 共享 | Lane 流量计入 staging 的限流计数，而不是 prod 的 |
 | Analytics dataset（`oma_events_staging`） | 与 staging 共享 | 所有 lane 的事件都落到这里，与 prod 的 `oma_events` 隔离 |
@@ -93,7 +92,7 @@ Lane 使用 Cloudflare 公开的「永远通过」Turnstile key（site `1x000000
 
 ## 回收机制
 
-`teardown-lane.yml` 以反向顺序（main → agent → integrations）对三个 lane worker 执行 `wrangler delete --force`。DO 存储随 worker 一起删除。共享资源（KV / D1 / R2 / Vectorize）**不会**被动到——lane 写入的内容会留下来。
+`teardown-lane.yml` 以反向顺序（main → agent → integrations）对三个 lane worker 执行 `wrangler delete --force`。DO 存储随 worker 一起删除。共享资源（KV / D1 / R2）**不会**被动到——lane 写入的内容会留下来。
 
 ## 限制与后续（MVP 不做）
 

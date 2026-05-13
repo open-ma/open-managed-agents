@@ -1,9 +1,10 @@
 # Self-host OMA — single-instance + Postgres backend.
 #
 # Same shape as docker-compose.yml but with a postgres service in
-# place of the SQLite file. better-auth still sits on its own sqlite file
-# (kysely-adapter limitation, see apps/main-node/src/index.ts:246-251);
-# everything else (agents/sessions/events/memories/vaults) goes to PG.
+# place of the SQLite file. better-auth's tables now live in the same
+# Postgres database as everything else (kysely-adapter PostgresDialect
+# wrapping a node-postgres Pool); AUTH_DATABASE_PATH is ignored in PG
+# mode.
 #
 # Quick start:
 #   1. Copy .env.example → .env (fill ANTHROPIC_API_KEY)
@@ -35,11 +36,8 @@ services:
       # Main store: postgres. main-node detects postgres:// scheme on
       # DATABASE_URL and routes every store package through the PG adapter.
       DATABASE_URL: postgres://oma:oma@postgres:5432/oma
-      # Auth still sqlite — the better-auth kysely adapter expects a
-      # node-postgres `Pool`, not the `postgres.js` driver we use for the
-      # main store. Small file (<1k rows in practice); same /app/data
-      # bind-mount as the SQLite compose so backups stay co-located.
-      AUTH_DATABASE_PATH: /app/data/auth.db
+      # AUTH_DATABASE_PATH is ignored in PG mode — better-auth's tables
+      # live in the same PG database as the main store.
       SANDBOX_WORKDIR: /app/data/sandboxes
       MEMORY_BLOB_DIR: /app/data/memory-blobs
       SESSION_OUTPUTS_DIR: /app/data/session-outputs
@@ -87,6 +85,12 @@ services:
   # data ends up in PG (oma-vault and oma-server share the same store
   # via the SqlVaultRepo abstraction), but oma-vault still reads from
   # its own DATABASE_URL — point it at the same postgres.
+  #
+  # Multi-replica: oma-vault is stateless. To run N copies behind a
+  # service / load balancer, uncomment `deploy.replicas: 3` below; all
+  # replicas share the same CA via the `./data/oma-vault-ca` volume,
+  # using an O_EXCL `ca.lock` so only the first replica generates the
+  # cert. Sandboxes point HTTPS_PROXY at the LB DNS (or one host:port).
   oma-vault:
     build:
       context: .
@@ -104,6 +108,8 @@ services:
       postgres:
         condition: service_healthy
     restart: unless-stopped
+    # deploy:
+    #   replicas: 3   # uncomment + put a Service / LB in front to fan-out
 
 volumes:
   oma-pgdata:

@@ -797,93 +797,12 @@ describe("Custom tools", () => {
 });
 
 // ============================================================
-// 4. MCP tools
+// 4. MCP tools — REMOVED. The legacy `mcp_<srv>_list_tools` / `mcp_<srv>_call`
+// generic-RPC entries no longer exist. Each remote MCP tool is now expanded
+// inline at buildTools time as `mcp__<server>__<tool>` with the upstream
+// schema (see apps/agent/src/harness/tools.ts:1150). Coverage of the new
+// shape is in MCP integration tests under test/integration/.
 // ============================================================
-describe("MCP tools", () => {
-  it("single MCP server creates list_tools and call tools", async () => {
-    const config = makeAgentConfig({
-      mcp_servers: [
-        { name: "github", type: "sse", url: "https://mcp.github.com/sse" },
-      ],
-    });
-    const tools = await buildTools(config, new TestSandbox());
-
-    expect(tools.mcp_github_list_tools).toBeDefined();
-    expect(tools.mcp_github_call).toBeDefined();
-  });
-
-  it("multiple MCP servers create independent tool pairs", async () => {
-    const config = makeAgentConfig({
-      mcp_servers: [
-        { name: "github", type: "sse", url: "https://mcp.github.com/sse" },
-        { name: "slack", type: "sse", url: "https://mcp.slack.com/sse" },
-      ],
-    });
-    const tools = await buildTools(config, new TestSandbox());
-
-    expect(tools.mcp_github_list_tools).toBeDefined();
-    expect(tools.mcp_github_call).toBeDefined();
-    expect(tools.mcp_slack_list_tools).toBeDefined();
-    expect(tools.mcp_slack_call).toBeDefined();
-    // Verify they are distinct objects
-    expect(tools.mcp_github_list_tools).not.toBe(tools.mcp_slack_list_tools);
-    expect(tools.mcp_github_call).not.toBe(tools.mcp_slack_call);
-  });
-
-  it("MCP list_tools tool can be executed (calls sandbox.exec with curl)", async () => {
-    let capturedCmd = "";
-    const sandbox: any = {
-      exec: async (cmd: string) => {
-        capturedCmd = cmd;
-        return 'exit=0\n{"jsonrpc":"2.0","id":1,"result":{"tools":[]}}';
-      },
-      readFile: async () => "",
-      writeFile: async () => "ok",
-    };
-    const config = makeAgentConfig({
-      mcp_servers: [
-        { name: "testmcp", type: "sse", url: "https://mcp.test.com/rpc" },
-      ],
-    });
-    const tools = await buildTools(config, sandbox);
-
-    const result = await tools.mcp_testmcp_list_tools.execute(
-      {},
-      TOOL_EXEC_OPTS
-    );
-    expect(capturedCmd).toContain("curl");
-    expect(capturedCmd).toContain("https://mcp.test.com/rpc");
-    expect(capturedCmd).toContain("tools/list");
-    expect(result).toContain("tools");
-  });
-
-  it("MCP call tool can be executed with tool_name and arguments", async () => {
-    let capturedCmd = "";
-    const sandbox: any = {
-      exec: async (cmd: string) => {
-        capturedCmd = cmd;
-        return 'exit=0\n{"jsonrpc":"2.0","id":1,"result":{"content":"done"}}';
-      },
-      readFile: async () => "",
-      writeFile: async () => "ok",
-    };
-    const config = makeAgentConfig({
-      mcp_servers: [
-        { name: "testmcp", type: "sse", url: "https://mcp.test.com/rpc" },
-      ],
-    });
-    const tools = await buildTools(config, sandbox);
-
-    const result = await tools.mcp_testmcp_call.execute(
-      { tool_name: "create_issue", arguments: JSON.stringify({ title: "Bug fix" }) },
-      TOOL_EXEC_OPTS
-    );
-    expect(capturedCmd).toContain("curl");
-    expect(capturedCmd).toContain("tools/call");
-    expect(capturedCmd).toContain("create_issue");
-    expect(result).toContain("done");
-  });
-});
 
 // ============================================================
 // 5. Memory tools — REMOVED in the Anthropic Memory Store migration. Agents

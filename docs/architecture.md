@@ -175,6 +175,44 @@ All of them get the same tools, skills, sandbox, and history from the platform. 
 
 Our `DefaultHarness` currently mixes some platform concerns (tool building, skill mounting) that should ideally be in SessionDO's context preparation. This is tracked as technical debt — the harness works correctly, but custom harness authors currently need to duplicate this setup code. A future refactor would move tool/skill preparation into `HarnessContext` construction so harnesses receive a fully-prepared context.
 
+## Package Layering (P2 — shared HTTP routes + supporting abstractions)
+
+CF Workers (`apps/main`) and self-host Node (`apps/main-node`) used to write
+their HTTP route bodies twice — once against D1/KV/R2/SEND_EMAIL, once
+against SqlClient/SqlKvStore/LocalFsBlobStore/nodemailer. The duplicated
+layer was extracted into eight runtime-agnostic packages plus one route
+package mounted by both apps:
+
+| Package | Purpose | Adapters |
+|---|---|---|
+| `@open-managed-agents/schema` | One canonical `applySchema` for the OMA tables, idempotent on sqlite + PG. | — |
+| `@open-managed-agents/email` | `EmailSender` interface; `null` is valid (signals "no SMTP, mount email-disabled better-auth flows"). | `cf` (SEND_EMAIL), `nodemailer` |
+| `@open-managed-agents/kv-store/adapters/sql` | KvStore on top of SqlClient (`kv_entries` table). Companion to existing `cf` + `in-memory` adapters. | sqlite + PG via SqlClient |
+| `@open-managed-agents/quotas` | `QuotaService` — daily session cap, upload freq, upload size. KV + RateLimitGate-backed. | KV-agnostic |
+| `@open-managed-agents/rate-limit` | `RateLimitGate` interface + `gates` bundle (5 named buckets). Hono middleware factory. | `cf` (Workers Rate Limiting bindings), `memory` (in-process token bucket) |
+| `@open-managed-agents/auth` | Hono auth middleware factory — apiKey + cookie session resolution, x-active-tenant validation, AUTH_DISABLED bypass. | Resolvers injected per-runtime |
+| `@open-managed-agents/auth-config` | `buildBetterAuth` factory + tenant auto-create hook + `ensureTenantSqlite`. | Driver injected |
+| `@open-managed-agents/vault-forward` | `buildAuthHeader`, `refreshMcpOAuth`, `forwardWithRefresh` (401-then-refresh pure transport). | Pluggable fetcher |
+| `@open-managed-agents/http-routes` | Hono `mountXxxRoutes(app, services)` factories: agents / vaults / sessions / memory / tenants / me / api_keys. Same paths CF mounts today; behavior preserved. The sessions package routes the runtime layer through the `SessionRouter` interface (see below). | Runtime constructs `RouteServices` bundle |
+| `@open-managed-agents/session-runtime` | `SessionStateMachine` + `RuntimeAdapter` (Phase 2) plus `SessionRouter` — uniform contract over the per-runtime session routing layer. CF impl wraps the SessionDO RPC surface; Node impl wraps `SessionRegistry` + `SqlEventLog` + `EventStreamHub`. | `apps/main/src/lib/cf-session-router.ts`, `apps/main-node/src/lib/node-session-router.ts` |
+| `@open-managed-agents/sandbox/orchestrator` | `SandboxOrchestrator` — single entry point both runtimes use to provision a session sandbox: vault outbound (HTTPS_PROXY + CA), `/mnt/memory` mounts, `/mnt/session/outputs` mount, optional workspace backup/restore. Replaces the per-runtime plumbing that lived separately in `apps/agent/src/oma-sandbox.ts` and `apps/main-node/src/registry.ts`. Per-provider capability matrix lives in `docs/self-host.md`. | `DefaultSandboxOrchestrator` (both runtimes); CF wires the OmaSandbox + R2 squashfs backup; Node wires `NodeWorkspaceBackupService` (tar+upload to BlobStore). |
+
+`apps/main-node/src/index.ts` is now ~280 lines: build the SqlClient,
+construct services, mount route bundles, start the server. The previous
+1664-line inline-routes implementation is gone.
+
+`apps/main/src/index.ts` mounts agents / vaults / sessions / api-keys /
+me / tenants from `@open-managed-agents/http-routes`. The legacy
+`apps/main/src/routes/{agents,vaults,sessions,api-keys,me,tenants}.ts`
+files are deleted; CF-only callbacks (USAGE_METER gate, GitHub fast-path
+token mint, `refreshProviderCredentialsForSession`, R2 outputs cascade,
+shard assignment, AUTH_DB membership reads) are passed in as `lifecycle`
+hooks + `services` callbacks so the package stays runtime-agnostic. The
+remaining CF-specific routes (`/v1/internal`, `/v1/integrations`,
+`/billing-api/*`, `/agents/runtime/_attach`, cron + queue handlers) stay
+in CF apps regardless — they depend on Durable Objects / service
+bindings / R2 Event Notifications that have no Node analog yet.
+
 ## References
 
 - [Scaling Managed Agents: Decoupling the brain from the hands](https://www.anthropic.com/engineering/managed-agents) — Anthropic engineering blog

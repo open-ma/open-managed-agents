@@ -94,8 +94,9 @@ async function startMainNode(opts: { dataDir: string }): Promise<ProcessHandle> 
     if (DEBUG) process.stderr.write(`[main-node:${port}] ${s}`);
   });
 
-  // Wait for /health to respond.
-  const deadline = Date.now() + 30_000;
+  // Wait for /health to respond. 60s — pino + prom-client + OTel SDK
+  // init add a few seconds to cold-start vs the pre-P6 boot path.
+  const deadline = Date.now() + 60_000;
   while (Date.now() < deadline) {
     try {
       const res = await fetch(`http://localhost:${port}/health`);
@@ -117,7 +118,7 @@ async function startMainNode(opts: { dataDir: string }): Promise<ProcessHandle> 
   // eslint-disable-next-line no-console
   console.error("main-node never became ready. Logs:\n" + logBuf.join(""));
   child.kill("SIGKILL");
-  throw new Error(`main-node didn't respond on /health within 30s`);
+  throw new Error(`main-node didn't respond on /health within 60s`);
 }
 
 function killHard(handle: ProcessHandle): Promise<void> {

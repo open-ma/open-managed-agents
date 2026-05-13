@@ -1,0 +1,14 @@
+{
+  "name": "@open-managed-agents/auth-config",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/email": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*",
+    "better-auth": "^1.6.3"
+  }
+}

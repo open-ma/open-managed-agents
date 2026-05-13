@@ -1,0 +1,20 @@
+{
+  "name": "@open-managed-agents/schema",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts"
+  },
+  "dependencies": {
+    "@open-managed-agents/sql-client": "workspace:*",
+    "@open-managed-agents/event-log": "workspace:*"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^11.5.0",
+    "vitest": "^4.1.3"
+  }
+}

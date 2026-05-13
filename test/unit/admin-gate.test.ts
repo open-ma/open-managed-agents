@@ -17,6 +17,10 @@ function envWith(opts: { gatewayOrigin: string; debugToken?: string | undefined 
   return {
     GATEWAY_ORIGIN: opts.gatewayOrigin,
     TEMP_DEBUG_TOKEN: opts.debugToken,
+    // P0 boot-guard: buildProviders constructs WebCryptoAesGcm at request
+    // time and throws on empty secret. Set a stable test value so the
+    // admin-gate router can run and return its real status.
+    PLATFORM_ROOT_SECRET: "test-platform-root-secret-padded-to-thirtytwo",
     // Other Env fields the routes never read on the early-return paths.
   } as unknown as Parameters<(typeof app)["fetch"]>[1];
 }
