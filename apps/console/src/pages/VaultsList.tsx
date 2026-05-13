@@ -52,18 +52,30 @@ export function VaultsList() {
   const [mcpSearch, setMcpSearch] = useState("");
   const [connecting, setConnecting] = useState<string | null>(null);
   // Bottom URL input on the MCP tab (separate from the search box above).
-  const [customUrlInput, setCustomUrlInput] = useState("");
-
-  // Custom MCP server form — opened from the bottom URL input on the MCP
-  // tab. Lets the user attach a server that's not in Anthropic's registry:
-  // name, OAuth or static-bearer, URL, optional token (bearer only).
-  const [customMode, setCustomMode] = useState(false);
+  // Custom MCP server form — single inline form (Anthropic-style).
+  // Renders all fields in one view: Name, Type, MCP Server (with embedded
+  // registry picker), Access token (Optional), and Refresh token block
+  // (Optional, visible only when Access token is filled — RFC 6749:
+  // refresh_token only makes sense alongside an access_token).
   const [customForm, setCustomForm] = useState({
     name: "",
     type: "oauth" as "oauth" | "bearer",
     url: "",
+    // pickedName/Icon: when the user selected a registry entry from the
+    // MCP Server picker, render it as a chip. Cleared by typing or X.
+    pickedName: "",
+    pickedIcon: "",
+    // OAuth-standard fields. token = access_token; refreshToken +
+    // tokenEndpoint + authMethod are only meaningful as a group and only
+    // when token is also set (RFC 6749 §6).
     token: "",
+    refreshToken: "",
+    tokenEndpoint: "",
+    authMethod: "client_secret_post" as "client_secret_basic" | "client_secret_post" | "none",
   });
+  const [pickerOpen, setPickerOpen] = useState(false);
+  const [tokenSectionOpen, setTokenSectionOpen] = useState(false);
+  const [refreshSectionOpen, setRefreshSectionOpen] = useState(false);
 
   // Add-CLI form (cap_cli credentials). Visible inside the unified
   // Add-credential modal under the "CLI" tab.
@@ -125,6 +137,10 @@ export function VaultsList() {
   };
 
   const connectMcp = (entry: McpRegistryEntry | { name: string; url: string }) => {
+    // Used by the unified MCP form's submit path. We never auto-connect
+    // when the user clicks a registry row — clicking only fills the
+    // MCP Server field; the user must hit Connect to actually start the
+    // OAuth handshake.
     if (!selectedVault) return;
     setConnecting(entry.name);
     const authUrl = `/v1/oauth/authorize?mcp_server_url=${encodeURIComponent(entry.url)}&vault_id=${encodeURIComponent(selectedVault.id)}&redirect_uri=${encodeURIComponent(window.location.href)}`;
@@ -135,20 +151,38 @@ export function VaultsList() {
     if (!selectedVault) return;
     setConnecting("custom");
     try {
-      await api(`/v1/vaults/${selectedVault.id}/credentials`, {
-        method: "POST",
-        body: JSON.stringify({
-          display_name: customForm.name || "Custom MCP",
-          auth: {
+      // OAuth-standard credential auth shape:
+      //   - access_token + refresh_token + token_endpoint → mcp_oauth
+      //     (server can refresh on 401 via vault-forward.refreshMcpOAuth).
+      //   - access_token only → static_bearer (no auto-refresh).
+      const hasRefresh = customForm.refreshToken && customForm.tokenEndpoint;
+      const auth: Record<string, unknown> = hasRefresh
+        ? {
+            type: "mcp_oauth",
+            access_token: customForm.token,
+            refresh_token: customForm.refreshToken,
+            token_endpoint: customForm.tokenEndpoint,
+            token_endpoint_auth_method: customForm.authMethod,
+            mcp_server_url: customForm.url,
+          }
+        : {
             type: "static_bearer",
             token: customForm.token,
             mcp_server_url: customForm.url,
-          },
+          };
+      await api(`/v1/vaults/${selectedVault.id}/credentials`, {
+        method: "POST",
+        body: JSON.stringify({
+          display_name: customForm.name || customForm.pickedName || "Custom MCP",
+          auth,
         }),
       });
       setShowAddCred(false);
-      setCustomMode(false);
-      setCustomForm({ name: "", type: "oauth", url: "", token: "" });
+      setCustomForm({
+        name: "", type: "oauth", url: "",
+        pickedName: "", pickedIcon: "",
+        token: "", refreshToken: "", tokenEndpoint: "", authMethod: "client_secret_post",
+      });
       openVault(selectedVault);
     } finally {
       setConnecting(null);
@@ -156,11 +190,18 @@ export function VaultsList() {
   };
 
   const submitCustom = () => {
+    // Submit rules for the unified Add-credential MCP form:
+    //   - User filled an Access token (or picked Bearer type) → POST a
+    //     credential immediately (mcp_oauth if refresh_token present,
+    //     else static_bearer). Button reads "Add credential".
+    //   - Otherwise → start /v1/oauth/authorize popup. Button reads
+    //     "Connect". Picking a registry row only fills the MCP Server
+    //     field, never auto-connects.
     if (!customForm.url) return;
-    if (customForm.type === "oauth") {
-      connectMcp({ name: customForm.name || customForm.url, url: customForm.url });
-    } else {
+    if (customForm.type === "bearer" || customForm.token) {
       void createBearerCred();
+    } else {
+      connectMcp({ name: customForm.name || customForm.pickedName || customForm.url, url: customForm.url });
     }
   };
 
@@ -411,15 +452,19 @@ export function VaultsList() {
         onClose={() => {
           setShowAddCred(false);
           setMcpSearch("");
-          setCustomMode(false);
-          setCustomUrlInput("");
-          setCustomForm({ name: "", type: "oauth", url: "", token: "" });
+          setPickerOpen(false);
+          setTokenSectionOpen(false);
+          setRefreshSectionOpen(false);
+          setCustomForm({
+            name: "", type: "oauth", url: "",
+            pickedName: "", pickedIcon: "",
+            token: "", refreshToken: "", tokenEndpoint: "", authMethod: "client_secret_post",
+          });
           setDeviceFlow(null);
         }}
-        title={customMode ? "Add credential" : "Add credential"}
+        title="Add credential"
         maxWidth="max-w-lg"
         footer={
-          // CLI tab footer reuses cap_cli flow.
           addTab === "cli" ? (
             deviceFlow?.status === "polling" ? (
               <Button variant="ghost" onClick={() => setDeviceFlow(null)}>Cancel</Button>
@@ -429,57 +474,43 @@ export function VaultsList() {
                 <Button onClick={createCapCliCred} disabled={!cliForm.token}>Create</Button>
               </>
             )
-          ) : customMode ? (
-            <Button
-              onClick={submitCustom}
-              disabled={!customForm.url || (customForm.type === "bearer" && !customForm.token) || !!connecting}
-            >
-              Connect
-            </Button>
-          ) : customUrlInput ? (
-            <Button
-              onClick={() => {
-                setCustomMode(true);
-                setCustomForm({ name: "", type: "oauth", url: customUrlInput, token: "" });
-              }}
-              disabled={!!connecting}
-            >
-              Connect
-            </Button>
-          ) : undefined
+          ) : (
+            <>
+              <Button variant="ghost" onClick={() => setShowAddCred(false)}>Cancel</Button>
+              <Button
+                onClick={submitCustom}
+                disabled={!customForm.url || !!connecting || (customForm.type === "bearer" && !customForm.token)}
+              >
+                {customForm.token || customForm.type === "bearer" ? "Add credential" : "Connect"}
+              </Button>
+            </>
+          )
         }
       >
-        {/* Top-level tab. Hidden when in custom-form view (drilling into
-            MCP detail) — clicking the title acts as a return. */}
-        {!customMode && (
-          <div className="flex gap-1 mb-3 border-b border-border-subtle">
-            {(["mcp", "cli"] as const).map((t) => (
-              <button
-                key={t}
-                onClick={() => { setAddTab(t); setMcpSearch(""); setCustomUrlInput(""); }}
-                className={`px-3 py-2 text-sm border-b-2 -mb-px ${
-                  addTab === t
-                    ? "border-fg text-fg font-medium"
-                    : "border-transparent text-fg-muted hover:text-fg"
-                }`}
-              >
-                {t === "mcp" ? "MCP server" : "CLI"}
-              </button>
-            ))}
-          </div>
-        )}
-
-        {addTab === "mcp" && customMode && (
-          <div className="space-y-4">
+        <div className="flex gap-1 mb-3 border-b border-border-subtle">
+          {(["mcp", "cli"] as const).map((t) => (
             <button
-              onClick={() => setCustomMode(false)}
-              className="text-xs text-fg-muted hover:text-fg flex items-center gap-1"
+              key={t}
+              onClick={() => { setAddTab(t); setPickerOpen(false); }}
+              className={`px-3 py-2 text-sm border-b-2 -mb-px ${
+                addTab === t
+                  ? "border-fg text-fg font-medium"
+                  : "border-transparent text-fg-muted hover:text-fg"
+              }`}
             >
-              ← Back
+              {t === "mcp" ? "MCP server" : "CLI"}
             </button>
+          ))}
+        </div>
+
+        {addTab === "mcp" && (
+          <div className="space-y-4">
             <div className="text-sm text-fg-muted">Authorize an MCP server for delegated user authentication.</div>
+
             <div>
-              <label className="text-sm font-medium text-fg">Name <span className="text-xs text-fg-muted ml-1">Optional</span></label>
+              <label className="text-sm font-medium text-fg block mb-1">
+                Name <span className="text-xs text-fg-muted ml-1 px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
+              </label>
               <input
                 value={customForm.name}
                 onChange={(e) => setCustomForm({ ...customForm, name: e.target.value })}
@@ -487,101 +518,185 @@ export function VaultsList() {
                 className={inputCls}
               />
             </div>
+
             <div>
-              <label className="text-sm font-medium text-fg">Type</label>
-              <div className="inline-flex rounded-md border border-border-subtle p-0.5 mt-1">
+              <label className="text-sm font-medium text-fg block mb-1">Type</label>
+              <div className="inline-flex rounded-md border border-border-subtle p-0.5">
                 {(["oauth", "bearer"] as const).map((t) => (
                   <button
                     key={t}
                     type="button"
                     onClick={() => setCustomForm({ ...customForm, type: t })}
-                    className={`px-3 py-1 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg" : "text-fg-muted"}`}
+                    className={`px-3 py-1 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg font-medium" : "text-fg-muted"}`}
                   >
                     {t === "oauth" ? "OAuth" : "Bearer token"}
                   </button>
                 ))}
               </div>
             </div>
+
             <div>
-              <label className="text-sm font-medium text-fg">MCP Server</label>
-              <input
-                value={customForm.url}
-                onChange={(e) => setCustomForm({ ...customForm, url: e.target.value })}
-                placeholder="https://mcp.example.com"
-                className={inputCls}
-              />
+              <label className="text-sm font-medium text-fg block mb-1">MCP Server</label>
+              {/* Picker — combobox style. Click toggles a registry list
+                  panel; click a row fills the URL field (does NOT auto-
+                  connect). User can also type a custom URL inline. */}
+              <div className="relative">
+                <div className={`flex items-center gap-2 ${inputCls} cursor-text`} onClick={() => setPickerOpen(true)}>
+                  {customForm.pickedIcon && (
+                    <img src={customForm.pickedIcon} alt="" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                  )}
+                  {customForm.pickedName ? (
+                    <>
+                      <span className="text-sm font-medium text-fg shrink-0">{customForm.pickedName}</span>
+                      <span className="text-xs text-fg-muted font-mono truncate">{customForm.url}</span>
+                    </>
+                  ) : (
+                    <input
+                      value={customForm.url}
+                      onChange={(e) => setCustomForm({ ...customForm, url: e.target.value })}
+                      placeholder="https://mcp.example.com"
+                      className="flex-1 bg-transparent outline-none text-sm"
+                    />
+                  )}
+                  {(customForm.url || customForm.pickedName) && (
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        setCustomForm({ ...customForm, url: "", pickedName: "", pickedIcon: "" });
+                      }}
+                      className="text-fg-muted hover:text-fg shrink-0 px-1"
+                      aria-label="Clear"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
+                {pickerOpen && (
+                  <div className="absolute left-0 right-0 top-full mt-1 bg-bg border border-border rounded-md shadow-lg z-10 max-h-72 overflow-y-auto">
+                    <div className="p-2 border-b border-border-subtle">
+                      <input
+                        value={mcpSearch}
+                        onChange={(e) => setMcpSearch(e.target.value)}
+                        placeholder="Search Anthropic's MCP registry or enter a custom URL"
+                        className={inputCls}
+                        autoFocus
+                      />
+                    </div>
+                    {filteredRegistry.map((entry) => (
+                      <button
+                        key={entry.id}
+                        onClick={() => {
+                          setCustomForm({
+                            ...customForm,
+                            url: entry.url,
+                            pickedName: entry.name,
+                            pickedIcon: entry.icon ?? "",
+                          });
+                          setPickerOpen(false);
+                          setMcpSearch("");
+                        }}
+                        className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-bg-surface cursor-pointer"
+                      >
+                        {entry.icon ? (
+                          <img src={entry.icon} alt="" className="w-5 h-5 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                        ) : (
+                          <div className="w-5 h-5 rounded bg-bg-surface shrink-0" />
+                        )}
+                        <div className="min-w-0 flex-1">
+                          <div className="text-sm font-medium text-fg">{entry.name}</div>
+                          <div className="text-xs text-fg-muted font-mono truncate">{entry.url}</div>
+                        </div>
+                      </button>
+                    ))}
+                    {filteredRegistry.length === 0 && (
+                      <div className="text-center py-4 text-fg-subtle text-xs">No matches. Close this dropdown and type a URL above.</div>
+                    )}
+                  </div>
+                )}
+              </div>
             </div>
-            {customForm.type === "bearer" && (
-              <div>
-                <label className="text-sm font-medium text-fg">Bearer token</label>
-                <input
-                  value={customForm.token}
-                  onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })}
-                  type="password"
-                  placeholder="••••••••"
-                  className={inputCls}
-                />
+
+            {/* Access token — collapsed Optional. Filling this switches
+                the submit path to POST static_bearer + button label
+                changes to Create. Visible regardless of Type so the
+                user can supply a pre-issued OAuth access_token without
+                a full handshake. */}
+            <div className="border border-border-subtle rounded-md">
+              <button
+                type="button"
+                onClick={() => setTokenSectionOpen((v) => !v)}
+                className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
+              >
+                <span className={`text-fg-muted transition-transform ${tokenSectionOpen ? "rotate-90" : ""}`}>›</span>
+                <span className="text-sm font-medium text-fg">Access token</span>
+                <span className="text-xs text-fg-muted px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
+              </button>
+              {tokenSectionOpen && (
+                <div className="px-3 pb-3">
+                  <input
+                    value={customForm.token}
+                    onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })}
+                    type="password"
+                    placeholder="••••••••"
+                    className={inputCls}
+                  />
+                  <div className="text-xs text-fg-subtle mt-1">If filled, the credential is stored as a static bearer token (no OAuth handshake).</div>
+                </div>
+              )}
+            </div>
+
+            {/* Refresh token block (Optional) — only meaningful when an
+                Access token is also set (RFC 6749 §6 refresh_token grant).
+                Render only when token has a value. */}
+            {customForm.token && (
+              <div className="border border-border-subtle rounded-md">
+                <button
+                  type="button"
+                  onClick={() => setRefreshSectionOpen((v) => !v)}
+                  className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
+                >
+                  <span className={`text-fg-muted transition-transform ${refreshSectionOpen ? "rotate-90" : ""}`}>›</span>
+                  <span className="text-sm font-medium text-fg">Refresh token</span>
+                  <span className="text-xs text-fg-muted px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
+                </button>
+                {refreshSectionOpen && (
+                  <div className="px-3 pb-3 space-y-3">
+                    <div>
+                      <input
+                        value={customForm.refreshToken}
+                        onChange={(e) => setCustomForm({ ...customForm, refreshToken: e.target.value })}
+                        placeholder="OAuth refresh token"
+                        className={inputCls}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-fg block mb-1">Token endpoint</label>
+                      <input
+                        value={customForm.tokenEndpoint}
+                        onChange={(e) => setCustomForm({ ...customForm, tokenEndpoint: e.target.value })}
+                        placeholder="https://auth.example.com/oauth/token"
+                        className={inputCls}
+                      />
+                    </div>
+                    <div>
+                      <label className="text-sm font-medium text-fg block mb-1">Auth method</label>
+                      <select
+                        value={customForm.authMethod}
+                        onChange={(e) => setCustomForm({ ...customForm, authMethod: e.target.value as typeof customForm.authMethod })}
+                        className={inputCls}
+                      >
+                        <option value="client_secret_post">client_secret_post</option>
+                        <option value="client_secret_basic">client_secret_basic</option>
+                        <option value="none">none</option>
+                      </select>
+                    </div>
+                    <div className="text-xs text-fg-subtle">RFC 8414 token_endpoint_auth_methods_supported. Used when the server refreshes on 401.</div>
+                  </div>
+                )}
               </div>
             )}
           </div>
-        )}
-
-        {addTab === "mcp" && !customMode && (
-        <div className="space-y-3">
-          <input
-            value={mcpSearch}
-            onChange={(e) => setMcpSearch(e.target.value)}
-            className={inputCls}
-            placeholder="Search Anthropic's MCP registry or enter a custom URL"
-            autoFocus
-          />
-
-          <div className="max-h-72 overflow-y-auto -mx-1">
-            {filteredRegistry.map((entry) => {
-              const isConnected = connectedUrls.has(entry.url);
-              return (
-                <button
-                  key={entry.id}
-                  onClick={() => !isConnected && connectMcp(entry)}
-                  disabled={isConnected || connecting === entry.name}
-                  className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-colors ${
-                    isConnected ? "opacity-50 cursor-default" : "hover:bg-bg-surface cursor-pointer"
-                  }`}
-                >
-                  {entry.icon ? (
-                    <img src={entry.icon} alt="" className="w-5 h-5 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                  ) : (
-                    <div className="w-5 h-5 rounded bg-bg-surface shrink-0" />
-                  )}
-                  <div className="min-w-0 flex-1">
-                    <div className="text-sm font-medium text-fg">{entry.name}</div>
-                    <div className="text-xs text-fg-muted font-mono truncate">{entry.url}</div>
-                  </div>
-                  {isConnected ? (
-                    <span className="text-xs text-success font-medium shrink-0">Connected</span>
-                  ) : connecting === entry.name ? (
-                    <span className="text-xs text-fg-muted shrink-0">Connecting...</span>
-                  ) : null}
-                </button>
-              );
-            })}
-            {filteredRegistry.length === 0 && (
-              <div className="text-center py-6 text-fg-subtle text-sm">No matches. Use the URL field below to connect a custom server.</div>
-            )}
-          </div>
-
-          {/* Bottom URL input (Anthropic-style). Submits via the modal
-              footer Connect button → opens the detailed Add-credential
-              form view (Name + Type + URL + optional token). */}
-          <div className="border-t border-border-subtle pt-3">
-            <input
-              value={customUrlInput}
-              onChange={(e) => setCustomUrlInput(e.target.value)}
-              placeholder="https://mcp.example.com"
-              className={inputCls}
-            />
-          </div>
-        </div>
         )}
 
         {addTab === "cli" && (
