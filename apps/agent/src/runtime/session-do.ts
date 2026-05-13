@@ -1063,13 +1063,22 @@ export class SessionDO extends DurableObject<Env> {
       //      semantic — pre-fix, user.message stayed pending until
       //      turn end (5–30s), so the UI hourglass never went away
       //      while the agent was already streaming a reply.
+      //
+      // Rewrite both the indexed `processed_at` column AND the JSON
+      // `data` blob — `/api/sessions/:id/events` returns the JSON
+      // verbatim, so leaving the embedded `processed_at` as the append
+      // time would violate the AMA spec ("null until processed by
+      // agent") and produce timelines where the agent's reply appears
+      // to predate the user message that triggered it.
+      const nowMs = Date.now();
+      const nowIso = new Date(nowMs).toISOString();
+      const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
+      event.processed_at = nowIso;
       this.ctx.storage.sql.exec(
-        `UPDATE events SET processed_at = ? WHERE seq = ?`,
-        Date.now(), pendingSeq,
+        `UPDATE events SET processed_at = ?, data = ? WHERE seq = ?`,
+        nowMs, JSON.stringify(event), pendingSeq,
       );
       try {
-        const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
-
         // Run the turn through the unified runtime: adapter.beginTurn /
         // endTurn write the marker on `sessions.turn_id`, hintTurnInFlight
         // wires CF's setAlarm-30s keep-alive, backup/persist runs

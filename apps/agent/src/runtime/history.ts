@@ -435,12 +435,23 @@ function serializeSummaryAsText(summary: ContentBlock[]): string {
 
 /**
  * Stamp an event with id and processed_at if not already set.
+ *
+ * AMA spec: `processed_at` is null until the agent actually processes the
+ * event. For inbound user-side events (user.message / user.tool_confirmation /
+ * user.custom_tool_result) that means "drained from the queue and handed to
+ * the model", which happens later in `SessionDO.drainEventQueue`. For all
+ * other events (agent output, tool output, system, lifecycle) the act of
+ * appending IS the processing, so we stamp at append time.
  */
 function stampEvent(event: SessionEvent): SessionEvent {
   if (!event.id) {
     event.id = generateEventId();
   }
-  if (!event.processed_at) {
+  const isPendingUntilDrain =
+    event.type === "user.message" ||
+    event.type === "user.tool_confirmation" ||
+    event.type === "user.custom_tool_result";
+  if (!event.processed_at && !isPendingUntilDrain) {
     event.processed_at = new Date().toISOString();
   }
   return event;
