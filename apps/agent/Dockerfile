@@ -15,6 +15,20 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     tree htop less file \
     zip unzip \
     sqlite3 \
+    sudo \
+    && rm -rf /var/lib/apt/lists/*
+
+# GitHub CLI (gh) — common enough that every session downloading it adds up
+# (~12MB tarball + extract on cold sandboxes). Official apt repo. Pre-install
+# so `gh auth` / `gh api` / `gh pr` work out of the box; agents don't have to
+# do the install dance per session.
+RUN curl -fsSL --retry 5 --retry-delay 5 --retry-all-errors --connect-timeout 30 \
+      https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+      -o /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && chmod go+r /usr/share/keyrings/githubcli-archive-keyring.gpg \
+    && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+       > /etc/apt/sources.list.d/github-cli.list \
+    && apt-get update && apt-get install -y --no-install-recommends gh \
     && rm -rf /var/lib/apt/lists/*
 
 # ripgrep — pre-built binary
