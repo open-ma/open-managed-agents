@@ -1295,6 +1295,36 @@ app.get("/:id/events", async (c) => {
   return handleJSONEvents(c, c.req.param("id"));
 });
 
+// GET /v1/sessions/:id/pending — AMA-spec pending queue surface. Lists
+// user.* events that have been enqueued (POST /events) but not yet
+// drained by the harness. Forwarded to SessionDO /pending; same auth +
+// tenant scoping as GET /events.
+//
+// Query: ?session_thread_id=… (default sthr_primary)
+//        ?include_cancelled=true
+app.get("/:id/pending", async (c) => {
+  const id = c.req.param("id");
+  const t = c.get("tenant_id");
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  const sbRes = await getSandboxBinding(c.env, session.environment_id, t);
+  const binding = sbRes.binding;
+  if (!binding) return bindingErrorResponse(c, sbRes);
+
+  const url = new URL(c.req.url);
+  const res = await forwardToSandbox(binding, `/sessions/${id}/pending${url.search}`, c.req.raw, "GET");
+  if (!res.ok) {
+    const body = await res.text();
+    return new Response(body, {
+      status: res.status,
+      headers: { "content-type": res.headers.get("content-type") ?? "text/plain" },
+    });
+  }
+  const result = await res.json();
+  return c.json(result);
+});
+
 // POST /v1/sessions/:id/__debug_recovery__ — ops-only forwarder for the
 // SessionDO recovery probe. Body forwards as-is. Both layers re-check
 // X-Debug-Token against env.DEBUG_TOKEN — the main-worker check fails

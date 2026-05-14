@@ -1954,6 +1954,46 @@ export class SessionDO extends DurableObject<Env> {
       });
     }
 
+    // GET /pending — AMA-spec pending queue surface. Lists user.* events
+    // that have been enqueued but not yet drained.
+    //
+    // Query params:
+    //   ?session_thread_id=…    → filter to one thread (default sthr_primary)
+    //   ?include_cancelled=true → include rows flushed by user.interrupt
+    //
+    // Response shape:
+    //   { data: [ { pending_seq, enqueued_at, type, event_id,
+    //               session_thread_id, cancelled_at, data } ] }
+    // Ordered by pending_seq ASC. Cancelled rows omitted by default.
+    if (request.method === "GET" && url.pathname === "/pending") {
+      const threadId =
+        url.searchParams.get("session_thread_id") ?? "sthr_primary";
+      const includeCancelled =
+        url.searchParams.get("include_cancelled") === "true";
+      const rows = this.pending!.list(threadId, includeCancelled);
+      const data = rows.map((r) => {
+        let parsed: unknown = null;
+        try {
+          parsed = JSON.parse(r.data);
+        } catch (err) {
+          parsed = {
+            _parse_error: err instanceof Error ? err.message : String(err),
+            _raw_preview: r.data.slice(0, 200),
+          };
+        }
+        return {
+          pending_seq: r.pending_seq,
+          enqueued_at: r.enqueued_at,
+          session_thread_id: r.session_thread_id,
+          type: r.type,
+          event_id: r.event_id,
+          cancelled_at: r.cancelled_at,
+          data: parsed,
+        };
+      });
+      return Response.json({ data });
+    }
+
     // GET /events — paginated event list
     if (request.method === "GET" && url.pathname === "/events") {
       const limitParam = url.searchParams.get("limit");
