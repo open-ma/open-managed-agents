@@ -678,10 +678,25 @@ export class DefaultHarness implements HarnessInterface {
         // Re-throw so drainEventQueue's TurnAborted handling still
         // runs (status_idle, queue flush already happened in the
         // POST /event handler).
+        //
+        // Drain ALL three live-stream registers, not just the message
+        // one — onStepFinish is the only place that drains thinking +
+        // tool-input streams normally, but it doesn't run on abort. A
+        // half-open thinking_stream_start without a matching
+        // thinking_stream_end leaves the client's "Claude is thinking…"
+        // bubble pulsing forever. Same for tool-input streams.
         if (currentMessageId) {
           await runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
           currentMessageId = null;
         }
+        for (const tid of liveThinking) {
+          await runtime.broadcastThinkingEnd(tid, "aborted");
+        }
+        liveThinking.clear();
+        for (const tid of liveToolInput) {
+          await runtime.broadcastToolInputEnd(tid, "aborted");
+        }
+        liveToolInput.clear();
         throw err;
       }
       const finishReason = await r.finishReason;

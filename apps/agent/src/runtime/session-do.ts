@@ -1792,8 +1792,15 @@ export class SessionDO extends DurableObject<Env> {
         // stop_reason=end_turn, seq 95 idle stop_reason=None).
         const shouldEmitIdle = hadActiveTurn || cancelledCount > 0;
         if (shouldEmitIdle) {
+          // stop_reason is required on session.status_idle per Anthropic
+          // spec — pydantic v2 in @anthropic-ai/sdk-python rejects events
+          // without it. Anthropic's StopReason union has no `interrupted`
+          // variant, so use `end_turn` (the closest semantic — agent
+          // stopped, user can send the next message). The accompanying
+          // user.interrupt event in the log carries the actual cause.
           const idleEvent: SessionEvent = {
             type: "session.status_idle",
+            stop_reason: { type: "end_turn" },
             ...(targetThread !== "sthr_primary" ? { session_thread_id: targetThread } : {}),
           };
           history.append(idleEvent);
