@@ -1,4 +1,5 @@
-import { useEffect, useState, useCallback } from "react";
+import { useEffect, useState, useCallback, useRef, useLayoutEffect } from "react";
+import { createPortal } from "react-dom";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
@@ -80,6 +81,26 @@ export function VaultsList() {
     clientSecret: "",
   });
   const [pickerOpen, setPickerOpen] = useState(false);
+  // Portal-positioned dropdown anchor. The MCP server picker dropdown
+  // can't render inside the modal body (which is overflow-y-auto and
+  // clips it); we render it via createPortal into document.body and
+  // position with `fixed` relative to this ref.
+  const pickerAnchorRef = useRef<HTMLDivElement | null>(null);
+  const [pickerRect, setPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  useLayoutEffect(() => {
+    if (!pickerOpen) { setPickerRect(null); return; }
+    const update = () => {
+      const r = pickerAnchorRef.current?.getBoundingClientRect();
+      if (r) setPickerRect({ top: r.bottom + 4, left: r.left, width: r.width });
+    };
+    update();
+    window.addEventListener("resize", update);
+    window.addEventListener("scroll", update, true);
+    return () => {
+      window.removeEventListener("resize", update);
+      window.removeEventListener("scroll", update, true);
+    };
+  }, [pickerOpen]);
   const [tokenSectionOpen, setTokenSectionOpen] = useState(false);
   const [refreshSectionOpen, setRefreshSectionOpen] = useState(false);
   const [clientCredsSectionOpen, setClientCredsSectionOpen] = useState(false);
@@ -558,7 +579,7 @@ export function VaultsList() {
               {/* Picker — combobox style. Click toggles a registry list
                   panel; click a row fills the URL field (does NOT auto-
                   connect). User can also type a custom URL inline. */}
-              <div className="relative">
+              <div className="relative" ref={pickerAnchorRef}>
                 <div className={`flex items-center gap-2 ${inputCls} cursor-text`} onClick={() => setPickerOpen(true)}>
                   {customForm.pickedIcon && (
                     <img src={customForm.pickedIcon} alt="" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
@@ -590,8 +611,17 @@ export function VaultsList() {
                     </button>
                   )}
                 </div>
-                {pickerOpen && (
-                  <div className="absolute left-0 right-0 top-full mt-1 bg-bg border border-border rounded-md shadow-lg z-[100] max-h-72 overflow-y-auto">
+                {pickerOpen && pickerRect && createPortal(
+                  <>
+                    {/* Click-outside blocker */}
+                    <div
+                      className="fixed inset-0 z-[9998]"
+                      onClick={() => { setPickerOpen(false); setMcpSearch(""); }}
+                    />
+                    <div
+                      className="fixed bg-bg border border-border rounded-md shadow-xl z-[9999] max-h-72 overflow-y-auto"
+                      style={{ top: pickerRect.top, left: pickerRect.left, width: pickerRect.width }}
+                    >
                     <div className="p-2 border-b border-border-subtle">
                       <input
                         value={mcpSearch}
@@ -630,7 +660,9 @@ export function VaultsList() {
                     {filteredRegistry.length === 0 && (
                       <div className="text-center py-4 text-fg-subtle text-xs">No matches. Close this dropdown and type a URL above.</div>
                     )}
-                  </div>
+                    </div>
+                  </>,
+                  document.body,
                 )}
               </div>
             </div>
