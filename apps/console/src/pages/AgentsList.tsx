@@ -188,6 +188,16 @@ export function AgentsList() {
           permission_policy: { type: v as "always_allow" | "always_ask" },
         };
       });
+    // AMA spec: each entry in mcp_servers gets a corresponding mcp_toolset
+    // tool that references it by name. Surface them all as always_allow
+    // by default — the user already opted in by adding the server.
+    const mcpToolsets = form.mcpServers
+      .filter((m) => m.name)
+      .map((m) => ({
+        type: "mcp_toolset" as const,
+        mcp_server_name: m.name,
+        default_config: { permission_policy: { type: "always_allow" as const } },
+      }));
     return [
       {
         type: "agent_toolset_20260401",
@@ -197,6 +207,7 @@ export function AgentsList() {
         },
         ...(overrides.length > 0 ? { configs: overrides } : {}),
       },
+      ...mcpToolsets,
     ];
   };
 
@@ -247,12 +258,12 @@ export function AgentsList() {
 
   const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : m?.id || "";
 
-  const addMcp = () => setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "sse", url: "" }] });
+  const addMcp = () => setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "url", url: "" }] });
   const addMcpFromRegistry = (entry: { id: string; name: string; url: string }) => {
     if (form.mcpServers.some((m) => m.url === entry.url)) return;
     setForm({
       ...form,
-      mcpServers: [...form.mcpServers, { name: entry.id, type: "sse", url: entry.url }],
+      mcpServers: [...form.mcpServers, { name: entry.id, type: "url", url: entry.url }],
     });
   };
   const updateMcp = (i: number, field: keyof McpEntry, val: string) => {
