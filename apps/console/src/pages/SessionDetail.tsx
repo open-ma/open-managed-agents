@@ -14,6 +14,19 @@ import { rewardHeadline, outcomeToStatusTone } from "../lib/trajectory";
 
 type View = "chat" | "timeline";
 
+/** A user.* event sitting in the server-side pending_events queue.
+ *  Maintained client-side via system.user_message_pending /
+ *  _promoted / _cancelled SSE frames. Server is authoritative on what's
+ *  pending; client mirrors the row for outbox rendering only. */
+interface PendingEntry {
+  event_id: string;
+  pending_seq: number;
+  enqueued_at: number;
+  session_thread_id: string;
+  /** The full canonical user.* event the server enqueued. */
+  event: Event;
+}
+
 export function SessionDetail() {
   const { id } = useParams();
   const { api, streamEvents } = useApi();
@@ -82,6 +95,14 @@ export function SessionDetail() {
    *  the events array at render time. SSE-driven new threads don't
    *  auto-switch — the operator stays on whatever they're watching. */
   const [activeThreadId, setActiveThreadId] = useState<string>("sthr_primary");
+  /** Server-mirrored pending queue, keyed by event_id. Populated from
+   *  the initial GET /pending plus live system.user_message_pending /
+   *  _promoted / _cancelled SSE frames. Pending entries render as a
+   *  separate "outbox" section at the bottom of the timeline; once the
+   *  server promotes the row (system.user_message_promoted), the entry
+   *  is removed from this map and the canonical user.* event takes its
+   *  place in the events array via the regular SSE broadcast. */
+  const [pendingByEventId, setPendingByEventId] = useState<Map<string, PendingEntry>>(new Map());
   const [showTrajectory, setShowTrajectory] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const seenKeys = useRef(new Set<string>());
@@ -246,7 +267,82 @@ export function SessionDetail() {
     // running→idle→running→idle×3 during exponential-backoff retries
     // (sess-y2bfxm1de4e1zqxm 2026-05-11). The next status_running event
     // for the retry attempt naturally restores the pill.
-    if (ev.type === "session.error") setStatus("idle");
+    if (ev.type === "session.error") {
+      setStatus("idle");
+      // session.error implies the active turn is dead; the harness won't
+      // pick anything else off the queue until the next user.message.
+      // Drop the outbox so the user doesn't see ghosts of inputs that
+      // can never run on this session state.
+      setPendingByEventId(new Map());
+    }
+
+    // AMA-spec pending-queue notifications. The server is authoritative
+    // on what's queued; we mirror its state into pendingByEventId so the
+    // outbox renders without polling /pending.
+    if (ev.type === "system.user_message_pending") {
+      const p = ev as unknown as {
+        event_id: string;
+        pending_seq: number;
+        enqueued_at: number;
+        session_thread_id: string;
+        event: Event;
+      };
+      if (p.event_id) {
+        setPendingByEventId((prev) => {
+          const next = new Map(prev);
+          next.set(p.event_id, {
+            event_id: p.event_id,
+            pending_seq: p.pending_seq,
+            enqueued_at: p.enqueued_at,
+            session_thread_id: p.session_thread_id ?? "sthr_primary",
+            event: p.event,
+          });
+          return next;
+        });
+      }
+      // System frame — don't add to events list. The canonical user.*
+      // event arrives separately at drain time.
+      return;
+    }
+    if (ev.type === "system.user_message_promoted") {
+      const p = ev as unknown as { event_id?: string };
+      if (p.event_id) {
+        setPendingByEventId((prev) => {
+          if (!prev.has(p.event_id!)) return prev;
+          const next = new Map(prev);
+          next.delete(p.event_id!);
+          return next;
+        });
+      }
+      return;
+    }
+    if (ev.type === "system.user_message_cancelled") {
+      const p = ev as unknown as { event_id?: string };
+      if (p.event_id) {
+        setPendingByEventId((prev) => {
+          if (!prev.has(p.event_id!)) return prev;
+          const next = new Map(prev);
+          next.delete(p.event_id!);
+          return next;
+        });
+      }
+      return;
+    }
+    // user.interrupt also clears the outbox client-side (server emits
+    // _cancelled per row above; this is defensive for the case where the
+    // SDK posts user.interrupt without a thread filter and we want to
+    // drop everything for the active thread).
+    if (ev.type === "user.interrupt") {
+      const tid = (ev as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
+      setPendingByEventId((prev) => {
+        if (prev.size === 0) return prev;
+        const next = new Map(prev);
+        for (const [k, v] of prev) {
+          if (v.session_thread_id === tid) next.delete(k);
+        }
+        return next;
+      });
+    }
     // Live-update the thread selector when a sub-agent spawns. We don't
     // auto-switch the operator's view — they stay on whatever they're
     // watching; the new tab just appears alongside.
@@ -314,6 +410,7 @@ export function SessionDetail() {
     setTrajectory(undefined);
     setThreads([]);
     setActiveThreadId("sthr_primary");
+    setPendingByEventId(new Map());
 
     // Load session info
     api<{
@@ -436,6 +533,39 @@ export function SessionDetail() {
         setThreads(subThreads);
       })
       .catch(() => setThreads([]));
+
+    // Initial pending queue snapshot. The SSE bridge picks up live
+    // changes from system.user_message_{pending,promoted,cancelled}
+    // frames; this fetch seeds the map so a page-reload during an
+    // in-flight queue still shows the outbox correctly. Best-effort —
+    // a 404/5xx leaves pendingByEventId empty (the SSE will repopulate
+    // when the next pending event lands).
+    api<{
+      data: Array<{
+        pending_seq: number;
+        enqueued_at: number;
+        type: string;
+        event_id: string;
+        session_thread_id: string;
+        cancelled_at: number | null;
+        data: Event;
+      }>;
+    }>(`/v1/sessions/${id}/pending`)
+      .then((res) => {
+        const next = new Map<string, PendingEntry>();
+        for (const r of res.data ?? []) {
+          if (!r.event_id) continue;
+          next.set(r.event_id, {
+            event_id: r.event_id,
+            pending_seq: r.pending_seq,
+            enqueued_at: r.enqueued_at,
+            session_thread_id: r.session_thread_id,
+            event: r.data,
+          });
+        }
+        if (next.size > 0) setPendingByEventId(next);
+      })
+      .catch(() => {/* leave empty */});
 
     return () => { abort.abort(); };
   }, [id]);
@@ -674,78 +804,15 @@ export function SessionDetail() {
           {/* Events */}
           <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
             {(() => {
-              // Per-thread "still pending" derivation. The wire-level
-              // `processed_at_ms` only flips when the agent picks an
-              // event up server-side; Console gets the user.message via
-              // SSE BEFORE drain runs, so processed_at_ms is null at
-              // arrival and never updates live (no re-broadcast on
-              // server-side UPDATE). Without this client derive the
-              // hourglass would stay forever even while the agent is
-              // streaming a reply.
-              //
-              // Heuristic: a user.message is "really" pending only if
-              // no later event on the same thread is non-user (i.e. no
-              // agent.* / span.* / session.status_idle has followed).
-              // As soon as the agent emits anything for this thread,
-              // the user message is no longer awaiting ingestion.
+              // Server-returned events are now in canonical drain order
+              // (events.seq = INSERT order = what the model saw). The
+              // pre-3a3e7ec client-side sort by processed_at_ms is
+              // retired; pending events live in a separate outbox below
+              // and never mix into this seq-ordered timeline.
               const filtered = events.filter((e) => {
                 const tid = (e as { session_thread_id?: string }).session_thread_id ?? "sthr_primary";
                 return tid === activeThreadId;
               });
-              // Re-sort by `processed_at` so the visual timeline reflects
-              // *agent processing order*, not *append order*. Background:
-              //   1. Server returns events ORDER BY seq (= append order).
-              //   2. If the user types while the agent is still streaming
-              //      a previous turn, the user.message gets appended at
-              //      seq=N during the prior turn → seq-sorted timeline
-              //      shows user.message INSIDE the prior turn's output,
-              //      visually "before" agent text it actually triggered.
-              //   3. drainEventQueue stamps processed_at when it picks
-              //      the user.message up (= when the new turn starts), so
-              //      processed_at order = logical chat order.
-              // Source of truth precedence:
-              //   • `processed_at_ms` (number) — injected by the cf-do
-              //     event-log adapter from the DB column on REST loads;
-              //     correct even for sessions created before the
-              //     stamp-JSON fix landed (DB column was always right).
-              //   • `processed_at`  (ISO string) — present on SSE-arrived
-              //     events (no adapter on the broadcast path).
-              //   • Both null → sort to end. This is the "still pending"
-              //     case: a freshly-sent user.message in live view sits
-              //     at the bottom until drain stamps it (no re-broadcast
-              //     today, so it stays at the bottom until next reload —
-              //     OK because "at the bottom" reads as "just sent").
-              // Tiebreaker: seq. Two events with the same processed_at
-              // (drain bursts, or sub-ms agent chunks) keep append order.
-              const sortKey = (e: typeof filtered[number]): number => {
-                const ms = (e as { processed_at_ms?: number | null }).processed_at_ms;
-                if (typeof ms === "number") return ms;
-                const iso = (e as { processed_at?: string | null }).processed_at;
-                if (typeof iso === "string") {
-                  const t = new Date(iso).getTime();
-                  if (Number.isFinite(t)) return t;
-                }
-                return Number.POSITIVE_INFINITY;
-              };
-              filtered.sort((a, b) => {
-                const ka = sortKey(a);
-                const kb = sortKey(b);
-                if (ka !== kb) return ka - kb;
-                const sa = (a as { seq?: number }).seq ?? 0;
-                const sb = (b as { seq?: number }).seq ?? 0;
-                return sa - sb;
-              });
-              // For each user.* event index, find whether any later
-              // index in the same filtered array is a non-user event.
-              // O(n) — single right-to-left pass tracking "have we
-              // seen a non-user event yet" per thread; works because
-              // we're already filtered to one thread.
-              const nonUserSeen: boolean[] = new Array(filtered.length).fill(false);
-              let seen = false;
-              for (let i = filtered.length - 1; i >= 0; i--) {
-                nonUserSeen[i] = seen;
-                if (!filtered[i].type?.startsWith("user.")) seen = true;
-              }
               // Pre-pair tool_use ↔ result events. Three flavors per the
               // wire spec emitted in default-loop.ts:emitToolCallEvent /
               // emitToolResultEvent:
@@ -811,11 +878,28 @@ export function SessionDetail() {
                   <EventBubble
                     key={stableKey}
                     event={e}
-                    livePending={!nonUserSeen[i]}
+                    livePending={false}
                     pairedResult={pairedResult}
                   />
                 );
               });
+            })()}
+            {/* Pending outbox — server-mirrored queue rows that haven't
+                been drained yet. Keyed by event_id; rendered below the
+                timeline, never inline. The hourglass treatment is the
+                visual tell ("queued, not yet ingested by the agent").
+                Filtered to the active thread. */}
+            {(() => {
+              const outbox = Array.from(pendingByEventId.values())
+                .filter((p) => p.session_thread_id === activeThreadId)
+                .sort((a, b) => a.pending_seq - b.pending_seq);
+              return outbox.map((p) => (
+                <EventBubble
+                  key={`pending-${p.event_id}`}
+                  event={p.event}
+                  livePending={true}
+                />
+              ));
             })()}
             {/* In-flight thinking streams. Render before message/tool
                 streams so the visual order roughly matches what the
