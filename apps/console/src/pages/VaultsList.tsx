@@ -1,11 +1,11 @@
-import { useEffect, useState, useCallback, useRef, useLayoutEffect } from "react";
-import { createPortal } from "react-dom";
+import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
 import { useCursorList } from "../lib/useCursorList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
 import { TextInput, SecretInput } from "../components/Input";
+import { LocalCombobox } from "../components/LocalCombobox";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 
 interface Vault { id: string; name: string; created_at: string; archived_at?: string; }
@@ -50,9 +50,7 @@ export function VaultsList() {
   // Folds the previously separate "+ Connect service" + "+ Add CLI" entry
   // points into one modal; matches Anthropic's UI shape.
   const [addTab, setAddTab] = useState<"mcp" | "cli">("mcp");
-  const [mcpSearch, setMcpSearch] = useState("");
   const [connecting, setConnecting] = useState<string | null>(null);
-  // Bottom URL input on the MCP tab (separate from the search box above).
   // Custom MCP server form — single inline form (Anthropic-style).
   // Renders all fields in one view: Name, Type, MCP Server (with embedded
   // registry picker), Access token (Optional), and Refresh token block
@@ -80,27 +78,6 @@ export function VaultsList() {
     clientId: "",
     clientSecret: "",
   });
-  const [pickerOpen, setPickerOpen] = useState(false);
-  // Portal-positioned dropdown anchor. The MCP server picker dropdown
-  // can't render inside the modal body (which is overflow-y-auto and
-  // clips it); we render it via createPortal into document.body and
-  // position with `fixed` relative to this ref.
-  const pickerAnchorRef = useRef<HTMLDivElement | null>(null);
-  const [pickerRect, setPickerRect] = useState<{ top: number; left: number; width: number } | null>(null);
-  useLayoutEffect(() => {
-    if (!pickerOpen) { setPickerRect(null); return; }
-    const update = () => {
-      const r = pickerAnchorRef.current?.getBoundingClientRect();
-      if (r) setPickerRect({ top: r.bottom + 4, left: r.left, width: r.width });
-    };
-    update();
-    window.addEventListener("resize", update);
-    window.addEventListener("scroll", update, true);
-    return () => {
-      window.removeEventListener("resize", update);
-      window.removeEventListener("scroll", update, true);
-    };
-  }, [pickerOpen]);
   const [tokenSectionOpen, setTokenSectionOpen] = useState(false);
   const [refreshSectionOpen, setRefreshSectionOpen] = useState(false);
   const [clientCredsSectionOpen, setClientCredsSectionOpen] = useState(false);
@@ -347,18 +324,6 @@ export function VaultsList() {
 
   const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
 
-  // Filter registry by search
-  const filteredRegistry = mcpSearch
-    ? MCP_REGISTRY.filter(
-        (e) =>
-          e.name.toLowerCase().includes(mcpSearch.toLowerCase()) ||
-          e.url.toLowerCase().includes(mcpSearch.toLowerCase()),
-      )
-    : MCP_REGISTRY;
-
-  // Check if search looks like a custom URL
-  const isCustomUrl = mcpSearch.startsWith("https://") || mcpSearch.startsWith("http://");
-
   // Already connected MCP server URLs
   const connectedUrls = new Set(credentials.map((c) => c.auth.mcp_server_url).filter(Boolean));
 
@@ -489,8 +454,6 @@ export function VaultsList() {
         open={showAddCred && !!selectedVault}
         onClose={() => {
           setShowAddCred(false);
-          setMcpSearch("");
-          setPickerOpen(false);
           setTokenSectionOpen(false);
           setRefreshSectionOpen(false);
           setCustomForm({
@@ -530,7 +493,7 @@ export function VaultsList() {
           {(["mcp", "cli"] as const).map((t) => (
             <button
               key={t}
-              onClick={() => { setAddTab(t); setPickerOpen(false); }}
+              onClick={() => setAddTab(t)}
               className={`px-3 py-2 text-sm border-b-2 -mb-px ${
                 addTab === t
                   ? "border-fg text-fg font-medium"
@@ -579,100 +542,52 @@ export function VaultsList() {
               {/* Picker — combobox style. Click toggles a registry list
                   panel; click a row fills the URL field (does NOT auto-
                   connect). User can also type a custom URL inline. */}
-              <div className="relative" ref={pickerAnchorRef}>
-                <div className={`flex items-center gap-2 ${inputCls}`}>
-                  {customForm.pickedIcon && (
-                    <img src={customForm.pickedIcon} alt="" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                  )}
-                  {customForm.pickedName ? (
-                    <>
-                      <span className="text-sm font-medium text-fg shrink-0">{customForm.pickedName}</span>
-                      <span className="text-xs text-fg-muted font-mono truncate flex-1">{customForm.url}</span>
-                    </>
-                  ) : (
-                    <input
-                      value={customForm.url}
-                      onChange={(e) => setCustomForm({ ...customForm, url: e.target.value })}
-                      placeholder="https://mcp.example.com"
-                      className="flex-1 bg-transparent outline-none text-sm"
-                    />
-                  )}
-                  {(customForm.url || customForm.pickedName) && (
-                    <button
-                      type="button"
-                      onClick={() => setCustomForm({ ...customForm, url: "", pickedName: "", pickedIcon: "" })}
-                      className="text-fg-muted hover:text-fg shrink-0 px-1"
-                      aria-label="Clear"
-                    >
-                      ×
-                    </button>
-                  )}
-                  <button
-                    type="button"
-                    onClick={() => setPickerOpen(true)}
-                    className="text-fg-muted hover:text-fg shrink-0 px-1"
-                    title="Browse Anthropic's MCP registry"
-                    aria-label="Browse registry"
-                  >
-                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
-                      <polyline points="6 9 12 15 18 9" />
-                    </svg>
-                  </button>
-                </div>
-                {pickerOpen && pickerRect && createPortal(
-                  <>
-                    {/* Click-outside blocker */}
-                    <div
-                      className="fixed inset-0 z-[9998]"
-                      onClick={() => { setPickerOpen(false); setMcpSearch(""); }}
-                    />
-                    <div
-                      className="fixed bg-bg border border-border rounded-md shadow-xl z-[9999] max-h-72 overflow-y-auto"
-                      style={{ top: pickerRect.top, left: pickerRect.left, width: pickerRect.width }}
-                    >
-                    <div className="p-2 border-b border-border-subtle">
-                      <input
-                        value={mcpSearch}
-                        onChange={(e) => setMcpSearch(e.target.value)}
-                        placeholder="Search Anthropic's MCP registry or enter a custom URL"
-                        className={inputCls}
-                        autoFocus
-                      />
-                    </div>
-                    {filteredRegistry.map((entry) => (
-                      <button
-                        key={entry.id}
-                        onClick={() => {
-                          setCustomForm({
-                            ...customForm,
-                            url: entry.url,
-                            pickedName: entry.name,
-                            pickedIcon: entry.icon ?? "",
-                          });
-                          setPickerOpen(false);
-                          setMcpSearch("");
-                        }}
-                        className="w-full flex items-center gap-3 px-3 py-2.5 text-left hover:bg-bg-surface cursor-pointer"
-                      >
-                        {entry.icon ? (
-                          <img src={entry.icon} alt="" className="w-5 h-5 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
-                        ) : (
-                          <div className="w-5 h-5 rounded bg-bg-surface shrink-0" />
-                        )}
-                        <div className="min-w-0 flex-1">
-                          <div className="text-sm font-medium text-fg">{entry.name}</div>
-                          <div className="text-xs text-fg-muted font-mono truncate">{entry.url}</div>
-                        </div>
-                      </button>
-                    ))}
-                    {filteredRegistry.length === 0 && (
-                      <div className="text-center py-4 text-fg-subtle text-xs">No matches. Close this dropdown and type a URL above.</div>
+              {/* Combobox: single input acts as both registry-search and
+                  custom-URL field. Focus opens the dropdown; typing filters
+                  the registry by name/URL substring. Picking a registry row
+                  fills the URL + shows the favicon as a prefix. The input
+                  always remains editable so the user can refine to a
+                  custom URL even after picking. */}
+              {/* Combobox: input filters the registry as you type. Pick a
+                  row to fill the URL + show the favicon as a left-side
+                  prefix; type a custom URL to ignore the registry. The
+                  dropdown renders into document.body via portal so it
+                  escapes Modal's overflow-y-auto clipping. */}
+              <LocalCombobox
+                value={customForm.url}
+                onChange={(text) => setCustomForm({ ...customForm, url: text, pickedName: "", pickedIcon: "" })}
+                onPick={(entry) => setCustomForm({
+                  ...customForm,
+                  url: entry.url,
+                  pickedName: entry.name,
+                  pickedIcon: entry.icon ?? "",
+                })}
+                options={MCP_REGISTRY}
+                filter={(entry, q) =>
+                  !q ||
+                  entry.name.toLowerCase().includes(q) ||
+                  entry.url.toLowerCase().includes(q)
+                }
+                getKey={(entry) => entry.id}
+                renderItem={(entry) => (
+                  <div className="flex items-center gap-3 px-3 py-2.5">
+                    {entry.icon ? (
+                      <img src={entry.icon} alt="" className="w-5 h-5 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                    ) : (
+                      <div className="w-5 h-5 rounded bg-bg-surface shrink-0" />
                     )}
+                    <div className="min-w-0 flex-1">
+                      <div className="text-sm font-medium text-fg">{entry.name}</div>
+                      <div className="text-xs text-fg-muted font-mono truncate">{entry.url}</div>
                     </div>
-                  </>,
-                  document.body,
+                  </div>
                 )}
-              </div>
+                prefix={customForm.pickedIcon ? (
+                  <img src={customForm.pickedIcon} alt="" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                ) : null}
+                placeholder="Search Anthropic's MCP registry or enter a custom URL"
+                emptyHint="No matches — keep typing for a custom URL"
+              />
             </div>
 
             {/* Access token — collapsed Optional. Filling this switches
