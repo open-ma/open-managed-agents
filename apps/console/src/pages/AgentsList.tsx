@@ -971,9 +971,16 @@ export function AgentsList() {
 
                   <div>
                     <label className="text-sm font-medium text-fg block mb-2">Custom Skills</label>
-                    {customSkills.length > 0 ? (
+                    {(() => {
+                      // Hide skills that are already surfaced under
+                      // Anthropic Skills above (xlsx/pdf/pptx/docx —
+                      // their backend rows show up in the same list as
+                      // user-registered skills, otherwise we duplicate).
+                      const anthropicIds = new Set(ANTHROPIC_SKILLS.map((s) => s.id));
+                      const filtered = customSkills.filter((cs) => !anthropicIds.has(cs.id));
+                      return filtered.length > 0 ? (
                       <div className="space-y-2">
-                        {customSkills.map((cs) => {
+                        {filtered.map((cs) => {
                           const active = form.skills.some(sk => sk.type === "custom" && sk.skill_id === cs.id);
                           return (
                             <button key={cs.id}
@@ -999,7 +1006,8 @@ export function AgentsList() {
                       </div>
                     ) : (
                       <p className="text-xs text-fg-subtle">No custom skills registered. <a href="/skills" className="underline hover:text-fg-muted">Create one</a>.</p>
-                    )}
+                    );
+                    })()}
                   </div>
                 </div>
               )}
