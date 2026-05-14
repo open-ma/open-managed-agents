@@ -751,6 +751,51 @@ export interface AuxModelCallEvent extends EventBase {
   error?: string;
 }
 
+// AMA-spec pending-queue notifications. New under the dual-table refactor:
+// turn-input events (user.message / user.tool_confirmation /
+// user.custom_tool_result) live in `pending_events` between POST
+// /v1/sessions/:id/events and drainEventQueue picking them up. These
+// `system.*` frames let live consumers render an outbox section without
+// polling /v1/sessions/:id/pending.
+//
+// Old SDK consumers don't filter on `system.*` so the new frames are
+// silently ignored. New consumers (Console) listen for them to maintain
+// a Map<event_id, pending_row> client-side.
+export interface SystemUserMessagePendingEvent extends EventBase {
+  type: "system.user_message_pending";
+  /** Mirrors data.id of the queued event. */
+  event_id: string;
+  /** AUTOINCREMENT order within the pending_events queue. */
+  pending_seq: number;
+  /** Wall-clock ms when the event hit the queue. */
+  enqueued_at: number;
+  session_thread_id: string;
+  /** The full canonical user.* event (so consumers that key on
+   *  `user.message` can render content immediately). */
+  event: SessionEvent;
+}
+
+export interface SystemUserMessagePromotedEvent extends EventBase {
+  type: "system.user_message_promoted";
+  event_id: string;
+  /** May be absent when the row was promoted via the legacy backfill
+   *  path (those rows never lived in `pending_events`). */
+  pending_seq?: number;
+  /** AUTOINCREMENT seq the row got in `events` at INSERT time. */
+  seq?: number;
+  /** ISO timestamp drain stamped at INSERT. */
+  processed_at: string;
+  session_thread_id: string;
+}
+
+export interface SystemUserMessageCancelledEvent extends EventBase {
+  type: "system.user_message_cancelled";
+  event_id: string;
+  pending_seq: number;
+  session_thread_id: string;
+  cancelled_at: number;
+}
+
 export type SessionEvent =
   | UserMessageEvent
   | UserInterruptEvent
@@ -795,7 +840,10 @@ export type SessionEvent =
   | SpanOutcomeEvaluationEndEvent
   | SpanCompactionSummarizeStartEvent
   | SpanCompactionSummarizeEndEvent
-  | AuxModelCallEvent;
+  | AuxModelCallEvent
+  | SystemUserMessagePendingEvent
+  | SystemUserMessagePromotedEvent
+  | SystemUserMessageCancelledEvent;
 
 // --- Vault ---
 

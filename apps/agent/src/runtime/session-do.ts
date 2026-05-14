@@ -54,6 +54,9 @@ import type {
   UserDefineOutcomeEvent,
   AgentMessageEvent,
   AgentToolUseEvent,
+  SystemUserMessagePendingEvent,
+  SystemUserMessagePromotedEvent,
+  SystemUserMessageCancelledEvent,
 } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessInterface, HistoryStore, SandboxExecutor, ProcessHandle } from "../harness/interface";
 import { resolveHarness } from "../harness/registry";
@@ -1097,12 +1100,12 @@ export class SessionDO extends DurableObject<Env> {
         const eventId = (event as { id?: string }).id;
         this.broadcastEvent({
           type: "system.user_message_promoted",
-          event_id: eventId,
+          event_id: eventId ?? "",
           // pending_seq absent — these never lived in pending_events.
           seq: lr.seq,
           processed_at: nowIso,
           session_thread_id: threadId,
-        } as unknown as SessionEvent);
+        } as SystemUserMessagePromotedEvent);
       }
     }
 
@@ -1176,12 +1179,12 @@ export class SessionDO extends DurableObject<Env> {
       // the client can correlate without polling.
       this.broadcastEvent({
         type: "system.user_message_promoted",
-        event_id: eventId,
+        event_id: eventId ?? "",
         pending_seq: row.pending_seq,
-        seq: promotedSeq,
+        seq: promotedSeq ?? undefined,
         processed_at: nowIso,
         session_thread_id: row.session_thread_id,
-      } as unknown as SessionEvent);
+      } as SystemUserMessagePromotedEvent);
 
       const turnName = `turn:${promotedSeq ?? row.pending_seq}`;
       try {
@@ -1756,7 +1759,7 @@ export class SessionDO extends DurableObject<Env> {
             event_id: row.event_id,
             session_thread_id: row.session_thread_id,
             cancelled_at: cancelTs,
-          } as unknown as SessionEvent);
+          } as SystemUserMessageCancelledEvent);
         }
         // Legacy back-compat: pre-3a3e7ec sessions may still have user.*
         // rows sitting in `events` with processed_at IS NULL. The legacy
@@ -3112,7 +3115,7 @@ export class SessionDO extends DurableObject<Env> {
     // mutex (_draining) hasn't yet picked it up, this row IS the one
     // we just wrote (FIFO within a thread).
     const row = this.pending!.peek(threadId);
-    const pendingSeq = row?.pending_seq;
+    const pendingSeq = row?.pending_seq ?? 0;
     const eventId = (event as unknown as { id?: string }).id ?? "";
     this.broadcastEvent({
       type: "system.user_message_pending",
@@ -3121,7 +3124,7 @@ export class SessionDO extends DurableObject<Env> {
       enqueued_at: row?.enqueued_at ?? Date.now(),
       session_thread_id: threadId,
       event,
-    } as unknown as SessionEvent);
+    } as SystemUserMessagePendingEvent);
   }
 
   /**
