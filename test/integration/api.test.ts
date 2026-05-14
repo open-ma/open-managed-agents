@@ -3,6 +3,9 @@ import { env, exports } from "cloudflare:workers";
 import { describe, it, expect, beforeAll } from "vitest";
 import { registerHarness } from "../../apps/agent/src/harness/registry";
 import type { HarnessInterface, HarnessContext } from "../../apps/agent/src/harness/interface";
+import { SPEC_EVENT_TYPES } from "../../packages/api-types/src/types";
+
+const SPEC_TYPES_FOR_TEST = SPEC_EVENT_TYPES;
 
 // Register a test harness that completes immediately (no real LLM call).
 // This runs in the same isolate as the Worker, so the registry is shared.
@@ -73,12 +76,21 @@ function getDoStatus(sessionId: string) {
   return stub.fetch(new Request("http://internal/status"));
 }
 
-// Helper: open WebSocket to DO and collect replayed events
+// Helper: open WebSocket to DO and collect replayed events. Sends the
+// new x-oma-replay + x-oma-include headers so existing tests that depend
+// on the old "always replay everything" behavior keep working post the
+// stream-split (default-spec, no-replay) wire-protocol change.
 async function collectReplayedEvents(sessionId: string): Promise<any[]> {
   const doId = env.SESSION_DO!.idFromName(sessionId);
   const stub = env.SESSION_DO!.get(doId);
   const wsRes = await stub.fetch(
-    new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
+    new Request("http://internal/ws", {
+      headers: {
+        Upgrade: "websocket",
+        "x-oma-replay": "1",
+        "x-oma-include": "chunks",
+      },
+    }),
   );
   const ws = wsRes.webSocket!;
   ws.accept();
@@ -646,5 +658,194 @@ describe("SSE endpoints", () => {
       headers: { "x-api-key": "test-key" },
     });
     expect(res.status).toBe(404);
+  });
+});
+
+// ============================================================
+// 8b. SSE endpoint matrix — spec-vs-extension behavior
+// ============================================================
+//
+// Wire contract under test:
+//   - default       → spec event types only, no replay (Anthropic-aligned)
+//   - ?include=chunks → admit OMA extension events (system.*, *_chunk, etc.)
+//   - ?replay=1     → replay full persisted history before tailing
+//   - Last-Event-ID → replay from seq > N (also implies replay)
+//
+// SPEC_EVENT_TYPES is the source of truth (api-types). The TestHarness only
+// emits `agent.message` (spec), so the canary for "extension events landed"
+// is `system.user_message_pending`, which the SessionDO emits whenever a
+// user.message is posted before the harness drains it.
+describe("SSE endpoint matrix", () => {
+  // Read raw SSE frames off a Response body, parsing each `data:` JSON
+  // payload until either `closeOnType` matches OR `timeoutMs` elapses.
+  // Returns the array of parsed events. Cancels the reader on exit so
+  // the underlying connection doesn't leak between tests.
+  async function readSse(
+    res: Response,
+    opts: { closeOnType?: string; timeoutMs?: number } = {},
+  ): Promise<any[]> {
+    const events: any[] = [];
+    if (!res.body) return events;
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let done = false;
+    // Fire a timer that cancels the reader; the in-flight read() then
+    // resolves with done=true (because we cancelled) and the loop exits.
+    const timer = setTimeout(() => {
+      reader.cancel().catch(() => undefined);
+    }, opts.timeoutMs ?? 500);
+    try {
+      while (!done) {
+        let r: ReadableStreamReadResult<Uint8Array>;
+        try {
+          r = await reader.read();
+        } catch {
+          break;
+        }
+        if (r.done) break;
+        buf += dec.decode(r.value, { stream: true });
+        let i: number;
+        while ((i = buf.indexOf("\n\n")) !== -1) {
+          const block = buf.slice(0, i);
+          buf = buf.slice(i + 2);
+          const line = block.split("\n").find((l) => l.startsWith("data: "));
+          if (!line) continue;
+          try {
+            const ev = JSON.parse(line.slice(6));
+            events.push(ev);
+            if (opts.closeOnType && ev.type === opts.closeOnType) {
+              done = true;
+              break;
+            }
+          } catch { /* skip malformed */ }
+        }
+      }
+    } finally {
+      clearTimeout(timer);
+      try { await reader.cancel(); } catch { /* already closed */ }
+    }
+    return events;
+  }
+
+  it("default endpoint: no replay, only spec event types", async () => {
+    const { session } = await createFullSession();
+    // Open stream first (default = no replay, no chunks). Then post a turn.
+    // Live broadcast must deliver spec event types but NOT the OMA-extension
+    // system.user_message_pending that the SessionDO emits on every enqueue.
+    const streamRes = await api(`/v1/sessions/${session.id}/events/stream`, {
+      headers: { "x-api-key": "test-key", Accept: "text/event-stream" },
+    });
+    expect(streamRes.status).toBe(200);
+
+    await postMessage(session.id, "default-mode");
+    // Read for a fixed window — agent.message arrival is best-effort under
+    // the in-process workerd test runtime (DO eviction can race), but the
+    // spec-vs-extension filter we're asserting fires synchronously on
+    // EVERY broadcast, so seeing user.message + lifecycle is enough.
+    const events = await readSse(streamRes, { timeoutMs: 1500 });
+    const types = events.map((e) => e.type);
+    expect(types.length).toBeGreaterThan(0);
+    // The synchronous user.message + status_running pair always lands.
+    expect(types).toContain("user.message");
+    // OMA extensions filtered out — system.user_message_pending fires on
+    // the SAME enqueue path as user.message, so its absence proves the
+    // spec filter is doing real work.
+    expect(types).not.toContain("system.user_message_pending");
+    // Every type that did land MUST be in the spec set.
+    for (const t of types) {
+      expect(SPEC_TYPES_FOR_TEST.has(t)).toBe(true);
+    }
+  });
+
+  it("?include=chunks: admits OMA extension events", async () => {
+    const { session } = await createFullSession();
+    const streamRes = await api(
+      `/v1/sessions/${session.id}/events/stream?include=chunks`,
+      { headers: { "x-api-key": "test-key", Accept: "text/event-stream" } },
+    );
+    expect(streamRes.status).toBe(200);
+
+    await postMessage(session.id, "with chunks");
+    const events = await readSse(streamRes, { closeOnType: "agent.message", timeoutMs: 1000 });
+
+    const types = events.map((e) => e.type);
+    // The pending-frame is the canary for OMA extensions landing.
+    expect(types).toContain("system.user_message_pending");
+  });
+
+  // Helper: wait until the JSON history endpoint reports `n` user.message
+  // rows (drained from pending_events). Workerd test runtime varies a few
+  // hundred ms in drain latency, so polling is more reliable than a fixed
+  // sleep. Returns when the threshold is met or after `maxWaitMs`.
+  async function waitForUserMessages(sessionId: string, n: number, maxWaitMs = 5000): Promise<any[]> {
+    const start = Date.now();
+    while (Date.now() - start < maxWaitMs) {
+      const r = await api(`/v1/sessions/${sessionId}/events`, {
+        headers: { "x-api-key": "test-key", Accept: "application/json" },
+      });
+      const body = (await r.json()) as { data: any[] };
+      const userMsgs = body.data.filter((row) => {
+        const t = row.data?.type ?? row.type;
+        return t === "user.message";
+      });
+      if (userMsgs.length >= n) return body.data;
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    throw new Error(`Timed out waiting for ${n} user.message events`);
+  }
+
+  it("?replay=1: replays persisted history before tailing", async () => {
+    const { session } = await createFullSession();
+    await postMessage(session.id, "turn one");
+    await postMessage(session.id, "turn two");
+    // Wait for both user.message rows to land in the events table — drain
+    // promotes from pending_events asynchronously after the harness runs.
+    await waitForUserMessages(session.id, 2);
+
+    const streamRes = await api(
+      `/v1/sessions/${session.id}/events/stream?replay=1`,
+      { headers: { "x-api-key": "test-key", Accept: "text/event-stream" } },
+    );
+    expect(streamRes.status).toBe(200);
+
+    const events = await readSse(streamRes, { timeoutMs: 500 });
+    const texts = events.flatMap((e: any) => {
+      if (e.type === "user.message" && e.content?.[0]?.text) return [e.content[0].text];
+      return [];
+    });
+    expect(texts).toContain("turn one");
+    expect(texts).toContain("turn two");
+  });
+
+  it("Last-Event-ID header: replays only events with seq > N", async () => {
+    const { session } = await createFullSession();
+    await postMessage(session.id, "before cursor");
+    await postMessage(session.id, "after cursor");
+    const histData = await waitForUserMessages(session.id, 2);
+
+    const allUsers = histData.filter((row) => {
+      const t = row.data?.type ?? row.type;
+      return t === "user.message";
+    });
+    expect(allUsers.length).toBeGreaterThanOrEqual(2);
+    const cursorSeq = allUsers[0].seq;
+
+    const streamRes = await api(`/v1/sessions/${session.id}/events/stream`, {
+      headers: {
+        "x-api-key": "test-key",
+        Accept: "text/event-stream",
+        "Last-Event-ID": String(cursorSeq),
+      },
+    });
+    expect(streamRes.status).toBe(200);
+
+    const events = await readSse(streamRes, { timeoutMs: 500 });
+    const replayedTexts = events.flatMap((e: any) => {
+      if (e.type === "user.message" && e.content?.[0]?.text) return [e.content[0].text];
+      return [];
+    });
+    expect(replayedTexts).not.toContain("before cursor");
+    expect(replayedTexts).toContain("after cursor");
   });
 });

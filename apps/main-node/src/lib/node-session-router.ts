@@ -8,6 +8,7 @@ import type { SqlClient } from "@open-managed-agents/sql-client";
 import { SqlEventLog } from "@open-managed-agents/event-log/sql";
 import type { SessionEvent, StoredEvent } from "@open-managed-agents/shared";
 import { buildTrajectory, type SessionRecord, type EnvironmentConfig } from "@open-managed-agents/shared";
+import { isSpecEvent } from "@open-managed-agents/api-types";
 import { getLogger } from "@open-managed-agents/observability";
 
 const moduleLog = getLogger("node-session-router");
@@ -130,14 +131,35 @@ export class NodeSessionRouter implements SessionRouter {
 
   async streamEvents(
     sessionId: string,
-    opts: { threadId?: string; lastEventId?: number } = {},
+    opts: {
+      threadId?: string;
+      lastEventId?: number;
+      replay?: boolean;
+      include?: string[];
+    } = {},
   ): Promise<SessionStreamHandle> {
     const buf: SessionStreamFrame[] = [];
     let waker: ((v: IteratorResult<SessionStreamFrame>) => void) | null = null;
     let closed = false;
 
+    // Spec-vs-extension filter. When `include` doesn't contain "chunks",
+    // only Anthropic-spec event types pass through (defaults to spec-only,
+    // matching Anthropic Managed Agents wire behavior).
+    const includeChunks = (opts.include ?? []).includes("chunks");
+    const passes = (raw: string): boolean => {
+      if (includeChunks) return true;
+      try {
+        const t = (JSON.parse(raw) as { type?: string }).type;
+        return typeof t === "string" && isSpecEvent(t);
+      } catch {
+        // Malformed frame — drop. Live broadcasts should always be valid JSON.
+        return false;
+      }
+    };
+
     const enqueue = (raw: string) => {
       if (closed) return;
+      if (!passes(raw)) return;
       const frame: SessionStreamFrame = { data: raw };
       if (waker) {
         const w = waker;
@@ -148,15 +170,19 @@ export class NodeSessionRouter implements SessionRouter {
       }
     };
 
-    // Replay history > lastEventId before subscribing.
-    const log = this.deps.newEventLog(sessionId);
-    const history = await log.getEventsAsync(opts.lastEventId ?? undefined);
-    for (const ev of history) {
-      const tid =
-        (ev as { session_thread_id?: string }).session_thread_id ??
-        "sthr_primary";
-      if (opts.threadId && tid !== opts.threadId) continue;
-      enqueue(JSON.stringify(ev));
+    // Replay history > lastEventId before subscribing — gated by `replay`
+    // OR `lastEventId` (Last-Event-ID = SSE-native resume contract: client
+    // sent it, they want history > N regardless of opt-in flag).
+    if (opts.replay || opts.lastEventId !== undefined) {
+      const log = this.deps.newEventLog(sessionId);
+      const history = await log.getEventsAsync(opts.lastEventId ?? undefined);
+      for (const ev of history) {
+        const tid =
+          (ev as { session_thread_id?: string }).session_thread_id ??
+          "sthr_primary";
+        if (opts.threadId && tid !== opts.threadId) continue;
+        enqueue(JSON.stringify(ev));
+      }
     }
 
     const writer = {

@@ -696,7 +696,11 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
       });
     }
 
-    const handle = await router.streamEvents(id);
+    // /messages is OMA-only sugar (Anthropic spec doesn't have it). Always
+    // open the underlying stream with chunks admitted so the in-turn matcher
+    // below sees the full chunk lifecycle and the SDK's onText/onThinking
+    // hooks fire. No replay — we wait for the user.message we just posted.
+    const handle = await router.streamEvents(id, { include: ["chunks"] });
     const enc = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
@@ -1188,9 +1192,23 @@ async function openSse(
   threadId?: string,
 ): Promise<Response> {
   const lastEventId = parseInt(c.req.header("Last-Event-ID") ?? "", 10);
+  // Spec-vs-extension opt-in (default = Anthropic-spec wire behavior):
+  //   ?include=chunks  → admit OMA extension events (chunks, lifecycle,
+  //                      system.*, session.warning, extra spans)
+  //   ?replay=1        → replay full persisted history before tailing
+  //                      (Last-Event-ID also implies replay-from-seq, so
+  //                      callers can resume cleanly without flag awareness)
+  // See SPEC_EVENT_TYPES in @open-managed-agents/api-types for the spec set.
+  const include = (c.req.query("include") ?? "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const replay = c.req.query("replay") === "1";
   const handle = await router.streamEvents(sessionId, {
     threadId,
     lastEventId: Number.isFinite(lastEventId) ? lastEventId : undefined,
+    replay,
+    include,
   });
   const enc = new TextEncoder();
   const stream = new ReadableStream<Uint8Array>({

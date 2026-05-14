@@ -137,7 +137,12 @@ export class CfSessionRouter implements SessionRouter {
 
   async streamEvents(
     sessionId: string,
-    opts: { threadId?: string; lastEventId?: number } = {},
+    opts: {
+      threadId?: string;
+      lastEventId?: number;
+      replay?: boolean;
+      include?: string[];
+    } = {},
   ): Promise<SessionStreamHandle> {
     const binding = await this.bindingForSession(sessionId);
     if (!binding) {
@@ -150,6 +155,15 @@ export class CfSessionRouter implements SessionRouter {
     wsHeaders.set("Connection", "Upgrade");
     if (opts.lastEventId !== undefined) {
       wsHeaders.set("Last-Event-ID", String(opts.lastEventId));
+    }
+    // Forward opt-in flags. SessionDO `/ws` reads these to decide history
+    // replay + spec-vs-extension event filtering. Defaults (no headers) =
+    // Anthropic-spec behavior: no replay, spec event types only.
+    if (opts.replay) {
+      wsHeaders.set("x-oma-replay", "1");
+    }
+    if (opts.include && opts.include.length > 0) {
+      wsHeaders.set("x-oma-include", opts.include.join(","));
     }
 
     const wsRes = await binding.fetch(`https://sandbox/sessions/${sessionId}/ws`, {

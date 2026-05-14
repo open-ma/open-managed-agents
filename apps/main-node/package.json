@@ -18,6 +18,7 @@
     "@hono/node-server": "^1.13.0",
     "@open-managed-agents/agent": "workspace:*",
     "@open-managed-agents/agents-store": "workspace:*",
+    "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/auth": "workspace:*",
     "@open-managed-agents/auth-config": "workspace:*",
     "@open-managed-agents/blob-store": "workspace:*",

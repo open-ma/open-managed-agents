@@ -853,6 +853,66 @@ export type SessionEvent =
   | SystemUserMessagePromotedEvent
   | SystemUserMessageCancelledEvent;
 
+/**
+ * Event types defined by Anthropic's Managed Agents spec — what their
+ * official SDK's closed `BetaManagedAgentsStreamSessionEvents` discriminator
+ * union accepts. Anything outside this set is an OMA extension and gated
+ * behind `?include=chunks` on the session SSE endpoint so wire-compat
+ * consumers (the official Anthropic SDK against an OMA server) get a clean
+ * stream by default.
+ *
+ * Source of truth: `BetaManagedAgentsStreamSessionEvents` in
+ * `anthropic-sdk-python` at
+ * src/anthropic/types/beta/sessions/beta_managed_agents_stream_session_events.py.
+ *
+ * Includes `session.deleted` for forward-compat — Anthropic emits it but we
+ * don't yet; when we add it the allowlist already covers it.
+ */
+export const SPEC_EVENT_TYPES: ReadonlySet<string> = new Set([
+  // User events
+  "user.message",
+  "user.interrupt",
+  "user.custom_tool_result",
+  "user.tool_confirmation",
+  "user.define_outcome",
+  // Agent events
+  "agent.message",
+  "agent.thinking",
+  "agent.tool_use",
+  "agent.tool_result",
+  "agent.mcp_tool_use",
+  "agent.mcp_tool_result",
+  "agent.custom_tool_use",
+  "agent.thread_message_received",
+  "agent.thread_message_sent",
+  "agent.thread_context_compacted",
+  // Session events
+  "session.status_running",
+  "session.status_idle",
+  "session.status_rescheduled",
+  "session.status_terminated",
+  "session.error",
+  "session.thread_created",
+  "session.thread_status_running",
+  "session.thread_status_idle",
+  "session.thread_status_terminated",
+  "session.thread_status_rescheduled",
+  "session.deleted",
+  // Span events
+  "span.model_request_start",
+  "span.model_request_end",
+  "span.outcome_evaluation_start",
+  "span.outcome_evaluation_end",
+  "span.outcome_evaluation_ongoing",
+]);
+
+/** True when `type` is in {@link SPEC_EVENT_TYPES}. Use this on the SSE
+ *  broadcast path to drop OMA extension events when the consumer hasn't
+ *  opted into `?include=chunks`. */
+export function isSpecEvent(type: string): boolean {
+  return SPEC_EVENT_TYPES.has(type);
+}
+
 // --- Vault ---
 
 export interface VaultConfig {

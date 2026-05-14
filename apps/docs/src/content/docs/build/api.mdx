@@ -85,32 +85,60 @@ curl -N "$OMA_BASE_URL/v1/sessions/sess_xyz/events/stream" \
   -H "x-api-key: $OMA_API_KEY"
 ```
 
-The connection stays open. Each `data:` line is a single JSON event. The full event taxonomy is in [Reference → API Endpoints](/reference/api/); the streaming-specific ones are:
+The connection stays open. Each `data:` line is a single JSON event.
+
+**Default behavior is Anthropic-spec-aligned** ([Managed Agents events](https://platform.claude.com/docs/en/managed-agents/events-and-streaming)) — only events emitted **after** open are delivered, and only the spec event types appear:
 
 | Event | When |
 |---|---|
 | `user.message` | Echo of the turn you posted |
-| `session.status_running` / `_idle` | Turn boundaries |
-| `agent.thinking_stream_start` / `_chunk` / `_stream_end` | Live extended-thinking deltas — chunk events carry `{ thinking_id, delta }` |
-| `agent.thinking` | Canonical thinking block (same `thinking_id` correlates) |
-| `agent.message_stream_start` / `_chunk` / `_stream_end` | Live assistant-text deltas — chunk events carry `{ message_id, delta }` |
-| `agent.message` | Canonical message (same `message_id` correlates) |
-| `agent.tool_use_input_stream_start` / `_chunk` / `_stream_end` | Live tool-input JSON streaming — chunk events carry `{ tool_use_id, delta }` |
-| `agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use` | Canonical tool call (id matches `tool_use_id`) |
+| `session.status_running` / `_idle` / `_rescheduled` / `_terminated` / `error` | Lifecycle |
+| `agent.thinking` | Extended-thinking block (whole) |
+| `agent.message` | Assistant message (whole) |
+| `agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use` | Tool call (whole) |
 | `agent.tool_result` / `agent.mcp_tool_result` | Tool execution result |
+| `agent.thread_*` / `session.thread_*` | [Multiagent](/build/multiagent/) coordination |
+| `span.model_request_start` / `_end` / `span.outcome_evaluation_*` | Observability |
+
+Use the official `@anthropic-ai/sdk` directly — it parses these unchanged.
+
+#### `?include=chunks` — OMA extension events
+
+Adds finer-grained streaming + extra observability. Required for token-by-token UI rendering.
+
+| Event | When |
+|---|---|
+| `agent.message_stream_start` / `_chunk` / `_stream_end` | Live assistant-text deltas — chunk events carry `{ message_id, delta }` |
+| `agent.thinking_stream_start` / `_chunk` / `_stream_end` | Live extended-thinking deltas — chunk events carry `{ thinking_id, delta }` |
+| `agent.tool_use_input_stream_start` / `_chunk` / `_stream_end` | Live tool-input JSON streaming — chunk events carry `{ tool_use_id, delta }` |
+| `system.user_message_pending` / `_promoted` / `_cancelled` | Pending-queue lifecycle (outbox UX) |
 | `session.warning` | Recovery scan reconciled an interrupted stream / orphan tool_use after a runtime restart |
+| `span.model_first_token` / `span.compaction_summarize_*` / `span.wakeup_scheduled` / `aux.model_call` | Extra observability |
 
 Stream-lifecycle events (`*_stream_start`, `*_chunk`, `*_stream_end`) are broadcast over the wire but **not** persisted to the events log — the canonical event with the same correlation id is the source of truth. Replay clients only see the canonical events; live subscribers see both.
 
-You can reconnect at any time and the platform replays the persisted event log from the beginning (or pass `?after_seq=N` on `/v1/sessions/:id/events` for cursored JSON paging).
+#### `?replay=1` and `Last-Event-ID` — history replay
+
+Default behavior matches Anthropic: no replay, only events after open. To bootstrap clients with persisted history:
+
+- `?replay=1` — replay the full persisted log on connect, then continue tailing
+- `Last-Event-ID: <seq>` — replay events with `seq > N` only (SSE-native resume; browsers send this automatically on reconnect)
+
+Both compose with `?include=chunks`. For the open-then-list-then-dedupe pattern (Anthropic's recommended way to recover history without `replay`), see [`GET /v1/sessions/:id/events`](/reference/api/) for the JSON-paginated history.
+
+```bash
+# Console-style: full history + token-level streaming
+curl -N "$OMA_BASE_URL/v1/sessions/sess_xyz/events/stream?include=chunks&replay=1" \
+  -H "x-api-key: $OMA_API_KEY"
+```
 
 <Aside type="tip" title="Resumable streams">
-  The session DO holds the canonical event log in SQLite. Drop your connection, reconnect days later — same stream. If a deploy / runtime restart kills a turn mid-stream, the cold-start recovery scan finalizes the partial as a single `agent.message` (with whatever chunks were buffered) and emits a `session.warning` so clients can flag it. Tool calls left without a result get a placeholder `agent.tool_result` injected so the next LLM turn doesn't 400.
+  The session DO holds the canonical event log in SQLite. Drop your connection, reconnect days later with `Last-Event-ID` set — pick up exactly where you left off. If a deploy / runtime restart kills a turn mid-stream, the cold-start recovery scan finalizes the partial as a single `agent.message` (with whatever chunks were buffered) and emits a `session.warning` so chunk-aware clients can flag it. Tool calls left without a result get a placeholder `agent.tool_result` injected so the next LLM turn doesn't 400.
 </Aside>
 
 ### Send a turn (chatbot one-shot)
 
-The chatbot-friendly endpoint posts the user message and streams the response in one HTTP call. The connection auto-closes when the turn finishes (`session.status_idle`).
+OMA-only convenience endpoint (no Anthropic-spec equivalent). Posts the user message and streams the response in one HTTP call. Always emits chunk events. The connection auto-closes when the turn finishes (`session.status_idle`).
 
 ```bash
 curl -N -X POST "$OMA_BASE_URL/v1/sessions/sess_xyz/messages" \

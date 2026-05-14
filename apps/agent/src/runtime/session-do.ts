@@ -42,6 +42,7 @@ import {
 } from "@open-managed-agents/session-runtime";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 import { cfWorkersAiToMarkdown } from "@open-managed-agents/markdown";
+import { isSpecEvent } from "@open-managed-agents/api-types";
 import type {
   AgentConfig,
   EnvironmentConfig,
@@ -1940,45 +1941,92 @@ export class SessionDO extends DurableObject<Env> {
         return new Response("Expected websocket", { status: 426 });
       }
       const pair = new WebSocketPair();
-      this.ctx.acceptWebSocket(pair[1]);
 
-      // Replay existing events to new connection
-      const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
-      const events = history.getEvents();
-      for (const event of events) {
-        pair[1].send(JSON.stringify(event));
+      // Wire-protocol opt-ins forwarded by cf-session-router.ts. Defaults
+      // (no headers) = Anthropic-spec behavior: no replay, only spec event
+      // types broadcast. `Last-Event-ID` is SSE-native resume — its
+      // presence implies replay-from-seq regardless of x-oma-replay.
+      const includeChunks =
+        (request.headers.get("x-oma-include") ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .includes("chunks");
+      const replayHeader = request.headers.get("x-oma-replay") === "1";
+      const lastEventIdRaw = request.headers.get("Last-Event-ID");
+      const lastEventId = lastEventIdRaw !== null
+        ? Number.parseInt(lastEventIdRaw, 10)
+        : NaN;
+      const wantsReplay = replayHeader || Number.isFinite(lastEventId);
+
+      // Tag the socket so broadcastEvent (line ~3120) can filter per-ws.
+      // Chunks-opted sockets get the "chunks" tag → broadcastEvent routes
+      // OMA extension events only to them; spec events go to all sockets.
+      // Pass undefined (not []) when no tags so the runtime skips the
+      // tag-array path entirely — empty-tags semantics differ across CF
+      // runtime versions and the cleanest contract is "no tags arg".
+      if (includeChunks) {
+        this.ctx.acceptWebSocket(pair[1], ["chunks"]);
+      } else {
+        this.ctx.acceptWebSocket(pair[1]);
+      }
+
+      // Conditional history replay. Skip entirely when neither flag set —
+      // this is the spec-default ("only events after open"). When set,
+      // filter by seq > lastEventId for clean SSE resume semantics.
+      if (wantsReplay) {
+        const history = new SqliteHistory(
+          this.ctx.storage.sql,
+          this.env.FILES_BUCKET ?? null,
+          `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`,
+        );
+        // Use the repo-level afterSeq filter — the SQL layer drops rows
+        // server-side, which is the only place that can see `seq` (the
+        // returned SessionEvent objects are bare wire payloads with no
+        // `seq` field stitched on).
+        const events = history.getEvents(
+          Number.isFinite(lastEventId) ? lastEventId : undefined,
+        );
+        for (const event of events) {
+          // Same spec-vs-extension filter applied to the live broadcast
+          // path (broadcastEvent below); replayed history must respect the
+          // same wire contract or a spec-only client would silently get
+          // OMA extension events on reconnect.
+          if (!includeChunks && !isSpecEvent(event.type)) continue;
+          pair[1].send(JSON.stringify(event));
+        }
       }
 
       // Pending queue replay — emit a system.user_message_pending frame
-      // for every active row across every thread, so a fresh client
-      // sees the outbox state without an extra GET /pending. Mirrors
-      // the broadcast that fires at enqueue time. Old SDK consumers
-      // ignore unknown system.* frames; new ones (Console) populate
-      // their pendingByEventId map.
-      try {
-        for (const threadId of this.pending!.threadsWithPending()) {
-          for (const row of this.pending!.list(threadId)) {
-            let parsed: SessionEvent;
-            try {
-              parsed = JSON.parse(row.data) as SessionEvent;
-            } catch {
-              continue;
+      // for every active row across every thread, so a fresh client sees
+      // the outbox state without an extra GET /pending. `system.*` is an
+      // OMA extension type, so this is gated by the chunks opt-in. Old
+      // SDK consumers (no opt-in) can fetch /pending directly.
+      if (includeChunks) {
+        try {
+          for (const threadId of this.pending!.threadsWithPending()) {
+            for (const row of this.pending!.list(threadId)) {
+              let parsed: SessionEvent;
+              try {
+                parsed = JSON.parse(row.data) as SessionEvent;
+              } catch {
+                continue;
+              }
+              const pendingFrame: SystemUserMessagePendingEvent = {
+                type: "system.user_message_pending",
+                event_id: row.event_id,
+                pending_seq: row.pending_seq,
+                enqueued_at: row.enqueued_at,
+                session_thread_id: row.session_thread_id,
+                event: parsed,
+              };
+              pair[1].send(JSON.stringify(pendingFrame));
             }
-            const pendingFrame: SystemUserMessagePendingEvent = {
-              type: "system.user_message_pending",
-              event_id: row.event_id,
-              pending_seq: row.pending_seq,
-              enqueued_at: row.enqueued_at,
-              session_thread_id: row.session_thread_id,
-              event: parsed,
-            };
-            pair[1].send(JSON.stringify(pendingFrame));
           }
+        } catch (err) {
+          console.warn(
+            `[ws-replay] pending queue replay failed: ${err instanceof Error ? err.message : String(err)}`,
+          );
         }
-      } catch (err) {
-        console.warn(
-          `[ws-replay] pending queue replay failed: ${err instanceof Error ? err.message : String(err)}`,
-        );
       }
 
       return new Response(null, { status: 101, webSocket: pair[0] });
@@ -3119,7 +3167,15 @@ export class SessionDO extends DurableObject<Env> {
 
   private broadcastEvent(event: SessionEvent) {
     const data = JSON.stringify(event);
-    for (const ws of this.ctx.getWebSockets()) {
+    // Per-socket spec-vs-extension routing. Sockets that opted into chunks
+    // (tagged "chunks" in the /ws handler) receive everything; others
+    // receive only Anthropic-spec event types. Keeps the spec-default
+    // wire contract clean for clients using the official Anthropic SDK
+    // against an OMA server.
+    const sockets = isSpecEvent(event.type)
+      ? this.ctx.getWebSockets()
+      : this.ctx.getWebSockets("chunks");
+    for (const ws of sockets) {
       try {
         ws.send(data);
       } catch {

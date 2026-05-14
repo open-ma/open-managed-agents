@@ -574,7 +574,7 @@ describe("Edge cases - concurrent and complex operations", () => {
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
-      new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
+      new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } })
     );
     const ws = wsRes.webSocket!;
     ws.accept();

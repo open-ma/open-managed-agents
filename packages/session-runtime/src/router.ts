@@ -132,10 +132,24 @@ export interface SessionRouter {
     opts?: SessionEventsQuery,
   ): Promise<SessionEventsPage>;
 
-  /** Open a live event stream. Caller drives consumption + close. */
+  /** Open a live event stream. Caller drives consumption + close.
+   *
+   *  - `replay` (default false): replay full persisted history before tailing
+   *    live events. With `lastEventId` set, replay is implicit and starts
+   *    from `seq > lastEventId`.
+   *  - `include` (default `[]`): comma-list of OMA extension buckets to admit
+   *    onto the stream. v1 only `"chunks"` is recognized — when present, all
+   *    OMA extension event types pass through (chunks, lifecycle, system.*,
+   *    session.warning, extra spans). When absent, only the Anthropic-spec
+   *    event union is delivered (see `SPEC_EVENT_TYPES` in api-types). */
   streamEvents(
     sessionId: string,
-    opts?: { threadId?: string; lastEventId?: number },
+    opts?: {
+      threadId?: string;
+      lastEventId?: number;
+      replay?: boolean;
+      include?: string[];
+    },
   ): Promise<SessionStreamHandle>;
 
   /** Abort the in-flight harness for the session. No-op when nothing's

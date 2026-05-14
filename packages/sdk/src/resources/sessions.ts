@@ -49,9 +49,22 @@ export interface ChatCompleteResult {
 
 export interface TailOptions {
   signal?: AbortSignal;
-  /** Resume from a specific seq (server-side). Only honored on the
-   *  long-lived stream; the chat one-shot is always per-turn. */
+  /** Resume from a specific seq (server-side). Sent as `Last-Event-ID`
+   *  per the SSE-native resume contract; presence of this option causes
+   *  history > seq to replay before live events stream in, regardless of
+   *  the `replay` flag below. */
   after_seq?: number;
+  /** Comma-list of OMA extension buckets to admit. Default `["chunks"]`
+   *  preserves the SDK's historical behavior (token-level chunks +
+   *  session.warning + system.user_message_* etc.) so existing callers
+   *  keep getting everything they used to. Pass `[]` for strict
+   *  Anthropic-spec event types only. */
+  include?: string[];
+  /** Replay full persisted history before tailing. Default `true` to
+   *  preserve historical SDK behavior (the server-side default is the
+   *  opposite — Anthropic-spec-aligned no-replay). Pass `false` to
+   *  match Anthropic's open-then-list-then-dedupe pattern. */
+  replay?: boolean;
 }
 
 export interface ListEventsOptions {
@@ -219,11 +232,28 @@ export class SessionsResource {
    * for this session — past (replayed on connect from the persisted
    * log) and future (live). Never closes on its own; pass an
    * AbortSignal or `break` out of the loop to stop.
+   *
+   * Defaults preserve historical SDK behavior (`include: ["chunks"]`,
+   * `replay: true`) so the OMA-extension chunk events that
+   * `chatComplete` and similar consumers depend on keep landing. The
+   * server-side default is stricter (Anthropic-spec, no replay, spec
+   * event types only) — pass `{ include: [], replay: false }` for that.
    */
   async *tail(sessionId: string, opts: TailOptions = {}): AsyncIterable<SessionEvent> {
+    const include = opts.include ?? ["chunks"];
+    const replay = opts.replay ?? true;
+    const query: Record<string, string | number | boolean | undefined> = {};
+    if (include.length > 0) query.include = include.join(",");
+    if (replay) query.replay = 1;
+    // `after_seq` rides as Last-Event-ID — SSE-native resume contract.
+    // Server treats Last-Event-ID presence as implicit replay-from-seq.
+    const headers: Record<string, string> = { accept: "text/event-stream" };
+    if (opts.after_seq !== undefined) {
+      headers["Last-Event-ID"] = String(opts.after_seq);
+    }
     const res = await this.client.raw("GET", `/v1/sessions/${sessionId}/events/stream`, {
-      headers: { accept: "text/event-stream" },
-      query: opts.after_seq !== undefined ? { after_seq: opts.after_seq } : undefined,
+      headers,
+      query: Object.keys(query).length > 0 ? query : undefined,
       signal: opts.signal,
     });
     yield* parseSSE<SessionEvent>(res, opts.signal);

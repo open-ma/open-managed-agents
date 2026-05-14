@@ -157,7 +157,17 @@ export function useApi() {
     const activeTenant = getActiveTenantId();
     // SSE endpoint goes through the same auth middleware so it needs the
     // header too. fetch() lets us set it; EventSource wouldn't.
-    fetch(`/v1/sessions/${sessionId}/events/stream`, {
+    //
+    // Console opts into both `chunks` (token-by-token rendering, pending
+    // queue events, session.warning, extra spans) and `replay=1` (full
+    // history on connect — Console renders the persistent timeline view
+    // and the dedup keyset at SessionDetail.tsx:108-121 already handles
+    // any seq-overlap from concurrent live broadcasts).
+    //
+    // Default endpoint behavior is Anthropic-spec — third-party clients
+    // using @anthropic-ai/sdk against an OMA server get a clean stream
+    // without these flags. See SPEC_EVENT_TYPES in @open-managed-agents/api-types.
+    fetch(`/v1/sessions/${sessionId}/events/stream?include=chunks&replay=1`, {
       credentials: "include",
       signal,
       headers: activeTenant ? { "x-active-tenant": activeTenant } : {},

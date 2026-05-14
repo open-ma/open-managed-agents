@@ -1499,7 +1499,7 @@ describe("SessionDO recovery — DO-level", () => {
 
     // Open the WebSocket. The fetch returns only after replay is done.
     const upgradeRes = await stub.fetch(
-      new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }),
+      new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }),
     );
     expect(upgradeRes.status).toBe(101);
     const ws = upgradeRes.webSocket as WebSocket;

@@ -446,7 +446,7 @@ describe("New event types", () => {
     const doId = env.SESSION_DO!.idFromName(sessionId);
     const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
-      new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
+      new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } })
     );
     const ws = wsRes.webSocket!;
     ws.accept();
@@ -590,7 +590,7 @@ describe("Session harness status flow", () => {
     // Check events include status events
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
-    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
     const events: any[] = [];
@@ -620,7 +620,7 @@ describe("Session harness status flow", () => {
 
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
-    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
     const events: any[] = [];
@@ -670,7 +670,7 @@ describe("Harness crash recovery", () => {
 
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
-    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
     const events: any[] = [];

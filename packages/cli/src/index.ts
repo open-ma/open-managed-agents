@@ -357,9 +357,15 @@ async function streamChat(config: Config, sessionId: string, text: string): Prom
 }
 
 async function tailSession(config: Config, sessionId: string): Promise<void> {
-  const res = await rawStream(config, `/v1/sessions/${sessionId}/events/stream`, {
-    headers: { accept: "text/event-stream" },
-  });
+  // Match SDK's tail() default: opt into chunks + history replay so the
+  // CLI keeps rendering the full timeline as it has historically. Server
+  // default (no flags) is Anthropic-spec-aligned (no replay, spec types
+  // only); these query params restore the OMA-extension stream.
+  const res = await rawStream(
+    config,
+    `/v1/sessions/${sessionId}/events/stream?include=chunks&replay=1`,
+    { headers: { accept: "text/event-stream" } },
+  );
   for await (const ev of parseSSE(res)) {
     process.stdout.write(JSON.stringify(ev) + "\n");
   }

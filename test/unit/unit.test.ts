@@ -58,7 +58,7 @@ describe.skip("SqliteHistory message conversion", () => {
     const doId = env.SESSION_DO!.idFromName(sessionId);
     const stub = env.SESSION_DO!.get(doId);
     const wsRes = await stub.fetch(
-      new Request("http://internal/ws", { headers: { Upgrade: "websocket" } })
+      new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } })
     );
     const ws = wsRes.webSocket!;
     ws.accept();
@@ -355,11 +355,11 @@ describe.skip("WebSocket broadcast", () => {
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
 
-    const ws1Res = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const ws1Res = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws1 = ws1Res.webSocket!;
     ws1.accept();
 
-    const ws2Res = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const ws2Res = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws2 = ws2Res.webSocket!;
     ws2.accept();
 
@@ -439,7 +439,7 @@ describe("Edge cases", () => {
     await new Promise((r) => setTimeout(r, 100));
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
-    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
     const events: any[] = [];
@@ -572,7 +572,7 @@ describe.skip("Harness error handling", () => {
     // Verify error event was broadcast
     const doId = env.SESSION_DO!.idFromName(session.id);
     const stub = env.SESSION_DO!.get(doId);
-    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket" } }));
+    const wsRes = await stub.fetch(new Request("http://internal/ws", { headers: { Upgrade: "websocket", "x-oma-replay": "1", "x-oma-include": "chunks" } }));
     const ws = wsRes.webSocket!;
     ws.accept();
     const events: any[] = [];
