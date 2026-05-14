@@ -4161,7 +4161,7 @@ export class SessionDO extends DurableObject<Env> {
       // Custom skills from KV — lightweight metadata
       if (this.env.CONFIG_KV) {
         try {
-          const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV, this.state.tenant_id);
+          const customSkills = await resolveCustomSkills(agent.skills, this.env.CONFIG_KV, this.env.FILES_BUCKET, this.state.tenant_id);
           for (const s of customSkills) {
             if (s.system_prompt_addition) {
               platformReminders.push({ source: `skill:${s.id}`, text: s.system_prompt_addition });

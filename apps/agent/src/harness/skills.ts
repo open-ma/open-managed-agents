@@ -35,15 +35,18 @@ export function resolveSkills(skillConfigs: Array<{ skill_id: string }>): Skill[
 }
 
 /**
- * Resolve custom skills by fetching metadata from KV.
- * Returns Skill objects with a lightweight system_prompt_addition that points
- * Claude to /home/user/.skills/{id}/SKILL.md for full instructions.
+ * Resolve custom skills by fetching metadata from KV and inlining SKILL.md
+ * content into the system prompt. AMA-aligned: the model sees the full
+ * skill instructions up-front, no read-tool round-trip needed.
  *
  * KV key format: t:{tenant}:skill:{skill_id} -> { id, name, display_title, description, latest_version, ... }
+ * Versioned manifest: t:{tenant}:skillver:{skill_id}:{version} -> { files: [{filename, ...}], ... }
+ * SKILL.md bytes live in R2 at the skillFileR2Key path.
  */
 export async function resolveCustomSkills(
   skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
   kv: KVNamespace,
+  filesBucket: R2Bucket | undefined,
   tenantId: string,
 ): Promise<Skill[]> {
   const customConfigs = skillConfigs.filter(
@@ -61,16 +64,47 @@ export async function resolveCustomSkills(
         name?: string;
         display_title?: string;
         description?: string;
+        latest_version?: string;
       };
 
       const name = meta.display_title || meta.name || cfg.skill_id;
       const description = meta.description || "";
 
+      // Try to inline the full SKILL.md so the model sees it in the
+      // system prompt without a read-tool round-trip. Falls back to
+      // a metadata-only addition if R2 / version manifest aren't
+      // available — keeps the lazy-load path as a safety net.
+      let body = "";
+      const version = (cfg.version && cfg.version !== "latest") ? cfg.version : meta.latest_version;
+      if (filesBucket && version) {
+        try {
+          const verRaw = await kv.get(`t:${tenantId}:skillver:${cfg.skill_id}:${version}`);
+          if (verRaw) {
+            const verData = JSON.parse(verRaw) as {
+              files?: Array<{ filename: string }>;
+            };
+            const hasSkillMd = verData.files?.some((f) => f.filename === "SKILL.md");
+            if (hasSkillMd) {
+              const obj = await filesBucket.get(
+                skillFileR2Key(tenantId, cfg.skill_id, version, "SKILL.md"),
+              );
+              if (obj) body = await obj.text();
+            }
+          }
+        } catch {
+          // Fall through to metadata-only.
+        }
+      }
+
+      const addition = body
+        ? `<skill name="${name}">\n${body}\n</skill>`
+        : `[Skill: ${name}] ${description}. Read /home/user/.skills/${name}/SKILL.md for instructions.`;
+
       skills.push({
         id: cfg.skill_id,
         name,
         source: "custom",
-        system_prompt_addition: `[Skill: ${name}] ${description}. Read /home/user/.skills/${name}/SKILL.md for instructions.`,
+        system_prompt_addition: addition,
       });
     } catch {
       // Skip skills that can't be resolved from KV
