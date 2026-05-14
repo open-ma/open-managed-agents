@@ -1325,6 +1325,51 @@ app.get("/:id/pending", async (c) => {
   return c.json(result);
 });
 
+// GET /v1/sessions/:id/llm-calls/:event_id — read the persisted full
+// LLM request/response body for a single provider call. The body was
+// PUT to R2 by the llm-logging middleware in apps/agent
+// (see apps/agent/src/harness/llm-logging-middleware.ts) at the key
+//   t/{tenant_id}/sessions/{session_id}/llm/{event_id}.json
+// `event_id` is the `id` field on the matching span.model_request_end
+// event (also surfaced as `body_r2_key` on that event for clients that
+// want to skip the key derivation).
+//
+// Auth: same tenant scoping as GET /events. The R2 key prefix is
+// tenant-scoped so a tenant can't read another tenant's logs even via
+// id-guess.
+app.get("/:id/llm-calls/:event_id", async (c) => {
+  const id = c.req.param("id");
+  const eventId = c.req.param("event_id");
+  const t = c.get("tenant_id");
+  // Tenant-scoping check — reject before touching R2 if the session
+  // doesn't belong to this tenant. Same shape as the other session
+  // routes.
+  const session = await c.var.services.sessions.get({ tenantId: t, sessionId: id });
+  if (!session) return c.json({ error: "Session not found" }, 404);
+
+  if (!c.env.FILES_BUCKET) {
+    return c.json({ error: "FILES_BUCKET binding not configured" }, 500);
+  }
+  const key = `t/${t}/sessions/${id}/llm/${eventId}.json`;
+  const obj = await c.env.FILES_BUCKET.get(key);
+  if (!obj) {
+    return c.json(
+      { error: "LLM call body not found", key },
+      404,
+    );
+  }
+  // Stream the JSON straight back. The middleware writes pretty
+  // application/json; preserve content-type so the browser inspector +
+  // SDK consumers parse cleanly.
+  return new Response(obj.body, {
+    status: 200,
+    headers: {
+      "content-type": "application/json",
+      ...(obj.size != null ? { "content-length": String(obj.size) } : {}),
+    },
+  });
+});
+
 // POST /v1/sessions/:id/__debug_recovery__ — ops-only forwarder for the
 // SessionDO recovery probe. Body forwards as-is. Both layers re-check
 // X-Debug-Token against env.DEBUG_TOKEN — the main-worker check fails
