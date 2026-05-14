@@ -724,14 +724,17 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
             } catch {
               /* ignore */
             }
+            // Same SSE-named-event format as openSse() — Anthropic SDKs
+            // discriminate on the SSE event name field, not on data.type.
+            const eventLine = parsed?.type ? `event: ${parsed.type}\n` : "";
             if (!inTurn) {
               if (parsed?.type === "user.message" && parsed.id === userMessageId) {
                 inTurn = true;
-                controller.enqueue(enc.encode(`data: ${frame.data}\n\n`));
+                controller.enqueue(enc.encode(`${eventLine}data: ${frame.data}\n\n`));
               }
               continue;
             }
-            controller.enqueue(enc.encode(`data: ${frame.data}\n\n`));
+            controller.enqueue(enc.encode(`${eventLine}data: ${frame.data}\n\n`));
             if (parsed?.type === "session.status_idle") {
               closeOnce();
               return;
@@ -1217,13 +1220,23 @@ async function openSse(
         controller.enqueue(enc.encode("retry: 1000\n\n"));
         for await (const frame of handle) {
           let seq: number | undefined;
+          let evType: string | undefined;
           try {
-            seq = (JSON.parse(frame.data) as { seq?: number }).seq;
+            const parsed = JSON.parse(frame.data) as { seq?: number; type?: string };
+            seq = parsed.seq;
+            evType = parsed.type;
           } catch {
             /* ignore */
           }
+          // Emit SSE-named events ("event: <type>") in addition to the
+          // data line. Anthropic's official SDKs use the SSE event-name
+          // field as the discriminator (see anthropic-sdk-python
+          // _streaming.py:84-130) and never yield frames where it's
+          // missing — without this line the SDK's iterator hangs forever
+          // even though the wire is delivering events.
+          const eventLine = evType ? `event: ${evType}\n` : "";
           const idLine = seq !== undefined ? `id: ${seq}\n` : "";
-          controller.enqueue(enc.encode(`${idLine}data: ${frame.data}\n\n`));
+          controller.enqueue(enc.encode(`${eventLine}${idLine}data: ${frame.data}\n\n`));
         }
       } finally {
         try {
