@@ -580,14 +580,14 @@ export function VaultsList() {
                   panel; click a row fills the URL field (does NOT auto-
                   connect). User can also type a custom URL inline. */}
               <div className="relative" ref={pickerAnchorRef}>
-                <div className={`flex items-center gap-2 ${inputCls} cursor-text`} onClick={() => setPickerOpen(true)}>
+                <div className={`flex items-center gap-2 ${inputCls}`}>
                   {customForm.pickedIcon && (
                     <img src={customForm.pickedIcon} alt="" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
                   )}
                   {customForm.pickedName ? (
                     <>
                       <span className="text-sm font-medium text-fg shrink-0">{customForm.pickedName}</span>
-                      <span className="text-xs text-fg-muted font-mono truncate">{customForm.url}</span>
+                      <span className="text-xs text-fg-muted font-mono truncate flex-1">{customForm.url}</span>
                     </>
                   ) : (
                     <input
@@ -600,16 +600,24 @@ export function VaultsList() {
                   {(customForm.url || customForm.pickedName) && (
                     <button
                       type="button"
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setCustomForm({ ...customForm, url: "", pickedName: "", pickedIcon: "" });
-                      }}
+                      onClick={() => setCustomForm({ ...customForm, url: "", pickedName: "", pickedIcon: "" })}
                       className="text-fg-muted hover:text-fg shrink-0 px-1"
                       aria-label="Clear"
                     >
                       ×
                     </button>
                   )}
+                  <button
+                    type="button"
+                    onClick={() => setPickerOpen(true)}
+                    className="text-fg-muted hover:text-fg shrink-0 px-1"
+                    title="Browse Anthropic's MCP registry"
+                    aria-label="Browse registry"
+                  >
+                    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                      <polyline points="6 9 12 15 18 9" />
+                    </svg>
+                  </button>
                 </div>
                 {pickerOpen && pickerRect && createPortal(
                   <>
