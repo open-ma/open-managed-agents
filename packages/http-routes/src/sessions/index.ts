@@ -688,19 +688,23 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
       id: userMessageId,
       content,
     } as unknown as UserMessageEvent;
+
+    // /messages is OMA-only sugar (Anthropic spec doesn't have it). Always
+    // open the underlying stream with chunks admitted so the in-turn matcher
+    // below sees the full chunk lifecycle and the SDK's onText/onThinking
+    // hooks fire. **Open the stream BEFORE appending the user.message** —
+    // post-stream-split the default streamEvents doesn't replay history,
+    // so a user.message broadcast before the stream attaches would be
+    // lost and inTurn would never trigger.
+    const handle = await router.streamEvents(id, { include: ["chunks"] });
     const append = await router.appendEvent(id, ev);
     if (append.status >= 400) {
+      handle.close();
       return new Response(append.body, {
         status: append.status,
         headers: { "content-type": "application/json" },
       });
     }
-
-    // /messages is OMA-only sugar (Anthropic spec doesn't have it). Always
-    // open the underlying stream with chunks admitted so the in-turn matcher
-    // below sees the full chunk lifecycle and the SDK's onText/onThinking
-    // hooks fire. No replay — we wait for the user.message we just posted.
-    const handle = await router.streamEvents(id, { include: ["chunks"] });
     const enc = new TextEncoder();
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
