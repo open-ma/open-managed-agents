@@ -538,6 +538,17 @@ export function ensureSchema(sql: SqlStorage): void {
   sql.exec(`
     CREATE INDEX IF NOT EXISTS idx_events_type ON events(type, seq)
   `);
+  // Expression index on the embedded event id (data.id JSON path). Used
+  // by the drain dedup check: SELECT 1 FROM events WHERE
+  // json_extract(data, '$.id') = ? LIMIT 1. Without it the dedup query
+  // is a full table scan; with it, sub-millisecond on bounded sessions.
+  // SQLite supports expression indexes since 3.9 (DO storage SQL is well
+  // past that). The index population on first-creation walks the table
+  // once; cheap on bounded sessions and a one-shot cost.
+  sql.exec(`
+    CREATE INDEX IF NOT EXISTS idx_events_event_id
+      ON events(json_extract(data, '$.id'))
+  `);
   // Hot path: drainEventQueue's "next pending user.* event for this thread".
   // Partial index — only user.* rows where processed_at IS NULL — keeps
   // the index tiny (typically 0-5 rows) and lets the lookup hit O(log n)

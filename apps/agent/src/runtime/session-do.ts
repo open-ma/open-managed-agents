@@ -685,28 +685,20 @@ export class SessionDO extends DurableObject<Env> {
    */
   async recoverEventQueue(): Promise<void> {
     this.ensureSchema();
-    // New canonical source of pending state: the pending_events table.
-    const newThreads = new Set<string>(this.pending!.threadsWithPending());
-    // Legacy back-compat: any pre-refactor rows still sitting in `events`
-    // with processed_at IS NULL belong to a thread that needs draining.
-    // After the deploy these are zero in steady state, but the first
-    // drain after rolling out may pick them up.
-    const legacyCursor = this.ctx.storage.sql.exec(
-      `SELECT DISTINCT session_thread_id FROM events
-         WHERE processed_at IS NULL AND cancelled_at IS NULL
-           AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
-    );
-    for (const row of legacyCursor) {
-      newThreads.add((row.session_thread_id as string) ?? "sthr_primary");
-    }
-    if (newThreads.size === 0) {
+    // Canonical source of pending state: the pending_events table.
+    // Pre-3a3e7ec sessions may have stuck `processed_at IS NULL` rows
+    // in `events` from before the dual-table refactor; those are NOT
+    // re-run by drain (the legacy queue semantics moved to
+    // pending_events). Sessions active at deploy time lose their
+    // in-flight queue state — acceptable for the small window.
+    const threads = this.pending!.threadsWithPending();
+    if (threads.length === 0) {
       // Nothing pending anywhere; defensive primary drain (cheap, returns
-      // immediately when both pending_events and the legacy partial index
-      // are empty).
+      // immediately when pending_events is empty).
       await this.drainEventQueue("sthr_primary");
       return;
     }
-    await Promise.all([...newThreads].map((t) => this.drainEventQueue(t)));
+    await Promise.all(threads.map((t) => this.drainEventQueue(t)));
   }
 
   /**
@@ -839,7 +831,14 @@ export class SessionDO extends DurableObject<Env> {
         fired_at: new Date().toISOString(),
       },
     };
-    this.persistAndBroadcastEvent(event);
+    // Wakeups go through the pending queue so the harness sees them in
+    // the same order as real user.message events. Mirrors the POST /event
+    // user.message path: stamp id + clear processed_at, enqueue, then
+    // broadcast the system.user_message_pending frame.
+    this.ensureSchema();
+    this._stampEventForPending(event);
+    this.pending!.enqueue(event);
+    this._broadcastPendingFrame(event, "sthr_primary");
     try { await this.schedule(5, "recoverEventQueue" as keyof this); } catch {}
     this.drainEventQueue();
   }
@@ -1057,59 +1056,134 @@ export class SessionDO extends DurableObject<Env> {
     try {
     const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
 
-    while (true) {
-      // Partial-index lookup — see ensureSchema's idx_events_pending.
-      // Returns the lowest-seq pending user event for this thread, or
-      // nothing (loop exits).
+    // Legacy backfill (one-shot per drain): pre-3a3e7ec sessions had
+    // user.* rows sitting in `events` with processed_at IS NULL. The
+    // refactor stops producing those. New code will never enqueue
+    // through `events`, so this query returns zero rows in steady state.
+    // We promote any stragglers in-place (UPDATE processed_at +
+    // re-stamp data.processed_at + broadcast _promoted) so the events
+    // log isn't visually wrong. The harness DOES NOT auto-run them —
+    // accepting that any session active at deploy boundary loses its
+    // in-flight queue state. Cheap (indexed; zero rows in steady state).
+    // TODO(dual-table-followup): remove this block after a soak window
+    // confirms no production session has had this trigger.
+    {
       const cursor = this.ctx.storage.sql.exec(
         `SELECT seq, data FROM events
            WHERE session_thread_id = ?
              AND processed_at IS NULL AND cancelled_at IS NULL
              AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')
-           ORDER BY seq ASC LIMIT 1`,
+           ORDER BY seq ASC`,
         threadId,
       );
-      let pendingUserEvent: { seq: number; data: string } | null = null;
+      const legacyRows: Array<{ seq: number; data: string }> = [];
       for (const row of cursor) {
-        pendingUserEvent = { seq: row.seq as number, data: row.data as string };
+        legacyRows.push({ seq: row.seq as number, data: row.data as string });
       }
+      for (const lr of legacyRows) {
+        const nowMs = Date.now();
+        const nowIso = new Date(nowMs).toISOString();
+        let event: SessionEvent;
+        try {
+          event = JSON.parse(lr.data) as SessionEvent;
+        } catch {
+          continue;
+        }
+        event.processed_at = nowIso;
+        this.ctx.storage.sql.exec(
+          `UPDATE events SET processed_at = ?, data = ? WHERE seq = ?`,
+          nowMs, JSON.stringify(event), lr.seq,
+        );
+        const eventId = (event as { id?: string }).id;
+        this.broadcastEvent({
+          type: "system.user_message_promoted",
+          event_id: eventId,
+          // pending_seq absent — these never lived in pending_events.
+          seq: lr.seq,
+          processed_at: nowIso,
+          session_thread_id: threadId,
+        } as unknown as SessionEvent);
+      }
+    }
 
-      if (!pendingUserEvent) {
-        break;
-      }
+    while (true) {
+      // Peek the next active row from `pending_events` (no DELETE).
+      // Crash-safety: we INSERT into events first, then DELETE here.
+      // If the DO dies between INSERT and DELETE, the next drain will
+      // peek the same row — the dedup check below detects it via
+      // event_id and skips the re-INSERT, just deleting the stale row.
+      const row = this.pending!.peek(threadId);
+      if (!row) break;
 
       // Fresh per-turn dedup window for agent.message broadcasts. See
       // broadcastedMessageIds field doc for the recovery-replay context.
       this.broadcastedMessageIds.clear();
 
-      const turnName = `turn:${pendingUserEvent.seq}`;
-      const pendingSeq = pendingUserEvent.seq;
-      // AMA spec: processed_at = "wall-clock ingestion time", i.e. when
-      // the agent picks the event up — not when the turn finishes.
-      // Set it BEFORE runAgentTurn so:
-      //   1. The next loop iteration's pending-index lookup skips it
-      //      even before the turn completes (defends against any
-      //      interleaved drain re-entry getting past the mutex).
-      //   2. Console + SDK consumers that derive "agent has started
-      //      processing" from `processed_at != null` get the right
-      //      semantic — pre-fix, user.message stayed pending until
-      //      turn end (5–30s), so the UI hourglass never went away
-      //      while the agent was already streaming a reply.
-      //
-      // Rewrite both the indexed `processed_at` column AND the JSON
-      // `data` blob — `/api/sessions/:id/events` returns the JSON
-      // verbatim, so leaving the embedded `processed_at` as the append
-      // time would violate the AMA spec ("null until processed by
-      // agent") and produce timelines where the agent's reply appears
-      // to predate the user message that triggered it.
+      // Parse the queued event and stamp processed_at = now (ISO).
+      // AMA spec: processed_at = "wall-clock ingestion time, when the
+      // agent picks the event up — not when the turn finishes". The
+      // INSERT below carries this value verbatim into the events row.
       const nowMs = Date.now();
       const nowIso = new Date(nowMs).toISOString();
-      const event = JSON.parse(pendingUserEvent.data) as SessionEvent;
+      const event = JSON.parse(row.data) as SessionEvent;
       event.processed_at = nowIso;
-      this.ctx.storage.sql.exec(
-        `UPDATE events SET processed_at = ?, data = ? WHERE seq = ?`,
-        nowMs, JSON.stringify(event), pendingSeq,
-      );
+      const eventId = (event as { id?: string }).id;
+
+      // Dedup-by-event-id: if a previous drain crashed between INSERT
+      // and DELETE, the event is already in `events` for this id.
+      // Skip the re-INSERT but still delete the stale pending row so
+      // the loop progresses and the harness doesn't re-run a turn that
+      // already happened. Cheap — events.id has an expression index
+      // (idx_events_event_id) so the lookup is O(log n).
+      let alreadyPromoted = false;
+      let promotedSeq: number | null = null;
+      if (eventId) {
+        for (const r of this.ctx.storage.sql.exec(
+          `SELECT seq FROM events WHERE json_extract(data, '$.id') = ? LIMIT 1`,
+          eventId,
+        )) {
+          alreadyPromoted = true;
+          promotedSeq = r.seq as number;
+        }
+      }
+
+      if (!alreadyPromoted) {
+        // INSERT into events: history.append uses the cf-do adapter
+        // which writes (type, data, processed_at, session_thread_id)
+        // and returns the AUTOINCREMENT seq via the RETURNING clause
+        // when reachable; here we re-read MAX(seq) for the broadcast.
+        history.append(event);
+        for (const r of this.ctx.storage.sql.exec(
+          `SELECT seq FROM events WHERE json_extract(data, '$.id') = ? ORDER BY seq DESC LIMIT 1`,
+          eventId ?? "",
+        )) {
+          promotedSeq = r.seq as number;
+        }
+      }
+
+      // Now safe to delete from pending_events. Idempotent: a DO restart
+      // before this DELETE leaves the dedup path above to handle the
+      // duplicate-promote case on the next drain.
+      this.pending!.delete(row.pending_seq);
+
+      // Broadcast the canonical user.* event (now with processed_at
+      // filled) so live consumers that key on user.message see the
+      // promoted copy with the right wall-clock. Mirror what the
+      // pre-refactor broadcastEvent path did at append time.
+      this.broadcastEvent(event);
+      // Promotion notification — lets new clients drop the outbox bubble
+      // and render the new events-log row. Includes the assigned seq so
+      // the client can correlate without polling.
+      this.broadcastEvent({
+        type: "system.user_message_promoted",
+        event_id: eventId,
+        pending_seq: row.pending_seq,
+        seq: promotedSeq,
+        processed_at: nowIso,
+        session_thread_id: row.session_thread_id,
+      } as unknown as SessionEvent);
+
+      const turnName = `turn:${promotedSeq ?? row.pending_seq}`;
       try {
         // Run the turn through the unified runtime: adapter.beginTurn /
         // endTurn write the marker on `sessions.turn_id`, hintTurnInFlight
@@ -1188,13 +1262,14 @@ export class SessionDO extends DurableObject<Env> {
         ) {
           this.terminate("billing");
         }
-        // processed_at was set up-front — no need to re-mark on
-        // catch. Status auto-derives from sessions.turn_id once the
+        // The promoted events row already exists (we INSERTed it before
+        // running the turn), and pending_events is already cleared.
+        // Status auto-derives from sessions.turn_id once the
         // RuntimeAdapter.endTurn callback fires.
         break; // Stop draining on error — let the client decide what to do
       }
-      // processed_at already set up-front; on success the row is
-      // already out of the pending-index. Just continue the while loop.
+      // Promoted row is in events with processed_at set; pending row is
+      // deleted. Loop back for the next pending event on this thread.
     }
     } finally {
       this._draining.delete(threadId);
@@ -3443,7 +3518,6 @@ export class SessionDO extends DurableObject<Env> {
           }
           let output = "";
           try { output = await sandbox.readFile(output_file); } catch {}
-          const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
           const ageMin = Math.round(ageMs / 60000);
           const notifEvent: SessionEvent = {
             type: "user.message",
@@ -3452,8 +3526,12 @@ export class SessionDO extends DurableObject<Env> {
               text: `<task_notification>\nBackground task ${task_id} exceeded the 30-minute lifetime cap and was killed${killNote}.\nRan for: ${ageMin} min\nOutput file (partial): ${output_file}\n\n${output.slice(0, 3000)}\n</task_notification>`,
             }],
           };
-          history.append(notifEvent);
-          this.broadcastEvent(notifEvent);
+          // Route through pending queue so drain promotes it the same way
+          // a real user.message does — ensures the harness actually runs
+          // a turn for the notification.
+          this._stampEventForPending(notifEvent);
+          this.pending!.enqueue(notifEvent);
+          this._broadcastPendingFrame(notifEvent, "sthr_primary");
           this.ctx.storage.sql.exec(`DELETE FROM background_tasks WHERE task_id = ?`, task_id);
           await this.drainEventQueue();
           continue;
@@ -3482,7 +3560,6 @@ export class SessionDO extends DurableObject<Env> {
         let output = "";
         try { output = await sandbox.readFile(output_file); } catch {}
 
-        const history = new SqliteHistory(this.ctx.storage.sql, this.env.FILES_BUCKET ?? null, `t/${this.state.tenant_id ?? "default"}/sessions/${this.state.session_id ?? "unknown"}`);
         const notifEvent: SessionEvent = {
           type: "user.message",
           content: [{
@@ -3490,8 +3567,12 @@ export class SessionDO extends DurableObject<Env> {
             text: `<task_notification>\nBackground task ${task_id} completed.\nOutput file: ${output_file}\n\n${output.slice(0, 3000)}\n</task_notification>`,
           }],
         };
-        history.append(notifEvent);
-        this.broadcastEvent(notifEvent);
+        // Route through pending queue so drain promotes it the same way
+        // a real user.message does — ensures the harness actually runs
+        // a turn for the notification.
+        this._stampEventForPending(notifEvent);
+        this.pending!.enqueue(notifEvent);
+        this._broadcastPendingFrame(notifEvent, "sthr_primary");
 
         // Remove completed task
         this.ctx.storage.sql.exec(`DELETE FROM background_tasks WHERE task_id = ?`, task_id);
