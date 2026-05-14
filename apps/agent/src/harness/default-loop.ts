@@ -1,4 +1,4 @@
-import { streamText, stepCountIs } from "ai";
+import { streamText, stepCountIs, wrapLanguageModel } from "ai";
 import type { ContentPart, ModelMessage, LanguageModel, SystemModelMessage } from "ai";
 import type { HarnessInterface, HarnessContext, HarnessRuntime } from "./interface";
 import type { SessionEvent, ContentBlock, AgentToolUseEvent } from "@open-managed-agents/shared";
@@ -7,6 +7,7 @@ import { eventsToMessages } from "../runtime/history";
 import { SummarizeCompactionStrategy, resolveCompactionStrategy } from "./compaction";
 import type { CompactionStrategy } from "./compaction";
 import { ALL_TOOLS } from "./tools";
+import { llmLoggingMiddleware, llmLogKey } from "./llm-logging-middleware";
 
 // Single source of truth lives in ./tools.ts (ALL_TOOLS). Importing here so
 // adding a new toolset entry can't drift the event-classification list — the
@@ -375,9 +376,35 @@ export class DefaultHarness implements HarnessInterface {
       const streamStartedAt = Date.now();
       console.log(`[stream] streamText START model=${modelId} messages=${finalMessages.length} tools=${Object.keys(cached.tools ?? {}).length}`);
 
+      // LLM full-body logging: wrap the model so every provider call's
+      // request + response is teed to R2 keyed by the per-step span
+      // event id. When env.llmLog is absent (test harnesses, non-CF),
+      // we skip the wrap entirely so the model object passes through.
+      // The spanIdResolver closure reads `stepStartId`, which AI SDK
+      // mints in experimental_onStepStart (called BEFORE the provider
+      // doStream call) — so the middleware always sees the right id at
+      // wrapStream invocation time.
+      // Note: wrapLanguageModel only accepts LanguageModelV3 instances
+      // (not the LanguageModel union which includes string ids). All
+      // resolveModel returns are V3 instances; cast through unknown to
+      // satisfy the wrapper's narrower type without runtime conversion.
+      const llmLogCtx = ctx.env.llmLog;
+      const wrappedModel: LanguageModel = llmLogCtx
+        ? (wrapLanguageModel({
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            model: model as any,
+            middleware: llmLoggingMiddleware({
+              tenant_id: llmLogCtx.tenant_id,
+              session_id: llmLogCtx.session_id,
+              r2: llmLogCtx.r2,
+              spanIdResolver: () => stepStartId,
+            }),
+          }) as unknown as LanguageModel)
+        : model;
+
       try {
       const r = streamText({
-      model,
+      model: wrappedModel,
       // Empty system prompt → omit entirely. Anthropic's API rejects an
       // empty `system` block ("system: text content blocks must be non-
       // empty"); the AI SDK forwards the empty string as a block instead
@@ -553,6 +580,13 @@ export class DefaultHarness implements HarnessInterface {
           .map((p) => p.text ?? "")
           .join("");
         const providerResponseId = (step.response as { id?: string } | undefined)?.id;
+        // body_r2_key: pointer to the R2-persisted full request/response
+        // for this provider call. Computable from session_id + event_id
+        // at read time; we surface it on the event so consumers don't
+        // have to know the key layout. Absent when llm logging is off.
+        const bodyR2Key = llmLogCtx
+          ? llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId ?? "")
+          : undefined;
         runtime.broadcast({
           type: "span.model_request_end",
           model: modelId,
@@ -567,6 +601,7 @@ export class DefaultHarness implements HarnessInterface {
           finish_reason: step.finishReason,
           final_text_length: stepText.length,
           is_error: false,
+          ...(bodyR2Key ? { body_r2_key: bodyR2Key } : {}),
         });
         // Clear so onError / onAbort don't double-close.
         stepStartId = null;
@@ -599,6 +634,9 @@ export class DefaultHarness implements HarnessInterface {
           final_text_length: 0,
           is_error: true,
           error_message: message.slice(0, 500),
+          ...(llmLogCtx
+            ? { body_r2_key: llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId) }
+            : {}),
         } as SessionEvent);
         stepStartId = null;
       },
@@ -615,6 +653,9 @@ export class DefaultHarness implements HarnessInterface {
           finish_reason: "aborted",
           final_text_length: 0,
           is_error: false,
+          ...(llmLogCtx
+            ? { body_r2_key: llmLogKey(llmLogCtx.tenant_id, llmLogCtx.session_id, stepStartId) }
+            : {}),
         });
         stepStartId = null;
       },

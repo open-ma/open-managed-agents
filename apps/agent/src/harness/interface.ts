@@ -211,6 +211,16 @@ export interface HarnessContext {
      *  this to attach to the daemon's room without going through main as
      *  an HTTP service. */
     RUNTIME_ROOM?: DurableObjectNamespace;
+    /** LLM full-body logging context. When set, the harness wraps each
+     *  model call in middleware that PUTs request + response to R2 keyed
+     *  by the per-step span event id. SessionDO populates this with the
+     *  session's tenant + id and the FILES_BUCKET binding. Absent in
+     *  test harnesses / non-CF deploys → middleware no-op. */
+    llmLog?: {
+      tenant_id: string;
+      session_id: string;
+      r2: R2Bucket | null;
+    };
   };
   runtime: HarnessRuntime;
 }

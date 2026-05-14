@@ -89,6 +89,13 @@ export interface Env {
   ANTHROPIC_API_KEY: string;
   ANTHROPIC_BASE_URL?: string;
   ANTHROPIC_MODEL?: string;
+  /** Killswitch for the LLM full-body logging middleware (Part B of the
+   *  dual-table refactor). When set to "1", apps/agent skips the
+   *  per-step R2 PUT entirely AND drops `body_r2_key` from
+   *  span.model_request_end events. Any other value (including unset)
+   *  enables capture. Tenant-scoped opt-out is a future
+   *  (TODO(llm-logging): add per-tenant flag in tenant config). */
+  LLM_LOGS_DISABLED?: string;
   TAVILY_API_KEY?: string;
   CLOUDFLARE_API_TOKEN?: string;
   CLOUDFLARE_ACCOUNT_ID?: string;

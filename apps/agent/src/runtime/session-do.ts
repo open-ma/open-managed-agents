@@ -3832,6 +3832,19 @@ export class SessionDO extends DurableObject<Env> {
         ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
         ANTHROPIC_MODEL: this.env.ANTHROPIC_MODEL,
         TAVILY_API_KEY: this.env.TAVILY_API_KEY,
+        // Sub-agent LLM calls share the same logging plumbing — span
+        // events emitted via parent broadcast carry body_r2_key under
+        // the SAME tenant + session keying. event_id stays unique per
+        // call because each model_request_start mints a fresh sevt_*.
+        ...(this.env.LLM_LOGS_DISABLED === "1"
+          ? {}
+          : {
+              llmLog: {
+                tenant_id: this.state.tenant_id,
+                session_id: this.state.session_id,
+                r2: this.env.FILES_BUCKET ?? null,
+              },
+            }),
         delegateToAgent: async (nestedAgentId: string, nestedMessage: string) => {
           // Nested delegate inside the env block; see runtime block
           // above for the same lineage rule.
@@ -4243,6 +4256,21 @@ export class SessionDO extends DurableObject<Env> {
         // shared INTEGRATIONS_INTERNAL_SECRET). Optional on the env type
         // — non-acp harnesses don't read it.
         RUNTIME_ROOM: this.env.RUNTIME_ROOM,
+        // LLM full-body logging context. default-loop wraps each model
+        // call in middleware that PUTs request + response to R2 keyed
+        // by the per-step span event id. The matching
+        // span.model_request_end event grows a body_r2_key field
+        // pointing to the same key. r2 = null disables capture
+        // (test harnesses, env without FILES_BUCKET).
+        ...(this.env.LLM_LOGS_DISABLED === "1"
+          ? {}
+          : {
+              llmLog: {
+                tenant_id: this.state.tenant_id,
+                session_id: this.state.session_id,
+                r2: this.env.FILES_BUCKET ?? null,
+              },
+            }),
         delegateToAgent: async (agentId: string, message: string) => {
           return this.runSubAgent(agentId, message, history, sandbox, turnThreadId);
         },

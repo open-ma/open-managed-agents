@@ -644,6 +644,14 @@ export interface SpanModelRequestEndEvent extends EventBase {
   is_error?: boolean;
   /** Error message when is_error=true. Truncated to 500 chars. */
   error_message?: string;
+  /** R2 key under FILES_BUCKET pointing to the persisted full
+   *  request/response body for this provider call. Computable from
+   *  session_id + this event's `id` at read time
+   *  (`t/{tenant}/sessions/{sid}/llm/{event_id}.json`); surfaced here
+   *  so consumers don't have to know the layout. Absent when the
+   *  per-tenant or per-env LLM logging flag (LLM_LOGS_DISABLED=1) is
+   *  off. Read via GET /v1/sessions/:id/llm-calls/:event_id. */
+  body_r2_key?: string;
 }
 
 export interface SpanOutcomeEvaluationStartEvent extends EventBase {
