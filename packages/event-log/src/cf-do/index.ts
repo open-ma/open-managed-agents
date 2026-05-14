@@ -41,52 +41,34 @@ export class CfDoEventLog implements EventLogRepo {
     private r2KeyPrefix: string = "",
   ) {}
 
+  /**
+   * Append a SessionEvent to the canonical `events` table. seq is assigned
+   * via AUTOINCREMENT, so seq order = INSERT order = drain order for
+   * promoted user.* events (their INSERT is delayed until the drain pulls
+   * them off `pending_events`).
+   *
+   * No queue routing lives here. Queue-input events (user.message /
+   * user.tool_confirmation / user.custom_tool_result) are enqueued by the
+   * caller via `PendingQueueRepo.enqueue` and only land in `events` after
+   * the drain promotes them. See SessionDO POST `/event` and
+   * `drainEventQueue` for the full path.
+   */
   append(event: SessionEvent): void {
     this.stamp(event);
     const fullData = JSON.stringify(event);
-    // Per AMA spec, the three user.* turn-input event types are queued in
-    // a separate `pending_events` table. drainEventQueue dequeues them
-    // (DELETE from pending_events, INSERT into events with the new
-    // processed_at + a freshly-assigned seq), so `events.seq` order is
-    // monotonic with what the model actually saw.
-    //
-    // user.interrupt + user.define_outcome are control events, not turn
-    // inputs — they go into `events` directly (with processed_at stamped
-    // at append time, same as agent.* / span.* / session.*).
-    const isQueueInput =
-      event.type === "user.message" ||
-      event.type === "user.tool_confirmation" ||
-      event.type === "user.custom_tool_result";
     // session_thread_id lives on the wire (per AMA spec, EventBase optionally
     // carries it). Default to primary so legacy emitters that don't set it
-    // still land in the primary thread's queue.
+    // still land in the primary thread's view.
     const threadId =
       (event as unknown as { session_thread_id?: string }).session_thread_id ??
       "sthr_primary";
 
-    if (isQueueInput) {
-      // Queue-bound: stamp goes to `pending_events`. event.id is set by
-      // `stamp()` above; carry it on the row so the promotion broadcast
-      // can correlate the pending bubble with the event-log row.
-      const eventId = (event as unknown as { id?: string }).id ?? "";
-      // Pending payloads are usually tiny — no spill path. If a tool
-      // confirmation ever carries a huge payload (it shouldn't), it
-      // still goes into `pending_events.data` directly; the spill cap
-      // only matters for the eventual `events`-table write at promotion.
-      this.sql.exec(
-        `INSERT INTO pending_events
-           (enqueued_at, session_thread_id, type, event_id, data)
-         VALUES (?, ?, ?, ?, ?)`,
-        Date.now(),
-        threadId,
-        event.type,
-        eventId,
-        fullData,
-      );
-      return;
-    }
-
-    // Non-queue events go into `events` with processed_at stamped now.
+    // processed_at semantics: integer ms in the SQL column = "this event has
+    // been ingested by the agent". For server-emitted events (agent.*,
+    // span.*, session.*) the act of appending IS the processing, so we
+    // stamp now. Drain-promoted user.* events arrive here with
+    // event.processed_at already set on the JSON payload (drain stamps it
+    // before INSERT), and the row column gets the same wall-clock.
     const processedAt = Date.now();
 
     if (fullData.length <= SPILL_THRESHOLD_BYTES || !this.r2) {
@@ -123,57 +105,6 @@ export class CfDoEventLog implements EventLogRepo {
       const msg = err instanceof Error ? err.message : String(err);
       console.error(`[event-log] R2 spill PUT failed (${r2Key}): ${msg}`);
     });
-  }
-
-  /**
-   * Insert a pre-formed event into the `events` table directly with a
-   * freshly-assigned seq, used by `drainEventQueue` to promote a row
-   * out of `pending_events` (the user.* event has already been picked
-   * up and the harness is about to ingest it). Bypasses the
-   * `isQueueInput` routing in `append()`.
-   *
-   * Returns the assigned `seq` so the promotion broadcast can carry it.
-   */
-  appendPromoted(event: SessionEvent, processedAtMs: number): number {
-    this.stamp(event);
-    const fullData = JSON.stringify(event);
-    const threadId =
-      (event as unknown as { session_thread_id?: string }).session_thread_id ??
-      "sthr_primary";
-
-    const insertCursor = (() => {
-      if (fullData.length <= SPILL_THRESHOLD_BYTES || !this.r2) {
-        return this.sql.exec(
-          "INSERT INTO events (type, data, processed_at, session_thread_id) VALUES (?, ?, ?, ?) RETURNING seq",
-          event.type,
-          fullData,
-          processedAtMs,
-          threadId,
-        );
-      }
-      const r2Key = `${this.r2KeyPrefix}/events/${Date.now()}-${Math.random().toString(36).slice(2, 12)}`;
-      const cur = this.sql.exec(
-        "INSERT INTO events (type, data, processed_at, session_thread_id) VALUES (?, ?, ?, ?) RETURNING seq",
-        event.type,
-        JSON.stringify({
-          type: event.type,
-          _spilled: { r2_key: r2Key, original_bytes: fullData.length },
-        }),
-        processedAtMs,
-        threadId,
-      );
-      void this.r2.put(r2Key, fullData).catch((err) => {
-        const msg = err instanceof Error ? err.message : String(err);
-        console.error(`[event-log] R2 spill PUT failed (${r2Key}): ${msg}`);
-      });
-      return cur;
-    })();
-
-    let seq = -1;
-    for (const row of insertCursor) {
-      seq = row.seq as number;
-    }
-    return seq;
   }
 
   /**
@@ -377,18 +308,45 @@ export class CfDoPendingQueue implements PendingQueueRepo {
   constructor(private sql: SqlStorage) {}
 
   /**
-   * Pop the next active (uncancelled) pending row for a thread. Returns
-   * null when nothing's queued. Caller is responsible for inserting the
-   * matching event into the `events` table — this method just removes
-   * the row from the queue and returns its data.
+   * Append a queue-input event (user.message / user.tool_confirmation /
+   * user.custom_tool_result) to `pending_events`. The caller (SessionDO
+   * POST `/event` handler) is responsible for choosing what events go to
+   * the queue vs the canonical events log — adapters don't decide. The
+   * row stays here until `drainEventQueue` peeks it, INSERTs into events,
+   * then deletes it.
+   */
+  enqueue(event: SessionEvent): void {
+    const threadId =
+      (event as unknown as { session_thread_id?: string }).session_thread_id ??
+      "sthr_primary";
+    const eventId = (event as unknown as { id?: string }).id ?? "";
+    const fullData = JSON.stringify(event);
+    this.sql.exec(
+      `INSERT INTO pending_events
+         (enqueued_at, session_thread_id, type, event_id, data)
+       VALUES (?, ?, ?, ?, ?)`,
+      Date.now(),
+      threadId,
+      event.type,
+      eventId,
+      fullData,
+    );
+  }
+
+  /**
+   * Read the next active (uncancelled) pending row for a thread WITHOUT
+   * deleting it. Returns null when nothing's queued. The caller is
+   * responsible for INSERTing the matching event into the `events` table
+   * AND THEN calling `delete(pending_seq)`. This insert-then-delete order
+   * is the crash-safety guarantee — a process death between INSERT and
+   * DELETE leaves a duplicate-promote case (mitigated by event-id dedup
+   * in the events table) instead of losing the event.
    *
    * Non-transactional: drainEventQueue's per-thread mutex (`_draining`)
-   * guarantees only one drainer runs per thread at a time, so SELECT +
-   * DELETE can't race within the same thread. Cross-thread drains can
-   * run in parallel — they touch different `session_thread_id` rows.
+   * guarantees only one drainer runs per thread at a time, so peek +
+   * append + delete can't race within the same thread.
    */
-  popNext(threadId: string): PendingRow | null {
-    let row: PendingRow | null = null;
+  peek(threadId: string): PendingRow | null {
     for (const r of this.sql.exec(
       `SELECT pending_seq, enqueued_at, session_thread_id, type, event_id, data
          FROM pending_events
@@ -396,7 +354,7 @@ export class CfDoPendingQueue implements PendingQueueRepo {
          ORDER BY pending_seq ASC LIMIT 1`,
       threadId,
     )) {
-      row = {
+      return {
         pending_seq: r.pending_seq as number,
         enqueued_at: r.enqueued_at as number,
         session_thread_id: r.session_thread_id as string,
@@ -406,10 +364,20 @@ export class CfDoPendingQueue implements PendingQueueRepo {
         cancelled_at: null,
       };
     }
-    if (row) {
-      this.sql.exec(`DELETE FROM pending_events WHERE pending_seq = ?`, row.pending_seq);
-    }
-    return row;
+    return null;
+  }
+
+  /**
+   * Delete a pending row by its pending_seq. Idempotent — deleting a row
+   * that doesn't exist (e.g. because a previous drain promoted but
+   * crashed before deleting; recovery's dedup path then re-deletes the
+   * stale row) is a no-op.
+   */
+  delete(pendingSeq: number): void {
+    this.sql.exec(
+      `DELETE FROM pending_events WHERE pending_seq = ?`,
+      pendingSeq,
+    );
   }
 
   /**

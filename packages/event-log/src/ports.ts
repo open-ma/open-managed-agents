@@ -23,19 +23,15 @@
 import type { SessionEvent } from "@open-managed-agents/shared";
 
 export interface EventLogRepo {
-  /** Append a SessionEvent. Implementation MUST stamp seq + ts.
-   *  user.message / user.tool_confirmation / user.custom_tool_result are
-   *  routed to the pending queue (see PendingQueueRepo); other types go
-   *  to the canonical events log. */
+  /** Append a SessionEvent to the canonical events log. Implementation
+   *  MUST stamp seq + processed_at. The adapter doesn't decide where
+   *  rows go — queue routing for user.message / user.tool_confirmation /
+   *  user.custom_tool_result is the caller's responsibility (see
+   *  PendingQueueRepo). Calling `append` for a queue-input event from
+   *  an arbitrary code path puts that event directly in the events log
+   *  with the next AUTOINCREMENT seq, bypassing the queue — only the
+   *  drain path should do this (after `peek`, before `delete`). */
   append(event: SessionEvent): void;
-
-  /** Insert a pre-formed event directly into the events log with a fresh
-   *  seq, bypassing the queue routing in `append()`. Used by the drain
-   *  path when promoting a pending row into the log. The
-   *  `processed_at_ms` is the wall-clock the agent actually picked the
-   *  event up; AMA-spec consumers read this as the authoritative
-   *  ingestion time. Returns the assigned `seq`. */
-  appendPromoted?(event: SessionEvent, processedAtMs: number): number;
 
   /** All events strictly after `afterSeq` in seq order. Omit for full log. */
   getEvents(afterSeq?: number): SessionEvent[];
@@ -114,10 +110,19 @@ export interface PendingRow {
 }
 
 export interface PendingQueueRepo {
-  /** Pop the next active (non-cancelled) row for a thread. The row is
-   *  removed from the queue. Caller is responsible for inserting the
-   *  matching event into the events log via EventLogRepo.appendPromoted. */
-  popNext(threadId: string): PendingRow | null;
+  /** Append a queue-input SessionEvent (user.message /
+   *  user.tool_confirmation / user.custom_tool_result) to the pending
+   *  queue. SessionDO POST `/event` calls this; the row stays here
+   *  until `drainEventQueue` peeks, the caller appends to the events
+   *  log, then calls `delete(pending_seq)`. */
+  enqueue(event: SessionEvent): void;
+  /** Read the next active (non-cancelled) row for a thread WITHOUT
+   *  deleting it. Caller must INSERT the matching event into the
+   *  events log first, then call `delete(pending_seq)` — this
+   *  insert-then-delete order is the crash-safety guarantee. */
+  peek(threadId: string): PendingRow | null;
+  /** Delete a pending row by pending_seq. Idempotent. */
+  delete(pendingSeq: number): void;
   /** Cancel every active row for a thread. Returns the cancelled rows
    *  so the caller can broadcast per-row notifications. */
   cancelAllForThread(threadId: string, cancelledAtMs: number): PendingRow[];

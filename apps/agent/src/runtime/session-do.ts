@@ -1614,8 +1614,17 @@ export class SessionDO extends DurableObject<Env> {
         const umThread =
           (um as unknown as { session_thread_id?: string })
             .session_thread_id ?? "sthr_primary";
-        history.append(um);
-        this.broadcastEvent(um);
+        // Stamp id + processed_at = null on the canonical event before
+        // enqueue. The pending row carries the same JSON; drain will
+        // overwrite processed_at to the wall-clock when promoting.
+        this._stampEventForPending(um);
+        this.pending!.enqueue(um);
+        // Broadcast the AMA-spec "pending" notification so live
+        // consumers can render the outbox bubble immediately. Carries
+        // pending_seq so the matching `system.user_message_promoted`
+        // frame can correlate the bubble with the eventual events-log
+        // row at drain time.
+        this._broadcastPendingFrame(um, umThread);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
@@ -1631,7 +1640,7 @@ export class SessionDO extends DurableObject<Env> {
         //       rearm path covers what it used to defend.
         // The 5s recoverEventQueue schedule above is the safety-net
         // re-trigger if this background promise dies before drain runs.
-        console.log(`[post /event] user.message appended (thread=${umThread}), firing drainEventQueue`);
+        console.log(`[post /event] user.message enqueued (thread=${umThread}), firing drainEventQueue`);
         this.drainEventQueue(umThread);
         return new Response(null, { status: 202 });
       }
@@ -1658,6 +1667,26 @@ export class SessionDO extends DurableObject<Env> {
           this._threadAbortControllers.delete(targetThread);
         }
         const cancelTs = Date.now();
+        // Cancel rows in the AMA-spec pending_events queue and broadcast
+        // a per-row notification so live consumers can strike-through the
+        // outbox bubble.
+        const cancelledRows = this.pending!.cancelAllForThread(
+          targetThread,
+          cancelTs,
+        );
+        for (const row of cancelledRows) {
+          this.broadcastEvent({
+            type: "system.user_message_cancelled",
+            pending_seq: row.pending_seq,
+            event_id: row.event_id,
+            session_thread_id: row.session_thread_id,
+            cancelled_at: cancelTs,
+          } as unknown as SessionEvent);
+        }
+        // Legacy back-compat: pre-3a3e7ec sessions may still have user.*
+        // rows sitting in `events` with processed_at IS NULL. The legacy
+        // partial pending-index on `events` would otherwise pick them up
+        // on the next drain. Mark them cancelled so they never run.
         const cancelResult = this.ctx.storage.sql.exec(
           `UPDATE events SET cancelled_at = ?
              WHERE session_thread_id = ?
@@ -1665,7 +1694,8 @@ export class SessionDO extends DurableObject<Env> {
                AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result')`,
           cancelTs, targetThread,
         );
-        const cancelledCount = (cancelResult as { rowsWritten?: number }).rowsWritten ?? 0;
+        const legacyCancelledCount = (cancelResult as { rowsWritten?: number }).rowsWritten ?? 0;
+        const cancelledCount = cancelledRows.length + legacyCancelledCount;
         history.append(body as UserInterruptEvent);
         // Emit status_idle when interrupt actually changed thread state:
         // either an active turn was aborted, or queued events were
@@ -1690,12 +1720,13 @@ export class SessionDO extends DurableObject<Env> {
         const tcThread =
           (tc as unknown as { session_thread_id?: string }).session_thread_id ??
           "sthr_primary";
-        history.append(tc);
-        this.broadcastEvent(body);
+        this._stampEventForPending(tc);
+        this.pending!.enqueue(tc);
+        this._broadcastPendingFrame(tc, tcThread);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        console.log("[post /event] tool_confirmation appended, firing drainEventQueue (no await)");
+        console.log("[post /event] tool_confirmation enqueued, firing drainEventQueue (no await)");
         this.drainEventQueue(tcThread);
         return new Response(null, { status: 202 });
       }
@@ -1705,12 +1736,13 @@ export class SessionDO extends DurableObject<Env> {
         const ctrThread =
           (customResult as unknown as { session_thread_id?: string })
             .session_thread_id ?? "sthr_primary";
-        history.append(customResult);
-        this.broadcastEvent(customResult);
+        this._stampEventForPending(customResult);
+        this.pending!.enqueue(customResult);
+        this._broadcastPendingFrame(customResult, ctrThread);
         try {
           await this.schedule(5, "recoverEventQueue");
         } catch {}
-        console.log("[post /event] custom_tool_result appended, firing drainEventQueue (no await)");
+        console.log("[post /event] custom_tool_result enqueued, firing drainEventQueue (no await)");
         this.drainEventQueue(ctrThread);
         return new Response(null, { status: 202 });
       }
@@ -2926,6 +2958,55 @@ export class SessionDO extends DurableObject<Env> {
         // Connection already closed
       }
     }
+  }
+
+  /**
+   * Stamp `id` and clear `processed_at` on a pending-bound event before
+   * enqueue. The event will sit in `pending_events.data` verbatim until
+   * `drainEventQueue` peeks it; drain then sets `processed_at` to the
+   * wall-clock and INSERTs into `events` with the next AUTOINCREMENT seq.
+   *
+   * AMA-spec semantics: `processed_at` MUST be null on the wire while
+   * the event is queued ("null if not yet processed by the agent").
+   * The stamp helper in event-log/cf-do skips stamping processed_at for
+   * the three queue-input types, so the value stays absent until drain
+   * stamps it explicitly.
+   */
+  private _stampEventForPending(event: SessionEvent): void {
+    const e = event as SessionEvent & { id?: string; processed_at?: string };
+    if (!e.id) {
+      e.id = `sevt_${generateEventId()}`;
+    }
+    // Defensive: clear any pre-set processed_at on inbound user.* events
+    // (clients should never set it, but if they do, drain owns the stamp).
+    delete e.processed_at;
+  }
+
+  /**
+   * Broadcast `system.user_message_pending` over WS so live consumers
+   * can render the outbox bubble immediately. Carries the canonical
+   * event payload (so older clients that key on `user.message` still
+   * see the content) AND `pending_seq` (so the matching `_promoted`
+   * frame at drain time can correlate the bubble with the events-log
+   * row that lands at INSERT).
+   */
+  private _broadcastPendingFrame(event: SessionEvent, threadId: string): void {
+    // Look up the just-enqueued row's pending_seq so the client has a
+    // stable correlation key. The peek returns the lowest-seq pending
+    // row for the thread; since we just enqueued and the per-thread
+    // mutex (_draining) hasn't yet picked it up, this row IS the one
+    // we just wrote (FIFO within a thread).
+    const row = this.pending!.peek(threadId);
+    const pendingSeq = row?.pending_seq;
+    const eventId = (event as unknown as { id?: string }).id ?? "";
+    this.broadcastEvent({
+      type: "system.user_message_pending",
+      event_id: eventId,
+      pending_seq: pendingSeq,
+      enqueued_at: row?.enqueued_at ?? Date.now(),
+      session_thread_id: threadId,
+      event,
+    } as unknown as SessionEvent);
   }
 
   /**

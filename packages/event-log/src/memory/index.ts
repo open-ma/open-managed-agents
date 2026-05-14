@@ -25,42 +25,28 @@ export class InMemoryEventLog implements EventLogRepo {
   // Exposed as readonly to tests + the in-memory thread storage path; do
   // not mutate from outside the repo.
   readonly _rows: MemRow[] = [];
-  readonly _pending: Array<{
-    pending_seq: number;
-    enqueued_at: number;
-    session_thread_id: string;
-    type: string;
-    event_id: string;
-    data: string;
-    cancelled_at: number | null;
-  }> = [];
   private nextSeq = 1;
-  private nextPendingSeq = 1;
 
   constructor(private stamp: (e: SessionEvent) => void) {}
 
+  /**
+   * Append a SessionEvent to the in-memory log. Mirrors the cf-do
+   * adapter: this is a primitive "write a row" operation. Queue-input
+   * events (user.message / user.tool_confirmation /
+   * user.custom_tool_result) are NOT auto-routed to a queue here —
+   * sub-agent and test code that uses InMemoryHistory needs the user
+   * message to be visible immediately to `getEvents()`/`getMessages()`,
+   * since sub-agents run synchronously without a drain step.
+   *
+   * SessionDO routes its primary-thread queue-input events through
+   * `InMemoryPendingQueue.enqueue` (or `CfDoPendingQueue.enqueue`)
+   * separately. The two paths are now independent.
+   */
   append(event: SessionEvent): void {
     this.stamp(event);
-    const isQueueInput =
-      event.type === "user.message" ||
-      event.type === "user.tool_confirmation" ||
-      event.type === "user.custom_tool_result";
     const threadId =
       (event as unknown as { session_thread_id?: string }).session_thread_id ??
       "sthr_primary";
-    if (isQueueInput) {
-      const eventId = (event as unknown as { id?: string }).id ?? "";
-      this._pending.push({
-        pending_seq: this.nextPendingSeq++,
-        enqueued_at: Date.now(),
-        session_thread_id: threadId,
-        type: event.type,
-        event_id: eventId,
-        data: JSON.stringify(event),
-        cancelled_at: null,
-      });
-      return;
-    }
     this._rows.push({
       seq: this.nextSeq++,
       type: event.type,
@@ -69,24 +55,6 @@ export class InMemoryEventLog implements EventLogRepo {
       cancelled_at: null,
       session_thread_id: threadId,
     });
-  }
-
-  /** See ports.ts: appendPromoted. */
-  appendPromoted(event: SessionEvent, processedAtMs: number): number {
-    this.stamp(event);
-    const threadId =
-      (event as unknown as { session_thread_id?: string }).session_thread_id ??
-      "sthr_primary";
-    const seq = this.nextSeq++;
-    this._rows.push({
-      seq,
-      type: event.type,
-      data: JSON.stringify(event),
-      processed_at: processedAtMs,
-      cancelled_at: null,
-      session_thread_id: threadId,
-    });
-    return seq;
   }
 
   getEvents(afterSeq?: number): SessionEvent[] {
@@ -123,28 +91,56 @@ export class InMemoryEventLog implements EventLogRepo {
 }
 
 /**
- * In-memory pending queue, paired with InMemoryEventLog. Mirrors
- * CfDoPendingQueue's contract.
+ * In-memory pending queue, parallel to (not embedded in) InMemoryEventLog.
+ * Mirrors CfDoPendingQueue's contract.
  *
- * Constructor takes the InMemoryEventLog so popNext / list / etc. read
- * from the same `_pending` array `append()` populated.
+ * Self-contained: holds its own rows array + counter. The queue is
+ * structurally separate from the canonical event log — same as the
+ * dual-table SQL design — so accidental crosswiring is impossible.
  */
 export class InMemoryPendingQueue implements PendingQueueRepo {
-  constructor(private log: InMemoryEventLog) {}
+  private rows: Array<{
+    pending_seq: number;
+    enqueued_at: number;
+    session_thread_id: string;
+    type: string;
+    event_id: string;
+    data: string;
+    cancelled_at: number | null;
+  }> = [];
+  private nextPendingSeq = 1;
 
-  popNext(threadId: string): PendingRow | null {
-    const idx = this.log._pending.findIndex(
+  enqueue(event: SessionEvent): void {
+    const threadId =
+      (event as unknown as { session_thread_id?: string }).session_thread_id ??
+      "sthr_primary";
+    const eventId = (event as unknown as { id?: string }).id ?? "";
+    this.rows.push({
+      pending_seq: this.nextPendingSeq++,
+      enqueued_at: Date.now(),
+      session_thread_id: threadId,
+      type: event.type,
+      event_id: eventId,
+      data: JSON.stringify(event),
+      cancelled_at: null,
+    });
+  }
+
+  peek(threadId: string): PendingRow | null {
+    const r = this.rows.find(
       (r) => r.session_thread_id === threadId && r.cancelled_at == null,
     );
-    if (idx < 0) return null;
-    const row = this.log._pending[idx];
-    this.log._pending.splice(idx, 1);
-    return { ...row };
+    return r ? { ...r } : null;
+  }
+
+  delete(pendingSeq: number): void {
+    const idx = this.rows.findIndex((r) => r.pending_seq === pendingSeq);
+    if (idx >= 0) this.rows.splice(idx, 1);
   }
 
   cancelAllForThread(threadId: string, cancelledAtMs: number): PendingRow[] {
     const out: PendingRow[] = [];
-    for (const r of this.log._pending) {
+    for (const r of this.rows) {
       if (r.session_thread_id === threadId && r.cancelled_at == null) {
         r.cancelled_at = cancelledAtMs;
         out.push({ ...r });
@@ -154,7 +150,7 @@ export class InMemoryPendingQueue implements PendingQueueRepo {
   }
 
   list(threadId: string, includeCancelled = false): PendingRow[] {
-    return this.log._pending
+    return this.rows
       .filter(
         (r) =>
           r.session_thread_id === threadId &&
@@ -164,12 +160,12 @@ export class InMemoryPendingQueue implements PendingQueueRepo {
   }
 
   countActive(): number {
-    return this.log._pending.filter((r) => r.cancelled_at == null).length;
+    return this.rows.filter((r) => r.cancelled_at == null).length;
   }
 
   threadsWithPending(): string[] {
     const set = new Set<string>();
-    for (const r of this.log._pending) {
+    for (const r of this.rows) {
       if (r.cancelled_at == null) set.add(r.session_thread_id);
     }
     return [...set];
