@@ -658,6 +658,25 @@ export class DefaultHarness implements HarnessInterface {
             : {}),
         });
         stepStartId = null;
+        // Drain live chunk-stream registers same way the catch-around-
+        // consumeStream below does. onAbort fires when the model emitted
+        // its content cleanly but a follow-up await (finishReason / text /
+        // step iteration) trips the abort signal — consumeStream itself
+        // doesn't throw in that path, so the catch block doesn't run and
+        // these stream lifecycles would be left half-open without us
+        // emitting the *_stream_end markers here.
+        if (currentMessageId) {
+          void runtime.broadcastStreamEnd(currentMessageId, "aborted", "interrupted_mid_stream");
+          currentMessageId = null;
+        }
+        for (const tid of liveThinking) {
+          void runtime.broadcastThinkingEnd(tid, "aborted");
+        }
+        liveThinking.clear();
+        for (const tid of liveToolInput) {
+          void runtime.broadcastToolInputEnd(tid, "aborted");
+        }
+        liveToolInput.clear();
       },
     });
       // streamText returns a StreamTextResult; consumeStream forces the
