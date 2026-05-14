@@ -436,9 +436,21 @@ describe("DO resilience", () => {
     const events = await collectReplayedEvents(session.id);
 
     expect(events.length).toBeGreaterThanOrEqual(2);
+    // Post-dual-table refactor: user.message events live in
+    // pending_events until drain promotes them. The WS replay reads
+    // from events (history.getEvents); concurrent broadcast surfaces
+    // each pending message via system.user_message_pending. Look at
+    // either to find both inputs.
     const texts = events
-      .filter((e: any) => e.type === "user.message")
-      .map((e: any) => e.content[0].text);
+      .flatMap((e: any) => {
+        if (e.type === "user.message" && e.content?.[0]?.text) {
+          return [e.content[0].text];
+        }
+        if (e.type === "system.user_message_pending" && e.event?.content?.[0]?.text) {
+          return [e.event.content[0].text];
+        }
+        return [];
+      });
     expect(texts).toContain("replay-test-1");
     expect(texts).toContain("replay-test-2");
   });
@@ -451,11 +463,20 @@ describe("DO resilience", () => {
       await postMessage(session.id, `rapid-${i}`);
     }
 
-    // Verify all 10 are in the event log via WebSocket replay
+    // Verify all 10 are visible via WebSocket replay. Same dual-table
+    // dance as above — pending messages surface via _pending frames,
+    // promoted ones via the canonical user.message replay.
     const events = await collectReplayedEvents(session.id);
     const texts = events
-      .filter((e: any) => e.type === "user.message")
-      .map((e: any) => e.content[0].text);
+      .flatMap((e: any) => {
+        if (e.type === "user.message" && e.content?.[0]?.text) {
+          return [e.content[0].text];
+        }
+        if (e.type === "system.user_message_pending" && e.event?.content?.[0]?.text) {
+          return [e.event.content[0].text];
+        }
+        return [];
+      });
 
     for (let i = 0; i < 10; i++) {
       expect(texts).toContain(`rapid-${i}`);
@@ -470,11 +491,20 @@ describe("DO resilience", () => {
     const statusRes = await getDoStatus(session.id);
     expect(statusRes.ok).toBe(true);
 
-    // Data should still be there
+    // Data should still be there — visible either as a promoted
+    // user.message in events or a pending row surfaced via the
+    // _pending frame at WS connect.
     const events = await collectReplayedEvents(session.id);
     const texts = events
-      .filter((e: any) => e.type === "user.message")
-      .map((e: any) => e.content[0].text);
+      .flatMap((e: any) => {
+        if (e.type === "user.message" && e.content?.[0]?.text) {
+          return [e.content[0].text];
+        }
+        if (e.type === "system.user_message_pending" && e.event?.content?.[0]?.text) {
+          return [e.event.content[0].text];
+        }
+        return [];
+      });
     expect(texts).toContain("before-reinit");
   });
 

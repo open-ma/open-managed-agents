@@ -1941,6 +1941,38 @@ export class SessionDO extends DurableObject<Env> {
         pair[1].send(JSON.stringify(event));
       }
 
+      // Pending queue replay — emit a system.user_message_pending frame
+      // for every active row across every thread, so a fresh client
+      // sees the outbox state without an extra GET /pending. Mirrors
+      // the broadcast that fires at enqueue time. Old SDK consumers
+      // ignore unknown system.* frames; new ones (Console) populate
+      // their pendingByEventId map.
+      try {
+        for (const threadId of this.pending!.threadsWithPending()) {
+          for (const row of this.pending!.list(threadId)) {
+            let parsed: SessionEvent;
+            try {
+              parsed = JSON.parse(row.data) as SessionEvent;
+            } catch {
+              continue;
+            }
+            const pendingFrame: SystemUserMessagePendingEvent = {
+              type: "system.user_message_pending",
+              event_id: row.event_id,
+              pending_seq: row.pending_seq,
+              enqueued_at: row.enqueued_at,
+              session_thread_id: row.session_thread_id,
+              event: parsed,
+            };
+            pair[1].send(JSON.stringify(pendingFrame));
+          }
+        }
+      } catch (err) {
+        console.warn(
+          `[ws-replay] pending queue replay failed: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
       return new Response(null, { status: 101, webSocket: pair[0] });
     }
 
