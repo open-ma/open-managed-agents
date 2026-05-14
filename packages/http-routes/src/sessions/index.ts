@@ -823,6 +823,49 @@ export function buildSessionRoutes(deps: SessionRoutesDeps) {
     }
   });
 
+  // ── Pending events (AMA) ──────────────────────────────────────────────
+  // GET /v1/sessions/:id/pending — list user.* events enqueued but not
+  // yet drained by the harness. Forwards opaque query string (?session_
+  // thread_id, ?include_cancelled) to the SessionRouter.
+  app.get("/:id/pending", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const router = resolveRouter(deps.router, c);
+    const tenantId = c.var.tenant_id;
+    const sessionId = c.req.param("id");
+    const sess = await services.sessions.get({ tenantId, sessionId });
+    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const url = new URL(c.req.url);
+    const result = await router.getPending(sessionId, { rawSearch: url.search });
+    return new Response(result.body, {
+      status: result.status,
+      headers: { "content-type": "application/json" },
+    });
+  });
+
+  // ── LLM call body fetch ───────────────────────────────────────────────
+  // GET /v1/sessions/:id/llm-calls/:event_id — read the persisted full
+  // LLM request/response body for one span.model_request_end event.
+  // CF reads from R2 (FILES_BUCKET); other runtimes return 501.
+  app.get("/:id/llm-calls/:event_id", async (c) => {
+    const services = resolveServices(deps.services, c);
+    const router = resolveRouter(deps.router, c);
+    const tenantId = c.var.tenant_id;
+    const sessionId = c.req.param("id");
+    const eventId = c.req.param("event_id");
+    const sess = await services.sessions.get({ tenantId, sessionId });
+    if (!sess) return c.json({ error: "Session not found" }, 404);
+    const result = await router.getLlmCallBody(tenantId, sessionId, eventId);
+    return new Response(result.body, {
+      status: result.status,
+      headers: {
+        "content-type": result.contentType,
+        ...(("contentLength" in result && result.contentLength != null)
+          ? { "content-length": String(result.contentLength) }
+          : {}),
+      },
+    });
+  });
+
   // ── Debug recovery ────────────────────────────────────────────────────
   app.post("/:id/__debug_recovery__", async (c) => {
     if (!deps.debugRecoveryToken) return c.json({ error: "not found" }, 404);

@@ -351,4 +351,38 @@ export class NodeSessionRouter implements SessionRouter {
     // add a session_threads table for hard archive semantics.
     return { status: 200, body: JSON.stringify({ id: threadId, archived: true }) };
   }
+
+  async getPending(
+    sessionId: string,
+    _opts?: { rawSearch?: string },
+  ): Promise<{ status: number; body: string }> {
+    // Node SqlEventLog doesn't yet have the dual-table queue surface
+    // (CF SessionDO holds pending in its DO sqlite). For now return an
+    // empty page so SDK callers don't 500 — pending events still drive
+    // the harness via in-process registry, just no read API for them.
+    void sessionId;
+    return {
+      status: 200,
+      body: JSON.stringify({ data: [], has_more: false }),
+    };
+  }
+
+  async getLlmCallBody(
+    _tenantId: string,
+    _sessionId: string,
+    _eventId: string,
+  ): Promise<
+    | { status: number; body: BodyInit; contentType: string; contentLength?: number }
+    | { status: 404 | 500 | 501; body: string; contentType: "application/json" }
+  > {
+    // LLM-body persistence requires a blob store (R2 on CF). Single-host
+    // Node has no equivalent today; return 501 with a clear remediation.
+    return {
+      status: 501,
+      body: JSON.stringify({
+        error: "LLM call body persistence is CF-only (requires FILES_BUCKET R2 binding)",
+      }),
+      contentType: "application/json",
+    };
+  }
 }

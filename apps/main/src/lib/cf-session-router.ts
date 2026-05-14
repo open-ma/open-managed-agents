@@ -300,6 +300,55 @@ export class CfSessionRouter implements SessionRouter {
     return { status: res.status, body: await res.text() };
   }
 
+  async getPending(
+    sessionId: string,
+    opts?: { rawSearch?: string },
+  ): Promise<{ status: number; body: string }> {
+    const binding = await this.bindingForSession(sessionId);
+    if (!binding) {
+      return { status: 503, body: JSON.stringify({ error: "binding unavailable" }) };
+    }
+    const search = opts?.rawSearch ?? "";
+    const res = await binding.fetch(
+      `https://sandbox/sessions/${sessionId}/pending${search}`,
+      { method: "GET" },
+    );
+    return { status: res.status, body: await res.text() };
+  }
+
+  async getLlmCallBody(
+    tenantId: string,
+    sessionId: string,
+    eventId: string,
+  ): Promise<
+    | { status: number; body: BodyInit; contentType: string; contentLength?: number }
+    | { status: 404 | 500 | 501; body: string; contentType: "application/json" }
+  > {
+    const filesBucket = (this.deps.env as unknown as { FILES_BUCKET?: R2Bucket }).FILES_BUCKET;
+    if (!filesBucket) {
+      return {
+        status: 500,
+        body: JSON.stringify({ error: "FILES_BUCKET binding not configured" }),
+        contentType: "application/json",
+      };
+    }
+    const key = `t/${tenantId}/sessions/${sessionId}/llm/${eventId}.json`;
+    const obj = await filesBucket.get(key);
+    if (!obj) {
+      return {
+        status: 404,
+        body: JSON.stringify({ error: "LLM call body not found", key }),
+        contentType: "application/json",
+      };
+    }
+    return {
+      status: 200,
+      body: obj.body as BodyInit,
+      contentType: "application/json",
+      contentLength: obj.size,
+    };
+  }
+
   // ── helpers ─────────────────────────────────────────────────────────
 
   /** Resolve the sandbox lane for an environment. Local-runtime sessions

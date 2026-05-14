@@ -189,6 +189,28 @@ export interface SessionRouter {
     sessionId: string,
     threadId: string,
   ): Promise<{ status: number; body: string }>;
+
+  // ── Pending events ────────────────────────────────────────────────────
+  /** GET /v1/sessions/:id/pending — AMA-spec pending queue. Lists user.*
+   *  events that have been enqueued but not yet drained by the harness.
+   *  Implementations forward the raw search-string + return whatever the
+   *  underlying store/SessionDO produces. */
+  getPending(
+    sessionId: string,
+    opts?: { rawSearch?: string },
+  ): Promise<{ status: number; body: string }>;
+
+  // ── LLM call body ─────────────────────────────────────────────────────
+  /** GET /v1/sessions/:id/llm-calls/:event_id — fetch the persisted full
+   *  LLM request/response body for a single span.model_request_end event.
+   *  CF reads from R2 (FILES_BUCKET) at
+   *  `t/{tenantId}/sessions/{sessionId}/llm/{eventId}.json`; runtimes
+   *  without that storage (Node single-host) return 501. */
+  getLlmCallBody(
+    tenantId: string,
+    sessionId: string,
+    eventId: string,
+  ): Promise<{ status: number; body: BodyInit; contentType: string; contentLength?: number } | { status: 404 | 500 | 501; body: string; contentType: "application/json" }>;
 }
 
 /** Thin helper: converts a base64-encoded ContentBlock (image / document)
