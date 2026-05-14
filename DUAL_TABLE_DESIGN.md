@@ -1,10 +1,11 @@
-# Dual-table event log + full LLM-call logging
+# Dual-table event log
 
 Branch: `feat/dual-table-and-llm-logs` (off `origin/main`).
 
 This document is the design target the code in this branch is built against.
-It is intentionally written before the code changes so the architectural
-intent is reviewable in isolation.
+Status: implemented through commit 7 (Part A) + commit 6 (Part B).
+LLM body logging (Part B) was originally documented separately here; below
+reflects what actually shipped.
 
 ## 1. Why we are doing this
 
@@ -27,7 +28,12 @@ A `SELECT * ORDER BY seq` then renders the second user bubble *between*
 the two halves of answer 1. Commit `7d40027` patched this on the client
 by re-sorting on `processed_at`, but `processed_at` is only stamped
 server-side at drain time and SSE never re-broadcasts the row, so live
-sessions stay stuck on "Pending..." until a hard reload.
+sessions stay stuck on "Pending..." until a hard reload. More
+critically, the LLM-replay path (`eventsToMessages` walks `getEvents()`
+which is `ORDER BY seq`) builds messages in arrival order, so the model
+sees `[user "first", assistant "answer 1 part a", user "second",
+assistant "answer 1 part b", ...]` on the next turn — silent prompt-cache
+drift + corrupted reasoning.
 
 The Anthropic AMA spec separates these two tables explicitly:
 
@@ -51,34 +57,12 @@ So the architecture is:
 
 We migrate the OMA implementation to that shape.
 
-## 2. Schema diff
-
-### Before
+## 2. Schema
 
 ```sql
-CREATE TABLE events (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT,
-  type TEXT NOT NULL,
-  data TEXT NOT NULL,
-  ts INTEGER NOT NULL DEFAULT (CAST(strftime('%s','now') AS INTEGER)),
-  processed_at INTEGER,
-  cancelled_at INTEGER,
-  session_thread_id TEXT
-);
-CREATE INDEX idx_events_pending
-  ON events(session_thread_id, seq)
-  WHERE processed_at IS NULL AND cancelled_at IS NULL
-    AND (type = 'user.message' OR type = 'user.tool_confirmation' OR type = 'user.custom_tool_result');
-```
-
-`user.*` and agent events shared the same `seq` namespace; pending state
-was encoded by `processed_at IS NULL` on the same row.
-
-### After
-
-```sql
--- events: only contains *processed* events. seq is assigned at append time
--- and is now monotonic with respect to what the model has actually seen.
+-- events: only contains *processed* events. seq is assigned at INSERT
+-- time and is now monotonic with respect to what the model has actually
+-- seen (drain INSERTs in promotion order).
 CREATE TABLE events (
   seq INTEGER PRIMARY KEY AUTOINCREMENT,
   type TEXT NOT NULL,
@@ -89,16 +73,19 @@ CREATE TABLE events (
   session_thread_id TEXT
 );
 CREATE INDEX idx_events_type ON events(type, seq);
+-- Expression index on data.id powers drain dedup (commit 2).
+CREATE INDEX idx_events_event_id ON events(json_extract(data, '$.id'));
 
--- pending_events: AMA-spec pending queue. user.* events live here
--- between events.send() and drainEventQueue picking them up. Promoted
--- (DELETE here, INSERT into events) in drain order.
+-- pending_events: AMA-spec pending queue. user.message /
+-- user.tool_confirmation / user.custom_tool_result events live here
+-- between events.send() and drainEventQueue picking them up.
+-- Promoted (INSERT into events, then DELETE here) in drain order.
 CREATE TABLE pending_events (
   pending_seq INTEGER PRIMARY KEY AUTOINCREMENT,
   enqueued_at INTEGER NOT NULL,
   session_thread_id TEXT NOT NULL,
-  type TEXT NOT NULL,         -- only user.message / user.tool_confirmation / user.custom_tool_result
-  event_id TEXT NOT NULL,     -- mirrors data.id, lets the client correlate pending->event-log row
+  type TEXT NOT NULL,         -- only the three turn-input types
+  event_id TEXT NOT NULL,     -- mirrors data.id, lets the client correlate pending->events row
   cancelled_at INTEGER,       -- set by user.interrupt
   data TEXT NOT NULL          -- full event JSON
 );
@@ -109,11 +96,10 @@ CREATE INDEX idx_pending_active
   WHERE cancelled_at IS NULL;
 ```
 
-The legacy partial pending-index on `events` is intentionally kept for
-backward-compatibility on existing DOs (it reads as zero rows once the
-new code path stops producing pending rows in `events`). New code never
-inserts pending user.* into `events`; the `idx_events_pending` index
-becomes a no-op zero-row index that drops out of query plans.
+The legacy partial pending-index on `events`
+(`idx_events_pending` from `a316dc3`) stays defined for backward
+compatibility on existing DOs (it reads zero rows once new code stops
+producing pending rows in `events`).
 
 `user.interrupt`, `user.define_outcome` keep going to `events` directly —
 they are control events, not turn inputs.
@@ -121,92 +107,93 @@ they are control events, not turn inputs.
 ### Migration story
 
 Schema bootstrap is purely additive (`CREATE TABLE IF NOT EXISTS`,
-`CREATE INDEX IF NOT EXISTS`). No backfill or data migration runs.
+`CREATE INDEX IF NOT EXISTS`, `ALTER TABLE ADD COLUMN` guarded by
+`PRAGMA table_info` check). No backfill or data migration runs.
 
 For an existing session at deploy time:
 
-- The `events` table may contain old user.* rows with `processed_at IS
-  NULL` (pre-fix sessions). They stay in `events` forever.
-- The legacy partial index `idx_events_pending` will still pick them up
-  on the next drain after the deploy, so any genuinely pending rows at
-  deploy time still get drained. We keep the legacy drain query as a
-  one-shot pre-step in `drainEventQueue` for back-compat (see §3).
-- The visual ordering of *those* old sessions in the console is
-  unchanged (still wrong-by-seq). Acceptable: we are explicitly not
-  back-filling. Fresh sessions get the correct ordering immediately.
+- Old `events` rows with `processed_at IS NULL` (pre-fix sessions)
+  stay in `events` forever.
+- The drain loop has a one-shot legacy backfill block that promotes
+  any stuck pending rows (UPDATE processed_at + broadcast
+  `system.user_message_promoted`) on the first drain after deploy.
+  The harness does NOT auto-run them — sessions active at deploy
+  boundary lose their in-flight queue state. Acceptable for the
+  small window. A `TODO(dual-table-followup)` marks the block for
+  removal after a soak window.
 
-Old SDK consumers that read `processed_at IS NULL` rows from `/events`
-will see fewer such rows over time. None should be relying on this as a
-queue surface — the real surface is the new `/v1/sessions/:id/pending`
-endpoint.
+## 3. Where the queue routing lives
 
-## 3. Drain semantics (rewritten)
+**Adapters are primitive**: `CfDoEventLog.append` and
+`InMemoryEventLog.append` always write a row to the canonical events
+log with `processed_at` stamped now. They DO NOT decide queue vs log
+based on event type — that decision moved to the call site.
 
-`drainEventQueue(threadId)` becomes:
+**SessionDO POST `/event` handles routing**:
+- `user.message` / `user.tool_confirmation` / `user.custom_tool_result`
+  → `pending.enqueue(event)` + broadcast `system.user_message_pending`
+- `user.interrupt` → `pending.cancelAllForThread(...)` (broadcasts
+  `system.user_message_cancelled` per row) + `events.append(event)` +
+  optional `session.status_idle`
+- `user.define_outcome` → `events.append(event)` (control event)
+
+The same routing applies to internal injectors (wakeup callback,
+background-task notifications): they call `pending.enqueue` so the
+harness sees them via the same drain path as real user input.
+
+## 4. Drain semantics — peek-then-append-then-delete with dedup
 
 ```
 loop:
-  begin a sql transaction (DO storage SQL is auto-transactional but we
-  do the SELECT + DELETE + INSERT in one synchronous block so a
-  concurrent interrupt can't race us between SELECT and DELETE)
-
-  row = SELECT pending_seq, data, type, event_id, enqueued_at
-        FROM pending_events
-        WHERE session_thread_id = ?  AND cancelled_at IS NULL
-        ORDER BY pending_seq ASC LIMIT 1
-  if no row: break
+  row = pending.peek(threadId)            -- SELECT, no DELETE
+  if !row: break
 
   parse(row.data) -> event
-  event.processed_at = now (ISO)
-  // Promote: insert into events with newly-assigned seq, then delete
-  // from pending_events.
-  INSERT INTO events (type, data, processed_at, session_thread_id, ts)
-       VALUES (event.type, JSON.stringify(event), now_ms, threadId, now_secs)
-  promotedSeq = last_insert_rowid()
-  DELETE FROM pending_events WHERE pending_seq = row.pending_seq
+  event.processed_at = nowIso             -- AMA spec: ingestion time
+  eventId = event.id
 
-  // Broadcast: tell every connected client that this pending row has
-  // been promoted into the event log so they can drop the pending
-  // bubble and render the new event-log row.
-  broadcast({
-    type: "system.user_message_promoted",
-    pending_seq: row.pending_seq,
-    event_id: event.id,            // === row.event_id
-    seq: promotedSeq,
-    session_thread_id: threadId,
+  if eventId is in events.json_extract(data, '$.id'):
+    -- A previous drain already INSERTed this event but crashed before
+    -- the DELETE. Skip the re-INSERT; deleting the stale pending row
+    -- is enough.
+    promotedSeq = (existing row's seq)
+  else:
+    history.append(event)                 -- INSERT into events, AUTOINCREMENT seq
+    promotedSeq = (just-inserted seq)
+
+  pending.delete(row.pending_seq)         -- only after INSERT succeeds
+
+  broadcast(event)                        -- canonical user.* with processed_at filled
+  broadcast(system.user_message_promoted{
+    event_id, pending_seq, seq: promotedSeq, processed_at, session_thread_id
   })
-  broadcast(event)                  // the canonical user.message frame, now with processed_at filled
-                                    // and an `_promoted: true` sidecar so the client knows it is the
-                                    // "real" copy of a previously-pending message.
 
-  hand the event to the harness (runAgentTurn -> processUserMessage / handleToolConfirmation / etc.)
-  on harness error: write session.error, break
+  runAgentTurn(...)                       -- harness writes agent.* events into events
 ```
 
-- The mutex on `_draining` per `threadId` stays exactly as today.
-- `event.id` is stamped on `append()` if missing (same as today's
-  `stampEvent`). The id flows through three places — pending row,
-  promotion event, promoted event-log row — so the client can correlate.
-- The legacy backfill: at the START of `drainEventQueue` we run the
-  legacy pending-index query against the OLD `events` table once per
-  invocation. If it returns a row, we treat it like a freshly-promoted
-  event (UPDATE its `processed_at` + broadcast `system.user_message_promoted`)
-  and continue. After all legacy rows are drained, the loop falls
-  through to the new `pending_events`-based loop. This means existing
-  sessions with stuck pending rows recover gracefully on the first
-  drain after deploy without any manual migration.
+Crash-safety:
+- Crash between INSERT and DELETE → next drain peeks the same row,
+  dedup hits via `idx_events_event_id`, skips re-INSERT, just
+  deletes the stale pending row. No duplicate harness invocation.
+- Crash before INSERT → next drain re-peeks, runs the whole
+  promote-and-turn cycle. Idempotent.
+- Crash between DELETE and `runAgentTurn`'s first agent event → the
+  events row exists with processed_at set, no agent reply. Identical
+  to today's behavior for the same case (`_finalizeStaleTurns`
+  cleanup).
 
-## 4. SSE / broadcast protocol changes
+The `_draining` per-thread mutex stays exactly as today; cross-thread
+drains run in parallel.
 
-### New on-the-wire frames
+## 5. SSE / broadcast protocol changes
 
-- `system.user_message_pending` — emitted when a user.* event is enqueued.
-  Same `data` payload as the user.* event, carries `pending_seq` and
-  `enqueued_at`. Client renders this in the bottom outbox region.
+### New on-the-wire frames (typed in `packages/api-types`)
 
+- `SystemUserMessagePendingEvent` — broadcast at enqueue
   ```json
   {
     "type": "system.user_message_pending",
+    "event_id": "sevt_abc",
     "pending_seq": 7,
     "enqueued_at": 1715000000000,
     "session_thread_id": "sthr_primary",
@@ -214,27 +201,25 @@ loop:
   }
   ```
 
-- `system.user_message_promoted` — emitted when the pending row is
-  consumed by drain and inserted into the event log.
-
+- `SystemUserMessagePromotedEvent` — broadcast at drain after INSERT
   ```json
   {
     "type": "system.user_message_promoted",
-    "pending_seq": 7,
     "event_id": "sevt_abc",
+    "pending_seq": 7,
     "seq": 42,
+    "processed_at": "2026-05-14T...",
     "session_thread_id": "sthr_primary"
   }
   ```
 
-- `system.user_message_cancelled` — emitted when `user.interrupt`
-  cancels a pending row.
-
+- `SystemUserMessageCancelledEvent` — broadcast at user.interrupt
+  per cancelled pending row.
   ```json
   {
     "type": "system.user_message_cancelled",
-    "pending_seq": 7,
     "event_id": "sevt_abc",
+    "pending_seq": 7,
     "session_thread_id": "sthr_primary",
     "cancelled_at": 1715000000123
   }
@@ -251,139 +236,165 @@ the event-log bubble. This means:
   `system.*` frames they ignore.
 - New clients (this branch's console) listen for the `system.*` frames
   to render the outbox + know exactly when to drop the pending bubble.
-- The pending broadcast at enqueue time is a NEW frame, so old clients
-  don't see it. Their existing UX (where typing immediately shows the
-  user bubble) is preserved by the new frontend code maintaining a
-  client-side optimistic outbox of the just-typed text — same as today.
 
-### Client compatibility risks
+### WS replay on connect
 
-- The SDK in `packages/sdk/` doesn't filter on `system.*` event types
-  today — it forwards every WS frame to the consumer. Consumers that
-  iterate by `type` and switch on the known set will silently ignore
-  the new frames. No breaking change.
-- `apps/main/src/routes/sessions.ts` SSE bridge forwards every WS frame
-  unmodified except for the `session_thread_id` filter. The new
-  `system.*` frames carry `session_thread_id` so the filter still works.
+GET `/ws` first replays the events table, then emits a
+`system.user_message_pending` frame for each active row in
+`pending_events` so a fresh client sees the outbox state without an
+extra GET `/pending`.
 
-## 5. New REST endpoint
+## 6. New REST endpoint
 
-- `GET /v1/sessions/:id/pending?session_thread_id=…`
+`GET /v1/sessions/:id/pending?session_thread_id=…&include_cancelled=…`
 
-  Response:
-  ```json
-  {
-    "data": [
-      { "pending_seq": 7, "enqueued_at": 1715000000000, "type": "user.message",
-        "event_id": "sevt_abc", "session_thread_id": "sthr_primary",
-        "cancelled_at": null,
-        "data": { "type": "user.message", "id": "sevt_abc", "content": [...] } }
-    ]
-  }
-  ```
+```json
+{
+  "data": [
+    {
+      "pending_seq": 7,
+      "enqueued_at": 1715000000000,
+      "type": "user.message",
+      "event_id": "sevt_abc",
+      "session_thread_id": "sthr_primary",
+      "cancelled_at": null,
+      "data": { "type": "user.message", "id": "sevt_abc", "content": [...] }
+    }
+  ]
+}
+```
 
-  Filtered by `session_thread_id` (default `sthr_primary`). Ordered by
-  `pending_seq ASC`. Cancelled rows are omitted by default; pass
-  `?include_cancelled=true` to include them.
+Filtered by `session_thread_id` (default `sthr_primary`). Ordered by
+`pending_seq ASC`. Cancelled rows are omitted by default; pass
+`?include_cancelled=true` to include them. Forwarded by
+`apps/main/src/routes/sessions.ts` -> SessionDO `/sessions/:id/pending`
+exactly like the existing `/events` endpoint.
 
-  Forwarded by `apps/main/src/routes/sessions.ts` -> SessionDO
-  `/sessions/:id/pending` exactly like the existing `/events` endpoint.
+## 7. Sub-agent paths
 
-## 6. LLM request/response logging (Part B)
+Sub-agents (`runSubAgent` in session-do.ts) use `InMemoryHistory`
+which composes `InMemoryEventLog`. After commit 1's refactor, that
+adapter is also a primitive — `append` always pushes to `_rows` so
+`getEvents` / `getMessages` see every appended event immediately.
+Sub-agents don't use a queue (they run synchronously); the
+`InMemoryPendingQueue` is parallel to `InMemoryEventLog` (not embedded)
+so accidental crosswiring is structurally impossible.
 
-### Storage layout
+The sub-agent path is unchanged from origin/main behavior in this
+respect.
+
+## 8. Console (apps/console)
+
+`SessionDetail.tsx` retired the 7d40027 client-side sort (server-side
+ordering via events.seq is now correct) and the `nonUserSeen[]`
+heuristic for "is this still pending" (server tells us via
+system.user_message_pending). The new state slice
+`pendingByEventId: Map<event_id, PendingEntry>` is:
+- Seeded on initial load from GET `/v1/sessions/:id/pending`.
+- Updated by `system.user_message_pending` (add) /
+  `_promoted` / `_cancelled` (remove) SSE frames.
+- Defensive-cleared on `session.error` and `user.interrupt`.
+
+Pending entries render as a separate "outbox" section at the bottom
+of the timeline, never mixed inline.
+
+## 9. LLM full request/response logging (Part B)
+
+### Hook point
+
+AI SDK `wrapLanguageModel` + `LanguageModelMiddleware`.
+`apps/agent/src/harness/llm-logging-middleware.ts` exports
+`llmLoggingMiddleware(ctx)` returning an object with `wrapStream` +
+`wrapGenerate`. Default-loop wraps the model right before the
+`streamText` call:
+
+```ts
+const wrappedModel = ctx.env.llmLog
+  ? wrapLanguageModel({ model, middleware: llmLoggingMiddleware({...}) })
+  : model;
+```
+
+`wrapStream` tees the stream via a TransformStream so the harness
+still gets every chunk live; we accumulate a copy of stream parts
+(typed JSON objects, not raw bytes) and PUT to R2 on flush.
+`wrapGenerate` does the analogous thing for non-streaming calls
+(unused today by default-loop but available).
+
+### Storage
 
 - Bucket: reuse `FILES_BUCKET` (same R2 binding the event-log spill
-  path uses). Avoids a new bucket binding per env.
-- Key: `t/{tenant}/sessions/{session_id}/llm/{event_id}.json`
+  path uses). No new bucket binding.
+- Key: `t/{tenant}/sessions/{session_id}/llm/{event_id}.json` via
+  `llmLogKey(tenant, session, event_id)` — single source of truth.
 - Body schema:
-
   ```json
   {
     "event_id": "sevt_…",
     "model": "claude-sonnet-4-6",
-    "started_at": 1715000000000,
-    "ended_at": 1715000005678,
+    "started_at": "2026-05-14T...",
+    "ended_at": "2026-05-14T...",
     "latency_ms": 5678,
     "request": {
-      "method": "POST",
-      "url": "https://api.anthropic.com/v1/messages",
-      "headers": { "content-type": "application/json", "anthropic-version": "2023-06-01" },
-      "body": "<full request JSON, not truncated>"
+      "params": { "...": "redacted-headers + full request params" },
+      "provider_request": { "body": "..." }
     },
     "response": {
-      "status": 200,
-      "headers": { "content-type": "text/event-stream" },
-      "body": "<full response body — for SSE responses, the assembled stream of bytes>"
-    },
-    "request_bytes": 12345,
-    "response_bytes": 67890
+      "stream_parts": [ ...full set of stream parts... ],
+      "response_meta": { "headers": {...} }
+    }
   }
   ```
 
-### Hook point
-
-`observingFetch` in `apps/agent/src/harness/provider.ts` is the seam.
-We extend it to:
-
-1. Capture request body before `fetch()`.
-2. For non-streaming responses, `res.clone().text()` after `fetch()`.
-3. For streaming responses (`Content-Type: text/event-stream`), wrap
-   `res.body` in a `TransformStream` that copies bytes to a buffer
-   while passing them through to the consumer. When the stream
-   completes (or errors), flush to R2.
-4. Redact `Authorization`, `x-api-key`, `anthropic-api-key` headers
-   before persisting.
-
 ### Wiring
 
-`observingFetch` today is a free function, with no access to
-SessionDO/tenant id. We extend it to take an optional
-`{ logBucket, logKey, eventId }` capture context, threaded through
-`resolveModel` -> `createAnthropic({ fetch })` via a closure built per
-call. To get the right `event_id`, we need to know the
-`span.model_request_start_id` *before* the model call fires. The
-existing `experimental_onStepStart` hook in `default-loop.ts` mints
-this id; we lift it out so it is generated *before* the streamText
-call and passed into both the span event AND the fetch closure.
+`HarnessContext.env.llmLog` carries `{ tenant_id, session_id, r2 }`.
+SessionDO populates this for both primary and sub-agent harness
+invocations from `FILES_BUCKET`. The `spanIdResolver` closure in
+default-loop reads the per-step `stepStartId` (minted in
+`experimental_onStepStart` BEFORE the provider doStream call), so
+the middleware always sees the right id at `wrapStream` time.
 
-Concretely:
-
-- `default-loop.ts` constructs a `LlmCallLogger` with
-  `{ tenant, session_id, files_bucket }` per-step and threads it into
-  the per-step fetch closure.
-- The fetch closure tags each call with the step's `eventId`.
-- On flush, we PUT `t/{tenant}/sessions/{session_id}/llm/{event_id}.json`
-  to R2, fire-and-forget.
-- The matching `span.model_request_end` event grows a
-  `body_r2_key` field pointing to the R2 object.
+The matching `span.model_request_end` events grow a `body_r2_key`
+field pointing to the R2 object so consumers don't have to know the
+key layout.
 
 ### Read endpoint
 
-- `GET /v1/sessions/:id/llm-calls/:event_id` -> R2 fetch -> JSON
-  pass-through. Tenant-scoped via the same auth as `/v1/sessions/:id`.
-  Forwarded by `apps/main` to SessionDO at
-  `/sessions/:id/llm-calls/:event_id`.
-
-### Opt-out
-
-Two knobs (default ON):
-
-- Per-tenant: not yet wired; would be a `tenants` row column. TODO.
-- Per-env: `env.LLM_LOGS_DISABLED === "1"` skips the capture entirely.
-  The fetch closure becomes a passthrough to the previous behavior.
+`GET /v1/sessions/:id/llm-calls/:event_id` in
+`apps/main/src/routes/sessions.ts`:
+- Auth: same tenant scoping as `/events`
+- Key prefix is tenant-scoped so a tenant can't read another
+  tenant's logs even via id-guess
+- Returns 404 with the attempted key when the object is absent
+  (LLM logging disabled at write time, retention purge, etc.)
 
 ### Redaction
 
-- HTTP headers: drop `Authorization`, `x-api-key`, `anthropic-api-key`,
-  `openai-api-key`, `x-anthropic-api-key`. Other headers pass through
-  verbatim.
-- Request body: not redacted. The whole point of this feature is that
-  ops can see exactly what the model saw, including tool inputs that
-  may carry user PII. Storage is private R2 keyed under the tenant
-  prefix, so RBAC is identical to the rest of the session data.
+- Headers: drop `Authorization`, `x-api-key`, `anthropic-api-key`,
+  `openai-api-key`, `x-anthropic-api-key`. Other headers pass
+  through.
+- Request body: not redacted. The whole point is operators can see
+  exactly what the model saw, including tool inputs that may carry
+  user PII. Storage is private R2 keyed under the tenant prefix —
+  RBAC is identical to the rest of session data.
 
-## 7. Manual test plan
+### Opt-out
+
+- Per-env: `env.LLM_LOGS_DISABLED === "1"` skips the wrap + drops
+  `body_r2_key` from span events.
+- Per-tenant: `TODO(llm-logging-followup): add a flag in tenant
+  config + check it in SessionDO before constructing llmLog`.
+
+### Failure mode
+
+Any R2 / serialization error inside the middleware is logged to
+console and swallowed. The model call's success path is independent
+of LLM logging — a dead R2 must not break the agent. Errors during
+the provider call itself ARE captured (we PUT a body containing
+`{ error, error_class }`) so post-mortems aren't blocked by the
+fact that the call failed.
+
+## 10. Manual test plan
 
 ### Part A — pending queue + drain ordering
 
@@ -398,77 +409,52 @@ Two knobs (default ON):
    - `GET /v1/sessions/:id/pending` returns empty.
    - `GET /v1/sessions/:id/events` ordered by `seq` shows
      `user.message(count) -> agent.message(...) -> user.message(HI) -> agent.message(HI back)`.
-   - Console shows the `HI` bubble inline in the timeline (NOT outbox).
+   - Console shows the `HI` bubble inline in the timeline (not outbox).
    - `system.user_message_promoted` was broadcast.
 4. Send `user.interrupt` while a third pending message is queued:
    - The pending row gets `cancelled_at`.
    - `GET /v1/sessions/:id/pending?include_cancelled=true` shows it
      with cancelled_at filled.
-   - Console shows the bubble struck-through in the outbox.
-
-### Part A — backward compat
-
-5. Open an existing prod-style session that has a stuck `processed_at
-   IS NULL` row in the legacy `events` table. The first drain after
-   deploy promotes the legacy row (UPDATE in place, broadcast
-   `system.user_message_promoted`) and the loop continues into
-   `pending_events`.
+   - Console outbox empties.
 
 ### Part B — LLM logging
 
-6. After any agent turn completes, take an `event_id` from a
+5. After any agent turn completes, take an `event_id` from a
    `span.model_request_end` event and fetch
    `GET /v1/sessions/:id/llm-calls/:event_id`. Response is the full
    request/response JSON, with API keys redacted in the request
    headers.
-7. Set `LLM_LOGS_DISABLED=1` in dev vars. Run a turn. R2 PUTs do not
+6. Set `LLM_LOGS_DISABLED=1` in dev vars. Run a turn. R2 PUTs do not
    fire. The `body_r2_key` field is absent on `span.model_request_end`.
 
-## 8. Outstanding TODOs / risks
+## 11. Outstanding TODOs / risks
 
-- **Sub-agent threads use `InMemoryHistory` (not `SqliteHistory`).** The
-  sub-agent path doesn't go through DO SQL, so the pending-queue
-  refactor doesn't strictly apply. Sub-agent `user.message`-like
-  events are produced internally by the orchestrator and never come
-  through `events.send()`, so this is fine as-is. Documented here to
-  flag that anyone wiring sub-agent user input would need to extend
-  `InMemoryEventLog` similarly.
+- **`recoverInterruptedState` + sub-agents.** Documented unchanged
+  from origin/main. Sub-agents run synchronously inside the parent
+  turn so they don't need their own queue recovery.
 
-- **Recovery replay.** `recoverInterruptedState` doesn't read from
-  `pending_events`. If the DO dies while drain is mid-cycle (between
-  `INSERT INTO events` and `DELETE FROM pending_events`), we'd
-  duplicate-promote on next drain. Mitigation: do the SELECT + INSERT
-  + DELETE as a single SQL operation in DO storage, which is
-  transactional within the storage namespace. Worst case a duplicate
-  agent.message event lands; today the same risk exists for any
-  mid-turn DO crash so we don't strictly worsen anything.
+- **Schedule-tool wakeups + background-task notifications inject
+  synthetic `user.message` events**. Routed through `pending.enqueue`
+  + the same drain path as real user input so the harness logic
+  stays uniform. The wakeup bubble briefly appears in the outbox
+  before being promoted — same UX as a typed message.
 
-- **Schedule-tool wakeups inject a synthetic `user.message` directly
-  into `history.append()`.** That now means they go to
-  `pending_events` and get drain-promoted. Acceptable — the wakeup
-  bubble in the console will briefly appear in the outbox before
-  being promoted. Alternative: route wakeups directly to `events`.
-  Decided against: wakeups SHOULD go through the same drain path as
-  real user input so the harness logic stays uniform.
-
-- **`getLastEventSeq("user.message")`** is used by `recoverEventQueue`
-  to compute "is the last user.message a real user input?". After this
-  refactor, the answer is always-yes for promoted rows, but pending
-  rows aren't reflected. This is fine because `recoverEventQueue` is
-  itself a re-trigger of drain, which now reads from `pending_events`
-  directly.
+- **Legacy backfill in drain.** A one-shot UPDATE block at the start
+  of `drainEventQueue` promotes any pre-deploy `processed_at IS NULL`
+  rows in `events` (broadcasts `_promoted` so the UI refreshes).
+  Marked `TODO(dual-table-followup): remove after soak window`.
 
 - **LLM logging can balloon R2 cost** on a high-volume tenant. No
   metering today; the `LLM_LOGS_DISABLED` env switch is the kill.
-  Future work: per-tenant flag in D1 + a sampling rate.
+  Future work: per-tenant flag in tenant-config + a sampling rate.
 
-- **Streaming response capture** uses a `TransformStream` between the
-  fetch result and the AI SDK consumer. This is a known pattern but
-  doubles bandwidth (we hold full response bytes in memory for the
-  R2 PUT). For very long responses (>5MB), this could OOM the DO.
-  Mitigation: cap at e.g. 2MB and elide the rest; flag with
-  `_truncated: true` in the persisted body.
+- **Stream-part capture** holds the entire response in memory for the
+  R2 PUT. For very long responses this could OOM the DO. Mitigation
+  TODO: cap at e.g. 2MB and elide the rest with `_truncated: true`
+  in the persisted body.
 
-- **The legacy `idx_events_pending` partial index** stays defined but
-  matches zero rows under the new code. Cost is negligible (DO SQLite
-  partial indexes only consume space when matching rows exist).
+- **Aux model calls (web_fetch summarization).** The aux model is
+  resolved + invoked through the same `resolveModel` path as the
+  primary, but those calls don't go through default-loop so they
+  do not get the middleware. If aux calls need full-body logging,
+  wire `llmLoggingMiddleware` at the aux call site too.
