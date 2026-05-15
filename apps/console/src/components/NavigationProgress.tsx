@@ -1,17 +1,11 @@
 import { useEffect, useRef, useState } from "react";
-import { useLocation, useNavigation } from "react-router";
+import { useLocation } from "react-router";
 
 /**
  * Top-of-viewport navigation progress bar.
  *
- * Two signals drive it:
- *   1. React Router's `useNavigation().state` — when the router is
- *      transitioning (data loading, lazy route boot), state goes
- *      from "idle" to "loading"/"submitting".
- *   2. Pathname change via `useLocation` — when the URL changes (no
- *      data router involved), we still want to show a progress hint
- *      because the page-level component is about to re-render and
- *      its own useEffect will fetch.
+ * Detects nav via `useLocation` pathname change (works in BrowserRouter
+ * + Routes; unlike `useNavigation` which requires the data router).
  *
  * The bar:
  *   - 0 → 80% over 400ms when nav starts (deceleration so it slows
@@ -25,10 +19,6 @@ import { useLocation, useNavigation } from "react-router";
  */
 export function NavigationProgress() {
   const location = useLocation();
-  // useNavigation only works inside a data router. In our setup
-  // (BrowserRouter + Routes), it returns idle always — but we still
-  // import it defensively for the future migration to data routing.
-  const navigation = useNavigation();
 
   const [progress, setProgress] = useState(0);
   const [visible, setVisible] = useState(false);
@@ -36,18 +26,12 @@ export function NavigationProgress() {
   const finishTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
-    if (lastPath.current === location.pathname && navigation.state === "idle") {
-      return;
-    }
-    // Path changed: kick off the bar.
+    if (lastPath.current === location.pathname) return;
     lastPath.current = location.pathname;
     if (finishTimer.current) clearTimeout(finishTimer.current);
     setVisible(true);
     setProgress(0);
-    // Start the climb on the next frame so the 0 → 80 animation runs.
     requestAnimationFrame(() => setProgress(80));
-    // Settle after a short window — most pages mount + first paint
-    // within ~150-300ms after URL change. Tuned conservatively.
     finishTimer.current = setTimeout(() => {
       setProgress(100);
       finishTimer.current = setTimeout(() => {
@@ -58,7 +42,7 @@ export function NavigationProgress() {
     return () => {
       if (finishTimer.current) clearTimeout(finishTimer.current);
     };
-  }, [location.pathname, navigation.state]);
+  }, [location.pathname]);
 
   return (
     <div
