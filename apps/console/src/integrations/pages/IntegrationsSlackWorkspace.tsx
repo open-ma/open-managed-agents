@@ -1,6 +1,7 @@
-import { Children, cloneElement, isValidElement, useEffect, useId, useState, type ReactElement } from "react";
+import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
+import { Field } from "../../components/Field";
 import type { SlackInstallation, SlackPublication } from "../api/types";
 
 const api = new IntegrationsApi();
@@ -61,7 +62,7 @@ export function IntegrationsSlackWorkspace() {
       <div className="max-w-[1100px] mx-auto px-4 sm:px-8 lg:px-10 py-8 lg:py-10">
         <Link
           to="/integrations/slack"
-          className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"
+          className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ← Slack integrations
         </Link>
@@ -78,7 +79,7 @@ export function IntegrationsSlackWorkspace() {
             </div>
             <Link
               to={`/integrations/slack/publish?workspace=${id}`}
-              className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors whitespace-nowrap"
+              className="shrink-0 inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] whitespace-nowrap"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
               Publish another
@@ -168,7 +169,7 @@ function PublicationCard({
       <button
         type="button"
         onClick={() => setOpen((o) => !o)}
-        className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-bg-surface/40 transition-colors text-left"
+        className="w-full flex items-center justify-between gap-4 px-5 py-4 hover:bg-bg-surface/40 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] text-left"
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           {pub.persona.avatarUrl ? (
@@ -257,7 +258,7 @@ function PublicationCard({
             <button
               onClick={save}
               disabled={working}
-              className="px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
+              className="px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               {working ? "Saving…" : "Save changes"}
             </button>
@@ -276,20 +277,4 @@ function PublicationCard({
 }
 
 const inputCls =
-  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  const generatedId = useId();
-  // Clone the child input/select/textarea so it shares the same id the
-  // <label htmlFor> points at. Saves callsites from threading ids manually.
-  const child = Children.only(children) as ReactElement<{ id?: string }>;
-  const childWithId = isValidElement(child) && !child.props.id
-    ? cloneElement(child, { id: generatedId })
-    : child;
-  return (
-    <div>
-      <label htmlFor={(childWithId.props as { id?: string }).id ?? generatedId} className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
-      {childWithId}
-    </div>
-  );
-}
+  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";

@@ -291,7 +291,7 @@ export function CliLogin() {
                         key={t.id}
                         type="button"
                         onClick={() => toggle(t.id)}
-                        className={`w-full text-left px-3 py-2.5 flex items-center gap-3 hover:bg-bg transition-colors ${isSelected ? "bg-bg/60" : ""}`}
+                        className={`w-full text-left px-3 py-2.5 flex items-center gap-3 hover:bg-bg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${isSelected ? "bg-bg/60" : ""}`}
                       >
                         <Checkbox checked={isSelected} />
                         <div className="w-7 h-7 rounded bg-brand/15 text-brand flex items-center justify-center text-xs font-mono font-bold shrink-0">
@@ -343,7 +343,7 @@ export function CliLogin() {
 function Checkbox({ checked }: { checked: boolean }) {
   return (
     <div
-      className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors ${
+      className={`w-4 h-4 rounded border flex items-center justify-center shrink-0 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
         checked ? "bg-brand border-brand" : "bg-bg border-border-strong"
       }`}
     >

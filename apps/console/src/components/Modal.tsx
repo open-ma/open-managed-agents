@@ -90,7 +90,7 @@ export function Modal({
 
   return (
     <div
-      className={`fixed inset-0 bg-bg-overlay flex items-center justify-center z-50 transition-opacity duration-200 ${visible ? "opacity-100" : "opacity-0"}`}
+      className={`fixed inset-0 bg-bg-overlay flex items-center justify-center z-50 transition-opacity duration-[var(--dur-base)] ease-[var(--ease-soft)] ${visible ? "opacity-100" : "opacity-0"}`}
       onClick={onClose}
       role="presentation"
     >
@@ -99,7 +99,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`bg-bg rounded-lg shadow-xl w-full ${maxWidth} max-h-[85vh] flex flex-col transition-[opacity,transform] duration-200 ${visible ? "opacity-100 scale-100" : "opacity-0 scale-95"}`}
+        className={`bg-bg rounded-lg shadow-xl w-full ${maxWidth} max-h-[85vh] flex flex-col transition-[opacity,transform] duration-[var(--dur-slow)] ease-[var(--ease-soft)] ${visible ? "opacity-100 scale-100" : "opacity-0 scale-95"}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}
@@ -112,7 +112,7 @@ export function Modal({
           </div>
           <button
             onClick={onClose}
-            className="shrink-0 p-2 text-fg-subtle hover:text-fg rounded transition-colors"
+            className="shrink-0 p-2 text-fg-subtle hover:text-fg rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             aria-label="Close"
           >
             <svg

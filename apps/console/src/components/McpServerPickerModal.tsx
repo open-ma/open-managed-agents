@@ -20,7 +20,7 @@ import { Modal } from "./Modal";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 
 const inputCls =
-  "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
 export interface McpServerPickerModalProps {
   open: boolean;
@@ -79,7 +79,7 @@ export function McpServerPickerModal({
                   setSearch("");
                 }}
                 disabled={alreadyAdded}
-                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-colors ${
+                className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-md text-left transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
                   alreadyAdded
                     ? "opacity-50 cursor-default"
                     : "hover:bg-bg-surface cursor-pointer"

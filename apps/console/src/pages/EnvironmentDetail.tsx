@@ -1,10 +1,11 @@
-import { Children, cloneElement, isValidElement, useEffect, useId, useState, type ReactElement } from "react";
+import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
 import { Button } from "../components/Button";
 import { Select, SelectOption } from "../components/Select";
 import { useToast } from "../components/Toast";
 import { Page } from "../components/Page";
+import { Field } from "../components/Field";
 
 // =================================================================
 // Types
@@ -191,7 +192,7 @@ export function EnvironmentDetail() {
     <Page>
       {/* Breadcrumb */}
       <div className="text-sm text-fg-muted mb-4 flex items-center gap-1.5">
-        <Link to="/environments" className="hover:text-fg transition-colors">
+        <Link to="/environments" className="hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">
           Environments
         </Link>
         <span className="text-fg-subtle">/</span>
@@ -208,7 +209,7 @@ export function EnvironmentDetail() {
               id="env-name"
               value={name}
               onChange={(e) => setName(e.target.value.slice(0, 50))}
-              className="border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors w-full sm:w-72"
+              className="border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-72"
               placeholder="environment name"
             />
             <span className="text-[11px] px-2 py-0.5 rounded border border-border bg-bg-surface text-fg-muted font-medium uppercase tracking-wider">
@@ -233,7 +234,7 @@ export function EnvironmentDetail() {
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
-              className="w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle resize-y"
+              className="w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle resize-y"
               placeholder="What is this environment for?"
             />
           </div>
@@ -286,7 +287,7 @@ export function EnvironmentDetail() {
                   value={allowedHostsText}
                   onChange={(e) => setAllowedHostsText(e.target.value)}
                   rows={2}
-                  className="w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle resize-y"
+                  className="w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle resize-y"
                   placeholder="www.example1.com, www.example2.com"
                 />
               </Field>
@@ -343,7 +344,7 @@ export function EnvironmentDetail() {
                       )
                     }
                     placeholder="package package==1.0.0"
-                    className="flex-1 min-w-0 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle font-mono"
+                    className="flex-1 min-w-0 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle font-mono"
                   />
                   <IconButton
                     label="Remove package row"
@@ -396,7 +397,7 @@ export function EnvironmentDetail() {
                       )
                     }
                     placeholder="client_key"
-                    className="flex-1 min-w-0 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle font-mono"
+                    className="flex-1 min-w-0 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle font-mono"
                   />
                   <input
                     value={row.value}
@@ -408,7 +409,7 @@ export function EnvironmentDetail() {
                       )
                     }
                     placeholder="Value"
-                    className="flex-1 min-w-0 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle"
+                    className="flex-1 min-w-0 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle"
                   />
                   <IconButton
                     label="Remove metadata row"
@@ -472,36 +473,6 @@ function SectionCard({
   );
 }
 
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  const generatedId = useId();
-  // Clone the child input/select/textarea so it shares the id the
-  // <label htmlFor> points at. Saves callsites from threading ids manually.
-  const child = Children.only(children) as ReactElement<{ id?: string; "aria-describedby"?: string }>;
-  const hintId = hint ? `${generatedId}-hint` : undefined;
-  const childWithProps = isValidElement(child)
-    ? cloneElement(child, {
-        id: child.props.id ?? generatedId,
-        "aria-describedby": hint ? hintId : child.props["aria-describedby"],
-      })
-    : child;
-  const inputId = (childWithProps.props as { id?: string }).id ?? generatedId;
-  return (
-    <div>
-      <label htmlFor={inputId} className="block text-[13px] font-medium text-fg mb-1.5">{label}</label>
-      {childWithProps}
-      {hint && <p id={hintId} className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
-    </div>
-  );
-}
-
 function Toggle({
   label,
   checked,
@@ -519,7 +490,7 @@ function Toggle({
         role="switch"
         aria-checked={checked}
         onClick={() => onChange(!checked)}
-        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors focus-visible:ring-2 focus-visible:ring-brand focus-visible:outline-none ${
+        className={`relative inline-flex h-5 w-9 shrink-0 items-center rounded-full transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] focus-visible:ring-2 focus-visible:ring-brand focus-visible:outline-none ${
           checked ? "bg-brand" : "bg-bg-surface border border-border"
         }`}
       >
@@ -547,7 +518,7 @@ function IconButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-bg-surface transition-colors"
+      className="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
     >
       {children}
     </button>

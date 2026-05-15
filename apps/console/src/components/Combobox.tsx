@@ -284,7 +284,7 @@ export function Combobox<T>({
         onClick={() => setOpen((v) => !v)}
         className={
           className ??
-          "w-full inline-flex items-center justify-between gap-2 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+          "w-full inline-flex items-center justify-between gap-2 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] disabled:opacity-50 disabled:cursor-not-allowed"
         }
       >
         <span

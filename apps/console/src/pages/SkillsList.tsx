@@ -296,7 +296,7 @@ export function SkillsList() {
   /* ---- helpers ---- */
 
   const inputCls =
-    "w-full border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-border-strong transition-colors bg-bg text-fg";
+    "w-full border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] bg-bg text-fg";
 
   const anthropicSkills = skills.filter((s) => s.source === "anthropic");
   const customSkills = skills.filter((s) => s.source === "custom");
@@ -410,7 +410,7 @@ export function SkillsList() {
                     <tr
                       key={s.id}
                       onClick={() => openDetail(s)}
-                      className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors"
+                      className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                     >
                       <td className="px-4 py-3">
                         <div className="font-medium">
@@ -598,7 +598,7 @@ export function SkillsList() {
                 </label>
                 <button
                   onClick={startNewVersion}
-                  className="text-xs text-fg-muted hover:text-fg transition-colors"
+                  className="text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                 >
                   + New version
                 </button>
@@ -766,7 +766,7 @@ export function SkillsList() {
           {chResults.length > 0 && (
             <div className="border border-border rounded-lg overflow-hidden max-h-80 overflow-y-auto">
               {chResults.map((s) => (
-                <div key={s.slug} className="flex items-start justify-between gap-3 px-4 py-3 border-b border-border last:border-b-0 hover:bg-bg-surface transition-colors">
+                <div key={s.slug} className="flex items-start justify-between gap-3 px-4 py-3 border-b border-border last:border-b-0 hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">
                   <div className="min-w-0">
                     <div className="font-medium text-fg text-sm">{s.name || s.slug}</div>
                     <div className="text-xs text-fg-subtle font-mono">{s.slug}</div>
@@ -775,7 +775,7 @@ export function SkillsList() {
                   <button
                     onClick={() => installFromClawHub(s.slug)}
                     disabled={chInstalling === s.slug}
-                    className="shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-brand text-brand-fg hover:bg-brand-hover disabled:opacity-50 transition-colors"
+                    className="shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-brand text-brand-fg hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                   >
                     {chInstalling === s.slug ? "Installing..." : "Install"}
                   </button>
@@ -833,7 +833,7 @@ function DropZone({
       }}
       onDrop={handleDrop}
       className={[
-        "border-2 border-dashed rounded-lg px-4 py-6 text-center transition-colors",
+        "border-2 border-dashed rounded-lg px-4 py-6 text-center transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]",
         dragOver
           ? "border-brand bg-brand/5"
           : "border-border bg-bg-surface/30",

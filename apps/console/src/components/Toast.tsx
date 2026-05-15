@@ -95,7 +95,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
 
   return (
     <div
-      className={`pointer-events-auto flex items-center gap-2.5 pl-3 pr-2 py-2 rounded-md border border-border bg-bg shadow-[var(--shadow-md)] text-[13px] text-fg min-w-[260px] max-w-[380px] transition-[opacity,transform] duration-200 ease-out ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"}`}
+      className={`pointer-events-auto flex items-center gap-2.5 pl-3 pr-2 py-2 rounded-md border border-border bg-bg shadow-[var(--shadow-md)] text-[13px] text-fg min-w-[260px] max-w-[380px] transition-[opacity,transform] duration-[var(--dur-base)] ease-[var(--ease-soft)] ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"}`}
       role="alert"
     >
       <span className={`shrink-0 ${iconColor[toast.type]}`}>{icons[toast.type]}</span>
@@ -105,7 +105,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
           setVisible(false);
           setTimeout(() => onDismiss(toast.id), 200);
         }}
-        className="shrink-0 text-fg-subtle hover:text-fg transition-colors p-1 -m-1 rounded"
+        className="shrink-0 text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] p-1 -m-1 rounded"
         aria-label="Dismiss"
       >
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round">

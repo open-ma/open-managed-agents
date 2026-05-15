@@ -40,7 +40,7 @@ export function EnvironmentsList() {
         <button
           key={t}
           onClick={() => setTab(t)}
-          className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+          className={`px-3 py-1.5 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
             tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"
           }`}
         >
@@ -115,7 +115,7 @@ export function EnvironmentsList() {
               id="env-create-name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value.slice(0, 50) })}
-              className="w-full border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-brand bg-bg text-fg transition-colors placeholder:text-fg-subtle"
+              className="w-full border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-brand bg-bg text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle"
               placeholder="production"
             />
             <p className="text-xs text-fg-subtle mt-1">{form.name.length}/50 characters</p>
@@ -134,7 +134,7 @@ export function EnvironmentsList() {
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               rows={3}
-              className="w-full border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-brand bg-bg text-fg resize-none transition-colors placeholder:text-fg-subtle"
+              className="w-full border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-brand bg-bg text-fg resize-none transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle"
               placeholder="Production environment for customer-facing agents..."
             />
           </div>

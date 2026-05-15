@@ -6,6 +6,7 @@ import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
 import { TextInput, SecretInput } from "../components/Input";
 import { LocalCombobox } from "../components/LocalCombobox";
+import { Disclosure } from "../components/Disclosure";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 
 interface Vault { id: string; name: string; created_at: string; archived_at?: string; }
@@ -322,7 +323,7 @@ export function VaultsList() {
     openVault(selectedVault);
   };
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   // Already connected MCP server URLs
   const connectedUrls = new Set(credentials.map((c) => c.auth.mcp_server_url).filter(Boolean));
@@ -336,7 +337,7 @@ export function VaultsList() {
         <button
           key={t}
           onClick={() => setVaultTab(t)}
-          className={`px-3 py-1.5 text-sm rounded-md transition-colors ${
+          className={`px-3 py-1.5 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
             vaultTab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"
           }`}
         >
@@ -442,7 +443,7 @@ export function VaultsList() {
                     : c.auth.type === "cap_cli" ? "bg-brand-subtle text-brand"
                     : "bg-success-subtle text-success"
                   }`}>{c.auth.type === "mcp_oauth" ? "OAuth" : c.auth.type === "cap_cli" ? "CLI" : "Bearer"}</span>
-                  <button onClick={() => deleteCred(c.id)} className="text-xs text-fg-subtle hover:text-danger transition-colors">Delete</button>
+                  <button onClick={() => deleteCred(c.id)} className="text-xs text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Delete</button>
                 </div>
               </div>
             ))}
@@ -600,123 +601,101 @@ export function VaultsList() {
                 changes to Create. Visible regardless of Type so the
                 user can supply a pre-issued OAuth access_token without
                 a full handshake. */}
-            <div className="border border-border rounded-md">
-              <button
-                type="button"
-                onClick={() => setTokenSectionOpen((v) => !v)}
-                aria-expanded={tokenSectionOpen}
-                className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
-              >
-                <span className={`text-fg-muted transition-transform ${tokenSectionOpen ? "rotate-90" : ""}`}>›</span>
-                <span className="text-sm font-medium text-fg">Access token</span>
-                <span className="text-xs text-fg-muted px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
-              </button>
-              {tokenSectionOpen && (
-                <div className="px-3 pb-3">
-                  <input
-                    value={customForm.token}
-                    onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })}
-                    type="password"
-                    placeholder="••••••••"
-                    aria-label="Access token"
-                    className={inputCls}
-                  />
-                  <div className="text-xs text-fg-subtle mt-1">If filled, the credential is stored as a static bearer token (no OAuth handshake).</div>
-                </div>
-              )}
-            </div>
+            <Disclosure
+              title="Access token"
+              meta={<span className="px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>}
+              open={tokenSectionOpen}
+              onOpenChange={setTokenSectionOpen}
+            >
+              <input
+                value={customForm.token}
+                onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })}
+                type="password"
+                placeholder="••••••••"
+                aria-label="Access token"
+                className={inputCls}
+              />
+              <div className="text-xs text-fg-subtle mt-1">If filled, the credential is stored as a static bearer token (no OAuth handshake).</div>
+            </Disclosure>
 
             {/* Refresh token block (Optional) — only meaningful when an
                 Access token is also set (RFC 6749 §6 refresh_token grant).
                 Render only when token has a value. */}
             {customForm.token && (
-              <div className="border border-border rounded-md">
-                <button
-                  type="button"
-                  onClick={() => setRefreshSectionOpen((v) => !v)}
-                  aria-expanded={refreshSectionOpen}
-                  className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
-                >
-                  <span className={`text-fg-muted transition-transform ${refreshSectionOpen ? "rotate-90" : ""}`}>›</span>
-                  <span className="text-sm font-medium text-fg">Refresh token</span>
-                  <span className="text-xs text-fg-muted px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
-                </button>
-                {refreshSectionOpen && (
-                  <div className="px-3 pb-3 space-y-3">
-                    <div>
-                      <input
-                        value={customForm.refreshToken}
-                        onChange={(e) => setCustomForm({ ...customForm, refreshToken: e.target.value })}
-                        placeholder="OAuth refresh token"
-                        aria-label="Refresh token"
-                        className={inputCls}
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="vault-token-endpoint" className="text-sm font-medium text-fg block mb-1">Token endpoint</label>
-                      <input
-                        id="vault-token-endpoint"
-                        value={customForm.tokenEndpoint}
-                        onChange={(e) => setCustomForm({ ...customForm, tokenEndpoint: e.target.value })}
-                        placeholder="https://auth.example.com/oauth/token"
-                        className={inputCls}
-                      />
-                    </div>
-                    <div>
-                      <label htmlFor="vault-auth-method" className="text-sm font-medium text-fg block mb-1">Auth method</label>
-                      <select
-                        id="vault-auth-method"
-                        value={customForm.authMethod}
-                        onChange={(e) => setCustomForm({ ...customForm, authMethod: e.target.value as typeof customForm.authMethod })}
-                        className={inputCls}
-                      >
-                        <option value="client_secret_post">client_secret_post</option>
-                        <option value="client_secret_basic">client_secret_basic</option>
-                        <option value="none">none</option>
-                      </select>
-                    </div>
-                    <div className="text-xs text-fg-subtle">RFC 8414 token_endpoint_auth_methods_supported. Used when the server refreshes on 401.</div>
+              <Disclosure
+                title="Refresh token"
+                meta={<span className="px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>}
+                open={refreshSectionOpen}
+                onOpenChange={setRefreshSectionOpen}
+                className="space-y-3"
+              >
+                <div className="space-y-3">
+                  <div>
+                    <input
+                      value={customForm.refreshToken}
+                      onChange={(e) => setCustomForm({ ...customForm, refreshToken: e.target.value })}
+                      placeholder="OAuth refresh token"
+                      aria-label="Refresh token"
+                      className={inputCls}
+                    />
                   </div>
-                )}
-              </div>
+                  <div>
+                    <label htmlFor="vault-token-endpoint" className="text-sm font-medium text-fg block mb-1">Token endpoint</label>
+                    <input
+                      id="vault-token-endpoint"
+                      value={customForm.tokenEndpoint}
+                      onChange={(e) => setCustomForm({ ...customForm, tokenEndpoint: e.target.value })}
+                      placeholder="https://auth.example.com/oauth/token"
+                      className={inputCls}
+                    />
+                  </div>
+                  <div>
+                    <label htmlFor="vault-auth-method" className="text-sm font-medium text-fg block mb-1">Auth method</label>
+                    <select
+                      id="vault-auth-method"
+                      value={customForm.authMethod}
+                      onChange={(e) => setCustomForm({ ...customForm, authMethod: e.target.value as typeof customForm.authMethod })}
+                      className={inputCls}
+                    >
+                      <option value="client_secret_post">client_secret_post</option>
+                      <option value="client_secret_basic">client_secret_basic</option>
+                      <option value="none">none</option>
+                    </select>
+                  </div>
+                  <div className="text-xs text-fg-subtle">RFC 8414 token_endpoint_auth_methods_supported. Used when the server refreshes on 401.</div>
+                </div>
+              </Disclosure>
             )}
             {/* OAuth client credentials (Optional) — only shown for the
                 OAuth flow. Lets the user override the server's preset
                 client_id/secret on a per-credential basis (GitHub /
                 Feishu / any provider that doesn't support DCR). */}
             {customForm.type === "oauth" && !customForm.token && (
-              <div className="border border-border rounded-md">
-                <button
-                  type="button"
-                  onClick={() => setClientCredsSectionOpen((v) => !v)}
-                  aria-expanded={clientCredsSectionOpen}
-                  className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
-                >
-                  <span className={`text-fg-muted transition-transform ${clientCredsSectionOpen ? "rotate-90" : ""}`}>›</span>
-                  <span className="text-sm font-medium text-fg">OAuth client credentials</span>
-                  <span className="text-xs text-fg-muted px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
-                </button>
-                {clientCredsSectionOpen && (
-                  <div className="px-3 pb-3 space-y-2">
-                    <input
-                      value={customForm.clientId}
-                      onChange={(e) => setCustomForm({ ...customForm, clientId: e.target.value })}
-                      placeholder="Client ID"
-                      aria-label="OAuth client ID"
-                      className={inputCls}
-                    />
-                    <input
-                      value={customForm.clientSecret}
-                      onChange={(e) => setCustomForm({ ...customForm, clientSecret: e.target.value })}
-                      type="password"
-                      placeholder="Client secret"
-                      aria-label="OAuth client secret"
-                      className={inputCls}
-                    />
-                    <div className="text-xs text-fg-subtle">For OAuth providers that don't support Dynamic Client Registration (GitHub, Feishu) — supply a client_id/secret from a pre-registered app.</div>
-                  </div>
-                )}
-              </div>
+              <Disclosure
+                title="OAuth client credentials"
+                meta={<span className="px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>}
+                open={clientCredsSectionOpen}
+                onOpenChange={setClientCredsSectionOpen}
+              >
+                <div className="space-y-2">
+                  <input
+                    value={customForm.clientId}
+                    onChange={(e) => setCustomForm({ ...customForm, clientId: e.target.value })}
+                    placeholder="Client ID"
+                    aria-label="OAuth client ID"
+                    className={inputCls}
+                  />
+                  <input
+                    value={customForm.clientSecret}
+                    onChange={(e) => setCustomForm({ ...customForm, clientSecret: e.target.value })}
+                    type="password"
+                    placeholder="Client secret"
+                    aria-label="OAuth client secret"
+                    className={inputCls}
+                  />
+                  <div className="text-xs text-fg-subtle">For OAuth providers that don't support Dynamic Client Registration (GitHub, Feishu) — supply a client_id/secret from a pre-registered app.</div>
+                </div>
+              </Disclosure>
             )}
           </div>
         )}

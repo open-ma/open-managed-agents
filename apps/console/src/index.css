@@ -43,6 +43,22 @@
      uses near-black at 10% opacity; dark mode bumps to 50% so drop
      shadows actually read against the dark surface. */
   --shadow-md: 0 4px 12px -4px rgb(0 0 0 / 0.12);
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 0.08);
+
+  /* Motion tokens. Default Tailwind transitions feel "computer-y" (linear
+     timing-function, 150ms blanket duration). These curves + scale give
+     interactions weight without being slow:
+     - soft: iOS-style spring out, perfect for modal/toast/menu reveal
+     - snap: tight ease-out for press states, hover state changes
+     - quart: gentle deceleration for layout-affecting changes
+     Pair with --dur-quick (button hover, focus), --dur-base (most state
+     changes), --dur-slow (overlays, page-level changes). */
+  --ease-soft: cubic-bezier(0.32, 0.72, 0, 1);
+  --ease-snap: cubic-bezier(0.5, 0, 0.1, 1);
+  --ease-quart: cubic-bezier(0.25, 1, 0.5, 1);
+  --dur-quick: 100ms;
+  --dur-base: 150ms;
+  --dur-slow: 220ms;
 
   --ring: var(--brand);
   color-scheme: light;
@@ -82,6 +98,7 @@
 
   /* Dark-mode shadow — needs more opacity to register against #151515. */
   --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
+  --shadow-sm: 0 1px 2px -1px rgb(0 0 0 / 0.4);
 
   --ring: var(--brand);
   color-scheme: dark;
@@ -206,4 +223,20 @@ body {
 .dark .hljs-addition {
   color: #aff5b4;
   background-color: #033a16;
+}
+
+/* BrandLoader dot pulse — wave from left to right via staggered
+   animation-delay on each child. Smoother than animate-pulse
+   (Tailwind's default opacity 0.5↔1) because the dots dim further
+   (0.25) and back, giving a clearer "moving" feel. */
+@keyframes brand-loader-dot {
+  0%, 100% { opacity: 0.25; transform: translateY(0); }
+  50%      { opacity: 1;    transform: translateY(-1px); }
+}
+.brand-loader-dot {
+  display: inline-block;
+  animation: brand-loader-dot 1200ms var(--ease-soft) infinite;
+}
+@media (prefers-reduced-motion: reduce) {
+  .brand-loader-dot { animation: none; opacity: 0.6; }
 }

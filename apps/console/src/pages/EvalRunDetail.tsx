@@ -182,7 +182,7 @@ export function EvalRunDetail() {
       <div>
         <button
           onClick={() => nav("/evals")}
-          className="text-sm text-fg-subtle hover:text-fg transition-colors"
+          className="text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ← All runs
         </button>
@@ -266,7 +266,7 @@ export function EvalRunDetail() {
               return [
                 <tr
                   key={t.id}
-                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors"
+                  className="border-t border-border hover:bg-bg-surface cursor-pointer transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                   onClick={() => toggleExpand(t.id)}
                 >
                   <td className="text-fg-subtle px-2 py-3 text-center">{isOpen ? "▾" : "▸"}</td>

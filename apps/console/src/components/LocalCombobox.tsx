@@ -46,7 +46,7 @@ export interface LocalComboboxProps<T> {
 }
 
 const DEFAULT_INPUT_CLS =
-  "w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus-within:border-brand transition-colors flex items-center gap-2";
+  "w-full rounded-md border border-border bg-bg px-3 py-2 text-sm text-fg outline-none focus-within:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] flex items-center gap-2";
 
 export function LocalCombobox<T>({
   value,

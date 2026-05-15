@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router";
 import { IntegrationsApi } from "../api/client";
+import { Avatar } from "../../components/Avatar";
+import { EmptyState } from "../../components/EmptyState";
 import type { LinearInstallation, LinearPublication } from "../api/types";
 
 const api = new IntegrationsApi();
@@ -54,14 +56,14 @@ export function IntegrationsLinearList() {
           <div className="shrink-0 flex items-center gap-2">
             <Link
               to="/integrations/linear/install-pat"
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-border rounded-md text-[13px] font-medium hover:border-brand transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 border border-border rounded-md text-[13px] font-medium hover:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] whitespace-nowrap"
               title="Symphony-equivalent: paste a Linear PAT, no OAuth dance"
             >
               Install via PAT
             </Link>
             <Link
               to="/integrations/linear/publish"
-              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors whitespace-nowrap"
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] whitespace-nowrap"
             >
               <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M12 5v14M5 12h14" /></svg>
               Publish agent
@@ -77,18 +79,17 @@ export function IntegrationsLinearList() {
         )}
 
         {!loading && items.length === 0 && (
-          <div className="border border-border rounded-lg px-6 py-12 text-center bg-bg-surface/30">
-            <div className="font-mono text-fg-subtle text-sm select-none mb-3">[ &nbsp;&nbsp; ]</div>
-            <p className="text-sm text-fg">No Linear workspaces connected yet.</p>
-            <p className="text-[13px] text-fg-muted mt-1.5">
+          <EmptyState
+            title="No Linear workspaces connected yet."
+            action={
               <Link
                 to="/integrations/linear/publish"
-                className="text-brand hover:underline"
+                className="text-brand hover:underline text-[13px]"
               >
                 Publish your first agent →
               </Link>
-            </p>
-          </div>
+            }
+          />
         )}
 
         <div className="space-y-3">
@@ -113,7 +114,7 @@ function WorkspaceCard({
   publications: LinearPublication[];
 }) {
   return (
-    <div className="border border-border rounded-lg overflow-hidden bg-bg hover:border-border-strong transition-colors">
+    <div className="border border-border rounded-lg overflow-hidden bg-bg hover:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="min-w-0">
           <div className="flex items-baseline gap-2">
@@ -133,7 +134,7 @@ function WorkspaceCard({
         </div>
         <Link
           to={`/integrations/linear/installations/${installation.id}`}
-          className="shrink-0 text-[13px] text-fg-muted hover:text-brand transition-colors"
+          className="shrink-0 text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           Manage →
         </Link>
@@ -153,19 +154,7 @@ function WorkspaceCard({
 function PublicationRow({ pub }: { pub: LinearPublication }) {
   return (
     <li className="flex items-center gap-3 px-5 py-2.5 text-sm">
-      {pub.persona.avatarUrl ? (
-        <img
-          src={pub.persona.avatarUrl}
-          alt=""
-          loading="lazy"
-          decoding="async"
-          className="w-6 h-6 rounded-full shrink-0"
-        />
-      ) : (
-        <div className="w-6 h-6 rounded-full bg-brand-subtle text-brand flex items-center justify-center text-[11px] font-medium shrink-0">
-          {pub.persona.name.slice(0, 1).toUpperCase()}
-        </div>
-      )}
+      <Avatar src={pub.persona.avatarUrl} name={pub.persona.name} size="sm" />
       <span className="font-medium text-fg flex-1 truncate">{pub.persona.name}</span>
       <StatusPill status={pub.status} />
     </li>

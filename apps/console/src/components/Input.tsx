@@ -1,11 +1,12 @@
-import { useId, useState, type InputHTMLAttributes, type ReactNode } from "react";
+import { useState, type InputHTMLAttributes, type ReactNode } from "react";
+import { Field } from "./Field";
 
 /**
  * Default styling for text-ish inputs across the console. Kept here so
  * pages don't each invent their own border/padding/focus look.
  */
 const baseClass =
-  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
 type CommonProps = Omit<
   InputHTMLAttributes<HTMLInputElement>,
@@ -32,25 +33,23 @@ export function TextInput({
   label,
   hint,
   autoComplete,
-  id: idProp,
   ...rest
 }: CommonProps) {
-  const generatedId = useId();
-  const id = idProp ?? generatedId;
-  const hintId = hint ? `${id}-hint` : undefined;
+  const input = (
+    <input
+      type="text"
+      autoComplete={autoComplete ?? "off"}
+      data-1p-ignore
+      data-lpignore="true"
+      className={className ?? baseClass}
+      {...rest}
+    />
+  );
+  if (!label && !hint) return input;
   return (
-    <FieldWrapper id={id} label={label} hint={hint}>
-      <input
-        id={id}
-        type="text"
-        autoComplete={autoComplete ?? "off"}
-        data-1p-ignore
-        data-lpignore="true"
-        aria-describedby={hintId}
-        className={className ?? baseClass}
-        {...rest}
-      />
-    </FieldWrapper>
+    <Field label={label} hint={hint}>
+      {input}
+    </Field>
   );
 }
 
@@ -72,64 +71,35 @@ export function SecretInput({
   className,
   label,
   hint,
-  id: idProp,
   ...rest
 }: CommonProps) {
   const [revealed, setRevealed] = useState(false);
-  const generatedId = useId();
-  const id = idProp ?? generatedId;
-  const hintId = hint ? `${id}-hint` : undefined;
-  return (
-    <FieldWrapper id={id} label={label} hint={hint}>
-      <div className="relative">
-        <input
-          id={id}
-          type={revealed ? "text" : "password"}
-          autoComplete="new-password"
-          data-1p-ignore
-          data-lpignore="true"
-          aria-describedby={hintId}
-          className={`${className ?? baseClass} pr-10`}
-          {...rest}
-        />
-        <button
-          type="button"
-          onClick={() => setRevealed((r) => !r)}
-          className="absolute inset-y-0 right-0 px-2.5 flex items-center text-fg-subtle hover:text-fg-muted transition-colors"
-          title={revealed ? "Hide" : "Show"}
-          aria-label={revealed ? "Hide secret" : "Show secret"}
-        >
-          {revealed ? <EyeOffIcon /> : <EyeIcon />}
-        </button>
-      </div>
-    </FieldWrapper>
-  );
-}
-
-/**
- * Internal wrapper. Generates a stable id (`useId`) one level up so both
- * the `<label htmlFor>` and the cloned `<input id>` see the same value.
- */
-function FieldWrapper({
-  id,
-  label,
-  hint,
-  children,
-}: {
-  id: string;
-  label?: ReactNode;
-  hint?: ReactNode;
-  children: ReactNode;
-}) {
-  if (!label && !hint) return <>{children}</>;
-  return (
-    <div>
-      {label && (
-        <label htmlFor={id} className="block text-[13px] font-medium text-fg mb-1.5">{label}</label>
-      )}
-      {children}
-      {hint && <p id={`${id}-hint`} className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
+  const input = (
+    <div className="relative">
+      <input
+        type={revealed ? "text" : "password"}
+        autoComplete="new-password"
+        data-1p-ignore
+        data-lpignore="true"
+        className={`${className ?? baseClass} pr-10`}
+        {...rest}
+      />
+      <button
+        type="button"
+        onClick={() => setRevealed((r) => !r)}
+        className="absolute inset-y-0 right-0 px-2.5 flex items-center text-fg-subtle hover:text-fg-muted transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+        title={revealed ? "Hide" : "Show"}
+        aria-label={revealed ? "Hide secret" : "Show secret"}
+      >
+        {revealed ? <EyeOffIcon /> : <EyeIcon />}
+      </button>
     </div>
+  );
+  if (!label && !hint) return input;
+  return (
+    <Field label={label} hint={hint}>
+      {input}
+    </Field>
   );
 }
 

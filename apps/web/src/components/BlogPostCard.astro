@@ -1,0 +1,28 @@
+---
+/**
+ * Blog-post card. Used in the homepage "From the blog" grid (3 cards).
+ * The blog index page uses a different (vertical list) layout, so it
+ * stays inline there.
+ *
+ * Title + description come as plain props; href is the slugged URL
+ * with trailing slash (matches astro `trailingSlash: "always"`).
+ */
+export interface Props {
+  href: string;
+  /** Pre-formatted date string (caller does the i18n / locale formatting). */
+  date: string;
+  title: string;
+  description: string;
+}
+
+const { href, date, title, description } = Astro.props;
+---
+
+<a
+  href={href}
+  class="block border border-[var(--color-border)] rounded-lg p-5 hover:border-[var(--color-brand)] transition-colors duration-150 no-underline"
+>
+  <div class="text-xs text-[var(--color-fg-subtle)] mb-2">{date}</div>
+  <h3 class="font-semibold text-base mb-2 text-[var(--color-fg)]">{title}</h3>
+  <p class="text-sm text-[var(--color-fg-muted)] line-clamp-3">{description}</p>
+</a>

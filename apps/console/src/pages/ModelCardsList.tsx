@@ -125,7 +125,7 @@ export function ModelCardsList() {
     setShowCreate(false); setEditingId(null); setForm({ ...INITIAL_FORM }); setError("");
   };
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   const providerLabel = (p: string) => PROVIDERS.find((x) => x.value === p)?.label || p;
 
@@ -233,7 +233,7 @@ export function ModelCardsList() {
                   type="button"
                   aria-pressed={form.provider === p.value}
                   onClick={() => { setForm({ ...form, provider: p.value, model: "", base_url: "" }); setAvailableModels([]); }}
-                  className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
+                  className={`text-left px-3 py-2 border rounded-md text-sm transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
                     form.provider === p.value
                       ? "border-brand bg-brand-subtle text-fg"
                       : "border-border text-fg-muted hover:border-fg-subtle"

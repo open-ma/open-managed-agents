@@ -3,6 +3,7 @@ import { Link, useParams } from "react-router";
 import { useApi } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { Page } from "../components/Page";
+import { Tabs, Tab, TabPanel } from "../components/Tabs";
 
 interface MemoryStore {
   id: string;
@@ -75,42 +76,21 @@ export function MemoryStoreDetail() {
         </div>
       </div>
 
-      <div role="tablist" aria-label="Memory store sections" className="border-b border-border mt-6 mb-6 flex gap-6">
-        {(["memories", "versions", "settings"] as Tab[]).map((t) => (
-          <button
-            key={t}
-            role="tab"
-            id={`memory-tab-${t}`}
-            aria-selected={tab === t}
-            aria-controls={`memory-tabpanel-${t}`}
-            tabIndex={tab === t ? 0 : -1}
-            onClick={() => setTab(t)}
-            className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
-              tab === t
-                ? "border-brand text-fg"
-                : "border-transparent text-fg-muted hover:text-fg"
-            }`}
-          >
-            {t === "memories" ? "Memories" : t === "versions" ? "Version history" : "Settings"}
-          </button>
-        ))}
-      </div>
+      <Tabs value={tab} onChange={(v) => setTab(v as Tab)} ariaLabel="Memory store sections" className="mt-6 mb-6">
+        <Tab value="memories">Memories</Tab>
+        <Tab value="versions">Version history</Tab>
+        <Tab value="settings">Settings</Tab>
+      </Tabs>
 
-      {tab === "memories" && (
-        <div role="tabpanel" id="memory-tabpanel-memories" aria-labelledby="memory-tab-memories">
-          <MemoriesPanel storeId={storeId} archived={!!store.archived_at} />
-        </div>
-      )}
-      {tab === "versions" && (
-        <div role="tabpanel" id="memory-tabpanel-versions" aria-labelledby="memory-tab-versions">
-          <VersionsPanel storeId={storeId} />
-        </div>
-      )}
-      {tab === "settings" && (
-        <div role="tabpanel" id="memory-tabpanel-settings" aria-labelledby="memory-tab-settings">
-          <SettingsPanel store={store} archived={!!store.archived_at} />
-        </div>
-      )}
+      <TabPanel value="memories" current={tab}>
+        <MemoriesPanel storeId={storeId} archived={!!store.archived_at} />
+      </TabPanel>
+      <TabPanel value="versions" current={tab}>
+        <VersionsPanel storeId={storeId} />
+      </TabPanel>
+      <TabPanel value="settings" current={tab}>
+        <SettingsPanel store={store} archived={!!store.archived_at} />
+      </TabPanel>
     </Page>
   );
 }
@@ -176,7 +156,7 @@ function MemoriesPanel({ storeId, archived }: { storeId: string; archived: boole
         />
         {!archived && (
           <button onClick={() => setShowWrite(true)}
-            className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors whitespace-nowrap">
+            className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] whitespace-nowrap">
             + New memory
           </button>
         )}
@@ -207,7 +187,7 @@ function MemoriesPanel({ storeId, archived }: { storeId: string; archived: boole
                 <tr
                   key={m.id}
                   onClick={() => openMemory(m)}
-                  className="border-t border-border cursor-pointer hover:bg-bg-surface transition-colors"
+                  className="border-t border-border cursor-pointer hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                 >
                   <td className="px-4 py-3 font-mono text-xs">{m.path}</td>
                   <td className="px-4 py-3">{m.size_bytes} B</td>
@@ -349,7 +329,7 @@ function MemoryDetailDialog({
           {!archived && !editing && (
             <button
               onClick={() => setEditing(true)}
-              className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+              className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               Edit
             </button>
@@ -358,7 +338,7 @@ function MemoryDetailDialog({
             <>
               <button
                 onClick={save}
-                className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+                className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 Save
               </button>
@@ -368,7 +348,7 @@ function MemoryDetailDialog({
                   setContent(memory.content);
                   setPath(memory.path);
                 }}
-                className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors"
+                className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 Cancel
               </button>
@@ -380,7 +360,7 @@ function MemoryDetailDialog({
                 setShowVersions((s) => !s);
                 if (!showVersions) loadVersions();
               }}
-              className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors"
+              className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               aria-expanded={showVersions}
             >
               {showVersions ? "Hide" : "Show"} version history
@@ -389,7 +369,7 @@ function MemoryDetailDialog({
           {!archived && !editing && (
             <button
               onClick={remove}
-              className="ml-auto px-3 py-1.5 bg-danger/10 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger/20 transition-colors"
+              className="ml-auto px-3 py-1.5 bg-danger/10 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger/20 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               Delete memory
             </button>
@@ -607,13 +587,13 @@ function WriteMemoryDialog({
         <>
           <button
             onClick={onClose}
-            className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors"
+            className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
             Cancel
           </button>
           <button
             onClick={save}
-            className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+            className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
             Create
           </button>

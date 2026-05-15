@@ -176,7 +176,7 @@ export function SessionsList() {
     return next;
   });
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   const [search, setSearch] = useState("");
   const [filterAgent, setFilterAgent] = useState("");
@@ -457,7 +457,7 @@ export function SessionsList() {
           type="button"
           onClick={() => setFilterAgent("")}
           aria-label="Clear agent filter"
-          className="text-fg-subtle hover:text-fg text-xs inline-flex items-center justify-center min-w-8 min-h-8 px-2 rounded hover:bg-bg-surface transition-colors"
+          className="text-fg-subtle hover:text-fg text-xs inline-flex items-center justify-center min-w-8 min-h-8 px-2 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ×
         </button>

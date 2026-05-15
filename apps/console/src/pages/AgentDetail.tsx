@@ -76,13 +76,13 @@ export function AgentDetail() {
 
   return (
     <Page>
-      <Link to="/agents" className="text-sm text-fg-subtle hover:text-fg-muted transition-colors">&larr; Agents</Link>
+      <Link to="/agents" className="text-sm text-fg-subtle hover:text-fg-muted transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">&larr; Agents</Link>
 
       <div className="flex items-start justify-between mt-2 mb-6">
         <h1 className="font-display text-xl font-semibold tracking-tight text-fg">{agent.name}</h1>
         <div className="flex gap-2">
-          <button onClick={archive} className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors">Archive</button>
-          <button onClick={del} className="px-3 py-1.5 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger-subtle transition-colors">Delete</button>
+          <button onClick={archive} className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Archive</button>
+          <button onClick={del} className="px-3 py-1.5 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger-subtle transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Delete</button>
         </div>
       </div>
 

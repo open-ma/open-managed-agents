@@ -4,6 +4,8 @@ import { useApi } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useToast } from "../components/Toast";
 import { StatusPill } from "../components/Badge";
+import { BrandLoader } from "../components/BrandLoader";
+import { EmptyState } from "../components/EmptyState";
 
 interface Stats {
   agents: number;
@@ -61,9 +63,9 @@ export function Dashboard() {
     <button
       key={label}
       onClick={() => nav(to)}
-      className="group relative text-left px-4 py-3.5 border border-border rounded-md bg-bg hover:border-border-strong hover:bg-bg-surface/40 transition-colors"
+      className="group relative text-left px-4 py-3.5 border border-border rounded-md bg-bg hover:border-border-strong hover:bg-bg-surface/40 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
     >
-      <div className="font-display text-[28px] leading-none font-semibold text-fg group-hover:text-brand transition-colors tabular-nums">
+      <div className="font-display text-[28px] leading-none font-semibold text-fg group-hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] tabular-nums">
         {value ?? "–"}
       </div>
       <div className="mt-2 text-[11px] uppercase tracking-[0.08em] text-fg-muted font-medium">
@@ -84,7 +86,7 @@ export function Dashboard() {
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
-        <div className="text-fg-subtle text-sm">Loading...</div>
+        <BrandLoader size="lg" label="Loading dashboard" />
       </div>
     );
   }
@@ -122,11 +124,11 @@ export function Dashboard() {
               </p>
               <button
                 onClick={() => copy(cmd, "cmd")}
-                className="group w-full sm:w-auto sm:inline-flex items-center gap-3 pl-3 pr-2 py-2 rounded-md border border-border bg-bg-surface/50 hover:border-border-strong transition-colors text-left"
+                className="group w-full sm:w-auto sm:inline-flex items-center gap-3 pl-3 pr-2 py-2 rounded-md border border-border bg-bg-surface/50 hover:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] text-left"
               >
                 <span className="text-fg-subtle select-none font-mono text-xs">›</span>
                 <span className="font-mono text-[13px] text-fg flex-1 truncate">{cmd}</span>
-                <span className="shrink-0 text-fg-subtle group-hover:text-fg transition-colors p-1">
+                <span className="shrink-0 text-fg-subtle group-hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] p-1">
                   {copied === "cmd" ? (
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6 9 17l-5-5" /></svg>
                   ) : (
@@ -138,7 +140,7 @@ export function Dashboard() {
                 or globally:{" "}
                 <button
                   onClick={() => copy(cmdGlobal, "cmd-global")}
-                  className="font-mono text-fg-muted hover:text-brand transition-colors"
+                  className="font-mono text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                 >
                   {cmdGlobal}
                 </button>
@@ -158,7 +160,7 @@ export function Dashboard() {
               </p>
               <button
                 onClick={() => nav("/api-keys")}
-                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors"
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 Generate API key
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
@@ -180,13 +182,13 @@ export function Dashboard() {
               </p>
               <button
                 onClick={() => copy(examplePrompt, "prompt")}
-                className="group w-full text-left rounded-md border border-border bg-bg-surface/50 hover:border-border-strong transition-colors p-3 flex items-start gap-3"
+                className="group w-full text-left rounded-md border border-border bg-bg-surface/50 hover:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] p-3 flex items-start gap-3"
               >
                 <span className="shrink-0 mt-0.5 font-mono text-[10px] tracking-wider text-fg-subtle">
                   PROMPT
                 </span>
                 <span className="flex-1 text-[13px] text-fg leading-snug">{examplePrompt}</span>
-                <span className="shrink-0 text-fg-subtle group-hover:text-fg transition-colors mt-0.5">
+                <span className="shrink-0 text-fg-subtle group-hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] mt-0.5">
                   {copied === "prompt" ? (
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5"><path d="M20 6 9 17l-5-5" /></svg>
                   ) : (
@@ -211,27 +213,28 @@ export function Dashboard() {
             <h2 className="font-display text-lg font-semibold text-fg">Recent sessions</h2>
             <button
               onClick={() => nav("/sessions")}
-              className="text-[13px] text-fg-muted hover:text-brand transition-colors"
+              className="text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               View all →
             </button>
           </div>
 
           {recentSessions.length === 0 ? (
-            <div className="border border-border rounded-lg px-6 py-10 text-center bg-bg-surface/30">
-              <div className="font-mono text-fg-subtle text-sm select-none mb-2" aria-hidden="true">[ &nbsp;&nbsp; ]</div>
-              <p className="text-sm text-fg">No sessions yet — the stable's empty.</p>
-              <p className="text-[13px] text-fg-muted mt-1">
-                Tell your agent to start one, or visit the{" "}
-                <button
-                  onClick={() => nav("/sessions")}
-                  className="text-brand hover:underline"
-                >
-                  Sessions page
-                </button>
-                .
-              </p>
-            </div>
+            <EmptyState
+              title="No sessions yet — the stable's empty."
+              body={
+                <>
+                  Tell your agent to start one, or visit the{" "}
+                  <button
+                    onClick={() => nav("/sessions")}
+                    className="text-brand hover:underline"
+                  >
+                    Sessions page
+                  </button>
+                  .
+                </>
+              }
+            />
           ) : (
             <div className="border border-border rounded-lg overflow-x-auto">
               <table className="w-full text-sm">
@@ -248,7 +251,7 @@ export function Dashboard() {
                     <tr
                       key={s.id}
                       onClick={() => nav(`/sessions/${s.id}`)}
-                      className="border-t border-border hover:bg-bg-surface/40 cursor-pointer transition-colors"
+                      className="border-t border-border hover:bg-bg-surface/40 cursor-pointer transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                     >
                       <td className="px-4 py-2.5 text-fg">{s.title || "Untitled"}</td>
                       <td className="px-4 py-2.5">

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApi, getActiveTenantId, setActiveTenantId } from "../lib/api";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
+import { Avatar } from "./Avatar";
 
 // Slot beneath the logo in the sidebar. Hidden when the user has only one
 // tenant — single-tenant accounts shouldn't even see the workspace concept.
@@ -88,11 +89,9 @@ export function TenantSwitcher() {
           aria-expanded={open}
           aria-label="Switch workspace"
           onClick={() => setOpen((o) => !o)}
-          className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-bg-surface transition-colors text-left group"
+          className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] text-left group"
         >
-          <div className="w-6 h-6 rounded-md bg-brand/15 text-brand flex items-center justify-center text-xs font-mono font-bold shrink-0">
-            {(current?.name ?? "?").trim().charAt(0).toUpperCase() || "·"}
-          </div>
+          <Avatar name={current?.name ?? "?"} size="sm" squared />
           <div className="min-w-0 flex-1">
             <div className="text-sm font-medium truncate text-fg">
               {current ? displayName(current) : "Workspace"}
@@ -120,9 +119,7 @@ export function TenantSwitcher() {
                   onClick={() => switchTo(t.id)}
                   className={`w-full text-left px-3 py-2 text-sm hover:bg-bg-surface flex items-center gap-2 ${t.id === active ? "bg-bg-surface/60" : ""}`}
                 >
-                  <div className="w-5 h-5 rounded bg-brand/15 text-brand flex items-center justify-center text-[10px] font-mono font-bold shrink-0">
-                    {displayName(t).charAt(0).toUpperCase() || "·"}
-                  </div>
+                  <Avatar name={displayName(t)} size="xs" squared />
                   <div className="min-w-0 flex-1">
                     <div className="truncate">{displayName(t)}</div>
                     <div className="text-[10px] text-fg-subtle font-mono">{t.id}</div>

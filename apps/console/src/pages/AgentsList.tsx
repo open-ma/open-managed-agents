@@ -488,8 +488,8 @@ export function AgentsList() {
       )
     : AGENT_TEMPLATES;
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
-  const tabCls = (t: string) => `px-3 py-1.5 text-sm rounded-md transition-colors ${tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`;
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  const tabCls = (t: string) => `px-3 py-1.5 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`;
 
   // Resolve which card the Model dropdown should highlight: explicit pick
   // wins, otherwise derive from model_id (paste path / pre-select effect).
@@ -602,7 +602,7 @@ export function AgentsList() {
                       <button
                         key={tmpl.id}
                         onClick={() => selectTemplate(tmpl)}
-                        className="text-left border border-border rounded-lg p-4 hover:border-brand hover:bg-bg-surface transition-colors"
+                        className="text-left border border-border rounded-lg p-4 hover:border-brand hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                       >
                         <div className="font-medium text-sm text-fg">{tmpl.name}</div>
                         <div className="text-xs text-fg-muted mt-1 line-clamp-2">{tmpl.description}</div>
@@ -631,11 +631,11 @@ export function AgentsList() {
               <>
             <div className="px-6 pt-6 pb-4 border-b border-border">
               <div className="flex items-center justify-between mb-1">
-                <button onClick={() => { setCreateStep("template"); setTemplateSearch(""); setCreateMode("form"); }} className="text-sm text-fg-subtle hover:text-fg transition-colors">&larr; Templates</button>
+                <button onClick={() => { setCreateStep("template"); setTemplateSearch(""); setCreateMode("form"); }} className="text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">&larr; Templates</button>
                 <div className="flex items-center gap-0.5 bg-bg-surface rounded-md p-0.5">
                   {(["form", "yaml", "json"] as const).map((m) => (
                     <button key={m} onClick={() => switchMode(m)}
-                      className={`px-2 py-1 text-xs rounded transition-colors ${createMode === m ? "bg-bg text-fg font-medium shadow-sm" : "text-fg-muted hover:text-fg"}`}>
+                      className={`px-2 py-1 text-xs rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${createMode === m ? "bg-bg text-fg font-medium shadow-sm" : "text-fg-muted hover:text-fg"}`}>
                       {m === "form" ? "Form" : m.toUpperCase()}
                     </button>
                   ))}
@@ -1015,7 +1015,7 @@ export function AgentsList() {
                         const active = form.skills.some(sk => sk.type === "anthropic" && sk.skill_id === s.id);
                         return (
                           <button key={s.id} onClick={() => toggleAnthropicSkill(s.id)}
-                            className={`flex items-center gap-2 px-3 py-2.5 rounded-md border text-sm text-left transition-colors ${active ? "border-brand bg-brand text-brand-fg" : "border-border hover:border-border-strong"}`}>
+                            className={`flex items-center gap-2 px-3 py-2.5 rounded-md border text-sm text-left transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${active ? "border-brand bg-brand text-brand-fg" : "border-border hover:border-border-strong"}`}>
                             <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs ${active ? "bg-brand-fg text-brand border-brand-fg" : "border-border-strong"}`}>
                               {active && "✓"}
                             </span>
@@ -1048,7 +1048,7 @@ export function AgentsList() {
                                   setForm({ ...form, skills: [...form.skills, { type: "custom", skill_id: cs.id, version: "latest" }] });
                                 }
                               }}
-                              className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-md border text-sm text-left transition-colors ${active ? "border-brand bg-brand text-brand-fg" : "border-border hover:border-border-strong"}`}>
+                              className={`flex items-center gap-2 w-full px-3 py-2.5 rounded-md border text-sm text-left transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${active ? "border-brand bg-brand text-brand-fg" : "border-border hover:border-border-strong"}`}>
                               <span className={`w-4 h-4 rounded border flex items-center justify-center text-xs shrink-0 ${active ? "bg-brand-fg text-brand border-brand-fg" : "border-border-strong"}`}>
                                 {active && "✓"}
                               </span>
@@ -1075,8 +1075,8 @@ export function AgentsList() {
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-sm font-medium text-fg">MCP Servers</label>
                     <div className="flex items-center gap-3">
-                      <button onClick={() => setShowMcpPicker(true)} className="text-xs text-fg-muted hover:text-fg transition-colors">+ Pick known</button>
-                      <button onClick={addMcp} className="text-xs text-fg-muted hover:text-fg transition-colors">+ Custom URL</button>
+                      <button onClick={() => setShowMcpPicker(true)} className="text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">+ Pick known</button>
+                      <button onClick={addMcp} className="text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">+ Custom URL</button>
                     </div>
                   </div>
                   {form.mcpServers.map((mcp, i) => (
@@ -1093,7 +1093,7 @@ export function AgentsList() {
                             <SelectOption value="stdio">stdio</SelectOption>
                           </Select>
                         </div>
-                        <button onClick={() => removeMcp(i)} aria-label={`Remove MCP server ${mcp.name || i + 1}`} className="self-end px-2 py-2 text-fg-subtle hover:text-danger transition-colors">×</button>
+                        <button onClick={() => removeMcp(i)} aria-label={`Remove MCP server ${mcp.name || i + 1}`} className="self-end px-2 py-2 text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">×</button>
                       </div>
                       <div>
                         <label htmlFor={`mcp-url-${i}`} className="text-xs text-fg-muted block mb-0.5">URL</label>
@@ -1150,7 +1150,7 @@ export function AgentsList() {
                           <div className="text-sm font-medium text-fg">{agentInfo?.name || ca.id}</div>
                           <div className="text-xs text-fg-subtle font-mono">{ca.id}</div>
                         </div>
-                        <button onClick={() => removeCallable(i)} className="px-2 text-fg-subtle hover:text-danger transition-colors">×</button>
+                        <button onClick={() => removeCallable(i)} className="px-2 text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">×</button>
                       </div>
                     );
                   })}
@@ -1194,9 +1194,9 @@ export function AgentsList() {
               <div className="flex gap-2">
                 <button onClick={closeCreate} className="px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
                 {createMode === "form" ? (
-                  <button onClick={create} disabled={!form.name} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors">Create Agent</button>
+                  <button onClick={create} disabled={!form.name} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Create Agent</button>
                 ) : (
-                  <button onClick={createFromCode} disabled={!codeValue.trim()} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors">Create Agent</button>
+                  <button onClick={createFromCode} disabled={!codeValue.trim()} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Create Agent</button>
                 )}
               </div>
             </div>

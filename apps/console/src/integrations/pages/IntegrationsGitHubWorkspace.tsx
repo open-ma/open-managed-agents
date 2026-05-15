@@ -80,7 +80,7 @@ export function IntegrationsGitHubWorkspace() {
       <div className="max-w-[900px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12">
         <Link
           to="/integrations/github"
-          className="inline-block mb-6 text-[13px] text-fg-muted hover:text-brand transition-colors"
+          className="inline-block mb-6 text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ← All GitHub installations
         </Link>
@@ -390,7 +390,7 @@ function ActivityRow({ session }: { session: SessionSummary }) {
           href={meta.htmlUrl}
           target="_blank"
           rel="noreferrer"
-          className="shrink-0 text-[12px] text-fg-muted hover:text-brand transition-colors"
+          className="shrink-0 text-[12px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           View on GitHub →
         </a>
@@ -468,7 +468,7 @@ function PublicationCard({
         <div className="flex items-center gap-2">
           <button
             onClick={() => setEditing(!editing)}
-            className="text-[13px] text-fg-muted hover:text-brand transition-colors px-3 py-1.5"
+            className="text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] px-3 py-1.5"
           >
             {editing ? "Cancel" : "Edit caps"}
           </button>
@@ -497,7 +497,7 @@ function PublicationCard({
                   {g.caps.map((c) => (
                     <label
                       key={c}
-                      className={`inline-flex items-center gap-1.5 text-[12px] px-2 py-1 border rounded cursor-pointer transition-colors ${
+                      className={`inline-flex items-center gap-1.5 text-[12px] px-2 py-1 border rounded cursor-pointer transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
                         caps.has(c)
                           ? "border-brand bg-brand-subtle text-brand"
                           : "border-border text-fg-muted hover:border-fg-muted"

@@ -335,7 +335,7 @@ export function Login() {
   }
 
   const inputCls =
-    "w-full border border-border rounded-md px-3 py-2.5 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+    "w-full border border-border rounded-md px-3 py-2.5 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   const isOtpMode = mode === "verify-signup" || mode === "verify-login" || mode === "reset-otp";
 
@@ -377,7 +377,7 @@ export function Login() {
             <>
               <button
                 onClick={handleGoogle}
-                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-border rounded-md text-sm text-fg hover:bg-bg-surface transition-colors"
+                className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border border-border rounded-md text-sm text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 <svg className="w-4 h-4" viewBox="0 0 24 24">
                   <path
@@ -567,7 +567,7 @@ export function Login() {
               ((mode === "login" || mode === "signup") && !password) ||
               (mode === "reset-otp" && !password)
             }
-            className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
+            className="w-full px-4 py-2.5 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
             {loading
               ? "Loading..."

@@ -6,6 +6,8 @@ import { useTheme } from "../lib/theme";
 import { authClient } from "../lib/auth-client";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { Logo } from "./Logo";
+import { BrandLoader } from "./BrandLoader";
+import { Avatar } from "./Avatar";
 import {
   AgentIcon,
   ApiKeysIcon,
@@ -91,7 +93,7 @@ function ChevronIcon({ open }: { open: boolean }) {
   return (
     <ChevronDownIcon
       aria-hidden="true"
-      className={`w-3.5 h-3.5 text-fg-subtle transition-transform duration-200 ${open ? "rotate-0" : "-rotate-90"}`}
+      className={`w-3.5 h-3.5 text-fg-subtle transition-transform duration-[var(--dur-base)] ease-[var(--ease-soft)] ${open ? "rotate-0" : "-rotate-90"}`}
     />
   );
 }
@@ -117,7 +119,7 @@ function ThemeToggle() {
         <button
           key={opt.value}
           onClick={() => setTheme(opt.value)}
-          className={`flex-1 px-2 py-1 text-xs rounded transition-colors ${
+          className={`flex-1 px-2 py-1 text-xs rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
             theme === opt.value
               ? "bg-bg text-fg font-medium shadow-sm"
               : "text-fg-muted hover:text-fg"
@@ -149,7 +151,7 @@ function NavGroup({
         onClick={() => setOpen(!open)}
         aria-expanded={open}
         aria-controls={panelId}
-        className="flex items-center justify-between w-full px-3 py-1.5 text-xs font-medium text-fg-subtle uppercase tracking-wider hover:text-fg-muted transition-colors"
+        className="flex items-center justify-between w-full px-3 py-1.5 text-xs font-medium text-fg-subtle uppercase tracking-wider hover:text-fg-muted transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
       >
         {label}
         <ChevronIcon open={open} />
@@ -163,9 +165,9 @@ function NavGroup({
               to={item.to}
               end={"end" in item && item.end}
               className={({ isActive }) =>
-                `flex items-center gap-2.5 px-3 py-1.5 mx-1 rounded-md text-sm transition-colors ${
+                `flex items-center gap-2.5 px-3 py-1.5 mx-1 rounded-md text-sm transition-[background-color,color,box-shadow] duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
                   isActive
-                    ? "bg-brand-subtle text-brand font-medium"
+                    ? "bg-brand-subtle text-brand font-medium shadow-[var(--shadow-sm)]"
                     : "text-fg-muted hover:bg-bg-surface hover:text-fg"
                 }`
               }
@@ -210,9 +212,7 @@ function UserMenu() {
 
   return (
     <div className="flex items-center gap-2 px-3 py-2">
-      <div className="w-7 h-7 rounded-full bg-brand-subtle text-brand text-xs font-medium flex items-center justify-center shrink-0">
-        {user.name?.[0]?.toUpperCase() || user.email[0].toUpperCase()}
-      </div>
+      <Avatar name={user.name || user.email} size="md" />
       <div className="flex-1 min-w-0">
         <div className="text-sm text-fg truncate">{user.name}</div>
         <div className="text-xs text-fg-subtle truncate">{user.email}</div>
@@ -221,7 +221,7 @@ function UserMenu() {
         onClick={handleSignOut}
         title="Sign out"
         aria-label="Sign out"
-        className="inline-flex items-center justify-center w-9 h-9 text-fg-subtle hover:text-fg hover:bg-bg-surface rounded transition-colors shrink-0"
+        className="inline-flex items-center justify-center w-9 h-9 text-fg-subtle hover:text-fg hover:bg-bg-surface rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] shrink-0"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
@@ -259,7 +259,7 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
       {/* Bottom section */}
       <div className="p-3 space-y-3 border-t border-border">
         <a href="https://docs.openma.dev" target="_blank" rel="noopener noreferrer"
-          className="flex items-center gap-2 px-3 py-1.5 text-sm text-fg-muted hover:text-fg hover:bg-bg-surface rounded-md transition-colors">
+          className="flex items-center gap-2 px-3 py-1.5 text-sm text-fg-muted hover:text-fg hover:bg-bg-surface rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">
           <svg className="w-4 h-4 opacity-60" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
           Documentation
         </a>
@@ -278,7 +278,7 @@ export function Layout() {
   if (isLoading) {
     return (
       <div className="flex h-screen items-center justify-center bg-bg">
-        <div className="text-fg-subtle text-sm">Loading...</div>
+        <BrandLoader size="lg" label="Loading session" />
       </div>
     );
   }
@@ -338,7 +338,7 @@ export function Layout() {
 
       {/* Mobile sidebar drawer */}
       <aside
-        className={`fixed inset-y-0 left-0 z-50 w-64 bg-bg-sidebar border-r border-border flex flex-col transform transition-transform duration-200 md:hidden ${
+        className={`fixed inset-y-0 left-0 z-50 w-64 bg-bg-sidebar border-r border-border flex flex-col transform transition-transform duration-[var(--dur-slow)] ease-[var(--ease-soft)] md:hidden ${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
         }`}
       >

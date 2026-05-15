@@ -4,6 +4,7 @@ import { IntegrationsApi } from "../api/client";
 import type { A1FormStep, A1InstallLink } from "../api/types";
 import { SecretInput, TextInput } from "../../components/Input";
 import { Combobox } from "../../components/Combobox";
+import { Field } from "../../components/Field";
 
 const api = new IntegrationsApi();
 
@@ -139,7 +140,7 @@ export function IntegrationsLinearPublishWizard({
       <div className="max-w-[760px] mx-auto px-4 sm:px-8 lg:px-10 py-8 lg:py-10">
         <Link
           to="/integrations/linear"
-          className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"
+          className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ← Linear integrations
         </Link>
@@ -322,7 +323,7 @@ function PickStep(props: {
         <button
           onClick={props.onContinue}
           disabled={props.working}
-          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
+          className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           {props.working ? "Working…" : "Continue"}
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
@@ -412,7 +413,7 @@ function A1CredentialsStep(props: {
           <button
             onClick={props.onSubmit}
             disabled={props.working || !props.clientId || !props.clientSecret || !props.webhookSecret}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors"
+            className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
             {props.working ? "Validating…" : "Continue"}
             <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M5 12h14M13 6l6 6-6 6" /></svg>
@@ -421,7 +422,7 @@ function A1CredentialsStep(props: {
           <button
             onClick={props.onHandoff}
             disabled={props.working}
-            className="text-[13px] text-fg-muted hover:text-brand transition-colors disabled:opacity-50"
+            className="text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] disabled:opacity-50"
           >
             Send setup link to your admin →
           </button>
@@ -466,14 +467,14 @@ function A1InstallStep({ link }: { link: A1InstallLink }) {
 
       <a
         href={link.url}
-        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover transition-colors"
+        className="inline-flex items-center gap-1.5 px-3.5 py-2 text-[13px] bg-brand text-brand-fg rounded-md font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
       >
         Install in Linear
         <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5" strokeLinecap="round" strokeLinejoin="round"><path d="M7 17 17 7M7 7h10v10" /></svg>
       </a>
 
       <details className="text-[12px] text-fg-muted mt-3">
-        <summary className="cursor-pointer hover:text-fg transition-colors">
+        <summary className="cursor-pointer hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">
           Verify the URLs Linear should now show
         </summary>
         <div className="mt-2 rounded-md border border-border bg-bg-surface/30 divide-y divide-border">
@@ -506,7 +507,7 @@ function CopyRow({ label, value, secret = false }: { label: string; value: strin
         {secret && (
           <button
             onClick={() => setReveal((r) => !r)}
-            className="text-[11px] text-fg-muted hover:text-fg transition-colors px-1.5 py-0.5 rounded"
+            className="text-[11px] text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] px-1.5 py-0.5 rounded"
             title={reveal ? "Hide" : "Reveal"}
           >
             {reveal ? "Hide" : "Show"}
@@ -514,7 +515,7 @@ function CopyRow({ label, value, secret = false }: { label: string; value: strin
         )}
         <button
           onClick={copy}
-          className={`text-[11px] px-2 py-0.5 rounded transition-colors ${
+          className={`text-[11px] px-2 py-0.5 rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
             copied
               ? "text-success bg-success-subtle"
               : "text-fg-muted hover:text-fg hover:bg-bg-surface"
@@ -528,15 +529,6 @@ function CopyRow({ label, value, secret = false }: { label: string; value: strin
 }
 
 const inputCls =
-  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
+  "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
 const selectCls = inputCls;
-
-function Field({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div>
-      <label className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
-      {children}
-    </div>
-  );
-}

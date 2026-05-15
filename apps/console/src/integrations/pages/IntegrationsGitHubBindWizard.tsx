@@ -3,6 +3,7 @@ import { useNavigate, useSearchParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { GitHubA1FormStep, GitHubA1InstallLink } from "../api/types";
 import { Combobox } from "../../components/Combobox";
+import { Field } from "../../components/Field";
 
 const api = new IntegrationsApi();
 
@@ -376,7 +377,7 @@ function ConfigForm({
         </p>
         <button
           type="submit"
-          className="shrink-0 px-5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors"
+          className="shrink-0 px-5 py-2 bg-brand text-brand-fg rounded-md text-[13px] font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           Bind on GitHub
         </button>
@@ -431,7 +432,7 @@ function InProgress({
         )}
         <button
           onClick={onRefresh}
-          className="text-[12px] text-fg-muted hover:text-brand transition-colors mt-3"
+          className="text-[12px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] mt-3"
         >
           Check now
         </button>
@@ -457,24 +458,6 @@ function Done({ livePubId, onView }: { livePubId: string | null; onView: () => v
       {livePubId && (
         <p className="mt-3 text-[11px] font-mono text-fg-subtle">publication: {livePubId}</p>
       )}
-    </div>
-  );
-}
-
-function Field({
-  label,
-  hint,
-  children,
-}: {
-  label: string;
-  hint?: string;
-  children: React.ReactNode;
-}) {
-  return (
-    <div>
-      <label className="block text-[13px] font-medium text-fg mb-1">{label}</label>
-      {children}
-      {hint && <p className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
     </div>
   );
 }

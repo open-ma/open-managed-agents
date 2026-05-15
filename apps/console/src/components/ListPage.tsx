@@ -150,7 +150,7 @@ export function ListPage<T>({
                 value={searchValue ?? ""}
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder={searchPlaceholder ?? "Search..."}
-                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-full sm:w-64"
+                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-64"
                 autoComplete="off"
                 name="oma-list-search"
               />
@@ -225,7 +225,7 @@ export function ListPage<T>({
                   <tr
                     key={getRowKey(item)}
                     onClick={onRowClick ? () => onRowClick(item) : undefined}
-                    className={`border-t border-border transition-colors ${
+                    className={`border-t border-border transition-[background-color] duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
                       onRowClick
                         ? "hover:bg-bg-surface cursor-pointer"
                         : "hover:bg-bg-surface"
@@ -253,7 +253,7 @@ export function ListPage<T>({
               <button
                 onClick={onLoadMore}
                 disabled={loadingMore}
-                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 {loadingMore ? "Loading…" : "Load more"}
               </button>

@@ -1,0 +1,44 @@
+---
+/**
+ * Pricing-tier card. Used 3× on the homepage (Free / Pro / Max). The
+ * `highlighted` prop adds the brand-bordered "Most popular" treatment
+ * so only the Pro tier gets the badge — others stay neutral.
+ */
+export interface Props {
+  name: string;
+  price: string;
+  /** Optional badge text. Renders the brand border + corner badge. */
+  badge?: string;
+  /** Bulleted feature list. HTML allowed via Astro slots if needed; for
+   *  bold-strong call-outs use the second slot pattern instead. */
+  features: string[];
+}
+
+const { name, price, badge, features } = Astro.props;
+---
+
+<div
+  class:list={[
+    "rounded-lg bg-[var(--color-bg)] p-6 relative",
+    badge
+      ? "border-2 border-[var(--color-brand)]"
+      : "border border-[var(--color-border)]",
+  ]}
+>
+  {badge && (
+    <span class="absolute -top-3 left-6 px-2 py-0.5 text-xs font-medium rounded bg-[var(--color-brand)] text-[var(--color-brand-fg)]">
+      {badge}
+    </span>
+  )}
+  <div class="text-sm uppercase tracking-wider text-[var(--color-fg-subtle)]">
+    {name}
+  </div>
+  <div class="mt-1 text-3xl font-bold">
+    {price}<span class="text-base font-normal text-[var(--color-fg-muted)]">/mo</span>
+  </div>
+  <ul class="mt-5 space-y-2 text-sm text-[var(--color-fg-muted)]">
+    {features.map((f) => (
+      <li set:html={f} />
+    ))}
+  </ul>
+</div>
