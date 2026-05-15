@@ -7,12 +7,14 @@
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-    <!-- Turnstile is loaded on the Login page; preconnect + preload here so
-         the script bytes start downloading in parallel with everything else,
-         not after React mounts the widget. Saves ~200-500ms perceived latency
-         on a cold cache. -->
+    <!-- Turnstile is loaded on the Login page only. preconnect opens the
+         TCP/TLS handshake so when the Login route mounts, the actual
+         script fetch is sub-100ms. The earlier `<link rel="preload">`
+         was too eager — every authenticated user lands on /agents (or
+         wherever) and Chrome flagged the unused preload as a perf
+         warning. preconnect alone gives 80% of the win without the
+         "preloaded but not used" noise. -->
     <link rel="preconnect" href="https://challenges.cloudflare.com" crossorigin />
-    <link rel="preload" href="https://challenges.cloudflare.com/turnstile/v0/api.js" as="script" crossorigin />
     <link
       href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500;700&display=swap"
       rel="stylesheet"

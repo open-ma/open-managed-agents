@@ -13,10 +13,10 @@
  * so it reads as a wave moving left → right rather than three pulses
  * firing in unison. animate-pulse alone (uniform) feels artificial.
  */
-const SIZE: Record<"sm" | "md" | "lg", { text: string; gap: string; dot: string }> = {
-  sm: { text: "text-[14px]", gap: "gap-[2px]", dot: "·" },
-  md: { text: "text-[18px]", gap: "gap-[3px]", dot: "·" },
-  lg: { text: "text-[32px] leading-none", gap: "gap-[4px]", dot: "·" },
+const SIZE: Record<"sm" | "md" | "lg", { text: string; gap: string; weight: string }> = {
+  sm: { text: "text-[12px]", gap: "gap-[1px]", weight: "font-medium" },
+  md: { text: "text-[14px]", gap: "gap-[2px]", weight: "font-medium" },
+  lg: { text: "text-[18px] leading-none", gap: "gap-[2px]", weight: "font-medium" },
 };
 
 interface BrandLoaderProps {
@@ -32,13 +32,13 @@ export function BrandLoader({ size = "md", label = "Loading", className = "" }: 
     <span
       role="status"
       aria-label={label}
-      className={`inline-flex items-center font-mono font-bold text-brand select-none ${s.text} ${className}`.trim()}
+      className={`inline-flex items-center font-mono ${s.weight} text-brand select-none ${s.text} ${className}`.trim()}
     >
       <span aria-hidden="true">[</span>
       <span aria-hidden="true" className={`inline-flex items-center px-[0.4em] ${s.gap}`}>
-        <span className="brand-loader-dot" style={{ animationDelay: "0ms" }}>{s.dot}</span>
-        <span className="brand-loader-dot" style={{ animationDelay: "200ms" }}>{s.dot}</span>
-        <span className="brand-loader-dot" style={{ animationDelay: "400ms" }}>{s.dot}</span>
+        <span className="brand-loader-dot" style={{ animationDelay: "0ms" }}>·</span>
+        <span className="brand-loader-dot" style={{ animationDelay: "200ms" }}>·</span>
+        <span className="brand-loader-dot" style={{ animationDelay: "400ms" }}>·</span>
       </span>
       <span aria-hidden="true">]</span>
     </span>

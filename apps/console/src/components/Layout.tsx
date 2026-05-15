@@ -8,6 +8,7 @@ import { TenantSwitcher } from "./TenantSwitcher";
 import { Logo } from "./Logo";
 import { BrandLoader } from "./BrandLoader";
 import { Avatar } from "./Avatar";
+import { NavigationProgress } from "./NavigationProgress";
 import {
   AgentIcon,
   ApiKeysIcon,
@@ -289,6 +290,7 @@ export function Layout() {
 
   return (
     <div className="flex h-screen bg-bg">
+      <NavigationProgress />
       {/*
         Autofill honeypot. Chrome / Safari ignore autoComplete="off" on
         text inputs and aggressively offer the saved login email/password
