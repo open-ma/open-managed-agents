@@ -249,7 +249,7 @@ export function EvalRunDetail() {
         </div>
       )}
 
-      <div className="border border-border rounded-lg overflow-hidden">
+      <div className="border border-border rounded-lg overflow-x-auto">
         <table className="w-full text-sm">
           <thead>
             <tr className="bg-bg-surface text-fg-subtle text-xs font-medium uppercase tracking-wider">
@@ -287,7 +287,8 @@ export function EvalRunDetail() {
                   <tr key={`${t.id}-trials`} className="border-t border-border bg-bg-surface">
                     <td />
                     <td colSpan={4} className="px-4 py-3 space-y-3">
-                      <table className="w-full text-xs">
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-xs">
                         <thead>
                           <tr className="text-fg-subtle">
                             <th className="text-left py-1 pr-3 font-medium">#</th>
@@ -333,6 +334,7 @@ export function EvalRunDetail() {
                           ))}
                         </tbody>
                       </table>
+                      </div>
 
                       {t.trials.some(tr => tr.session_id && trajectories.get(tr.session_id) && trajectories.get(tr.session_id) !== "loading" && trajectories.get(tr.session_id) !== "error") && (
                         <details>
@@ -500,16 +502,18 @@ function RewardBreakdown({
       {entries.length === 0 ? (
         <div className="text-[11px] text-fg-subtle italic">no raw_rewards recorded</div>
       ) : (
-        <table className="w-full text-[11px]">
-          <tbody>
-            {entries.map(([k, v]) => (
-              <tr key={k} className="border-t border-border/40">
-                <td className="py-0.5 pr-2 font-mono text-fg-muted">{k}</td>
-                <td className="py-0.5 text-right text-fg">{Number.isFinite(v) ? v.toFixed(2) : String(v)}</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+        <div className="overflow-x-auto">
+          <table className="w-full text-[11px]">
+            <tbody>
+              {entries.map(([k, v]) => (
+                <tr key={k} className="border-t border-border/40">
+                  <td className="py-0.5 pr-2 font-mono text-fg-muted">{k}</td>
+                  <td className="py-0.5 text-right text-fg">{Number.isFinite(v) ? v.toFixed(2) : String(v)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       )}
     </div>
   );

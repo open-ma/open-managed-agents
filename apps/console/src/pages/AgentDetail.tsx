@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
+import { Page } from "../components/Page";
 
 interface Agent {
   id: string; name: string; model: string | { id: string; speed?: string };
@@ -74,7 +75,7 @@ export function AgentDetail() {
   if (!agent) return <div className="p-10 text-fg-subtle">Loading...</div>;
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
+    <Page>
       <Link to="/agents" className="text-sm text-fg-subtle hover:text-fg-muted transition-colors">&larr; Agents</Link>
 
       <div className="flex items-start justify-between mt-2 mb-6">
@@ -153,7 +154,7 @@ export function AgentDetail() {
       {versions.length > 0 && (
         <div className="mt-8 max-w-2xl">
           <h2 className="font-display text-base font-semibold mb-2">Version History</h2>
-          <div className="border border-border rounded-lg overflow-hidden">
+          <div className="border border-border rounded-lg overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
                 <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
@@ -175,7 +176,7 @@ export function AgentDetail() {
           </div>
         </div>
       )}
-    </div>
+    </Page>
   );
 }
 

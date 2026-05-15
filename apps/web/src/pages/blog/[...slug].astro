@@ -57,7 +57,7 @@ const schemas = [
   }),
   breadcrumbSchema([
     { name: "Home", path: "/" },
-    { name: "Blog", path: "/blog" },
+    { name: "Blog", path: "/blog/" },
     { name: post.data.title, path: `/blog/${slug}/` },
   ]),
 ];
@@ -66,7 +66,7 @@ const schemas = [
 <Base
   title={post.data.title}
   description={post.data.description}
-  canonical={`/blog/${slug}`}
+  canonical={`/blog/${slug}/`}
   ogType="article"
   publishedAt={post.data.publishedAt}
   updatedAt={post.data.updatedAt}
@@ -79,9 +79,9 @@ const schemas = [
       <ol class="flex gap-2">
         <li><a href="/" class="hover:underline">Home</a></li>
         <li aria-hidden="true">/</li>
-        <li><a href="/blog" class="hover:underline">Blog</a></li>
+        <li><a href="/blog/" class="hover:underline">Blog</a></li>
         <li aria-hidden="true">/</li>
-        <li class="text-[var(--color-fg-muted)] truncate max-w-[12em]" title={post.data.title}>
+        <li class="text-[var(--color-fg-muted)] truncate max-w-[12em]" aria-current="page" title={post.data.title}>
           {post.data.title}
         </li>
       </ol>
@@ -118,12 +118,12 @@ const schemas = [
     </div>
 
     {related.length > 0 && (
-      <aside class="mt-16 pt-8 border-t border-[var(--color-border)]">
-        <h2 class="font-display text-xl font-semibold mb-5">Related posts</h2>
+      <aside class="mt-16 pt-8 border-t border-[var(--color-border)]" aria-labelledby="related-heading">
+        <h2 id="related-heading" class="font-display text-xl font-semibold mb-5">Related posts</h2>
         <div class="grid sm:grid-cols-3 gap-4">
           {related.map((r) => (
             <a
-              href={`/blog/${r.id}`}
+              href={`/blog/${r.id}/`}
               class="block border border-[var(--color-border)] rounded-lg p-4 hover:border-[var(--color-brand)] transition-colors no-underline"
             >
               <div class="text-xs text-[var(--color-fg-subtle)] mb-1">
@@ -142,7 +142,7 @@ const schemas = [
     )}
 
     <footer class="mt-12 pt-6 border-t border-[var(--color-border)] text-sm text-[var(--color-fg-muted)] flex flex-wrap gap-x-6 gap-y-2 justify-between">
-      <a href="/blog" class="hover:underline">← All posts</a>
+      <a href="/blog/" class="hover:underline">← All posts</a>
       <a href="/blog/rss.xml" class="hover:underline">Subscribe via RSS</a>
     </footer>
   </article>

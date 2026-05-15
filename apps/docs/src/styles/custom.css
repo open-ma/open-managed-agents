@@ -1,25 +1,52 @@
-/* openma docs theme — derived from logo orange #FF6B50 */
+/* openma docs theme — derived from .impeccable.md.
+   Accent matches the canonical brand coral (#FF6B50); in light mode the
+   accent darkens to #e0512f (spec's --brand-hover family) so inline body
+   links pass WCAG AA-normal contrast (4.5:1) on a white surface. The
+   logo, hero, and dark-mode accents stay coral.
+
+   Brand fonts (DM Sans, Source Serif 4, JetBrains Mono) are loaded via
+   Starlight's head[] config in astro.config.mjs — non-blocking via
+   print-onload, with a <noscript> fallback. Removed from this file so
+   the @import waterfall doesn't gate FCP. */
 
 :root {
-  --sl-hue-accent: 9;
+  /* Starlight body + mono fonts — overridden so docs uses DM Sans / JBM. */
+  --sl-font: 'DM Sans', -apple-system, 'Segoe UI', sans-serif;
+  --sl-font-system-mono: 'JetBrains Mono', 'SF Mono', Menlo, Consolas, monospace;
 
+  /* Dark-theme defaults. */
   --sl-color-accent-low: #4a1a10;
   --sl-color-accent: #ff6b50;
   --sl-color-accent-high: #ffd9d0;
 }
 
 :root[data-theme='light'] {
+  /* Light-theme accent uses the slightly darker coral so links read at
+     AA-normal contrast on white. Visually a little browner than the logo
+     coral, but accessibility wins inside long-form prose. */
   --sl-color-accent-low: #ffd9d0;
   --sl-color-accent: #e0512f;
   --sl-color-accent-high: #5a1a0a;
 }
 
-/* Slightly tighter inline-code so it doesn't dominate prose */
+/* Headings use Source Serif 4 — matches the console's font-display token.
+   Selectors target Starlight's actual DOM: page-title H1 inside
+   .content-panel, body headings inside .sl-markdown-content, and the
+   splash-template hero (h1 + .tagline). The earlier .hero-title selector
+   never matched anything in the rendered output. */
+.content-panel > .sl-container > h1,
+.sl-markdown-content :is(h2, h3, h4, h5, h6),
+.hero h1,
+.hero .tagline {
+  font-family: 'Source Serif 4', Georgia, 'Times New Roman', serif;
+}
+
+/* Slightly tighter inline-code so it doesn't dominate prose. */
 .sl-markdown-content :not(a, strong, em, del, span, input, code) + code:not(:where(.not-content *)) {
   font-size: 0.92em;
 }
 
-/* Subtle hover on sidebar links to feel more product-y */
+/* Subtle hover on sidebar links to feel more product-y. */
 .sidebar-pane a:hover {
   background-color: var(--sl-color-gray-7);
 }

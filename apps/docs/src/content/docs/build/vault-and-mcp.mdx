@@ -9,7 +9,7 @@ Mirrors the [Anthropic Managed Agents](https://www.anthropic.com/engineering/man
 
 ## Three callers, one resolver
 
-```
+```text
                     ┌──────────────────┐
                     │  Vault (D1+KV)   │  single source of truth
                     └────────┬─────────┘
@@ -52,7 +52,7 @@ If refresh itself fails (revoked refresh_token, scope change), the second upstre
 
 Tools registered as `mcp__<server>__<tool_name>` with full schemas — first-class AI SDK tools, not stringly-typed wrappers. The model picks tools by name + structured arguments; the platform handles auth and forwarding.
 
-```
+```text
 agent.mcp_tool_use:
   name: mcp__linear__list_issues
   input: { team: "OpenMA", limit: 1, orderBy: "updatedAt" }

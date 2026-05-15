@@ -80,7 +80,7 @@ function LinearBadge({ metadata }: { metadata?: Record<string, unknown> }) {
   if (!linear || (!linear.issueId && !linear.issueIdentifier)) return null;
   return (
     <span
-      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-blue-50 text-blue-700"
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-info-subtle text-info"
       title={`Linear issue ${linear.issueIdentifier ?? linear.issueId}`}
     >
       🔗 {linear.issueIdentifier ?? "Linear"}
@@ -101,7 +101,7 @@ function SlackBadge({ metadata }: { metadata?: Record<string, unknown> }) {
     : "Slack";
   return (
     <span
-      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-purple-50 text-purple-700"
+      className="inline-flex items-center gap-1 text-[11px] px-1.5 py-0.5 rounded bg-accent-violet-subtle text-accent-violet"
       title={`Slack channel ${slack.channelId}${slack.threadTs ? ` thread ${slack.threadTs}` : ""}`}
     >
       💬 {label}
@@ -457,7 +457,7 @@ export function SessionsList() {
           type="button"
           onClick={() => setFilterAgent("")}
           aria-label="Clear agent filter"
-          className="text-fg-subtle hover:text-fg text-xs px-1.5 py-1 rounded hover:bg-bg-surface transition-colors"
+          className="text-fg-subtle hover:text-fg text-xs inline-flex items-center justify-center min-w-8 min-h-8 px-2 rounded hover:bg-bg-surface transition-colors"
         >
           ×
         </button>
@@ -607,11 +607,12 @@ export function SessionsList() {
             </p>
           )}
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></label>
+            <label htmlFor="session-title" className="text-sm text-fg-muted block mb-1">Title <span className="text-fg-subtle">(optional)</span></label>
             {/* autoComplete=off + an unrecognised name to defeat Chrome /
                 Safari email autofill — first text input in the dialog
                 got pre-filled with the user's saved email otherwise. */}
             <input
+              id="session-title"
               value={form.title}
               onChange={(e) => setForm({ ...form, title: e.target.value })}
               className={inputCls}
@@ -708,8 +709,9 @@ export function SessionsList() {
                     {r.kind === "github" && (
                       <div className="space-y-2">
                         <div>
-                          <label className="text-xs text-fg-muted block mb-0.5">Repository URL <span className="text-danger">*</span></label>
+                          <label htmlFor={`session-resource-${i}-url`} className="text-xs text-fg-muted block mb-0.5">Repository URL <span className="text-danger">*</span></label>
                           <input
+                            id={`session-resource-${i}-url`}
                             value={r.url}
                             onChange={(e) => updateResource<"github">(i, { url: e.target.value })}
                             className={inputCls}
@@ -717,11 +719,12 @@ export function SessionsList() {
                           />
                         </div>
                         <div>
-                          <label className="text-xs text-fg-muted block mb-0.5">
+                          <label htmlFor={`session-resource-${i}-token`} className="text-xs text-fg-muted block mb-0.5">
                             Authorization Token <span className="text-danger">*</span>
                           </label>
                           <div className="relative">
                             <input
+                              id={`session-resource-${i}-token`}
                               type={revealedSecrets.has(`${i}:token`) ? "text" : "password"}
                               value={r.token}
                               onChange={(e) => updateResource<"github">(i, { token: e.target.value })}
@@ -742,8 +745,9 @@ export function SessionsList() {
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="text-xs text-fg-muted block mb-0.5">Checkout</label>
+                            <label htmlFor={`session-resource-${i}-checkout-type`} className="text-xs text-fg-muted block mb-0.5">Checkout</label>
                             <select
+                              id={`session-resource-${i}-checkout-type`}
                               value={r.checkout_type}
                               onChange={(e) => updateResource<"github">(i, { checkout_type: e.target.value as "none" | "branch" | "commit", checkout_name: "" })}
                               className={inputCls}
@@ -754,10 +758,11 @@ export function SessionsList() {
                             </select>
                           </div>
                           <div>
-                            <label className="text-xs text-fg-muted block mb-0.5">
+                            <label htmlFor={`session-resource-${i}-checkout-name`} className="text-xs text-fg-muted block mb-0.5">
                               {r.checkout_type === "commit" ? "Commit SHA" : "Name"}
                             </label>
                             <input
+                              id={`session-resource-${i}-checkout-name`}
                               value={r.checkout_name}
                               onChange={(e) => updateResource<"github">(i, { checkout_name: e.target.value })}
                               className={inputCls}
@@ -767,8 +772,9 @@ export function SessionsList() {
                           </div>
                         </div>
                         <div>
-                          <label className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
+                          <label htmlFor={`session-resource-${i}-mount`} className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
                           <input
+                            id={`session-resource-${i}-mount`}
                             value={r.mount_path}
                             onChange={(e) => updateResource<"github">(i, { mount_path: e.target.value })}
                             className={inputCls}
@@ -781,10 +787,11 @@ export function SessionsList() {
                       <div className="space-y-2">
                         <div>
                           <div className="flex items-center justify-between mb-0.5">
-                            <label className="text-xs text-fg-muted">File <span className="text-danger">*</span></label>
+                            <label htmlFor={`session-resource-${i}-file`} className="text-xs text-fg-muted">File <span className="text-danger">*</span></label>
                             <a href="/files" className="text-xs text-brand hover:underline">Manage files →</a>
                           </div>
                           <select
+                            id={`session-resource-${i}-file`}
                             value={r.file_id}
                             onChange={(e) => updateResource<"file">(i, { file_id: e.target.value })}
                             className={inputCls}
@@ -801,8 +808,9 @@ export function SessionsList() {
                           )}
                         </div>
                         <div>
-                          <label className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
+                          <label htmlFor={`session-resource-${i}-file-mount`} className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
                           <input
+                            id={`session-resource-${i}-file-mount`}
                             value={r.mount_path}
                             onChange={(e) => updateResource<"file">(i, { mount_path: e.target.value })}
                             className={inputCls}
@@ -815,10 +823,11 @@ export function SessionsList() {
                       <div className="space-y-2">
                         <div>
                           <div className="flex items-center justify-between mb-0.5">
-                            <label className="text-xs text-fg-muted">Store <span className="text-danger">*</span></label>
+                            <label htmlFor={`session-resource-${i}-store`} className="text-xs text-fg-muted">Store <span className="text-danger">*</span></label>
                             <a href="/memory" className="text-xs text-brand hover:underline">Manage stores →</a>
                           </div>
                           <select
+                            id={`session-resource-${i}-store`}
                             value={r.memory_store_id}
                             onChange={(e) => updateResource<"memory_store">(i, { memory_store_id: e.target.value })}
                             className={inputCls}
@@ -833,8 +842,9 @@ export function SessionsList() {
                         </div>
                         <div className="grid grid-cols-2 gap-2">
                           <div>
-                            <label className="text-xs text-fg-muted block mb-0.5">Access</label>
+                            <label htmlFor={`session-resource-${i}-access`} className="text-xs text-fg-muted block mb-0.5">Access</label>
                             <select
+                              id={`session-resource-${i}-access`}
                               value={r.access}
                               onChange={(e) => updateResource<"memory_store">(i, { access: e.target.value as "read_write" | "read_only" })}
                               className={inputCls}
@@ -844,8 +854,9 @@ export function SessionsList() {
                             </select>
                           </div>
                           <div>
-                            <label className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
+                            <label htmlFor={`session-resource-${i}-store-mount`} className="text-xs text-fg-muted block mb-0.5">Mount Path <span className="text-fg-subtle">(optional)</span></label>
                             <input
+                              id={`session-resource-${i}-store-mount`}
                               value={r.mount_path}
                               onChange={(e) => updateResource<"memory_store">(i, { mount_path: e.target.value })}
                               className={inputCls}
@@ -858,8 +869,9 @@ export function SessionsList() {
                     {r.kind === "env" && (
                       <div className="grid grid-cols-2 gap-2">
                         <div>
-                          <label className="text-xs text-fg-muted block mb-0.5">Name <span className="text-danger">*</span></label>
+                          <label htmlFor={`session-resource-${i}-env-name`} className="text-xs text-fg-muted block mb-0.5">Name <span className="text-danger">*</span></label>
                           <input
+                            id={`session-resource-${i}-env-name`}
                             value={r.name}
                             onChange={(e) => updateResource<"env">(i, { name: e.target.value })}
                             className={inputCls}
@@ -867,9 +879,10 @@ export function SessionsList() {
                           />
                         </div>
                         <div>
-                          <label className="text-xs text-fg-muted block mb-0.5">Value <span className="text-danger">*</span></label>
+                          <label htmlFor={`session-resource-${i}-env-value`} className="text-xs text-fg-muted block mb-0.5">Value <span className="text-danger">*</span></label>
                           <div className="relative">
                             <input
+                              id={`session-resource-${i}-env-value`}
                               type={revealedSecrets.has(`${i}:value`) ? "text" : "password"}
                               value={r.value}
                               onChange={(e) => updateResource<"env">(i, { value: e.target.value })}

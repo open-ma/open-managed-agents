@@ -3,6 +3,7 @@ import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
 import { useAuth } from "../lib/auth";
 import { useToast } from "../components/Toast";
+import { StatusPill } from "../components/Badge";
 
 interface Stats {
   agents: number;
@@ -80,12 +81,6 @@ export function Dashboard() {
     { label: "Model Cards", value: stats?.model_cards, to: "/model-cards" },
   ];
 
-  const statusCls = (s: string) => {
-    if (s === "running") return "bg-info-subtle text-info";
-    if (s === "idle") return "bg-success-subtle text-success";
-    return "bg-bg-surface text-fg-muted";
-  };
-
   if (loading) {
     return (
       <div className="flex-1 flex items-center justify-center">
@@ -101,7 +96,7 @@ export function Dashboard() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[1100px] mx-auto px-8 lg:px-10 py-10 lg:py-12 space-y-10">
+      <div className="max-w-[1100px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12 space-y-10">
         {/* Header */}
         <header>
           <h1 className="font-display text-[32px] leading-tight font-semibold tracking-tight text-fg">
@@ -224,7 +219,7 @@ export function Dashboard() {
 
           {recentSessions.length === 0 ? (
             <div className="border border-border rounded-lg px-6 py-10 text-center bg-bg-surface/30">
-              <div className="font-mono text-fg-subtle text-sm select-none mb-2">[ &nbsp;&nbsp; ]</div>
+              <div className="font-mono text-fg-subtle text-sm select-none mb-2" aria-hidden="true">[ &nbsp;&nbsp; ]</div>
               <p className="text-sm text-fg">No sessions yet — the stable's empty.</p>
               <p className="text-[13px] text-fg-muted mt-1">
                 Tell your agent to start one, or visit the{" "}
@@ -238,7 +233,7 @@ export function Dashboard() {
               </p>
             </div>
           ) : (
-            <div className="border border-border rounded-lg overflow-hidden">
+            <div className="border border-border rounded-lg overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-bg-surface/40 text-fg-subtle text-[11px] uppercase tracking-[0.08em]">
@@ -257,9 +252,7 @@ export function Dashboard() {
                     >
                       <td className="px-4 py-2.5 text-fg">{s.title || "Untitled"}</td>
                       <td className="px-4 py-2.5">
-                        <span className={`text-[11px] px-2 py-0.5 rounded ${statusCls(s.status)}`}>
-                          {s.status || "idle"}
-                        </span>
+                        <StatusPill status={s.status || "idle"} />
                       </td>
                       <td className="px-4 py-2.5 text-fg-muted font-mono text-[12px]">
                         {s.agent_id}

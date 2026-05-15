@@ -137,6 +137,7 @@ export function FilesList() {
           value={scopeFilter}
           onChange={(e) => setScopeFilter(e.target.value)}
           placeholder="Filter by scope (session ID)…"
+          aria-label="Filter by session scope"
           className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors w-full sm:w-72"
         />
       }

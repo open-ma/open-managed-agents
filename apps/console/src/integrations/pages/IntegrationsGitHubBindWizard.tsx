@@ -189,7 +189,7 @@ export function IntegrationsGitHubBindWizard({ loadAgents, loadEnvironments }: P
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[680px] mx-auto px-8 lg:px-10 py-10 lg:py-12">
+      <div className="max-w-[680px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12">
         <h1 className="font-display text-[28px] leading-tight font-semibold tracking-tight text-fg mb-2">
           Bind agent to GitHub
         </h1>

@@ -49,7 +49,7 @@ export function TimelineView({ events }: { events: Event[] }) {
 
   return (
     <div className="flex-1 flex min-h-0">
-      <div ref={containerRef} className="flex-1 min-w-0 overflow-y-auto px-8 py-6 space-y-3">
+      <div ref={containerRef} className="flex-1 min-w-0 overflow-y-auto px-4 sm:px-8 py-6 space-y-3">
         {turns.map((turn, i) => {
           const prev = i > 0 ? turns[i - 1] : null;
           const idleMs =
@@ -451,20 +451,21 @@ function ZoomToolbar({
   const btn = "px-2 py-0.5 rounded border hover:bg-bg-surface";
   return (
     <div className="px-4 pb-2 flex items-center gap-1 text-xs">
-      <button onClick={() => onZoomBy(0.5)} className={`${btn} border-border text-fg-muted`} title="Zoom out">
+      <button onClick={() => onZoomBy(0.5)} aria-label="Zoom out" className={`${btn} border-border text-fg-muted`} title="Zoom out">
         −
       </button>
       <button
         onClick={onAuto}
+        aria-label="Auto-pick scale by event density"
         className={`${btn} ${mode === "auto" ? "border-info text-info" : "border-border text-fg-muted"}`}
         title="Auto-pick scale by event density"
       >
         auto
       </button>
-      <button onClick={onFit} className={`${btn} border-border text-fg-muted`} title="Fit turn duration to viewport">
+      <button onClick={onFit} aria-label="Fit turn duration to viewport" className={`${btn} border-border text-fg-muted`} title="Fit turn duration to viewport">
         fit
       </button>
-      <button onClick={() => onZoomBy(2)} className={`${btn} border-border text-fg-muted`} title="Zoom in">
+      <button onClick={() => onZoomBy(2)} aria-label="Zoom in" className={`${btn} border-border text-fg-muted`} title="Zoom in">
         +
       </button>
       <span className="ml-2 font-mono text-fg-subtle">{fmtRate(pxPerMs)}</span>

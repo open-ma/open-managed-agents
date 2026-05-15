@@ -1,5 +1,6 @@
 import { type ReactNode } from "react";
 import { Button } from "./Button";
+import { Page } from "./Page";
 
 interface Column<T> {
   key: string;
@@ -105,7 +106,7 @@ export function ListPage<T>({
   const showCreate = !!onCreate && !!createLabel;
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-4 md:p-8 lg:p-10">
+    <Page>
       {/* Header */}
       <div className="flex items-start justify-between mb-6 gap-3">
         <div className="min-w-0">
@@ -262,6 +263,6 @@ export function ListPage<T>({
       )}
 
       {children}
-    </div>
+    </Page>
   );
 }

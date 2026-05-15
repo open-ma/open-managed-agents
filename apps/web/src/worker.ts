@@ -12,22 +12,36 @@ interface Env {
   ASSETS: { fetch: typeof fetch };
 }
 
-// Top-level paths that used to belong to the Console SPA when apex
-// was managed-agents. Catches old bookmarks + the few hardcoded
-// openma.dev/login links we already patched but might miss.
+// Top-level paths that belong to the Console SPA at app.openma.dev. Old
+// bookmarks, accidentally-shared apex links, and external backlinks
+// (forums, Twitter, our own historical CLI versions) all 301 to app.*
+// instead of 404'ing against the marketing site.
+//
+// Keep this list in sync with apps/console/src/main.tsx top-level
+// routes. When you add a new console route, add it here too — otherwise
+// Googlebot indexes a 404 on the apex (we hit this with /model-cards).
 const CONSOLE_PATH_PREFIXES = [
   "/login",
   "/signup",
-  "/sessions",
+  "/cli",            // CLI auth callbacks: /cli/login
+  "/connect-runtime",
   "/agents",
+  "/sessions",
+  "/files",
+  "/evals",
   "/environments",
+  "/skills",
   "/vaults",
+  "/memory",
+  "/model-cards",
+  "/api-keys",
+  "/runtimes",
+  "/integrations",
+  // Hosted-only plugin routes — listed defensively so old links keep
+  // redirecting even when the OSS build doesn't ship the page.
   "/dashboard",
   "/billing",
   "/settings",
-  "/integrations",
-  "/memory",
-  "/runtimes",
   "/usage",
 ];
 

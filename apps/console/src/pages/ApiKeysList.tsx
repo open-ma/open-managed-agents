@@ -162,10 +162,11 @@ export function ApiKeysList() {
               </div>
             )}
             <div>
-              <label className="text-sm text-fg-muted block mb-1">
+              <label htmlFor="api-key-name" className="text-sm text-fg-muted block mb-1">
                 Name (optional)
               </label>
               <input
+                id="api-key-name"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
                 className={inputCls}

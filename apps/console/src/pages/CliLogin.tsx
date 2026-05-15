@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../lib/api";
 import { Button } from "../components/Button";
+import { Logo } from "../components/Logo";
 
 // Browser-side handler for `oma auth login`. The CLI opens this URL with
 // callback + state in the query string, the user authenticates (cookie
@@ -194,11 +195,11 @@ export function CliLogin() {
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-4">
-      <div className="w-full max-w-md bg-bg-surface border border-border rounded-2xl p-8 shadow-sm">
+      <div className="w-full max-w-md bg-bg-surface border border-border rounded-xl p-8 shadow-sm">
         <div className="flex items-center gap-3 mb-6">
-          <img src="/logo.svg" alt="openma" className="h-9 shrink-0" />
+          <Logo size="md" />
           <div>
-            <div className="font-display text-lg font-semibold">Authorize CLI</div>
+            <h1 className="font-display text-lg font-semibold">Authorize CLI</h1>
             <div className="text-xs text-fg-subtle">openma command-line client</div>
           </div>
         </div>

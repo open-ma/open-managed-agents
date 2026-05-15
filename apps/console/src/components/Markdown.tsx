@@ -1,12 +1,51 @@
 import ReactMarkdown from "react-markdown";
-import rehypeHighlight from "rehype-highlight";
 import remarkGfm from "remark-gfm";
+import { createLowlight } from "lowlight";
+import { toJsxRuntime } from "hast-util-to-jsx-runtime";
+import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+import bash from "highlight.js/lib/languages/bash";
+import json from "highlight.js/lib/languages/json";
+import yaml from "highlight.js/lib/languages/yaml";
+import python from "highlight.js/lib/languages/python";
+import typescript from "highlight.js/lib/languages/typescript";
+import javascript from "highlight.js/lib/languages/javascript";
+import plaintext from "highlight.js/lib/languages/plaintext";
+
+/**
+ * Hand-rolled syntax highlighting registry. Replaces rehype-highlight,
+ * which pulls all 36+ languages from lowlight's `common` set (>500 KB
+ * gzipped). The console only renders bash/json/yaml/python/ts/js in
+ * chat output — registering only those keeps the bundle lean.
+ *
+ * To add a language: import from `highlight.js/lib/languages/<name>`
+ * and add it (plus any aliases) to the createLowlight() call.
+ */
+const lowlight = createLowlight({
+  bash,
+  sh: bash,
+  shell: bash,
+  zsh: bash,
+  json,
+  yaml,
+  yml: yaml,
+  python,
+  py: python,
+  typescript,
+  ts: typescript,
+  javascript,
+  js: javascript,
+  jsx: javascript,
+  tsx: typescript,
+  plaintext,
+  text: plaintext,
+});
+
+const jsxRuntime = { Fragment, jsx, jsxs } as Parameters<typeof toJsxRuntime>[1];
 
 export function Markdown({ children }: { children: string }) {
   return (
     <ReactMarkdown
       remarkPlugins={[remarkGfm]}
-      rehypePlugins={[rehypeHighlight]}
       components={{
         pre: ({ children }) => (
           <pre className="bg-bg-surface border border-border rounded-md p-3 overflow-x-auto my-2 text-[13px]">
@@ -15,11 +54,29 @@ export function Markdown({ children }: { children: string }) {
         ),
         code: ({ className, children, ...props }) => {
           const isInline = !className;
-          return isInline ? (
-            <code className="bg-bg-surface px-1 py-0.5 rounded text-[0.85em] font-mono" {...props}>
-              {children}
-            </code>
-          ) : (
+          if (isInline) {
+            return (
+              <code className="bg-bg-surface px-1 py-0.5 rounded text-[0.85em] font-mono" {...props}>
+                {children}
+              </code>
+            );
+          }
+          // Block code with a language hint — apply syntax highlighting if
+          // the language is in our registered set, otherwise render plain.
+          const langMatch = /language-([\w-]+)/.exec(className || "");
+          const lang = langMatch?.[1];
+          const codeText = typeof children === "string"
+            ? children
+            : Array.isArray(children) ? children.join("") : String(children ?? "");
+          if (lang && lowlight.registered(lang)) {
+            const tree = lowlight.highlight(lang, codeText.replace(/\n$/, ""));
+            return (
+              <code className={`${className} font-mono hljs`} {...props}>
+                {toJsxRuntime(tree, jsxRuntime)}
+              </code>
+            );
+          }
+          return (
             <code className={`${className} font-mono`} {...props}>
               {children}
             </code>
@@ -33,7 +90,7 @@ export function Markdown({ children }: { children: string }) {
         h2: ({ children }) => <h2 className="font-display text-base font-semibold mt-2 mb-1 text-fg">{children}</h2>,
         h3: ({ children }) => <h3 className="font-semibold mt-2 mb-1 text-fg">{children}</h3>,
         blockquote: ({ children }) => (
-          <blockquote className="border-l-3 border-border-strong pl-3 my-2 text-fg-muted">{children}</blockquote>
+          <blockquote className="border-l-2 border-border-strong pl-3 my-2 text-fg-muted">{children}</blockquote>
         ),
         table: ({ children }) => (
           <table className="border-collapse my-2 text-sm w-full">{children}</table>

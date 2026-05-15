@@ -97,7 +97,7 @@ The connection stays open. Each `data:` line is a single JSON event.
 | `agent.message` | Assistant message (whole) |
 | `agent.tool_use` / `agent.mcp_tool_use` / `agent.custom_tool_use` | Tool call (whole) |
 | `agent.tool_result` / `agent.mcp_tool_result` | Tool execution result |
-| `agent.thread_*` / `session.thread_*` | [Multiagent](/build/multiagent/) coordination |
+| `agent.thread_*` / `session.thread_*` | Multiagent coordination |
 | `span.model_request_start` / `_end` / `span.outcome_evaluation_*` | Observability |
 
 Use the official `@anthropic-ai/sdk` directly — it parses these unchanged.

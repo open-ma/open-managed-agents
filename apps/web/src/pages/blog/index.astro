@@ -13,7 +13,7 @@ function formatDate(d: Date) {
 <Base
   title="Blog"
   description="openma blog — posts about agents, infrastructure, and the people building them."
-  canonical="/blog"
+  canonical="/blog/"
 >
   <div class="max-w-3xl mx-auto px-4 py-12">
     <h1 class="font-display text-4xl font-bold mb-2">Blog</h1>
@@ -43,7 +43,7 @@ function formatDate(d: Date) {
               )}
             </div>
             <h2 class="font-display text-2xl font-semibold mb-1">
-              <a href={`/blog/${post.id}`} class="text-[var(--color-fg)]">{post.data.title}</a>
+              <a href={`/blog/${post.id}/`} class="text-[var(--color-fg)]">{post.data.title}</a>
             </h2>
             <p class="text-[var(--color-fg-muted)]">{post.data.description}</p>
           </article>

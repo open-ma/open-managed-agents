@@ -99,7 +99,7 @@ export function Modal({
         role="dialog"
         aria-modal="true"
         aria-label={title}
-        className={`bg-bg rounded-lg shadow-xl w-full ${maxWidth} max-h-[85vh] flex flex-col transition-all duration-200 ${visible ? "opacity-100 scale-100" : "opacity-0 scale-95"}`}
+        className={`bg-bg rounded-lg shadow-xl w-full ${maxWidth} max-h-[85vh] flex flex-col transition-[opacity,transform] duration-200 ${visible ? "opacity-100 scale-100" : "opacity-0 scale-95"}`}
         onClick={(e) => e.stopPropagation()}
       >
         {/* Header */}

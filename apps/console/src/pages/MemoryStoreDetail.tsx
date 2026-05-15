@@ -1,6 +1,8 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { useApi } from "../lib/api";
+import { Modal } from "../components/Modal";
+import { Page } from "../components/Page";
 
 interface MemoryStore {
   id: string;
@@ -60,7 +62,7 @@ export function MemoryStoreDetail() {
   if (!store) return <div className="flex-1 p-8 text-fg-muted">Loading...</div>;
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
+    <Page>
       <Link to="/memory" className="text-sm text-fg-muted hover:text-fg mb-4 inline-block">← Memory stores</Link>
       <div className="flex items-start justify-between mb-2">
         <div>
@@ -73,10 +75,15 @@ export function MemoryStoreDetail() {
         </div>
       </div>
 
-      <div className="border-b border-border mt-6 mb-6 flex gap-6">
+      <div role="tablist" aria-label="Memory store sections" className="border-b border-border mt-6 mb-6 flex gap-6">
         {(["memories", "versions", "settings"] as Tab[]).map((t) => (
           <button
             key={t}
+            role="tab"
+            id={`memory-tab-${t}`}
+            aria-selected={tab === t}
+            aria-controls={`memory-tabpanel-${t}`}
+            tabIndex={tab === t ? 0 : -1}
             onClick={() => setTab(t)}
             className={`pb-2 text-sm font-medium border-b-2 transition-colors ${
               tab === t
@@ -89,10 +96,22 @@ export function MemoryStoreDetail() {
         ))}
       </div>
 
-      {tab === "memories" && <MemoriesPanel storeId={storeId} archived={!!store.archived_at} />}
-      {tab === "versions" && <VersionsPanel storeId={storeId} />}
-      {tab === "settings" && <SettingsPanel store={store} archived={!!store.archived_at} />}
-    </div>
+      {tab === "memories" && (
+        <div role="tabpanel" id="memory-tabpanel-memories" aria-labelledby="memory-tab-memories">
+          <MemoriesPanel storeId={storeId} archived={!!store.archived_at} />
+        </div>
+      )}
+      {tab === "versions" && (
+        <div role="tabpanel" id="memory-tabpanel-versions" aria-labelledby="memory-tab-versions">
+          <VersionsPanel storeId={storeId} />
+        </div>
+      )}
+      {tab === "settings" && (
+        <div role="tabpanel" id="memory-tabpanel-settings" aria-labelledby="memory-tab-settings">
+          <SettingsPanel store={store} archived={!!store.archived_at} />
+        </div>
+      )}
+    </Page>
   );
 }
 
@@ -143,12 +162,14 @@ function MemoriesPanel({ storeId, archived }: { storeId: string; archived: boole
       <div className="flex gap-2 mb-4">
         <input
           placeholder="Filter by path prefix (e.g. /preferences/)"
+          aria-label="Filter by path prefix"
           value={pathPrefix}
           onChange={(e) => setPathPrefix(e.target.value)}
           className="flex-1 border border-border rounded-lg px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-border-strong"
         />
         <input
           placeholder="Depth"
+          aria-label="Depth filter"
           value={depth}
           onChange={(e) => setDepth(e.target.value.replace(/[^0-9]/g, ""))}
           className="w-24 border border-border rounded-lg px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-border-strong"
@@ -171,7 +192,7 @@ function MemoriesPanel({ storeId, archived }: { storeId: string; archived: boole
       )}
 
       {loading ? <p className="text-fg-subtle text-sm py-4">Loading...</p> : (
-        <div className="border border-border rounded-lg overflow-hidden">
+        <div className="border border-border rounded-lg overflow-x-auto">
           <table className="w-full text-sm">
             <thead>
               <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
@@ -317,127 +338,142 @@ function MemoryDetailDialog({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="bg-bg border border-border rounded-lg p-6 max-w-3xl w-full max-h-[85vh] overflow-y-auto shadow-xl"
-      >
-        <div className="flex items-start justify-between mb-3">
-          <div className="flex-1 min-w-0">
-            {editing ? (
-              <input
-                value={path}
-                onChange={(e) => setPath(e.target.value)}
-                className="w-full font-mono text-sm border border-border rounded-lg px-3 py-1.5 bg-bg outline-none focus:border-border-strong"
-              />
-            ) : (
-              <h3 className="font-mono text-sm font-semibold">{memory.path}</h3>
-            )}
-            <p className="text-fg-subtle text-xs font-mono mt-1">
-              {memory.id} · sha256={memory.content_sha256.slice(0, 16)}… · {memory.size_bytes}B
-            </p>
-          </div>
-          <button onClick={onClose} className="text-fg-muted hover:text-fg ml-3">✕</button>
-        </div>
-
-        {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
-
-        {editing ? (
-          <textarea
-            value={content}
-            onChange={(e) => setContent(e.target.value)}
-            rows={20}
-            className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-bg text-fg font-mono outline-none focus:border-border-strong"
-          />
-        ) : (
-          <pre className="whitespace-pre-wrap bg-bg-surface border border-border rounded-lg p-3 max-h-[40vh] overflow-auto text-sm font-mono text-fg">
-            {memory.content || <span className="text-fg-subtle">(empty)</span>}
-          </pre>
-        )}
-
-        <div className="flex gap-2 mt-4">
+    <Modal
+      open
+      onClose={onClose}
+      title={memory.path}
+      subtitle={`${memory.id} · sha256=${memory.content_sha256.slice(0, 16)}… · ${memory.size_bytes}B`}
+      maxWidth="max-w-3xl"
+      footer={
+        <div className="flex gap-2 w-full">
           {!archived && !editing && (
-            <button onClick={() => setEditing(true)}
-              className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">
+            <button
+              onClick={() => setEditing(true)}
+              className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+            >
               Edit
             </button>
           )}
           {editing && (
             <>
-              <button onClick={save}
-                className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">
+              <button
+                onClick={save}
+                className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+              >
                 Save
               </button>
-              <button onClick={() => { setEditing(false); setContent(memory.content); setPath(memory.path); }}
-                className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors">
+              <button
+                onClick={() => {
+                  setEditing(false);
+                  setContent(memory.content);
+                  setPath(memory.path);
+                }}
+                className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors"
+              >
                 Cancel
               </button>
             </>
           )}
           {!editing && (
-            <button onClick={() => { setShowVersions((s) => !s); if (!showVersions) loadVersions(); }}
-              className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors">
+            <button
+              onClick={() => {
+                setShowVersions((s) => !s);
+                if (!showVersions) loadVersions();
+              }}
+              className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors"
+              aria-expanded={showVersions}
+            >
               {showVersions ? "Hide" : "Show"} version history
             </button>
           )}
           {!archived && !editing && (
-            <button onClick={remove}
-              className="ml-auto px-3 py-1.5 bg-danger/10 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger/20 transition-colors">
+            <button
+              onClick={remove}
+              className="ml-auto px-3 py-1.5 bg-danger/10 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger/20 transition-colors"
+            >
               Delete memory
             </button>
           )}
         </div>
+      }
+    >
+      {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
-        {showVersions && versions && (
-          <div className="mt-4 border border-border rounded-lg overflow-hidden">
-            <table className="w-full text-xs">
-              <thead>
-                <tr className="bg-bg-surface/60 text-fg-muted uppercase tracking-wider">
-                  <th className="text-left px-3 py-2">When</th>
-                  <th className="text-left px-3 py-2">Op</th>
-                  <th className="text-left px-3 py-2">Actor</th>
-                  <th className="text-left px-3 py-2">SHA-256</th>
-                  <th className="text-right px-3 py-2"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {versions.map((v) => {
-                  const isLiveHead = v.content_sha256 && v.content_sha256 === memory.content_sha256;
-                  return (
-                    <tr key={v.id} className="border-t border-border">
-                      <td className="px-3 py-2 text-fg-muted">{new Date(v.created_at).toLocaleString()}</td>
-                      <td className="px-3 py-2 font-mono">{v.operation}{v.redacted && " · redacted"}</td>
-                      <td className="px-3 py-2 font-mono text-fg-muted">{v.actor.type}:{v.actor.id}</td>
-                      <td className="px-3 py-2 font-mono text-fg-muted">
-                        {v.content_sha256 ? v.content_sha256.slice(0, 12) + "…" : "—"}
-                        {isLiveHead && <span className="ml-2 text-brand">(head)</span>}
-                      </td>
-                      <td className="px-3 py-2 text-right">
-                        {!archived && !v.redacted && v.content !== undefined && v.content !== null && !isLiveHead && (
-                          <button onClick={() => rollback(v)}
-                            className="text-xs text-brand hover:underline mr-2">
-                            Roll back
-                          </button>
-                        )}
-                        {!archived && !v.redacted && !isLiveHead && (
-                          <button onClick={() => redact(v)}
-                            className="text-xs text-danger hover:underline">
-                            Redact
-                          </button>
-                        )}
-                      </td>
-                    </tr>
-                  );
-                })}
-                {!versions.length && (
-                  <tr><td colSpan={5} className="px-3 py-4 text-center text-fg-subtle">No versions</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        )}
-      </div>
-    </div>
+      {editing && (
+        <div className="mb-3">
+          <label htmlFor="memory-edit-path" className="sr-only">Memory path</label>
+          <input
+            id="memory-edit-path"
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            className="w-full font-mono text-sm border border-border rounded-lg px-3 py-1.5 bg-bg outline-none focus:border-border-strong"
+          />
+        </div>
+      )}
+
+      {editing ? (
+        <textarea
+          value={content}
+          onChange={(e) => setContent(e.target.value)}
+          rows={20}
+          aria-label="Memory content"
+          className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-bg text-fg font-mono outline-none focus:border-border-strong"
+        />
+      ) : (
+        <pre className="whitespace-pre-wrap bg-bg-surface border border-border rounded-lg p-3 max-h-[40vh] overflow-auto text-sm font-mono text-fg">
+          {memory.content || <span className="text-fg-subtle">(empty)</span>}
+        </pre>
+      )}
+
+      {showVersions && versions && (
+        <div className="mt-4 border border-border rounded-lg overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead>
+              <tr className="bg-bg-surface/60 text-fg-muted uppercase tracking-wider">
+                <th className="text-left px-3 py-2">When</th>
+                <th className="text-left px-3 py-2">Op</th>
+                <th className="text-left px-3 py-2">Actor</th>
+                <th className="text-left px-3 py-2">SHA-256</th>
+                <th className="text-right px-3 py-2"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {versions.map((v) => {
+                const isLiveHead = v.content_sha256 && v.content_sha256 === memory.content_sha256;
+                return (
+                  <tr key={v.id} className="border-t border-border">
+                    <td className="px-3 py-2 text-fg-muted">{new Date(v.created_at).toLocaleString()}</td>
+                    <td className="px-3 py-2 font-mono">{v.operation}{v.redacted && " · redacted"}</td>
+                    <td className="px-3 py-2 font-mono text-fg-muted">{v.actor.type}:{v.actor.id}</td>
+                    <td className="px-3 py-2 font-mono text-fg-muted">
+                      {v.content_sha256 ? v.content_sha256.slice(0, 12) + "…" : "—"}
+                      {isLiveHead && <span className="ml-2 text-brand">(head)</span>}
+                    </td>
+                    <td className="px-3 py-2 text-right">
+                      {!archived && !v.redacted && v.content !== undefined && v.content !== null && !isLiveHead && (
+                        <button onClick={() => rollback(v)}
+                          className="text-xs text-brand hover:underline mr-2">
+                          Roll back
+                        </button>
+                      )}
+                      {!archived && !v.redacted && !isLiveHead && (
+                        <button onClick={() => redact(v)}
+                          className="text-xs text-danger hover:underline">
+                          Redact
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+              {!versions.length && (
+                <tr><td colSpan={5} className="px-3 py-4 text-center text-fg-subtle">No versions</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </Modal>
   );
 }
 
@@ -464,7 +500,7 @@ function VersionsPanel({ storeId }: { storeId: string }) {
   if (!versions.length) return <p className="text-fg-subtle text-sm py-4">No versions yet.</p>;
 
   return (
-    <div className="border border-border rounded-lg overflow-hidden">
+    <div className="border border-border rounded-lg overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
           <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
@@ -562,40 +598,48 @@ function WriteMemoryDialog({
   };
 
   return (
-    <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4" onClick={onClose}>
-      <div
-        onClick={(e) => e.stopPropagation()}
-        className="bg-bg border border-border rounded-lg p-6 max-w-2xl w-full shadow-xl"
-      >
-        <div className="flex items-start justify-between mb-3">
-          <h3 className="font-display text-lg font-semibold">New memory</h3>
-          <button onClick={onClose} className="text-fg-muted hover:text-fg">✕</button>
-        </div>
+    <Modal
+      open
+      onClose={onClose}
+      title="New memory"
+      maxWidth="max-w-2xl"
+      footer={
+        <>
+          <button
+            onClick={onClose}
+            className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors"
+          >
+            Cancel
+          </button>
+          <button
+            onClick={save}
+            className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors"
+          >
+            Create
+          </button>
+        </>
+      }
+    >
+      {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
 
-        {error && <ErrorBanner message={error} onDismiss={() => setError(null)} />}
+      <label htmlFor="new-memory-path" className="block text-xs font-medium uppercase tracking-wider text-fg-muted mb-1">Path</label>
+      <input
+        id="new-memory-path"
+        placeholder="/preferences/formatting.md"
+        value={path}
+        onChange={(e) => setPath(e.target.value)}
+        className="w-full font-mono border border-border rounded-lg px-3 py-2 text-sm mb-3 bg-bg text-fg outline-none focus:border-border-strong"
+      />
 
-        <label className="block text-xs font-medium uppercase tracking-wider text-fg-muted mb-1">Path</label>
-        <input
-          placeholder="/preferences/formatting.md"
-          value={path}
-          onChange={(e) => setPath(e.target.value)}
-          className="w-full font-mono border border-border rounded-lg px-3 py-2 text-sm mb-3 bg-bg text-fg outline-none focus:border-border-strong"
-        />
-
-        <label className="block text-xs font-medium uppercase tracking-wider text-fg-muted mb-1">Content (max 100KB)</label>
-        <textarea
-          value={content}
-          onChange={(e) => setContent(e.target.value)}
-          rows={14}
-          className="w-full border border-border rounded-lg px-3 py-2 text-sm mb-3 bg-bg text-fg font-mono outline-none focus:border-border-strong"
-        />
-
-        <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors">Cancel</button>
-          <button onClick={save} className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors">Create</button>
-        </div>
-      </div>
-    </div>
+      <label htmlFor="new-memory-content" className="block text-xs font-medium uppercase tracking-wider text-fg-muted mb-1">Content (max 100KB)</label>
+      <textarea
+        id="new-memory-content"
+        value={content}
+        onChange={(e) => setContent(e.target.value)}
+        rows={14}
+        className="w-full border border-border rounded-lg px-3 py-2 text-sm bg-bg text-fg font-mono outline-none focus:border-border-strong"
+      />
+    </Modal>
   );
 }
 

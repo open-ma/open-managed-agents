@@ -58,8 +58,8 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
 
     <!-- Color scheme — let browsers pick chrome that matches our theme. -->
     <meta name="color-scheme" content="light dark" />
-    <meta name="theme-color" content="#ea580c" media="(prefers-color-scheme: light)" />
-    <meta name="theme-color" content="#fb923c" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#ff6b50" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#ff6b50" media="(prefers-color-scheme: dark)" />
 
     <!-- Favicons + manifest. SVG primary; PNG fallbacks for Safari /
          Android home screen. The PNG set is generated from
@@ -78,14 +78,44 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
       }
     </script>
 
+    <!-- Font-readiness gate. Brand fonts arrive ~200-500ms after first
+         paint; without this the page renders in system-ui, then visibly
+         swaps to DM Sans / Source Serif 4 ("FOUT"). Hide body via CSS
+         until document.fonts.ready resolves, then fade in. 1500ms hard
+         timeout covers font-load failure (offline, blocked CDN). -->
+    <script is:inline>
+      const FONT_TIMEOUT_MS = 1500;
+      const reveal = () => document.documentElement.classList.add("fonts-loaded");
+      if ("fonts" in document) {
+        Promise.race([
+          document.fonts.ready,
+          new Promise((r) => setTimeout(r, FONT_TIMEOUT_MS)),
+        ]).then(reveal);
+      } else {
+        reveal();
+      }
+    </script>
+
     <!-- Fonts: same set Console uses, so cross-domain feels consistent.
-         display=swap so text renders before the font lands (avoids CLS). -->
+         Trimmed to weights actually used (no italics, no opsz axis): Source
+         Serif 4 needs 400/600/700, DM Sans needs 400/500/600, JetBrains Mono
+         needs 400/500/700. Loaded via the print-onload pattern so the
+         stylesheet is non-blocking; the <noscript> fallback keeps it
+         working without JS. display=swap on each face avoids CLS. -->
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link
-      href="https://fonts.googleapis.com/css2?family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;0,8..60,700;1,8..60,400&family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;1,9..40,400&family=JetBrains+Mono:wght@400;500;700&display=swap"
       rel="stylesheet"
+      href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      media="print"
+      onload="this.media='all'"
     />
+    <noscript>
+      <link
+        rel="stylesheet"
+        href="https://fonts.googleapis.com/css2?family=Source+Serif+4:wght@400;600;700&family=DM+Sans:wght@400;500;600&family=JetBrains+Mono:wght@400;500;700&display=swap"
+      />
+    </noscript>
 
     <!-- Open Graph -->
     <meta property="og:title" content={fullTitle} />
@@ -123,39 +153,198 @@ const allSchemas = [organizationSchema(), websiteSchema(), ...schemas];
     ))}
   </head>
   <body class="bg-bg text-fg">
+    <!-- Skip-to-content for keyboard users. sr-only by default, becomes
+         visible on :focus-visible (next focusable element after document
+         start), so the very first Tab press exposes it. -->
+    <a
+      href="#main"
+      class="sr-only focus-visible:not-sr-only focus-visible:fixed focus-visible:top-3 focus-visible:left-3 focus-visible:z-50 focus-visible:px-3 focus-visible:py-2 focus-visible:rounded-md focus-visible:bg-[var(--color-fg)] focus-visible:text-[var(--color-bg)] focus-visible:font-medium focus-visible:no-underline"
+    >
+      Skip to content
+    </a>
+
     <header class="border-b border-[var(--color-border)]">
-      <div class="max-w-5xl mx-auto px-4 py-4 flex items-center justify-between">
-        <a href="/" class="flex items-center gap-2 text-fg hover:text-fg" aria-label="Open Managed Agents — home">
+      <div class="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-3">
+        <a
+          href="/"
+          class="flex items-center gap-2 text-[var(--color-brand)] hover:text-[var(--color-brand-hover)] py-1.5"
+          aria-label="Open Managed Agents — home"
+        >
           <img src="/logo.svg" alt="" class="h-7" width="28" height="28" />
           <span class="font-mono font-bold">openma</span>
         </a>
-        <nav class="flex items-center gap-5 text-sm" aria-label="Primary">
-          <a href="/blog">Blog</a>
-          <a href="https://docs.openma.dev">Docs</a>
-          <a href="https://github.com/open-ma/open-managed-agents" target="_blank" rel="noopener">GitHub</a>
+
+        <!-- Desktop nav -->
+        <nav class="hidden md:flex items-center gap-1 text-sm" aria-label="Primary">
+          <a href="/blog/" class="px-3 py-2 rounded-md text-[var(--color-fg)] hover:text-[var(--color-brand)]">Blog</a>
+          <a href="https://docs.openma.dev" class="px-3 py-2 rounded-md text-[var(--color-fg)] hover:text-[var(--color-brand)]">Docs</a>
+          <a
+            href="https://github.com/open-ma/open-managed-agents"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="px-3 py-2 rounded-md text-[var(--color-fg)] hover:text-[var(--color-brand)]"
+            >GitHub</a
+          >
+          <button
+            type="button"
+            data-theme-toggle
+            aria-label="Toggle color theme"
+            aria-pressed="false"
+            title="Toggle color theme"
+            class="ml-1 inline-flex items-center justify-center w-10 h-10 rounded-md text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-bg-surface)] transition-colors"
+          >
+            <!-- Sun (visible in dark mode) -->
+            <svg
+              class="hidden dark:block w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <circle cx="12" cy="12" r="4" />
+              <path
+                stroke-linecap="round"
+                d="M12 3v1.5M12 19.5V21M3 12h1.5M19.5 12H21M5.6 5.6l1.1 1.1M17.3 17.3l1.1 1.1M5.6 18.4l1.1-1.1M17.3 6.7l1.1-1.1"
+              />
+            </svg>
+            <!-- Moon (visible in light mode) -->
+            <svg
+              class="block dark:hidden w-4 h-4"
+              fill="none"
+              stroke="currentColor"
+              stroke-width="2"
+              viewBox="0 0 24 24"
+              aria-hidden="true"
+            >
+              <path
+                stroke-linecap="round"
+                stroke-linejoin="round"
+                d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z"
+              />
+            </svg>
+          </button>
           <a
             href="https://app.openma.dev/login"
-            class="px-3 py-1.5 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
+            class="ml-2 px-3 py-2 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
             >Sign in</a
           >
         </nav>
+
+        <!-- Mobile: theme toggle + hamburger via <details>. JS-free; the
+             <summary> handles toggle. Closes on backdrop click via the
+             absolute panel design + click-outside detection in the
+             inline script below. -->
+        <div class="md:hidden flex items-center gap-1">
+          <button
+            type="button"
+            data-theme-toggle
+            aria-label="Toggle color theme"
+            aria-pressed="false"
+            class="inline-flex items-center justify-center w-11 h-11 rounded-md text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-bg-surface)] transition-colors"
+          >
+            <svg class="hidden dark:block w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <circle cx="12" cy="12" r="4" />
+              <path stroke-linecap="round" d="M12 3v1.5M12 19.5V21M3 12h1.5M19.5 12H21M5.6 5.6l1.1 1.1M17.3 17.3l1.1 1.1M5.6 18.4l1.1-1.1M17.3 6.7l1.1-1.1" />
+            </svg>
+            <svg class="block dark:hidden w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8z" />
+            </svg>
+          </button>
+          <details class="relative" data-mobile-menu>
+            <summary
+              class="list-none inline-flex items-center justify-center w-11 h-11 rounded-md text-[var(--color-fg-muted)] hover:text-[var(--color-fg)] hover:bg-[var(--color-bg-surface)] transition-colors cursor-pointer"
+              aria-label="Open menu"
+            >
+              <svg class="block w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" d="M4 7h16M4 12h16M4 17h16" />
+              </svg>
+            </summary>
+            <nav
+              class="absolute right-0 top-full mt-2 min-w-[180px] py-2 bg-[var(--color-bg)] border border-[var(--color-border)] rounded-md shadow-lg flex flex-col text-sm z-40"
+              aria-label="Mobile primary"
+            >
+              <a href="/blog/" class="block px-4 py-3 hover:bg-[var(--color-bg-surface)]">Blog</a>
+              <a href="https://docs.openma.dev" class="block px-4 py-3 hover:bg-[var(--color-bg-surface)]">Docs</a>
+              <a
+                href="https://github.com/open-ma/open-managed-agents"
+                target="_blank"
+                rel="noopener noreferrer"
+                class="block px-4 py-3 hover:bg-[var(--color-bg-surface)]"
+                >GitHub</a
+              >
+              <a
+                href="https://app.openma.dev/login"
+                class="block mx-2 mt-1 px-3 py-3 rounded-md text-center bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
+                >Sign in</a
+              >
+            </nav>
+          </details>
+        </div>
       </div>
     </header>
 
-    <main>
+    <main id="main">
       <slot />
     </main>
 
     <footer class="border-t border-[var(--color-border)] mt-20">
       <div class="max-w-5xl mx-auto px-4 py-8 text-sm text-[var(--color-fg-muted)] flex flex-wrap gap-x-8 gap-y-2 justify-between">
         <div>© {new Date().getFullYear()} Open Managed Agents. Apache 2.0 licensed.</div>
-        <nav class="flex gap-5" aria-label="Footer">
-          <a href="/blog">Blog</a>
-          <a href="https://docs.openma.dev">Docs</a>
-          <a href="https://github.com/open-ma/open-managed-agents">GitHub</a>
-          <a href="/blog/rss.xml">RSS</a>
+        <nav class="flex flex-wrap gap-x-3 gap-y-1" aria-label="Footer">
+          <a href="/blog/" class="py-2 px-2 -mx-2 rounded hover:bg-[var(--color-bg-surface)]">Blog</a>
+          <a href="https://docs.openma.dev" class="py-2 px-2 rounded hover:bg-[var(--color-bg-surface)]">Docs</a>
+          <a
+            href="https://github.com/open-ma/open-managed-agents"
+            target="_blank"
+            rel="noopener noreferrer"
+            class="py-2 px-2 rounded hover:bg-[var(--color-bg-surface)]"
+            >GitHub</a
+          >
+          <a href="/blog/rss.xml" class="py-2 px-2 rounded hover:bg-[var(--color-bg-surface)]">RSS</a>
         </nav>
       </div>
     </footer>
+
+    <!-- Theme toggle: writes localStorage and flips .dark on <html>.
+         Pairs with the FOUC-free bootstrap script in <head>. Also closes
+         the mobile menu when a link inside it is clicked or when clicking
+         outside, since <details> doesn't auto-close on navigation. -->
+    <script is:inline>
+      // Sync theme-toggle aria-pressed with current theme on load + after each click.
+      const syncThemePressed = () => {
+        const isDark = document.documentElement.classList.contains('dark');
+        for (const btn of document.querySelectorAll('[data-theme-toggle]')) {
+          btn.setAttribute('aria-pressed', String(isDark));
+        }
+      };
+      syncThemePressed();
+      for (const btn of document.querySelectorAll('[data-theme-toggle]')) {
+        btn.addEventListener('click', () => {
+          const isDark = document.documentElement.classList.toggle('dark');
+          localStorage.setItem('theme', isDark ? 'dark' : 'light');
+          syncThemePressed();
+        });
+      }
+      const menu = document.querySelector('[data-mobile-menu]');
+      if (menu) {
+        const summary = menu.querySelector('summary');
+        // Flip aria-label when the disclosure opens/closes so SR users get
+        // honest "Open menu" / "Close menu" feedback instead of stale text.
+        const syncMenuLabel = () => {
+          if (summary) summary.setAttribute('aria-label', menu.open ? 'Close menu' : 'Open menu');
+        };
+        menu.addEventListener('toggle', syncMenuLabel);
+        syncMenuLabel();
+        // Click outside closes
+        document.addEventListener('click', (e) => {
+          if (menu.open && !menu.contains(e.target)) menu.open = false;
+        });
+        // Click on a link inside the menu closes (in case of in-page nav)
+        for (const a of menu.querySelectorAll('a')) {
+          a.addEventListener('click', () => { menu.open = false; });
+        }
+      }
+    </script>
   </body>
 </html>

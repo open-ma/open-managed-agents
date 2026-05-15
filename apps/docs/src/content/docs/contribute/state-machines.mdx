@@ -16,7 +16,7 @@ fastest way to debug "why didn't my session resume."
 Three states. Status is **derived**, not stored — there's no
 `state.status` field for code paths to mutate inconsistently.
 
-```
+```text
                            +-----------+
               first /init  |   idle    |
         ----------------->  |           |  <----------------+
@@ -97,7 +97,7 @@ OmaSandbox is the container Durable Object (extends `Sandbox` from
 SessionDO directly — SessionDO just makes RPC calls (`exec`, `readFile`,
 `setOutboundHandler`, etc.) and the platform handles boot/sleep/destroy.
 
-```
+```text
                         +---------+
               first RPC |  cold   |
               -------->  |  (no    |
@@ -152,8 +152,8 @@ When `interceptHttps = true`, the container's PID 1 polls
 startup. The cert is only pushed by the Cloudflare platform once
 SessionDO calls `sandbox.setOutboundHandler(...)`. If you skip that
 call, the cert never lands and PID 1 exits with "Certificate not
-found." See the
-[CF sandbox cert push](#) note for the bisection that got us here.
+found." This is the bisected behavior on @cloudflare/sandbox versions
+prior to the fix; track upstream changes in the sandbox SDK release notes.
 
 The warmup sequence in SessionDO's `warmUpSandbox`:
 
@@ -173,7 +173,7 @@ The warmup sequence in SessionDO's `warmUpSandbox`:
 
 ### Outbound traffic (active state)
 
-```
+```text
 container's libcurl issues HTTPS request
   -> CF Sandbox MITM
        -> outboundByHost lookup (static):
@@ -216,7 +216,7 @@ only path that takes a final snapshot before the container goes away.
 
 ## How the two interact
 
-```
+```text
 SessionDO                                   OmaSandbox (container DO)
 =========                                   =========================
 warmUpSandbox()

@@ -2,6 +2,15 @@ import { defineConfig } from 'astro/config';
 import starlight from '@astrojs/starlight';
 import mdx from '@astrojs/mdx';
 
+// Brand fonts — DM Sans (body), Source Serif 4 (display headings),
+// JetBrains Mono (code). Loaded via Starlight's head[] config rather
+// than @import inside customCss so the CSS waterfall (custom.css → @import
+// fonts.googleapis.com → fonts.gstatic.com) collapses into parallel
+// requests. print-onload makes the stylesheet non-blocking; the
+// <noscript> fallback keeps it working without JS. Same pattern web uses.
+const FONT_HREF =
+  'https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&family=Source+Serif+4:wght@500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap';
+
 export default defineConfig({
   site: 'https://docs.openma.dev',
   integrations: [
@@ -14,6 +23,33 @@ export default defineConfig({
       },
       favicon: '/favicon.svg',
       customCss: ['./src/styles/custom.css'],
+      head: [
+        {
+          tag: 'link',
+          attrs: { rel: 'preconnect', href: 'https://fonts.googleapis.com' },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'preconnect',
+            href: 'https://fonts.gstatic.com',
+            crossorigin: '',
+          },
+        },
+        {
+          tag: 'link',
+          attrs: {
+            rel: 'stylesheet',
+            href: FONT_HREF,
+            media: 'print',
+            onload: "this.media='all'",
+          },
+        },
+        {
+          tag: 'noscript',
+          content: `<link rel="stylesheet" href="${FONT_HREF}">`,
+        },
+      ],
       social: [
         {
           icon: 'github',
@@ -83,6 +119,10 @@ export default defineConfig({
           ],
         },
         {
+          // ↗ glyph in label is load-bearing: Starlight 0.38.4 doesn't
+          // paint an external-link affordance on sidebar entries, so
+          // without this prefix the Console link looks identical to
+          // internal docs links.
           label: '↗ Console',
           link: 'https://app.openma.dev',
           attrs: { target: '_blank', rel: 'noopener' },

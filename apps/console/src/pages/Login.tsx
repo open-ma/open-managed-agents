@@ -4,6 +4,7 @@ import { authClient } from "../lib/auth-client";
 import { useAuth } from "../lib/auth";
 import { useToast } from "../components/Toast";
 import { Turnstile } from "../components/Turnstile";
+import { Logo } from "../components/Logo";
 import { setActiveTenantId } from "../lib/api";
 
 // Clear browser-cached tenant pin on every successful auth transition.
@@ -363,7 +364,7 @@ export function Login() {
       <div className="w-full max-w-sm space-y-6">
         {/* Header */}
         <div className="text-center">
-          <img src="/logo.svg" alt="openma" className="h-10 mx-auto" />
+          <Logo size="lg" className="mx-auto" />
           <h1 className="font-display text-xl font-semibold text-fg mt-4">
             {titles[mode]}
           </h1>
@@ -417,8 +418,9 @@ export function Login() {
           {/* Name — signup only */}
           {mode === "signup" && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Name</label>
+              <label htmlFor="auth-name" className="text-sm text-fg-muted block mb-1">Name</label>
               <input
+                id="auth-name"
                 type="text"
                 value={name}
                 onChange={(e) => setName(e.target.value)}
@@ -431,8 +433,9 @@ export function Login() {
           {/* Email — non-OTP modes */}
           {!isOtpMode && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Email</label>
+              <label htmlFor="auth-email" className="text-sm text-fg-muted block mb-1">Email</label>
               <input
+                id="auth-email"
                 type="email"
                 value={email}
                 onChange={(e) => setEmail(e.target.value)}
@@ -455,7 +458,7 @@ export function Login() {
           {(mode === "login" || mode === "signup") && (
             <div>
               <div className="flex items-center justify-between mb-1">
-                <label className="text-sm text-fg-muted">Password</label>
+                <label htmlFor="auth-password" className="text-sm text-fg-muted">Password</label>
                 {mode === "login" && (
                   <button
                     type="button"
@@ -470,6 +473,7 @@ export function Login() {
                 )}
               </div>
               <input
+                id="auth-password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}
@@ -489,10 +493,11 @@ export function Login() {
           {/* OTP input */}
           {isOtpMode && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">
+              <label htmlFor="auth-otp" className="text-sm text-fg-muted block mb-1">
                 Verification code
               </label>
               <input
+                id="auth-otp"
                 ref={otpRef}
                 type="text"
                 inputMode="numeric"
@@ -513,10 +518,11 @@ export function Login() {
           {/* New password — reset-otp */}
           {mode === "reset-otp" && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">
+              <label htmlFor="auth-new-password" className="text-sm text-fg-muted block mb-1">
                 New password
               </label>
               <input
+                id="auth-new-password"
                 type="password"
                 value={password}
                 onChange={(e) => setPassword(e.target.value)}

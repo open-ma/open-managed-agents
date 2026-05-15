@@ -83,6 +83,10 @@ export function TenantSwitcher() {
     <>
       <div className="px-3 pt-1 pb-2 relative" ref={dropdownRef}>
         <button
+          type="button"
+          aria-haspopup="menu"
+          aria-expanded={open}
+          aria-label="Switch workspace"
           onClick={() => setOpen((o) => !o)}
           className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-bg-surface transition-colors text-left group"
         >
@@ -99,17 +103,20 @@ export function TenantSwitcher() {
               </div>
             )}
           </div>
-          <svg className="w-3.5 h-3.5 text-fg-subtle shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
+          <svg className="w-3.5 h-3.5 text-fg-subtle shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24" aria-hidden="true">
             <polyline points="6 9 12 15 18 9" />
           </svg>
         </button>
 
         {open && (
-          <div className="absolute left-3 right-3 top-full mt-1 z-30 bg-bg border border-border rounded-lg shadow-lg overflow-hidden">
+          <div role="menu" aria-label="Workspaces" className="absolute left-3 right-3 top-full mt-1 z-30 bg-bg border border-border rounded-lg shadow-lg overflow-hidden">
             <div className="max-h-72 overflow-y-auto py-1">
               {tenants.map((t) => (
                 <button
                   key={t.id}
+                  type="button"
+                  role="menuitemradio"
+                  aria-checked={t.id === active}
                   onClick={() => switchTo(t.id)}
                   className={`w-full text-left px-3 py-2 text-sm hover:bg-bg-surface flex items-center gap-2 ${t.id === active ? "bg-bg-surface/60" : ""}`}
                 >
@@ -196,10 +203,11 @@ function CreateTenantModal({
           and integrations. You'll be the owner of the new one.
         </p>
         <div>
-          <label className="block text-xs uppercase tracking-wider text-fg-subtle mb-1">
+          <label htmlFor="tenant-create-name" className="block text-xs uppercase tracking-wider text-fg-subtle mb-1">
             Name
           </label>
           <input
+            id="tenant-create-name"
             value={name}
             onChange={(e) => setName(e.target.value)}
             onKeyDown={(e) => e.key === "Enter" && submit()}

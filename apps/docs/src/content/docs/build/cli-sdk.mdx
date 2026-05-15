@@ -119,7 +119,7 @@ The openma API is **wire-compatible with [Anthropic's Managed Agents API](https:
     import Anthropic from "@anthropic-ai/sdk";
 
     const client = new Anthropic({
-      baseURL: "https://openma.dev",
+      baseURL: "https://app.openma.dev",
       apiKey: process.env.OMA_API_KEY!,
     });
 
@@ -145,7 +145,7 @@ The openma API is **wire-compatible with [Anthropic's Managed Agents API](https:
     from anthropic import Anthropic
 
     client = Anthropic(
-        base_url="https://openma.dev",
+        base_url="https://app.openma.dev",
         api_key=os.environ["OMA_API_KEY"],
     )
 
@@ -176,7 +176,7 @@ The openma API is **wire-compatible with [Anthropic's Managed Agents API](https:
     )
 
     client := anthropic.NewClient(
-        option.WithBaseURL("https://openma.dev"),
+        option.WithBaseURL("https://app.openma.dev"),
         option.WithAPIKey(os.Getenv("OMA_API_KEY")),
     )
 
@@ -245,7 +245,7 @@ The Stainless-generated SDKs in every language pass unknown body fields through 
     import Anthropic from "@anthropic-ai/sdk";
 
     const client = new Anthropic({
-      baseURL: "https://openma.dev",
+      baseURL: "https://app.openma.dev",
       apiKey: process.env.OMA_API_KEY!,
     });
 
@@ -265,7 +265,7 @@ The Stainless-generated SDKs in every language pass unknown body fields through 
     from anthropic import Anthropic
 
     client = Anthropic(
-        base_url="https://openma.dev",
+        base_url="https://app.openma.dev",
         api_key=os.environ["OMA_API_KEY"],
     )
 
@@ -290,7 +290,7 @@ The Stainless-generated SDKs in every language pass unknown body fields through 
     )
 
     client := anthropic.NewClient(
-        option.WithBaseURL("https://openma.dev"),
+        option.WithBaseURL("https://app.openma.dev"),
         option.WithAPIKey(os.Getenv("OMA_API_KEY")),
     )
 

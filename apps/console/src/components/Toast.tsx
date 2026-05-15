@@ -95,7 +95,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
 
   return (
     <div
-      className={`pointer-events-auto flex items-center gap-2.5 pl-3 pr-2 py-2 rounded-md border border-border bg-bg shadow-[0_4px_12px_-4px_rgb(0_0_0/0.12)] text-[13px] text-fg min-w-[260px] max-w-[380px] transition-all duration-200 ease-out ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"}`}
+      className={`pointer-events-auto flex items-center gap-2.5 pl-3 pr-2 py-2 rounded-md border border-border bg-bg shadow-[var(--shadow-md)] text-[13px] text-fg min-w-[260px] max-w-[380px] transition-[opacity,transform] duration-200 ease-out ${visible ? "opacity-100 translate-y-0" : "opacity-0 translate-y-1"}`}
       role="alert"
     >
       <span className={`shrink-0 ${iconColor[toast.type]}`}>{icons[toast.type]}</span>

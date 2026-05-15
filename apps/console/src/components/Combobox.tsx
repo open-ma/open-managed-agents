@@ -277,6 +277,9 @@ export function Combobox<T>({
       <button
         ref={triggerRef}
         type="button"
+        role="combobox"
+        aria-haspopup="listbox"
+        aria-expanded={open}
         disabled={disabled}
         onClick={() => setOpen((v) => !v)}
         className={

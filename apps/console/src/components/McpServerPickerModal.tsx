@@ -89,6 +89,8 @@ export function McpServerPickerModal({
                   <img
                     src={entry.icon}
                     alt=""
+                    loading="lazy"
+                    decoding="async"
                     className="w-5 h-5 rounded shrink-0"
                     onError={(e) => {
                       (e.target as HTMLImageElement).style.display = "none";

@@ -5,6 +5,7 @@ import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import { authClient } from "../lib/auth-client";
 import { TenantSwitcher } from "./TenantSwitcher";
+import { Logo } from "./Logo";
 import {
   AgentIcon,
   ApiKeysIcon,
@@ -89,6 +90,7 @@ const navGroups: NavGroup[] = [
 function ChevronIcon({ open }: { open: boolean }) {
   return (
     <ChevronDownIcon
+      aria-hidden="true"
       className={`w-3.5 h-3.5 text-fg-subtle transition-transform duration-200 ${open ? "rotate-0" : "-rotate-90"}`}
     />
   );
@@ -96,9 +98,7 @@ function ChevronIcon({ open }: { open: boolean }) {
 
 /* ── Logo ── */
 function LogoMark() {
-  return (
-    <img src="/logo.svg" alt="openma" className="h-8 shrink-0" />
-  );
+  return <Logo size="sm" />;
 }
 
 /* ── Theme toggle ── */
@@ -141,11 +141,14 @@ function NavGroup({
   defaultOpen?: boolean;
 }) {
   const [open, setOpen] = useState(defaultOpen);
+  const panelId = `sidebar-group-${label.toLowerCase().replace(/\s+/g, "-")}`;
 
   return (
     <div>
       <button
         onClick={() => setOpen(!open)}
+        aria-expanded={open}
+        aria-controls={panelId}
         className="flex items-center justify-between w-full px-3 py-1.5 text-xs font-medium text-fg-subtle uppercase tracking-wider hover:text-fg-muted transition-colors"
       >
         {label}
@@ -153,7 +156,7 @@ function NavGroup({
       </button>
 
       {open && (
-        <div className="mt-0.5 space-y-0.5">
+        <div id={panelId} className="mt-0.5 space-y-0.5">
           {items.map((item) => (
             <NavLink
               key={item.to}
@@ -217,7 +220,8 @@ function UserMenu() {
       <button
         onClick={handleSignOut}
         title="Sign out"
-        className="p-1 text-fg-subtle hover:text-fg rounded transition-colors shrink-0"
+        aria-label="Sign out"
+        className="inline-flex items-center justify-center w-9 h-9 text-fg-subtle hover:text-fg hover:bg-bg-surface rounded transition-colors shrink-0"
       >
         <svg className="w-4 h-4" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
           <path strokeLinecap="round" strokeLinejoin="round" d="M17 16l4-4m0 0l-4-4m4 4H7m6 4v1a3 3 0 01-3 3H6a3 3 0 01-3-3V7a3 3 0 013-3h4a3 3 0 013 3v1" />
@@ -341,7 +345,8 @@ export function Layout() {
         {/* Close button */}
         <button
           onClick={() => setSidebarOpen(false)}
-          className="absolute top-4 right-3 p-1 text-fg-muted hover:text-fg rounded-md"
+          aria-label="Close menu"
+          className="absolute top-3 right-3 inline-flex items-center justify-center w-10 h-10 text-fg-muted hover:text-fg hover:bg-bg-surface rounded-md"
         >
           <CloseIcon />
         </button>
@@ -354,7 +359,8 @@ export function Layout() {
         <div className="flex items-center gap-3 px-4 py-3 border-b border-border md:hidden">
           <button
             onClick={() => setSidebarOpen(true)}
-            className="p-1 text-fg-muted hover:text-fg rounded-md"
+            aria-label="Open menu"
+            className="inline-flex items-center justify-center w-10 h-10 text-fg-muted hover:text-fg hover:bg-bg-surface rounded-md"
           >
             <MenuIcon />
           </button>

@@ -1,4 +1,4 @@
-import { useState, type InputHTMLAttributes, type ReactNode } from "react";
+import { useId, useState, type InputHTMLAttributes, type ReactNode } from "react";
 
 /**
  * Default styling for text-ish inputs across the console. Kept here so
@@ -13,23 +13,13 @@ type CommonProps = Omit<
 > & {
   className?: string;
   /** Wrap with a labelled <div> if provided. Saves callsites the
-   *  boilerplate of label + helper-text composition. */
+   *  boilerplate of label + helper-text composition. The label is
+   *  programmatically associated with the input via `htmlFor`/`id` so
+   *  screen readers announce them as a pair and clicking the label
+   *  focuses the input. */
   label?: ReactNode;
   hint?: ReactNode;
 };
-
-function Field({ label, hint, children }: { label?: ReactNode; hint?: ReactNode; children: ReactNode }) {
-  if (!label && !hint) return <>{children}</>;
-  return (
-    <div>
-      {label && (
-        <label className="block text-[13px] font-medium text-fg mb-1.5">{label}</label>
-      )}
-      {children}
-      {hint && <p className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
-    </div>
-  );
-}
 
 /**
  * Plain text input. Defaults `autoComplete="off"` to prevent the browser
@@ -42,19 +32,25 @@ export function TextInput({
   label,
   hint,
   autoComplete,
+  id: idProp,
   ...rest
 }: CommonProps) {
+  const generatedId = useId();
+  const id = idProp ?? generatedId;
+  const hintId = hint ? `${id}-hint` : undefined;
   return (
-    <Field label={label} hint={hint}>
+    <FieldWrapper id={id} label={label} hint={hint}>
       <input
+        id={id}
         type="text"
         autoComplete={autoComplete ?? "off"}
         data-1p-ignore
         data-lpignore="true"
+        aria-describedby={hintId}
         className={className ?? baseClass}
         {...rest}
       />
-    </Field>
+    </FieldWrapper>
   );
 }
 
@@ -76,17 +72,23 @@ export function SecretInput({
   className,
   label,
   hint,
+  id: idProp,
   ...rest
 }: CommonProps) {
   const [revealed, setRevealed] = useState(false);
+  const generatedId = useId();
+  const id = idProp ?? generatedId;
+  const hintId = hint ? `${id}-hint` : undefined;
   return (
-    <Field label={label} hint={hint}>
+    <FieldWrapper id={id} label={label} hint={hint}>
       <div className="relative">
         <input
+          id={id}
           type={revealed ? "text" : "password"}
           autoComplete="new-password"
           data-1p-ignore
           data-lpignore="true"
+          aria-describedby={hintId}
           className={`${className ?? baseClass} pr-10`}
           {...rest}
         />
@@ -100,7 +102,34 @@ export function SecretInput({
           {revealed ? <EyeOffIcon /> : <EyeIcon />}
         </button>
       </div>
-    </Field>
+    </FieldWrapper>
+  );
+}
+
+/**
+ * Internal wrapper. Generates a stable id (`useId`) one level up so both
+ * the `<label htmlFor>` and the cloned `<input id>` see the same value.
+ */
+function FieldWrapper({
+  id,
+  label,
+  hint,
+  children,
+}: {
+  id: string;
+  label?: ReactNode;
+  hint?: ReactNode;
+  children: ReactNode;
+}) {
+  if (!label && !hint) return <>{children}</>;
+  return (
+    <div>
+      {label && (
+        <label htmlFor={id} className="block text-[13px] font-medium text-fg mb-1.5">{label}</label>
+      )}
+      {children}
+      {hint && <p id={`${id}-hint`} className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
+    </div>
   );
 }
 

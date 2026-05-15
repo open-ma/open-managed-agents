@@ -30,7 +30,7 @@ const schemas = [softwareApplicationSchema()];
       <p class="text-sm font-mono uppercase tracking-wider text-[var(--color-fg-subtle)] mb-4">
         Apache 2.0 · Cloudflare-native · Self-hostable
       </p>
-      <h1 class="font-display text-4xl md:text-6xl font-bold tracking-tight">
+      <h1 class="font-display text-4xl sm:text-5xl md:text-6xl font-bold tracking-tight">
         Open Managed Agents
       </h1>
       <p class="mt-4 text-xl md:text-2xl text-[var(--color-fg-muted)]">
@@ -46,7 +46,7 @@ const schemas = [softwareApplicationSchema()];
       <div class="mt-8 flex items-center justify-center gap-3 flex-wrap">
         <a
           href="https://github.com/open-ma/open-managed-agents"
-          target="_blank" rel="noopener"
+          target="_blank" rel="noopener noreferrer"
           class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
           >★ Star on GitHub</a
         >
@@ -213,49 +213,49 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
       <table class="w-full text-sm border border-[var(--color-border)] rounded-lg">
         <thead>
           <tr class="bg-[var(--color-bg-surface)] text-left">
-            <th class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">&nbsp;</th>
-            <th class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Open Managed Agents</th>
-            <th class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Anthropic Managed Agents</th>
+            <th scope="col" class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Feature</th>
+            <th scope="col" class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Open Managed Agents</th>
+            <th scope="col" class="px-4 py-3 font-semibold border-b border-[var(--color-border)]">Anthropic Managed Agents</th>
           </tr>
         </thead>
         <tbody>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">License</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">License</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Apache 2.0 — fork, embed, commercial use</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Proprietary, closed source</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Where it runs</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Where it runs</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Your Cloudflare account, your VPS, or our hosted</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic-managed only</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Data residency</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Data residency</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">You pick the region (Cloudflare or your DC)</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic's chosen regions</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">LLM key</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">LLM key</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">BYOK — Anthropic, OpenAI, OpenRouter, your own gateway</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic only, no BYOK</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Pricing model</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Pricing model</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Sandbox compute only, no token markup; self-host is free</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Token + platform fees bundled</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Custom harness</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Custom harness</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Yes — write your own loop, swap caching/compaction</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">No — vendor-defined loop</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Sandbox runtime</td>
+            <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Sandbox runtime</th>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Cloudflare Containers, LocalSubprocess, E2B, Daytona, BoxRun</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic-managed sandbox</td>
           </tr>
           <tr>
-            <td class="px-4 py-3 font-medium">API surface</td>
+            <th scope="row" class="px-4 py-3 font-medium">API surface</th>
             <td class="px-4 py-3"><code class="font-mono text-xs">/v1/agents</code>, <code class="font-mono text-xs">/v1/sessions</code> — drop-in compatible</td>
             <td class="px-4 py-3">Same shape (we mirror it)</td>
           </tr>
@@ -292,7 +292,7 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
           </ul>
         </div>
         <div class="border-2 border-[var(--color-brand)] rounded-lg bg-[var(--color-bg)] p-6 relative">
-          <span class="absolute -top-3 left-6 px-2 py-0.5 text-xs font-medium rounded bg-[var(--color-brand)] text-white">Most popular</span>
+          <span class="absolute -top-3 left-6 px-2 py-0.5 text-xs font-medium rounded bg-[var(--color-brand)] text-[var(--color-brand-fg)]">Most popular</span>
           <div class="text-sm uppercase tracking-wider text-[var(--color-fg-subtle)]">Pro</div>
           <div class="mt-1 text-3xl font-bold">$20<span class="text-base font-normal text-[var(--color-fg-muted)]">/mo</span></div>
           <ul class="mt-5 space-y-2 text-sm text-[var(--color-fg-muted)]">
@@ -323,11 +323,11 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
     <section class="max-w-5xl mx-auto px-4 py-16">
       <div class="flex items-end justify-between mb-8">
         <h2 class="font-display text-2xl font-bold">From the blog</h2>
-        <a href="/blog" class="text-sm">All posts →</a>
+        <a href="/blog/" class="text-sm py-2 px-2 -mx-2 rounded hover:bg-[var(--color-bg-surface)]">All posts →</a>
       </div>
       <div class="grid md:grid-cols-3 gap-6">
         {posts.map((post) => (
-          <a href={`/blog/${post.id}`} class="block border border-[var(--color-border)] rounded-lg p-5 hover:border-[var(--color-brand)] transition-colors no-underline">
+          <a href={`/blog/${post.id}/`} class="block border border-[var(--color-border)] rounded-lg p-5 hover:border-[var(--color-brand)] transition-colors no-underline">
             <div class="text-xs text-[var(--color-fg-subtle)] mb-2">
               {formatDate(post.data.publishedAt)}
             </div>
@@ -350,7 +350,7 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
       <div class="flex items-center justify-center gap-3 flex-wrap">
         <a
           href="https://github.com/open-ma/open-managed-agents"
-          target="_blank" rel="noopener"
+          target="_blank" rel="noopener noreferrer"
           class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
           >Clone the repo</a
         >

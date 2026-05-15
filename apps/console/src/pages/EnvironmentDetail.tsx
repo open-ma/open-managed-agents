@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useId, useState, type ReactElement } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
 import { Button } from "../components/Button";
 import { Select, SelectOption } from "../components/Select";
 import { useToast } from "../components/Toast";
+import { Page } from "../components/Page";
 
 // =================================================================
 // Types
@@ -187,7 +188,7 @@ export function EnvironmentDetail() {
   }
 
   return (
-    <div className="flex-1 overflow-y-auto px-4 py-4 md:p-8 lg:p-10">
+    <Page>
       {/* Breadcrumb */}
       <div className="text-sm text-fg-muted mb-4 flex items-center gap-1.5">
         <Link to="/environments" className="hover:text-fg transition-colors">
@@ -200,8 +201,11 @@ export function EnvironmentDetail() {
       <div className="max-w-3xl space-y-6">
         {/* Header: name input + Cloud badge + status */}
         <section className="space-y-3">
+          <h1 className="sr-only">{env.name || "Environment"}</h1>
           <div className="flex items-center gap-3 flex-wrap">
+            <label className="sr-only" htmlFor="env-name">Environment name</label>
             <input
+              id="env-name"
               value={name}
               onChange={(e) => setName(e.target.value.slice(0, 50))}
               className="border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors w-full sm:w-72"
@@ -221,10 +225,11 @@ export function EnvironmentDetail() {
           </div>
 
           <div>
-            <label className="block text-[13px] font-medium text-fg mb-1.5">
+            <label className="block text-[13px] font-medium text-fg mb-1.5" htmlFor="env-description">
               Description
             </label>
             <textarea
+              id="env-description"
               value={description}
               onChange={(e) => setDescription(e.target.value)}
               rows={2}
@@ -432,7 +437,7 @@ export function EnvironmentDetail() {
           </span>
         </div>
       </div>
-    </div>
+    </Page>
   );
 }
 
@@ -476,11 +481,23 @@ function Field({
   hint?: string;
   children: React.ReactNode;
 }) {
+  const generatedId = useId();
+  // Clone the child input/select/textarea so it shares the id the
+  // <label htmlFor> points at. Saves callsites from threading ids manually.
+  const child = Children.only(children) as ReactElement<{ id?: string; "aria-describedby"?: string }>;
+  const hintId = hint ? `${generatedId}-hint` : undefined;
+  const childWithProps = isValidElement(child)
+    ? cloneElement(child, {
+        id: child.props.id ?? generatedId,
+        "aria-describedby": hint ? hintId : child.props["aria-describedby"],
+      })
+    : child;
+  const inputId = (childWithProps.props as { id?: string }).id ?? generatedId;
   return (
     <div>
-      <label className="block text-[13px] font-medium text-fg mb-1.5">{label}</label>
-      {children}
-      {hint && <p className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
+      <label htmlFor={inputId} className="block text-[13px] font-medium text-fg mb-1.5">{label}</label>
+      {childWithProps}
+      {hint && <p id={hintId} className="mt-1 text-[12px] text-fg-muted">{hint}</p>}
     </div>
   );
 }

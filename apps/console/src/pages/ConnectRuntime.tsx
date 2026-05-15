@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../lib/api";
 import { Button } from "../components/Button";
+import { Logo } from "../components/Logo";
 
 /** Browser-side handler for `oma bridge setup`. The CLI binds a random
  *  127.0.0.1 port and opens this URL with `?cb=http://127.0.0.1:<port>/cb&state=<nonce>`.
@@ -107,11 +108,11 @@ export function ConnectRuntime() {
 
   return (
     <div className="min-h-screen bg-bg flex items-center justify-center px-4">
-      <div className="w-full max-w-md bg-bg-surface border border-border rounded-2xl p-8 shadow-sm">
+      <div className="w-full max-w-md bg-bg-surface border border-border rounded-xl p-8 shadow-sm">
         <div className="flex items-center gap-3 mb-6">
-          <img src="/logo.svg" alt="openma" className="h-9 shrink-0" />
+          <Logo size="md" />
           <div>
-            <div className="font-display text-lg font-semibold">Connect machine</div>
+            <h1 className="font-display text-lg font-semibold">Connect machine</h1>
             <div className="text-xs text-fg-subtle">openma local runtime</div>
           </div>
         </div>

@@ -92,7 +92,7 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[720px] mx-auto px-8 lg:px-10 py-10 lg:py-12">
+      <div className="max-w-[720px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12">
         <header className="mb-8">
           <h1 className="font-display text-[28px] leading-tight font-semibold tracking-tight text-fg">
             Install Linear via Personal API Key
@@ -101,7 +101,7 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
             Paste a Linear PAT, pick the agent + environment to bind. Bot
             actions in Linear will be attributed to the PAT owner. For full
             agent identity (panel UX, dedicated bot user), use{" "}
-            <a className="text-accent underline" href="/integrations/linear/publish">
+            <a className="text-brand underline" href="/integrations/linear/publish">
               Publish agent
             </a>{" "}
             instead.
@@ -109,7 +109,7 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
         </header>
 
         {error && (
-          <div className="mb-4 px-4 py-3 rounded-md border border-red-500/40 bg-red-500/10 text-[13px] text-red-300">
+          <div className="mb-4 px-4 py-3 rounded-md border border-danger/40 bg-danger-subtle text-[13px] text-danger">
             {error}
           </div>
         )}
@@ -181,7 +181,7 @@ export function IntegrationsLinearPatInstall({ loadAgents, loadEnvironments }: P
             <button
               type="submit"
               disabled={working}
-              className="px-4 py-2 rounded-md bg-accent text-accent-fg text-[14px] font-medium disabled:opacity-50"
+              className="px-4 py-2 rounded-md bg-brand text-brand-fg text-[14px] font-medium disabled:opacity-50"
             >
               {working ? "Installing…" : "Install"}
             </button>

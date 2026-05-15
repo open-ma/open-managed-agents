@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useId, useState, type ReactElement } from "react";
 import { Link, useParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type { SlackInstallation, SlackPublication } from "../api/types";
@@ -58,7 +58,7 @@ export function IntegrationsSlackWorkspace() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[1100px] mx-auto px-8 lg:px-10 py-8 lg:py-10">
+      <div className="max-w-[1100px] mx-auto px-4 sm:px-8 lg:px-10 py-8 lg:py-10">
         <Link
           to="/integrations/slack"
           className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"
@@ -172,7 +172,7 @@ function PublicationCard({
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           {pub.persona.avatarUrl ? (
-            <img src={pub.persona.avatarUrl} alt="" className="w-7 h-7 rounded-full shrink-0" />
+            <img src={pub.persona.avatarUrl} alt="" loading="lazy" decoding="async" className="w-7 h-7 rounded-full shrink-0" />
           ) : (
             <div className="w-7 h-7 rounded-full bg-brand-subtle text-brand flex items-center justify-center text-[12px] font-medium shrink-0">
               {pub.persona.name.slice(0, 1).toUpperCase()}
@@ -279,10 +279,17 @@ const inputCls =
   "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  const generatedId = useId();
+  // Clone the child input/select/textarea so it shares the same id the
+  // <label htmlFor> points at. Saves callsites from threading ids manually.
+  const child = Children.only(children) as ReactElement<{ id?: string }>;
+  const childWithId = isValidElement(child) && !child.props.id
+    ? cloneElement(child, { id: generatedId })
+    : child;
   return (
     <div>
-      <label className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
-      {children}
+      <label htmlFor={(childWithId.props as { id?: string }).id ?? generatedId} className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
+      {childWithId}
     </div>
   );
 }

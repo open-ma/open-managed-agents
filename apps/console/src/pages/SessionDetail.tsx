@@ -620,11 +620,11 @@ export function SessionDetail() {
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
-      <div className="px-8 py-3 border-b border-border flex flex-col gap-2 shrink-0">
+      <div className="px-4 sm:px-8 py-3 border-b border-border flex flex-col gap-2 shrink-0">
         <div className="flex items-center gap-3">
           <Link to="/sessions" className="text-fg-subtle hover:text-fg-muted text-sm">&larr; Sessions</Link>
           <span className="text-fg-subtle">/</span>
-          <h2 className="font-mono text-sm text-fg-muted truncate flex-1" title={id}>{title}</h2>
+          <h1 className="font-mono text-sm text-fg-muted truncate flex-1" title={id}>{title}</h1>
           {/* Stop / Interrupt — only while the session is actively running.
               Posts user.interrupt scoped to the active thread; server fires
               thread AbortController + flushes pending events + emits
@@ -715,7 +715,7 @@ export function SessionDetail() {
       )}
 
       {/* View tabs */}
-      <div className="px-8 border-b border-border flex items-center gap-1 shrink-0">
+      <div role="tablist" aria-label="Session view" className="px-4 sm:px-8 border-b border-border flex items-center gap-1 shrink-0">
         <ViewTab label="Conversation" active={view === "chat"} onClick={() => setView("chat")} />
         <ViewTab label="Timeline" active={view === "timeline"} onClick={() => setView("timeline")} />
         {view === "timeline" && (
@@ -743,10 +743,10 @@ export function SessionDetail() {
 
       {/* Linear context (when triggered by a Linear webhook) */}
       {linear && (
-        <div className="px-8 py-2 border-b border-border bg-blue-50/50 text-xs flex items-center gap-2 text-blue-900">
+        <div className="px-4 sm:px-8 py-2 border-b border-border bg-info-subtle text-xs flex items-center gap-2 text-info">
           <span>🔗</span>
           <span className="font-medium">Linear</span>
-          <span className="text-blue-700">·</span>
+          <span className="opacity-60">·</span>
           <span>
             issue{" "}
             <span className="font-mono">{linear.issueIdentifier ?? linear.issueId}</span>
@@ -766,10 +766,10 @@ export function SessionDetail() {
 
       {/* Slack context (when triggered by a Slack event) */}
       {slack && (
-        <div className="px-8 py-2 border-b border-border bg-purple-50/50 text-xs flex items-center gap-2 text-purple-900">
+        <div className="px-4 sm:px-8 py-2 border-b border-border bg-accent-violet-subtle text-xs flex items-center gap-2 text-accent-violet">
           <span>💬</span>
           <span className="font-medium">Slack</span>
-          <span className="text-purple-700">·</span>
+          <span className="opacity-60">·</span>
           <span>
             {slack.channelId ? (
               <>
@@ -786,7 +786,7 @@ export function SessionDetail() {
             )}
           </span>
           {slack.eventKind && (
-            <span className="text-purple-700/60 font-mono uppercase tracking-wider text-[10px]">
+            <span className="opacity-60 font-mono uppercase tracking-wider text-[10px]">
               {slack.eventKind}
             </span>
           )}
@@ -802,7 +802,7 @@ export function SessionDetail() {
       {view === "chat" ? (
         <>
           {/* Events */}
-          <div ref={scrollRef} className="flex-1 overflow-y-auto px-8 py-6 space-y-4">
+          <div ref={scrollRef} className="flex-1 overflow-y-auto px-4 sm:px-8 py-6 space-y-4">
             {(() => {
               // Server-returned events are now in canonical drain order
               // (events.seq = INSERT order = what the model saw). The
@@ -922,20 +922,21 @@ export function SessionDetail() {
               && thinkingStreams.size === 0
               && toolInputStreams.size === 0 && (
               <div className="flex gap-1 py-2">
-                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "0ms" }} />
-                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "150ms" }} />
-                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-bounce" style={{ animationDelay: "300ms" }} />
+                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-pulse" style={{ animationDelay: "0ms" }} />
+                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-pulse" style={{ animationDelay: "150ms" }} />
+                <span className="w-1.5 h-1.5 bg-fg-subtle rounded-full animate-pulse" style={{ animationDelay: "300ms" }} />
               </div>
             )}
           </div>
 
           {/* Input */}
-          <div className="px-8 py-4 border-t border-border flex gap-2 shrink-0">
+          <div className="px-4 sm:px-8 py-4 border-t border-border flex gap-2 shrink-0">
             <input
               value={input}
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
               placeholder="Send a message..."
+              aria-label="Send a message"
               className="flex-1 border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-border-strong transition-colors bg-bg text-fg"
               disabled={sending}
             />
@@ -1095,6 +1096,9 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
   return (
     <button
       onClick={onClick}
+      role="tab"
+      aria-selected={active}
+      tabIndex={active ? 0 : -1}
       className={`px-3 py-2.5 text-sm border-b-2 transition-colors ${
         active
           ? "border-brand text-fg font-medium"
@@ -1123,6 +1127,9 @@ function ThreadTab({
   return (
     <button
       onClick={onClick}
+      role="tab"
+      aria-selected={active}
+      tabIndex={active ? 0 : -1}
       className={`py-1.5 text-xs whitespace-nowrap border-b-2 transition-colors flex items-center gap-1 ${
         active
           ? "border-info text-fg font-medium"
@@ -1188,10 +1195,10 @@ function ThreadTree({
   // is actually readable.
   const isFlat = maxDepth <= 1;
   const containerClass = isFlat
-    ? "px-8 border-b border-border flex items-center gap-1 shrink-0 overflow-x-auto"
-    : "px-8 py-1 border-b border-border flex flex-col items-stretch gap-0 shrink-0 overflow-y-auto max-h-40";
+    ? "px-4 sm:px-8 border-b border-border flex items-center gap-1 shrink-0 overflow-x-auto"
+    : "px-4 sm:px-8 py-1 border-b border-border flex flex-col items-stretch gap-0 shrink-0 overflow-y-auto max-h-40";
   return (
-    <div className={containerClass}>
+    <div role="tablist" aria-label="Threads" className={containerClass}>
       {flat.map((n) => (
         <ThreadTab
           key={n.id}
@@ -1299,8 +1306,9 @@ function ResourcePanel({
         </div>
         <button
           onClick={onClose}
-          className="text-fg-subtle hover:text-fg-muted text-lg leading-none px-1"
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none inline-flex items-center justify-center min-w-8 min-h-8 rounded hover:bg-bg-surface transition-colors"
           title="Close"
+          aria-label="Close panel"
         >
           ×
         </button>
@@ -1371,8 +1379,9 @@ function FilesPanel({ sessionId, onClose }: { sessionId: string; onClose: () => 
         </div>
         <button
           onClick={onClose}
-          className="text-fg-subtle hover:text-fg-muted text-lg leading-none px-1"
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none inline-flex items-center justify-center min-w-8 min-h-8 rounded hover:bg-bg-surface transition-colors"
           title="Close"
+          aria-label="Close panel"
         >
           ×
         </button>
@@ -1561,7 +1570,7 @@ function EventBubble({
       // without competing with live messages for attention.
       const labelText = isCancelled ? "Retracted" : isPending ? "Pending…" : "You";
       const bubbleClass = isCancelled
-        ? "bg-bg-muted text-fg-subtle rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed line-through opacity-70"
+        ? "bg-bg-surface text-fg-subtle rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed line-through opacity-70"
         : isPending
         ? "bg-bg-surface border border-border-strong text-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed"
         : "bg-brand text-brand-fg rounded-2xl rounded-br-sm px-4 py-3 text-sm leading-relaxed";
@@ -1643,6 +1652,7 @@ function EventBubble({
         <div className="max-w-2xl">
           <button
             onClick={() => setToolOpen(!toolOpen)}
+            aria-expanded={toolOpen}
             className="flex items-center gap-2 px-3 py-2 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors w-full text-left"
           >
             <svg className="w-3.5 h-3.5 text-fg-muted shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
@@ -1650,7 +1660,7 @@ function EventBubble({
             </svg>
             <span className="font-mono text-xs text-fg shrink-0">{event.name}</span>
             {event.type === "agent.mcp_tool_use" && (event as { mcp_server_name?: string }).mcp_server_name && (
-              <span className="text-[10px] text-fg-subtle font-mono uppercase tracking-wide bg-bg-muted rounded px-1 py-0.5 shrink-0">
+              <span className="text-[10px] text-fg-subtle font-mono uppercase tracking-wide bg-bg-surface rounded px-1 py-0.5 shrink-0">
                 mcp · {(event as { mcp_server_name: string }).mcp_server_name}
               </span>
             )}

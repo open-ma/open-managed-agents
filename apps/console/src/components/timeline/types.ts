@@ -54,9 +54,9 @@ export type SpanFamily =
 
 export const FAMILY_DOT: Record<SpanFamily, string> = {
   model: "bg-info",
-  tool: "bg-emerald-500",
-  mcp: "bg-purple-500",
-  custom_tool: "bg-amber-500",
+  tool: "bg-success",
+  mcp: "bg-accent-violet",
+  custom_tool: "bg-warning",
   user: "bg-brand",
   agent: "bg-fg-muted",
   system: "bg-fg-subtle",
@@ -64,8 +64,8 @@ export const FAMILY_DOT: Record<SpanFamily, string> = {
   error: "bg-danger",
   schedule: "bg-info",
   wakeup: "bg-info",
-  compaction: "bg-purple-400",
-  outcome: "bg-emerald-400",
+  compaction: "bg-accent-violet/70",
+  outcome: "bg-success/70",
   thread: "bg-fg-muted",
   aux: "bg-fg-subtle",
   thinking: "bg-fg-subtle",
@@ -74,9 +74,9 @@ export const FAMILY_DOT: Record<SpanFamily, string> = {
 
 export const FAMILY_BAR: Record<SpanFamily, string> = {
   model: "bg-info/70",
-  tool: "bg-emerald-500/70",
-  mcp: "bg-purple-500/70",
-  custom_tool: "bg-amber-500/70",
+  tool: "bg-success/70",
+  mcp: "bg-accent-violet/70",
+  custom_tool: "bg-warning/70",
   user: "bg-brand/70",
   agent: "bg-fg-muted/70",
   system: "bg-fg-subtle/70",
@@ -84,8 +84,8 @@ export const FAMILY_BAR: Record<SpanFamily, string> = {
   error: "bg-danger/70",
   schedule: "bg-info/40",
   wakeup: "bg-info/70",
-  compaction: "bg-purple-400/70",
-  outcome: "bg-emerald-400/70",
+  compaction: "bg-accent-violet/50",
+  outcome: "bg-success/50",
   thread: "bg-fg-muted/50",
   aux: "bg-fg-subtle/70",
   thinking: "bg-fg-subtle/40",
@@ -134,8 +134,8 @@ export const TRIGGER_LABEL: Record<TurnTriggerKind, string> = {
 export const TRIGGER_DOT: Record<TurnTriggerKind, string> = {
   user_message: "bg-brand",
   wakeup: "bg-info",
-  tool_confirmation: "bg-amber-500",
-  custom_tool_result: "bg-amber-500",
+  tool_confirmation: "bg-warning",
+  custom_tool_result: "bg-warning",
   init: "bg-fg-subtle",
 };
 

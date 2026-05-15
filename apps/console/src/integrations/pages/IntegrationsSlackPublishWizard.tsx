@@ -146,7 +146,7 @@ export function IntegrationsSlackPublishWizard({
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[760px] mx-auto px-8 lg:px-10 py-8 lg:py-10">
+      <div className="max-w-[760px] mx-auto px-4 sm:px-8 lg:px-10 py-8 lg:py-10">
         <Link
           to="/integrations/slack"
           className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"

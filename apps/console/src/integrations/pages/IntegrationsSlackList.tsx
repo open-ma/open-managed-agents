@@ -40,7 +40,7 @@ export function IntegrationsSlackList() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[1100px] mx-auto px-8 lg:px-10 py-10 lg:py-12">
+      <div className="max-w-[1100px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12">
         <header className="flex items-start justify-between gap-6 mb-8">
           <div className="min-w-0">
             <h1 className="font-display text-[28px] leading-tight font-semibold tracking-tight text-fg">
@@ -148,6 +148,8 @@ function PublicationRow({ pub }: { pub: SlackPublication }) {
         <img
           src={pub.persona.avatarUrl}
           alt=""
+          loading="lazy"
+          decoding="async"
           className="w-6 h-6 rounded-full shrink-0"
         />
       ) : (

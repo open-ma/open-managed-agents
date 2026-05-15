@@ -11,7 +11,10 @@
   --brand: oklch(0.68 0.19 25);        /* #FF6B50 in oklch */
   --brand-hover: oklch(0.62 0.19 25);  /* darker coral */
   --brand-subtle: oklch(0.96 0.03 25); /* barely-there coral tint */
-  --brand-fg: #fff;
+  /* Dark warm tone that pairs with brand for AA contrast (~5.4:1 on coral).
+     White on coral is only 2.96:1 — fails AA-normal at every UI text size,
+     so brand-fg is dark, not white. Visually keeps brand "warm" not "stark". */
+  --brand-fg: #3d2520;
 
   --bg: #fefefe;
   --bg-sidebar: #f8f8f7;
@@ -33,6 +36,13 @@
   --danger-subtle: oklch(0.96 0.04 25);
   --info: oklch(0.58 0.16 260);
   --info-subtle: oklch(0.96 0.03 260);
+  --accent-violet: oklch(0.55 0.2 300);
+  --accent-violet-subtle: oklch(0.96 0.03 300);
+
+  /* Surface elevation — single shadow token, theme-aware. Light mode
+     uses near-black at 10% opacity; dark mode bumps to 50% so drop
+     shadows actually read against the dark surface. */
+  --shadow-md: 0 4px 12px -4px rgb(0 0 0 / 0.12);
 
   --ring: var(--brand);
   color-scheme: light;
@@ -43,7 +53,9 @@
   --brand: oklch(0.7 0.18 25);         /* slightly brighter coral for dark bg */
   --brand-hover: oklch(0.76 0.16 25);
   --brand-subtle: oklch(0.25 0.06 25);
-  --brand-fg: #fff;
+  /* Same dark warm tone in dark mode — brand stays coral, fg stays dark.
+     #3d2520 on coral is ~5.4:1 (AA-pass); white would be ~2.96:1 (AA-fail). */
+  --brand-fg: #3d2520;
 
   --bg: #151515;
   --bg-sidebar: #1a1a1a;
@@ -65,6 +77,11 @@
   --danger-subtle: oklch(0.22 0.05 25);
   --info: oklch(0.72 0.14 260);
   --info-subtle: oklch(0.22 0.04 260);
+  --accent-violet: oklch(0.72 0.16 300);
+  --accent-violet-subtle: oklch(0.22 0.05 300);
+
+  /* Dark-mode shadow — needs more opacity to register against #151515. */
+  --shadow-md: 0 4px 12px -2px rgb(0 0 0 / 0.5);
 
   --ring: var(--brand);
   color-scheme: dark;
@@ -103,6 +120,8 @@
   --color-danger-subtle: var(--danger-subtle);
   --color-info: var(--info);
   --color-info-subtle: var(--info-subtle);
+  --color-accent-violet: var(--accent-violet);
+  --color-accent-violet-subtle: var(--accent-violet-subtle);
 
   --color-ring: var(--ring);
 }
@@ -138,8 +157,53 @@ body {
   background: var(--fg-subtle);
 }
 
-/* Dark mode code highlights */
+/* Dark mode code highlights — github.css ships light-mode token colors
+   (greens, blues, purples) that look dim against --bg-surface in dark
+   mode. Override with github-dark token palette so syntax stays readable. */
 .dark pre code.hljs {
   background: var(--bg-surface);
   color: var(--fg);
+}
+.dark .hljs-comment,
+.dark .hljs-quote {
+  color: #8b949e;
+}
+.dark .hljs-keyword,
+.dark .hljs-selector-tag,
+.dark .hljs-section,
+.dark .hljs-link {
+  color: #ff7b72;
+}
+.dark .hljs-string,
+.dark .hljs-attr,
+.dark .hljs-meta-string {
+  color: #a5d6ff;
+}
+.dark .hljs-number,
+.dark .hljs-literal,
+.dark .hljs-symbol {
+  color: #79c0ff;
+}
+.dark .hljs-built_in,
+.dark .hljs-type,
+.dark .hljs-class .hljs-title {
+  color: #ffa657;
+}
+.dark .hljs-title,
+.dark .hljs-name,
+.dark .hljs-function .hljs-title {
+  color: #d2a8ff;
+}
+.dark .hljs-variable,
+.dark .hljs-template-variable,
+.dark .hljs-attribute {
+  color: #ffa657;
+}
+.dark .hljs-deletion {
+  color: #ffdcd7;
+  background-color: #67060c;
+}
+.dark .hljs-addition {
+  color: #aff5b4;
+  background-color: #033a16;
 }

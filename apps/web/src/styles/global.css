@@ -6,29 +6,44 @@
   --font-display: "Source Serif 4", ui-serif, Georgia, serif;
   --font-mono: "JetBrains Mono", ui-monospace, monospace;
 
-  --color-bg: #ffffff;
-  --color-bg-surface: #f7f7f8;
-  --color-fg: #16181d;
-  --color-fg-muted: #4a4f5a;
-  --color-fg-subtle: #8a8f99;
-  --color-border: #e6e7eb;
-  /* Citrus / tangerine — brighter than the previous brick-orange so the
-     CTAs read as fresh, not blood-orange. */
-  --color-brand: #f97316;        /* orange-500 */
-  --color-brand-subtle: #fff7ed; /* orange-50 */
-  --color-link: #ea580c;         /* orange-600 — slightly darker for AAA on body bg */
+  --color-bg: #fdfdfc;
+  --color-bg-surface: #f5f5f5;
+  --color-fg: #171717;
+  --color-fg-muted: #737373;
+  /* Tertiary text — small kicker labels, dates, breadcrumbs. #707070 lands
+     at ~4.84:1 against --color-bg (#fdfdfc warm-tinted), comfortably above
+     AA-normal (4.5:1). Earlier #767676 was just under threshold (4.43:1)
+     because the bg isn't pure white. */
+  --color-fg-subtle: #707070;
+  --color-border: #e5e5e5;
+  --color-border-strong: #d4d4d4;
+  /* Coral brand — matches .impeccable.md (#FF6B50) and the console + logo. */
+  --color-brand: #ff6b50;
+  --color-brand-hover: #e85a40;
+  --color-brand-subtle: #fff0ec;
+  /* Dark warm tone — pairs with brand at ~5.4:1 (AA-pass; white would be 2.96:1, AA-fail).
+     Used by anything that puts text on a brand background. */
+  --color-brand-fg: #3d2520;
 }
 
 .dark {
-  --color-bg: #0e1014;
-  --color-bg-surface: #1a1d22;
-  --color-fg: #f3f4f6;
-  --color-fg-muted: #b3b8c1;
-  --color-fg-subtle: #7c828c;
-  --color-border: #2a2e36;
-  --color-brand: #fdba74;        /* orange-300 — pops on dark, no muddiness */
-  --color-brand-subtle: #2a1808;
-  --color-link: #fed7aa;         /* orange-200 */
+  --color-bg: #161616;
+  --color-bg-surface: #222222;
+  --color-fg: #ededed;
+  --color-fg-muted: #999999;
+  /* Tertiary text in dark mode — bumped from #6b6b6b to #9b9b9b for AA
+     contrast (≥4.5:1) against --color-bg. */
+  --color-fg-subtle: #9b9b9b;
+  --color-border: #333333;
+  --color-border-strong: #444444;
+  /* Brand stays #ff6b50 in dark too — spec calls for identical hue both modes;
+     it lands at ~6.5:1 on the dark bg so it passes AA without darkening. */
+  --color-brand: #ff6b50;
+  --color-brand-hover: #ff8068;
+  --color-brand-subtle: #3d2520;
+  /* Same dark fg in dark mode — brand stays coral, the dark-on-coral pair
+     keeps AA contrast (white-on-coral fails at any size below ~24px bold). */
+  --color-brand-fg: #3d2520;
 }
 
 html {
@@ -38,12 +53,77 @@ html {
   -webkit-font-smoothing: antialiased;
 }
 
-a {
-  color: var(--color-link);
-  text-decoration: none;
+/* Hide body until brand fonts are ready. Eliminates the FOUT swap from
+   system-ui → DM Sans / Source Serif 4. Reveal class is added by the
+   inline script in Base.astro head (with a 1500ms safety timeout). */
+html:not(.fonts-loaded) body {
+  opacity: 0;
 }
-a:hover {
+body {
+  opacity: 1;
+  transition: opacity 150ms ease-out;
+}
+@media (prefers-reduced-motion: reduce) {
+  body { transition: none; }
+}
+
+/* Anchor defaults — color is `inherit` by default so nav/breadcrumb/
+   footer links pick up the surrounding text color instead of being
+   loud-red everywhere. The body-link coral is opt-in via the prose
+   selector below — only links inside paragraphs / lists / table cells
+   / blockquotes get colored + underlined. */
+@layer base {
+  a {
+    color: inherit;
+    text-decoration: none;
+  }
+  a:hover {
+    text-decoration: underline;
+  }
+}
+
+/* Inline body links: text inherits fg (passes AA-normal at 14:1+), brand
+   coral lives on the underline + hover state. Decoration colors aren't
+   subject to WCAG 1.4.3, so we get visible brand presence without using
+   coral as the readable text color (which would fail 4.5:1 on white). */
+:where(p, li, dd, td, blockquote) a {
+  color: inherit;
   text-decoration: underline;
+  text-decoration-color: var(--color-brand);
+  text-decoration-thickness: 2px;
+  text-underline-offset: 3px;
+  transition: color 120ms ease-out, text-decoration-color 120ms ease-out;
+}
+:where(p, li, dd, td, blockquote) a:hover {
+  color: var(--color-brand);
+  text-decoration-color: var(--color-brand-hover);
+}
+
+/* Brand-colored focus ring on every interactive element. The site had no
+   focus-visible styling before — keyboard users on a public marketing
+   site couldn't see where focus was. */
+a:focus-visible,
+button:focus-visible,
+summary:focus-visible,
+[role="button"]:focus-visible,
+input:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--color-brand);
+  outline-offset: 2px;
+  border-radius: 2px;
+}
+
+/* Reduced-motion users get instant transitions. Any future animation
+   we add will inherit this guard. */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
 }
 
 /* Markdown rendered prose (blog posts). Tailwind's typography plugin would

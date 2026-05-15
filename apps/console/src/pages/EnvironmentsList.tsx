@@ -110,8 +110,9 @@ export function EnvironmentsList() {
       >
         <div className="space-y-4">
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Name</label>
+            <label htmlFor="env-create-name" className="text-sm text-fg-muted block mb-1">Name</label>
             <input
+              id="env-create-name"
               value={form.name}
               onChange={(e) => setForm({ ...form, name: e.target.value.slice(0, 50) })}
               className="w-full border border-border rounded-md px-3 py-2 text-sm outline-none focus:border-brand bg-bg text-fg transition-colors placeholder:text-fg-subtle"
@@ -120,15 +121,16 @@ export function EnvironmentsList() {
             <p className="text-xs text-fg-subtle mt-1">{form.name.length}/50 characters</p>
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Hosting Type</label>
+            <span className="text-sm text-fg-muted block mb-1">Hosting Type</span>
             <Select value="cloud" onValueChange={() => {}} disabled>
               <SelectOption value="cloud">Cloud</SelectOption>
             </Select>
             <p className="text-xs text-fg-subtle mt-1">This cannot be changed after creation.</p>
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Description <span className="text-fg-subtle">(optional)</span></label>
+            <label htmlFor="env-create-description" className="text-sm text-fg-muted block mb-1">Description <span className="text-fg-subtle">(optional)</span></label>
             <textarea
+              id="env-create-description"
               value={form.description}
               onChange={(e) => setForm({ ...form, description: e.target.value })}
               rows={3}

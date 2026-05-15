@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApi } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { Page } from "../components/Page";
 
 /* ---------- types ---------- */
 
@@ -303,7 +304,7 @@ export function SkillsList() {
   /* ---- render ---- */
 
   return (
-    <div className="flex-1 overflow-y-auto p-8 lg:p-10">
+    <Page>
       {/* header */}
       <div className="flex items-start justify-between mb-6">
         <div>
@@ -343,7 +344,7 @@ export function SkillsList() {
               <h3 className="text-sm font-medium text-fg mb-3">
                 Anthropic Pre-built Skills
               </h3>
-              <div className="border border-border rounded-lg overflow-hidden mb-6">
+              <div className="border border-border rounded-lg overflow-x-auto mb-6">
                 <table className="w-full text-sm">
                   <thead>
                     <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
@@ -394,7 +395,7 @@ export function SkillsList() {
               </p>
             </div>
           ) : (
-            <div className="border border-border rounded-lg overflow-hidden">
+            <div className="border border-border rounded-lg overflow-x-auto">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
@@ -693,7 +694,7 @@ export function SkillsList() {
                   No version history available.
                 </p>
               ) : (
-                <div className="border border-border rounded-lg overflow-hidden">
+                <div className="border border-border rounded-lg overflow-x-auto">
                   <table className="w-full text-sm">
                     <thead>
                       <tr className="bg-bg-surface/60 text-fg-muted text-xs uppercase tracking-wider">
@@ -753,6 +754,7 @@ export function SkillsList() {
               value={chQuery}
               onChange={(e) => setChQuery(e.target.value)}
               onKeyDown={(e) => { if (e.key === "Enter") searchClawHub(); }}
+              aria-label="Search ClawHub skills"
               className={inputCls + " flex-1"}
               placeholder="Search skills... e.g. git, docker, research"
               autoFocus
@@ -786,7 +788,7 @@ export function SkillsList() {
           )}
         </div>
       </Modal>
-    </div>
+    </Page>
   );
 }
 

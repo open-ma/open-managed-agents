@@ -386,8 +386,9 @@ export function VaultsList() {
       >
         <div className="space-y-4">
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Name</label>
+            <label htmlFor="vault-name" className="text-sm text-fg-muted block mb-1">Name</label>
             <input
+              id="vault-name"
               value={vaultName}
               onChange={(e) => setVaultName(e.target.value.slice(0, 30))}
               className={inputCls}
@@ -489,10 +490,13 @@ export function VaultsList() {
           )
         }
       >
-        <div className="flex gap-1 mb-3 border-b border-border-subtle">
+        <div role="tablist" aria-label="Add credential" className="flex gap-1 mb-3 border-b border-border">
           {(["mcp", "cli"] as const).map((t) => (
             <button
               key={t}
+              role="tab"
+              aria-selected={addTab === t}
+              tabIndex={addTab === t ? 0 : -1}
               onClick={() => setAddTab(t)}
               className={`px-3 py-2 text-sm border-b-2 -mb-px ${
                 addTab === t
@@ -510,10 +514,11 @@ export function VaultsList() {
             <div className="text-sm text-fg-muted">Authorize an MCP server for delegated user authentication.</div>
 
             <div>
-              <label className="text-sm font-medium text-fg block mb-1">
+              <label htmlFor="vault-mcp-name" className="text-sm font-medium text-fg block mb-1">
                 Name <span className="text-xs text-fg-muted ml-1 px-1.5 py-0.5 rounded bg-bg-surface">Optional</span>
               </label>
               <input
+                id="vault-mcp-name"
                 value={customForm.name}
                 onChange={(e) => setCustomForm({ ...customForm, name: e.target.value })}
                 placeholder="Example MCP"
@@ -523,7 +528,7 @@ export function VaultsList() {
 
             <div>
               <label className="text-sm font-medium text-fg block mb-1">Type</label>
-              <div className="inline-flex rounded-md border border-border-subtle p-0.5">
+              <div className="inline-flex rounded-md border border-border p-0.5">
                 {(["oauth", "bearer"] as const).map((t) => (
                   <button
                     key={t}
@@ -572,7 +577,7 @@ export function VaultsList() {
                 renderItem={(entry) => (
                   <div className="flex items-center gap-3 px-3 py-2.5">
                     {entry.icon ? (
-                      <img src={entry.icon} alt="" className="w-5 h-5 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                      <img src={entry.icon} alt="" loading="lazy" decoding="async" className="w-5 h-5 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
                     ) : (
                       <div className="w-5 h-5 rounded bg-bg-surface shrink-0" />
                     )}
@@ -583,7 +588,7 @@ export function VaultsList() {
                   </div>
                 )}
                 prefix={customForm.pickedIcon ? (
-                  <img src={customForm.pickedIcon} alt="" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
+                  <img src={customForm.pickedIcon} alt="" loading="lazy" decoding="async" className="w-4 h-4 rounded shrink-0" onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }} />
                 ) : null}
                 placeholder="Search Anthropic's MCP registry or enter a custom URL"
                 emptyHint="No matches — keep typing for a custom URL"
@@ -595,10 +600,11 @@ export function VaultsList() {
                 changes to Create. Visible regardless of Type so the
                 user can supply a pre-issued OAuth access_token without
                 a full handshake. */}
-            <div className="border border-border-subtle rounded-md">
+            <div className="border border-border rounded-md">
               <button
                 type="button"
                 onClick={() => setTokenSectionOpen((v) => !v)}
+                aria-expanded={tokenSectionOpen}
                 className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
               >
                 <span className={`text-fg-muted transition-transform ${tokenSectionOpen ? "rotate-90" : ""}`}>›</span>
@@ -612,6 +618,7 @@ export function VaultsList() {
                     onChange={(e) => setCustomForm({ ...customForm, token: e.target.value })}
                     type="password"
                     placeholder="••••••••"
+                    aria-label="Access token"
                     className={inputCls}
                   />
                   <div className="text-xs text-fg-subtle mt-1">If filled, the credential is stored as a static bearer token (no OAuth handshake).</div>
@@ -623,10 +630,11 @@ export function VaultsList() {
                 Access token is also set (RFC 6749 §6 refresh_token grant).
                 Render only when token has a value. */}
             {customForm.token && (
-              <div className="border border-border-subtle rounded-md">
+              <div className="border border-border rounded-md">
                 <button
                   type="button"
                   onClick={() => setRefreshSectionOpen((v) => !v)}
+                  aria-expanded={refreshSectionOpen}
                   className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
                 >
                   <span className={`text-fg-muted transition-transform ${refreshSectionOpen ? "rotate-90" : ""}`}>›</span>
@@ -640,12 +648,14 @@ export function VaultsList() {
                         value={customForm.refreshToken}
                         onChange={(e) => setCustomForm({ ...customForm, refreshToken: e.target.value })}
                         placeholder="OAuth refresh token"
+                        aria-label="Refresh token"
                         className={inputCls}
                       />
                     </div>
                     <div>
-                      <label className="text-sm font-medium text-fg block mb-1">Token endpoint</label>
+                      <label htmlFor="vault-token-endpoint" className="text-sm font-medium text-fg block mb-1">Token endpoint</label>
                       <input
+                        id="vault-token-endpoint"
                         value={customForm.tokenEndpoint}
                         onChange={(e) => setCustomForm({ ...customForm, tokenEndpoint: e.target.value })}
                         placeholder="https://auth.example.com/oauth/token"
@@ -653,8 +663,9 @@ export function VaultsList() {
                       />
                     </div>
                     <div>
-                      <label className="text-sm font-medium text-fg block mb-1">Auth method</label>
+                      <label htmlFor="vault-auth-method" className="text-sm font-medium text-fg block mb-1">Auth method</label>
                       <select
+                        id="vault-auth-method"
                         value={customForm.authMethod}
                         onChange={(e) => setCustomForm({ ...customForm, authMethod: e.target.value as typeof customForm.authMethod })}
                         className={inputCls}
@@ -674,10 +685,11 @@ export function VaultsList() {
                 client_id/secret on a per-credential basis (GitHub /
                 Feishu / any provider that doesn't support DCR). */}
             {customForm.type === "oauth" && !customForm.token && (
-              <div className="border border-border-subtle rounded-md">
+              <div className="border border-border rounded-md">
                 <button
                   type="button"
                   onClick={() => setClientCredsSectionOpen((v) => !v)}
+                  aria-expanded={clientCredsSectionOpen}
                   className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
                 >
                   <span className={`text-fg-muted transition-transform ${clientCredsSectionOpen ? "rotate-90" : ""}`}>›</span>
@@ -690,6 +702,7 @@ export function VaultsList() {
                       value={customForm.clientId}
                       onChange={(e) => setCustomForm({ ...customForm, clientId: e.target.value })}
                       placeholder="Client ID"
+                      aria-label="OAuth client ID"
                       className={inputCls}
                     />
                     <input
@@ -697,6 +710,7 @@ export function VaultsList() {
                       onChange={(e) => setCustomForm({ ...customForm, clientSecret: e.target.value })}
                       type="password"
                       placeholder="Client secret"
+                      aria-label="OAuth client secret"
                       className={inputCls}
                     />
                     <div className="text-xs text-fg-subtle">For OAuth providers that don't support Dynamic Client Registration (GitHub, Feishu) — supply a client_id/secret from a pre-registered app.</div>
@@ -710,8 +724,9 @@ export function VaultsList() {
         {addTab === "cli" && (
           <div className="space-y-3">
             <div>
-              <label className="text-sm text-fg-muted block mb-1">CLI</label>
+              <label htmlFor="vault-cli-id" className="text-sm text-fg-muted block mb-1">CLI</label>
               <select
+                id="vault-cli-id"
                 value={cliForm.cli_id}
                 onChange={(e) => { setCliForm({ ...cliForm, cli_id: e.target.value }); setDeviceFlow(null); }}
                 className={inputCls}
@@ -756,8 +771,9 @@ export function VaultsList() {
             )}
 
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Display Name <span className="text-fg-subtle">(optional)</span></label>
+              <label htmlFor="vault-cli-display-name" className="text-sm text-fg-muted block mb-1">Display Name <span className="text-fg-subtle">(optional)</span></label>
               <TextInput
+                id="vault-cli-display-name"
                 value={cliForm.display_name}
                 onChange={(e) => setCliForm({ ...cliForm, display_name: e.target.value })}
                 className={inputCls}
@@ -766,8 +782,9 @@ export function VaultsList() {
               />
             </div>
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only — leave blank to use OAuth above)</span></label>
+              <label htmlFor="vault-cli-token" className="text-sm text-fg-muted block mb-1">Token <span className="text-fg-subtle">(write-only — leave blank to use OAuth above)</span></label>
               <SecretInput
+                id="vault-cli-token"
                 value={cliForm.token}
                 onChange={(e) => setCliForm({ ...cliForm, token: e.target.value })}
                 className={inputCls}

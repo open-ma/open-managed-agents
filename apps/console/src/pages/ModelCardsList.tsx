@@ -217,20 +217,21 @@ export function ModelCardsList() {
         <form autoComplete="off" onSubmit={(e) => e.preventDefault()} className="space-y-3">
           {error && <div className="text-sm text-danger bg-danger-subtle border border-danger/30 rounded-lg px-3 py-2">{error}</div>}
           <div>
-            <label className="text-sm text-fg-muted block mb-1">
+            <label htmlFor="modelcard-id" className="text-sm text-fg-muted block mb-1">
               Model ID *
               <span className="ml-1 text-xs text-fg-subtle">(tenant-unique handle agents reference)</span>
             </label>
-            <TextInput value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
+            <TextInput id="modelcard-id" value={form.model_id} onChange={(e) => setForm({ ...form, model_id: e.target.value })} className={inputCls}
               placeholder="claude-prod, claude-sonnet-4-6, bedrock-sonnet, ..." />
           </div>
-          <div>
-            <label className="text-sm text-fg-muted block mb-1">API Format *</label>
+          <div role="group" aria-labelledby="modelcard-provider-label">
+            <span id="modelcard-provider-label" className="text-sm text-fg-muted block mb-1">API Format *</span>
             <div className="grid grid-cols-2 gap-2">
               {PROVIDERS.map((p) => (
                 <button
                   key={p.value}
                   type="button"
+                  aria-pressed={form.provider === p.value}
                   onClick={() => { setForm({ ...form, provider: p.value, model: "", base_url: "" }); setAvailableModels([]); }}
                   className={`text-left px-3 py-2 border rounded-md text-sm transition-colors ${
                     form.provider === p.value
@@ -245,8 +246,8 @@ export function ModelCardsList() {
             </div>
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
-            <SecretInput value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
+            <label htmlFor="modelcard-api-key" className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</label>
+            <SecretInput id="modelcard-api-key" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
               placeholder={editingId ? "Leave blank to keep current key" : "sk-..."}
               name="model-api-key-field"
               onBlur={() => { if (OFFICIAL_PROVIDERS.has(form.provider) && form.api_key) fetchModels(form.provider, form.api_key); }} />
@@ -255,11 +256,11 @@ export function ModelCardsList() {
             )}
           </div>
           <div className="relative">
-            <label className="text-sm text-fg-muted block mb-1">
+            <label htmlFor="modelcard-wire-model" className="text-sm text-fg-muted block mb-1">
               Wire Model
               <span className="ml-1 text-xs text-fg-subtle">(sent to provider; defaults to Model ID)</span>
             </label>
-            <input value={form.model}
+            <input id="modelcard-wire-model" value={form.model}
               onChange={(e) => { setForm({ ...form, model: e.target.value }); setShowModelSuggestions(true); }}
               onFocus={() => setShowModelSuggestions(true)}
               onBlur={() => setTimeout(() => setShowModelSuggestions(false), 150)}
@@ -288,8 +289,8 @@ export function ModelCardsList() {
           </div>
           {!OFFICIAL_PROVIDERS.has(form.provider) && (
             <div>
-              <label className="text-sm text-fg-muted block mb-1">Base URL *</label>
-              <input value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
+              <label htmlFor="modelcard-base-url" className="text-sm text-fg-muted block mb-1">Base URL *</label>
+              <input id="modelcard-base-url" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
                 placeholder={form.provider === "ant-compatible" ? "https://your-proxy.com/v1" : "https://api.deepseek.com/v1"} autoComplete="off" />
             </div>
           )}
@@ -303,12 +304,12 @@ export function ModelCardsList() {
                       const hdrs = [...form.custom_headers];
                       hdrs[i] = { ...hdrs[i], key: e.target.value };
                       setForm({ ...form, custom_headers: hdrs });
-                    }} className={inputCls} placeholder="Header-Name" autoComplete="off" />
+                    }} className={inputCls} placeholder="Header-Name" aria-label={`Custom header ${i + 1} name`} autoComplete="off" />
                     <input value={h.value} onChange={(e) => {
                       const hdrs = [...form.custom_headers];
                       hdrs[i] = { ...hdrs[i], value: e.target.value };
                       setForm({ ...form, custom_headers: hdrs });
-                    }} className={inputCls} placeholder="value" autoComplete="off" />
+                    }} className={inputCls} placeholder="value" aria-label={`Custom header ${i + 1} value`} autoComplete="off" />
                     {form.custom_headers.length > 1 && (
                       <button type="button" onClick={() => setForm({ ...form, custom_headers: form.custom_headers.filter((_, j) => j !== i) })}
                         className="text-fg-subtle hover:text-danger text-xs shrink-0">Remove</button>

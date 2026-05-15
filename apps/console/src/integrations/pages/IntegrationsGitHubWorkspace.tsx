@@ -77,7 +77,7 @@ export function IntegrationsGitHubWorkspace() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[900px] mx-auto px-8 lg:px-10 py-10 lg:py-12">
+      <div className="max-w-[900px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12">
         <Link
           to="/integrations/github"
           className="inline-block mb-6 text-[13px] text-fg-muted hover:text-brand transition-colors"
@@ -444,7 +444,7 @@ function PublicationCard({
       <div className="flex items-center justify-between gap-4 px-5 py-4">
         <div className="flex items-center gap-3 min-w-0">
           {pub.persona.avatarUrl ? (
-            <img src={pub.persona.avatarUrl} alt="" className="w-8 h-8 rounded-full shrink-0" />
+            <img src={pub.persona.avatarUrl} alt="" loading="lazy" decoding="async" className="w-8 h-8 rounded-full shrink-0" />
           ) : (
             <div className="w-8 h-8 rounded-full bg-brand-subtle text-brand flex items-center justify-center text-[12px] font-medium shrink-0">
               {pub.persona.name.slice(0, 1).toUpperCase()}

@@ -153,8 +153,9 @@ export function MemoryStoresList() {
             </div>
           )}
           <div>
-            <label className="text-sm text-fg-muted block mb-1">Name</label>
+            <label htmlFor="memory-store-name" className="text-sm text-fg-muted block mb-1">Name</label>
             <input
+              id="memory-store-name"
               placeholder="e.g. User Preferences"
               value={formName}
               onChange={(e) => setFormName(e.target.value)}
@@ -162,10 +163,11 @@ export function MemoryStoresList() {
             />
           </div>
           <div>
-            <label className="text-sm text-fg-muted block mb-1">
+            <label htmlFor="memory-store-description" className="text-sm text-fg-muted block mb-1">
               Description <span className="text-fg-subtle">(optional)</span>
             </label>
             <input
+              id="memory-store-description"
               placeholder="What's stored here?"
               value={formDesc}
               onChange={(e) => setFormDesc(e.target.value)}

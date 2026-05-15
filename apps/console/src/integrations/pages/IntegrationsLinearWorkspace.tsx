@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { Children, cloneElement, isValidElement, useEffect, useId, useState, type ReactElement } from "react";
 import { Link, useParams } from "react-router";
 import { IntegrationsApi } from "../api/client";
 import type {
@@ -68,7 +68,7 @@ export function IntegrationsLinearWorkspace() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[1100px] mx-auto px-8 lg:px-10 py-8 lg:py-10">
+      <div className="max-w-[1100px] mx-auto px-4 sm:px-8 lg:px-10 py-8 lg:py-10">
         <Link
           to="/integrations/linear"
           className="inline-flex items-center gap-1 text-[13px] text-fg-muted hover:text-brand transition-colors"
@@ -182,7 +182,7 @@ function PublicationCard({
       >
         <div className="flex items-center gap-3 min-w-0 flex-1">
           {pub.persona.avatarUrl ? (
-            <img src={pub.persona.avatarUrl} alt="" className="w-7 h-7 rounded-full shrink-0" />
+            <img src={pub.persona.avatarUrl} alt="" loading="lazy" decoding="async" className="w-7 h-7 rounded-full shrink-0" />
           ) : (
             <div className="w-7 h-7 rounded-full bg-brand-subtle text-brand flex items-center justify-center text-[12px] font-medium shrink-0">
               {pub.persona.name.slice(0, 1).toUpperCase()}
@@ -344,7 +344,7 @@ function DispatchRulesSection({ publicationId }: { publicationId: string }) {
         </button>
       </div>
 
-      {error && <div className="mb-3 px-3 py-2 rounded-md bg-red-500/10 border border-red-500/40 text-[12px] text-red-300">{error}</div>}
+      {error && <div className="mb-3 px-3 py-2 rounded-md bg-danger-subtle border border-danger/40 text-[12px] text-danger">{error}</div>}
 
       {showCreate && (
         <CreateRuleForm
@@ -432,7 +432,7 @@ function CreateRuleForm({
 
   return (
     <form onSubmit={submit} className="mb-3 border border-border rounded-md p-3 bg-bg space-y-2 text-[12px]">
-      {error && <div className="px-2 py-1.5 rounded bg-red-500/10 border border-red-500/40 text-red-300">{error}</div>}
+      {error && <div className="px-2 py-1.5 rounded bg-danger-subtle border border-danger/40 text-danger">{error}</div>}
       <div className="grid grid-cols-2 gap-2">
         <label className="flex flex-col gap-1">
           <span className="text-fg-muted">Name</span>
@@ -466,10 +466,17 @@ const inputCls =
   "w-full border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors placeholder:text-fg-subtle";
 
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
+  const generatedId = useId();
+  // Clone the child input/select/textarea so it shares the same id the
+  // <label htmlFor> points at. Saves callsites from threading ids manually.
+  const child = Children.only(children) as ReactElement<{ id?: string }>;
+  const childWithId = isValidElement(child) && !child.props.id
+    ? cloneElement(child, { id: generatedId })
+    : child;
   return (
     <div>
-      <label className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
-      {children}
+      <label htmlFor={(childWithId.props as { id?: string }).id ?? generatedId} className="block text-[12px] font-medium text-fg-muted mb-1.5">{label}</label>
+      {childWithId}
     </div>
   );
 }
