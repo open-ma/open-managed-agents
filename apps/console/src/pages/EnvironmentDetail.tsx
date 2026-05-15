@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Button } from "../components/Button";
 import { Select, SelectOption } from "../components/Select";
 import { useToast } from "../components/Toast";
@@ -95,22 +96,25 @@ export function EnvironmentDetail() {
   // so save doesn't silently strip them.
   const [preservedGem, setPreservedGem] = useState<string[] | undefined>(undefined);
 
+  // Initial load via TQ. Re-renders when the cache is populated; the
+  // applyEnv side-effect below seeds the editable form state once per
+  // fetched payload (id changes between renders → form re-seeds).
+  const { data: fetchedEnv, error: fetchError } = useApiQuery<Env>(
+    id ? `/v1/environments/${id}` : null,
+  );
   useEffect(() => {
-    if (!id) return;
-    let cancelled = false;
-    api<Env>(`/v1/environments/${id}`)
-      .then((e) => {
-        if (cancelled) return;
-        applyEnv(e);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setLoadError(err instanceof Error ? err.message : "load failed");
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [id]);
+    if (fetchedEnv) applyEnv(fetchedEnv);
+    // applyEnv only depends on `fetchedEnv` (it's a closure over the
+    // setters which are stable from useState). Disabled the lint rule
+    // because pulling applyEnv into deps would require memoizing every
+    // setter chain — simpler to keep this an "on data arrival" effect.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [fetchedEnv]);
+  useEffect(() => {
+    if (fetchError) {
+      setLoadError(fetchError instanceof Error ? fetchError.message : "load failed");
+    }
+  }, [fetchError]);
 
   function applyEnv(e: Env) {
     setEnv(e);

@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useMemo, useState } from "react";
 import { Link } from "react-router";
+import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useApi, getActiveTenantId } from "../lib/api";
 import { useToast } from "../components/Toast";
 import { ListPage } from "../components/ListPage";
@@ -27,53 +28,51 @@ const PAGE_SIZE = 50;
 export function FilesList() {
   const { api } = useApi();
   const { toast } = useToast();
-  const [items, setItems] = useState<FileRecord[]>([]);
-  const [hasMore, setHasMore] = useState(false);
-  const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
+  const queryClient = useQueryClient();
   const [scopeFilter, setScopeFilter] = useState("");
   const [search, setSearch] = useState("");
 
-  const buildUrl = (beforeId?: string) => {
-    const sp = new URLSearchParams();
-    sp.set("limit", String(PAGE_SIZE));
-    if (scopeFilter) sp.set("scope_id", scopeFilter);
-    if (beforeId) sp.set("before_id", beforeId);
-    return `/v1/files?${sp.toString()}`;
-  };
+  // Files uses `before_id` + `has_more` (Anthropic Files-style cursor),
+  // not the `next_cursor` shape `useInfiniteApiQuery` expects, so wire
+  // `useInfiniteQuery` inline with the right pageParam logic. Cache key
+  // includes the scope filter so flipping it gets its own cache slot.
+  const queryKey = useMemo(
+    () => ["/v1/files", "infinite", scopeFilter || ""] as const,
+    [scopeFilter],
+  );
 
-  const refresh = async () => {
-    setLoading(true);
-    try {
-      const res = await api<ListResponse>(buildUrl());
-      setItems(res.data);
-      setHasMore(!!res.has_more);
-    } catch {
-      // api() already toasted; empty list communicates the failure.
-    } finally {
-      setLoading(false);
+  const query = useInfiniteQuery<ListResponse>({
+    queryKey,
+    initialPageParam: undefined as string | undefined,
+    queryFn: ({ pageParam, signal }) => {
+      const sp = new URLSearchParams();
+      sp.set("limit", String(PAGE_SIZE));
+      if (scopeFilter) sp.set("scope_id", scopeFilter);
+      if (typeof pageParam === "string") sp.set("before_id", pageParam);
+      return api<ListResponse>(`/v1/files?${sp.toString()}`, { signal });
+    },
+    // Page-after cursor for this endpoint is the last id on the page;
+    // Anthropic Files uses `before_id` to mean "give me items older than
+    // this id", which matches the descending-by-id list we're rendering.
+    getNextPageParam: (lastPage) =>
+      lastPage.has_more ? lastPage.data[lastPage.data.length - 1]?.id : undefined,
+  });
+
+  const items: FileRecord[] = useMemo(() => {
+    const pages = query.data?.pages ?? [];
+    if (pages.length === 0) return [];
+    if (pages.length === 1) return pages[0].data;
+    return pages.flatMap((p) => p.data);
+  }, [query.data]);
+
+  const loading = query.isPending;
+  const loadingMore = query.isFetchingNextPage;
+  const hasMore = !!query.hasNextPage;
+  const loadMore = () => {
+    if (query.hasNextPage && !query.isFetchingNextPage) {
+      void query.fetchNextPage();
     }
   };
-
-  const loadMore = async () => {
-    const lastId = items[items.length - 1]?.id;
-    if (!lastId || loadingMore) return;
-    setLoadingMore(true);
-    try {
-      const res = await api<ListResponse>(buildUrl(lastId));
-      setItems((prev) => [...prev, ...res.data]);
-      setHasMore(!!res.has_more);
-    } catch {
-      // toasted by api()
-    } finally {
-      setLoadingMore(false);
-    }
-  };
-
-  useEffect(() => {
-    void refresh();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [scopeFilter]);
 
   // Direct fetch for binary download — api() always parses JSON, and we need
   // the raw blob. Mirror its tenant-pin header so downloads honor the active
@@ -107,7 +106,10 @@ export function FilesList() {
     if (!confirm(`Delete "${f.filename}"? The R2 object and metadata both go. This cannot be undone.`)) return;
     try {
       await api(`/v1/files/${f.id}`, { method: "DELETE" });
-      setItems((prev) => prev.filter((x) => x.id !== f.id));
+      // Invalidate every /v1/files query (any scope filter) so the page
+      // refetches the latest. Cheaper than the previous in-place setItems —
+      // the next refetch lands a fresh server-truth list.
+      void queryClient.invalidateQueries({ queryKey: ["/v1/files"] });
     } catch {
       // toasted
     }

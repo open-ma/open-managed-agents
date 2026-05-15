@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
-import { useCursorList } from "../lib/useCursorList";
+import { usePagedList } from "../lib/usePagedList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { Select, SelectOption } from "../components/Select";
@@ -181,9 +181,10 @@ export function SessionsList() {
   const [search, setSearch] = useState("");
   const [filterAgent, setFilterAgent] = useState("");
 
-  // Sessions table — cursor-paginated, server-side filtered by agent_id
-  // when the filter dropdown is set. Filter change resets to page 1
-  // (useCursorList re-fetches when params change).
+  // Sessions table — cursor-paginated with proper Prev/Next/Page-N
+  // pagination, server-side filtered by agent_id when the filter dropdown
+  // is set. Filter change resets to page 1 (usePagedList re-fetches and
+  // clears the cursor stack when params change).
   const sessionsParams = useMemo(
     () => ({ agent_id: filterAgent || undefined }),
     [filterAgent],
@@ -191,11 +192,13 @@ export function SessionsList() {
   const {
     items: sessions,
     isLoading: loading,
-    isLoadingMore,
-    hasMore,
-    loadMore,
+    pageIndex,
+    hasNext,
+    hasPrev,
+    nextPage,
+    prevPage,
     refresh: refreshSessions,
-  } = useCursorList<Session>("/v1/sessions", { limit: 50, params: sessionsParams });
+  } = usePagedList<Session>("/v1/sessions", { limit: 20, params: sessionsParams });
 
   const loadAux = async () => {
     setAuxLoading(true);
@@ -483,10 +486,19 @@ export function SessionsList() {
       loading={loading}
       getRowKey={(s) => s.id}
       onRowClick={(s) => nav(`/sessions/${s.id}`)}
-      hasMore={hasMore}
-      onLoadMore={loadMore}
-      loadingMore={isLoadingMore}
+      pageIndex={pageIndex}
+      hasNext={hasNext}
+      hasPrev={hasPrev}
+      onNextPage={nextPage}
+      onPrevPage={prevPage}
       emptyTitle={search || filterAgent ? "No matching sessions" : "No sessions yet"}
+      emptyAction={!search && !filterAgent && (
+        <Button onClick={() => {
+          setShowCreate(true);
+          if (!form.agent && agents[0]) setForm(f => ({ ...f, agent: agents[0].id }));
+          if (!form.environment_id && envs[0]) setForm(f => ({ ...f, environment_id: envs[0].id }));
+        }}>+ New session</Button>
+      )}
       emptySubtitle={
         search || filterAgent
           ? "Try different filters."

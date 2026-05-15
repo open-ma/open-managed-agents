@@ -48,7 +48,7 @@ export function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number }
   // FIFO), so multiple parallel or nested model calls stay correctly
   // associated. FIFO fallback below for events that predate the field.
   const modelEndsById = new Map<string, { t: number; e: Event; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finishReason?: string }>();
-  const modelEndsFifo: { t: number; e: Event }[] = [];
+  const modelEndsFifo: { t: number; e: Event; usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finishReason?: string }[] = [];
   // OMA-extension span — pairs to model_request_start the same way the end
   // does. Lets the model bar split into TTFT (start→first_token) and
   // generation (first_token→end). FIFO fallback for events without ids.
@@ -67,10 +67,11 @@ export function deriveSpans(events: Event[]): { spans: Span[]; totalMs: number }
     else if (e.type === "agent.mcp_tool_result" && e.mcp_tool_use_id) mcpResults.set(e.mcp_tool_use_id, { t, e });
     else if (e.type === "user.custom_tool_result" && (e as Event).id) customResults.set(String(e.id), { t, e });
     else if (e.type === "span.model_request_end") {
-      modelEndsFifo.push({ t, e });
       const data = (e.data as { model_request_start_id?: string; model_usage?: { input_tokens: number; output_tokens: number; cache_read_input_tokens?: number; cache_creation_input_tokens?: number }; finish_reason?: string } | undefined);
       const sid = (e as { model_request_start_id?: string }).model_request_start_id ?? data?.model_request_start_id;
-      if (sid) modelEndsById.set(sid, { t, e, usage: data?.model_usage, finishReason: data?.finish_reason });
+      const entry = { t, e, usage: data?.model_usage, finishReason: data?.finish_reason };
+      modelEndsFifo.push(entry);
+      if (sid) modelEndsById.set(sid, entry);
     }
     else if (e.type === "span.model_first_token") {
       modelFirstTokensFifo.push({ t, e });

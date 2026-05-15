@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { Link } from "react-router";
 import { useApi } from "../lib/api";
-import { useCursorList } from "../lib/useCursorList";
+import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { Select, SelectOption } from "../components/Select";
@@ -22,7 +22,7 @@ export function EnvironmentsList() {
     hasMore,
     loadMore,
     refresh: load,
-  } = useCursorList<Env>("/v1/environments", { limit: 50 });
+  } = useInfiniteApiQuery<Env>("/v1/environments", { limit: 50 });
 
   const create = async () => {
     await api("/v1/environments", {

@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import type { Trajectory } from "../lib/trajectory";
 import { rewardHeadline } from "../lib/trajectory";
 
@@ -74,9 +75,6 @@ export function EvalRunDetail() {
   const { id } = useParams<{ id: string }>();
   const { api } = useApi();
   const nav = useNavigate();
-  const [run, setRun] = useState<EvalRunDetail | null>(null);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
   /** Cache of trajectory fetches keyed by session_id. Populated lazily when
    *  the user expands a task row — we don't pull every trial's trajectory
@@ -88,31 +86,26 @@ export function EvalRunDetail() {
     Map<string, Trajectory | "loading" | "error">
   >(new Map());
 
-  useEffect(() => {
-    if (!id) return;
-    let cancelled = false;
-    let timer: number | undefined;
-    async function load() {
-      try {
-        const r = await api<EvalRunDetail>(`/v1/evals/runs/${id}`);
-        if (cancelled) return;
-        setRun(r);
-        setLoading(false);
-        if (r.status === "pending" || r.status === "running") {
-          timer = window.setTimeout(load, 5_000);
-        }
-      } catch (err) {
-        if (cancelled) return;
-        setError(err instanceof Error ? err.message : "load failed");
-        setLoading(false);
-      }
-    }
-    load();
-    return () => {
-      cancelled = true;
-      if (timer) clearTimeout(timer);
-    };
-  }, [id, api]);
+  // Run detail with auto-poll while the run is unfinished. Using TQ's
+  // refetchInterval so we don't have to hand-roll the cleanup-on-unmount
+  // dance the previous useEffect did. Returning `false` stops the poll
+  // once the run reaches a terminal state.
+  const {
+    data: run,
+    isLoading: loading,
+    error: queryError,
+  } = useApiQuery<EvalRunDetail>(
+    id ? `/v1/evals/runs/${id}` : null,
+    undefined,
+    {
+      refetchInterval: (query) => {
+        const r = query.state.data as EvalRunDetail | undefined;
+        if (!r) return false;
+        return r.status === "pending" || r.status === "running" ? 5_000 : false;
+      },
+    },
+  );
+  const error = queryError instanceof Error ? queryError.message : queryError ? String(queryError) : null;
 
   function toggleExpand(taskId: string) {
     setExpanded(prev => {

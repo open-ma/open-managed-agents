@@ -160,7 +160,7 @@ export function SessionDetail() {
     // Thinking stream lifecycle. Same pattern as message stream:
     // start opens an entry, chunk appends, end is held, canonical
     // agent.thinking with same thinking_id closes it.
-    if (ev.type === "agent.thinking_stream_start" && ev.thinking_id) {
+    if (ev.type === "agent.thinking_stream_start" && typeof ev.thinking_id === "string") {
       const tid = ev.thinking_id;
       setThinkingStreams((prev) => {
         if (prev.has(tid)) return prev;
@@ -170,7 +170,7 @@ export function SessionDetail() {
       });
       return;
     }
-    if (ev.type === "agent.thinking_chunk" && ev.thinking_id && typeof ev.delta === "string") {
+    if (ev.type === "agent.thinking_chunk" && typeof ev.thinking_id === "string" && typeof ev.delta === "string") {
       const tid = ev.thinking_id;
       const delta = ev.delta;
       setThinkingStreams((prev) => {
@@ -227,7 +227,7 @@ export function SessionDetail() {
     // bail-clear all live thinking streams (multi-stream-per-step is
     // rare and safer to err on closing them all).
     if (ev.type === "agent.thinking") {
-      const tid = ev.thinking_id;
+      const tid = typeof ev.thinking_id === "string" ? ev.thinking_id : undefined;
       setThinkingStreams((prev) => {
         if (prev.size === 0) return prev;
         if (tid && !prev.has(tid)) return prev;

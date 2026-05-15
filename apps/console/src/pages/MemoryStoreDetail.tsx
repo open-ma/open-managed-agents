@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
 import { Page } from "../components/Page";
 import { Tabs, Tab, TabPanel } from "../components/Tabs";
@@ -43,15 +44,17 @@ type Tab = "memories" | "versions" | "settings";
 
 export function MemoryStoreDetail() {
   const { id: storeId } = useParams<{ id: string }>();
-  const { api } = useApi();
-  const [store, setStore] = useState<MemoryStore | null>(null);
   const [tab, setTab] = useState<Tab>("memories");
   const [error, setError] = useState<string | null>(null);
 
+  // Top-level store fetch via TQ. The two child panels do their own
+  // queries — this one just gates the page render and seeds the header.
+  const { data: store, error: storeError } = useApiQuery<MemoryStore>(
+    storeId ? `/v1/memory_stores/${storeId}` : null,
+  );
   useEffect(() => {
-    if (!storeId) return;
-    api<MemoryStore>(`/v1/memory_stores/${storeId}`).then(setStore).catch((e) => setError(errMsg(e)));
-  }, [storeId]);
+    if (storeError) setError(errMsg(storeError));
+  }, [storeError]);
 
   if (!storeId) return <div className="p-8">Missing store id.</div>;
   if (error) return (
@@ -101,30 +104,35 @@ export function MemoryStoreDetail() {
 
 function MemoriesPanel({ storeId, archived }: { storeId: string; archived: boolean }) {
   const { api } = useApi();
-  const [memories, setMemories] = useState<MemoryListItem[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pathPrefix, setPathPrefix] = useState("");
   const [depth, setDepth] = useState("");
   const [showWrite, setShowWrite] = useState(false);
   const [open, setOpen] = useState<Memory | null>(null);
 
-  const load = async () => {
-    setLoading(true);
-    setError(null);
-    try {
-      const qs = new URLSearchParams();
-      if (pathPrefix) qs.set("path_prefix", pathPrefix);
-      if (depth) qs.set("depth", depth);
-      const url = `/v1/memory_stores/${storeId}/memories${qs.toString() ? `?${qs}` : ""}`;
-      setMemories((await api<{ data: MemoryListItem[] }>(url)).data);
-    } catch (e) {
-      setError(errMsg(e));
-    }
-    setLoading(false);
+  // List query — TQ keys on (path, params), so changing pathPrefix/depth
+  // gets a fresh cache slot and refetch automatically. The previous hand-
+  // rolled load() had the same shape, just without the cache and dedup.
+  const params = {
+    path_prefix: pathPrefix || undefined,
+    depth: depth || undefined,
   };
-
-  useEffect(() => { load(); }, [storeId, pathPrefix, depth]);
+  const {
+    data: listRes,
+    isLoading: loading,
+    error: listError,
+    refetch,
+  } = useApiQuery<{ data: MemoryListItem[] }>(
+    `/v1/memory_stores/${storeId}/memories`,
+    params,
+  );
+  useEffect(() => {
+    if (listError) setError(errMsg(listError));
+  }, [listError]);
+  const memories = listRes?.data ?? [];
+  const load = () => {
+    void refetch();
+  };
 
   const openMemory = async (m: MemoryListItem) => {
     try {
@@ -462,18 +470,18 @@ function MemoryDetailDialog({
 // =================================================================
 
 function VersionsPanel({ storeId }: { storeId: string }) {
-  const { api } = useApi();
-  const [versions, setVersions] = useState<MemoryVersion[]>([]);
-  const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-
+  const {
+    data: res,
+    isLoading: loading,
+    error: queryError,
+  } = useApiQuery<{ data: MemoryVersion[] }>(
+    `/v1/memory_stores/${storeId}/memory_versions`,
+  );
   useEffect(() => {
-    setLoading(true);
-    api<{ data: MemoryVersion[] }>(`/v1/memory_stores/${storeId}/memory_versions`)
-      .then((r) => setVersions(r.data))
-      .catch((e) => setError(errMsg(e)))
-      .finally(() => setLoading(false));
-  }, [storeId]);
+    if (queryError) setError(errMsg(queryError));
+  }, [queryError]);
+  const versions = res?.data ?? [];
 
   if (error) return <ErrorBanner message={error} onDismiss={() => setError(null)} />;
   if (loading) return <p className="text-fg-subtle text-sm py-4">Loading...</p>;

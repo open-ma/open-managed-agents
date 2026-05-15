@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useApi } from "../lib/api";
-import { useCursorList } from "../lib/useCursorList";
+import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
@@ -43,7 +43,7 @@ export function ModelCardsList() {
     hasMore,
     loadMore,
     refresh: load,
-  } = useCursorList<ModelCard>("/v1/model_cards", { limit: 50 });
+  } = useInfiniteApiQuery<ModelCard>("/v1/model_cards", { limit: 50 });
 
   // Fetch models from official API using the user's key
   const fetchModels = useCallback(async (provider: string, apiKey: string) => {

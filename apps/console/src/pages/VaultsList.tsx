@@ -1,6 +1,6 @@
 import { useEffect, useState, useCallback } from "react";
 import { useApi } from "../lib/api";
-import { useCursorList } from "../lib/useCursorList";
+import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
@@ -111,7 +111,7 @@ export function VaultsList() {
     hasMore,
     loadMore,
     refresh: load,
-  } = useCursorList<Vault>("/v1/vaults", { limit: 50 });
+  } = useInfiniteApiQuery<Vault>("/v1/vaults", { limit: 50 });
 
   // Listen for OAuth popup completion
   const handleOAuthMessage = useCallback((event: MessageEvent) => {
@@ -362,6 +362,9 @@ export function VaultsList() {
       onLoadMore={loadMore}
       loadingMore={isLoadingMore}
       emptyTitle="No vaults yet"
+      emptyAction={
+        <Button onClick={() => setShowCreateVault(true)}>+ New vault</Button>
+      }
       columns={[
         { key: "name", label: "Name", className: "font-medium text-fg" },
         { key: "id", label: "ID", className: "font-mono text-xs text-fg-muted" },

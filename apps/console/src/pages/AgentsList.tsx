@@ -1,8 +1,9 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
-import { useCursorList } from "../lib/useCursorList";
+import { useInfiniteApiQuery } from "../lib/useApiQuery";
 import { ListPage } from "../components/ListPage";
+import { Button } from "../components/Button";
 import { Select, SelectOption, SelectGroup, SelectGroupLabel } from "../components/Select";
 import { Combobox } from "../components/Combobox";
 import { McpServerPickerModal } from "../components/McpServerPickerModal";
@@ -133,7 +134,7 @@ export function AgentsList() {
     hasMore,
     loadMore,
     refresh: refreshAgents,
-  } = useCursorList<Agent>("/v1/agents", { limit: 50, params: agentsParams });
+  } = useInfiniteApiQuery<Agent>("/v1/agents", { limit: 50, params: agentsParams });
 
   // Aux fetches that aren't paginated UI surfaces — refreshed on mount and
   // after agent CRUD. Pull all agents (for the callable-agents dropdown)
@@ -526,6 +527,9 @@ export function AgentsList() {
       onLoadMore={loadMore}
       loadingMore={isLoadingMore}
       emptyTitle={search ? "No matching agents" : "No agents yet"}
+      emptyAction={!search && (
+        <Button onClick={() => setShowCreate(true)}>+ New agent</Button>
+      )}
       emptySubtitle={
         search ? (
           "Try a different search term."

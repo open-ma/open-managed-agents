@@ -15,7 +15,7 @@
 //
 // The modal closes itself after a pick — caller doesn't need to manage that.
 
-import { useState } from "react";
+import { useState, type JSX } from "react";
 import { Modal } from "./Modal";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 

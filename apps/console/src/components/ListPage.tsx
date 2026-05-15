@@ -1,6 +1,9 @@
 import { type ReactNode } from "react";
 import { Button } from "./Button";
+import { EmptyState } from "./EmptyState";
 import { Page } from "./Page";
+import { Pagination } from "./Pagination";
+import { SkeletonRows } from "./Skeleton";
 
 interface Column<T> {
   key: string;
@@ -51,16 +54,30 @@ interface ListPageProps<T> {
   emptyTitle?: string;
   /** ReactNode so callers can include code snippets, links etc. */
   emptySubtitle?: ReactNode;
+  /** Action slot rendered inside the empty state — typically a Button
+   *  that opens the create dialog so the empty state isn't a dead end. */
+  emptyAction?: ReactNode;
 
   onRowClick?: (item: T) => void;
   getRowKey: (item: T) => string;
 
   /** Cursor pagination (mirrors useCursorList). When `onLoadMore` is set
    *  and `hasMore` is true, a "Load more" footer is rendered below the
-   *  table; while `loadingMore` is true the button shows a loading state. */
+   *  table; while `loadingMore` is true the button shows a loading state.
+   *  Mutually exclusive with paginated mode (`onNextPage` / `onPrevPage`). */
   hasMore?: boolean;
   onLoadMore?: () => void;
   loadingMore?: boolean;
+
+  /** Paginated mode (mirrors usePagedList). When `onNextPage` and
+   *  `onPrevPage` are set, a Prev / Page-N / Next footer is rendered
+   *  instead of "Load more". Mutually exclusive with `hasMore` /
+   *  `onLoadMore`; if both are wired the load-more footer wins. */
+  pageIndex?: number;
+  hasNext?: boolean;
+  hasPrev?: boolean;
+  onNextPage?: () => void;
+  onPrevPage?: () => void;
 
   /** Anything to render below the table — typically modals tied to the
    *  page (create dialog, detail dialog, etc.). */
@@ -94,11 +111,17 @@ export function ListPage<T>({
   loading,
   emptyTitle = "Nothing here yet",
   emptySubtitle,
+  emptyAction,
   onRowClick,
   getRowKey,
   hasMore,
   onLoadMore,
   loadingMore,
+  pageIndex,
+  hasNext,
+  hasPrev,
+  onNextPage,
+  onPrevPage,
   children,
 }: ListPageProps<T>) {
   const hasControlsRow =
@@ -175,35 +198,9 @@ export function ListPage<T>({
 
       {/* Table / loading / empty */}
       {loading ? (
-        <div className="flex items-center justify-center py-16">
-          <svg
-            className="animate-spin h-5 w-5 text-fg-subtle"
-            xmlns="http://www.w3.org/2000/svg"
-            fill="none"
-            viewBox="0 0 24 24"
-          >
-            <circle
-              className="opacity-25"
-              cx="12"
-              cy="12"
-              r="10"
-              stroke="currentColor"
-              strokeWidth="4"
-            />
-            <path
-              className="opacity-75"
-              fill="currentColor"
-              d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z"
-            />
-          </svg>
-        </div>
+        <SkeletonRows count={8} height={40} gap={8} />
       ) : data.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle">
-          <p className="text-lg mb-1">{emptyTitle}</p>
-          {emptySubtitle && (
-            <div className="text-sm">{emptySubtitle}</div>
-          )}
-        </div>
+        <EmptyState title={emptyTitle} body={emptySubtitle} action={emptyAction} size="lg" />
       ) : (
         <div className="border border-border rounded-lg overflow-hidden">
           <div className="overflow-x-auto">
@@ -248,7 +245,7 @@ export function ListPage<T>({
               </tbody>
             </table>
           </div>
-          {hasMore && onLoadMore && (
+          {hasMore && onLoadMore ? (
             <div className="flex justify-center border-t border-border bg-bg-surface py-3">
               <button
                 onClick={onLoadMore}
@@ -258,7 +255,16 @@ export function ListPage<T>({
                 {loadingMore ? "Loading…" : "Load more"}
               </button>
             </div>
-          )}
+          ) : onNextPage && onPrevPage ? (
+            <Pagination
+              pageIndex={pageIndex ?? 0}
+              hasNext={hasNext ?? false}
+              hasPrev={hasPrev ?? false}
+              onNext={onNextPage}
+              onPrev={onPrevPage}
+              loading={loading}
+            />
+          ) : null}
         </div>
       )}
 

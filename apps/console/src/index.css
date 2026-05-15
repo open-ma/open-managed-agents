@@ -240,3 +240,63 @@ body {
 @media (prefers-reduced-motion: reduce) {
   .brand-loader-dot { animation: none; opacity: 0.6; }
 }
+
+/* Modal (Radix Dialog) overlay + content animations.
+   Driven by data-state on Dialog.Overlay and Dialog.Content; Radix
+   waits for the closed-state animation to finish before unmounting
+   via its built-in Presence wrapper. Durations match the previous
+   hand-rolled Modal (overlay = --dur-base, content = --dur-slow). */
+@keyframes modal-overlay-in  { from { opacity: 0 } to { opacity: 1 } }
+@keyframes modal-overlay-out { from { opacity: 1 } to { opacity: 0 } }
+@keyframes modal-content-in {
+  from { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+  to   { opacity: 1; transform: translate(-50%, -50%) scale(1);    }
+}
+@keyframes modal-content-out {
+  from { opacity: 1; transform: translate(-50%, -50%) scale(1);    }
+  to   { opacity: 0; transform: translate(-50%, -50%) scale(0.96); }
+}
+.modal-overlay[data-state="open"]    { animation: modal-overlay-in  var(--dur-base) var(--ease-soft); }
+.modal-overlay[data-state="closed"]  { animation: modal-overlay-out var(--dur-base) var(--ease-soft); }
+.modal-content[data-state="open"]    { animation: modal-content-in  var(--dur-slow) var(--ease-soft); }
+.modal-content[data-state="closed"]  { animation: modal-content-out var(--dur-slow) var(--ease-soft); }
+@media (prefers-reduced-motion: reduce) {
+  .modal-overlay[data-state="open"],
+  .modal-overlay[data-state="closed"],
+  .modal-content[data-state="open"],
+  .modal-content[data-state="closed"] {
+    animation-duration: 1ms;
+  }
+}
+
+/* Skeleton placeholder pulse — quieter than animate-pulse (Tailwind's
+   default goes opacity 0.5↔1, which reads as "flashing" in long lists).
+   This stays subtle: 0.4↔0.65 with the same soft easing as the rest. */
+@keyframes skeleton-pulse {
+  0%, 100% { opacity: 0.4;  }
+  50%      { opacity: 0.65; }
+}
+.skeleton-pulse { animation: skeleton-pulse 1500ms var(--ease-soft) infinite; }
+@media (prefers-reduced-motion: reduce) {
+  .skeleton-pulse { animation: none; opacity: 0.55; }
+}
+
+/* Radix Collapsible (Disclosure) panel slide. The library exposes
+   --radix-collapsible-content-height on the Content element so we can
+   animate height from 0 → measured (or vice versa). */
+@keyframes collapsible-down {
+  from { height: 0; }
+  to   { height: var(--radix-collapsible-content-height); }
+}
+@keyframes collapsible-up {
+  from { height: var(--radix-collapsible-content-height); }
+  to   { height: 0; }
+}
+.collapsible-content[data-state="open"]   { animation: collapsible-down var(--dur-base) var(--ease-soft); }
+.collapsible-content[data-state="closed"] { animation: collapsible-up   var(--dur-base) var(--ease-soft); }
+@media (prefers-reduced-motion: reduce) {
+  .collapsible-content[data-state="open"],
+  .collapsible-content[data-state="closed"] {
+    animation-duration: 1ms;
+  }
+}

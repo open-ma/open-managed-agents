@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useMemo } from "react";
 import { useParams, Link, useNavigate } from "react-router";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { GitHubIcon, LinearIcon, SlackIcon } from "../components/icons";
 import { Page } from "../components/Page";
 
@@ -32,30 +33,58 @@ export function AgentDetail() {
   const { id } = useParams();
   const { api } = useApi();
   const nav = useNavigate();
-  const [agent, setAgent] = useState<Agent | null>(null);
-  const [versions, setVersions] = useState<Agent[]>([]);
-  const [linearPubs, setLinearPubs] = useState<Pub[]>([]);
-  const [githubPubs, setGithubPubs] = useState<Pub[]>([]);
-  const [slackPubs, setSlackPubs] = useState<Pub[]>([]);
-  const [error, setError] = useState("");
 
-  useEffect(() => {
-    if (!id) return;
-    api<Agent>(`/v1/agents/${id}`).then(setAgent).catch((e) => setError(e.message));
-    api<{ data: Agent[] }>(`/v1/agents/${id}/versions`).then((d) => setVersions(d.data)).catch(() => {});
-    // Reverse-lookup publications per provider. Each endpoint exists thanks
-    // to the /linear/agents/:id/publications + /slack/agents/:id/publications
-    // + /github/agents/:id/publications routes added on the main worker.
-    api<{ data: Pub[] }>(`/v1/integrations/linear/agents/${id}/publications`)
-      .then((r) => setLinearPubs(r.data.filter((p) => p.status === "live")))
-      .catch(() => {});
-    api<{ data: Pub[] }>(`/v1/integrations/github/agents/${id}/publications`)
-      .then((r) => setGithubPubs(r.data.filter((p) => p.status === "live")))
-      .catch(() => {});
-    api<{ data: Pub[] }>(`/v1/integrations/slack/agents/${id}/publications`)
-      .then((r) => setSlackPubs(r.data.filter((p) => p.status === "live")))
-      .catch(() => {});
-  }, [id]);
+  // Single-resource fetches via TQ. `enabled: !!id` defers until the route
+  // param is available; the publication queries inherit the same gate.
+  // Each query runs independently — failures on the publication endpoints
+  // (404 / not-installed) don't block the agent detail render, same as
+  // the previous behavior where each had its own .catch.
+  const enabled = !!id;
+  const { data: agent, error: agentError } = useApiQuery<Agent>(
+    id ? `/v1/agents/${id}` : null,
+    undefined,
+    { enabled },
+  );
+  const { data: versionsRes } = useApiQuery<{ data: Agent[] }>(
+    id ? `/v1/agents/${id}/versions` : null,
+    undefined,
+    { enabled },
+  );
+  // Reverse-lookup publications per provider. Each endpoint exists thanks
+  // to the /linear/agents/:id/publications + /slack/agents/:id/publications
+  // + /github/agents/:id/publications routes added on the main worker.
+  const { data: linearRes } = useApiQuery<{ data: Pub[] }>(
+    id ? `/v1/integrations/linear/agents/${id}/publications` : null,
+    undefined,
+    { enabled },
+  );
+  const { data: githubRes } = useApiQuery<{ data: Pub[] }>(
+    id ? `/v1/integrations/github/agents/${id}/publications` : null,
+    undefined,
+    { enabled },
+  );
+  const { data: slackRes } = useApiQuery<{ data: Pub[] }>(
+    id ? `/v1/integrations/slack/agents/${id}/publications` : null,
+    undefined,
+    { enabled },
+  );
+
+  const versions = versionsRes?.data ?? [];
+  // Filter to live publications only — same predicate the old useEffect ran.
+  const linearPubs = useMemo(
+    () => (linearRes?.data ?? []).filter((p) => p.status === "live"),
+    [linearRes],
+  );
+  const githubPubs = useMemo(
+    () => (githubRes?.data ?? []).filter((p) => p.status === "live"),
+    [githubRes],
+  );
+  const slackPubs = useMemo(
+    () => (slackRes?.data ?? []).filter((p) => p.status === "live"),
+    [slackRes],
+  );
+
+  const error = agentError instanceof Error ? agentError.message : agentError ? String(agentError) : "";
 
   const modelStr = (m: Agent["model"]) => typeof m === "string" ? m : `${m?.id} (${m?.speed || "standard"})`;
 

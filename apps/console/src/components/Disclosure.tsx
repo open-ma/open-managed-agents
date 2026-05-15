@@ -1,13 +1,13 @@
 import { useId, useState, type ReactNode } from "react";
+import * as Collapsible from "@radix-ui/react-collapsible";
 
 /**
  * Collapsible section with chevron indicator and aria-expanded wiring.
- * Replaces the 5+ in-page disclosure patterns (vault OAuth sections,
- * memory version-history, sidebar groups, tool-call cards) that each
- * reimplemented chevron rotation + aria-expanded + panel id.
  *
- * Visual: chevron right→down on open, content below. Trigger uses the
- * same `transition-transform` motion tokens as the rest of the app.
+ * Wraps `@radix-ui/react-collapsible` so we get free Escape support,
+ * proper aria-controls / aria-expanded linkage, and animated height
+ * transitions via CSS keyframes keyed off `data-state` (see
+ * `.collapsible-content` rules in src/index.css).
  *
  * Two trigger variants:
  *   - default ("border")  → bordered row with title left + chevron right
@@ -15,13 +15,9 @@ import { useId, useState, type ReactNode } from "react";
  *                           where the parent already provides chrome
  */
 interface DisclosureProps {
-  /** Trigger label content (string or arbitrary nodes). */
   title: ReactNode;
-  /** Optional right-aligned label (e.g. "Optional", a count chip). */
   meta?: ReactNode;
-  /** Whether the disclosure starts open. */
   defaultOpen?: boolean;
-  /** Controlled mode: pass both to override internal state. */
   open?: boolean;
   onOpenChange?: (open: boolean) => void;
   variant?: "border" | "bare";
@@ -40,38 +36,44 @@ export function Disclosure({
   children,
 }: DisclosureProps) {
   const [internalOpen, setInternalOpen] = useState(defaultOpen);
+  const isControlled = controlledOpen !== undefined;
   const open = controlledOpen ?? internalOpen;
   const setOpen = (next: boolean) => {
-    if (controlledOpen === undefined) setInternalOpen(next);
+    if (!isControlled) setInternalOpen(next);
     onOpenChange?.(next);
   };
 
-  const panelId = useId();
+  // Stable id pair for aria — Radix wires aria-controls / id automatically
+  // on Trigger/Content, but we still want a deterministic key for tests
+  // and external aria refs to attach to.
+  const _id = useId();
+
   const wrapperCls = variant === "border" ? "border border-border rounded-md" : "";
 
   return (
-    <div className={`${wrapperCls} ${className}`.trim()}>
-      <button
-        type="button"
-        aria-expanded={open}
-        aria-controls={panelId}
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
-      >
-        <span
-          aria-hidden="true"
-          className={`text-fg-muted transition-transform duration-[var(--dur-base)] ease-[var(--ease-soft)] ${open ? "rotate-90" : ""}`}
+    <Collapsible.Root
+      open={open}
+      onOpenChange={setOpen}
+      className={`${wrapperCls} ${className}`.trim()}
+    >
+      <Collapsible.Trigger asChild>
+        <button
+          type="button"
+          className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
         >
-          ›
-        </span>
-        <span className="text-sm font-medium text-fg flex-1 min-w-0">{title}</span>
-        {meta && <span className="text-xs text-fg-muted shrink-0">{meta}</span>}
-      </button>
-      {open && (
-        <div id={panelId} className="px-3 pb-3">
-          {children}
-        </div>
-      )}
-    </div>
+          <span
+            aria-hidden="true"
+            className={`text-fg-muted transition-transform duration-[var(--dur-base)] ease-[var(--ease-soft)] ${open ? "rotate-90" : ""}`}
+          >
+            ›
+          </span>
+          <span className="text-sm font-medium text-fg flex-1 min-w-0">{title}</span>
+          {meta && <span className="text-xs text-fg-muted shrink-0">{meta}</span>}
+        </button>
+      </Collapsible.Trigger>
+      <Collapsible.Content className="collapsible-content overflow-hidden">
+        <div className="px-3 pb-3">{children}</div>
+      </Collapsible.Content>
+    </Collapsible.Root>
   );
 }
