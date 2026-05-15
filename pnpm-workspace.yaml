@@ -23,6 +23,7 @@ allowBuilds:
   '@anthropic-ai/tokenizer': true
   better-sqlite3: true
   esbuild: true
+  msw: false
   protobufjs: true
   sharp: true
   workerd: true
