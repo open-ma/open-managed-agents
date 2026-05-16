@@ -128,7 +128,7 @@ export function ModelCardsList() {
     setShowCreate(false); setEditingId(null); setForm({ ...INITIAL_FORM }); setError("");
   };
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   const providerLabel = (p: string) => PROVIDERS.find((x) => x.value === p)?.label || p;
 
@@ -213,8 +213,8 @@ export function ModelCardsList() {
           className: "text-right",
           render: (c) => (
             <>
-              <button onClick={() => startEdit(c)} className="text-xs text-fg-muted hover:text-fg mr-3">Edit</button>
-              <button onClick={() => remove(c.id)} className="text-xs text-fg-subtle hover:text-danger">Delete</button>
+              <button onClick={() => startEdit(c)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-fg-muted hover:text-fg mr-1 sm:mr-3">Edit</button>
+              <button onClick={() => remove(c.id)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-fg-subtle hover:text-danger">Delete</button>
             </>
           ),
         },
@@ -284,7 +284,7 @@ export function ModelCardsList() {
                   .map((m) => (
                     <button key={m.id} type="button"
                       onMouseDown={() => { setForm({ ...form, model: m.id }); setShowModelSuggestions(false); }}
-                      className="w-full text-left px-3 py-1.5 text-sm hover:bg-bg-surface">
+                      className="w-full text-left px-3 py-1.5 min-h-11 sm:min-h-0 text-sm hover:bg-bg-surface">
                       <span className="text-fg">{m.name !== m.id ? m.name : m.id}</span>
                       {m.name !== m.id && <span className="text-fg-subtle text-xs ml-2">{m.id}</span>}
                     </button>
@@ -320,12 +320,12 @@ export function ModelCardsList() {
                     }} className={inputCls} placeholder="value" aria-label={`Custom header ${i + 1} value`} autoComplete="off" />
                     {form.custom_headers.length > 1 && (
                       <button type="button" onClick={() => setForm({ ...form, custom_headers: form.custom_headers.filter((_, j) => j !== i) })}
-                        className="text-fg-subtle hover:text-danger text-xs shrink-0">Remove</button>
+                        className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-fg-subtle hover:text-danger text-xs shrink-0">Remove</button>
                     )}
                   </div>
                 ))}
                 <button type="button" onClick={() => setForm({ ...form, custom_headers: [...form.custom_headers, { key: "", value: "" }] })}
-                  className="text-xs text-fg-muted hover:text-fg">+ Add header</button>
+                  className="inline-flex items-center justify-center min-h-11 sm:min-h-0 px-2 text-xs text-fg-muted hover:text-fg">+ Add header</button>
               </div>
             </div>
           )}

@@ -466,7 +466,7 @@ export function Login() {
                       setMode("forgot");
                       setError("");
                     }}
-                    className="text-xs text-brand hover:underline"
+                    className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-brand hover:underline"
                   >
                     Forgot password?
                   </button>
@@ -592,7 +592,7 @@ export function Login() {
             <button
               onClick={handleResend}
               disabled={loading}
-              className="text-brand hover:underline disabled:opacity-50"
+              className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline disabled:opacity-50"
             >
               Resend
             </button>
@@ -608,7 +608,7 @@ export function Login() {
                   setMode("otp-login");
                   setError("");
                 }}
-                className="text-brand hover:underline"
+                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
               >
                 Sign in with email code
               </button>
@@ -618,7 +618,7 @@ export function Login() {
                   setMode("signup");
                   setError("");
                 }}
-                className="text-brand hover:underline"
+                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
               >
                 Sign up
               </button>
@@ -632,7 +632,7 @@ export function Login() {
                   setMode("login");
                   setError("");
                 }}
-                className="text-brand hover:underline"
+                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
               >
                 Sign in
               </button>
@@ -645,7 +645,7 @@ export function Login() {
                   setMode("login");
                   setError("");
                 }}
-                className="text-brand hover:underline"
+                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
               >
                 Sign in with password
               </button>
@@ -655,7 +655,7 @@ export function Login() {
                   setMode("signup");
                   setError("");
                 }}
-                className="text-brand hover:underline"
+                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
               >
                 Sign up
               </button>
@@ -668,7 +668,7 @@ export function Login() {
                 setError("");
                 clearOtp();
               }}
-              className="text-brand hover:underline"
+              className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
             >
               Go back
             </button>
@@ -681,7 +681,7 @@ export function Login() {
                   setMode("login");
                   setError("");
                 }}
-                className="text-brand hover:underline"
+                className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
               >
                 Sign in
               </button>
@@ -694,7 +694,7 @@ export function Login() {
                 setError("");
                 clearOtp();
               }}
-              className="text-brand hover:underline"
+              className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
             >
               Go back
             </button>

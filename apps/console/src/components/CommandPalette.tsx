@@ -129,7 +129,7 @@ export function CommandPalette() {
                         key={cmd.to}
                         value={`${cmd.label} ${cmd.aliases ?? ""}`}
                         onSelect={() => go(cmd.to)}
-                        className="flex items-center gap-2.5 px-2.5 py-2 rounded-md text-sm text-fg cursor-pointer data-[selected=true]:bg-bg-surface data-[selected=true]:text-fg"
+                        className="flex items-center gap-2.5 px-2.5 py-2 min-h-11 sm:min-h-0 rounded-md text-sm text-fg cursor-pointer data-[selected=true]:bg-bg-surface data-[selected=true]:text-fg"
                       >
                         <Icon className="w-4 h-4 opacity-60 shrink-0" />
                         <span className="flex-1 min-w-0 truncate">{cmd.label}</span>

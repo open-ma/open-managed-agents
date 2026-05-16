@@ -176,7 +176,7 @@ export function SessionsList() {
     return next;
   });
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   const [search, setSearch] = useState("");
   const [filterAgent, setFilterAgent] = useState("");
@@ -461,7 +461,7 @@ export function SessionsList() {
           type="button"
           onClick={() => setFilterAgent("")}
           aria-label="Clear agent filter"
-          className="text-fg-subtle hover:text-fg text-xs inline-flex items-center justify-center min-w-8 min-h-8 px-2 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+          className="text-fg-subtle hover:text-fg text-xs inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-8 sm:min-h-8 px-2 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ×
         </button>
@@ -716,7 +716,7 @@ export function SessionsList() {
                       <button
                         type="button"
                         onClick={() => removeResource(i)}
-                        className="text-fg-subtle hover:text-danger text-xs"
+                        className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-fg-subtle hover:text-danger text-xs"
                         aria-label="Remove resource"
                       >
                         Remove
@@ -751,7 +751,7 @@ export function SessionsList() {
                               <button
                                 type="button"
                                 onClick={() => toggleReveal(`${i}:token`)}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
+                                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-1 text-xs text-fg-subtle hover:text-fg"
                                 aria-label="Toggle token visibility"
                               >
                                 {revealedSecrets.has(`${i}:token`) ? "hide" : "show"}
@@ -804,7 +804,7 @@ export function SessionsList() {
                         <div>
                           <div className="flex items-center justify-between mb-0.5">
                             <label htmlFor={`session-resource-${i}-file`} className="text-xs text-fg-muted">File <span className="text-danger">*</span></label>
-                            <a href="/files" className="text-xs text-brand hover:underline">Manage files →</a>
+                            <a href="/files" className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-brand hover:underline">Manage files →</a>
                           </div>
                           <select
                             id={`session-resource-${i}-file`}
@@ -840,7 +840,7 @@ export function SessionsList() {
                         <div>
                           <div className="flex items-center justify-between mb-0.5">
                             <label htmlFor={`session-resource-${i}-store`} className="text-xs text-fg-muted">Store <span className="text-danger">*</span></label>
-                            <a href="/memory" className="text-xs text-brand hover:underline">Manage stores →</a>
+                            <a href="/memory" className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-brand hover:underline">Manage stores →</a>
                           </div>
                           <select
                             id={`session-resource-${i}-store`}
@@ -909,7 +909,7 @@ export function SessionsList() {
                               <button
                                 type="button"
                                 onClick={() => toggleReveal(`${i}:value`)}
-                                className="absolute right-2 top-1/2 -translate-y-1/2 text-xs text-fg-subtle hover:text-fg"
+                                className="absolute right-2 top-1/2 -translate-y-1/2 inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-1 text-xs text-fg-subtle hover:text-fg"
                                 aria-label="Toggle value visibility"
                               >
                                 {revealedSecrets.has(`${i}:value`) ? "hide" : "show"}
@@ -925,10 +925,10 @@ export function SessionsList() {
               </div>
             )}
             <div className="flex flex-wrap gap-2 mt-2">
-              <button type="button" onClick={() => addResource("github")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ GitHub repo</button>
-              <button type="button" onClick={() => addResource("file")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ File</button>
-              <button type="button" onClick={() => addResource("memory_store")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ Memory store</button>
-              <button type="button" onClick={() => addResource("env")} className="text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ Env var</button>
+              <button type="button" onClick={() => addResource("github")} className="inline-flex items-center justify-center min-h-11 sm:min-h-0 text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ GitHub repo</button>
+              <button type="button" onClick={() => addResource("file")} className="inline-flex items-center justify-center min-h-11 sm:min-h-0 text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ File</button>
+              <button type="button" onClick={() => addResource("memory_store")} className="inline-flex items-center justify-center min-h-11 sm:min-h-0 text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ Memory store</button>
+              <button type="button" onClick={() => addResource("env")} className="inline-flex items-center justify-center min-h-11 sm:min-h-0 text-xs px-2.5 py-1.5 border border-border rounded-md hover:bg-bg-surface text-fg-muted hover:text-fg">+ Env var</button>
             </div>
           </div>
         </div>

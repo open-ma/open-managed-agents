@@ -4,7 +4,44 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Open Managed Agents</title>
+
+    <!-- Favicon variants. SVG is the primary mark; modern browsers prefer
+         it. apple-touch-icon is an opaque rounded SVG so the iOS install
+         animation doesn't flash the wallpaper through transparent corners.
+         mask-icon is for older Safari pinned-tab rendering, which paints a
+         monochrome stencil tinted to the supplied color. -->
     <link rel="icon" type="image/svg+xml" href="/logo.svg" />
+    <link rel="apple-touch-icon" href="/apple-touch-icon.svg" />
+    <link rel="mask-icon" href="/logo.svg" color="#FF6B50" />
+
+    <!-- Browser-chrome tint. Light value matches --bg in :root; dark value
+         matches --bg in .dark — keeps the address bar reading the same
+         tone as the page itself. -->
+    <meta name="theme-color" content="#fefefe" media="(prefers-color-scheme: light)" />
+    <meta name="theme-color" content="#151515" media="(prefers-color-scheme: dark)" />
+
+    <!-- SEO: short description + canonical. The console is a single-page
+         app behind auth, so canonical is the production app root — every
+         in-app route shares the same indexable surface. -->
+    <meta name="description" content="Console for Open Managed Agents — manage agents, sessions, and infrastructure." />
+    <link rel="canonical" href="https://app.openma.dev/" />
+
+    <!-- Open Graph (Facebook, LinkedIn, Slack, Discord). -->
+    <meta property="og:type" content="website" />
+    <meta property="og:title" content="Open Managed Agents Console" />
+    <meta property="og:description" content="Manage agents, sessions, and infrastructure." />
+    <meta property="og:url" content="https://app.openma.dev/" />
+    <meta property="og:image" content="https://app.openma.dev/og.svg" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:site_name" content="openma" />
+
+    <!-- Twitter / X large image card. -->
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:title" content="Open Managed Agents Console" />
+    <meta name="twitter:description" content="Manage agents, sessions, and infrastructure." />
+    <meta name="twitter:image" content="https://app.openma.dev/og.svg" />
+
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <!-- Turnstile is loaded on the Login page only. preconnect opens the

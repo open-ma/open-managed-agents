@@ -492,8 +492,8 @@ export function AgentsList() {
       )
     : AGENT_TEMPLATES;
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
-  const tabCls = (t: string) => `px-3 py-1.5 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`;
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  const tabCls = (t: string) => `inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${tab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"}`;
 
   // Resolve which card the Model dropdown should highlight: explicit pick
   // wins, otherwise derive from model_id (paste path / pre-select effect).
@@ -544,7 +544,7 @@ export function AgentsList() {
         ) : (
           <>
             <p>Create your first agent to get started.</p>
-            <button onClick={() => nav("/")} className="mt-3 text-sm text-brand hover:underline">
+            <button onClick={() => nav("/")} className="inline-flex items-center min-h-11 sm:min-h-0 mt-3 text-sm text-brand hover:underline">
               Get started with the quickstart guide →
             </button>
           </>
@@ -633,7 +633,7 @@ export function AgentsList() {
                   )}
                 </div>
                 <div className="px-6 py-4 border-t border-border flex justify-end">
-                  <button onClick={closeCreate} className="px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
+                  <button onClick={closeCreate} className="inline-flex items-center min-h-11 sm:min-h-0 px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
                 </div>
               </>
             )}
@@ -643,11 +643,11 @@ export function AgentsList() {
               <>
             <div className="px-6 pt-6 pb-4 border-b border-border">
               <div className="flex items-center justify-between mb-1">
-                <button onClick={() => { setCreateStep("template"); setTemplateSearch(""); setCreateMode("form"); }} className="text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">&larr; Templates</button>
+                <button onClick={() => { setCreateStep("template"); setTemplateSearch(""); setCreateMode("form"); }} className="inline-flex items-center min-h-11 sm:min-h-0 text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">&larr; Templates</button>
                 <div className="flex items-center gap-0.5 bg-bg-surface rounded-md p-0.5">
                   {(["form", "yaml", "json"] as const).map((m) => (
                     <button key={m} onClick={() => switchMode(m)}
-                      className={`px-2 py-1 text-xs rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${createMode === m ? "bg-bg text-fg font-medium shadow-sm" : "text-fg-muted hover:text-fg"}`}>
+                      className={`inline-flex items-center justify-center px-2 py-1 min-h-11 sm:min-h-0 text-xs rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${createMode === m ? "bg-bg text-fg font-medium shadow-sm" : "text-fg-muted hover:text-fg"}`}>
                       {m === "form" ? "Form" : m.toUpperCase()}
                     </button>
                   ))}
@@ -867,7 +867,7 @@ export function AgentsList() {
                                     <button
                                       type="button"
                                       onClick={() => setForm({ ...form, localSkillBlocklist: [] })}
-                                      className="text-[10px] text-fg-subtle hover:text-fg underline"
+                                      className="inline-flex items-center min-h-11 sm:min-h-0 px-1 text-[10px] text-fg-subtle hover:text-fg underline"
                                     >
                                       reset
                                     </button>
@@ -1002,7 +1002,7 @@ export function AgentsList() {
                                 else next[bt.name] = v;
                                 setForm({ ...form, toolOverrides: next });
                               }}
-                              className="border border-border rounded-md px-2 py-1 text-xs bg-bg text-fg outline-none focus:border-brand shrink-0"
+                              className="border border-border rounded-md px-2 py-1 min-h-11 sm:min-h-0 text-xs bg-bg text-fg outline-none focus:border-brand shrink-0"
                             >
                               <option value="default">default ({effectiveLabel})</option>
                               <option value="always_allow">always_allow</option>
@@ -1087,8 +1087,8 @@ export function AgentsList() {
                   <div className="flex items-center justify-between mb-1">
                     <label className="text-sm font-medium text-fg">MCP Servers</label>
                     <div className="flex items-center gap-3">
-                      <button onClick={() => setShowMcpPicker(true)} className="text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">+ Pick known</button>
-                      <button onClick={addMcp} className="text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">+ Custom URL</button>
+                      <button onClick={() => setShowMcpPicker(true)} className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">+ Pick known</button>
+                      <button onClick={addMcp} className="inline-flex items-center min-h-11 sm:min-h-0 text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">+ Custom URL</button>
                     </div>
                   </div>
                   {form.mcpServers.map((mcp, i) => (
@@ -1105,7 +1105,7 @@ export function AgentsList() {
                             <SelectOption value="stdio">stdio</SelectOption>
                           </Select>
                         </div>
-                        <button onClick={() => removeMcp(i)} aria-label={`Remove MCP server ${mcp.name || i + 1}`} className="self-end px-2 py-2 text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">×</button>
+                        <button onClick={() => removeMcp(i)} aria-label={`Remove MCP server ${mcp.name || i + 1}`} className="self-end inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 py-2 text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">×</button>
                       </div>
                       <div>
                         <label htmlFor={`mcp-url-${i}`} className="text-xs text-fg-muted block mb-0.5">URL</label>
@@ -1162,7 +1162,7 @@ export function AgentsList() {
                           <div className="text-sm font-medium text-fg">{agentInfo?.name || ca.id}</div>
                           <div className="text-xs text-fg-subtle font-mono">{ca.id}</div>
                         </div>
-                        <button onClick={() => removeCallable(i)} className="px-2 text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">×</button>
+                        <button onClick={() => removeCallable(i)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">×</button>
                       </div>
                     );
                   })}
@@ -1204,11 +1204,11 @@ export function AgentsList() {
                 {createMode !== "form" && <span>{createMode.toUpperCase()} editor</span>}
               </div>
               <div className="flex gap-2">
-                <button onClick={closeCreate} className="px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
+                <button onClick={closeCreate} className="inline-flex items-center min-h-11 sm:min-h-0 px-4 py-2 text-sm text-fg-muted hover:text-fg">Cancel</button>
                 {createMode === "form" ? (
-                  <button onClick={create} disabled={!form.name} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Create Agent</button>
+                  <button onClick={create} disabled={!form.name} className="inline-flex items-center justify-center min-h-11 sm:min-h-0 px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Create Agent</button>
                 ) : (
-                  <button onClick={createFromCode} disabled={!codeValue.trim()} className="px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Create Agent</button>
+                  <button onClick={createFromCode} disabled={!codeValue.trim()} className="inline-flex items-center justify-center min-h-11 sm:min-h-0 px-5 py-2 bg-brand text-brand-fg rounded-md text-sm font-medium hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Create Agent</button>
                 )}
               </div>
             </div>

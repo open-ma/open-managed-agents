@@ -185,7 +185,7 @@ export function ListPage<T>({
                 value={searchValue ?? ""}
                 onChange={(e) => onSearchChange(e.target.value)}
                 placeholder={searchPlaceholder ?? "Search..."}
-                className="border border-border rounded-md pl-8 pr-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-64"
+                className="border border-border rounded-md pl-8 pr-3 py-1.5 min-h-11 sm:min-h-0 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-64"
                 autoComplete="off"
                 name="oma-list-search"
               />
@@ -195,12 +195,12 @@ export function ListPage<T>({
           {filters}
 
           {onShowArchivedChange && (
-            <label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer select-none">
+            <label className="flex items-center gap-2 min-h-11 sm:min-h-0 text-sm text-fg-muted cursor-pointer select-none">
               <input
                 type="checkbox"
                 checked={showArchived ?? false}
                 onChange={(e) => onShowArchivedChange(e.target.checked)}
-                className="rounded accent-brand"
+                className="w-4 h-4 rounded accent-brand"
               />
               Show archived
             </label>
@@ -269,7 +269,7 @@ export function ListPage<T>({
               <button
                 onClick={onLoadMore}
                 disabled={loadingMore}
-                className="text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                className="inline-flex items-center justify-center px-3 min-h-11 sm:min-h-0 text-sm text-fg-muted hover:text-fg disabled:opacity-50 disabled:cursor-not-allowed transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 {loadingMore ? "Loading…" : "Load more"}
               </button>

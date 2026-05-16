@@ -376,10 +376,10 @@ function DispatchRulesSection({ publicationId }: { publicationId: string }) {
                 </div>
               </div>
               <div className="flex items-center gap-2">
-                <button onClick={() => toggle(r)} className="px-2 py-1 text-[11px] hover:underline">
+                <button onClick={() => toggle(r)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 py-1 text-[11px] hover:underline">
                   {r.enabled ? "Disable" : "Enable"}
                 </button>
-                <button onClick={() => remove(r)} className="px-2 py-1 text-[11px] text-danger hover:underline">
+                <button onClick={() => remove(r)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 py-1 text-[11px] text-danger hover:underline">
                   Delete
                 </button>
               </div>

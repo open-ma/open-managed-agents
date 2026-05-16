@@ -72,7 +72,7 @@ export function MemoryStoresList() {
     }
   };
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   return (
     <ListPage<MemoryStore>
@@ -122,11 +122,11 @@ export function MemoryStoresList() {
           render: (s) => (
             <>
               {!s.archived_at && (
-                <button onClick={() => archiveStore(s.id)} className="text-xs text-fg-muted hover:text-fg mr-3">
+                <button onClick={() => archiveStore(s.id)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-fg-muted hover:text-fg mr-1 sm:mr-3">
                   Archive
                 </button>
               )}
-              <button onClick={() => deleteStore(s.id)} className="text-xs text-danger hover:text-danger/80">
+              <button onClick={() => deleteStore(s.id)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-danger hover:text-danger/80">
                 Delete
               </button>
             </>

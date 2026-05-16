@@ -1,0 +1,36 @@
+<!--
+  Apple touch icon (and Android home-screen icon fallback).
+  Apple expects an opaque rounded square — they'll mask + round it themselves
+  on iOS, but a transparent SVG flashes the wallpaper through the corners
+  during the install animation, so we paint an opaque coral square underneath.
+
+  180×180 square viewBox to match the standard apple-touch-icon size. The
+  inner glyph is the brand `[horse]` mark in --brand-fg (dark warm tone),
+  same one-off ink the rest of the app uses on coral.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 180 180" width="180" height="180" role="img" aria-label="openma">
+  <!-- Opaque coral background. rx≈22% matches the iOS app-icon mask
+       radius so the SVG isn't visibly clipped further at install time. -->
+  <rect width="180" height="180" rx="40" ry="40" fill="#FF6B50"/>
+
+  <!-- Brand glyph: [ horse ] centered. Source paths are from logo.svg but
+       recolored to --brand-fg (#3d2520) for AA contrast on coral. -->
+  <g transform="translate(90, 90)">
+    <g transform="translate(-65, -45)" fill="none" stroke="#3d2520" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <text font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="90" font-weight="800" fill="#3d2520" stroke="none" x="0" y="78">[</text>
+      <g transform="translate(48, -12)">
+        <defs>
+          <mask id="ati-m" maskUnits="userSpaceOnUse">
+            <rect x="-200" y="-200" width="900" height="900" fill="white"/>
+            <rect x="-4" y="16.4" width="62.2" height="108.8" fill="black" rx="2"/>
+            <rect x="96" y="16.4" width="62.2" height="108.8" fill="black" rx="2"/>
+          </mask>
+        </defs>
+        <path d="M30,50 Q28,30 22,8 Q35,20 40,45" mask="url(#ati-m)"/>
+        <path d="M30,50 Q28,58 30,65" stroke-width="3" mask="url(#ati-m)"/>
+        <circle cx="34" cy="52" r="3.5" fill="#3d2520" stroke="none"/>
+      </g>
+      <text font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="90" font-weight="800" fill="#3d2520" stroke="none" x="92" y="78">]</text>
+    </g>
+  </g>
+</svg>

@@ -268,7 +268,7 @@ export function CliLogin() {
                     <button
                       type="button"
                       onClick={selectAll}
-                      className="text-fg-muted hover:text-fg underline-offset-2 hover:underline"
+                      className="inline-flex items-center min-h-11 sm:min-h-0 px-1 text-fg-muted hover:text-fg underline-offset-2 hover:underline"
                     >
                       All
                     </button>
@@ -276,7 +276,7 @@ export function CliLogin() {
                     <button
                       type="button"
                       onClick={selectNone}
-                      className="text-fg-muted hover:text-fg underline-offset-2 hover:underline"
+                      className="inline-flex items-center min-h-11 sm:min-h-0 px-1 text-fg-muted hover:text-fg underline-offset-2 hover:underline"
                     >
                       None
                     </button>
@@ -325,7 +325,7 @@ export function CliLogin() {
               <button
                 onClick={cancel}
                 disabled={working}
-                className="px-4 py-2.5 rounded-lg border border-border text-sm text-fg-muted hover:bg-bg disabled:opacity-40"
+                className="inline-flex items-center justify-center px-4 py-2.5 min-h-11 sm:min-h-0 rounded-lg border border-border text-sm text-fg-muted hover:bg-bg disabled:opacity-40"
               >
                 Cancel
               </button>

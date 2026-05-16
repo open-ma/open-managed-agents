@@ -1,0 +1,65 @@
+<!--
+  Open Graph share image — 1200×630 (the Facebook/Twitter/LinkedIn standard
+  large-card size). Clean light background with the brand `[horse]` glyph
+  and the "openma" wordmark.
+
+  NOTE on format: most modern social platforms (Facebook, Twitter/X,
+  LinkedIn, Slack, Discord) now render SVG OG images fine. The one stale
+  cache that historically struggled is the older Twitter card snapshotter,
+  which sometimes returns a blank preview the first time it sees an SVG.
+  If we hit that in practice, generate a PNG via a build-time step
+  (`sharp` or similar) and update the og:image URL to `/og.png`. For now,
+  SVG keeps the asset crisp and ~2 KB instead of ~120 KB.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" width="1200" height="630" role="img" aria-label="Open Managed Agents">
+  <!-- Background — same #fefefe as the light-mode --bg token. -->
+  <rect width="1200" height="630" fill="#fefefe"/>
+
+  <!-- Subtle brand-tinted halo so the image isn't a flat white card in
+       a feed. Radial gradient, very low opacity coral, off-center to
+       feel intentional. -->
+  <defs>
+    <radialGradient id="halo" cx="0.18" cy="0.22" r="0.7">
+      <stop offset="0%"  stop-color="#FF6B50" stop-opacity="0.12"/>
+      <stop offset="60%" stop-color="#FF6B50" stop-opacity="0.03"/>
+      <stop offset="100%" stop-color="#FF6B50" stop-opacity="0"/>
+    </radialGradient>
+    <mask id="og-m" maskUnits="userSpaceOnUse">
+      <rect x="-200" y="-200" width="900" height="900" fill="white"/>
+      <rect x="-4" y="16.4" width="62.2" height="108.8" fill="black" rx="2"/>
+      <rect x="96" y="16.4" width="62.2" height="108.8" fill="black" rx="2"/>
+    </mask>
+  </defs>
+  <rect width="1200" height="630" fill="url(#halo)"/>
+
+  <!-- Brand glyph + wordmark, vertically stacked, optically centered.
+       Glyph drawn at ~3x of header size to fill the share card; wordmark
+       sits below at display weight. -->
+  <g transform="translate(600, 250)">
+    <!-- [horse] glyph, scaled 3x and re-anchored around (0,0). -->
+    <g transform="translate(-195, -135) scale(3)" fill="none" stroke="#FF6B50" stroke-width="4.5" stroke-linecap="round" stroke-linejoin="round">
+      <text font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="90" font-weight="800" fill="#FF6B50" stroke="none" x="0" y="78">[</text>
+      <g transform="translate(48, -10)">
+        <path d="M30,50 Q28,30 22,8 Q35,20 40,45" mask="url(#og-m)"/>
+        <path d="M30,50 Q28,58 30,65" stroke-width="3" mask="url(#og-m)"/>
+        <circle cx="34" cy="52" r="3.5" fill="#FF6B50" stroke="none"/>
+      </g>
+      <text font-family="'JetBrains Mono', 'SF Mono', monospace" font-size="90" font-weight="800" fill="#FF6B50" stroke="none" x="92" y="78">]</text>
+    </g>
+  </g>
+
+  <!-- Wordmark — "openma" in display serif, matches the --font-display
+       Source Serif 4 we use in the app. Falls back to Georgia/serif on
+       systems that don't have the webfont, which is fine for a static
+       SVG meant for OG previews (most renderers don't load webfonts). -->
+  <text x="600" y="475" text-anchor="middle"
+        font-family="'Source Serif 4', Georgia, 'Times New Roman', serif"
+        font-size="84" font-weight="700" fill="#1a1a1a"
+        letter-spacing="-1">openma</text>
+
+  <!-- Tagline -->
+  <text x="600" y="540" text-anchor="middle"
+        font-family="'DM Sans', -apple-system, 'Segoe UI', sans-serif"
+        font-size="26" font-weight="400" fill="#6b6b6b"
+        letter-spacing="0.2">Manage agents, sessions, and infrastructure.</text>
+</svg>

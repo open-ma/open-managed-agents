@@ -24,8 +24,11 @@ const variantClasses: Record<NonNullable<ButtonProps["variant"]>, string> = {
 };
 
 const sizeClasses: Record<NonNullable<ButtonProps["size"]>, string> = {
-  sm: "px-3 py-1 text-xs",
-  md: "px-4 py-2 text-sm",
+  // min-h-11 (44px) on mobile satisfies iOS HIG / WCAG 2.5.5 touch-target
+  // guidance; sm: collapses to the original tight desktop sizing so dense
+  // toolbars/footers don't grow on wider viewports.
+  sm: "px-3 py-1 text-xs min-h-11 sm:min-h-0",
+  md: "px-4 py-2 text-sm min-h-11 sm:min-h-0",
 };
 
 export const Button = forwardRef<HTMLButtonElement, ButtonProps>(

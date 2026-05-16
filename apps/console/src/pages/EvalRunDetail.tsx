@@ -175,7 +175,7 @@ export function EvalRunDetail() {
       <div>
         <button
           onClick={() => nav("/evals")}
-          className="text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+          className="inline-flex items-center min-h-11 sm:min-h-0 text-sm text-fg-subtle hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         >
           ← All runs
         </button>

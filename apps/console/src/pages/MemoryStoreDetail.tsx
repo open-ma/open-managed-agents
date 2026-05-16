@@ -4,7 +4,7 @@ import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
 import { Page } from "../components/Page";
-import { Tabs, Tab, TabPanel } from "../components/Tabs";
+import { TabsRoot, TabList, Tab, TabPanel } from "../components/Tabs";
 
 interface MemoryStore {
   id: string;
@@ -79,21 +79,23 @@ export function MemoryStoreDetail() {
         </div>
       </div>
 
-      <Tabs value={tab} onChange={(v) => setTab(v as Tab)} ariaLabel="Memory store sections" className="mt-6 mb-6">
-        <Tab value="memories">Memories</Tab>
-        <Tab value="versions">Version history</Tab>
-        <Tab value="settings">Settings</Tab>
-      </Tabs>
+      <TabsRoot value={tab} onValueChange={(v) => setTab(v as Tab)} aria-label="Memory store sections" className="mt-6">
+        <TabList className="mb-6">
+          <Tab value="memories">Memories</Tab>
+          <Tab value="versions">Version history</Tab>
+          <Tab value="settings">Settings</Tab>
+        </TabList>
 
-      <TabPanel value="memories" current={tab}>
-        <MemoriesPanel storeId={storeId} archived={!!store.archived_at} />
-      </TabPanel>
-      <TabPanel value="versions" current={tab}>
-        <VersionsPanel storeId={storeId} />
-      </TabPanel>
-      <TabPanel value="settings" current={tab}>
-        <SettingsPanel store={store} archived={!!store.archived_at} />
-      </TabPanel>
+        <TabPanel value="memories">
+          <MemoriesPanel storeId={storeId} archived={!!store.archived_at} />
+        </TabPanel>
+        <TabPanel value="versions">
+          <VersionsPanel storeId={storeId} />
+        </TabPanel>
+        <TabPanel value="settings">
+          <SettingsPanel store={store} archived={!!store.archived_at} />
+        </TabPanel>
+      </TabsRoot>
     </Page>
   );
 }
@@ -160,11 +162,11 @@ function MemoriesPanel({ storeId, archived }: { storeId: string; archived: boole
           aria-label="Depth filter"
           value={depth}
           onChange={(e) => setDepth(e.target.value.replace(/[^0-9]/g, ""))}
-          className="w-24 border border-border rounded-lg px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-border-strong"
+          className="w-24 border border-border rounded-lg px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-border-strong"
         />
         {!archived && (
           <button onClick={() => setShowWrite(true)}
-            className="px-4 py-2 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] whitespace-nowrap">
+            className="inline-flex items-center justify-center px-4 py-2 min-h-11 sm:min-h-0 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] whitespace-nowrap">
             + New memory
           </button>
         )}
@@ -337,7 +339,7 @@ function MemoryDetailDialog({
           {!archived && !editing && (
             <button
               onClick={() => setEditing(true)}
-              className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+              className="inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               Edit
             </button>
@@ -346,7 +348,7 @@ function MemoryDetailDialog({
             <>
               <button
                 onClick={save}
-                className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                className="inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 Save
               </button>
@@ -356,7 +358,7 @@ function MemoryDetailDialog({
                   setContent(memory.content);
                   setPath(memory.path);
                 }}
-                className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                className="inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               >
                 Cancel
               </button>
@@ -368,7 +370,7 @@ function MemoryDetailDialog({
                 setShowVersions((s) => !s);
                 if (!showVersions) loadVersions();
               }}
-              className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+              className="inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               aria-expanded={showVersions}
             >
               {showVersions ? "Hide" : "Show"} version history
@@ -377,7 +379,7 @@ function MemoryDetailDialog({
           {!archived && !editing && (
             <button
               onClick={remove}
-              className="ml-auto px-3 py-1.5 bg-danger/10 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger/20 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+              className="ml-auto inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 bg-danger/10 border border-danger/30 text-danger rounded-lg text-sm hover:bg-danger/20 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               Delete memory
             </button>
@@ -394,7 +396,7 @@ function MemoryDetailDialog({
             id="memory-edit-path"
             value={path}
             onChange={(e) => setPath(e.target.value)}
-            className="w-full font-mono text-sm border border-border rounded-lg px-3 py-1.5 bg-bg outline-none focus:border-border-strong"
+            className="w-full font-mono text-sm border border-border rounded-lg px-3 py-1.5 min-h-11 sm:min-h-0 bg-bg outline-none focus:border-border-strong"
           />
         </div>
       )}
@@ -440,13 +442,13 @@ function MemoryDetailDialog({
                     <td className="px-3 py-2 text-right">
                       {!archived && !v.redacted && v.content !== undefined && v.content !== null && !isLiveHead && (
                         <button onClick={() => rollback(v)}
-                          className="text-xs text-brand hover:underline mr-2">
+                          className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-brand hover:underline mr-1 sm:mr-2">
                           Roll back
                         </button>
                       )}
                       {!archived && !v.redacted && !isLiveHead && (
                         <button onClick={() => redact(v)}
-                          className="text-xs text-danger hover:underline">
+                          className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-danger hover:underline">
                           Redact
                         </button>
                       )}
@@ -595,13 +597,13 @@ function WriteMemoryDialog({
         <>
           <button
             onClick={onClose}
-            className="px-3 py-1.5 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+            className="inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 border border-border rounded-lg text-sm hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
             Cancel
           </button>
           <button
             onClick={save}
-            className="px-3 py-1.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+            className="inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           >
             Create
           </button>
@@ -635,7 +637,7 @@ function ErrorBanner({ message, onDismiss }: { message: string; onDismiss: () =>
   return (
     <div className="bg-danger/10 border border-danger/30 rounded-lg px-4 py-3 mb-4 flex items-start justify-between gap-4">
       <p className="text-danger text-sm">{message}</p>
-      <button onClick={onDismiss} className="text-danger/70 hover:text-danger text-sm flex-shrink-0">Dismiss</button>
+      <button onClick={onDismiss} className="inline-flex items-center min-h-11 sm:min-h-0 text-danger/70 hover:text-danger text-sm flex-shrink-0">Dismiss</button>
     </div>
   );
 }

@@ -297,7 +297,7 @@ export function SkillsList() {
   /* ---- helpers ---- */
 
   const inputCls =
-    "w-full border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] bg-bg text-fg";
+    "w-full border border-border rounded-lg px-3 py-2 min-h-11 sm:min-h-0 text-sm outline-none focus:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] bg-bg text-fg";
 
   const anthropicSkills = skills.filter((s) => s.source === "anthropic");
   const customSkills = skills.filter((s) => s.source === "custom");
@@ -598,7 +598,7 @@ export function SkillsList() {
                 </label>
                 <button
                   onClick={startNewVersion}
-                  className="text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                  className="inline-flex items-center min-h-11 sm:min-h-0 px-2 text-xs text-fg-muted hover:text-fg transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                 >
                   + New version
                 </button>
@@ -775,7 +775,7 @@ export function SkillsList() {
                   <button
                     onClick={() => installFromClawHub(s.slug)}
                     disabled={chInstalling === s.slug}
-                    className="shrink-0 px-3 py-1 text-xs font-medium rounded-md bg-brand text-brand-fg hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                    className="shrink-0 inline-flex items-center justify-center px-3 py-1 min-h-11 sm:min-h-0 text-xs font-medium rounded-md bg-brand text-brand-fg hover:bg-brand-hover disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                   >
                     {chInstalling === s.slug ? "Installing..." : "Install"}
                   </button>

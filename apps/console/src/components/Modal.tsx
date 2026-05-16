@@ -63,7 +63,7 @@ export function Modal({
             </div>
             <Dialog.Close asChild>
               <button
-                className="shrink-0 p-2 text-fg-subtle hover:text-fg rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                className="shrink-0 inline-flex items-center justify-center w-11 h-11 sm:w-9 sm:h-9 text-fg-subtle hover:text-fg rounded transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                 aria-label="Close"
               >
                 <svg

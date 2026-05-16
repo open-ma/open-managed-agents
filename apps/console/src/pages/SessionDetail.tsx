@@ -667,7 +667,7 @@ export function SessionDetail() {
             <button
               onClick={() => void interrupt()}
               disabled={interrupting}
-              className="px-2.5 py-1 rounded-md text-xs font-medium border border-border bg-bg-surface text-fg-muted hover:text-fg hover:border-border-strong disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+              className="inline-flex items-center justify-center px-2.5 py-1 min-h-11 sm:min-h-0 rounded-md text-xs font-medium border border-border bg-bg-surface text-fg-muted hover:text-fg hover:border-border-strong disabled:opacity-50 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
               title="Interrupt the active turn on this thread"
             >
               {interrupting ? "Stopping…" : "Stop"}
@@ -675,7 +675,7 @@ export function SessionDetail() {
           )}
           <button
             onClick={() => setShowFiles((v) => !v)}
-            className={`px-2.5 py-1 rounded-md text-xs font-medium border transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
+            className={`inline-flex items-center justify-center px-2.5 py-1 min-h-11 sm:min-h-0 rounded-md text-xs font-medium border transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
               showFiles
                 ? "bg-bg-surface text-fg border-border-strong"
                 : "bg-bg-surface text-fg-muted border-border hover:text-fg hover:border-border-strong"
@@ -760,7 +760,7 @@ export function SessionDetail() {
         <button
           onClick={() => setShowTrajectory(true)}
           disabled={trajectory === undefined || trajectory === "loading"}
-          className={`${view === "timeline" ? "ml-3" : "ml-auto"} text-xs text-fg-muted hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed border border-border hover:border-border-strong rounded px-2 py-1 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] my-1.5`}
+          className={`${view === "timeline" ? "ml-3" : "ml-auto"} inline-flex items-center min-h-11 sm:min-h-0 text-xs text-fg-muted hover:text-fg disabled:opacity-40 disabled:cursor-not-allowed border border-border hover:border-border-strong rounded px-2 py-1 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] my-1.5`}
           title={
             trajectory === "loading"
               ? "Loading trajectory…"
@@ -983,13 +983,13 @@ export function SessionDetail() {
               onKeyDown={(e) => e.key === "Enter" && !e.shiftKey && send()}
               placeholder="Send a message..."
               aria-label="Send a message"
-              className="flex-1 border border-border rounded-lg px-4 py-2.5 text-sm outline-none focus:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] bg-bg text-fg"
+              className="flex-1 border border-border rounded-lg px-4 py-2.5 min-h-11 sm:min-h-0 text-sm outline-none focus:border-border-strong transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] bg-bg text-fg"
               disabled={sending}
             />
             <button
               onClick={send}
               disabled={sending || !input.trim()}
-              className="px-5 py-2.5 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover disabled:opacity-40 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+              className="inline-flex items-center justify-center px-5 py-2.5 min-h-11 sm:min-h-0 bg-brand text-brand-fg rounded-lg text-sm font-medium hover:bg-brand-hover disabled:opacity-40 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               Send
             </button>
@@ -1145,7 +1145,7 @@ function ViewTab({ label, active, onClick }: { label: string; active: boolean; o
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
-      className={`px-3 py-2.5 text-sm border-b-2 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
+      className={`inline-flex items-center justify-center px-3 py-2.5 min-h-11 sm:min-h-0 text-sm border-b-2 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
         active
           ? "border-brand text-fg font-medium"
           : "border-transparent text-fg-subtle hover:text-fg-muted"
@@ -1176,7 +1176,7 @@ function ThreadTab({
       role="tab"
       aria-selected={active}
       tabIndex={active ? 0 : -1}
-      className={`py-1.5 text-xs whitespace-nowrap border-b-2 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] flex items-center gap-1 ${
+      className={`py-1.5 min-h-11 sm:min-h-0 text-xs whitespace-nowrap border-b-2 transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] flex items-center gap-1 ${
         active
           ? "border-info text-fg font-medium"
           : "border-transparent text-fg-subtle hover:text-fg-muted"
@@ -1352,7 +1352,7 @@ function ResourcePanel({
         </div>
         <button
           onClick={onClose}
-          className="text-fg-subtle hover:text-fg-muted text-lg leading-none inline-flex items-center justify-center min-w-8 min-h-8 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-8 sm:min-h-8 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           title="Close"
           aria-label="Close panel"
         >
@@ -1425,7 +1425,7 @@ function FilesPanel({ sessionId, onClose }: { sessionId: string; onClose: () => 
         </div>
         <button
           onClick={onClose}
-          className="text-fg-subtle hover:text-fg-muted text-lg leading-none inline-flex items-center justify-center min-w-8 min-h-8 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+          className="text-fg-subtle hover:text-fg-muted text-lg leading-none inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-8 sm:min-h-8 rounded hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
           title="Close"
           aria-label="Close panel"
         >

@@ -7,6 +7,7 @@ import { ListPage } from "../components/ListPage";
 import { TextInput, SecretInput } from "../components/Input";
 import { LocalCombobox } from "../components/LocalCombobox";
 import { Disclosure } from "../components/Disclosure";
+import { TabsRoot, TabList, Tab, TabPanel } from "../components/Tabs";
 import { MCP_REGISTRY, type McpRegistryEntry } from "../data/mcp-registry";
 
 interface Vault { id: string; name: string; created_at: string; archived_at?: string; }
@@ -326,7 +327,7 @@ export function VaultsList() {
     openVault(selectedVault);
   };
 
-  const inputCls = "w-full border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
+  const inputCls = "w-full border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] placeholder:text-fg-subtle";
 
   // Already connected MCP server URLs
   const connectedUrls = new Set(credentials.map((c) => c.auth.mcp_server_url).filter(Boolean));
@@ -340,7 +341,7 @@ export function VaultsList() {
         <button
           key={t}
           onClick={() => setVaultTab(t)}
-          className={`px-3 py-1.5 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
+          className={`inline-flex items-center justify-center px-3 py-1.5 min-h-11 sm:min-h-0 text-sm rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
             vaultTab === t ? "bg-brand text-brand-fg" : "text-fg-muted hover:bg-bg-surface"
           }`}
         >
@@ -454,7 +455,7 @@ export function VaultsList() {
                     : c.auth.type === "cap_cli" ? "bg-brand-subtle text-brand"
                     : "bg-success-subtle text-success"
                   }`}>{c.auth.type === "mcp_oauth" ? "OAuth" : c.auth.type === "cap_cli" ? "CLI" : "Bearer"}</span>
-                  <button onClick={() => deleteCred(c.id)} className="text-xs text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Delete</button>
+                  <button onClick={() => deleteCred(c.id)} className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-fg-subtle hover:text-danger transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]">Delete</button>
                 </div>
               </div>
             ))}
@@ -502,27 +503,17 @@ export function VaultsList() {
           )
         }
       >
-        <div role="tablist" aria-label="Add credential" className="flex gap-1 mb-3 border-b border-border">
-          {(["mcp", "cli"] as const).map((t) => (
-            <button
-              key={t}
-              role="tab"
-              aria-selected={addTab === t}
-              tabIndex={addTab === t ? 0 : -1}
-              onClick={() => setAddTab(t)}
-              className={`px-3 py-2 text-sm border-b-2 -mb-px ${
-                addTab === t
-                  ? "border-fg text-fg font-medium"
-                  : "border-transparent text-fg-muted hover:text-fg"
-              }`}
-            >
-              {t === "mcp" ? "MCP server" : "CLI"}
-            </button>
-          ))}
-        </div>
+        <TabsRoot
+          value={addTab}
+          onValueChange={(v) => setAddTab(v as "mcp" | "cli")}
+          aria-label="Add credential"
+        >
+          <TabList className="mb-3">
+            <Tab value="mcp" compact>MCP server</Tab>
+            <Tab value="cli" compact>CLI</Tab>
+          </TabList>
 
-        {addTab === "mcp" && (
-          <div className="space-y-4">
+          <TabPanel value="mcp" className="space-y-4">
             <div className="text-sm text-fg-muted">Authorize an MCP server for delegated user authentication.</div>
 
             <div>
@@ -546,7 +537,7 @@ export function VaultsList() {
                     key={t}
                     type="button"
                     onClick={() => setCustomForm({ ...customForm, type: t })}
-                    className={`px-3 py-1 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg font-medium" : "text-fg-muted"}`}
+                    className={`inline-flex items-center justify-center px-3 py-1 min-h-11 sm:min-h-0 text-sm rounded ${customForm.type === t ? "bg-bg-surface text-fg font-medium" : "text-fg-muted"}`}
                   >
                     {t === "oauth" ? "OAuth" : "Bearer token"}
                   </button>
@@ -708,11 +699,9 @@ export function VaultsList() {
                 </div>
               </Disclosure>
             )}
-          </div>
-        )}
+          </TabPanel>
 
-        {addTab === "cli" && (
-          <div className="space-y-3">
+          <TabPanel value="cli" className="space-y-3">
             <div>
               <label htmlFor="vault-cli-id" className="text-sm text-fg-muted block mb-1">CLI</label>
               <select
@@ -782,8 +771,8 @@ export function VaultsList() {
                 disabled={deviceFlow?.status === "polling"}
               />
             </div>
-          </div>
-        )}
+          </TabPanel>
+        </TabsRoot>
       </Modal>
 
     </ListPage>

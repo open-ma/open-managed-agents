@@ -122,9 +122,9 @@ export function Pagination({
   const hasPrev = pageIndex > 0;
 
   const navBtn =
-    "inline-flex items-center justify-center min-w-[32px] h-8 px-2 text-[13px] text-fg-muted bg-bg hover:bg-bg-sidebar hover:text-fg border border-border rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg disabled:hover:text-fg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
+    "inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-[32px] sm:min-h-8 sm:h-8 px-2 text-[13px] text-fg-muted bg-bg hover:bg-bg-sidebar hover:text-fg border border-border rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:bg-bg disabled:hover:text-fg-muted focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg";
   const pageBtn = (active: boolean) =>
-    `inline-flex items-center justify-center min-w-[32px] h-8 px-2 text-[13px] border rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg tabular-nums ${
+    `inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-[32px] sm:min-h-8 sm:h-8 px-2 text-[13px] border rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg tabular-nums ${
       active
         ? "bg-brand text-brand-fg border-brand font-medium"
         : "text-fg-muted bg-bg hover:bg-bg-sidebar hover:text-fg border-border"
@@ -151,7 +151,7 @@ export function Pagination({
         <Select.Root value={String(pageSize)} onValueChange={(v) => onPageSizeChange(parseInt(v, 10))}>
           <Select.Trigger
             aria-label="Rows per page"
-            className="inline-flex items-center gap-1.5 h-8 px-2.5 text-[13px] text-fg bg-bg border border-border rounded-md hover:bg-bg-sidebar transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg tabular-nums"
+            className="inline-flex items-center gap-1.5 min-h-11 sm:min-h-8 sm:h-8 px-2.5 text-[13px] text-fg bg-bg border border-border rounded-md hover:bg-bg-sidebar transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand focus-visible:ring-offset-2 focus-visible:ring-offset-bg tabular-nums"
           >
             <Select.Value />
             <Select.Icon><ChevronDown /></Select.Icon>
@@ -167,7 +167,7 @@ export function Pagination({
                   <Select.Item
                     key={n}
                     value={String(n)}
-                    className="flex items-center gap-2 rounded px-2.5 py-1.5 text-[13px] text-fg cursor-pointer outline-none data-[highlighted]:bg-bg-sidebar data-[state=checked]:font-medium tabular-nums"
+                    className="flex items-center gap-2 rounded px-2.5 py-1.5 min-h-11 sm:min-h-0 text-[13px] text-fg cursor-pointer outline-none data-[highlighted]:bg-bg-sidebar data-[state=checked]:font-medium tabular-nums"
                   >
                     <Select.ItemText>{n}</Select.ItemText>
                   </Select.Item>

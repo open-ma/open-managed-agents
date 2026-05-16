@@ -89,7 +89,7 @@ export function TenantSwitcher() {
           aria-expanded={open}
           aria-label="Switch workspace"
           onClick={() => setOpen((o) => !o)}
-          className="w-full flex items-center gap-2 px-2.5 py-2 rounded-md hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] text-left group"
+          className="w-full flex items-center gap-2 px-2.5 py-2 min-h-11 sm:min-h-0 rounded-md hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] text-left group"
         >
           <Avatar name={current?.name ?? "?"} size="sm" squared />
           <div className="min-w-0 flex-1">
@@ -117,7 +117,7 @@ export function TenantSwitcher() {
                   role="menuitemradio"
                   aria-checked={t.id === active}
                   onClick={() => switchTo(t.id)}
-                  className={`w-full text-left px-3 py-2 text-sm hover:bg-bg-surface flex items-center gap-2 ${t.id === active ? "bg-bg-surface/60" : ""}`}
+                  className={`w-full text-left px-3 py-2 min-h-11 sm:min-h-0 text-sm hover:bg-bg-surface flex items-center gap-2 ${t.id === active ? "bg-bg-surface/60" : ""}`}
                 >
                   <Avatar name={displayName(t)} size="xs" squared />
                   <div className="min-w-0 flex-1">
@@ -135,7 +135,7 @@ export function TenantSwitcher() {
             <div className="border-t border-border">
               <button
                 onClick={() => { setOpen(false); setCreateOpen(true); }}
-                className="w-full text-left px-3 py-2 text-sm text-fg-muted hover:bg-bg-surface flex items-center gap-2"
+                className="w-full text-left px-3 py-2 min-h-11 sm:min-h-0 text-sm text-fg-muted hover:bg-bg-surface flex items-center gap-2"
               >
                 <svg className="w-4 h-4 shrink-0" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24">
                   <path strokeLinecap="round" strokeLinejoin="round" d="M12 4v16m8-8H4" />
@@ -211,7 +211,7 @@ function CreateTenantModal({
             placeholder="e.g. Acme Production"
             autoFocus
             disabled={working}
-            className="w-full bg-bg border border-border rounded-lg px-3 py-2 text-sm outline-none focus:border-border-strong"
+            className="w-full bg-bg border border-border rounded-lg px-3 py-2 min-h-11 sm:min-h-0 text-sm outline-none focus:border-border-strong"
           />
         </div>
         {error && (
@@ -223,7 +223,7 @@ function CreateTenantModal({
           <button
             onClick={onClose}
             disabled={working}
-            className="px-4 py-2 rounded-lg border border-border text-sm text-fg-muted hover:bg-bg-surface disabled:opacity-40"
+            className="inline-flex items-center justify-center px-4 py-2 min-h-11 sm:min-h-0 rounded-lg border border-border text-sm text-fg-muted hover:bg-bg-surface disabled:opacity-40"
           >
             Cancel
           </button>

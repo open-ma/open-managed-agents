@@ -59,7 +59,7 @@ export function Disclosure({
       <Collapsible.Trigger asChild>
         <button
           type="button"
-          className="w-full flex items-center gap-2 px-3 py-2.5 text-left"
+          className="w-full flex items-center gap-2 px-3 py-2.5 min-h-11 sm:min-h-0 text-left"
         >
           <span
             aria-hidden="true"

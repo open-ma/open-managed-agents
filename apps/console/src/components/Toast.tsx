@@ -207,7 +207,7 @@ function ToastItem({
       <Toast.Title className="flex-1 leading-tight">{item.message}</Toast.Title>
       <Toast.Close
         className={
-          "shrink-0 -m-1 rounded p-1 text-fg-subtle hover:text-fg " +
+          "shrink-0 -m-1 inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 rounded p-1 text-fg-subtle hover:text-fg " +
           "transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
         }
         aria-label="Dismiss"

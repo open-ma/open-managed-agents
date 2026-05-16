@@ -140,7 +140,7 @@ export function Dashboard() {
                 or globally:{" "}
                 <button
                   onClick={() => copy(cmdGlobal, "cmd-global")}
-                  className="font-mono text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+                  className="inline-flex items-center min-h-11 sm:min-h-0 font-mono text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
                 >
                   {cmdGlobal}
                 </button>
@@ -213,7 +213,7 @@ export function Dashboard() {
             <h2 className="font-display text-lg font-semibold text-fg">Recent sessions</h2>
             <button
               onClick={() => nav("/sessions")}
-              className="text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+              className="inline-flex items-center min-h-11 sm:min-h-0 text-[13px] text-fg-muted hover:text-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
             >
               View all →
             </button>
@@ -227,7 +227,7 @@ export function Dashboard() {
                   Tell your agent to start one, or visit the{" "}
                   <button
                     onClick={() => nav("/sessions")}
-                    className="text-brand hover:underline"
+                    className="inline-flex items-center min-h-11 sm:min-h-0 text-brand hover:underline"
                   >
                     Sessions page
                   </button>

@@ -284,7 +284,7 @@ export function Combobox<T>({
         onClick={() => setOpen((v) => !v)}
         className={
           className ??
-          "w-full inline-flex items-center justify-between gap-2 border border-border rounded-md px-3 py-2 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] disabled:opacity-50 disabled:cursor-not-allowed"
+          "w-full inline-flex items-center justify-between gap-2 border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-[13px] bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] disabled:opacity-50 disabled:cursor-not-allowed"
         }
       >
         <span
@@ -310,7 +310,7 @@ export function Combobox<T>({
                   value={input}
                   onValueChange={setInput}
                   placeholder="Search..."
-                  className="w-full px-3 py-2 text-[13px] bg-bg text-fg outline-none placeholder:text-fg-subtle"
+                  className="w-full px-3 py-2 min-h-11 sm:min-h-0 text-[13px] bg-bg text-fg outline-none placeholder:text-fg-subtle"
                   autoFocus
                 />
               </div>
@@ -334,7 +334,7 @@ export function Combobox<T>({
                       setOpen(false);
                       setInput("");
                     }}
-                    className="relative flex items-center gap-2 px-3 py-1.5 text-[13px] text-fg rounded cursor-pointer outline-none data-[selected=true]:bg-bg-surface aria-selected:bg-bg-surface"
+                    className="relative flex items-center gap-2 px-3 py-1.5 min-h-11 sm:min-h-0 text-[13px] text-fg rounded cursor-pointer outline-none data-[selected=true]:bg-bg-surface aria-selected:bg-bg-surface"
                   >
                     <span className="truncate flex-1">{getLabel(it)}</span>
                     {value === v && (

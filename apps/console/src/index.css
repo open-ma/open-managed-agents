@@ -341,3 +341,143 @@ body {
     animation-duration: 1ms;
   }
 }
+
+/* ---------- Print stylesheet ----------
+   The console is web-app-first, but operators do print session timelines,
+   eval reports, and run summaries (PDF export via the OS print dialog is
+   the path of least resistance). The rules below:
+
+   1) Force a light palette regardless of `.dark` on <html>, so the page
+      isn't a wall of inverted ink.
+   2) Hide non-content chrome (sidebar, nav header, modal portals, action
+      buttons) — anything an operator wouldn't want on paper.
+   3) Strip animations so transitions don't leave half-rendered frames in
+      the snapshot.
+   4) Expand min-h-screen / h-screen containers to their natural height so
+      content past the first viewport isn't clipped.
+   5) Print external link URLs inline (in parens after the anchor text),
+      because a printed page loses click affordance. Internal nav (#hash
+      and relative paths) is excluded — those URLs are noise on paper.
+   6) Avoid breaking cards / table rows across page boundaries. */
+@media print {
+  :root,
+  .dark {
+    /* Force light tokens. We list both selectors because the app may have
+       `.dark` on <html> at print time, and we want the override to win
+       regardless of theme state. */
+    --bg: #ffffff;
+    --bg-sidebar: #ffffff;
+    --bg-surface: #f5f5f5;
+    --bg-overlay: transparent;
+    --fg: #1a1a1a;
+    --fg-muted: #555555;
+    --fg-subtle: #888888;
+    --border: #cccccc;
+    --border-strong: #999999;
+    --shadow-md: none;
+    --shadow-sm: none;
+    color-scheme: light;
+  }
+
+  @page {
+    margin: 1.5cm;
+  }
+
+  html, body {
+    background: #ffffff !important;
+    color: #000000 !important;
+    font-size: 11pt;
+    line-height: 1.45;
+  }
+
+  /* Hide chrome that has no place on a printed page. The aria-label
+     selectors target buttons rendered in Layout / TopBar / CommandPalette
+     without coupling to Tailwind class strings. */
+  aside,
+  nav,
+  [role="dialog"],
+  [role="alertdialog"],
+  [data-radix-portal],
+  [data-radix-popper-content-wrapper],
+  .toast-root,
+  button[aria-label="Open menu"],
+  button[aria-label="Close menu"],
+  button[aria-label="Close panel"],
+  button[aria-label="Close"],
+  button[aria-label="Dismiss"],
+  button[aria-label="Sign out"],
+  button[aria-label="Switch workspace"],
+  button[aria-label*="theme" i],
+  button[aria-label*="command" i] {
+    display: none !important;
+  }
+
+  /* Print every external link's URL inline so the page is usable on
+     paper. Internal links (`/agents`, `#section`) are skipped to keep
+     the printed output readable. */
+  a[href^="http"]::after,
+  a[href^="mailto:"]::after {
+    content: " (" attr(href) ")";
+    font-size: 0.85em;
+    color: #555555;
+    word-break: break-all;
+  }
+
+  /* Strip all motion. Transitions / animations mid-print can leave a
+     half-faded toast or modal in the snapshot. */
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+  }
+
+  /* Containers with screen-locked heights (h-screen, min-h-screen) clip
+     long content to ~one viewport when printed. Let them grow. */
+  main,
+  .h-screen,
+  .min-h-screen,
+  [class*="overflow-"] {
+    height: auto !important;
+    min-height: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+  }
+
+  /* Keep logical content units together when possible. */
+  tr,
+  article,
+  section,
+  li,
+  pre,
+  blockquote,
+  figure,
+  .skeleton-pulse {
+    page-break-inside: avoid;
+    break-inside: avoid;
+  }
+
+  /* Code blocks: keep their background tint so syntax highlighting is
+     legible on paper. color-adjust: exact tells the browser not to
+     "ink-save" the swatch out of existence. */
+  pre,
+  code,
+  .hljs {
+    background: #f5f5f5 !important;
+    color: #1a1a1a !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  /* Headings shouldn't dangle alone at page bottom. */
+  h1, h2, h3, h4 {
+    page-break-after: avoid;
+    break-after: avoid;
+    color: #000000 !important;
+  }
+
+  /* Skeleton placeholders are loading states — never useful on paper. */
+  .skeleton-pulse {
+    display: none !important;
+  }
+}

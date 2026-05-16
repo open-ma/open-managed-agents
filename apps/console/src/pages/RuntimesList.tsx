@@ -177,7 +177,7 @@ export function RuntimesList() {
           render: (r) => (
             <button
               onClick={() => remove(r.id)}
-              className="text-xs text-fg-subtle hover:text-danger"
+              className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 px-2 text-xs text-fg-subtle hover:text-danger"
             >
               Revoke
             </button>

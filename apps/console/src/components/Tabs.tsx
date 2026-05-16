@@ -1,56 +1,83 @@
-import { createContext, useContext, useId, type ReactNode } from "react";
+import { type ReactNode } from "react";
+import * as TabsPrimitive from "@radix-ui/react-tabs";
 
 /**
- * Accessible tab pattern with full ARIA tab semantics.
+ * Accessible tab pattern built on @radix-ui/react-tabs.
  *
  *   const [tab, setTab] = useState("memories");
- *   <Tabs value={tab} onChange={setTab} ariaLabel="Memory store sections">
- *     <Tab value="memories">Memories</Tab>
- *     <Tab value="versions">Version history</Tab>
- *     <Tab value="settings">Settings</Tab>
- *   </Tabs>
- *   <TabPanel value="memories" current={tab}>...</TabPanel>
+ *   <TabsRoot value={tab} onValueChange={setTab} aria-label="Memory store sections">
+ *     <TabList>
+ *       <Tab value="memories">Memories</Tab>
+ *       <Tab value="versions">Version history</Tab>
+ *       <Tab value="settings">Settings</Tab>
+ *     </TabList>
+ *     <TabPanel value="memories">...</TabPanel>
+ *     <TabPanel value="versions">...</TabPanel>
+ *     <TabPanel value="settings">...</TabPanel>
+ *   </TabsRoot>
  *
- * <Tabs> is the role="tablist" container that broadcasts current value
- * + change handler via context. <Tab> reads context and renders a
- * role="tab" button with aria-selected, aria-controls, and roving
- * tabindex. <TabPanel> is the content slot with role="tabpanel" and
- * aria-labelledby pointing back at its trigger.
+ * Radix gives us free Left/Right arrow cycling, Home/End jump, roving
+ * tabindex, ARIA wiring (id, aria-controls, aria-selected, aria-labelledby),
+ * and Tab-key focus shift from trigger into the active panel. Inactive
+ * panels are unmounted (same shape as the old hand-rolled `current` check).
  *
- * Visual: border-b-2 active state in brand color. Inactive uses
- * fg-muted with a hover-text-fg affordance. Spring transition.
+ * Visual: border-b-2 active state in brand color, fg-muted text with a
+ * hover-text-fg affordance. Spring transition. The `compact` Tab variant
+ * tightens padding for in-modal / in-card tab strips.
  */
 type TabValue = string;
 
-interface TabsContextValue {
-  /** Stable namespace for id pair (tab + tabpanel). */
-  group: string;
-  current: TabValue;
-  onChange: (value: TabValue) => void;
+interface TabsRootProps {
+  value: TabValue;
+  onValueChange: (value: TabValue) => void;
+  orientation?: "horizontal" | "vertical";
+  dir?: "ltr" | "rtl";
+  /** "automatic" (default): focusing a trigger selects it. "manual":
+   *  arrow keys move focus only; Enter/Space activates. */
+  activationMode?: "automatic" | "manual";
+  className?: string;
+  "aria-label"?: string;
+  children: ReactNode;
 }
 
-const TabsContext = createContext<TabsContextValue | null>(null);
+export function TabsRoot({
+  value,
+  onValueChange,
+  orientation,
+  dir,
+  activationMode,
+  className,
+  "aria-label": ariaLabel,
+  children,
+}: TabsRootProps) {
+  return (
+    <TabsPrimitive.Root
+      value={value}
+      onValueChange={onValueChange}
+      orientation={orientation}
+      dir={dir}
+      activationMode={activationMode}
+      className={className}
+      aria-label={ariaLabel}
+    >
+      {children}
+    </TabsPrimitive.Root>
+  );
+}
 
-interface TabsProps {
-  value: TabValue;
-  onChange: (value: TabValue) => void;
-  ariaLabel: string;
+interface TabListProps {
+  /** Extra classes appended after defaults (border-b border-border flex gap-6). */
   className?: string;
   children: ReactNode;
 }
 
-export function Tabs({ value, onChange, ariaLabel, className = "", children }: TabsProps) {
-  const group = useId();
+export function TabList({ className = "", children }: TabListProps) {
   return (
-    <TabsContext.Provider value={{ group, current: value, onChange }}>
-      <div
-        role="tablist"
-        aria-label={ariaLabel}
-        className={`border-b border-border flex gap-6 ${className}`.trim()}
-      >
-        {children}
-      </div>
-    </TabsContext.Provider>
+    <TabsPrimitive.List
+      className={`border-b border-border flex gap-6 ${className}`.trim()}
+    >
+      {children}
+    </TabsPrimitive.List>
   );
 }
 
@@ -62,44 +89,27 @@ interface TabProps {
 }
 
 export function Tab({ value, compact, children }: TabProps) {
-  const ctx = useContext(TabsContext);
-  if (!ctx) throw new Error("<Tab> must be inside <Tabs>");
-  const active = ctx.current === value;
-  const tabId = `${ctx.group}-tab-${value}`;
-  const panelId = `${ctx.group}-panel-${value}`;
   const padding = compact ? "px-3 py-2 text-sm" : "pb-2 text-sm font-medium";
   return (
-    <button
-      type="button"
-      role="tab"
-      id={tabId}
-      aria-selected={active}
-      aria-controls={panelId}
-      tabIndex={active ? 0 : -1}
-      onClick={() => ctx.onChange(value)}
-      className={`${padding} border-b-2 -mb-px transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
-        active
-          ? "border-brand text-fg"
-          : "border-transparent text-fg-muted hover:text-fg"
-      }`}
+    <TabsPrimitive.Trigger
+      value={value}
+      className={`${padding} min-h-11 sm:min-h-0 border-b-2 -mb-px transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] border-transparent text-fg-muted hover:text-fg data-[state=active]:border-brand data-[state=active]:text-fg`}
     >
       {children}
-    </button>
+    </TabsPrimitive.Trigger>
   );
 }
 
 interface TabPanelProps {
   value: TabValue;
-  /** Current selected value (lifted from <Tabs>). Required because the
-   *  panel often renders outside the <Tabs> tree (e.g. tab strip up
-   *  top, content body below). */
-  current: TabValue;
-  /** Optional id namespace if not the default. Match `useId` group from
-   *  the same tree to wire aria-labelledby. */
+  className?: string;
   children: ReactNode;
 }
 
-export function TabPanel({ value, current, children }: TabPanelProps) {
-  if (value !== current) return null;
-  return <div role="tabpanel">{children}</div>;
+export function TabPanel({ value, className, children }: TabPanelProps) {
+  return (
+    <TabsPrimitive.Content value={value} className={className}>
+      {children}
+    </TabsPrimitive.Content>
+  );
 }

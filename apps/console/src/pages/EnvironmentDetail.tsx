@@ -213,7 +213,7 @@ export function EnvironmentDetail() {
               id="env-name"
               value={name}
               onChange={(e) => setName(e.target.value.slice(0, 50))}
-              className="border border-border rounded-md px-3 py-2 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-72"
+              className="border border-border rounded-md px-3 py-2 min-h-11 sm:min-h-0 text-sm bg-bg text-fg outline-none focus:border-brand transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-72"
               placeholder="environment name"
             />
             <span className="text-[11px] px-2 py-0.5 rounded border border-border bg-bg-surface text-fg-muted font-medium uppercase tracking-wider">
@@ -487,7 +487,7 @@ function Toggle({
   onChange: (v: boolean) => void;
 }) {
   return (
-    <label className="flex items-center justify-between gap-4 cursor-pointer">
+    <label className="flex items-center justify-between gap-4 min-h-11 sm:min-h-0 cursor-pointer">
       <span className="text-[13px] text-fg">{label}</span>
       <button
         type="button"
@@ -522,7 +522,7 @@ function IconButton({
       type="button"
       onClick={onClick}
       aria-label={label}
-      className="p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+      className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 p-1.5 rounded-md text-fg-subtle hover:text-fg hover:bg-bg-surface transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
     >
       {children}
     </button>

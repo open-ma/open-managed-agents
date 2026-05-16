@@ -60,7 +60,7 @@ export function Badge({
     return (
       <button
         onClick={onClick}
-        className="text-[11px] px-2 py-0.5 rounded border border-border hover:border-border-strong hover:bg-bg-surface text-fg-muted flex items-center gap-1.5 font-mono max-w-xs"
+        className="text-[11px] px-2 py-0.5 min-h-11 sm:min-h-0 rounded border border-border hover:border-border-strong hover:bg-bg-surface text-fg-muted flex items-center gap-1.5 font-mono max-w-xs"
         title={title ?? (typeof label === "string" ? label : undefined)}
       >
         {inner}

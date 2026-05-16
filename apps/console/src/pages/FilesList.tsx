@@ -124,7 +124,7 @@ export function FilesList() {
           onChange={(e) => setScopeFilter(e.target.value)}
           placeholder="Filter by scope (session ID)…"
           aria-label="Filter by session scope"
-          className="border border-border rounded-md px-3 py-1.5 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-72"
+          className="border border-border rounded-md px-3 py-1.5 min-h-11 sm:min-h-0 text-sm bg-bg text-fg placeholder:text-fg-subtle focus:border-brand focus:outline-none transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] w-full sm:w-72"
         />
       }
       data={filtered}
@@ -203,14 +203,14 @@ export function FilesList() {
               {f.downloadable && (
                 <button
                   onClick={(e) => { e.stopPropagation(); void download(f); }}
-                  className="text-xs text-fg-muted hover:text-fg mr-3"
+                  className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 text-xs text-fg-muted hover:text-fg mr-1 sm:mr-3 px-2"
                 >
                   Download
                 </button>
               )}
               <button
                 onClick={(e) => { e.stopPropagation(); void remove(f); }}
-                className="text-xs text-danger hover:text-danger/80"
+                className="inline-flex items-center justify-center min-w-11 min-h-11 sm:min-w-0 sm:min-h-0 text-xs text-danger hover:text-danger/80 px-2"
               >
                 Delete
               </button>
