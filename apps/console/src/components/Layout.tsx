@@ -12,6 +12,7 @@ import { BrandLoader } from "./BrandLoader";
 import { Avatar } from "./Avatar";
 import { CommandPalette } from "./CommandPalette";
 import { NavigationProgress } from "./NavigationProgress";
+import { SidebarResizer } from "./SidebarResizer";
 import {
   AgentIcon,
   ApiKeysIcon,
@@ -503,8 +504,20 @@ export function Layout() {
       </div>
 
       {/* Desktop sidebar */}
-      <aside className={`hidden md:flex shrink-0 bg-bg-sidebar border-r border-border flex-col transition-[width] duration-[var(--dur-slow)] ease-[var(--ease-soft)] ${sidebar.collapsed ? "w-14" : "w-60"}`}>
+      <aside
+        className={`hidden md:flex shrink-0 bg-bg-sidebar border-r border-border flex-col relative ${sidebar.collapsed ? "w-14 transition-[width] duration-[var(--dur-slow)] ease-[var(--ease-soft)]" : ""}`}
+        style={sidebar.collapsed ? undefined : { width: `${sidebar.width}px` }}
+      >
         <SidebarContent />
+        {!sidebar.collapsed && (
+          <SidebarResizer
+            width={sidebar.width}
+            minWidth={sidebar.minWidth}
+            maxWidth={sidebar.maxWidth}
+            onResize={sidebar.setWidth}
+            onReset={sidebar.resetWidth}
+          />
+        )}
       </aside>
 
       {/* Mobile overlay */}
