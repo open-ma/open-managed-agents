@@ -47,11 +47,11 @@ export function NavigationProgress() {
   return (
     <div
       aria-hidden="true"
-      className="fixed top-0 left-0 right-0 z-[60] pointer-events-none h-[2px]"
+      className="nav-progress-root fixed top-0 left-0 right-0 z-[60] pointer-events-none h-[2px]"
       style={{ opacity: visible ? 1 : 0, transition: "opacity 200ms ease-out" }}
     >
       <div
-        className="h-full bg-brand origin-left"
+        className="nav-progress-bar h-full bg-brand origin-left"
         style={{
           transform: `scaleX(${progress / 100})`,
           transition: progress === 80

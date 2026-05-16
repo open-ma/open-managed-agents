@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from "react";
+import { useRef, useState } from "react";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { EmptyState } from "../components/EmptyState";
@@ -62,9 +63,18 @@ function isZipFile(file: File): boolean {
 export function SkillsList() {
   const { api } = useApi();
 
-  /* list state */
-  const [skills, setSkills] = useState<Skill[]>([]);
-  const [loading, setLoading] = useState(true);
+  /* list state — TQ owns the fetch lifecycle. `load()` becomes
+   * `refetch`, which kicks off a background refetch that leaves
+   * the prior items on screen until the new payload lands. */
+  const {
+    data: skillsRes,
+    isLoading: loading,
+    refetch: refetchSkills,
+  } = useApiQuery<{ data: Skill[] }>("/v1/skills");
+  const skills = skillsRes?.data ?? [];
+  const load = () => {
+    void refetchSkills();
+  };
 
   /* create dialog */
   const [showCreate, setShowCreate] = useState(false);
@@ -98,18 +108,6 @@ export function SkillsList() {
   const [chError, setChError] = useState("");
 
   /* ---- loaders ---- */
-
-  const load = async () => {
-    setLoading(true);
-    try {
-      setSkills((await api<{ data: Skill[] }>("/v1/skills")).data);
-    } catch {}
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    load();
-  }, []);
 
   /* ---- create ---- */
 

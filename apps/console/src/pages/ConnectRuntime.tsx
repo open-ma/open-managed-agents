@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Button } from "../components/Button";
 import { Logo } from "../components/Logo";
 
@@ -37,36 +38,42 @@ export function ConnectRuntime() {
   const state = params.get("state") ?? "";
   const callbackOk = isLoopback(callback);
 
-  const [me, setMe] = useState<MeResponse | null>(null);
-  const [loading, setLoading] = useState(true);
   const [authNeeded, setAuthNeeded] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState("");
 
+  // Validate URL params synchronously so an invalid callback never wastes
+  // a /v1/me roundtrip. The `enabled` gate on the query below carries the
+  // same guard for the actual fetch.
+  const paramsValid = callbackOk && !!state && state.length >= 8;
   useEffect(() => {
     if (!callbackOk) {
       setError(
         "Invalid callback URL — only loopback addresses (127.0.0.1, localhost) are permitted.",
       );
-      setLoading(false);
       return;
     }
     if (!state || state.length < 8) {
       setError("Missing or invalid state parameter — re-run `oma bridge setup`.");
-      setLoading(false);
-      return;
     }
-    api<MeResponse>("/v1/me")
-      .then(setMe)
-      .catch((err) => {
-        if (/401|Unauthorized/i.test(String(err?.message))) {
-          setAuthNeeded(true);
-        } else {
-          setError(String(err?.message ?? err));
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [api, callbackOk, state]);
+  }, [callbackOk, state]);
+
+  // /v1/me lookup via TQ. Deduped across the page's lifetime; a tab switch
+  // away and back doesn't re-hit the endpoint within staleTime.
+  const meQuery = useApiQuery<MeResponse>(paramsValid ? "/v1/me" : null);
+  const me = meQuery.data ?? null;
+  const loading = paramsValid ? meQuery.isLoading : false;
+
+  // /v1/me failure: 401 → show "Sign in" CTA; everything else → inline.
+  useEffect(() => {
+    const err = meQuery.error;
+    if (!err) return;
+    if (/401|Unauthorized/i.test(String((err as Error).message))) {
+      setAuthNeeded(true);
+    } else {
+      setError(String((err as Error).message ?? err));
+    }
+  }, [meQuery.error]);
 
   const goLogin = () => {
     const next = encodeURIComponent(window.location.pathname + window.location.search);

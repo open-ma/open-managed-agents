@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { useApi, getActiveTenantId, setActiveTenantId } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Modal } from "./Modal";
 import { Button } from "./Button";
 import { Avatar } from "./Avatar";
@@ -23,36 +24,35 @@ function displayName(t: Tenant): string {
 }
 
 export function TenantSwitcher() {
-  const { api } = useApi();
-  const [tenants, setTenants] = useState<Tenant[]>([]);
   const [active, setActive] = useState<string>("");
   const [open, setOpen] = useState(false);
   const [createOpen, setCreateOpen] = useState(false);
   const dropdownRef = useRef<HTMLDivElement>(null);
 
+  // TQ replaces the previous mount-once useEffect that hand-rolled a fetch
+  // + setState. Dedup means a re-mount (sidebar collapse/expand) reuses the
+  // cached membership list rather than re-hitting /v1/me/tenants. A 401 on
+  // first paint (pre-auth) is silenced by useApi's auth-error list.
+  const { data: tenantsRes } = useApiQuery<{ data: Tenant[] }>(
+    "/v1/me/tenants",
+  );
+  const tenants = tenantsRes?.data ?? [];
+
+  // Sync the active-tenant pin once the membership list lands. The
+  // localStorage pin is the source of truth across page loads; on first
+  // visit (or when the stored id is no longer a valid membership) we
+  // fall back to whichever tenant the backend resolved (its own fallback
+  // chain ends at user.tenantId).
   useEffect(() => {
-    api<{ data: Tenant[] }>("/v1/me/tenants")
-      .then((res) => {
-        setTenants(res.data);
-        // First-time / no active set: pick whichever tenant the backend
-        // resolved (which itself fell back to user.tenantId). Persist so
-        // future requests pin it explicitly.
-        const stored = getActiveTenantId();
-        if (stored && res.data.some((t) => t.id === stored)) {
-          setActive(stored);
-        } else if (res.data.length > 0) {
-          setActive(res.data[0].id);
-          setActiveTenantId(res.data[0].id);
-        }
-      })
-      .catch(() => {
-        // Pre-auth or backend down — sidebar just hides the switcher.
-      });
-    // useApi() returns a fresh { api, streamEvents } closure every render,
-    // so listing `api` as a dep would re-fire this effect infinitely and
-    // hammer /v1/me/tenants. Mount-once is the right semantics.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+    if (tenants.length === 0) return;
+    const stored = getActiveTenantId();
+    if (stored && tenants.some((t) => t.id === stored)) {
+      setActive(stored);
+    } else {
+      setActive(tenants[0].id);
+      setActiveTenantId(tenants[0].id);
+    }
+  }, [tenants]);
 
   // Close dropdown on outside click.
   useEffect(() => {

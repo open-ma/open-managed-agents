@@ -1,6 +1,5 @@
-import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
-import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { ListPage } from "../components/ListPage";
 
 interface EvalRunSummary {
@@ -62,33 +61,27 @@ function passRateStr(r: EvalRunSummary): string {
 }
 
 export function EvalRunsList() {
-  const { api } = useApi();
   const nav = useNavigate();
-  const [runs, setRuns] = useState<EvalRunSummary[]>([]);
-  const [loading, setLoading] = useState(true);
 
-  useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      try {
-        const res = await api<{ data: EvalRunSummary[] }>("/v1/evals/runs?limit=100");
-        if (cancelled) return;
-        setRuns(res.data);
-        setLoading(false);
-      } catch {
-        if (cancelled) return;
-        setLoading(false);
-      }
-    }
-    load();
-    const id = setInterval(() => {
-      if (cancelled) return;
-      const anyActive = runs.some(r => r.status === "pending" || r.status === "running");
-      if (anyActive) load();
-    }, 5_000);
-    return () => { cancelled = true; clearInterval(id); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  // Auto-poll every 5s only while at least one run is still pending or
+  // running. TQ inspects the cached `data` on each tick to decide, so a
+  // run reaching a terminal state pauses the poll on its own — matches
+  // the previous `anyActive` guard without the manual setInterval +
+  // cancelled flag dance.
+  const { data: runsRes, isLoading: loading } = useApiQuery<{ data: EvalRunSummary[] }>(
+    "/v1/evals/runs",
+    { limit: "100" },
+    {
+      refetchInterval: (query) => {
+        const data = query.state.data as { data: EvalRunSummary[] } | undefined;
+        const anyActive = !!data?.data.some(
+          (r) => r.status === "pending" || r.status === "running",
+        );
+        return anyActive ? 5_000 : false;
+      },
+    },
+  );
+  const runs = runsRes?.data ?? [];
 
   return (
     <ListPage<EvalRunSummary>

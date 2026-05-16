@@ -1,5 +1,6 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Button } from "../components/Button";
 import { Modal } from "../components/Modal";
 import { ListPage } from "../components/ListPage";
@@ -36,31 +37,28 @@ interface Runtime {
  *  to one of these. */
 export function RuntimesList() {
   const { api } = useApi();
-  const [runtimes, setRuntimes] = useState<Runtime[]>([]);
-  const [loading, setLoading] = useState(true);
   const [showInstructions, setShowInstructions] = useState(false);
 
-  const load = async () => {
-    setLoading(true);
-    try {
-      setRuntimes((await api<{ runtimes: Runtime[] }>("/v1/runtimes")).runtimes);
-    } catch { /* ignore */ }
-    setLoading(false);
-  };
-
-  useEffect(() => {
-    load();
-    // Auto-refresh every 15s so a freshly-attached daemon shows up without a
-    // hard reload. Cheap query — single SELECT against runtimes.
-    const t = setInterval(load, 15_000);
-    return () => clearInterval(t);
-  }, []);
+  // Auto-refresh every 15s via TQ's `refetchInterval` so a freshly-attached
+  // daemon shows up without a hard reload. Cheap query — single SELECT
+  // against runtimes — and TQ cleans up the interval on unmount, replacing
+  // the hand-rolled setInterval/clearInterval the previous version ran.
+  const {
+    data: runtimesRes,
+    isLoading: loading,
+    refetch,
+  } = useApiQuery<{ runtimes: Runtime[] }>(
+    "/v1/runtimes",
+    undefined,
+    { refetchInterval: 15_000 },
+  );
+  const runtimes = runtimesRes?.runtimes ?? [];
 
   const remove = async (id: string) => {
     if (!confirm("Revoke this runtime? Daemon on that machine will stop being able to attach.")) return;
     try {
       await api(`/v1/runtimes/${id}`, { method: "DELETE" });
-      load();
+      void refetch();
     } catch { /* ignore */ }
   };
 

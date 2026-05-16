@@ -342,6 +342,53 @@ body {
   }
 }
 
+/* ---------- Reduced-motion fallback ----------
+   WCAG 2.3.3 (AAA) — honor the OS-level `prefers-reduced-motion: reduce`
+   signal across the whole console. Strategy:
+
+   1) Zero out the motion tokens. Every component that animates via
+      `duration-[var(--dur-quick|base|slow)]` (Tailwind arbitrary value)
+      or `transition: ... var(--dur-*) ...` inline picks this up for free.
+      This is the load-bearing line — adds reduced-motion coverage to
+      every existing + future user of the tokens with one rule.
+   2) Tailwind's `animate-*` utilities ship their own keyframes that
+      bypass our tokens, so override them explicitly. `animate-pulse` and
+      `animate-bounce` freeze (they're decorative). `animate-spin` slows
+      to 5s rather than stopping — a frozen spinner reads as "stuck",
+      and the spinner's semantic job (still working) needs *some* motion
+      to communicate. 5s is slow enough not to provoke motion sickness.
+   3) `.nav-progress-*` classes are added to NavigationProgress to give
+      its inline `transition` strings (which include hardcoded 200/400ms
+      values that don't go through the tokens) a hook to neutralize.
+
+   Tailwind utilities like `transition-transform` / `transition-colors`
+   used without a duration arbitrary value pick up Tailwind's default
+   150ms — short enough that we leave them as-is for reduced-motion
+   users (the task brief explicitly allows ≤300ms transitions to pass
+   through). The rules above target the long-duration / infinite
+   animations that actually trigger motion sickness. */
+@media (prefers-reduced-motion: reduce) {
+  :root,
+  .dark {
+    --dur-quick: 1ms;
+    --dur-base: 1ms;
+    --dur-slow: 1ms;
+  }
+
+  .animate-pulse,
+  .animate-bounce {
+    animation: none !important;
+  }
+  .animate-spin {
+    animation-duration: 5s !important;
+  }
+
+  .nav-progress-root,
+  .nav-progress-bar {
+    transition-duration: 1ms !important;
+  }
+}
+
 /* ---------- Print stylesheet ----------
    The console is web-app-first, but operators do print session timelines,
    eval reports, and run summaries (PDF export via the OS print dialog is

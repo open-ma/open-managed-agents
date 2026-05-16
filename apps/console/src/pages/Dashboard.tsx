@@ -1,7 +1,7 @@
-import { useEffect, useState } from "react";
+import { useState } from "react";
 import { useNavigate } from "react-router";
-import { useApi } from "../lib/api";
 import { useAuth } from "../lib/auth";
+import { useApiQuery } from "../lib/useApiQuery";
 import { useToast } from "../components/Toast";
 import { StatusPill } from "../components/Badge";
 import { BrandLoader } from "../components/BrandLoader";
@@ -27,30 +27,26 @@ interface RecentSession {
 
 export function Dashboard() {
   const nav = useNavigate();
-  const { api } = useApi();
   const { user: _user } = useAuth();
   const { toast } = useToast();
-  const [stats, setStats] = useState<Stats | null>(null);
-  const [recentSessions, setRecentSessions] = useState<RecentSession[]>([]);
-  const [loading, setLoading] = useState(true);
   const [copied, setCopied] = useState<string | null>(null);
 
-  useEffect(() => {
-    (async () => {
-      try {
-        // Headline cards: one /v1/stats roundtrip (server-side COUNT(*)
-        // per resource, all on covering tenant indexes). Recent sessions
-        // panel needs row data so it stays a list call, capped at 5.
-        const [stats, sessions] = await Promise.all([
-          api<Stats>("/v1/stats").catch(() => null),
-          api<{ data: RecentSession[] }>("/v1/sessions?limit=5").catch(() => ({ data: [] })),
-        ]);
-        if (stats) setStats(stats);
-        setRecentSessions(sessions.data.slice(0, 5));
-      } catch {}
-      setLoading(false);
-    })();
-  }, []);
+  // Headline cards + recent panel each ride their own TQ query so the
+  // dashboard renders the parts it has — a flaky /v1/stats no longer
+  // blocks the recent-sessions panel and vice versa. The previous
+  // hand-rolled `Promise.all` + single `loading` boolean made one failure
+  // hide both panels.
+  const statsQuery = useApiQuery<Stats>("/v1/stats");
+  const sessionsQuery = useApiQuery<{ data: RecentSession[] }>(
+    "/v1/sessions",
+    { limit: "5" },
+  );
+  const stats = statsQuery.data ?? null;
+  const recentSessions = sessionsQuery.data?.data.slice(0, 5) ?? [];
+  // Block initial render until BOTH first fetches settle (succeed or fail)
+  // so the page doesn't shift layout twice. `isLoading` is true only on
+  // the very first fetch; refetches stay invisible.
+  const loading = statsQuery.isLoading || sessionsQuery.isLoading;
 
   const copy = (text: string, key: string) => {
     navigator.clipboard.writeText(text);

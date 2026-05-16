@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useState } from "react";
 import { useApi } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 import { Button } from "../components/Button";
 import { Logo } from "../components/Logo";
 
@@ -83,39 +84,54 @@ export function CliLogin() {
 
   const [me, setMe] = useState<MeResponse | null>(null);
   const [selected, setSelected] = useState<Set<string>>(new Set());
-  const [loading, setLoading] = useState(true);
   const [authNeeded, setAuthNeeded] = useState(false);
   const [working, setWorking] = useState(false);
   const [error, setError] = useState<string>("");
 
+  // /v1/me lookup via TQ. `enabled: callbackOk` defers the fetch until
+  // we've validated the callback URL — an invalid callback short-circuits
+  // straight to the error banner with no API roundtrip. /v1/me's 401 is
+  // already on useApi's silent-auth list so a pre-auth visit doesn't
+  // produce a stray toast.
+  const meQuery = useApiQuery<MeResponse>(
+    callbackOk ? "/v1/me" : null,
+  );
+  const loading = callbackOk ? meQuery.isLoading : false;
+
+  // Apply the side effects of a successful /v1/me — seed the default
+  // workspace selection and stash the response for the render path.
+  // Kept in an effect so a TQ refetch (tab focus, etc.) re-applies the
+  // same defaults if data changes shape.
   useEffect(() => {
     if (!callbackOk) {
       setError("Invalid callback URL — only loopback addresses (127.0.0.1, localhost) are permitted.");
-      setLoading(false);
       return;
     }
-    api<MeResponse>("/v1/me")
-      .then((res) => {
-        setMe(res);
-        // Default selection: respect ?tenant if it's a real membership,
-        // otherwise select all (the "authorize CLI for everything" intent
-        // most multi-tenant users have on first login).
-        const ids = res.tenants.map((t) => t.id);
-        if (requestedTenant && ids.includes(requestedTenant)) {
-          setSelected(new Set([requestedTenant]));
-        } else {
-          setSelected(new Set(ids));
-        }
-      })
-      .catch((err) => {
-        if (/401|Unauthorized/i.test(String(err?.message))) {
-          setAuthNeeded(true);
-        } else {
-          setError(String(err?.message ?? err));
-        }
-      })
-      .finally(() => setLoading(false));
-  }, [api, callbackOk, requestedTenant]);
+    const res = meQuery.data;
+    if (!res) return;
+    setMe(res);
+    // Default selection: respect ?tenant if it's a real membership,
+    // otherwise select all (the "authorize CLI for everything" intent
+    // most multi-tenant users have on first login).
+    const ids = res.tenants.map((t) => t.id);
+    if (requestedTenant && ids.includes(requestedTenant)) {
+      setSelected(new Set([requestedTenant]));
+    } else {
+      setSelected(new Set(ids));
+    }
+  }, [callbackOk, meQuery.data, requestedTenant]);
+
+  // /v1/me failure handling: 401 → bounce to /login; anything else → show
+  // the message inline. Matches the prior .catch() branch.
+  useEffect(() => {
+    const err = meQuery.error;
+    if (!err) return;
+    if (/401|Unauthorized/i.test(String((err as Error).message))) {
+      setAuthNeeded(true);
+    } else {
+      setError(String((err as Error).message ?? err));
+    }
+  }, [meQuery.error]);
 
   const goLogin = () => {
     const next = encodeURIComponent(window.location.pathname + window.location.search);

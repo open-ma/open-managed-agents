@@ -6,6 +6,7 @@ import { useToast } from "../components/Toast";
 import { Turnstile } from "../components/Turnstile";
 import { Logo } from "../components/Logo";
 import { setActiveTenantId } from "../lib/api";
+import { useApiQuery } from "../lib/useApiQuery";
 
 // Clear browser-cached tenant pin on every successful auth transition.
 // The pin is per-user — different login → different membership set →
@@ -37,11 +38,26 @@ export function Login() {
   const [otp, setOtp] = useState("");
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
-  const [googleEnabled, setGoogleEnabled] = useState(false);
-  // Turnstile site key (public) is fetched from /auth-info; null when the
+  // /auth-info is a public unauthenticated endpoint advertising which
+  // providers (google / email-otp) are wired up and the Turnstile public
+  // site key. TQ keeps the result cached + deduped across this page's
+  // re-mounts so a navigation between modes doesn't refetch.
+  const { data: authInfo } = useApiQuery<{
+    providers?: string[];
+    turnstile_site_key?: string | null;
+  }>("/auth-info");
+  const googleEnabled = !!authInfo?.providers?.includes("google");
+  // Whether the backend gates sign-up behind an email-OTP verification.
+  // /auth-info advertises "email-otp" iff AUTH_REQUIRE_EMAIL_VERIFY=1 on
+  // the server. When absent (default self-host), the sign-up flow does
+  // NOT route through verify-signup — sign-up succeeds → session cookie
+  // → straight to /. Avoids stranding the user on a verify screen with
+  // no way to receive the code.
+  const emailVerifyRequired = !!authInfo?.providers?.includes("email-otp");
+  // Turnstile site key (public) is read from /auth-info; null when the
   // backend hasn't been configured yet, in which case the auth middleware
   // also soft-passes — both sides agree to skip the check.
-  const [turnstileSiteKey, setTurnstileSiteKey] = useState<string | null>(null);
+  const turnstileSiteKey = authInfo?.turnstile_site_key ?? null;
   const [turnstileToken, setTurnstileToken] = useState("");
   // Bumping this counter re-mounts the Turnstile widget after each form
   // submission so the next attempt gets a fresh single-use token.
@@ -79,25 +95,6 @@ export function Login() {
       nav(nextUrl, { replace: true });
     }
   }, [isAuthenticated, isLoading]);
-
-  // Whether the backend gates sign-up behind an email-OTP verification.
-  // /auth-info advertises "email-otp" iff AUTH_REQUIRE_EMAIL_VERIFY=1 on
-  // the server. When absent (default self-host), the sign-up flow does
-  // NOT route through verify-signup — sign-up succeeds → session cookie
-  // → straight to /. Avoids stranding the user on a verify screen with
-  // no way to receive the code.
-  const [emailVerifyRequired, setEmailVerifyRequired] = useState(false);
-
-  useEffect(() => {
-    fetch("/auth-info")
-      .then((r) => r.json())
-      .then((data: { providers: string[]; turnstile_site_key?: string | null }) => {
-        if (data.providers?.includes("google")) setGoogleEnabled(true);
-        if (data.providers?.includes("email-otp")) setEmailVerifyRequired(true);
-        setTurnstileSiteKey(data.turnstile_site_key ?? null);
-      })
-      .catch(() => {});
-  }, []);
 
   useEffect(() => {
     if (
