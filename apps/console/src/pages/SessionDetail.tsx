@@ -893,6 +893,19 @@ export function SessionDetail() {
                 // (e.g. general_subagent) showed their result as an "unpaired"
                 // orphan block because the use side was custom_tool_use.
                 const resultByToolUseId = new Map<string, typeof filtered[number]>();
+                // session.error → upstream model_request_end error_message
+                // map. session.error's payload from SSE only carries the
+                // generic "No output generated. Check the stream for errors."
+                // — the actionable cause (e.g. "usage limit exceeded (2056)",
+                // "context length", "401 from upstream") is on the preceding
+                // span.model_request_end with is_error=true. Walk forward
+                // remembering the last failed model end and attach it to the
+                // next session.error we hit. Cleared by any model_request_end
+                // with finish_reason!=error (succeeded → previous failure is
+                // no longer the immediate cause). Keyed by stable event id
+                // so EventRender can look it up at render time.
+                const sessionErrorCause = new Map<string, { error: string; model?: string }>();
+                let pendingModelErr: { error: string; model?: string } | null = null;
                 for (const ev of filtered) {
                   if (ev.type === "agent.tool_result") {
                     const id = (ev as { tool_use_id?: string }).tool_use_id;
@@ -900,6 +913,22 @@ export function SessionDetail() {
                   } else if (ev.type === "agent.mcp_tool_result") {
                     const id = (ev as { mcp_tool_use_id?: string }).mcp_tool_use_id;
                     if (id) resultByToolUseId.set(id, ev);
+                  } else if (ev.type === "span.model_request_end") {
+                    const d = (ev as { data?: { finish_reason?: string; error_message?: string; model?: string }; finish_reason?: string; error_message?: string; model?: string });
+                    const finish = d.data?.finish_reason ?? d.finish_reason;
+                    const errMsg = d.data?.error_message ?? d.error_message;
+                    const model = d.data?.model ?? d.model;
+                    if (finish === "error" && errMsg) {
+                      pendingModelErr = { error: errMsg, model };
+                    } else if (finish && finish !== "error") {
+                      pendingModelErr = null;
+                    }
+                  } else if (ev.type === "session.error") {
+                    const id = (ev as { id?: string }).id;
+                    if (id && pendingModelErr) {
+                      sessionErrorCause.set(id, pendingModelErr);
+                      pendingModelErr = null;
+                    }
                   }
                 }
                 const pairedResultIds = new Set<string>();
@@ -950,6 +979,11 @@ export function SessionDetail() {
                       event={e}
                       livePending={false}
                       pairedResult={pairedResult}
+                      modelErrorCause={
+                        e.type === "session.error"
+                          ? sessionErrorCause.get((e as { id?: string }).id ?? "")
+                          : undefined
+                      }
                     />
                   );
                 });
@@ -1579,6 +1613,7 @@ function EventRender({
   event,
   livePending = false,
   pairedResult,
+  modelErrorCause,
 }: {
   event: Event;
   /**
@@ -1601,6 +1636,17 @@ function EventRender({
    * bubbles.
    */
   pairedResult?: Event;
+  /**
+   * Upstream model error context for `session.error` events. The
+   * SSE-delivered session.error payload only carries a generic
+   * "No output generated. Check the stream for errors." message; the
+   * actionable cause (rate limit, billing, model 4xx, etc.) lives on
+   * the preceding `span.model_request_end` with `is_error=true`. Caller
+   * walks the events array and pairs them, passing the looked-up cause
+   * here so operators see the real reason inline without diving into
+   * the timeline tab. Only meaningful when `event.type === "session.error"`.
+   */
+  modelErrorCause?: { error: string; model?: string };
 }) {
   // AMA pending lifecycle (set by event-log adapter from row.processed_at /
   // row.cancelled_at). Cancelled events stay in the log for audit but
@@ -1776,7 +1822,16 @@ function EventRender({
     case "session.error":
       return (
         <div className="max-w-2xl bg-danger-subtle border border-danger/30 rounded-lg px-4 py-2.5 text-sm text-danger">
-          Error: {event.error}
+          <div>Error: {event.error}</div>
+          {modelErrorCause && (
+            <div className="mt-1.5 pt-1.5 border-t border-danger/20 text-[12px] opacity-90">
+              <span className="font-medium">Cause</span>
+              {modelErrorCause.model && (
+                <span className="ml-1 font-mono opacity-75">({modelErrorCause.model})</span>
+              )}
+              : {modelErrorCause.error}
+            </div>
+          )}
         </div>
       );
 
