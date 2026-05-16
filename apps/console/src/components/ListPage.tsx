@@ -64,20 +64,22 @@ interface ListPageProps<T> {
   /** Cursor pagination (mirrors useCursorList). When `onLoadMore` is set
    *  and `hasMore` is true, a "Load more" footer is rendered below the
    *  table; while `loadingMore` is true the button shows a loading state.
-   *  Mutually exclusive with paginated mode (`onNextPage` / `onPrevPage`). */
+   *  Mutually exclusive with paginated mode (`onPageChange`). */
   hasMore?: boolean;
   onLoadMore?: () => void;
   loadingMore?: boolean;
 
-  /** Paginated mode (mirrors usePagedList). When `onNextPage` and
-   *  `onPrevPage` are set, a Prev / Page-N / Next footer is rendered
-   *  instead of "Load more". Mutually exclusive with `hasMore` /
+  /** Paginated mode (mirrors usePagedList). When `onPageChange` is set
+   *  the full Pagination component is rendered (numbered pages, page-size
+   *  selector, range info). Mutually exclusive with `hasMore` /
    *  `onLoadMore`; if both are wired the load-more footer wins. */
   pageIndex?: number;
+  pageSize?: number;
   hasNext?: boolean;
-  hasPrev?: boolean;
-  onNextPage?: () => void;
-  onPrevPage?: () => void;
+  knownPages?: number;
+  pageSizeOptions?: number[];
+  onPageChange?: (idx: number) => void;
+  onPageSizeChange?: (size: number) => void;
 
   /** Anything to render below the table — typically modals tied to the
    *  page (create dialog, detail dialog, etc.). */
@@ -118,10 +120,12 @@ export function ListPage<T>({
   onLoadMore,
   loadingMore,
   pageIndex,
+  pageSize,
   hasNext,
-  hasPrev,
-  onNextPage,
-  onPrevPage,
+  knownPages,
+  pageSizeOptions,
+  onPageChange,
+  onPageSizeChange,
   children,
 }: ListPageProps<T>) {
   const hasControlsRow =
@@ -255,15 +259,17 @@ export function ListPage<T>({
                 {loadingMore ? "Loading…" : "Load more"}
               </button>
             </div>
-          ) : onNextPage && onPrevPage ? (
+          ) : onPageChange && onPageSizeChange ? (
             <Pagination
               pageIndex={pageIndex ?? 0}
+              pageSize={pageSize ?? 20}
               hasNext={hasNext ?? false}
-              hasPrev={hasPrev ?? false}
-              onNext={onNextPage}
-              onPrev={onPrevPage}
-              loading={loading}
+              knownPages={knownPages ?? 1}
               itemCount={data.length}
+              pageSizeOptions={pageSizeOptions}
+              loading={loading}
+              onPageChange={onPageChange}
+              onPageSizeChange={onPageSizeChange}
             />
           ) : null}
         </div>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
 import { useApi } from "../lib/api";
-import { useInfiniteApiQuery } from "../lib/useApiQuery";
+import { usePagedList } from "../lib/usePagedList";
 import { ListPage } from "../components/ListPage";
 import { Button } from "../components/Button";
 import { Select, SelectOption, SelectGroup, SelectGroupLabel } from "../components/Select";
@@ -121,8 +121,8 @@ export function AgentsList() {
   const [codeValue, setCodeValue] = useState("");
   const [showMcpPicker, setShowMcpPicker] = useState(false);
 
-  // Main agents table — cursor-paginated. Filter changes (showArchived)
-  // reset to page 1 automatically.
+  // Main agents table — paginated. Filter changes (showArchived) reset to
+  // page 0 automatically.
   const agentsParams = useMemo(
     () => ({ include_archived: showArchived ? "true" : undefined }),
     [showArchived],
@@ -130,11 +130,14 @@ export function AgentsList() {
   const {
     items: agents,
     isLoading: loading,
-    isLoadingMore,
-    hasMore,
-    loadMore,
+    pageIndex,
+    pageSize,
+    hasNext,
+    knownPages,
+    goToPage,
+    setPageSize,
     refresh: refreshAgents,
-  } = useInfiniteApiQuery<Agent>("/v1/agents", { limit: 50, params: agentsParams });
+  } = usePagedList<Agent>("/v1/agents", { defaultPageSize: 20, params: agentsParams });
 
   // Aux fetches that aren't paginated UI surfaces — refreshed on mount and
   // after agent CRUD. Pull all agents (for the callable-agents dropdown)
@@ -523,9 +526,13 @@ export function AgentsList() {
       loading={loading}
       getRowKey={(a) => a.id}
       onRowClick={(a) => nav(`/agents/${a.id}`)}
-      hasMore={hasMore}
-      onLoadMore={loadMore}
-      loadingMore={isLoadingMore}
+      pageIndex={pageIndex}
+      pageSize={pageSize}
+      hasNext={hasNext}
+      knownPages={knownPages}
+      pageSizeOptions={[10, 20, 50, 100]}
+      onPageChange={goToPage}
+      onPageSizeChange={setPageSize}
       emptyTitle={search ? "No matching agents" : "No agents yet"}
       emptyAction={!search && (
         <Button onClick={() => setShowCreate(true)}>+ New agent</Button>

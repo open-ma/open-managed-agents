@@ -33,9 +33,11 @@ export function FilesList() {
   const [search, setSearch] = useState("");
 
   // Files uses `before_id` + `has_more` (Anthropic Files-style cursor),
-  // not the `next_cursor` shape `useInfiniteApiQuery` expects, so wire
-  // `useInfiniteQuery` inline with the right pageParam logic. Cache key
-  // includes the scope filter so flipping it gets its own cache slot.
+  // not the `next_cursor` shape that `usePagedList` / `useInfiniteApiQuery`
+  // expect — needs both a custom cursor param name AND a custom extractor,
+  // so wire `useInfiniteQuery` inline. Stays on the load-more footer (no
+  // numbered pagination) until the hook grows a Files-shaped adapter.
+  // Cache key includes the scope filter so flipping it gets its own slot.
   const queryKey = useMemo(
     () => ["/v1/files", "infinite", scopeFilter || ""] as const,
     [scopeFilter],

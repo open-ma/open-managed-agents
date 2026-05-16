@@ -1,41 +1,49 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useSearchParams } from "react-router";
 import { useApi } from "./api";
 
 /**
- * Cursor-paginated list hook with proper Prev/Next/Page-N pagination.
+ * Cursor-paginated list hook with proper Prev / Page-N / Next pagination,
+ * page-size selection, and URL sync.
  *
- * The `/v1/<resource>` endpoints expose only forward cursors via
- * `{data: T[], next_cursor?: string}` — no "previous cursor" exists. To
- * support a Prev button we cache every cursor we've ever used in a stack:
- * the cursor at index N is the cursor that fetches page N. Index 0 is
- * always `undefined` (the initial fetch with no cursor).
+ * The `/v1/<resource>` endpoints expose only forward cursors — to support
+ * Prev + jumping to known pages, we cache every cursor we've ever used in
+ * a stack: `cursorStack[N]` is the cursor that fetches page N. Index 0 is
+ * always `undefined` (initial fetch). The cursor stack lives across
+ * renders (ref) and is cleared whenever filters / page size change.
+ *
+ * URL sync uses `?page=N&size=N`. Page is 1-based for human-friendly URLs;
+ * the hook converts back to 0-based internally. Size persists across
+ * navigation so the user's choice sticks.
  *
  * Usage:
  *
  *     const {
- *       items, isLoading, pageIndex, hasNext, hasPrev,
- *       nextPage, prevPage, refresh,
- *     } = usePagedList<Session>("/v1/sessions", { limit: 20 });
+ *       items, isLoading, pageIndex, pageSize, hasNext, hasPrev,
+ *       goToPage, setPageSize, refresh, knownPages,
+ *     } = usePagedList<Session>("/v1/sessions", { defaultPageSize: 20 });
  *
- *     // ... render items ...
  *     <Pagination
- *       pageIndex={pageIndex} hasNext={hasNext} hasPrev={hasPrev}
- *       onNext={nextPage} onPrev={prevPage} loading={isLoading}
+ *       pageIndex={pageIndex}
+ *       pageSize={pageSize}
+ *       hasNext={hasNext}
+ *       knownPages={knownPages}
+ *       onPageChange={goToPage}
+ *       onPageSizeChange={setPageSize}
  *     />
- *
- * `params` is a flat string→string map of extra query params. Changing
- * it resets the cursor stack and bounces back to page 0 — pass a stable
- * object reference (or memoize) to avoid pointless refetches.
- *
- * `enabled: false` defers the initial fetch — useful when an upstream
- * value (`tenantId`, etc.) isn't ready yet.
  */
 export interface PagedListOpts {
-  limit?: number;
+  /** Default rows per page when URL doesn't specify. */
+  defaultPageSize?: number;
+  /** Allowed page sizes for the selector. Defaults to [10, 20, 50, 100]. */
+  pageSizeOptions?: number[];
   /** Extra query params (filters etc.). Stable identity recommended. */
   params?: Record<string, string | undefined>;
   /** When false, skip the initial fetch. Defaults to true. */
   enabled?: boolean;
+  /** Sync `?page=N&size=N` to the URL. Default true; turn off when you
+   *  want the URL untouched (e.g. paginated list inside a modal). */
+  syncUrl?: boolean;
 }
 
 export interface PagedListResult<T> {
@@ -43,11 +51,18 @@ export interface PagedListResult<T> {
   isLoading: boolean;
   /** Zero-based — display as `pageIndex + 1` to humans. */
   pageIndex: number;
+  pageSize: number;
   hasNext: boolean;
   hasPrev: boolean;
-  nextPage(): void;
-  prevPage(): void;
-  /** Clear cached cursor stack, drop back to page 0, refetch. */
+  /** Number of pages we've actually visited (i.e. have cursors for).
+   *  The Pagination component renders these as numbered tiles plus an
+   *  ellipsis if `hasNext` is true. */
+  knownPages: number;
+  /** Jump to a specific page (0-based). Refuses to skip past pages we
+   *  don't have a cursor for. Use `pageIndex + 1` to advance. */
+  goToPage(index: number): void;
+  setPageSize(size: number): void;
+  /** Clear the cursor stack, drop back to page 0, refetch. */
   refresh(): void;
   error: string | null;
 }
@@ -57,63 +72,87 @@ interface PageResponse<T> {
   next_cursor?: string;
 }
 
+const DEFAULT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
 export function usePagedList<T>(
   endpoint: string,
   opts: PagedListOpts = {},
 ): PagedListResult<T> {
   const { api } = useApi();
+
+  const defaultSize = opts.defaultPageSize ?? 20;
+  const sizeOptions = opts.pageSizeOptions ?? DEFAULT_PAGE_SIZE_OPTIONS;
+  const enabled = opts.enabled ?? true;
+  const syncUrl = opts.syncUrl ?? true;
+
+  const [searchParams, setSearchParams] = useSearchParams();
+
+  // Derive initial page / size from URL (or fallback to defaults). We pin
+  // these to URL on every change via a separate effect — the URL is the
+  // source of truth, but we mirror to local state so the render is sync.
+  const initialPage = (() => {
+    if (!syncUrl) return 0;
+    const v = parseInt(searchParams.get("page") ?? "1", 10);
+    return Number.isFinite(v) && v > 0 ? v - 1 : 0;
+  })();
+  const initialSize = (() => {
+    if (!syncUrl) return defaultSize;
+    const v = parseInt(searchParams.get("size") ?? "", 10);
+    return sizeOptions.includes(v) ? v : defaultSize;
+  })();
+
+  const [pageIndex, setPageIndex] = useState(initialPage);
+  const [pageSize, setPageSizeState] = useState(initialSize);
   const [items, setItems] = useState<T[]>([]);
-  const [pageIndex, setPageIndex] = useState(0);
   const [hasNext, setHasNext] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Bumped by `refresh()` to force the fetch effect to re-run even when
-  // pageIndex is already 0 (most common refresh case).
   const [refreshKey, setRefreshKey] = useState(0);
 
-  const enabled = opts.enabled ?? true;
   // Stable identity for the params object so the effect doesn't loop on
   // inline object literals from callers.
   const paramsKey = JSON.stringify(opts.params ?? {});
 
   // Cursor stack: index N holds the cursor that fetches page N. Backend
-  // is forward-only, so we cache every cursor we've used to make Prev work.
+  // is forward-only, so we cache every cursor we've used. Cleared when
+  // filters or page size change.
   const cursorStackRef = useRef<Array<string | undefined>>([undefined]);
-  // Track last paramsKey across renders so the effect can detect a filter
-  // change and blow away the stack before fetching.
-  const lastParamsKeyRef = useRef(paramsKey);
+  // Track `knownPages` as React state (not just the ref) so the pagination
+  // UI re-renders when we discover a new page.
+  const [knownPages, setKnownPages] = useState(1);
+  // Track filters / size across renders to detect changes that should
+  // blow away the stack.
+  const lastResetKeyRef = useRef(`${paramsKey}|${pageSize}`);
 
   const buildUrl = useCallback(
     (afterCursor?: string): string => {
       const sp = new URLSearchParams();
-      if (opts.limit) sp.set("limit", String(opts.limit));
+      sp.set("limit", String(pageSize));
       if (opts.params) {
         for (const [k, v] of Object.entries(opts.params)) {
           if (v !== undefined && v !== "") sp.set(k, v);
         }
       }
       if (afterCursor) sp.set("cursor", afterCursor);
-      const qs = sp.toString();
-      return qs ? `${endpoint}?${qs}` : endpoint;
+      return `${endpoint}?${sp.toString()}`;
     },
-    // paramsKey covers `opts.params`; opts.limit is primitive.
+    // paramsKey covers `opts.params`; pageSize is primitive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [endpoint, opts.limit, paramsKey],
+    [endpoint, pageSize, paramsKey],
   );
 
-  // Single fetch effect — runs on mount, page change, refresh, and any
-  // upstream change (endpoint/params/limit/enabled).
+  // Fetch effect — fires on mount, page change, refresh, filter change,
+  // page size change. AbortController tears down stale fetches.
   useEffect(() => {
     if (!enabled) return;
 
-    // Filter / endpoint / limit change → reset cursor stack and bounce to
-    // page 0. The reset happens before the fetch so the URL we build below
-    // uses the correct (undefined) cursor. If pageIndex was already 0, we
-    // fall through and fetch immediately; otherwise the setPageIndex re-runs
-    // this effect with the right index.
-    if (lastParamsKeyRef.current !== paramsKey) {
-      lastParamsKeyRef.current = paramsKey;
+    // Filter / size change → clear stack and bounce to page 0. Has to
+    // happen before we read the cursor since the URL we build uses it.
+    const resetKey = `${paramsKey}|${pageSize}`;
+    if (lastResetKeyRef.current !== resetKey) {
+      lastResetKeyRef.current = resetKey;
       cursorStackRef.current = [undefined];
+      setKnownPages(1);
       if (pageIndex !== 0) {
         setPageIndex(0);
         return;
@@ -132,11 +171,9 @@ export function usePagedList<T>(
         if (controller.signal.aborted) return;
         setItems(res.data);
         setHasNext(!!res.next_cursor);
-        // Cache the cursor for the next page so Next + future Prev work.
-        // Overwrite is fine — data may have shifted between visits, the
-        // freshest cursor is the right one to use.
         if (res.next_cursor) {
           cursorStackRef.current[pageIndex + 1] = res.next_cursor;
+          setKnownPages((n) => Math.max(n, pageIndex + 2));
         }
       })
       .catch((err) => {
@@ -149,41 +186,72 @@ export function usePagedList<T>(
       });
 
     return () => controller.abort();
-    // `api` is a fresh function identity each render and including it would
-    // loop the effect — same pattern as useCursorList.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [endpoint, paramsKey, opts.limit, enabled, refreshKey, pageIndex]);
+  }, [endpoint, paramsKey, pageSize, enabled, refreshKey, pageIndex]);
 
-  const nextPage = useCallback(() => {
-    setPageIndex((idx) => {
-      // Refuse to advance past what we have a cursor for. The button is
-      // already disabled in the UI, but spam-clicks during a fast click
-      // sequence shouldn't be able to skip pages.
-      if (!hasNext) return idx;
-      if (idx + 1 >= cursorStackRef.current.length) return idx;
-      return idx + 1;
-    });
-  }, [hasNext]);
+  // URL sync. Pin `?page=N&size=N` whenever they change. Skip when
+  // disabled or when both already match (avoids a no-op history entry).
+  useEffect(() => {
+    if (!syncUrl) return;
+    const wantPage = String(pageIndex + 1);
+    const wantSize = String(pageSize);
+    const currentPage = searchParams.get("page");
+    const currentSize = searchParams.get("size");
+    // pageIndex 0 + default size means "clean URL" — drop the params.
+    const shouldSetPage = pageIndex !== 0;
+    const shouldSetSize = pageSize !== defaultSize;
+    if (
+      (shouldSetPage ? currentPage === wantPage : currentPage === null) &&
+      (shouldSetSize ? currentSize === wantSize : currentSize === null)
+    ) {
+      return;
+    }
+    const next = new URLSearchParams(searchParams);
+    if (shouldSetPage) next.set("page", wantPage);
+    else next.delete("page");
+    if (shouldSetSize) next.set("size", wantSize);
+    else next.delete("size");
+    setSearchParams(next, { replace: true });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageIndex, pageSize, syncUrl]);
 
-  const prevPage = useCallback(() => {
-    setPageIndex((idx) => Math.max(0, idx - 1));
+  const goToPage = useCallback(
+    (idx: number) => {
+      if (idx < 0) return;
+      // Refuse to skip past known pages (only Next can extend the stack).
+      if (idx >= cursorStackRef.current.length) return;
+      setPageIndex(idx);
+    },
+    [],
+  );
+
+  const setPageSize = useCallback((size: number) => {
+    setPageSizeState(size);
   }, []);
 
   const refresh = useCallback(() => {
     cursorStackRef.current = [undefined];
+    setKnownPages(1);
     setPageIndex(0);
     setRefreshKey((k) => k + 1);
   }, []);
 
-  return {
-    items,
-    isLoading,
-    pageIndex,
-    hasNext,
-    hasPrev: pageIndex > 0,
-    nextPage,
-    prevPage,
-    refresh,
-    error,
-  };
+  const result = useMemo<PagedListResult<T>>(
+    () => ({
+      items,
+      isLoading,
+      pageIndex,
+      pageSize,
+      hasNext,
+      hasPrev: pageIndex > 0,
+      knownPages,
+      goToPage,
+      setPageSize,
+      refresh,
+      error,
+    }),
+    [items, isLoading, pageIndex, pageSize, hasNext, knownPages, goToPage, setPageSize, refresh, error],
+  );
+
+  return result;
 }

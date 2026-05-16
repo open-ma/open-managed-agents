@@ -193,12 +193,13 @@ export function SessionsList() {
     items: sessions,
     isLoading: loading,
     pageIndex,
+    pageSize,
     hasNext,
-    hasPrev,
-    nextPage,
-    prevPage,
+    knownPages,
+    goToPage,
+    setPageSize,
     refresh: refreshSessions,
-  } = usePagedList<Session>("/v1/sessions", { limit: 20, params: sessionsParams });
+  } = usePagedList<Session>("/v1/sessions", { defaultPageSize: 20, params: sessionsParams });
 
   const loadAux = async () => {
     setAuxLoading(true);
@@ -487,10 +488,12 @@ export function SessionsList() {
       getRowKey={(s) => s.id}
       onRowClick={(s) => nav(`/sessions/${s.id}`)}
       pageIndex={pageIndex}
+      pageSize={pageSize}
       hasNext={hasNext}
-      hasPrev={hasPrev}
-      onNextPage={nextPage}
-      onPrevPage={prevPage}
+      knownPages={knownPages}
+      pageSizeOptions={[10, 20, 50, 100]}
+      onPageChange={goToPage}
+      onPageSizeChange={setPageSize}
       emptyTitle={search || filterAgent ? "No matching sessions" : "No sessions yet"}
       emptyAction={!search && !filterAgent && (
         <Button onClick={() => {

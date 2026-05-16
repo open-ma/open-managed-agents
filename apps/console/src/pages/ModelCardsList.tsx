@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { useApi } from "../lib/api";
-import { useInfiniteApiQuery } from "../lib/useApiQuery";
+import { usePagedList } from "../lib/usePagedList";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
 import { ListPage } from "../components/ListPage";
@@ -39,11 +39,14 @@ export function ModelCardsList() {
   const {
     items: cards,
     isLoading: loading,
-    isLoadingMore,
-    hasMore,
-    loadMore,
+    pageIndex,
+    pageSize,
+    hasNext,
+    knownPages,
+    goToPage,
+    setPageSize,
     refresh: load,
-  } = useInfiniteApiQuery<ModelCard>("/v1/model_cards", { limit: 50 });
+  } = usePagedList<ModelCard>("/v1/model_cards", { defaultPageSize: 20 });
 
   // Fetch models from official API using the user's key
   const fetchModels = useCallback(async (provider: string, apiKey: string) => {
@@ -144,9 +147,13 @@ export function ModelCardsList() {
       data={cards}
       loading={loading}
       getRowKey={(c) => c.id}
-      hasMore={hasMore}
-      onLoadMore={loadMore}
-      loadingMore={isLoadingMore}
+      pageIndex={pageIndex}
+      pageSize={pageSize}
+      hasNext={hasNext}
+      knownPages={knownPages}
+      pageSizeOptions={[10, 20, 50, 100]}
+      onPageChange={goToPage}
+      onPageSizeChange={setPageSize}
       emptyTitle="No model cards yet"
       emptySubtitle={
         <>
