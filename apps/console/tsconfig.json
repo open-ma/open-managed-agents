@@ -11,7 +11,13 @@
     "outDir": "dist",
     "rootDir": "src",
     "baseUrl": ".",
-    "paths": { "@/*": ["./src/*"] }
+    "paths": {
+      "@/*": ["./src/*"],
+      "@/registry/default/ui/*": ["./src/components/ui/*"],
+      "@/registry/default/blocks/*": ["./src/components/blocks/*"],
+      "@/registry/default/hooks/*": ["./src/hooks/*"],
+      "@/registry/default/lib/*": ["./src/lib/*"]
+    }
   },
   "include": ["src"]
 }

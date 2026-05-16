@@ -1,4 +1,4 @@
-import { StrictMode } from "react";
+import { StrictMode, lazy, Suspense } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter, Routes, Route, Navigate } from "react-router";
 import { QueryClientProvider } from "@tanstack/react-query";
@@ -13,7 +13,12 @@ import { Dashboard } from "./pages/Dashboard";
 import { AgentsList } from "./pages/AgentsList";
 import { AgentDetail } from "./pages/AgentDetail";
 import { SessionsList } from "./pages/SessionsList";
-import { SessionDetail } from "./pages/SessionDetail";
+// SessionDetail lazy-loads — it pulls in ai-elements + Shiki + Streamdown
+// + mermaid + dozens of language defs (~500 kB gzipped). Splitting it out
+// keeps the initial bundle for /agents, /sessions list, etc. under 350 kB.
+const SessionDetail = lazy(() =>
+  import("./pages/SessionDetail").then((m) => ({ default: m.SessionDetail })),
+);
 import { FilesList } from "./pages/FilesList";
 import { EnvironmentsList } from "./pages/EnvironmentsList";
 import { EnvironmentDetail } from "./pages/EnvironmentDetail";
@@ -62,7 +67,14 @@ createRoot(document.getElementById("root")!).render(
                   <Route path="agents" element={<AgentsList />} />
                   <Route path="agents/:id" element={<AgentDetail />} />
                   <Route path="sessions" element={<SessionsList />} />
-                  <Route path="sessions/:id" element={<SessionDetail />} />
+                  <Route
+                    path="sessions/:id"
+                    element={
+                      <Suspense fallback={null}>
+                        <SessionDetail />
+                      </Suspense>
+                    }
+                  />
                   <Route path="files" element={<FilesList />} />
                   <Route path="evals" element={<EvalRunsList />} />
                   <Route path="evals/:id" element={<EvalRunDetail />} />

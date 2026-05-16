@@ -141,6 +141,41 @@
   --color-accent-violet-subtle: var(--accent-violet-subtle);
 
   --color-ring: var(--ring);
+
+  /* shadcn-style primitive aliases. The ai-elements + components/ui
+     primitives are vanilla shadcn copy-paste and reach for tokens like
+     `--color-secondary`, `--color-muted-foreground`, etc. Without these
+     aliases Tailwind v4 emits no rule for `bg-secondary`, `text-muted-
+     foreground`, `bg-popover`, `border-input` (the lookup just silently
+     yields nothing) and the lifted shadcn surfaces render unstyled.
+     Mapping straight onto the existing OMA palette keeps the chat surface
+     visually consistent with the rest of the console — no second palette
+     to maintain. Both themes (light + dark) get correct values automatically
+     because the OMA tokens above are theme-aware. */
+  --color-background: var(--bg);
+  --color-foreground: var(--fg);
+  --color-card: var(--bg);
+  --color-card-foreground: var(--fg);
+  --color-popover: var(--bg);
+  --color-popover-foreground: var(--fg);
+  --color-primary: var(--brand);
+  --color-primary-foreground: var(--brand-fg);
+  --color-secondary: var(--bg-surface);
+  --color-secondary-foreground: var(--fg);
+  --color-muted: var(--bg-surface);
+  --color-muted-foreground: var(--fg-muted);
+  --color-accent: var(--bg-surface);
+  --color-accent-foreground: var(--fg);
+  --color-destructive: var(--danger);
+  --color-destructive-foreground: #ffffff;
+  --color-input: var(--border);
+
+  /* shadcn primitives derive button + input rounding from --radius
+     via `rounded-[min(var(--radius-md),12px)]` and similar. OMA's
+     existing rounded utilities use the Tailwind defaults, so pin a
+     value that matches our existing chat bubble feel (rounded-lg). */
+  --radius: 0.5rem;
+  --radius-md: 0.5rem;
 }
 
 /* ---------- Base typography ---------- */

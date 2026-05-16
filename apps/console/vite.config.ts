@@ -19,6 +19,10 @@ export default defineConfig({
   plugins: [react(), tailwindcss()],
   resolve: {
     alias: {
+      "@/registry/default/ui": path.resolve(__dirname, "./src/components/ui"),
+      "@/registry/default/blocks": path.resolve(__dirname, "./src/components/blocks"),
+      "@/registry/default/hooks": path.resolve(__dirname, "./src/hooks"),
+      "@/registry/default/lib": path.resolve(__dirname, "./src/lib"),
       "@": path.resolve(__dirname, "./src"),
     },
   },
