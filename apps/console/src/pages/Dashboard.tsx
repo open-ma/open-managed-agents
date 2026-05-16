@@ -98,7 +98,7 @@ export function Dashboard() {
 
   return (
     <div className="flex-1 overflow-y-auto">
-      <div className="max-w-[1100px] mx-auto px-4 sm:px-8 lg:px-10 py-10 lg:py-12 space-y-10">
+      <div className="px-4 sm:px-8 lg:px-10 py-10 lg:py-12 space-y-10">
         {/* Header */}
         <header>
           <h1 className="font-display text-[32px] leading-tight font-semibold tracking-tight text-fg">

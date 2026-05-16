@@ -325,13 +325,33 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
   return (
     <>
       {/* Logo + collapse toggle. The toggle is desktop-only — mobile
-          uses the drawer overlay pattern (sidebarOpen), not collapse. */}
-      <div className={`flex items-center pt-4 pb-2 text-brand ${collapsed ? "justify-center px-2" : "justify-between px-4"}`}>
-        <div className={`flex items-center gap-2 min-w-0 ${collapsed ? "justify-center" : ""}`}>
-          <LogoMark />
-          {!collapsed && <span className="font-mono font-bold text-base">openma</span>}
+          uses the drawer overlay pattern (sidebarOpen), not collapse.
+          When collapsed, the toggle sits directly under the logo as a
+          dedicated full-width button — same vertical region as the
+          collapse button when expanded so muscle memory holds; high
+          contrast so it can't be missed (the previous bottom-section
+          placement was below 12 nav icons and easy to miss). */}
+      {collapsed ? (
+        <div className="flex flex-col items-center pt-3 pb-2 gap-1.5">
+          <div className="flex items-center justify-center text-brand">
+            <LogoMark />
+          </div>
+          <button
+            type="button"
+            onClick={toggle}
+            aria-label="Expand sidebar"
+            title="Expand sidebar (press [)"
+            className="hidden md:flex items-center justify-center w-10 h-7 mt-1 rounded-md text-fg-subtle hover:text-fg bg-bg hover:bg-bg-surface border border-border transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
+          >
+            <ExpandIcon />
+          </button>
         </div>
-        {!collapsed && (
+      ) : (
+        <div className="flex items-center justify-between pt-4 pb-2 px-4 text-brand">
+          <div className="flex items-center gap-2 min-w-0">
+            <LogoMark />
+            <span className="font-mono font-bold text-base">openma</span>
+          </div>
           <button
             type="button"
             onClick={toggle}
@@ -341,8 +361,8 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
           >
             <CollapseIcon />
           </button>
-        )}
-      </div>
+        </div>
+      )}
 
       {/* Workspace switcher — hidden in collapsed mode (it relies on
           showing the tenant name). Expand sidebar to switch. */}
@@ -373,15 +393,6 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
             >
               <svg className="w-[18px] h-[18px] opacity-80" fill="none" stroke="currentColor" strokeWidth={2} viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" /></svg>
             </a>
-            <button
-              type="button"
-              onClick={toggle}
-              aria-label="Expand sidebar"
-              title="Expand sidebar (press [)"
-              className="flex items-center justify-center w-10 h-10 mx-auto text-fg-subtle hover:text-fg hover:bg-bg-surface rounded-md transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)]"
-            >
-              <ExpandIcon />
-            </button>
             <UserMenu />
           </>
         ) : (
