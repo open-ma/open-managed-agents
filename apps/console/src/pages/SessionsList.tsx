@@ -495,6 +495,7 @@ export function SessionsList() {
       onPageChange={goToPage}
       onPageSizeChange={setPageSize}
       emptyTitle={search || filterAgent ? "No matching sessions" : "No sessions yet"}
+      emptyKind="session"
       emptyAction={!search && !filterAgent && (
         <Button onClick={() => {
           setShowCreate(true);

@@ -155,6 +155,7 @@ export function ModelCardsList() {
       onPageChange={goToPage}
       onPageSizeChange={setPageSize}
       emptyTitle="No model cards yet"
+      emptyKind="model_card"
       emptySubtitle={
         <>
           <p>Add a model card to configure API credentials for your agents.</p>

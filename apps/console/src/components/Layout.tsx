@@ -1,9 +1,10 @@
-import { useState } from "react";
+import { useMemo, useState } from "react";
 import type { ComponentType } from "react";
-import { NavLink, Outlet, Navigate } from "react-router";
+import { NavLink, Outlet, Navigate, useNavigate } from "react-router";
 import { useAuth } from "../lib/auth";
 import { useTheme } from "../lib/theme";
 import { authClient } from "../lib/auth-client";
+import { useChordKeybinding, type ChordBinding } from "../lib/useChordKeybinding";
 import { TenantSwitcher } from "./TenantSwitcher";
 import { Logo } from "./Logo";
 import { BrandLoader } from "./BrandLoader";
@@ -89,6 +90,32 @@ const navGroups: NavGroup[] = [
   // the spread is type-checked by tsc.
   ...consolePlugins.flatMap((p) => p.navGroups ?? []),
 ];
+
+/* ── Linear-style chord keybindings (g + letter → route) ──
+ *
+ * Mapping is path → second-key. Prefix is always "g". Letter choice
+ * follows Linear's convention (first letter of the route) wherever
+ * possible; clashes are resolved with the second-most-meaningful letter:
+ *
+ *   k is taken by Skills, so API Keys uses `i` ("key id")
+ *   e is taken by Environments, so Eval Runs uses `h` ("hist")
+ *
+ * Exported so CommandPalette can render the same chord next to each
+ * route, making them discoverable without a separate cheatsheet. */
+export const ROUTE_CHORDS: Record<string, string> = {
+  "/":              "d",
+  "/agents":        "a",
+  "/sessions":      "s",
+  "/files":         "f",
+  "/environments":  "e",
+  "/vaults":        "v",
+  "/skills":        "k",
+  "/memory":        "m",
+  "/model-cards":   "c",
+  "/api-keys":      "i",
+  "/runtimes":      "r",
+  "/evals":         "h",
+};
 
 /* ── Chevron icon for collapsible groups ── */
 function ChevronIcon({ open }: { open: boolean }) {
@@ -276,6 +303,24 @@ function SidebarContent({ onNavigate }: { onNavigate?: () => void }) {
 export function Layout() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const { isAuthenticated, isLoading } = useAuth();
+  const navigate = useNavigate();
+
+  // Linear-style chord bindings. Derived from ROUTE_CHORDS so the
+  // sidebar / palette / chords stay in lockstep — adding a route to
+  // the map enables `g <key>` automatically. The hook itself bypasses
+  // chords inside form inputs and while a Radix dialog is open, so
+  // these are safe to register at the top of the authenticated layout.
+  const chordBindings = useMemo<ChordBinding[]>(
+    () =>
+      Object.entries(ROUTE_CHORDS).map(([path, key]) => ({
+        prefix: "g",
+        key,
+        handler: () => navigate(path),
+        label: path,
+      })),
+    [navigate],
+  );
+  useChordKeybinding(chordBindings);
 
   if (isLoading) {
     return (

@@ -99,6 +99,7 @@ export function EvalRunsList() {
       getRowKey={(r) => r.id}
       onRowClick={(r) => nav(`/evals/${r.id}`)}
       emptyTitle="No eval runs yet"
+      emptyKind="eval"
       emptySubtitle={
         <p>
           Submit one with{" "}

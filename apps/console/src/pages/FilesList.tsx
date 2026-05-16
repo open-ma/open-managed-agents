@@ -137,6 +137,7 @@ export function FilesList() {
       onPageSizeChange={setPageSize}
       getRowKey={(f) => f.id}
       emptyTitle={scopeFilter ? "No files in this scope" : "No files yet"}
+      emptyKind="file"
       emptySubtitle={
         scopeFilter
           ? "Try clearing the scope filter, or check the session id."

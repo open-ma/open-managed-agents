@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import { useApi } from "../lib/api";
 import { Modal } from "../components/Modal";
 import { Button } from "../components/Button";
+import { EmptyState } from "../components/EmptyState";
 import { Page } from "../components/Page";
 
 /* ---------- types ---------- */
@@ -330,12 +331,12 @@ export function SkillsList() {
           Loading...
         </div>
       ) : skills.length === 0 ? (
-        <div className="text-center py-16 text-fg-subtle border border-dashed border-border rounded-lg">
-          <p className="text-lg mb-1">No skills yet</p>
-          <p className="text-sm">
-            Create a skill to give your agents domain expertise.
-          </p>
-        </div>
+        <EmptyState
+          size="lg"
+          kind="skill"
+          title="No skills yet"
+          body="Create a skill to give your agents domain expertise."
+        />
       ) : (
         <>
           {/* Anthropic built-in skills */}
@@ -388,12 +389,11 @@ export function SkillsList() {
             Custom Skills
           </h3>
           {customSkills.length === 0 ? (
-            <div className="text-center py-12 text-fg-subtle border border-dashed border-border rounded-lg">
-              <p className="text-sm mb-1">No custom skills yet</p>
-              <p className="text-xs">
-                Upload a skill folder as a .zip with SKILL.md at the root.
-              </p>
-            </div>
+            <EmptyState
+              kind="skill"
+              title="No custom skills yet"
+              body="Upload a skill folder as a .zip with SKILL.md at the root."
+            />
           ) : (
             <div className="border border-border rounded-lg overflow-x-auto">
               <table className="w-full text-sm">

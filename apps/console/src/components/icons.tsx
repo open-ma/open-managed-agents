@@ -11,6 +11,8 @@
  * `fill` because their official paths are designed for fill rendering.
  */
 
+import type { ReactNode } from "react";
+
 interface IconProps {
   className?: string;
 }
@@ -39,6 +41,35 @@ function FillIcon({ d, className }: { d: string; className?: string }) {
       viewBox="0 0 24 24"
     >
       <path d={d} />
+    </svg>
+  );
+}
+
+/**
+ * Wrapper for the larger, thinner-stroked icons used inside `<EmptyState>`.
+ * Defaults to 36px (w-9) and stroke-width 1.5 so the glyph reads as a
+ * decorative illustration rather than a chunky UI affordance. Takes
+ * `children` so individual icons can mix paths, circles, and grouped
+ * transforms (e.g. the tilted `EmptyFileIcon`).
+ */
+function EmptyStateSvg({
+  className,
+  children,
+}: {
+  className?: string;
+  children: ReactNode;
+}) {
+  return (
+    <svg
+      className={className ?? "w-9 h-9"}
+      fill="none"
+      stroke="currentColor"
+      strokeWidth={1.5}
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      viewBox="0 0 24 24"
+    >
+      {children}
     </svg>
   );
 }
@@ -119,4 +150,161 @@ export function DurationIcon({ className }: IconProps) {
 
 export function ChevronDownIcon({ className }: IconProps) {
   return <StrokeIcon className={className} d="M19 9l-7 7-7-7" />;
+}
+
+// ─── EmptyState entity icons ──────────────────────────────────────────────
+// Larger, thinner-stroked illustrations rendered above the title in
+// `<EmptyState>`. Distinct from the sidebar nav icons (which are 16px and
+// chunkier) so the empty page reads as an illustration, not a button. Each
+// is intentionally a different shape vocabulary (hexagon, isometric box,
+// bar chart, padlock, …) so a user glancing at any list page can tell at a
+// distance "ah, that's the agents empty state, not the vaults one."
+
+/** Hexagonal robot head with two eye slits and a mouth bar. Avoids the
+ *  cliché chat-bubble "AI assistant" look. */
+export function EmptyAgentIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M12 3 L20 7.5 L20 16.5 L12 21 L4 16.5 L4 7.5 Z" />
+      <path d="M9 11 v2 M15 11 v2" />
+      <path d="M9.5 16 h5" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Two overlapping speech bubbles — back bubble in the top-right, front
+ *  bubble in the bottom-left. Reads as "a conversation" without copying
+ *  any existing messenger app icon. */
+export function EmptySessionIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M11 3 h9 a1 1 0 011 1 v6 a1 1 0 01-1 1 h-3 l-2 2 v-2 h-4 a1 1 0 01-1-1 V4 a1 1 0 011-1 Z" />
+      <path d="M3 9 h9 a1 1 0 011 1 v6 a1 1 0 01-1 1 h-4 l-2 2 v-2 H3 a1 1 0 01-1-1 v-6 a1 1 0 011-1 Z" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Document with the canonical folded corner, tilted ~6° so it doesn't
+ *  feel like a database table row. */
+export function EmptyFileIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <g transform="rotate(-6 12 12)">
+        <path d="M6 3 h8 l4 4 v13 a1 1 0 01-1 1 H6 a1 1 0 01-1-1 V4 a1 1 0 011-1 Z" />
+        <path d="M14 3 v4 h4" />
+        <path d="M8 12 h7 M8 15 h5 M8 18 h6" />
+      </g>
+    </EmptyStateSvg>
+  );
+}
+
+/** Padlock with a combination dial in the body — the dial is the
+ *  visual differentiator from a generic lock icon and from `EnvIcon`'s
+ *  rectangle silhouette. */
+export function EmptyVaultIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M5 11 h14 a1 1 0 011 1 v7 a1 1 0 01-1 1 H5 a1 1 0 01-1-1 v-7 a1 1 0 011-1 Z" />
+      <path d="M8 11 V7 a4 4 0 018 0 V11" />
+      <circle cx="12" cy="15.5" r="2" />
+      <path d="M12 13.5 V14.5" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Isometric 3D box / container. Picked over a flat rectangle so it can't
+ *  be confused with `EmptyVaultIcon`'s padlock body or
+ *  `EmptyRuntimeIcon`'s rack units. */
+export function EmptyEnvIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M12 3 L20 7 L20 16 L12 20 L4 16 L4 7 Z" />
+      <path d="M4 7 L12 11 L20 7" />
+      <path d="M12 11 V20" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Three vertical bars of unequal height with a baseline — reads as
+ *  "benchmark results" without copying any specific chart lib. */
+export function EmptyEvalIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M3 20 H21" />
+      <path d="M6 20 V14 H9 V20" />
+      <path d="M11 20 V7 H14 V20" />
+      <path d="M16 20 V11 H19 V20" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Front card with two stack-hint lines above suggesting more cards
+ *  layered behind. Picked over "stacked discs" because discs would
+ *  collide visually with the database cylinder used for memory. */
+export function EmptySkillIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M5 6 h12 v1" />
+      <path d="M3 9 h14 v1" />
+      <path d="M2 12 h16 a1 1 0 011 1 v6 a1 1 0 01-1 1 H2 a1 1 0 01-1-1 v-6 a1 1 0 011-1 Z" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Database cylinder with one mid-line divider — the universal "data
+ *  store" glyph, kept simple so it stays distinguishable from the
+ *  stacked-card `EmptySkillIcon` above. */
+export function EmptyMemoryIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M3 6 a9 3 0 1 0 18 0 a9 3 0 1 0 -18 0" />
+      <path d="M3 6 v12 a9 3 0 0 0 18 0 V6" />
+      <path d="M3 12 a9 3 0 0 0 18 0" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Card frame with three horizontal bars inside — mocks the
+ *  label/value/sub layout of an actual model-card row. */
+export function EmptyModelCardIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M3 5 h18 a1 1 0 011 1 v12 a1 1 0 01-1 1 H3 a1 1 0 01-1-1 V6 a1 1 0 011-1 Z" />
+      <path d="M6 10 h6" />
+      <path d="M6 13 h12" />
+      <path d="M6 16 h8" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Key silhouette — round bow on the left with a hole in it, shaft
+ *  pointing right, two teeth at the tip. Different from the existing
+ *  `ApiKeysIcon` (hex-handle key) so the empty state has its own
+ *  vocabulary. */
+export function EmptyApiKeyIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <circle cx="7" cy="12" r="3.5" />
+      <circle cx="7" cy="12" r="1" />
+      <path d="M10.5 12 H21" />
+      <path d="M19 12 V14" />
+      <path d="M16 12 V13.5" />
+    </EmptyStateSvg>
+  );
+}
+
+/** Server rack with two stacked 1U units, each with a left-side handle
+ *  bar and a right-side indicator dot. Reads unmistakably as
+ *  "hardware" so it can't be confused with the env container or the
+ *  vault padlock. */
+export function EmptyRuntimeIcon({ className }: IconProps) {
+  return (
+    <EmptyStateSvg className={className}>
+      <path d="M3 4 h18 a1 1 0 011 1 v5 a1 1 0 01-1 1 H3 a1 1 0 01-1-1 V5 a1 1 0 011-1 Z" />
+      <path d="M3 13 h18 a1 1 0 011 1 v5 a1 1 0 01-1 1 H3 a1 1 0 01-1-1 v-5 a1 1 0 011-1 Z" />
+      <path d="M5 6 v3 M5 15 v3" />
+      <circle cx="18" cy="7.5" r="0.6" />
+      <circle cx="18" cy="16.5" r="0.6" />
+    </EmptyStateSvg>
+  );
 }

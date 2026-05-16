@@ -281,6 +281,47 @@ body {
   .skeleton-pulse { animation: none; opacity: 0.55; }
 }
 
+/* Radix Toast root animations. Driven by data-state (open/closed) and
+   data-swipe (start/move/cancel/end) that Radix sets on Toast.Root.
+
+   - Open: slide in from the right + fade. We use --dur-slow so the
+     reveal has the same weight as the modal reveal.
+   - Close (timeout or X / Escape): slide back out the right + fade.
+   - Swipe: during a drag, Radix exposes --radix-toast-swipe-move-x and
+     we follow the pointer. On cancel, snap back. On end (past the
+     swipeThreshold), fly off using --radix-toast-swipe-end-x as the
+     starting point so the motion is continuous with the gesture. */
+@keyframes toast-slide-in {
+  from { transform: translateX(calc(100% + 1rem)); opacity: 0; }
+  to   { transform: translateX(0);                 opacity: 1; }
+}
+@keyframes toast-slide-out {
+  from { transform: translateX(0);                 opacity: 1; }
+  to   { transform: translateX(calc(100% + 1rem)); opacity: 0; }
+}
+@keyframes toast-swipe-out {
+  from { transform: translateX(var(--radix-toast-swipe-end-x)); }
+  to   { transform: translateX(calc(100% + 1rem)); opacity: 0;  }
+}
+.toast-root[data-state="open"]    { animation: toast-slide-in  var(--dur-slow) var(--ease-soft); }
+.toast-root[data-state="closed"]  { animation: toast-slide-out var(--dur-base) var(--ease-soft); }
+.toast-root[data-swipe="move"]    { transform: translateX(var(--radix-toast-swipe-move-x)); }
+.toast-root[data-swipe="cancel"]  {
+  transform: translateX(0);
+  transition: transform var(--dur-base) var(--ease-soft);
+}
+.toast-root[data-swipe="end"]     { animation: toast-swipe-out var(--dur-base) var(--ease-soft); }
+@media (prefers-reduced-motion: reduce) {
+  .toast-root[data-state="open"],
+  .toast-root[data-state="closed"],
+  .toast-root[data-swipe="end"] {
+    animation-duration: 1ms;
+  }
+  .toast-root[data-swipe="cancel"] {
+    transition-duration: 1ms;
+  }
+}
+
 /* Radix Collapsible (Disclosure) panel slide. The library exposes
    --radix-collapsible-content-height on the Content element so we can
    animate height from 0 → measured (or vice versa). */

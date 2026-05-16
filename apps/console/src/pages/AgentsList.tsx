@@ -534,6 +534,7 @@ export function AgentsList() {
       onPageChange={goToPage}
       onPageSizeChange={setPageSize}
       emptyTitle={search ? "No matching agents" : "No agents yet"}
+      emptyKind="agent"
       emptyAction={!search && (
         <Button onClick={() => setShowCreate(true)}>+ New agent</Button>
       )}

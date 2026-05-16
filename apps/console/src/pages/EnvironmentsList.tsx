@@ -71,6 +71,7 @@ export function EnvironmentsList() {
       onPageChange={goToPage}
       onPageSizeChange={setPageSize}
       emptyTitle="No environments yet"
+      emptyKind="env"
       emptySubtitle="Create your first environment to get started."
       columns={[
         {

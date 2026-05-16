@@ -1,6 +1,6 @@
 import { type ReactNode } from "react";
 import { Button } from "./Button";
-import { EmptyState } from "./EmptyState";
+import { EmptyState, type EmptyStateKind } from "./EmptyState";
 import { Page } from "./Page";
 import { Pagination } from "./Pagination";
 import { SkeletonRows } from "./Skeleton";
@@ -57,6 +57,12 @@ interface ListPageProps<T> {
   /** Action slot rendered inside the empty state — typically a Button
    *  that opens the create dialog so the empty state isn't a dead end. */
   emptyAction?: ReactNode;
+  /** Entity-specific illustration shown above the empty-state title.
+   *  Omit to fall back to the `[ ]` brand glyph. */
+  emptyKind?: EmptyStateKind;
+  /** Custom illustration override for the empty state. Wins over
+   *  `emptyKind` when both are set. */
+  emptyIcon?: ReactNode;
 
   onRowClick?: (item: T) => void;
   getRowKey: (item: T) => string;
@@ -114,6 +120,8 @@ export function ListPage<T>({
   emptyTitle = "Nothing here yet",
   emptySubtitle,
   emptyAction,
+  emptyKind,
+  emptyIcon,
   onRowClick,
   getRowKey,
   hasMore,
@@ -204,7 +212,14 @@ export function ListPage<T>({
       {loading ? (
         <SkeletonRows count={8} height={40} gap={8} />
       ) : data.length === 0 ? (
-        <EmptyState title={emptyTitle} body={emptySubtitle} action={emptyAction} size="lg" />
+        <EmptyState
+          title={emptyTitle}
+          body={emptySubtitle}
+          action={emptyAction}
+          kind={emptyKind}
+          icon={emptyIcon}
+          size="lg"
+        />
       ) : (
         <div className="border border-border rounded-lg overflow-hidden">
           <div className="overflow-x-auto">

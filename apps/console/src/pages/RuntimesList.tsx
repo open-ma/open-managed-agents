@@ -84,6 +84,7 @@ export function RuntimesList() {
       loading={loading}
       getRowKey={(r) => r.id}
       emptyTitle="No runtimes connected"
+      emptyKind="runtime"
       emptySubtitle={
         <>
           Run <code className="text-xs bg-bg-surface px-1 py-0.5 rounded">npx @openma/cli bridge setup</code> on the machine you want to connect.

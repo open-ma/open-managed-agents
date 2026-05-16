@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useNavigate } from "react-router";
 import * as Dialog from "@radix-ui/react-dialog";
 import { Command } from "cmdk";
+import { ROUTE_CHORDS } from "./Layout";
 import {
   AgentIcon,
   ApiKeysIcon,
@@ -122,6 +123,7 @@ export function CommandPalette() {
                 >
                   {items.map((cmd) => {
                     const Icon = cmd.icon;
+                    const chord = ROUTE_CHORDS[cmd.to];
                     return (
                       <Command.Item
                         key={cmd.to}
@@ -132,6 +134,11 @@ export function CommandPalette() {
                         <Icon className="w-4 h-4 opacity-60 shrink-0" />
                         <span className="flex-1 min-w-0 truncate">{cmd.label}</span>
                         <span className="text-[11px] text-fg-subtle">{cmd.group}</span>
+                        {chord && (
+                          <span className="font-mono text-[10px] text-fg-subtle border border-border rounded px-1.5 py-0.5">
+                            g {chord}
+                          </span>
+                        )}
                       </Command.Item>
                     );
                   })}

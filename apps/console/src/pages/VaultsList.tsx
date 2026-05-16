@@ -369,6 +369,7 @@ export function VaultsList() {
       onPageChange={goToPage}
       onPageSizeChange={setPageSize}
       emptyTitle="No vaults yet"
+      emptyKind="vault"
       emptyAction={
         <Button onClick={() => setShowCreateVault(true)}>+ New vault</Button>
       }

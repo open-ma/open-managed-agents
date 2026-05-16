@@ -79,6 +79,7 @@ export function ApiKeysList() {
       loading={loading}
       getRowKey={(k) => k.id}
       emptyTitle="No API keys yet"
+      emptyKind="api_key"
       emptySubtitle="Create an API key to access the platform from CLI or SDK."
       columns={[
         {

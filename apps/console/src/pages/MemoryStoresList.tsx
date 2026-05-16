@@ -90,6 +90,7 @@ export function MemoryStoresList() {
       loading={loading}
       getRowKey={(s) => s.id}
       emptyTitle="No memory stores"
+      emptyKind="memory"
       columns={[
         {
           key: "name",
