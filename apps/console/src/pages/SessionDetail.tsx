@@ -46,6 +46,16 @@ export function SessionDetail() {
   const [view, setView] = useState<View>("chat");
   const [input, setInput] = useState("");
   const [sending, setSending] = useState(false);
+  // Optimistic outbox slot — what the user typed, between hitting Send
+  // and the server-side pending broadcast (system.user_message_pending)
+  // arriving over SSE. Without this, hitting Send clears the input
+  // field instantly and the user stares at a blank conversation for the
+  // 100-500ms POST → SSE roundtrip. With it, the message appears in the
+  // queued-state EventBubble immediately and is replaced by the server's
+  // pending row the moment SSE delivers it. Single slot is intentional
+  // (we never let two POSTs be in flight at once — Send is disabled
+  // while `sending`). Set to null when SSE confirms or POST settles.
+  const [localPending, setLocalPending] = useState<string | null>(null);
   const [title, setTitle] = useState("");
   const [agentId, setAgentId] = useState("");
   const [sessionMeta, setSessionMeta] = useState<{
@@ -287,6 +297,14 @@ export function SessionDetail() {
         session_thread_id: string;
         event: Event;
       };
+      // Server claimed our optimistic outbox slot — drop the client-only
+      // mirror so we don't double-render the same user message (server
+      // entry has more metadata + a stable event_id; ours has neither).
+      const inner = p.event;
+      const innerText =
+        inner && (inner as { content?: Array<{ type?: string; text?: string }> }).content
+          ?.find((c) => c.type === "text")?.text;
+      if (innerText) setLocalPending((cur) => (cur === innerText ? null : cur));
       if (p.event_id) {
         setPendingByEventId((prev) => {
           const next = new Map(prev);
@@ -411,6 +429,7 @@ export function SessionDetail() {
     setThreads([]);
     setActiveThreadId("sthr_primary");
     setPendingByEventId(new Map());
+    setLocalPending(null);
 
     // Load session info
     api<{
@@ -579,6 +598,7 @@ export function SessionDetail() {
     if (!input.trim() || !id) return;
     const text = input;
     setInput("");
+    setLocalPending(text);
     setSending(true);
     try {
       await api(`/v1/sessions/${id}/events`, {
@@ -587,7 +607,19 @@ export function SessionDetail() {
           events: [{ type: "user.message", content: [{ type: "text", text }] }],
         }),
       });
-    } catch {}
+      // POST resolved → server already inserted the row + broadcast
+      // system.user_message_pending. The outbox map will pick it up
+      // (and likely already has by the time await unblocks here).
+      // Clear our local slot so we don't double-render with the server
+      // entry — but only if the server's pending hasn't already cleared
+      // it via the system.user_message_pending handler.
+      setLocalPending((cur) => (cur === text ? null : cur));
+    } catch {
+      // api() already toasted the error; clear the optimistic slot so
+      // the user doesn't keep seeing a "stuck" pending row that will
+      // never actually run.
+      setLocalPending(null);
+    }
     setSending(false);
   };
 
@@ -884,6 +916,20 @@ export function SessionDetail() {
                 );
               });
             })()}
+            {/* Optimistic outbox slot — what the user just typed before
+                the server's system.user_message_pending broadcast lands.
+                Rendered above the server-mirrored outbox so the typed
+                text appears INSTANTLY (no 100-500ms void after Send).
+                Cleared by the SSE handler the moment the server picks it
+                up; rendered with the same hourglass treatment as the
+                server-side rows so the UI is visually consistent. */}
+            {localPending && activeThreadId === "sthr_primary" && (
+              <EventBubble
+                key="local-pending"
+                event={{ type: "user.message", content: [{ type: "text", text: localPending }] } as Event}
+                livePending={true}
+              />
+            )}
             {/* Pending outbox — server-mirrored queue rows that haven't
                 been drained yet. Keyed by event_id; rendered below the
                 timeline, never inline. The hourglass treatment is the

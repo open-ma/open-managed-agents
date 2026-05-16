@@ -44,6 +44,15 @@ export interface PagedListOpts {
   /** Sync `?page=N&size=N` to the URL. Default true; turn off when you
    *  want the URL untouched (e.g. paginated list inside a modal). */
   syncUrl?: boolean;
+  /** Cursor query param name. Defaults to `cursor` (most OMA endpoints).
+   *  Override for endpoints that follow a different convention — e.g.
+   *  Anthropic Files (`before_id`). */
+  cursorParam?: string;
+  /** Custom extractor for the next-cursor in the response body. Defaults
+   *  to `res.next_cursor`. Override for endpoints that return it under a
+   *  different key — e.g. Anthropic Files returns `last_id` only when
+   *  `has_more` is true (so you'd return `res.has_more ? res.last_id : undefined`). */
+  getNextCursor?: (res: unknown) => string | undefined;
 }
 
 export interface PagedListResult<T> {
@@ -73,6 +82,14 @@ interface PageResponse<T> {
 }
 
 const DEFAULT_PAGE_SIZE_OPTIONS = [10, 20, 50, 100];
+
+/** Default cursor extractor — reads `next_cursor` from the response body
+ *  (the OMA standard envelope shape). Override via `opts.getNextCursor`
+ *  for endpoints that return it differently. */
+function defaultGetNextCursor(res: unknown): string | undefined {
+  const r = res as { next_cursor?: string };
+  return r.next_cursor;
+}
 
 export function usePagedList<T>(
   endpoint: string,
@@ -124,6 +141,9 @@ export function usePagedList<T>(
   // blow away the stack.
   const lastResetKeyRef = useRef(`${paramsKey}|${pageSize}`);
 
+  const cursorParam = opts.cursorParam ?? "cursor";
+  const getNextCursor = opts.getNextCursor ?? defaultGetNextCursor;
+
   const buildUrl = useCallback(
     (afterCursor?: string): string => {
       const sp = new URLSearchParams();
@@ -133,12 +153,12 @@ export function usePagedList<T>(
           if (v !== undefined && v !== "") sp.set(k, v);
         }
       }
-      if (afterCursor) sp.set("cursor", afterCursor);
+      if (afterCursor) sp.set(cursorParam, afterCursor);
       return `${endpoint}?${sp.toString()}`;
     },
-    // paramsKey covers `opts.params`; pageSize is primitive.
+    // paramsKey covers `opts.params`; pageSize + cursorParam are primitive.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [endpoint, pageSize, paramsKey],
+    [endpoint, pageSize, paramsKey, cursorParam],
   );
 
   // Fetch effect — fires on mount, page change, refresh, filter change,
@@ -170,9 +190,10 @@ export function usePagedList<T>(
       .then((res) => {
         if (controller.signal.aborted) return;
         setItems(res.data);
-        setHasNext(!!res.next_cursor);
-        if (res.next_cursor) {
-          cursorStackRef.current[pageIndex + 1] = res.next_cursor;
+        const nextCursor = getNextCursor(res);
+        setHasNext(!!nextCursor);
+        if (nextCursor) {
+          cursorStackRef.current[pageIndex + 1] = nextCursor;
           setKnownPages((n) => Math.max(n, pageIndex + 2));
         }
       })

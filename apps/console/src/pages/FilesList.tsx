@@ -1,9 +1,9 @@
 import { useMemo, useState } from "react";
 import { Link } from "react-router";
-import { useInfiniteQuery, useQueryClient } from "@tanstack/react-query";
 import { useApi, getActiveTenantId } from "../lib/api";
 import { useToast } from "../components/Toast";
 import { ListPage } from "../components/ListPage";
+import { usePagedList } from "../lib/usePagedList";
 
 interface FileRecord {
   id: string;
@@ -23,58 +23,39 @@ interface ListResponse {
   last_id?: string;
 }
 
-const PAGE_SIZE = 50;
-
 export function FilesList() {
   const { api } = useApi();
   const { toast } = useToast();
-  const queryClient = useQueryClient();
   const [scopeFilter, setScopeFilter] = useState("");
   const [search, setSearch] = useState("");
 
-  // Files uses `before_id` + `has_more` (Anthropic Files-style cursor),
-  // not the `next_cursor` shape that `usePagedList` / `useInfiniteApiQuery`
-  // expect — needs both a custom cursor param name AND a custom extractor,
-  // so wire `useInfiniteQuery` inline. Stays on the load-more footer (no
-  // numbered pagination) until the hook grows a Files-shaped adapter.
-  // Cache key includes the scope filter so flipping it gets its own slot.
-  const queryKey = useMemo(
-    () => ["/v1/files", "infinite", scopeFilter || ""] as const,
+  // Files endpoint follows the Anthropic Files API shape — `before_id`
+  // for the cursor param and `last_id` (only when `has_more` is true) for
+  // the next-page cursor — instead of OMA's standard `cursor` /
+  // `next_cursor`. usePagedList accepts adapter overrides for both.
+  const filesParams = useMemo(
+    () => ({ scope_id: scopeFilter || undefined }),
     [scopeFilter],
   );
-
-  const query = useInfiniteQuery<ListResponse>({
-    queryKey,
-    initialPageParam: undefined as string | undefined,
-    queryFn: ({ pageParam, signal }) => {
-      const sp = new URLSearchParams();
-      sp.set("limit", String(PAGE_SIZE));
-      if (scopeFilter) sp.set("scope_id", scopeFilter);
-      if (typeof pageParam === "string") sp.set("before_id", pageParam);
-      return api<ListResponse>(`/v1/files?${sp.toString()}`, { signal });
+  const {
+    items,
+    isLoading: loading,
+    pageIndex,
+    pageSize,
+    hasNext,
+    knownPages,
+    goToPage,
+    setPageSize,
+    refresh: refreshFiles,
+  } = usePagedList<FileRecord>("/v1/files", {
+    defaultPageSize: 20,
+    params: filesParams,
+    cursorParam: "before_id",
+    getNextCursor: (res) => {
+      const r = res as ListResponse;
+      return r.has_more ? r.data[r.data.length - 1]?.id : undefined;
     },
-    // Page-after cursor for this endpoint is the last id on the page;
-    // Anthropic Files uses `before_id` to mean "give me items older than
-    // this id", which matches the descending-by-id list we're rendering.
-    getNextPageParam: (lastPage) =>
-      lastPage.has_more ? lastPage.data[lastPage.data.length - 1]?.id : undefined,
   });
-
-  const items: FileRecord[] = useMemo(() => {
-    const pages = query.data?.pages ?? [];
-    if (pages.length === 0) return [];
-    if (pages.length === 1) return pages[0].data;
-    return pages.flatMap((p) => p.data);
-  }, [query.data]);
-
-  const loading = query.isPending;
-  const loadingMore = query.isFetchingNextPage;
-  const hasMore = !!query.hasNextPage;
-  const loadMore = () => {
-    if (query.hasNextPage && !query.isFetchingNextPage) {
-      void query.fetchNextPage();
-    }
-  };
 
   // Direct fetch for binary download — api() always parses JSON, and we need
   // the raw blob. Mirror its tenant-pin header so downloads honor the active
@@ -109,9 +90,10 @@ export function FilesList() {
     try {
       await api(`/v1/files/${f.id}`, { method: "DELETE" });
       // Invalidate every /v1/files query (any scope filter) so the page
-      // refetches the latest. Cheaper than the previous in-place setItems —
-      // the next refetch lands a fresh server-truth list.
-      void queryClient.invalidateQueries({ queryKey: ["/v1/files"] });
+      // Refetch — usePagedList exposes refresh() which clears the cursor
+      // stack and bounces back to page 0. Cheaper than maintaining a
+      // local optimistic copy; the next refetch lands fresh server truth.
+      refreshFiles();
     } catch {
       // toasted
     }
@@ -147,9 +129,12 @@ export function FilesList() {
       }
       data={filtered}
       loading={loading}
-      hasMore={hasMore && !search}
-      onLoadMore={loadMore}
-      loadingMore={loadingMore}
+      hasNext={hasNext && !search}
+      pageIndex={pageIndex}
+      pageSize={pageSize}
+      knownPages={knownPages}
+      onPageChange={goToPage}
+      onPageSizeChange={setPageSize}
       getRowKey={(f) => f.id}
       emptyTitle={scopeFilter ? "No files in this scope" : "No files yet"}
       emptySubtitle={
