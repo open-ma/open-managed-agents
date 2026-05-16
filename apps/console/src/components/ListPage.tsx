@@ -263,6 +263,7 @@ export function ListPage<T>({
               onNext={onNextPage}
               onPrev={onPrevPage}
               loading={loading}
+              itemCount={data.length}
             />
           ) : null}
         </div>
