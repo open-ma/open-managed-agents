@@ -7,6 +7,7 @@ import type {
   ManagedSandboxLease,
   ManagedSandboxPort,
   RuntimeResourceScope,
+  RuntimeResourceFence,
   SandboxHarnessDriverPort,
   SandboxResourceCapabilities,
   SessionOutputBinding,
@@ -17,6 +18,9 @@ import type {
   WorkspaceCheckpointCandidate,
   WorkspacePersistencePort,
   WorkspaceStrategy,
+  RuntimeCheckpointKind,
+  RuntimeCheckpointPort,
+  RuntimeCheckpointRef,
 } from "@open-managed-agents/runtime-resource-contract";
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
@@ -90,6 +94,29 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
   }) => Promise<void>;
   /** Statically declared: capability negotiation must not probe a live box. */
   drivers: readonly Extract<HarnessDriverType, "ama_worker">[];
+  /**
+   * Optional provider-native process checkpoint adapter. The provider must
+   * explicitly prove that its snapshot captures resumable process state; the
+   * generic SandboxRuntimePort checkpoint is intentionally not promoted.
+   */
+  runtimeCheckpoint?: {
+    kind: RuntimeCheckpointKind;
+    create(input: {
+      runtime: Runtime;
+      scope: RuntimeResourceScope;
+      fence: RuntimeResourceFence;
+      workspaceRevision: number;
+      harnessVersion: string;
+      runtimeIdentity: string;
+    }): Promise<SandboxCheckpointHandle>;
+    restore(input: {
+      checkpoint: RuntimeCheckpointRef;
+      scope: RuntimeResourceScope;
+      fence: RuntimeResourceFence;
+      context: SandboxFactoryContext;
+      environment: SandboxFactoryEnv;
+    }): Promise<Runtime>;
+  };
 }
 
 export interface ProviderManagedRuntimeComposition {
@@ -98,6 +125,7 @@ export interface ProviderManagedRuntimeComposition {
   outputs: SessionOutputPort;
   harness: SandboxHarnessDriverPort;
   supervisorTransport: HarnessSupervisorTransportPort;
+  runtimeCheckpoint?: RuntimeCheckpointPort;
 }
 
 function stableCheckpointJson(checkpoint: SandboxCheckpointHandle): string {
@@ -859,5 +887,71 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
     },
   };
 
-  return { sandbox, workspace, outputs, harness, supervisorTransport };
+  const runtimeCheckpoint: RuntimeCheckpointPort | undefined =
+    options.runtimeCheckpoint === undefined
+      ? undefined
+      : {
+          async create(input) {
+            const providerRuntime = requireRuntime(input.sandbox);
+            const checkpoint = await options.runtimeCheckpoint!.create({
+              runtime: providerRuntime,
+              scope: input.scope,
+              fence: input.fence,
+              workspaceRevision: input.workspaceRevision,
+              harnessVersion: input.harnessVersion,
+              runtimeIdentity: input.runtimeIdentity,
+            });
+            if (
+              checkpoint.provider !== options.providerName
+              || checkpoint.checkpointId.length === 0
+              || checkpoint.sourceRuntimeId.length === 0
+            ) {
+              throw new Error(
+                `Provider returned an incompatible runtime checkpoint for ${options.providerName}`,
+              );
+            }
+            const runtime = providerRuntime.runtimeHandle();
+            if (runtime.runtimeId !== checkpoint.sourceRuntimeId) {
+              throw new Error("Provider runtime checkpoint source runtime mismatch");
+            }
+            return {
+              provider: options.providerName,
+              checkpointId: checkpoint.checkpointId,
+              kind: options.runtimeCheckpoint!.kind,
+              sourceRuntimeId: checkpoint.sourceRuntimeId,
+              sessionId: input.scope.sessionId,
+              workGeneration: input.fence.generation,
+              workspaceRevision: input.workspaceRevision,
+              harnessVersion: input.harnessVersion,
+              runtimeIdentity: input.runtimeIdentity,
+            } satisfies RuntimeCheckpointRef;
+          },
+          async restore(input) {
+            if (
+              input.checkpoint.provider !== options.providerName
+              || input.checkpoint.kind !== options.runtimeCheckpoint!.kind
+            ) {
+              throw new Error("Incompatible provider runtime checkpoint");
+            }
+            const runtime = await options.runtimeCheckpoint!.restore({
+              checkpoint: input.checkpoint,
+              scope: input.scope,
+              fence: input.fence,
+              context: options.context(input.scope),
+              environment: options.environment(input.scope),
+            });
+            const lease = assertProviderRuntime(runtime);
+            await runtime.renewLease({ ttlMs: options.leaseTtlMs });
+            return lease;
+          },
+        };
+
+  return {
+    sandbox,
+    workspace,
+    outputs,
+    harness,
+    supervisorTransport,
+    ...(runtimeCheckpoint === undefined ? {} : { runtimeCheckpoint }),
+  };
 }

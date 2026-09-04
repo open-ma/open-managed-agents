@@ -59,6 +59,17 @@ describe("SqlRuntimeResourceFencePort", () => {
         contentHash: "sha256:outputs-2",
         metadata: { manifest: "opaque-output-handle" },
       },
+      runtimeCheckpoint: {
+        provider: "fake",
+        checkpointId: "proc-2",
+        kind: "process" as const,
+        sourceRuntimeId: "runtime-2",
+        sessionId: scope.sessionId,
+        workGeneration: 2,
+        workspaceRevision: 1,
+        harnessVersion: "ama-worker-v1",
+        runtimeIdentity: "fake-runtime",
+      },
     };
     await expect(fences.publish(publication)).resolves.toEqual({
       type: "published",
@@ -82,6 +93,11 @@ describe("SqlRuntimeResourceFencePort", () => {
         },
         outputCandidate: {
           metadata: { manifest: "opaque-output-handle" },
+        },
+        runtimeCheckpoint: {
+          checkpointId: "proc-2",
+          kind: "process",
+          sourceRuntimeId: "runtime-2",
         },
       },
     });

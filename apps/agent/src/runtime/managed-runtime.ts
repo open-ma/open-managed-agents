@@ -4,6 +4,7 @@ import {
   createManagedRuntimeHost,
   createManagedRuntimeOrphanReconciler,
   SupervisedSandboxHarnessDriver,
+  type RuntimeCheckpointPort,
 } from "@open-managed-agents/managed-runtime-host";
 import {
   SqlRuntimeOrphanPort,
@@ -30,6 +31,8 @@ export interface CloudflareManagedRuntimeHostOptions
   /** Stable identity of this SessionDO/worker instance; never a user token. */
   ownerId: string;
   heartbeatIntervalMs?: number;
+  /** Optional provider-owned process checkpoint adapter. */
+  runtimeCheckpoint?: RuntimeCheckpointPort;
 }
 
 /**
@@ -152,6 +155,9 @@ export function createCloudflareManagedRuntimeHost(
     outputs: runtime.outputs,
     harnessDriver,
     orphans,
+    ...(options.runtimeCheckpoint === undefined
+      ? {}
+      : { runtimeCheckpoint: options.runtimeCheckpoint }),
   });
   const orphanReconciler = createManagedRuntimeOrphanReconciler({
     orphans,

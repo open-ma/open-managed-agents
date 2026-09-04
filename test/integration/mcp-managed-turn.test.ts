@@ -175,9 +175,15 @@ async function waitForCompletedTurn(sessionId: string) {
       row.data && typeof row.data === "object"
         ? row.data as Record<string, unknown>
         : row);
-    if (events.some((event) =>
+    const hasFinalMessage = events.some((event) =>
       event.type === "agent.message"
-      && JSON.stringify(event.content ?? "").includes("MCP echo completed."))) {
+      && JSON.stringify(event.content ?? "").includes("MCP echo completed."));
+    // `agent.message` is not the lifecycle boundary: the harness publishes
+    // the final message before it closes per-turn MCP clients.  Wait for the
+    // terminal idle event, which is emitted only after disposeTools() has
+    // completed, so assertions below observe the public completion contract
+    // instead of racing the MCP DELETE.
+    if (hasFinalMessage && events.some((event) => event.type === "session.status_idle")) {
       return events;
     }
     await new Promise((resolve) => setTimeout(resolve, 25));

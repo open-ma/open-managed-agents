@@ -199,3 +199,20 @@ export function getManagedRuntimeProviderConformance(
   if (!profile) throw new Error(`Unknown managed runtime provider: ${String(id)}`);
   return profile;
 }
+
+/**
+ * Admission guard for callers that want ManagedRuntimeHost semantics. A raw
+ * SandboxPort adapter can be useful on its own, but it must never be silently
+ * upgraded into a host composition without fenced persistence and cleanup.
+ */
+export function requireManagedRuntimeProvider(
+  id: ManagedRuntimeProviderId,
+): ManagedRuntimeProviderConformance & { managedRuntime: true } {
+  const profile = getManagedRuntimeProviderConformance(id);
+  if (!profile.managedRuntime) {
+    throw new Error(
+      `${id} is sandbox-port-only; provide a ManagedRuntimeHost composition with fenced lease, workspace/output persistence, and orphan reaping`,
+    );
+  }
+  return profile as ManagedRuntimeProviderConformance & { managedRuntime: true };
+}

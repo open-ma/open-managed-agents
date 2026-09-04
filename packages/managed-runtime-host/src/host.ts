@@ -1,5 +1,6 @@
 import type {
   ManagedRuntimeProfile,
+  ManagedRuntimePlan,
   ManagedSandboxLease,
   ManagedSandboxPort,
   SandboxHarnessDriverPort,
@@ -7,6 +8,8 @@ import type {
   RuntimeResourceFencePort,
   RuntimeOrphanPort,
   RuntimeResourceScope,
+  RuntimeCheckpointPort,
+  RuntimeCheckpointRef,
   SessionOutputBinding,
   SessionOutputManifestCandidate,
   SessionOutputPort,
@@ -32,6 +35,8 @@ export interface ManagedRuntimeHostDependencies {
   harnessDriver: SandboxHarnessDriverPort;
   orphans: RuntimeOrphanPort;
   scheduler?: RuntimeSchedulerPort;
+  /** Optional provider-owned process/runtime checkpoint implementation. */
+  runtimeCheckpoint?: RuntimeCheckpointPort;
 }
 
 export type ManagedRuntimeRunResult =
@@ -75,6 +80,59 @@ function idempotencyKey(
   return `${scope.workId}:${generation}:${stage}`;
 }
 
+function stableJson(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableJson).join(",")}]`;
+  if (typeof value === "object" && value !== null) {
+    return `{${Object.entries(value)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, child]) => `${JSON.stringify(key)}:${stableJson(child)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value);
+}
+
+function checkpointIdentity(profile: ManagedRuntimeProfile): {
+  harnessVersion: string;
+  runtimeIdentity: string;
+} {
+  if (profile.driver.type === "openma_supervised") {
+    return {
+      harnessVersion: profile.driver.harness.version,
+      runtimeIdentity: stableJson({
+        type: profile.driver.type,
+        id: profile.driver.harness.id,
+        version: profile.driver.harness.version,
+        supervisor: profile.driver.supervisor,
+      }),
+    };
+  }
+  return {
+    harnessVersion: "ama-worker-v1",
+    runtimeIdentity: stableJson({ type: profile.driver.type, process: profile.driver.process }),
+  };
+}
+
+function reusableCheckpoint(
+  checkpoint: RuntimeCheckpointRef | null | undefined,
+  scope: RuntimeResourceScope,
+  fenceGeneration: number,
+  kind: NonNullable<ManagedRuntimePlan["runtimeCheckpoint"]>,
+  identity: { harnessVersion: string; runtimeIdentity: string },
+): checkpoint is RuntimeCheckpointRef {
+  return checkpoint !== null
+    && checkpoint !== undefined
+    && checkpoint.kind === kind
+    && checkpoint.sessionId === scope.sessionId
+    && checkpoint.workGeneration < fenceGeneration
+    && checkpoint.harnessVersion === identity.harnessVersion
+    && checkpoint.runtimeIdentity === identity.runtimeIdentity
+    && checkpoint.provider.length > 0
+    && checkpoint.checkpointId.length > 0
+    && checkpoint.sourceRuntimeId.length > 0
+    && Number.isSafeInteger(checkpoint.workspaceRevision)
+    && Number.isSafeInteger(checkpoint.workGeneration);
+}
+
 export function createManagedRuntimeHost(
   dependencies: ManagedRuntimeHostDependencies,
 ): ManagedRuntimeHost {
@@ -100,6 +158,12 @@ export function createManagedRuntimeHost(
         outputs: outputCapabilities,
         harness: harnessCapabilities,
       });
+      if (plan.runtimeCheckpoint !== null && dependencies.runtimeCheckpoint === undefined) {
+        throw new Error(
+          `The selected composition advertises ${plan.runtimeCheckpoint} runtime checkpoints but does not provide RuntimeCheckpointPort`,
+        );
+      }
+      const runtimeIdentity = checkpointIdentity(profile);
 
       const acquired = await dependencies.fences.acquire({
         scope,
@@ -114,6 +178,7 @@ export function createManagedRuntimeHost(
       let sandboxLease: ManagedSandboxLease | null = null;
       let cleanupReason: "completed" | "failed" | "lease_lost" = "failed";
       let outputPublished = false;
+      let runtimeCheckpoint: RuntimeCheckpointRef | null = null;
       let retainedRuntimePublished = false;
       let cleanupPersistenceError: unknown = null;
       const controller = new AbortController();
@@ -192,14 +257,39 @@ export function createManagedRuntimeHost(
           });
           controller.signal.throwIfAborted();
         }
-        sandboxLease = await dependencies.sandbox.acquire({
-          scope,
-          fence,
-          plan,
-          workspace: workspaceBinding,
-          outputs: outputBinding,
-          signal: controller.signal,
-        });
+        const previousRuntimeCheckpoint = acquired.publication?.runtimeCheckpoint;
+        if (
+          plan.runtimeCheckpoint !== null
+          && reusableCheckpoint(
+            previousRuntimeCheckpoint,
+            scope,
+            fence.generation,
+            plan.runtimeCheckpoint,
+            runtimeIdentity,
+          )
+        ) {
+          try {
+            sandboxLease = await dependencies.runtimeCheckpoint!.restore({
+              scope,
+              fence,
+              checkpoint: previousRuntimeCheckpoint,
+            });
+          } catch {
+            // A provider checkpoint is an optimization. The canonical recovery
+            // path remains workspace materialization plus a fresh runtime.
+            sandboxLease = null;
+          }
+        }
+        if (sandboxLease === null) {
+          sandboxLease = await dependencies.sandbox.acquire({
+            scope,
+            fence,
+            plan,
+            workspace: workspaceBinding,
+            outputs: outputBinding,
+            signal: controller.signal,
+          });
+        }
         controller.signal.throwIfAborted();
 
         await dependencies.workspace.attach({
@@ -263,6 +353,34 @@ export function createManagedRuntimeHost(
           });
         controller.signal.throwIfAborted();
         if (leaseLost) return { type: "lease_lost" };
+        if (plan.runtimeCheckpoint !== null) {
+          try {
+            runtimeCheckpoint = await dependencies.runtimeCheckpoint!.create({
+              scope,
+              fence,
+              sandbox: sandboxLease,
+              kind: plan.runtimeCheckpoint,
+              workspaceRevision: workspaceCandidate.revision,
+              ...runtimeIdentity,
+            });
+            if (
+              runtimeCheckpoint.kind !== plan.runtimeCheckpoint
+              || runtimeCheckpoint.provider !== sandboxLease.provider
+              || runtimeCheckpoint.sourceRuntimeId !== sandboxLease.runtimeId
+              || runtimeCheckpoint.sessionId !== scope.sessionId
+              || runtimeCheckpoint.workGeneration !== fence.generation
+              || runtimeCheckpoint.harnessVersion !== runtimeIdentity.harnessVersion
+              || runtimeCheckpoint.runtimeIdentity !== runtimeIdentity.runtimeIdentity
+              || runtimeCheckpoint.workspaceRevision !== workspaceCandidate.revision
+            ) {
+              throw new Error("RuntimeCheckpointPort returned an incompatible checkpoint ref");
+            }
+          } catch (error) {
+            if (profile.runtimeCheckpoint === "required") throw error;
+            runtimeCheckpoint = null;
+          }
+          controller.signal.throwIfAborted();
+        }
         let outputCandidate: SessionOutputManifestCandidate | null = null;
         if (outputBinding !== null && plan.outputStrategy !== null) {
           const entries = await dependencies.outputs.collect({
@@ -293,6 +411,7 @@ export function createManagedRuntimeHost(
           fence,
           workspaceCandidate,
           outputCandidate,
+          ...(runtimeCheckpoint === null ? {} : { runtimeCheckpoint }),
         });
         if (published.type === "lost") {
           cleanupReason = "lease_lost";

@@ -12,6 +12,7 @@ import {
   type SqlRuntimeResourceFenceOptions,
 } from "@open-managed-agents/runtime-resource-fence-sql";
 import type { SqlClient } from "@open-managed-agents/sql-client";
+import type { RuntimeCheckpointPort } from "@open-managed-agents/runtime-resource-contract";
 
 import {
   DockerManagedRuntimeAdapter,
@@ -39,6 +40,8 @@ export interface CreateNodeManagedRuntimeOptions {
   extraHosts?: readonly { hostname: string; address: string }[];
   scheduler?: RuntimeSchedulerPort;
   fence?: SqlRuntimeResourceFenceOptions;
+  /** Optional provider-owned process checkpoint adapter. */
+  runtimeCheckpoint?: RuntimeCheckpointPort;
 }
 
 /** Preinstalled Node reference composition: SQL fence + filesystem + Docker. */
@@ -79,6 +82,9 @@ export async function createNodeManagedRuntime(
     harnessDriver,
     orphans,
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
+    ...(options.runtimeCheckpoint === undefined
+      ? {}
+      : { runtimeCheckpoint: options.runtimeCheckpoint }),
   });
   const orphanReconciler = createManagedRuntimeOrphanReconciler({ orphans, sandbox });
   return {
@@ -90,5 +96,8 @@ export async function createNodeManagedRuntime(
     workspace,
     outputs,
     harnessDriver,
+    ...(options.runtimeCheckpoint === undefined
+      ? {}
+      : { runtimeCheckpoint: options.runtimeCheckpoint }),
   };
 }

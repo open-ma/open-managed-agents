@@ -277,7 +277,12 @@ export class CloudflareSandbox
     // mountBucket below throws InvalidMountConfigError "already in use".
     // Idempotent unmount first; ignore errors (path wasn't mounted —
     // that's the happy case for a fresh isolate).
-    await sandbox.unmountBucket(mountPath).catch(() => {});
+    // `unmountBucket` is an optional SDK capability on local/fake sandbox
+    // implementations.  Mount cleanup is best-effort; absence must not turn
+    // a valid mount request into an opaque warning or fail a session warmup.
+    if (typeof sandbox.unmountBucket === "function") {
+      await sandbox.unmountBucket(mountPath).catch(() => {});
+    }
 
     if (fuse && bucketName) {
       await sandbox.mountBucket(bucketName, mountPath, {
@@ -352,7 +357,9 @@ export class CloudflareSandbox
     // throws InvalidMountConfigError "Mount path already in use" because
     // the SDK's per-isolate mount table still has the old entry. Caught
     // in sess-fa7j85x / sess-pkgiwl7 (2026-05-13 incident).
-    await sandbox.unmountBucket(mountPath).catch(() => {});
+    if (typeof sandbox.unmountBucket === "function") {
+      await sandbox.unmountBucket(mountPath).catch(() => {});
+    }
 
     try {
       if (fuse) {

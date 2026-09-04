@@ -50,6 +50,13 @@ function sameCandidate(
   return left.id === right.id && left.contentHash === right.contentHash;
 }
 
+function sameRuntimeCheckpoint(
+  left: RuntimeResourcePublication["runtimeCheckpoint"],
+  right: RuntimeResourcePublication["runtimeCheckpoint"],
+): boolean {
+  return JSON.stringify(left ?? null) === JSON.stringify(right ?? null);
+}
+
 /**
  * Deterministic fake for lifecycle/fault tests. It mirrors the required
  * single-record transaction: active fence validation and publication pointer
@@ -123,6 +130,7 @@ export class MemoryRuntimeResourceFencePort implements RuntimeResourceFencePort 
     fence: RuntimeResourceFence;
     workspaceCandidate: RuntimePublicationCandidate;
     outputCandidate: RuntimePublicationCandidate | null;
+    runtimeCheckpoint?: RuntimeResourcePublication["runtimeCheckpoint"];
   }): Promise<PublishRuntimeResourcesResult> {
     const record = this.#records.get(scopeKey(input.fence));
     if (!this.#isCurrent(record, input.fence)) return { type: "lost" };
@@ -131,7 +139,8 @@ export class MemoryRuntimeResourceFencePort implements RuntimeResourceFencePort 
       previous !== null &&
       previous.generation === input.fence.generation &&
       sameCandidate(previous.workspaceCandidate, input.workspaceCandidate) &&
-      sameCandidate(previous.outputCandidate, input.outputCandidate)
+      sameCandidate(previous.outputCandidate, input.outputCandidate) &&
+      sameRuntimeCheckpoint(previous.runtimeCheckpoint, input.runtimeCheckpoint)
     ) {
       return { type: "published", revision: previous.revision };
     }
@@ -143,6 +152,9 @@ export class MemoryRuntimeResourceFencePort implements RuntimeResourceFencePort 
       workspaceCandidate: { ...input.workspaceCandidate },
       outputCandidate:
         input.outputCandidate === null ? null : { ...input.outputCandidate },
+      ...(input.runtimeCheckpoint === undefined
+        ? {}
+        : { runtimeCheckpoint: input.runtimeCheckpoint }),
     };
     return { type: "published", revision };
   }

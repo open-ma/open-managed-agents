@@ -9,7 +9,7 @@ import {
 describe("Harbor-compatible ACP native session profiles", () => {
   it("classifies Harbor resume agents without pretending non-ACP CLIs are runnable", () => {
     expect(HARBOR_NATIVE_STATE_COVERAGE).toEqual([
-      { harborId: "aider", status: "requires-acp-adapter" },
+      { harborId: "aider", status: "acp-adapter", profileId: "aider" },
       { harborId: "claude-code", status: "native-resume", profileId: "claude-code" },
       { harborId: "codex", status: "native-resume", profileId: "codex" },
       { harborId: "copilot-cli", status: "native-resume", profileId: "copilot" },
@@ -18,9 +18,9 @@ describe("Harbor-compatible ACP native session profiles", () => {
       { harborId: "goose", status: "native-resume", profileId: "goose" },
       { harborId: "junie", status: "native-resume", profileId: "junie" },
       { harborId: "kimi-cli", status: "native-resume", profileId: "kimi" },
-      { harborId: "kimi-code", status: "requires-acp-adapter" },
+      { harborId: "kimi-code", status: "acp-adapter", profileId: "kimi-code" },
       { harborId: "mcode", status: "native-resume", profileId: "mcode" },
-      { harborId: "mimo", status: "requires-acp-adapter" },
+      { harborId: "mimo", status: "acp-adapter", profileId: "mimo" },
       { harborId: "opencode", status: "native-resume", profileId: "opencode" },
       { harborId: "pi", status: "native-resume", profileId: "pi" },
       { harborId: "qwen-code", status: "native-resume", profileId: "qwen-code" },
@@ -34,7 +34,9 @@ describe("Harbor-compatible ACP native session profiles", () => {
     );
     expect(coveredProfiles).toEqual(new Set(
       ACP_NATIVE_STATE_PROFILES
-        .filter((profile) => profile.provenance === "harbor")
+        .filter((profile) => HARBOR_NATIVE_STATE_COVERAGE.some((entry) =>
+          "profileId" in entry && entry.profileId === profile.id,
+        ))
         .map((profile) => profile.id),
     ));
   });
@@ -94,10 +96,25 @@ describe("Harbor-compatible ACP native session profiles", () => {
 
   it("keeps OMA extensions distinct from profiles proven by Harbor", () => {
     expect(ACP_NATIVE_STATE_PROFILES.filter((profile) => profile.provenance === "oma"))
-      .toEqual([
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ id: "aider", durability: "acp", resume: "acp-only" }),
+        expect.objectContaining({ id: "kimi-code", durability: "acp", resume: "acp-only" }),
+        expect.objectContaining({ id: "mimo", durability: "acp", resume: "acp-only" }),
         expect.objectContaining({ id: "dsh", resume: "native-and-acp" }),
         expect.objectContaining({ id: "hermes", resume: "native-and-acp" }),
-      ]);
+      ]));
+  });
+
+  it.each([
+    ["aider", "aider-acp"],
+    ["kimi-code", "kimi-code-acp"],
+    ["mimo", "mimo-acp"],
+  ])("materializes the %s ACP-only profile without native artifacts", (adapterId, agentId) => {
+    const profile = ACP_NATIVE_STATE_PROFILES.find((candidate) => candidate.id === adapterId);
+    expect(profile).toBeDefined();
+    expect(profile?.matches({ id: agentId, command: agentId })).toBe(true);
+    expect(profile?.bindEnvironment("/checkpoint/native")).toEqual({});
+    expect(profile?.sessionArtifacts("/checkpoint/native")).toEqual([]);
   });
 
   it("isolates the DSH ACP JSONL session root for portable native resume", () => {

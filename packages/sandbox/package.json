@@ -14,7 +14,8 @@
   },
   "scripts": {
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts"
+    "test": "vitest run --config vitest.config.ts",
+    "test:e2b:certification": "OMA_E2B_CERTIFICATION=1 vitest run --config vitest.config.ts test/e2b-certification.e2e.test.ts"
   },
   "dependencies": {
     "@open-managed-agents/observability": "workspace:*",

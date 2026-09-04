@@ -117,6 +117,85 @@ async function freshBinding(runtimeComposition: ReturnType<typeof composition>) 
 }
 
 describe("provider managed runtime adapter", () => {
+  it("exposes an explicit provider checkpoint port without promoting snapshots", async () => {
+    const previous = runtime("checkpoint-source");
+    const restored = runtime("checkpoint-restored");
+    const composed = createProviderManagedRuntime({
+      providerName: "e2b",
+      provider: {
+        create: async () => previous,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({ sessionId: inputScope.sessionId, workdir: "/workspace" }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      sandboxCapabilities: {
+        suspendResume: "supported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: ["process"],
+      },
+      workspace: { strategies: ["checkpoint_restore"], portableCheckpointKind: "memory" },
+      drivers: ["ama_worker"],
+      runtimeCheckpoint: {
+        kind: "process",
+        create: async ({ runtime: providerRuntime }) => ({
+          provider: "e2b",
+          checkpointId: "process-1",
+          sourceRuntimeId: providerRuntime.runtimeHandle().runtimeId,
+          kind: "memory",
+          scope: "portable",
+        }),
+        restore: async () => restored,
+      },
+    });
+
+    const binding = await composed.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace",
+      signal: new AbortController().signal,
+    });
+    const lease = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: "process",
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace: binding,
+      outputs: null,
+      signal: new AbortController().signal,
+    });
+    const checkpoint = await composed.runtimeCheckpoint!.create({
+      scope,
+      fence,
+      sandbox: lease,
+      kind: "process",
+      workspaceRevision: 4,
+      harnessVersion: "worker-v1",
+      runtimeIdentity: "identity-1",
+    });
+    expect(checkpoint).toMatchObject({
+      provider: "e2b",
+      checkpointId: "process-1",
+      kind: "process",
+      sourceRuntimeId: "checkpoint-source",
+      sessionId: scope.sessionId,
+      workGeneration: fence.generation,
+      workspaceRevision: 4,
+    });
+    await expect(composed.runtimeCheckpoint!.restore({
+      scope,
+      fence,
+      checkpoint,
+    })).resolves.toEqual({ provider: "e2b", runtimeId: "checkpoint-restored" });
+  });
+
   it("exposes a provider-native Session output mount without folding it into SandboxPort", async () => {
     const created = runtime("sandbox-output-mount");
     const mounted: Array<{ runtimeId: string; tenant: string; session: string }> = [];

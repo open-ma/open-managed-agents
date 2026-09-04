@@ -488,6 +488,17 @@ describe("managed runtime lifecycle", () => {
       expiresAt: "2026-09-03T12:00:00.000Z",
     };
     const lease = { provider: "e2b", runtimeId: "sandbox-1" };
+    const runtimeCheckpoint = {
+      provider: "e2b",
+      checkpointId: "process-checkpoint-1",
+      kind: "process" as const,
+      sourceRuntimeId: "sandbox-1",
+      sessionId: scope.sessionId,
+      workGeneration: fence.generation,
+      workspaceRevision: 1,
+      harnessVersion: "ama-worker-v1",
+      runtimeIdentity: "test-runtime",
+    };
     const host = createManagedRuntimeHost({
       ownerId: "worker_1",
       leaseTtlMs: 90_000,
@@ -523,6 +534,13 @@ describe("managed runtime lifecycle", () => {
         terminate: vi.fn(async () => calls.push("sandbox.terminate")),
         reap: vi.fn(async () => {}),
         inspect: vi.fn(),
+      },
+      runtimeCheckpoint: {
+        create: vi.fn(async () => {
+          calls.push("runtime.checkpoint");
+          return runtimeCheckpoint;
+        }),
+        restore: vi.fn(),
       },
       workspace: {
         capabilities: vi.fn(async () => ({ strategies: ["retained_runtime"] })),
@@ -570,10 +588,118 @@ describe("managed runtime lifecycle", () => {
       "harness.run",
       "sandbox.suspend",
       "workspace.checkpoint",
+      // Runtime checkpoints are created only after the canonical workspace
+      // candidate exists, so the checkpoint records its revision.
+      "runtime.checkpoint",
       "fence.publish",
       "workspace.release",
       "fence.release",
     ]);
     expect(calls).not.toContain("sandbox.terminate");
+  });
+
+  it("restores a compatible published process checkpoint before allocating a new runtime", async () => {
+    const createManagedRuntimeHost = exportedFunction("createManagedRuntimeHost");
+    const fence = {
+      ...scope,
+      ownerId: "worker_restore",
+      generation: 2,
+      token: "fence_restore",
+      expiresAt: "2026-09-03T12:00:00.000Z",
+    };
+    const checkpoint = {
+      provider: "fake",
+      checkpointId: "process-checkpoint-1",
+      kind: "process" as const,
+      sourceRuntimeId: "runtime-previous",
+      sessionId: scope.sessionId,
+      workGeneration: 1,
+      workspaceRevision: 1,
+      harnessVersion: "ama-worker-v1",
+      runtimeIdentity: JSON.stringify({
+        process: { args: ["worker.mjs"], command: "node" },
+        type: "ama_worker",
+      }),
+    };
+    const restoredLease = { provider: "fake", runtimeId: "runtime-restored" };
+    const acquire = vi.fn(async () => restoredLease);
+    const restore = vi.fn(async () => restoredLease);
+    const host = createManagedRuntimeHost({
+      ownerId: fence.ownerId,
+      leaseTtlMs: 90_000,
+      heartbeatIntervalMs: 30_000,
+      orphans: new MemoryRuntimeOrphanPort(),
+      scheduler: {
+        sleep: (_ms: number, signal: AbortSignal) =>
+          new Promise<void>((_resolve, reject) =>
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true }),
+          ),
+      },
+      fences: {
+        acquire: vi.fn(async () => ({
+          type: "acquired" as const,
+          fence,
+          publication: {
+            generation: 1,
+            revision: 1,
+            workspaceCandidate: { id: "workspace-1", contentHash: "sha256:one" },
+            outputCandidate: null,
+            runtimeCheckpoint: checkpoint,
+          },
+        })),
+        renew: vi.fn(),
+        publish: vi.fn(async () => ({ type: "published" as const, revision: 2 })),
+        release: vi.fn(async () => {}),
+      },
+      runtimeCheckpoint: { create: vi.fn(), restore },
+      sandbox: {
+        capabilities: vi.fn(async () => ({
+          hardTerminate: "supported" as const,
+          suspendResume: "unsupported" as const,
+          runtimeCheckpoints: ["process" as const],
+        })),
+        acquire,
+        heartbeat: vi.fn(async () => ({ type: "alive" as const })),
+        terminate: vi.fn(async () => {}),
+        reap: vi.fn(async () => {}),
+        inspect: vi.fn(),
+      },
+      workspace: {
+        capabilities: vi.fn(async () => ({ strategies: ["checkpoint_restore" as const] })),
+        materialize: vi.fn(async () => ({ mountPath: "/workspace", bindingId: "ws" })),
+        attach: vi.fn(async () => {}),
+        checkpoint: vi.fn(async () => ({
+          id: "workspace-next",
+          contentHash: "sha256:next",
+          revision: 2,
+        })),
+        release: vi.fn(async () => {}),
+      },
+      outputs: {
+        capabilities: vi.fn(async () => ({ strategies: [] })),
+        prepare: vi.fn(),
+        attach: vi.fn(),
+        collect: vi.fn(),
+        finalize: vi.fn(),
+        release: vi.fn(),
+        abort: vi.fn(),
+      },
+      harnessDriver: {
+        driverCapabilities: vi.fn(async () => ({ drivers: ["ama_worker" as const] })),
+        run: vi.fn(async () => ({ type: "completed" as const })),
+      },
+    });
+
+    await expect(host.run({
+      scope,
+      profile: {
+        workspace: { requirement: "durable" },
+        outputs: { requirement: "disabled" },
+        runtimeCheckpoint: "optional",
+        driver: directDriver,
+      },
+    })).resolves.toEqual({ type: "completed", revision: 2 });
+    expect(restore).toHaveBeenCalledWith(expect.objectContaining({ checkpoint }));
+    expect(acquire).not.toHaveBeenCalled();
   });
 });

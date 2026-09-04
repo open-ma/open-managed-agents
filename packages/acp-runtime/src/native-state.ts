@@ -17,6 +17,9 @@ export interface AcpStatefulAgentSpec {
 }
 
 export type AcpNativeStateAdapterId =
+  | "aider"
+  | "kimi-code"
+  | "mimo"
   | "claude-code"
   | "codex"
   | "gemini"
@@ -45,7 +48,7 @@ export interface AcpNativeSessionArtifact {
 
 export interface AcpAgentStateBinding {
   adapterId: AcpNativeStateAdapterId | "opaque";
-  durability: "native" | "opaque";
+  durability: "native" | "acp" | "opaque";
   /** `acp-only` retains files for inspection but does not promise resume. */
   resume: "native-and-acp" | "acp-only";
   rootPath: string;
@@ -59,7 +62,7 @@ export interface AcpAgentStateBinding {
 export interface AcpNativeStateProfile {
   id: AcpNativeStateAdapterId;
   provenance: "harbor" | "oma";
-  durability: "native";
+  durability: "native" | "acp";
   resume: AcpAgentStateBinding["resume"];
   matches(agent: AcpStatefulAgentSpec): boolean;
   bindEnvironment(nativePath: string): Record<string, string>;
@@ -88,6 +91,17 @@ const sqlite = (path: string, requiredForResume = true): AcpNativeSessionArtifac
 });
 
 export const ACP_NATIVE_STATE_PROFILES: readonly AcpNativeStateProfile[] = [
+  {
+    id: "aider",
+    provenance: "oma",
+    durability: "acp",
+    resume: "acp-only",
+    matches: (agent) => matchesIdentity(agent, ["aider", "aider-acp"]),
+    // Harbor can launch Aider, but Aider's local transcript is not a stable
+    // native resume contract. Keep the ACP checkpoint as the portable state.
+    bindEnvironment: () => ({}),
+    sessionArtifacts: () => [],
+  },
   {
     id: "claude-code",
     provenance: "harbor",
@@ -227,6 +241,15 @@ export const ACP_NATIVE_STATE_PROFILES: readonly AcpNativeStateProfile[] = [
     sessionArtifacts: (nativePath) => [directory(`${nativePath}/share/sessions`)],
   },
   {
+    id: "kimi-code",
+    provenance: "oma",
+    durability: "acp",
+    resume: "acp-only",
+    matches: (agent) => matchesIdentity(agent, ["kimi-code", "kimi-code-acp"]),
+    bindEnvironment: () => ({}),
+    sessionArtifacts: () => [],
+  },
+  {
     id: "qwen-code",
     provenance: "harbor",
     durability: "native",
@@ -244,6 +267,15 @@ export const ACP_NATIVE_STATE_PROFILES: readonly AcpNativeStateProfile[] = [
     matches: (agent) => matchesIdentity(agent, ["mistral-vibe", "vibe-acp", "vibe"]),
     bindEnvironment: (nativePath) => ({ VIBE_HOME: nativePath }),
     sessionArtifacts: (nativePath) => [directory(`${nativePath}/logs/session`, false)],
+  },
+  {
+    id: "mimo",
+    provenance: "oma",
+    durability: "acp",
+    resume: "acp-only",
+    matches: (agent) => matchesIdentity(agent, ["mimo", "mimo-acp"]),
+    bindEnvironment: () => ({}),
+    sessionArtifacts: () => [],
   },
   {
     id: "dsh",
@@ -280,14 +312,14 @@ export const ACP_NATIVE_STATE_PROFILES: readonly AcpNativeStateProfile[] = [
 export type HarborNativeStateCoverage =
   | {
       harborId: string;
-      status: "native-resume" | "native-capture";
+      status: "native-resume" | "native-capture" | "acp-adapter";
       profileId: AcpNativeStateAdapterId;
     }
   | { harborId: string; status: "requires-acp-adapter" };
 
 /** Harbor native-resume inventory. Non-ACP agents remain explicit gaps. */
 export const HARBOR_NATIVE_STATE_COVERAGE: readonly HarborNativeStateCoverage[] = [
-  { harborId: "aider", status: "requires-acp-adapter" },
+  { harborId: "aider", status: "acp-adapter", profileId: "aider" },
   { harborId: "claude-code", status: "native-resume", profileId: "claude-code" },
   { harborId: "codex", status: "native-resume", profileId: "codex" },
   { harborId: "copilot-cli", status: "native-resume", profileId: "copilot" },
@@ -296,9 +328,9 @@ export const HARBOR_NATIVE_STATE_COVERAGE: readonly HarborNativeStateCoverage[] 
   { harborId: "goose", status: "native-resume", profileId: "goose" },
   { harborId: "junie", status: "native-resume", profileId: "junie" },
   { harborId: "kimi-cli", status: "native-resume", profileId: "kimi" },
-  { harborId: "kimi-code", status: "requires-acp-adapter" },
+  { harborId: "kimi-code", status: "acp-adapter", profileId: "kimi-code" },
   { harborId: "mcode", status: "native-resume", profileId: "mcode" },
-  { harborId: "mimo", status: "requires-acp-adapter" },
+  { harborId: "mimo", status: "acp-adapter", profileId: "mimo" },
   { harborId: "opencode", status: "native-resume", profileId: "opencode" },
   { harborId: "pi", status: "native-resume", profileId: "pi" },
   { harborId: "qwen-code", status: "native-resume", profileId: "qwen-code" },

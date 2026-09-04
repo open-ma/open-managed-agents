@@ -8,6 +8,7 @@ import {
 describe("ACP agent-native session state", () => {
   it("covers Harbor-derived native state profiles available through ACP or an OMA overlay", () => {
     expect(ACP_NATIVE_STATE_PROFILES.map((profile) => profile.id).sort()).toEqual([
+      "aider",
       "claude-code",
       "codex",
       "copilot",
@@ -18,14 +19,20 @@ describe("ACP agent-native session state", () => {
       "hermes",
       "junie",
       "kimi",
+      "kimi-code",
       "mcode",
+      "mimo",
       "mistral-vibe",
       "opencode",
       "pi",
       "qwen-code",
     ]);
     for (const profile of ACP_NATIVE_STATE_PROFILES) {
-      expect(profile.sessionArtifacts("/native"), profile.id).not.toHaveLength(0);
+      if (profile.durability === "native") {
+        expect(profile.sessionArtifacts("/native"), profile.id).not.toHaveLength(0);
+      } else {
+        expect(profile.sessionArtifacts("/native"), profile.id).toHaveLength(0);
+      }
       for (const artifact of profile.sessionArtifacts("/native")) {
         expect(artifact.path, profile.id).toMatch(/^\/native(?:\/|$)/);
       }

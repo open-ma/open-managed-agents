@@ -141,6 +141,19 @@ and one of the declared harness lanes. The machine-readable source is
 `MANAGED_RUNTIME_PROVIDER_CONFORMANCE` from
 `@open-managed-agents/managed-runtime-host`.
 
+The E2B adapter also has an explicit credentialed certification lane. It is
+opt-in (to avoid spending provider credits in ordinary CI):
+
+```sh
+E2B_API_KEY=... pnpm --filter @open-managed-agents/sandbox test:e2b:certification
+```
+
+Set `E2B_API_URL` for an E2B-compatible control plane and
+`OMA_E2B_TEMPLATE` for the template to certify. The lane exercises real
+command execution, lease renewal, memory suspend/resume, and a portable
+provider snapshot. It does not promote that snapshot to process-memory
+checkpoint semantics; that still requires an explicit `RuntimeCheckpointPort`.
+
 ## Preinstalled composition
 
 <Tabs syncKey="runtime-provider">

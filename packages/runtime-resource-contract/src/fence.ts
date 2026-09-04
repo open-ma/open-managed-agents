@@ -1,4 +1,5 @@
 import type { RuntimeResourceScope } from "./scope";
+import type { RuntimeCheckpointRef } from "./checkpoint";
 
 export interface RuntimeResourceFence extends RuntimeResourceScope {
   ownerId: string;
@@ -21,6 +22,8 @@ export interface RuntimeResourcePublication {
   revision: number;
   workspaceCandidate: RuntimePublicationCandidate;
   outputCandidate: RuntimePublicationCandidate | null;
+  /** Provider-aware process checkpoint, when the composition can create one. */
+  runtimeCheckpoint?: RuntimeCheckpointRef | null;
 }
 
 export interface AcquireRuntimeFenceInput {
@@ -61,6 +64,7 @@ export interface RuntimeResourceFencePort {
     fence: RuntimeResourceFence;
     workspaceCandidate: RuntimePublicationCandidate;
     outputCandidate: RuntimePublicationCandidate | null;
+    runtimeCheckpoint?: RuntimeCheckpointRef | null;
   }): Promise<PublishRuntimeResourcesResult>;
   release(input: {
     fence: RuntimeResourceFence;

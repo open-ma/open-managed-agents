@@ -158,6 +158,39 @@ export const OMA_OVERLAY_AGENTS: KnownAgentEntry[] = [
     installHint: "npm install -g opencode-ai@latest  # or curl -fsSL https://opencode.ai/install | bash",
     homepage: "https://opencode.ai/",
   },
+  // Aider does not ship an ACP server. This community bridge is a real ACP
+  // process which invokes the installed `aider` CLI, so the upstream binary
+  // is kept explicit instead of pretending `aider` itself speaks ACP.
+  {
+    id: "aider",
+    label: "Aider",
+    spec: { command: "aider-acp" },
+    wraps: "aider",
+    installHint:
+      "install aider-chat, then build https://github.com/jorgejhms/aider-acp and put aider-acp on PATH",
+    homepage: "https://github.com/jorgejhms/aider-acp",
+  },
+  // Kimi Code exposes a native ACP stdio server. Keep it separate from the
+  // official `kimi` registry id because Harbor's Kimi Code CLI and Moonshot's
+  // Kimi CLI have different launch/configuration surfaces.
+  {
+    id: "kimi-code",
+    label: "Kimi Code",
+    spec: { command: "kimi", args: ["acp"] },
+    installHint: "install Kimi Code, then run `kimi acp`",
+    homepage: "https://github.com/MoonshotAI/kimi-cli",
+  },
+  // MiMo Code is OpenCode-derived and exposes its own ACP stdio command.
+  // Keep the entry overlay-only until the upstream ACP registry publishes a
+  // stable canonical id and distribution recipe.
+  {
+    id: "mimo",
+    label: "MiMo Code",
+    spec: { command: "mimo", args: ["acp"] },
+    install: { kind: "npm", package: "@mimo-ai/cli" },
+    installHint: "npm install -g @mimo-ai/cli",
+    homepage: "https://github.com/XiaomiMiMo/MiMo-Code",
+  },
   // pi-acp is in the official registry. Keep an overlay entry as well so
   // network-isolated hosts can still discover it, and so wrapper audit knows
   // that the adapter also requires the upstream `pi` binary.

@@ -81,6 +81,24 @@ function asSafeInteger(value: number | string, name: string): number {
   return parsed;
 }
 
+function validRuntimeCheckpoint(value: unknown): boolean {
+  if (value === undefined || value === null) return true;
+  if (typeof value !== "object") return false;
+  const checkpoint = value as Record<string, unknown>;
+  return typeof checkpoint.provider === "string"
+    && checkpoint.provider.length > 0
+    && typeof checkpoint.checkpointId === "string"
+    && checkpoint.checkpointId.length > 0
+    && (checkpoint.kind === "filesystem" || checkpoint.kind === "process")
+    && typeof checkpoint.sourceRuntimeId === "string"
+    && checkpoint.sourceRuntimeId.length > 0
+    && typeof checkpoint.sessionId === "string"
+    && Number.isSafeInteger(checkpoint.workGeneration)
+    && Number.isSafeInteger(checkpoint.workspaceRevision)
+    && typeof checkpoint.harnessVersion === "string"
+    && typeof checkpoint.runtimeIdentity === "string";
+}
+
 function validateTtl(ttlMs: number): void {
   if (!Number.isSafeInteger(ttlMs) || ttlMs <= 0) {
     throw new Error("Runtime resource fence ttlMs must be a positive integer");
@@ -98,13 +116,16 @@ function parsePublication(
   }
   const candidates = JSON.parse(value) as Pick<
     RuntimeResourcePublication,
-    "workspaceCandidate" | "outputCandidate"
+    "workspaceCandidate" | "outputCandidate" | "runtimeCheckpoint"
   >;
   const parsed: RuntimeResourcePublication = {
     generation: asSafeInteger(generation, "publication generation"),
     revision: asSafeInteger(revision, "revision"),
     workspaceCandidate: candidates.workspaceCandidate,
     outputCandidate: candidates.outputCandidate,
+    ...(candidates.runtimeCheckpoint === undefined
+      ? {}
+      : { runtimeCheckpoint: candidates.runtimeCheckpoint }),
   };
   if (
     typeof parsed !== "object"
@@ -113,6 +134,7 @@ function parsePublication(
     || !Number.isSafeInteger(parsed.revision)
     || typeof parsed.workspaceCandidate?.id !== "string"
     || typeof parsed.workspaceCandidate?.contentHash !== "string"
+    || !validRuntimeCheckpoint(parsed.runtimeCheckpoint)
   ) {
     throw new Error("SQL runtime fence contains an invalid publication");
   }
@@ -251,11 +273,15 @@ export class SqlRuntimeResourceFencePort implements RuntimeResourceFencePort {
     fence: RuntimeResourceFence;
     workspaceCandidate: RuntimeResourcePublication["workspaceCandidate"];
     outputCandidate: RuntimeResourcePublication["outputCandidate"];
+    runtimeCheckpoint?: RuntimeResourcePublication["runtimeCheckpoint"];
   }): Promise<PublishRuntimeResourcesResult> {
     const now = this.#now().getTime();
     const candidates = {
       workspaceCandidate: input.workspaceCandidate,
       outputCandidate: input.outputCandidate,
+      ...(input.runtimeCheckpoint === undefined
+        ? {}
+        : { runtimeCheckpoint: input.runtimeCheckpoint }),
     };
     const candidateJson = stableJson(candidates);
 

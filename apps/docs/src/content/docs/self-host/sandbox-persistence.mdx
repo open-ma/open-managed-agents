@@ -126,6 +126,20 @@ fresh runtime, restore the last active candidate into `/workspace`, replay the
 durable Session event log and resume the harness. A provider-native retained
 runtime is a latency optimization unless an external checkpoint also exists.
 
+### Optional process-memory checkpoints
+
+The host has a provider-aware `RuntimeCheckpointPort` for runtimes that can
+actually capture and restore process state. It is deliberately separate from
+workspace persistence: a provider snapshot or a warm `suspend` handle must not
+be advertised as a process checkpoint unless its adapter implements this Port.
+When present, the ref is published in the same fenced CAS as the workspace and
+output candidates. A later owner validates provider, session, generation,
+checkpoint kind, and harness identity before attempting restore. A failed or
+stale restore falls back to the canonical `checkpoint_restore` workspace path;
+the checkpoint is an optimization, never the source of truth. A profile with
+`runtimeCheckpoint: "required"` fails closed when the composition does not
+expose the Port or cannot create the requested checkpoint.
+
 <Aside type="caution">
   Filesystem persistence is not process-memory persistence. Open file handles,
   sockets, child PIDs and in-memory model context are rebuilt. ACP may persist
@@ -210,17 +224,27 @@ lossy boundary for UI and observability.
 | Mistral Vibe | `VIBE_HOME` | `logs/session/` | capture only; native resume is not advertised |
 | DeepSeek Harness ACP | `DSH_HOME`, `DSH_SESSION_ROOT` | `sessions/` JSONL tree | OMA extension; native + ACP resume/load |
 | Hermes | `HERMES_HOME` | `state.db` family | OMA extension; native + ACP load |
+| Aider | ACP state root only | none (native transcript is not stable) | ACP adapter; canonical-event recovery |
+| Kimi Code | ACP state root only | none (native transcript is not stable) | ACP adapter; canonical-event recovery |
+| MiMo | ACP state root only | none (native transcript is not stable) | ACP adapter; canonical-event recovery |
 
 Copying only a SQLite base file while an agent is writing is not a valid
 checkpoint. Configuration and authentication are reconstructed from the Agent,
 Model Card, and Vault inputs on every placement; they are never recovered from
 the native-session artifact set.
 
-Harbor also has resume-capable CLI adapters for Aider, Kimi Code, and MiMo.
-They do not currently have a compatible ACP entry in OpenMA's registry, so
-they are reported as `requires-acp-adapter`; OpenMA does not silently fall
-back to a bespoke CLI protocol. Once a real ACP adapter exists, adding its
-native-state profile does not change the host protocol.
+Harbor also has CLI adapters for Aider, Kimi Code, and MiMo. OpenMA now has
+explicit ACP process entries for these agents (`aider-acp`, `kimi acp`, and
+`mimo acp`). Aider uses the community
+[aider-acp bridge](https://github.com/jorgejhms/aider-acp); Kimi Code and MiMo
+Code expose native ACP commands. They are intentionally not claimed as native
+session-file resume: their native transcripts are not a stable persistence
+contract, so the ACP checkpoint and canonical Managed Agents event log are used
+for recovery. MiMo's ACP command currently has an upstream `session/prompt`
+failure mode in some releases; the adapter remains discoverable but a failed
+prompt is surfaced and recovery falls back to the canonical event context.
+OpenMA still never falls back to a bespoke CLI protocol; all process
+interaction remains ACP.
 
 ACP `PromptResponse.usage` is projected into paired
 `span.model_request_start` / `span.model_request_end` events. The terminal
@@ -285,15 +309,17 @@ what a vendor might theoretically support.
 |---|---|---|---|---|---|
 | Node + Docker | hard remove; no suspend | filesystem `checkpoint_restore` | filesystem `final_collect` | none | `ama_worker`; `openma_supervised` |
 | Cloudflare Sandbox | destroy + durable orphan reap; no runtime-scoped resume | `createBackup`/`restoreBackup` as filesystem `checkpoint_restore` | R2 `final_collect` when `FILES_BUCKET` exists | not advertised | `ama_worker`; full preset also installs `openma_supervised` transport |
-| E2B / compatible | suspend/resume + kill/reap | `retained_runtime` and provider snapshot as `checkpoint_restore` | S3-compatible `final_collect` only with a complete store configuration | not advertised | `ama_worker` |
+| E2B / compatible | suspend/resume + kill/reap | `retained_runtime` and provider snapshot as `checkpoint_restore` | S3-compatible `final_collect` only with a complete store configuration | not advertised; RuntimeCheckpointPort required for process memory | `ama_worker` |
 
 Daytona, LiteBox and BoxRun are intentionally absent from this ManagedRuntime
 Host table. Their current implementations are `SandboxPort` adapters only:
 they expose provider-specific file/process primitives, but do not yet provide
 the host-fenced lease, immutable workspace candidate, fenced output manifest,
-or orphan-reap composition required by this contract. Their raw adapter
-capabilities remain documented in the [provider conformance registry](/self-host/managed-runtime-host/#provider-capabilities)
-and are not silently promoted to durable runtime semantics.
+or orphan-reap composition required by this contract. The provider conformance
+registry is a strict capability contract: a caller must not construct a
+ManagedRuntimeHost from these adapters until it supplies those missing Ports.
+Their raw capabilities remain usable for lower-level SandboxPort workflows and
+are never silently promoted to durable runtime semantics.
 
 For E2B, durable outputs require either an explicit `outputStore` or all of:
 

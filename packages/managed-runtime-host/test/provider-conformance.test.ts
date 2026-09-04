@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import {
   MANAGED_RUNTIME_PROVIDER_CONFORMANCE,
   getManagedRuntimeProviderConformance,
+  requireManagedRuntimeProvider,
 } from "../src/provider-conformance";
 
 describe("managed runtime provider conformance", () => {
@@ -46,5 +47,17 @@ describe("managed runtime provider conformance", () => {
   it("fails closed for an unknown provider", () => {
     expect(() => getManagedRuntimeProviderConformance("unknown" as never))
       .toThrow(/Unknown managed runtime provider/);
+  });
+
+  it("rejects SandboxPort-only providers at ManagedRuntimeHost admission", () => {
+    for (const provider of ["daytona", "litebox", "boxrun"] as const) {
+      expect(() => requireManagedRuntimeProvider(provider)).toThrow(
+        `${provider} is sandbox-port-only`,
+      );
+    }
+    expect(requireManagedRuntimeProvider("e2b")).toMatchObject({
+      id: "e2b",
+      managedRuntime: true,
+    });
   });
 });
