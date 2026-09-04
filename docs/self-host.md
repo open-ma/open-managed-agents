@@ -601,6 +601,71 @@ binding, same shared INTEGRATIONS_DB.
 (both call out to a `USAGE_METER` worker that lives in a separate repo).
 Self-host operators run their own metering or skip the billing pipeline.
 
+## Local provider chaos lab
+
+The repository includes an opt-in local cluster runner for exercising a real
+Daytona, LiteBox, or BoxRun adapter without sending model traffic to a paid
+provider. The runner starts three pieces in one disposable lab:
+
+```
+local Anthropic Messages fixture ──┐
+                                  ├── OpenMA main-node (temporary SQLite + event log)
+configured SandboxPort provider ──┘       └── Daytona | LiteBox | BoxRun
+```
+
+The fixture is the only mocked external dependency. Sandbox calls are real,
+so a run is meaningful only when the selected provider is configured. The
+chaos sequence is:
+
+1. complete a healthy turn through `/v1/oma/*`;
+2. delay the next model response, kill main-node in-flight, and leave its
+   SQLite/event-log state behind;
+3. restart main-node with the same state directory, verify orphan recovery,
+   then complete another turn;
+4. optionally invoke an operator-supplied provider delete endpoint.
+
+Run it from the repository root:
+
+```sh
+# Local hardware-isolated BoxLite/LiteBox (requires its native runtime/KVM).
+OMA_CHAOS_PROVIDER=litebox pnpm test:e2e:provider-chaos
+
+# Daytona (the adapter creates a real VM; the key is never printed).
+OMA_CHAOS_PROVIDER=daytona DAYTONA_API_KEY="$DAYTONA_API_KEY" \
+  pnpm test:e2e:provider-chaos
+
+# BoxRun/boxlite serve (the endpoint must already be running).
+OMA_CHAOS_PROVIDER=boxrun BOXRUN_URL=http://127.0.0.1:8100/v1/default \
+  pnpm test:e2e:provider-chaos
+```
+
+Useful controls:
+
+| Variable | Meaning |
+| --- | --- |
+| `OMA_CHAOS_LLM_DELAY_MS` | Delay used to create the in-flight crash window (default `15000`). |
+| `OMA_CHAOS_HEALTH_TIMEOUT_MS` | Main-node boot deadline (default `60000`). |
+| `OMA_CHAOS_TURN_TIMEOUT_MS` | Per-turn/recovery deadline (default `60000`). |
+| `OMA_CHAOS_PORT` | Fixed local main-node port; otherwise a free port is selected. |
+| `OMA_CHAOS_KEEP_DATA=1` | Keep the temporary SQLite/blob/workdir tree for inspection. |
+| `OMA_CHAOS_PROVIDER_KILL_URL` | Explicit destructive provider endpoint. If absent, the provider-kill step is reported as skipped. |
+| `OMA_CHAOS_PROVIDER_KILL_TOKEN` | Optional bearer token for that endpoint (never logged). |
+
+The runner is deliberately not a claim that every adapter has Managed
+Runtime Host fencing. It verifies the common `SandboxPort` execution path and
+Node `SessionRegistry` crash recovery. Daytona/LiteBox/BoxRun sessions are
+created lazily by their adapters; a hard kill can leave a provider-side box
+or VM orphaned when the provider has no discover/delete hook. Use the explicit
+kill URL or the provider's own cleanup tooling for that case. Full lease,
+fencing, split-brain, and retry-budget chaos remains covered by the
+deterministic managed-runtime tests and is not silently attributed to a
+SandboxPort-only provider.
+
+The runner always forces `AUTH_DISABLED=1`, a temporary SQLite database, and
+local blob roots. It inherits provider configuration but replaces
+`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` with the local fixture, so no real LLM
+credential is required or used.
+
 ## Production hardening (what's NOT in the PoC)
 
 If you take this past trusted-dev territory, you'll want:
