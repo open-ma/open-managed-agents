@@ -117,6 +117,96 @@ async function freshBinding(runtimeComposition: ReturnType<typeof composition>) 
 }
 
 describe("provider managed runtime adapter", () => {
+  it("exposes a provider-native Session output mount without folding it into SandboxPort", async () => {
+    const created = runtime("sandbox-output-mount");
+    const mounted: Array<{ runtimeId: string; tenant: string; session: string }> = [];
+    const composed = createProviderManagedRuntime({
+      providerName: "e2b",
+      provider: {
+        create: async () => created,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({
+        sessionId: inputScope.sessionId,
+        workdir: `/tmp/${inputScope.workId}`,
+      }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      sandboxCapabilities: {
+        suspendResume: "supported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: [],
+      },
+      workspace: {
+        strategies: ["retained_runtime"],
+        retainedSuspendKind: "memory",
+      },
+      outputs: {
+        store: new InMemoryBlobStore(),
+        durableMount: {
+          async attach({ runtime: providerRuntime, scope: inputScope }) {
+            mounted.push({
+              runtimeId: providerRuntime.runtimeHandle().runtimeId,
+              tenant: inputScope.workspaceId,
+              session: inputScope.sessionId,
+            });
+          },
+        },
+      },
+      drivers: ["ama_worker"],
+    });
+
+    await expect(composed.outputs.capabilities(scope)).resolves.toEqual({
+      strategies: [
+        { strategy: "durable_mount", durability: "durable" },
+        { strategy: "final_collect", durability: "durable" },
+      ],
+    });
+    const workspace = await composed.workspace.materialize({
+      scope,
+      fence,
+      strategy: "retained_runtime",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace",
+      signal: new AbortController().signal,
+    });
+    const outputs = await composed.outputs.prepare({
+      scope,
+      fence,
+      strategy: "durable_mount",
+      idempotencyKey: "outputs",
+      signal: new AbortController().signal,
+    });
+    const lease = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: "durable_mount",
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs,
+      signal: new AbortController().signal,
+    });
+    await composed.outputs.attach({
+      scope,
+      fence,
+      strategy: "durable_mount",
+      binding: outputs,
+      sandbox: lease,
+      signal: new AbortController().signal,
+    });
+
+    expect(mounted).toEqual([{
+      runtimeId: "sandbox-output-mount",
+      tenant: "workspace_1",
+      session: "session_1",
+    }]);
+  });
+
   it("carries the shared supervisor protocol over sandbox stdio with fragmented JSONL", async () => {
     const commands: string[] = [];
     const encoder = new TextEncoder();

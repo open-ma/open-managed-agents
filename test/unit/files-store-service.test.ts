@@ -385,7 +385,10 @@ describe("FileService — deleteBySession cascade", () => {
       r2Key: r2KeyFor(TENANT, "file-s2"),
     });
 
-    const deleted = await service.deleteBySession({ sessionId: SESSION });
+    const deleted = await service.deleteBySession({
+      tenantId: TENANT,
+      sessionId: SESSION,
+    });
     expect(deleted.map((f) => f.id).sort()).toEqual(["file-s1-a", "file-s1-b"]);
     // Each row has the r2_key the caller needs for R2 cleanup
     expect(deleted.every((d) => d.r2_key.startsWith(`t/${TENANT}/files/`))).toBe(true);
@@ -401,7 +404,12 @@ describe("FileService — deleteBySession cascade", () => {
 
   it("returns an empty array when no files belong to the session", async () => {
     const { service } = createInMemoryFileService();
-    expect(await service.deleteBySession({ sessionId: "sess-empty" })).toEqual([]);
+    expect(
+      await service.deleteBySession({
+        tenantId: TENANT,
+        sessionId: "sess-empty",
+      }),
+    ).toEqual([]);
   });
 });
 

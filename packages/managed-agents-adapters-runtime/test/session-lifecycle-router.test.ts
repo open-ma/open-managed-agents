@@ -118,4 +118,39 @@ describe("Environment-aware Session lifecycle router", () => {
       },
     ]);
   });
+
+  it("runs deletion cleanup after stopping either runtime placement", async () => {
+    const calls: string[] = [];
+    const router = new EnvironmentAwareSessionLifecycleRouter({
+      environments: { find: async () => selfHostedEnvironment },
+      runtime: {
+        sessionStarted: async () => {},
+        sessionStopped: async () => {
+          calls.push("runtime.stop");
+        },
+      },
+      selfHostedWork: {
+        enqueue: async () => ({ type: "queued", work: {} as never }),
+        stop: async () => {
+          calls.push("self-hosted.stop");
+          return { type: "not_found" };
+        },
+      },
+      cleanupSession: async ({ workspaceId, sessionId }) => {
+        calls.push(`cleanup:${workspaceId}:${sessionId}`);
+      },
+    });
+
+    await router.sessionStopped({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      reason: "deleted",
+    });
+
+    expect(calls).toEqual([
+      "self-hosted.stop",
+      `cleanup:workspace_01:${session.id}`,
+    ]);
+  });
 });

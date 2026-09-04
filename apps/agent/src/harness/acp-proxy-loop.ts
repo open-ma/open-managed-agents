@@ -92,7 +92,9 @@ export class AcpProxyHarness implements HarnessInterface {
     }
 
     const turnId = generateEventId();
-    const translator = new AcpTranslator(runtime);
+    const translator = new AcpTranslator(runtime, {
+      model: typeof ctx.agent.model === "string" ? ctx.agent.model : ctx.agent.model.id,
+    });
     const abortHandler = () => {
       try { ws.send(JSON.stringify({ type: "session.cancel", turn_id: turnId })); } catch { /* ws may be dead */ }
     };
@@ -147,8 +149,11 @@ export class AcpProxyHarness implements HarnessInterface {
       await translator.flush("completed");
     } catch (err) {
       const aborted = runtime.abortSignal?.aborted ?? false;
-      await translator.flush(aborted ? "aborted" : "completed");
       const msg = err instanceof Error ? err.message : String(err);
+      if (!aborted) {
+        await translator.consume({ type: "promptError", error: msg });
+      }
+      await translator.flush(aborted ? "aborted" : "completed");
       if (aborted) {
         log({ op: "acp_proxy.aborted", session_id: sid }, "user-aborted");
       } else {

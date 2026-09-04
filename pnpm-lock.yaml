@@ -132,6 +132,9 @@ importers:
       '@open-managed-agents/files-store':
         specifier: workspace:*
         version: link:../../packages/files-store
+      '@open-managed-agents/managed-agents-adapters-runtime':
+        specifier: workspace:*
+        version: link:../../packages/managed-agents-adapters-runtime
       '@open-managed-agents/managed-runtime-host':
         specifier: workspace:*
         version: link:../../packages/managed-runtime-host
@@ -165,6 +168,12 @@ importers:
       '@open-managed-agents/session-runtime':
         specifier: workspace:*
         version: link:../../packages/session-runtime
+      '@open-managed-agents/session-runtime-contract':
+        specifier: workspace:*
+        version: link:../../packages/session-runtime-contract
+      '@open-managed-agents/session-runtime-sql':
+        specifier: workspace:*
+        version: link:../../packages/session-runtime-sql
       '@open-managed-agents/session-secrets-store':
         specifier: workspace:*
         version: link:../../packages/session-secrets-store
@@ -2954,6 +2963,9 @@ importers:
       '@open-managed-agents/session-event-store':
         specifier: workspace:*
         version: link:../session-event-store
+      '@open-managed-agents/session-runtime-contract':
+        specifier: workspace:*
+        version: link:../session-runtime-contract
       '@open-managed-agents/sql-client':
         specifier: workspace:*
         version: link:../sql-client
@@ -3017,6 +3029,9 @@ importers:
       '@open-managed-agents/sandbox':
         specifier: workspace:*
         version: link:../sandbox
+      '@open-managed-agents/session-runtime-contract':
+        specifier: workspace:*
+        version: link:../session-runtime-contract
       '@open-managed-agents/shared':
         specifier: workspace:*
         version: link:../shared
@@ -3054,6 +3069,13 @@ importers:
       '@open-managed-agents/sql-client':
         specifier: workspace:*
         version: link:../sql-client
+    devDependencies:
+      better-sqlite3:
+        specifier: ^13.0.3
+        version: 13.0.3
+      vitest:
+        specifier: ^4.1.3
+        version: 4.1.4(@opentelemetry/api@1.9.0)(@types/node@26.3.0)(@vitest/coverage-v8@4.1.4)(jsdom@29.1.1(@noble/hashes@2.2.0))(msw@2.14.6(@types/node@26.3.0)(typescript@7.0.2))(vite@8.0.8(@types/node@26.3.0)(esbuild@0.28.1)(jiti@2.6.1)(tsx@4.21.0)(yaml@2.9.0))
 
   packages/session-secrets-store:
     dependencies:

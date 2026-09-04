@@ -15,13 +15,19 @@ import type {
   HarnessInterface,
   HarnessRuntime,
 } from "./interface";
+import {
+  bindAcpAgentState,
+  type AcpAgentStateBinding,
+} from "@open-managed-agents/acp-runtime/native-state";
+import {
+  buildAcpSemanticRecoveryPrompt,
+  type AcpSemanticRecoveryReason,
+} from "./acp-recovery";
 
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const DEFAULT_TURN_TIMEOUT_MS = 5 * 60_000;
 const DEFAULT_SANDBOX_LEASE_TTL_MS = 90_000;
 const DEFAULT_SANDBOX_HEARTBEAT_MS = 30_000;
-const ACP_CHECKPOINT_PATH = "/workspace/.openma/acp-session-checkpoint.json";
-
 interface AcpSandboxCheckpoint {
   version: 1;
   configurationSha256: string;
@@ -36,6 +42,8 @@ export class AcpSandboxHarness implements HarnessInterface {
   #resumeAcpSessionId: string | null = null;
   #checkpointLoadedForKey: string | null = null;
   #runtime: HarnessRuntime | null = null;
+  #stateBinding: AcpAgentStateBinding | null = null;
+  #semanticRecoveryReason: AcpSemanticRecoveryReason | null = null;
 
   async onSessionInit(ctx: HarnessContext, runtime: HarnessRuntime): Promise<void> {
     const prompt = ctx.systemPrompt.trimEnd();
@@ -66,6 +74,10 @@ export class AcpSandboxHarness implements HarnessInterface {
       this.#emitError(runtime, "selected sandbox does not support duplex ACP processes");
       return;
     }
+    if (!ctx.session_id) {
+      this.#emitError(runtime, "AcpSandboxHarness requires a session_id for native state isolation");
+      return;
+    }
 
     const text = extractUserText(ctx.userMessage);
     if (!text) {
@@ -73,10 +85,20 @@ export class AcpSandboxHarness implements HarnessInterface {
       return;
     }
 
-    const configKey = JSON.stringify(config);
+    const stateBinding = bindAcpAgentState({
+      sessionId: ctx.session_id,
+      agent: config.agent,
+    });
+    const configKey = JSON.stringify({ config, stateAdapter: stateBinding.adapterId });
+    await this.#ensureStateBinding(runtime, stateBinding);
     if (!this.#session && this.#checkpointLoadedForKey !== configKey) {
       this.#checkpointLoadedForKey = configKey;
-      this.#resumeAcpSessionId = await this.#loadCheckpoint(runtime, configKey);
+      this.#semanticRecoveryReason = null;
+      this.#resumeAcpSessionId = await this.#loadCheckpoint(
+        runtime,
+        configKey,
+        stateBinding.checkpointPath,
+      );
     }
     if (this.#session && (this.#configKey !== configKey || !this.#session.isAlive())) {
       this.#resumeAcpSessionId = this.#configKey === configKey
@@ -86,7 +108,19 @@ export class AcpSandboxHarness implements HarnessInterface {
       this.#session = null;
     }
 
-    const translator = new AcpTranslator(runtime);
+    if (
+      !this.#session &&
+      this.#resumeAcpSessionId &&
+      stateBinding.resume === "native-and-acp" &&
+      !(await this.#hasRequiredNativeState(runtime, stateBinding))
+    ) {
+      this.#resumeAcpSessionId = null;
+      this.#semanticRecoveryReason = "native-state-missing";
+    }
+
+    const translator = new AcpTranslator(runtime, {
+      model: typeof ctx.agent.model === "string" ? ctx.agent.model : ctx.agent.model.id,
+    });
     try {
       if (!this.#session) {
         const acpRuntime = createAcpRuntime({
@@ -95,8 +129,8 @@ export class AcpSandboxHarness implements HarnessInterface {
         });
         this.#session = await acpRuntime.start({
           agent: {
-            ...config.agent,
-            cwd: config.agent.cwd ?? "/workspace",
+            ...stateBinding.agent,
+            cwd: stateBinding.agent.cwd ?? "/workspace",
           },
           restart: config.restart
             ? {
@@ -113,20 +147,39 @@ export class AcpSandboxHarness implements HarnessInterface {
             : {}),
         });
         this.#configKey = configKey;
+        this.#stateBinding = stateBinding;
         this.#resumeAcpSessionId = this.#session.acpSessionId || null;
-        await this.#saveCheckpoint(runtime, configKey, this.#session.acpSessionId);
+        await this.#saveCheckpoint(
+          runtime,
+          configKey,
+          this.#session.acpSessionId,
+          stateBinding.checkpointPath,
+        );
       }
 
       const session = this.#session;
+      const recoveryReason = this.#semanticRecoveryReason;
+      const promptText = recoveryReason
+        ? buildAcpSemanticRecoveryPrompt(
+            runtime.history.getEvents(),
+            ctx.userMessage,
+            { reason: recoveryReason },
+          )
+        : text;
+      if (recoveryReason) {
+        runtime.broadcast({
+          type: "session.warning",
+          source: "acp_semantic_recovery",
+          message: "Agent-native session state was unavailable; continued from canonical OpenMA history.",
+          details: {
+            reason: recoveryReason,
+            adapter_id: stateBinding.adapterId,
+          },
+        });
+      }
       const consumePrompt = async (abortSignal: AbortSignal) => {
-        for await (const update of session.prompt(text, { abortSignal })) {
-          await translator.consume({
-            type: "session.event",
-            event: {
-              sessionId: session.acpSessionId,
-              update,
-            },
-          } as never);
+        for await (const update of session.prompt(promptText, { abortSignal })) {
+          await translator.consumePromptItem(update, session.acpSessionId);
         }
       };
       if (
@@ -154,6 +207,7 @@ export class AcpSandboxHarness implements HarnessInterface {
         }
       }
       await translator.flush(runtime.abortSignal?.aborted ? "aborted" : "completed");
+      this.#semanticRecoveryReason = null;
     } catch (error) {
       const leaseLost = error instanceof SandboxLeaseLostError;
       const aborted = leaseLost || (runtime.abortSignal?.aborted ?? false);
@@ -176,28 +230,38 @@ export class AcpSandboxHarness implements HarnessInterface {
   async dispose(reason: HarnessDisposeReason = "destroy"): Promise<void> {
     const session = this.#session;
     const runtime = this.#runtime;
+    const stateBinding = this.#stateBinding;
     this.#session = null;
     this.#configKey = null;
     this.#resumeAcpSessionId = null;
     this.#checkpointLoadedForKey = null;
     this.#runtime = null;
+    this.#stateBinding = null;
+    this.#semanticRecoveryReason = null;
     await session?.dispose();
     // A host shutdown is a placement change, not logical session deletion.
-    // Keep the native ACP id in /workspace so the replacement host can resume
-    // after restoring the provider filesystem checkpoint. Explicit destroy and
-    // harness replacement intentionally invalidate it.
-    if (reason !== "shutdown") {
-      await runtime?.sandbox.exec(`rm -f ${ACP_CHECKPOINT_PATH}`).catch(() => undefined);
+    // Keep the native ACP id and session artifacts in /workspace so a
+    // replacement host can resume after restoring the provider filesystem
+    // checkpoint. Explicit logical destruction or harness replacement removes
+    // the complete isolated session root; configuration and cache files must
+    // not outlive the session merely because the agent wrote them beside its
+    // native transcript.
+    if (reason !== "shutdown" && stateBinding) {
+      await runtime?.sandbox.exec(
+        `rm -rf -- ${shellQuote(sandboxShellPath(stateBinding.rootPath))}`,
+      )
+        .catch(() => undefined);
     }
   }
 
   async #loadCheckpoint(
     runtime: HarnessRuntime,
     configKey: string,
+    checkpointPath: string,
   ): Promise<string | null> {
     let parsed: unknown;
     try {
-      parsed = JSON.parse(await runtime.sandbox.readFile(ACP_CHECKPOINT_PATH));
+      parsed = JSON.parse(await runtime.sandbox.readFile(checkpointPath));
     } catch {
       return null;
     }
@@ -219,6 +283,7 @@ export class AcpSandboxHarness implements HarnessInterface {
     runtime: HarnessRuntime,
     configKey: string,
     acpSessionId: string,
+    checkpointPath: string,
   ): Promise<void> {
     if (!acpSessionId) return;
     const checkpoint: AcpSandboxCheckpoint = {
@@ -227,14 +292,66 @@ export class AcpSandboxHarness implements HarnessInterface {
       acpSessionId,
     };
     await runtime.sandbox.writeFile(
-      ACP_CHECKPOINT_PATH,
+      checkpointPath,
       `${JSON.stringify(checkpoint)}\n`,
     );
+  }
+
+  async #ensureStateBinding(
+    runtime: HarnessRuntime,
+    binding: AcpAgentStateBinding,
+  ): Promise<void> {
+    await runtime.sandbox.writeFile(
+      `${binding.rootPath}/session-binding.json`,
+      `${JSON.stringify({
+        version: 1,
+        adapter_id: binding.adapterId,
+        durability: binding.durability,
+        resume: binding.resume,
+        session_artifacts: binding.sessionArtifacts,
+      })}\n`,
+    );
+  }
+
+  async #hasRequiredNativeState(
+    runtime: HarnessRuntime,
+    binding: AcpAgentStateBinding,
+  ): Promise<boolean> {
+    const required = binding.sessionArtifacts.filter(
+      (artifact) => artifact.requiredForResume,
+    );
+    if (required.length === 0) return true;
+    for (const artifact of required) {
+      const predicate = artifact.kind === "directory" ? "-d" : "-f";
+      // Relative-to-/workspace paths work in real sandbox containers and in
+      // LocalSubprocessSandbox, whose shell cwd is the host-backed workspace.
+      // Its exec() intentionally cannot rewrite paths embedded in shell text.
+      const path = sandboxShellPath(artifact.path);
+      try {
+        const result = await runtime.sandbox.exec(
+          `if [ ${predicate} ${shellQuote(path)} ]; then printf present; else printf missing; fi`,
+        );
+        if (result.trim() !== "present") return false;
+      } catch {
+        return false;
+      }
+    }
+    return true;
   }
 
   #emitError(runtime: HarnessRuntime, message: string): void {
     runtime.broadcast({ type: "session.error", error: message } as SessionEvent);
   }
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'"'"'`)}'`;
+}
+
+function sandboxShellPath(path: string): string {
+  return path.startsWith("/workspace/")
+    ? path.slice("/workspace/".length)
+    : path;
 }
 
 async function configurationDigest(value: string): Promise<string> {

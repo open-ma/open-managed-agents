@@ -260,6 +260,12 @@ export class DaytonaSandbox implements SandboxExecutor {
     this.logger.log(`mounted memory store ${opts.storeName} → ${target} ${opts.readOnly ? "(ro)" : ""}`);
   }
 
+  sessionOutputMountCapabilities(): { durability: "durable" } | null {
+    return this.opts.memoryBucket === undefined
+      ? null
+      : { durability: "durable" };
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;

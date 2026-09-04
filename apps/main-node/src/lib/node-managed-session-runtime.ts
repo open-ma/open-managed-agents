@@ -12,6 +12,7 @@ import type {
   AcceptedSessionEvents,
   SessionEventDispatchPort,
 } from "@open-managed-agents/session-runtime-contract/dispatch";
+import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
 import type {
   SessionLifecycleCommandPort,
   StartSessionExecution,
@@ -41,6 +42,11 @@ export type StopNodeManagedSessionRuntime = StopSessionExecution;
 
 export type AcceptNodeManagedSessionEvents = AcceptedSessionEvents;
 
+export interface ExecuteNodeManagedSessionEvents
+  extends AcceptNodeManagedSessionEvents {
+  executionFence?: SessionExecutionFence;
+}
+
 export type ArchiveNodeManagedSessionThread = ArchivedSessionThread;
 
 export type SubscribeNodeManagedSessionRuntime =
@@ -50,9 +56,19 @@ export type SubscribeNodeManagedSessionRuntime =
 export interface NodeManagedSessionRuntimeDriver {
   start(input: StartNodeManagedSessionRuntime): Promise<void>;
   stop(input: StopNodeManagedSessionRuntime): Promise<void>;
-  accept(input: AcceptNodeManagedSessionEvents): Promise<void>;
+  accept(input: ExecuteNodeManagedSessionEvents): Promise<void>;
   archiveThread(input: ArchiveNodeManagedSessionThread): Promise<void>;
   subscribe(input: SubscribeNodeManagedSessionRuntime): AsyncIterable<unknown>;
+}
+
+export interface NodeManagedSessionRuntimeCoordination
+  extends SessionEventDispatchPort
+{
+  cancelSession(input: {
+    workspaceId: string;
+    sessionId: string;
+    reason: string;
+  }): Promise<void>;
 }
 
 export interface NodeManagedSessionRuntimeEngine {
@@ -61,7 +77,9 @@ export interface NodeManagedSessionRuntimeEngine {
     output: (frame: unknown) => Promise<void>,
   ): Promise<void>;
   stop(input: StopNodeManagedSessionRuntime): Promise<void>;
-  accept(input: AcceptNodeManagedSessionEvents): Promise<void>;
+  accept(input: AcceptNodeManagedSessionEvents & {
+    executionFence?: SessionExecutionFence;
+  }): Promise<void>;
   archiveThread(input: ArchiveNodeManagedSessionThread): Promise<void>;
 }
 
@@ -75,6 +93,7 @@ export interface DefaultNodeManagedSessionRuntimeDriverDependencies {
 
 export interface NodeManagedSessionRunnerAcceptInput
   extends AcceptNodeManagedSessionEvents {
+  executionFence?: SessionExecutionFence;
   initialEvents: SessionBootstrapEvent[];
   historyEvents: SessionEventView[];
   output(frame: unknown): Promise<void>;
@@ -132,8 +151,13 @@ export class ApplicationBackedNodeManagedSessionRuntimeEngine
     if (history.type === "not_found") {
       throw new Error(`Session ${input.sessionId} history was not found`);
     }
+    const executionFence = "executionFence" in input && input.executionFence !== null &&
+      typeof input.executionFence === "object"
+      ? input.executionFence as SessionExecutionFence
+      : undefined;
     await this.dependencies.runner.accept({
       ...input,
+      ...(executionFence !== undefined ? { executionFence } : {}),
       initialEvents: history.initialEvents,
       historyEvents: history.events,
       output,
@@ -196,6 +220,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
 {
   private readonly outputChains = new ScopedSessionMap<Promise<void>>();
   private readonly starts = new ScopedSessionMap<Promise<void>>();
+  private readonly executionFences = new ScopedSessionMap<SessionExecutionFence>();
   private readonly realtime: SessionRealtimeHub;
 
   constructor(
@@ -208,7 +233,12 @@ export class DefaultNodeManagedSessionRuntimeDriver
     let start = this.starts.get(input);
     if (start === undefined) {
       start = this.dependencies.engine.start(input, (frame) =>
-        this.enqueueOutput(input.workspaceId, input.sessionId, frame));
+        this.enqueueOutput(
+          input.workspaceId,
+          input.sessionId,
+          frame,
+          this.executionFences.get(input),
+        ));
       this.starts.set(input, start);
     }
     try {
@@ -231,17 +261,37 @@ export class DefaultNodeManagedSessionRuntimeDriver
     }
   }
 
-  async accept(input: AcceptNodeManagedSessionEvents): Promise<void> {
-    if (!this.starts.has(input)) {
-      await this.start({
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        session: input.session,
-        environment: input.environment,
-        initialEvents: [],
-      });
+  async accept(input: ExecuteNodeManagedSessionEvents): Promise<void> {
+    const fence = input.executionFence;
+    if (
+      fence !== undefined &&
+      (fence.workspaceId !== input.workspaceId ||
+        fence.sessionId !== input.sessionId)
+    ) {
+      throw new Error("Session execution fence scope does not match runtime input");
     }
-    await this.dependencies.engine.accept(input);
+    if (fence !== undefined) this.executionFences.set(input, fence);
+    try {
+      if (!this.starts.has(input)) {
+        await this.start({
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          session: input.session,
+          environment: input.environment,
+          initialEvents: [],
+        });
+      }
+      const { executionFence: _executionFence, ...accepted } = input;
+      await this.dependencies.engine.accept({
+        ...accepted,
+        ...(fence !== undefined && { executionFence: fence }),
+      });
+      await this.outputChains.get(input);
+    } finally {
+      if (fence !== undefined && this.executionFences.get(input) === fence) {
+        this.executionFences.delete(input);
+      }
+    }
   }
 
   archiveThread(input: ArchiveNodeManagedSessionThread): Promise<void> {
@@ -275,6 +325,7 @@ export class DefaultNodeManagedSessionRuntimeDriver
     workspaceId: string,
     sessionId: string,
     frame: unknown,
+    executionFence?: SessionExecutionFence,
   ): Promise<void> {
     const event = decodeRuntimeProducedSessionEvent(frame);
     if (event !== null) {
@@ -283,9 +334,15 @@ export class DefaultNodeManagedSessionRuntimeDriver
         const projected = await projection.recordSessionRuntimeEvents({
           sessionId,
           events: [event],
+          ...(executionFence !== undefined && { executionFence }),
         });
         if (projected.type === "recorded") break;
         if (projected.type === "not_found") return;
+        if (projected.type === "execution_fence_lost") {
+          throw new Error(
+            `Session ${workspaceId}/${sessionId} execution fence was lost`,
+          );
+        }
         if (attempt === 2) throw new Error(projected.message);
       }
     }
@@ -310,12 +367,18 @@ export class DefaultNodeManagedSessionRuntimeDriver
     workspaceId: string,
     sessionId: string,
     frame: unknown,
+    executionFence?: SessionExecutionFence,
   ): Promise<void> {
     const scope = { workspaceId, sessionId };
     const previous = this.outputChains.get(scope) ?? Promise.resolve();
     const current = previous
       .catch(() => undefined)
-      .then(() => this.handleOutput(workspaceId, sessionId, frame));
+      .then(() => this.handleOutput(
+        workspaceId,
+        sessionId,
+        frame,
+        executionFence,
+      ));
     this.outputChains.set(scope, current);
     current.then(
       () => this.removeOutputChain(scope, current),
@@ -346,18 +409,32 @@ export class NodeManagedSessionRuntimeAdapter
     SessionEventStreamPort,
     SessionThreadEventStreamPort
 {
-  constructor(private readonly driver: NodeManagedSessionRuntimeDriver) {}
+  constructor(
+    private readonly driver: NodeManagedSessionRuntimeDriver,
+    private readonly coordination?: NodeManagedSessionRuntimeCoordination,
+  ) {}
 
   async sessionStarted(input: StartSessionExecution): Promise<void> {
+    if (this.coordination !== undefined) return;
     await this.driver.start(input);
   }
 
   async sessionStopped(input: StopSessionExecution): Promise<void> {
+    if (this.coordination !== undefined) {
+      await this.coordination.cancelSession({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        reason: `session_${input.reason}`,
+      });
+    }
     await this.driver.stop(input);
   }
 
   async sessionEventsAccepted(input: AcceptedSessionEvents): Promise<void> {
-    await this.driver.accept(input);
+    await (this.coordination ?? {
+      sessionEventsAccepted: (accepted: AcceptedSessionEvents) =>
+        this.driver.accept(accepted),
+    }).sessionEventsAccepted(input);
   }
 
   async sessionThreadArchived(input: ArchivedSessionThread): Promise<void> {

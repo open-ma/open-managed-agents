@@ -393,7 +393,18 @@ describe("ManagedAgentsSessionHost", () => {
       async *prompt(input: string) {
         expect(input).toBe("Inspect the API");
         yield { type: "agent_message_chunk", text: "Looking" };
-        yield { type: "promptComplete", response: { stopReason: "end_turn" } };
+        yield {
+          type: "promptComplete",
+          response: {
+            stopReason: "end_turn",
+            usage: {
+              totalTokens: 110,
+              inputTokens: 10,
+              outputTokens: 5,
+              cachedReadTokens: 95,
+            },
+          },
+        };
       },
       async dispose() {},
     });
@@ -423,6 +434,23 @@ describe("ManagedAgentsSessionHost", () => {
         sessionId: "session-2",
         turnId: "turn-1",
         event: { type: "agent_message_chunk", text: "Looking" },
+      },
+      {
+        type: "session.event",
+        sessionId: "session-2",
+        turnId: "turn-1",
+        event: {
+          type: "promptComplete",
+          response: {
+            stopReason: "end_turn",
+            usage: {
+              totalTokens: 110,
+              inputTokens: 10,
+              outputTokens: 5,
+              cachedReadTokens: 95,
+            },
+          },
+        },
       },
       {
         type: "session.complete",

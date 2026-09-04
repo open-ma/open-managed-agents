@@ -168,7 +168,10 @@ export function cfSessionLifecycle(c: Context): SessionLifecycleHooks {
       await services.sessionSecrets.deleteAllForSession({ tenantId, sessionId });
       // 2. file_metadata + R2 blobs (orphan files belonging to session)
       try {
-        const orphans = await services.files.deleteBySession({ sessionId });
+        const orphans = await services.files.deleteBySession({
+          tenantId,
+          sessionId,
+        });
         const bucket = services.filesBlob;
         if (bucket && orphans.length) {
           await Promise.all(

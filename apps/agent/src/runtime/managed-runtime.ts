@@ -15,6 +15,7 @@ import type {
   SandboxCheckpointHandle,
   SandboxProviderPort,
 } from "@open-managed-agents/sandbox";
+import { supportsSessionOutputMount } from "@open-managed-agents/sandbox";
 import type { Env } from "@open-managed-agents/shared";
 
 import { CloudflareSandbox } from "./sandbox";
@@ -41,6 +42,12 @@ export function createCloudflareManagedRuntime(
   env: Env,
   options: CloudflareManagedRuntimeOptions = {},
 ) {
+  const hasDurableOutputMount = Boolean(
+    env.FILES_BUCKET
+      && env.R2_ENDPOINT
+      && env.R2_ACCESS_KEY_ID
+      && env.R2_SECRET_ACCESS_KEY,
+  );
   const instantiate = options.createSandbox
     ?? ((runtimeEnv: Env, runtimeId: string) =>
       new CloudflareSandbox(runtimeEnv, runtimeId));
@@ -89,6 +96,26 @@ export function createCloudflareManagedRuntime(
             store: new CfR2BlobStore(env.FILES_BUCKET),
             keyPrefix: "managed-runtime-output-candidates",
             durability: "durable" as const,
+            ...(hasDurableOutputMount
+              ? {
+                  durableMount: {
+                    durability: "durable" as const,
+                    async attach({ runtime, scope, signal }) {
+                      signal.throwIfAborted();
+                      if (!supportsSessionOutputMount(runtime)) {
+                        throw new Error(
+                          "Cloudflare runtime does not expose the Session output mount Port",
+                        );
+                      }
+                      await runtime.mountSessionOutputs({
+                        tenantId: scope.workspaceId,
+                        sessionId: scope.sessionId,
+                      });
+                      signal.throwIfAborted();
+                    },
+                  },
+                }
+              : {}),
           },
         }),
     drivers: ["ama_worker"],

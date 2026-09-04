@@ -306,6 +306,83 @@ continues resource-fence heartbeats through drain, checkpoint, output
 collection, and the atomic publication—not only while the harness command is
 running.
 
+### Session execution ownership across Cloudflare and Node
+
+The Session brain depends on `SessionEventDispatchPort`; it does not depend on
+Durable Objects, a process-local registry, or SQL. The two production presets
+provide equivalent ownership semantics through different adapters:
+
+```text
+accepted Managed Events
+          │
+          ▼
+SessionEventDispatchPort
+   ├─ Cloudflare ──> one SessionDO id per Session
+   │                  └─ DO SQLite pending-event queue + structural single writer
+   │
+   └─ Node ───────> durable execution outbox
+                      └─ SessionExecutionCoordinatorPort
+                           └─ SQL claim/lease/generation adapter
+                                └─ stateless Node workers
+```
+
+Cloudflare does not emulate the Node SQL lease queue inside a Durable Object.
+The DO namespace already routes one Session id to one logical actor, and its
+SQLite queue survives actor eviction. Node processes do not have that
+structural singleton, so an accepted actionable Event batch is atomically
+written to the event log and `managed_session_executions`; any replica may
+then claim it under a renewable lease.
+
+`managed_session_executions` is Node runtime infrastructure, not a Managed
+Agents resource. It is present only in the Node PostgreSQL and SQLite schema
+barrels and migrations. It does not add a field to `managed_sessions`, change
+an SDK response, or appear in the Cloudflare D1 schema. A Redis, queue, or
+external scheduler adapter may implement `SessionExecutionCoordinatorPort`
+without this table.
+
+The Node coordinator guarantees:
+
+1. accepted Events and the execution outbox commit in one database
+   transaction under the Session revision CAS;
+2. strict FIFO within a Session and parallel claims across Sessions;
+3. one winning claim generation, renewable only by its owner/attempt;
+4. expired attempts may be reclaimed only by a different live owner;
+5. interrupt intent is durable, cancels queued work, and is observed through
+   renewal by a running owner;
+6. every canonical runtime projection is committed with the execution fence,
+   so an expired generation cannot append accepted output.
+
+PostgreSQL acceptance first obtains a write lock through the existing Session
+revision row. Event inserts, interrupt updates, the outbox insert, and the
+revision advance are one transaction. A concurrent writer whose revision is
+stale cannot leak an Event or execution row. SQLite gets the same result from
+its serialized write transaction. Deployment applies the generated Node
+migrations; request handling never creates or alters this schema.
+
+Execution attempts are **at least once**, not arbitrary side effects exactly
+once. After lease loss a stale process is cancelled and all later canonical
+Session writes fail the generation fence, but a tool call that already changed
+GitHub, a database, or another external service cannot be undone. Such tools
+need an idempotency key or compensation. A renewal transport error is treated
+as uncertain ownership: the local runtime is stopped rather than allowed to
+continue speculatively.
+
+Harness placement is below this boundary. For a harness outside the sandbox,
+the execution fence directly gates Session projection. For a supervised
+harness inside a sandbox, the same outer execution owns a nested Runtime Host
+resource fence:
+
+```text
+Session execution generation (canonical Event authority)
+  └─ Runtime resource generation (sandbox/workspace/output authority)
+       └─ supervisor heartbeat (in-sandbox process health)
+```
+
+Losing the outer execution cancels the inner host. Losing the inner resource
+fence or supervisor heartbeat fails that execution attempt. The inner fence
+may never grant authority to write canonical Session Events after the outer
+generation has expired.
+
 ## Capability negotiation
 
 Capability negotiation happens during Runtime Host composition, before work

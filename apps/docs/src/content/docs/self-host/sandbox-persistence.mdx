@@ -133,6 +133,103 @@ runtime is a latency optimization unless an external checkpoint also exists.
   token, not a memory image.
 </Aside>
 
+## ACP native session persistence
+
+OpenMA does not copy Harbor's per-agent interaction adapters. Every external
+coding agent is still started and driven through ACP: `initialize`,
+`session/new` or `session/resume` (with legacy `session/load` fallback),
+`session/prompt`, `session/cancel`, and
+`session/close`.
+
+It does reuse the reliable part of Harbor's installed-agent adapters: the
+agent-specific knowledge of where native session state lives. Before the ACP
+process starts, `@open-managed-agents/acp-runtime/native-state` binds that
+state below:
+
+```text
+/workspace/.openma/harness-state/acp/<session-id>/<profile>/v1/
+├── acp-session.json       # ACP logical session id + configuration hash
+├── session-binding.json   # exclusive native-session artifact manifest
+└── native/                # isolated runtime root; only declared artifacts are portable
+```
+
+The binding is deliberately session-only. It does not claim that the agent's
+configuration, credentials, skills, telemetry, caches, logs, shell history, or
+ordinary home directory are portable. `session-binding.json` is the complete
+allowlist of native artifacts required to continue one agent session. A
+provider may checkpoint the containing `/workspace` as one coarse filesystem
+candidate, but sibling files outside that manifest are not part of the native
+session contract and consumers must not depend on them during restore.
+
+A graceful drain stops the ACP writer before the candidate is finalized; a
+replacement runtime restores the candidate first and then calls ACP
+`session/resume`, falling back to legacy `session/load` when that is the
+agent's advertised capability. This is filesystem recovery, not process-memory
+recovery. A hard loss before the next successful candidate publication can
+lose the current unfinished turn, but cannot replace the last active candidate
+with a partial upload.
+
+Host shutdown keeps this session namespace for the next placement. Logical
+session destruction or harness replacement removes the entire isolated
+namespace, including the ACP id, manifest, declared session artifacts, and any
+incidental sibling files the native process created there.
+
+Native session artifacts do not have an independent continuous uploader. They
+use the workspace drain/checkpoint/finalize lifecycle, while session outputs
+remain a separate public-delivery namespace with different retention
+semantics. OpenMA declares an allowlist rather than trying to maintain an
+unbounded blacklist for every agent release. An artifact marked `directory` is
+recursive. An artifact marked `sqlite` includes the base database and its
+`-wal` and `-shm` sidecars as one quiesced unit.
+
+On restore, OpenMA validates every artifact marked `requiredForResume`. When
+the ACP checkpoint is valid and the required native state is present, recovery
+is lossless through `session/resume`. When required state is missing, OpenMA
+does not send a stale resume id and does not replay prior tool calls. It starts
+a new ACP session and sends exactly one bounded recovery message projected
+from the canonical Managed Agents event log. The message includes the latest
+compaction summary, subsequent user/assistant turns, completed tool results,
+attachment references and the current request; raw completed-tool inputs are
+omitted. A `session.warning` with source `acp_semantic_recovery` marks this
+lossy boundary for UI and observability.
+
+| ACP profile | Bound runtime root | Portable native-session artifacts | Recovery claim |
+|---|---|---|---|
+| Claude Code | `CLAUDE_CONFIG_DIR` | `projects/` | native + ACP load |
+| Codex | `CODEX_HOME` | `sessions/` | native + ACP load |
+| Gemini CLI | `GEMINI_CLI_HOME` | `.gemini/tmp/` | native + ACP load |
+| OpenCode | `XDG_DATA_HOME`, `XDG_STATE_HOME` | OpenCode session data/state stores used by the current native resume path | native + ACP load |
+| Pi / pi-acp | `PI_CODING_AGENT_DIR`, isolated `HOME` | Pi `sessions/` plus pi-acp `session-map.json` | native + ACP load |
+| MiniMax Code | `MINIMAX_DATA_DIR` | `v2/sessions/` plus both v2 SQLite indexes | native + ACP load |
+| GitHub Copilot CLI | isolated `HOME` | `session-state/` plus `session-store.db` family | native + ACP load |
+| Cortex Code | isolated `HOME` | `.snowflake/cortex/conversations/` | native + ACP load |
+| Goose | `XDG_DATA_HOME`, `XDG_STATE_HOME` | both Goose data/state trees | native + ACP load |
+| Junie | isolated `HOME` | `.junie/sessions/` | native + ACP load |
+| Kimi CLI | `KIMI_SHARE_DIR` | `sessions/` | native + ACP load |
+| Qwen Code | isolated `HOME` | `.qwen/projects/` | native + ACP load |
+| Mistral Vibe | `VIBE_HOME` | `logs/session/` | capture only; native resume is not advertised |
+| DeepSeek Harness ACP | `DSH_HOME`, `DSH_SESSION_ROOT` | `sessions/` JSONL tree | OMA extension; native + ACP resume/load |
+| Hermes | `HERMES_HOME` | `state.db` family | OMA extension; native + ACP load |
+
+Copying only a SQLite base file while an agent is writing is not a valid
+checkpoint. Configuration and authentication are reconstructed from the Agent,
+Model Card, and Vault inputs on every placement; they are never recovered from
+the native-session artifact set.
+
+Harbor also has resume-capable CLI adapters for Aider, Kimi Code, and MiMo.
+They do not currently have a compatible ACP entry in OpenMA's registry, so
+they are reported as `requires-acp-adapter`; OpenMA does not silently fall
+back to a bespoke CLI protocol. Once a real ACP adapter exists, adding its
+native-state profile does not change the host protocol.
+
+ACP `PromptResponse.usage` is projected into paired
+`span.model_request_start` / `span.model_request_end` events. The terminal
+event preserves `inputTokens`, `outputTokens`, `cachedReadTokens`, and
+`cachedWriteTokens` as Managed Agents `model_usage`, so a restored native
+session's provider-prefix cache behavior remains observable in both direct
+sandbox and daemon-hosted placements. Standard `usage_update` remains context
+window occupancy (`used` / `size`) and is not treated as model billing usage.
+
 ## Session output strategies
 
 Only files deliberately written under `/mnt/session/outputs` are deliverables.
@@ -186,9 +283,17 @@ what a vendor might theoretically support.
 
 | Preset | Sandbox lifecycle | Workspace | Outputs | Runtime memory | Driver lanes |
 |---|---|---|---|---|---|
-| Node + Docker | hard remove; no suspend | filesystem `checkpoint_restore` | filesystem `final_collect` | none | `ama_worker` |
+| Node + Docker | hard remove; no suspend | filesystem `checkpoint_restore` | filesystem `final_collect` | none | `ama_worker`; `openma_supervised` |
 | Cloudflare Sandbox | destroy + durable orphan reap; no runtime-scoped resume | `createBackup`/`restoreBackup` as filesystem `checkpoint_restore` | R2 `final_collect` when `FILES_BUCKET` exists | not advertised | `ama_worker`; full preset also installs `openma_supervised` transport |
 | E2B / compatible | suspend/resume + kill/reap | `retained_runtime` and provider snapshot as `checkpoint_restore` | S3-compatible `final_collect` only with a complete store configuration | not advertised | `ama_worker` |
+
+Daytona, LiteBox and BoxRun are intentionally absent from this ManagedRuntime
+Host table. Their current implementations are `SandboxPort` adapters only:
+they expose provider-specific file/process primitives, but do not yet provide
+the host-fenced lease, immutable workspace candidate, fenced output manifest,
+or orphan-reap composition required by this contract. Their raw adapter
+capabilities remain documented in the [provider conformance registry](/self-host/managed-runtime-host/#provider-capabilities)
+and are not silently promoted to durable runtime semantics.
 
 For E2B, durable outputs require either an explicit `outputStore` or all of:
 
@@ -253,16 +358,17 @@ output strategy; it does not pretend local output files are persisted.
 | Harness outside sandbox | Real Pi loop with a real local subprocess Sandbox and real filesystem tool; only the LLM is a scripted Pi provider |
 | ACP process inside sandbox | Real stateful ACP child across turns, logical-session recovery after child crash, lease renewal and shutdown ordering |
 | E2B ACP mapping | Stateful E2B SDK adapter exercised against a scripted E2B service; no E2B credential is required in normal CI |
-| Generic supervised protocol | Ready/heartbeat/completion/drain/timeout/stop state machine with deterministic transport faults |
+| Generic supervised protocol | Ready/heartbeat/completion/drain/timeout/stop state machine with deterministic transport faults and a real Docker supervisor process |
+| ACP native recovery | Real child crash, workspace checkpoint copy, fresh sandbox + fresh harness, native state restore, then ACP `session/resume` |
+| ACP semantic recovery | Delete required native state after checkpoint restore; assert one `session/new` recovery prompt, bounded canonical history, no completed-tool input replay, and an explicit warning boundary |
 | Direct worker in a runtime | Real Docker Engine, bind paths, process execution, checkpoint restore, output manifest and hard kill after fence loss |
 | Official AMA worker wire | Installed `@anthropic-ai/sdk` EnvironmentWorker runs poll, ack, heartbeat, Session event/tool-result and force-stop unchanged |
 | Cloudflare deployment | Credentialed staging SDK/Console/CLI and SSE turn; deterministic external LLM, real Worker/DO/storage path |
 
 The suite therefore tests both placement models, but not every combination as
 a credentialed vendor E2E. In particular, the E2B test is an adapter-level
-protocol simulation, and the generic `openma_supervised` driver is not yet run
-as a real Docker supervisor process. These are provider certification lanes,
-not hidden guarantees of the portable core.
+protocol simulation. Credentialed E2B/Modal/Cloudflare runs remain provider
+certification lanes, not hidden guarantees of the portable core.
 
 Run the portable gates with:
 

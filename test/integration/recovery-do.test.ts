@@ -941,7 +941,6 @@ describe("SessionDO recovery — DO-level", () => {
     await runDurableObjectAlarm(stub);
     await new Promise((r) => setTimeout(r, 50));
     spyArmed = false;
-
     // No setAlarm — nothing to keep alive.
     expect(setAlarmInside.length).toBe(0);
     // deleteAlarm DID fire — _scheduleNextAlarm cleared the slot

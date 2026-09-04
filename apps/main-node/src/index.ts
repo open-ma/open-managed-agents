@@ -201,6 +201,7 @@ import {
 } from "@open-managed-agents/managed-agents-adapters-sql";
 import {
   createSqlSessionRuntimeReaders,
+  SqlSessionExecutionCoordinator,
 } from "@open-managed-agents/session-runtime-sql";
 import { MemorySessionRealtimeHub } from "@open-managed-agents/session-realtime-memory";
 import {
@@ -288,6 +289,7 @@ import {
   NodeManagedSessionRuntimeAdapter,
 } from "./lib/node-managed-session-runtime.js";
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
+import { NodeSessionExecutionWorker } from "./lib/node-session-execution-worker.js";
 
 registerCoreHarnesses();
 
@@ -914,8 +916,33 @@ const managedRuntimeDriver = new DefaultNodeManagedSessionRuntimeDriver({
       persistence: new SqlSessionRuntimeProjectionPersistence(sql),
     }),
 });
+const managedSessionExecutionWorker = new NodeSessionExecutionWorker({
+  coordinator: new SqlSessionExecutionCoordinator(sql),
+  context: managedRuntimeReaders.executionContext,
+  runtime: {
+    run: async ({ executionId: _executionId, fence, ...input }) => {
+      await managedRuntimeDriver.accept({ ...input, executionFence: fence });
+    },
+    cancel: async (input) => {
+      managedRuntimeRunner.cancel(input);
+    },
+  },
+  ownerId: process.env.OMA_SESSION_EXECUTION_OWNER_ID ??
+    `node:${process.pid}:${nanoid()}`,
+  clock: { now: () => new Date() },
+  ids: { nextAttemptId: () => `attempt_${nanoid()}` },
+  leaseTtlMs: 30_000,
+  heartbeatIntervalMs: 10_000,
+  maxConcurrent: Number(process.env.OMA_SESSION_EXECUTION_CONCURRENCY ?? 8),
+  onError: (err) => logger.error(
+    { err, op: "main-node.session_execution.background_failed" },
+    "managed Session execution background operation failed",
+  ),
+});
+managedSessionExecutionWorker.start();
 const managedSessionRuntime = new NodeManagedSessionRuntimeAdapter(
   managedRuntimeDriver,
+  managedSessionExecutionWorker,
 );
 
 const persistedManagedEnvironments = new SqlSessionEnvironmentSource(sql);
@@ -940,6 +967,11 @@ const nodeManagedEnvironments: SessionEnvironmentSourcePort = {
     };
   },
 };
+const nodeSessionLifecycleHooks = nodeSessionLifecycle({
+  files: filesService,
+  filesBlob,
+  outputs: nodeOutputsAdapter(outputsRoot),
+});
 const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
   environments: nodeManagedEnvironments,
   runtime: managedSessionRuntime,
@@ -949,12 +981,19 @@ const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
     stop: (input) =>
       managedEnvironmentWorkEnqueuerFor(input.workspaceId).stop(input),
   },
+  cleanupSession: async ({ workspaceId, sessionId }) => {
+    await nodeSessionLifecycleHooks.cascadeDeleteFiles?.({
+      tenantId: workspaceId,
+      sessionId,
+    });
+  },
 });
 const managedResourceCipher = platformRootSecret === undefined
   ? null
   : new WebCryptoAesGcm(platformRootSecret, "managed.sessions.resources");
 const managedSessionsComposition = new SqlManagedSessionsComposition({
   client: sql,
+  executionOutbox: true,
   environments: nodeManagedEnvironments,
   lifecycle: managedSessionLifecycle,
   runtime: managedSessionRuntime,
@@ -1744,7 +1783,7 @@ v1.route("/oma/sessions", buildSessionRoutes({
   services,
   router: sessionRouter,
   outputs: nodeOutputsAdapter(outputsRoot),
-  lifecycle: nodeSessionLifecycle({ files: filesService, filesBlob }),
+  lifecycle: nodeSessionLifecycleHooks,
   // Node has no per-tenant cloud environments yet — every agent is treated
   // as a local runtime. The package's loadEnvironment hook returns a
   // synthetic snapshot so session create doesn't 404 on missing env_id.
@@ -2314,6 +2353,7 @@ logger.info({ op: "main-node.scheduler.started" }, "scheduler started");
 
 const shutdown = async (signal: string) => {
   logger.info({ op: "main-node.shutdown", signal }, `received ${signal}, shutting down`);
+  managedSessionExecutionWorker.stop();
   try { await managedSessionsComposition.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_sessions_stop_failed" }, "managed Sessions app graphs stop failed"); }
   try { await managedAgentsPlatform.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_platform_stop_failed" }, "managed platform stop failed"); }
   try { await managedCredentialsPlatform.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_credentials_platform_stop_failed" }, "managed Credentials platform stop failed"); }

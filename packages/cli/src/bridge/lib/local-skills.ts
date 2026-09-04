@@ -8,7 +8,6 @@
  *   - codex-acp         → only ~/.codex/AGENTS.md (single global doc; not a
  *                         per-skill dir, so no enumerable items to blocklist)
  *   - hermes            → no documented per-skill dir convention yet
- *   - openclaw          → wraps other agents; no skill ecosystem of its own
  *
  * (ids match the official ACP registry's slugs; pre-A2 ids like
  * "claude-agent-acp" or "gemini-cli" route here via overlay aliases.)
@@ -40,7 +39,7 @@ export interface LocalSkill {
   description?: string;
   /** Where the skill came from — affects how Console labels it. */
   source: "global" | "plugin" | "project";
-  /** When source=plugin, the plugin name (e.g. "openclaw"). */
+  /** When source=plugin, the plugin name. */
   source_label?: string;
   /** Absolute path on disk — daemon-only, not persisted server-side. */
   path: string;

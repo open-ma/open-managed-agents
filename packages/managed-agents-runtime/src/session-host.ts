@@ -243,6 +243,12 @@ export class ManagedAgentsSessionHost {
           error?: unknown;
         } | null;
         if (sentinel?.type === "promptComplete") {
+          this.#emit({
+            type: "session.event",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            event,
+          });
           continue;
         }
         if (sentinel?.type === "promptError") {

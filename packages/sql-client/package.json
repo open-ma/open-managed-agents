@@ -5,6 +5,7 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./adapters/cf-do": "./src/adapters/cf-do.ts",
     "./adapters/cf-d1": "./src/adapters/cf-d1.ts",
     "./adapters/better-sqlite3": "./src/adapters/better-sqlite3.ts",
     "./adapters/postgres": "./src/adapters/postgres.ts"

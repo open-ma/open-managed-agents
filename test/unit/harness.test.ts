@@ -389,7 +389,7 @@ describe("Sandbox lifecycle", () => {
     expect(restoreBackup).toHaveBeenCalledOnce();
   });
 
-  it("Cloudflare managed runtime advertises portable filesystem restore without warm-process claims", async () => {
+  it("Cloudflare managed runtime does not claim a durable output mount without R2 FUSE credentials", async () => {
     const runtime = createCloudflareManagedRuntime({ SANDBOX: {}, FILES_BUCKET: {} } as any);
     const scope = {
       workspaceId: "workspace-1",
@@ -412,6 +412,141 @@ describe("Sandbox lifecycle", () => {
     await expect(runtime.harness.driverCapabilities(scope)).resolves.toEqual({
       drivers: ["ama_worker"],
     });
+  });
+
+  it("Cloudflare managed runtime advertises durable output mount with complete R2 FUSE credentials", async () => {
+    const runtime = createCloudflareManagedRuntime({
+      SANDBOX: {},
+      FILES_BUCKET: {},
+      R2_ENDPOINT: "https://example.r2.cloudflarestorage.com",
+      R2_ACCESS_KEY_ID: "access",
+      R2_SECRET_ACCESS_KEY: "secret",
+    } as any);
+    const scope = {
+      workspaceId: "workspace-1",
+      environmentId: "environment-1",
+      sessionId: "session-1",
+      workId: "work-1",
+    };
+
+    await expect(runtime.outputs.capabilities(scope)).resolves.toEqual({
+      strategies: [
+        { strategy: "durable_mount", durability: "durable" },
+        { strategy: "final_collect", durability: "durable" },
+      ],
+    });
+  });
+
+  it("Cloudflare managed runtime mounts Session outputs through the dedicated output Port", async () => {
+    const mounted: Array<{ tenantId: string; sessionId: string }> = [];
+    const fakeSandbox = {
+      runtimeHandle: () => ({ provider: "cloudflare", runtimeId: "session-1" }),
+      runtimeCapabilities: () => ({
+        lease: true,
+        suspend: [],
+        checkpoint: ["filesystem"],
+      }),
+      status: async () => "running",
+      renewLease: async () => {},
+      suspend: async () => { throw new Error("not supported"); },
+      resume: async () => {},
+      checkpoint: async () => ({
+        provider: "cloudflare",
+        checkpointId: "backup-1",
+        sourceRuntimeId: "session-1",
+        kind: "filesystem",
+        scope: "portable",
+      }),
+      exec: async () => "",
+      readFile: async () => "",
+      writeFile: async (path: string) => path,
+      destroy: async () => {},
+      sessionOutputMountCapabilities: () => ({ durability: "durable" }),
+      async mountSessionOutputs(input: { tenantId: string; sessionId: string }) {
+        mounted.push(input);
+      },
+    };
+    const runtime = createCloudflareManagedRuntime(
+      {
+        SANDBOX: {},
+        FILES_BUCKET: {},
+        R2_ENDPOINT: "https://example.r2.cloudflarestorage.com",
+        R2_ACCESS_KEY_ID: "access",
+        R2_SECRET_ACCESS_KEY: "secret",
+      } as any,
+      { createSandbox: () => fakeSandbox as any },
+    );
+    const scope = {
+      workspaceId: "tenant-1",
+      environmentId: "environment-1",
+      sessionId: "session-1",
+      workId: "work-1",
+    };
+    const fence = {
+      ...scope,
+      ownerId: "owner-1",
+      generation: 1,
+      token: "secret-fence",
+      expiresAt: "2026-09-04T00:00:00.000Z",
+    };
+    const signal = new AbortController().signal;
+    const workspace = await runtime.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace",
+      signal,
+    });
+    const outputs = await runtime.outputs.prepare({
+      scope,
+      fence,
+      strategy: "durable_mount",
+      idempotencyKey: "outputs",
+      signal,
+    });
+    const lease = await runtime.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: "durable_mount",
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs,
+      signal,
+    });
+    await runtime.outputs.attach({
+      scope,
+      fence,
+      strategy: "durable_mount",
+      binding: outputs,
+      sandbox: lease,
+      signal,
+    });
+
+    expect(mounted).toEqual([{ tenantId: "tenant-1", sessionId: "session-1" }]);
+  });
+
+  it("CloudflareSandbox surfaces an output mount failure to its Port caller", async () => {
+    const sandbox = new CloudflareSandbox({
+      SANDBOX: {},
+      FILES_BUCKET: {},
+      R2_ENDPOINT: "https://example.r2.cloudflarestorage.com",
+      R2_ACCESS_KEY_ID: "access",
+      R2_SECRET_ACCESS_KEY: "secret",
+    } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve({
+      unmountBucket: async () => {},
+      mountBucket: async () => { throw new Error("r2 mount unavailable"); },
+    });
+
+    await expect(sandbox.mountSessionOutputs({
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+    })).rejects.toThrow("r2 mount unavailable");
   });
 
   it("Cloudflare host preset preinstalls fencing, orphan cleanup, and both harness lanes", async () => {

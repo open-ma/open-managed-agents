@@ -1,4 +1,7 @@
-import type { SandboxExecutor } from "@open-managed-agents/sandbox";
+import {
+  withSandboxExecutionGuard,
+  type SandboxExecutor,
+} from "@open-managed-agents/sandbox";
 import type {
   HarnessContext,
   HarnessInterface,
@@ -114,6 +117,10 @@ export class DefaultNodeManagedSessionRunner
     private readonly dependencies: DefaultNodeManagedSessionRunnerDependencies,
   ) {}
 
+  cancel(input: { workspaceId: string; sessionId: string }): void {
+    this.abortControllers.get(input)?.abort();
+  }
+
   async start(input: StartNodeManagedSessionRuntime): Promise<void> {
     if (this.sandboxes.has(input)) return;
     const sandbox = await this.dependencies.buildSandbox({
@@ -154,12 +161,21 @@ export class DefaultNodeManagedSessionRunner
         `Managed Node runner does not yet support ${event.type}`,
       );
     }
-    const sandbox = this.sandboxes.get(input);
-    if (sandbox === undefined) {
+    const rawSandbox = this.sandboxes.get(input);
+    if (rawSandbox === undefined) {
       throw new Error(`Session ${input.sessionId} sandbox was not started`);
     }
     const abortController = new AbortController();
     this.abortControllers.set(input, abortController);
+    // The Node execution worker owns the durable fence and cancels this
+    // controller when renewal fails. The guard keeps provider calls from a
+    // stale runner from continuing after that cancellation; canonical frame
+    // writes are fenced separately by DefaultNodeManagedSessionRuntimeDriver.
+    const sandbox = input.executionFence === undefined
+      ? rawSandbox
+      : withSandboxExecutionGuard(rawSandbox, {
+          signal: abortController.signal,
+        });
     const runtime = new ManagedNodeHarnessRuntime({
       initialEvents: input.initialEvents,
       events: input.historyEvents,

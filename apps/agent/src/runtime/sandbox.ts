@@ -318,6 +318,17 @@ export class CloudflareSandbox
    * Best-effort: any failure logs and proceeds (the agent can still
    * write to /workspace as a fallback, just not callable-retrievable).
    */
+  sessionOutputMountCapabilities(): {
+    durability: "durable" | "best_effort";
+  } | null {
+    if (!this.env.FILES_BUCKET) return null;
+    return {
+      durability: this.fuseR2ConfigOrNull() === null
+        ? "best_effort"
+        : "durable",
+    };
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;
@@ -370,8 +381,10 @@ export class CloudflareSandbox
       console.error(
         `[sandbox] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
       );
-      // Don't throw — agent can fall back to /workspace, just not
-      // callable-retrievable via the outputs endpoints.
+      // The Port caller decides whether this is best-effort (SessionDO) or a
+      // required managed-runtime capability. Swallowing here made a failed
+      // mount indistinguishable from a durable attachment.
+      throw err;
     }
   }
 

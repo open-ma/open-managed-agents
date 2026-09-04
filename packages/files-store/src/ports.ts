@@ -57,11 +57,10 @@ export interface FileRepo {
 
   /**
    * Cascade hard-delete every file scoped to a session. Returns the deleted
-   * rows so the caller can DELETE each from R2. Used by the session-delete
-   * cleanup path (currently a TODO in routes/sessions.ts — service exposes
-   * the capability for when that lands).
+   * rows so the caller can DELETE each from R2. The tenant is part of the
+   * predicate so an opaque session id can never delete another tenant's row.
    */
-  deleteBySession(sessionId: string): Promise<FileRow[]>;
+  deleteBySession(tenantId: string, sessionId: string): Promise<FileRow[]>;
 }
 
 export interface Clock {

@@ -24,6 +24,10 @@ import type { SessionLifecycleHooks } from "@open-managed-agents/http-routes";
 export interface NodeSessionLifecycleDeps {
   files: FileService;
   filesBlob: BlobStore;
+  /** Remove the provider-owned `/mnt/session/outputs` projection. */
+  outputs?: {
+    deleteAll(tenantId: string, sessionId: string): Promise<void>;
+  };
 }
 
 /** Build the per-process lifecycle hooks bundle for main-node. */
@@ -61,24 +65,28 @@ export function nodeSessionLifecycle(deps: NodeSessionLifecycleDeps): SessionLif
     },
     cascadeDeleteFiles: async ({ tenantId, sessionId }) => {
       try {
-        const orphans = await deps.files.deleteBySession({ sessionId });
-        if (!orphans.length) return;
-        await Promise.all(
-          orphans.map((f) =>
-            deps.filesBlob.delete(f.r2_key).catch((err) => {
-              logWarn(
-                {
-                  op: "session.delete.blob_cleanup",
-                  session_id: sessionId,
-                  tenant_id: tenantId,
-                  blob_key: f.r2_key,
-                  err,
-                },
-                "orphan blob delete failed",
-              );
-            }),
-          ),
-        );
+        const orphans = await deps.files.deleteBySession({
+          tenantId,
+          sessionId,
+        });
+        if (orphans.length) {
+          await Promise.all(
+            orphans.map((f) =>
+              deps.filesBlob.delete(f.r2_key).catch((err) => {
+                logWarn(
+                  {
+                    op: "session.delete.blob_cleanup",
+                    session_id: sessionId,
+                    tenant_id: tenantId,
+                    blob_key: f.r2_key,
+                    err,
+                  },
+                  "orphan blob delete failed",
+                );
+              }),
+            ),
+          );
+        }
       } catch (err) {
         logWarn(
           {
@@ -88,6 +96,22 @@ export function nodeSessionLifecycle(deps: NodeSessionLifecycleDeps): SessionLif
             err,
           },
           "files metadata cleanup failed",
+        );
+      }
+      // Outputs are a separate provider-owned namespace from file metadata.
+      // Run this even when the metadata query returned zero rows: a previous
+      // attempt may have published output before its metadata was recorded.
+      try {
+        await deps.outputs?.deleteAll(tenantId, sessionId);
+      } catch (err) {
+        logWarn(
+          {
+            op: "session.delete.outputs_cleanup",
+            session_id: sessionId,
+            tenant_id: tenantId,
+            err,
+          },
+          "session output cleanup failed",
         );
       }
     },

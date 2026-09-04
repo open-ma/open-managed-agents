@@ -81,6 +81,9 @@ export interface AgentConfig {
    * OpenMA host retains ownership of the ACP loop and canonical event stream. */
   acp?: {
     agent: {
+      /** Canonical ACP registry id. Enables the matching native-state adapter;
+       * legacy records without it fall back to matching the command basename. */
+      id?: string;
       command: string;
       args?: string[];
       env?: Record<string, string | undefined>;

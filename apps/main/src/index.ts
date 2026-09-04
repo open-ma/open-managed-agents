@@ -695,13 +695,24 @@ function managedSessionsCompositionFor(ctx: AppCtx): SqlManagedSessionsCompositi
   const workspaceId = ctx.var.tenant_id;
   const selfHostedWork = managedEnvironmentWorkApplicationFor(ctx)
     .port(environmentSessionWorkEnqueuerPort);
+  const sessionLifecycleHooks = cfSessionLifecycle(ctx as never);
   return new SqlManagedSessionsComposition({
     client,
+    // Event acceptance and runtime work admission must share one D1 batch.
+    // SessionDO is only an execution host; a failed service-binding wakeup
+    // therefore cannot erase already accepted work.
+    executionOutbox: true,
     environments,
     lifecycle: new EnvironmentAwareSessionLifecycleRouter({
       environments,
       runtime,
       selfHostedWork,
+      cleanupSession: async ({ workspaceId, sessionId }) => {
+        await sessionLifecycleHooks.cascadeDeleteFiles?.({
+          tenantId: workspaceId,
+          sessionId,
+        });
+      },
     }),
     runtime,
     sealer: new CfManagedSessionSecretSealer(ctx.env.PLATFORM_ROOT_SECRET),
@@ -1343,6 +1354,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     workspaceId: string;
     sessionId: string;
     event: string;
+    executionFence?: import("@open-managed-agents/session-runtime-contract/coordination").SessionExecutionFence;
   }): Promise<
     | { type: "recorded" }
     | { type: "ignored" }
@@ -1370,9 +1382,13 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       }).recordSessionRuntimeEvents({
         sessionId: opts.sessionId,
         events: [event],
+        ...(opts.executionFence !== undefined && {
+          executionFence: opts.executionFence,
+        }),
       });
       if (result.type === "recorded") return { type: "recorded" };
       if (result.type === "not_found") return { type: "not_found" };
+      if (result.type === "execution_fence_lost") return { type: "version_conflict" };
     }
     return { type: "version_conflict" };
   }

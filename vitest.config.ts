@@ -108,6 +108,7 @@ export default defineConfig({
       { find: "@open-managed-agents/services", replacement: "./packages/services/src/index.ts" },
 
       // ─── sql-client ───────────────────────────────────────────────────
+      { find: "@open-managed-agents/sql-client/adapters/cf-do", replacement: "./packages/sql-client/src/adapters/cf-do.ts" },
       { find: "@open-managed-agents/sql-client/adapters/cf-d1", replacement: "./packages/sql-client/src/adapters/cf-d1.ts" },
       { find: "@open-managed-agents/sql-client", replacement: "./packages/sql-client/src/index.ts" },
 
@@ -181,12 +182,14 @@ export default defineConfig({
       { find: "@open-managed-agents/vault-store-memory", replacement: "./packages/vault-store-memory/src/index.ts" },
       { find: "@open-managed-agents/vault-store", replacement: "./packages/vault-store/src/index.ts" },
       { find: "@open-managed-agents/session-runtime-contract/context", replacement: "./packages/session-runtime-contract/src/context.ts" },
+      { find: "@open-managed-agents/session-runtime-contract/coordination", replacement: "./packages/session-runtime-contract/src/coordination.ts" },
       { find: "@open-managed-agents/session-runtime-contract/dispatch", replacement: "./packages/session-runtime-contract/src/dispatch.ts" },
       { find: "@open-managed-agents/session-runtime-contract/history", replacement: "./packages/session-runtime-contract/src/history.ts" },
       { find: "@open-managed-agents/session-runtime-contract/lifecycle", replacement: "./packages/session-runtime-contract/src/lifecycle.ts" },
       { find: "@open-managed-agents/session-runtime-contract/stream", replacement: "./packages/session-runtime-contract/src/stream.ts" },
       { find: "@open-managed-agents/session-runtime-contract", replacement: "./packages/session-runtime-contract/src/index.ts" },
       { find: "@open-managed-agents/session-runtime-sql/context", replacement: "./packages/session-runtime-sql/src/context.ts" },
+      { find: "@open-managed-agents/session-runtime-sql/coordination", replacement: "./packages/session-runtime-sql/src/coordination.ts" },
       { find: "@open-managed-agents/session-runtime-sql/history", replacement: "./packages/session-runtime-sql/src/history.ts" },
       { find: "@open-managed-agents/session-runtime-sql", replacement: "./packages/session-runtime-sql/src/index.ts" },
       { find: "@open-managed-agents/session-realtime", replacement: "./packages/session-realtime/src/index.ts" },
@@ -295,6 +298,7 @@ export default defineConfig({
       { find: "@open-managed-agents/session-runtime", replacement: "./packages/session-runtime/src/index.ts" },
       { find: "@open-managed-agents/acp-runtime/cf-sandbox", replacement: "./packages/acp-runtime/src/cf-sandbox.ts" },
       { find: "@open-managed-agents/acp-runtime/known-agents", replacement: "./packages/acp-runtime/src/known-agents.ts" },
+      { find: "@open-managed-agents/acp-runtime/native-state", replacement: "./packages/acp-runtime/src/native-state.ts" },
       { find: "@open-managed-agents/acp-runtime/placement", replacement: "./packages/acp-runtime/src/placement.ts" },
       { find: "@open-managed-agents/acp-runtime/sandbox-spawner", replacement: "./packages/acp-runtime/src/spawners/sandbox.ts" },
       { find: "@open-managed-agents/acp-runtime/node-spawner", replacement: "./packages/acp-runtime/src/node-spawner.ts" },
@@ -367,6 +371,7 @@ export default defineConfig({
       "packages/managed-runtime-sandbox/**",
       "packages/harness-supervisor/**",
       "packages/runtime-resource-fence-sql/**",
+      "packages/session-runtime-sql/test/**",
       "packages/managed-agents-api/test/official-environment-worker.contract.test.ts",
       "packages/sandbox/test/**",
       "packages/agent-store-sql/test/**",

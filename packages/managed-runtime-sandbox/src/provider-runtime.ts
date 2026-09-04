@@ -68,6 +68,18 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
     durability?: "durable" | "best_effort";
     maxFiles?: number;
     maxBytes?: number;
+    /** Optional provider-native attachment for `/mnt/session/outputs`.
+     * Keeping this callback here lets a provider expose durable mount
+     * semantics without adding persistence methods to the compute Port. */
+    durableMount?: {
+      durability?: "durable" | "best_effort";
+      attach(input: {
+        runtime: Runtime;
+        scope: RuntimeResourceScope;
+        binding: SessionOutputBinding;
+        signal: AbortSignal;
+      }): Promise<void>;
+    };
   };
   /** Provider-specific reconnect-and-destroy path for persisted orphans. */
   reapRuntime?: (input: {
@@ -462,10 +474,19 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
     async capabilities() {
       if (options.outputs === undefined) return { strategies: [] };
       return {
-        strategies: [{
-          strategy: "final_collect",
-          durability: options.outputs.durability ?? "durable",
-        }],
+        strategies: [
+          ...(options.outputs.durableMount === undefined
+            ? []
+            : [{
+                strategy: "durable_mount" as const,
+                durability:
+                  options.outputs.durableMount.durability ?? "durable" as const,
+              }]),
+          {
+            strategy: "final_collect" as const,
+            durability: options.outputs.durability ?? "durable",
+          },
+        ],
       };
     },
 
@@ -474,7 +495,11 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
       if (options.outputs === undefined) {
         throw new Error("Provider composition has no Session output store");
       }
-      if (input.strategy !== "final_collect") {
+      if (
+        input.strategy !== "final_collect"
+        && !(input.strategy === "durable_mount"
+          && options.outputs.durableMount !== undefined)
+      ) {
         throw new Error(`Provider outputs do not support ${input.strategy}`);
       }
       const identity = JSON.stringify([
@@ -498,6 +523,19 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
       }
       const runtime = requireRuntime(input.sandbox);
       outputRuntime.set(input.binding.bindingId, input.sandbox.runtimeId);
+      if (input.strategy === "durable_mount") {
+        if (options.outputs.durableMount === undefined) {
+          throw new Error("Provider composition has no durable Session output mount");
+        }
+        await options.outputs.durableMount.attach({
+          runtime,
+          scope: input.scope,
+          binding: input.binding,
+          signal: input.signal,
+        });
+        input.signal.throwIfAborted();
+        return;
+      }
       await captureProcess(
         runtime,
         { command: "mkdir", args: ["-p", "/mnt/session/outputs"] },

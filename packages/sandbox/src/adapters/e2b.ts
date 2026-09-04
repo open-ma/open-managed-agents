@@ -553,6 +553,12 @@ export class E2BSandboxExecutor
     }
   }
 
+  sessionOutputMountCapabilities(): { durability: "durable" } | null {
+    return this.memoryBucketConfig === undefined
+      ? null
+      : { durability: "durable" };
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;

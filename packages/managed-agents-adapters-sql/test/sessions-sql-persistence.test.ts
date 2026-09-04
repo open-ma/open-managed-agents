@@ -11,6 +11,10 @@ import {
   SqlSessionSource,
 } from "../src";
 import { sessionStorePortContract } from "./contracts/store-port-contracts";
+import {
+  ensureSessionExecutionCoordinatorSchema,
+  SqlSessionExecutionCoordinator,
+} from "@open-managed-agents/session-runtime-sql/coordination";
 
 const SCHEMA_SQL = `
 CREATE TABLE managed_sessions (
@@ -325,6 +329,76 @@ describe("SqlSessionPersistence", () => {
         .bind("workspace_01", session.id)
         .all<{ id: string }>(),
     ).resolves.toMatchObject({ results: [{ id: "event_runtime_01" }] });
+  });
+
+  it("atomically fences runtime projection against a reclaimed execution", async () => {
+    await ensureSessionExecutionCoordinatorSchema(client);
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session: { ...session, status: "idle" },
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    const coordinator = new SqlSessionExecutionCoordinator(client);
+    await coordinator.admit({
+      execution: {
+        id: "execution_01",
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        admittedAt: "2026-08-26T02:00:00.000Z",
+        events: [{
+          id: "input_01",
+          type: "user.message",
+          content: [{ type: "text", text: "Run" }],
+          processedAt: "2026-08-26T02:00:00.000Z",
+        }],
+      },
+    });
+    const old = await coordinator.claim({
+      ownerId: "node_old",
+      attemptId: "attempt_old",
+      claimedAt: "2026-08-26T02:00:01.000Z",
+      leaseTtlMs: 1_000,
+    });
+    expect(old.type).toBe("claimed");
+    if (old.type !== "claimed") return;
+    const current = await sessions.findCurrent({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+    });
+    expect(current).not.toBeNull();
+    if (current === null) return;
+
+    await coordinator.claim({
+      ownerId: "node_new",
+      attemptId: "attempt_new",
+      claimedAt: "2026-08-26T02:00:03.000Z",
+      leaseTtlMs: 30_000,
+    });
+    const projection = new SqlSessionRuntimeProjectionPersistence(client, {
+      now: () => new Date("2026-08-26T02:00:04.000Z"),
+    });
+    const event = {
+      id: "stale_output_01",
+      type: "session.status_running" as const,
+      processedAt: "2026-08-26T02:00:04.000Z",
+    };
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: current.revision,
+      executionFence: old.fence,
+      events: [event],
+      next: {
+        ...current.session,
+        status: "running",
+        updatedAt: event.processedAt,
+      },
+    })).resolves.toEqual({ type: "execution_fence_lost" });
+    await expect(client.prepare(
+      "SELECT id FROM managed_session_events WHERE id = ?",
+    ).bind(event.id).first()).resolves.toBeNull();
   });
 
   it("archives lifecycle state and increments the internal revision", async () => {

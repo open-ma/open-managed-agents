@@ -5,7 +5,7 @@
  * Two layers:
  *   - **overlay** (known-agents.ts): hand-curated entries OMA needs on
  *     top — legacy id aliases, agents the official registry doesn't
- *     carry (hermes, openclaw). Pure data, browser-safe.
+ *     carry (currently Hermes). Pure data, browser-safe.
  *   - **official** (registry-fetch.ts): live JSON from
  *     cdn.agentclientprotocol.com, fetched once at daemon startup,
  *     cached to disk. Node-only (uses fetch + fs).
@@ -38,6 +38,7 @@
 import { spawn, spawnSync } from "node:child_process";
 import {
   OMA_OVERLAY_AGENTS,
+  REMOVED_ACP_AGENT_IDS,
   resolveOverlayAgent,
   type KnownAgentEntry,
 } from "./known-agents.js";
@@ -78,7 +79,7 @@ export async function loadRegistry(opts?: {
     const reg = await fetchOfficialRegistry({ cachePath: opts?.cachePath, ttlMs: opts?.ttlMs });
     for (const o of reg.agents) {
       const m = mapOfficialAgent(o);
-      if (m) officialMapped.push(m);
+      if (m && !REMOVED_ACP_AGENT_IDS.has(m.id)) officialMapped.push(m);
     }
   } catch (e) {
     process.stderr.write(
@@ -159,7 +160,7 @@ function mergeOverlay(
       merged.push(o);
     }
   }
-  // Append overlay-only (not in official) — hermes, openclaw today.
+  // Append overlay-only entries (currently Hermes).
   for (const ov of overlay) {
     if (!seenOverlay.has(ov.id)) merged.push(ov);
   }

@@ -66,7 +66,7 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 | Auth | `better-auth` on a separate `./data/auth.db` (sqlite). Email + password by default; Google OAuth optional. `AUTH_DISABLED=1` bypasses for single-user demos |
 | Vault credential injection | `apps/oma-vault` sidecar — mockttp HTTPS MITM proxy with self-signed CA. Reads vault credentials from the same sqlite db |
 | Memory mount | sandbox symlinks `/mnt/memory/<storeName>` → `<MEMORY_BLOB_DIR>/<storeId>/`. chokidar watcher reflects fs writes back into the SQL `memories` index |
-| Cron | not wired yet (TODO: `node-cron` adapter for the per-tenant memory retention pass) |
+| Cron | `croner` per-minute scheduler; memory-version retention and eval/webhook sweeps run in-process |
 | Queue | not used — chokidar watcher replaces the R2-event Queue consumer |
 | Console UI | embedded in main-node image (`apps/console/dist` served by `serveStatic` middleware on the same `:8787` port, with SPA fallback). Skippable via `--build-arg SKIP_CONSOLE=1` for API-only image. `vite dev` mode also supported for live-reload |
 | Observability | `console.log` / `pino` (operator pipes stdout to Loki / Grafana) |
@@ -296,7 +296,7 @@ pnpm deploy
 | Auth | better-auth + sqlite (own file) | better-auth + D1 local sim | better-auth + D1 + Email Workers + OAuth |
 | Vault inject | oma-vault sidecar (mockttp MITM) | MAIN_MCP.outboundForward RPC | MAIN_MCP.outboundForward RPC |
 | Memory mount | symlink to LocalFsBlobStore + chokidar | R2 sim + mountBucket(localBucket:true) | R2 + s3fs + R2 Events → Queue → D1 |
-| Cron | TODO (node-cron) | wrangler dev `--test-scheduled` | CF cron `* * * * *` |
+| Cron | `croner` per-minute scheduler (memory/eval/webhook jobs) | wrangler dev `--test-scheduled` | CF cron `* * * * *` |
 | Queue | none (chokidar replaces it) | wrangler queue sim | CF Queues + DLQ |
 | Browser tool | not supported | wrangler dev BROWSER sim (limited) | @cloudflare/playwright |
 | Email | nodemailer (set SMTP_HOST/PORT/USER/PASS) — null sender mounts no email-bearing better-auth flows | wrangler dev SEND_EMAIL sim | CF Email Workers |

@@ -1,6 +1,8 @@
 import {
+  composeSandboxHarnessDrivers,
   createManagedRuntimeHost,
   createManagedRuntimeOrphanReconciler,
+  SupervisedSandboxHarnessDriver,
   type RuntimeSchedulerPort,
 } from "@open-managed-agents/managed-runtime-host";
 import {
@@ -29,6 +31,12 @@ export interface CreateNodeManagedRuntimeOptions {
   image: string;
   network?: string;
   docker?: DockerCommandPort;
+  additionalMounts?: readonly {
+    source: string;
+    destination: string;
+    readOnly?: boolean;
+  }[];
+  extraHosts?: readonly { hostname: string; address: string }[];
   scheduler?: RuntimeSchedulerPort;
   fence?: SqlRuntimeResourceFenceOptions;
 }
@@ -48,7 +56,18 @@ export async function createNodeManagedRuntime(
     image: options.image,
     ...(options.network === undefined ? {} : { network: options.network }),
     ...(options.docker === undefined ? {} : { docker: options.docker }),
+    ...(options.additionalMounts === undefined
+      ? {}
+      : { additionalMounts: options.additionalMounts }),
+    ...(options.extraHosts === undefined ? {} : { extraHosts: options.extraHosts }),
   });
+  const supervisedHarness = new SupervisedSandboxHarnessDriver({
+    transport: sandbox,
+  });
+  const harnessDriver = composeSandboxHarnessDrivers(
+    sandbox,
+    supervisedHarness,
+  );
   const host = createManagedRuntimeHost({
     ownerId: options.ownerId,
     leaseTtlMs: options.leaseTtlMs,
@@ -57,10 +76,19 @@ export async function createNodeManagedRuntime(
     sandbox,
     workspace,
     outputs,
-    harnessDriver: sandbox,
+    harnessDriver,
     orphans,
     ...(options.scheduler === undefined ? {} : { scheduler: options.scheduler }),
   });
   const orphanReconciler = createManagedRuntimeOrphanReconciler({ orphans, sandbox });
-  return { host, fences, orphans, orphanReconciler, sandbox, workspace, outputs };
+  return {
+    host,
+    fences,
+    orphans,
+    orphanReconciler,
+    sandbox,
+    workspace,
+    outputs,
+    harnessDriver,
+  };
 }

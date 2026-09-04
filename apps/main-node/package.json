@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "test": "vitest run --config vitest.config.ts",
+    "test:e2e:acp-deepseek-cache": "tsx scripts/acp-deepseek-native-cache.e2e.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

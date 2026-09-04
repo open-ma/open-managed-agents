@@ -117,6 +117,12 @@ export interface SqlManagedSessionsCompositionDependencies {
   sealer: SessionResourceSecretSealer;
   clock: { now(): Date };
   ids: SqlManagedSessionsIds;
+  /**
+   * Atomically create durable Session Execution work with accepted events.
+   * Enable for lease-based Node workers. Structural single-writer runtimes
+   * such as Cloudflare Durable Objects dispatch directly instead.
+   */
+  executionOutbox?: boolean;
 }
 
 interface SqlManagedSessionsWorkspaceApp extends App {
@@ -186,7 +192,9 @@ export class SqlManagedSessionsComposition {
     this.files = new SqlFileMetadataPersistence(client);
     this.sessions = new SqlSessionPersistence(client, sealer);
     this.sessionSource = new SqlSessionSource(client);
-    this.sessionEvents = new SqlSessionEventPersistence(client);
+    this.sessionEvents = new SqlSessionEventPersistence(client, {
+      executionOutbox: dependencies.executionOutbox,
+    });
     this.sessionResources = new SqlSessionResourceStore(client, sealer);
     this.sessionThreads = new SqlSessionThreadStore(client);
     this.sessionThreadContext = new SqlSessionThreadContextSource(client);

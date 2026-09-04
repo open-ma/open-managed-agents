@@ -196,7 +196,7 @@ export class LocalSubprocessSandbox
     const env = this.buildEnv(spec.command);
     for (const [name, value] of Object.entries(spec.env ?? {})) {
       if (value === undefined) delete env[name];
-      else env[name] = value;
+      else env[name] = this.resolveProcessEnvValue(value);
     }
     const child: ChildProcessWithoutNullStreams = spawn(
       spec.command,
@@ -363,6 +363,10 @@ export class LocalSubprocessSandbox
     });
   }
 
+  sessionOutputMountCapabilities(): { durability: "durable" } | null {
+    return this.outputsRoot === null ? null : { durability: "durable" };
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;
@@ -495,6 +499,19 @@ export class LocalSubprocessSandbox
     else if (normalised.startsWith("/")) normalised = normalised.slice(1);
     if (isAbsolute(normalised)) return normalised; // explicit absolute escape — caller's responsibility
     return join(this.workdir, normalised);
+  }
+
+  /**
+   * A local subprocess sees host paths, while every real sandbox sees the
+   * logical `/workspace` mount. Translate only an entire logical workspace
+   * path (not arbitrary strings containing that word) so agent-specific home
+   * variables such as CODEX_HOME and CLAUDE_CONFIG_DIR behave identically in
+   * local conformance tests.
+   */
+  private resolveProcessEnvValue(value: string): string {
+    return value === "/workspace" || value.startsWith("/workspace/")
+      ? this.resolvePath(value)
+      : value;
   }
 
   /** True if a path exists on the host filesystem (symlink-followed). */

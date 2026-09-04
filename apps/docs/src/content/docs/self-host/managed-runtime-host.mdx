@@ -33,6 +33,56 @@ Both lanes use the same sandbox, workspace, output, and resource-fence Ports.
 The supervisor protocol is never required for an ordinary Managed Agents
 worker.
 
+Harness-native session data and user-visible outputs share the Runtime Host's
+drain/checkpoint/finalize lifecycle. They do not share a namespace or a data
+contract: outputs are immutable published artifacts, while native session data
+is private recovery state inside the workspace candidate. Each agent adapter
+declares an exclusive session-artifact allowlist. The native-session contract
+does not include the agent's complete profile, config, credentials, cache, or
+ordinary home. A coarse provider workspace snapshot can physically carry
+unrelated workspace bytes, but a replacement harness must not use those bytes
+as native recovery state. OpenMA does not run a second continuous state-sync
+sidecar.
+
+For an ACP harness, interaction stays provider-neutral while native recovery
+is agent-specific. The ACP runtime selects a native-session profile, isolates
+the agent runtime below `/workspace/.openma/harness-state/`, declares the exact
+session artifacts needed for resume, and stores the ACP logical session id
+beside them. The Runtime Host persists them as part of the workspace candidate.
+If a restored candidate lacks required native
+state, the host starts a new ACP session with one bounded semantic-recovery
+message derived from canonical Session events; it never replays old tool
+calls. See [ACP native session persistence](/self-host/sandbox-persistence/#acp-native-session-persistence)
+for the exact Claude Code, Codex, Gemini, OpenCode, Pi, MCode, Copilot, Cortex,
+Goose, Junie, Kimi, Qwen, Vibe, DeepSeek Harness ACP, and Hermes session
+artifacts.
+
+## Session brain placement and scaling
+
+The application talks to `SessionEventDispatchPort` in both deployments:
+
+| Preset | Single-owner mechanism | Durable pending work |
+|---|---|---|
+| Cloudflare | One `SessionDO` identity per Session | DO SQLite event queue |
+| Node PostgreSQL/SQLite | Renewable SQL claim with owner, attempt and generation fence | `managed_session_executions` outbox |
+
+The Node server is therefore horizontally scalable. Every accepted actionable
+Event batch and its execution row commit under the same Session revision CAS;
+replicas claim different Sessions in parallel but preserve FIFO within one
+Session. A lost lease rejects late canonical output and allows a different
+replica to reclaim the attempt. An indeterminate renewal stops the local
+runtime instead of assuming it still owns the Session.
+
+The execution table is Node-only infrastructure. It does not change the
+Managed Agents SDK shape, add fields to `managed_sessions`, or appear in the
+Cloudflare D1 schema. Node deployments apply it through the normal generated
+PostgreSQL/SQLite migrations.
+
+For harness-in-sandbox, Session execution ownership is the outer fence. The
+Runtime Host resource generation and supervisor heartbeat are nested inside
+it. Losing the outer fence cancels the inner host; the inner host can publish
+workspace/output candidates only while both generations remain current.
+
 ## Resource contract
 
 The host uses four independent boundaries:
@@ -70,6 +120,26 @@ Cloudflare and E2B may internally capture more runtime state. OpenMA treats
 those snapshots only as workspace restore candidates until a separate
 `RuntimeCheckpointPort` is configured. Durable Session events remain the
 source of truth for rebuilding the agent loop.
+
+The conformance registry is intentionally stricter than the generic
+`SandboxPort` adapter registry:
+
+| Provider | ManagedRuntimeHost conformance | What the raw SandboxPort adapter can still do |
+|---|---|---|
+| Node + Docker | `managed-runtime` | Docker process/stdio and filesystem workspace/output ports |
+| Cloudflare Sandbox | `managed-runtime` | Sandbox DO process/stdio, `createBackup`/`restoreBackup`, and configured R2 output mount |
+| E2B / compatible | `managed-runtime` | E2B suspend/resume, provider memory snapshot, and configured S3-compatible output collection |
+| Daytona | `sandbox-port-only` | File/process operations; optional S3FS memory and output mounts when configured |
+| LiteBox | `sandbox-port-only` | File/process operations and host bind volumes |
+| BoxRun | `sandbox-port-only` | File/process operations and best-effort file archive; no memory or output mount primitive |
+
+`sandbox-port-only` is a deliberate fail-closed status. These adapters are
+usable by legacy callers that only need `SandboxPort`, but they must not be
+passed to a ManagedRuntimeHost until a composition supplies a fenced lease,
+workspace candidate publication, output manifest publication, orphan reaping,
+and one of the declared harness lanes. The machine-readable source is
+`MANAGED_RUNTIME_PROVIDER_CONFORMANCE` from
+`@open-managed-agents/managed-runtime-host`.
 
 ## Preinstalled composition
 

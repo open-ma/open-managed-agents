@@ -74,10 +74,10 @@ export class InMemoryFileRepo implements FileRepo {
     return toRow(row);
   }
 
-  async deleteBySession(sessionId: string): Promise<FileRow[]> {
+  async deleteBySession(tenantId: string, sessionId: string): Promise<FileRow[]> {
     const out: FileRow[] = [];
     for (const [id, row] of this.byId.entries()) {
-      if (row.session_id === sessionId) {
+      if (row.tenant_id === tenantId && row.session_id === sessionId) {
         out.push(toRow(row));
         this.byId.delete(id);
       }

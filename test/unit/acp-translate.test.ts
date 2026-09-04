@@ -22,8 +22,13 @@ interface Broadcast {
 
 /** Capture every event the translator broadcasts; ignore stream-lifecycle
  *  noise we don't care about for these tests. */
-function makeFakeRuntime(): { runtime: HarnessRuntime; events: Broadcast[] } {
+function makeFakeRuntime(): {
+  runtime: HarnessRuntime;
+  events: Broadcast[];
+  reportedUsage: Array<{ input: number; output: number }>;
+} {
   const events: Broadcast[] = [];
+  const reportedUsage: Array<{ input: number; output: number }> = [];
   const runtime = {
     history: { append() {}, getMessages() { return []; }, getEvents() { return []; } },
     sandbox: {} as never,
@@ -37,8 +42,11 @@ function makeFakeRuntime(): { runtime: HarnessRuntime; events: Broadcast[] } {
     broadcastToolInputStart: async () => { /* noop */ },
     broadcastToolInputChunk: async () => { /* noop */ },
     broadcastToolInputEnd: async () => { /* noop */ },
+    reportUsage: async (input: number, output: number) => {
+      reportedUsage.push({ input, output });
+    },
   } as unknown as HarnessRuntime;
-  return { runtime, events };
+  return { runtime, events, reportedUsage };
 }
 
 function ev(update: Record<string, unknown>) {
@@ -219,5 +227,67 @@ describe("AcpTranslator tool_call dedup", () => {
     expect(toolUses).toHaveLength(1);
     expect(toolUses[0].name).toBe("Mystery");
     expect(typeof toolUses[0].id).toBe("string");
+  });
+});
+
+describe("AcpTranslator prompt usage", () => {
+  it("projects ACP PromptResponse usage, including cache hits, into the managed span", async () => {
+    const { runtime, events, reportedUsage } = makeFakeRuntime();
+    const translator = new AcpTranslator(runtime, { model: "deepseek-v4-flash" });
+
+    await translator.consume({
+      type: "promptComplete",
+      response: {
+        stopReason: "end_turn",
+        usage: {
+          totalTokens: 1_520,
+          inputTokens: 300,
+          outputTokens: 20,
+          cachedReadTokens: 1_200,
+          cachedWriteTokens: 0,
+        },
+      },
+    });
+
+    expect(events).toEqual([
+      expect.objectContaining({
+        type: "span.model_request_start",
+        model: "deepseek-v4-flash",
+        id: expect.any(String),
+      }),
+      expect.objectContaining({
+        type: "span.model_request_end",
+        model: "deepseek-v4-flash",
+        model_request_start_id: expect.any(String),
+        model_usage: {
+          input_tokens: 300,
+          output_tokens: 20,
+          cache_read_input_tokens: 1_200,
+          cache_creation_input_tokens: 0,
+        },
+        finish_reason: "end_turn",
+        is_error: false,
+      }),
+    ]);
+    expect(events[1]?.model_request_start_id).toBe(events[0]?.id);
+    expect(reportedUsage).toEqual([{ input: 300, output: 20 }]);
+  });
+
+  it("closes the managed span as an error when the ACP prompt rejects", async () => {
+    const { runtime, events, reportedUsage } = makeFakeRuntime();
+    const translator = new AcpTranslator(runtime);
+
+    await translator.consume({
+      type: "promptError",
+      error: "provider unavailable",
+    });
+
+    expect(events.at(-1)).toMatchObject({
+      type: "span.model_request_end",
+      is_error: true,
+      finish_reason: "error",
+      error_message: "provider unavailable",
+    });
+    expect(reportedUsage).toEqual([]);
   });
 });

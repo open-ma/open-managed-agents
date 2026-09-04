@@ -181,6 +181,12 @@ export class LiteBoxSandbox implements SandboxExecutor {
     this.volumes.push({ hostPath, guestPath, readOnly: opts.readOnly });
   }
 
+  sessionOutputMountCapabilities(): { durability: "durable" } | null {
+    return this.opts.outputsRoot || process.env.FILES_BLOB_DIR
+      ? { durability: "durable" }
+      : null;
+  }
+
   async mountSessionOutputs(opts: {
     tenantId: string;
     sessionId: string;

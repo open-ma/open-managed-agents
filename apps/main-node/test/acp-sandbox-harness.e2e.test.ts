@@ -1,4 +1,4 @@
-import { mkdtemp } from "node:fs/promises";
+import { cp, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -36,6 +36,7 @@ describe("ACP sandbox harness", () => {
       harness: "acp-sandbox",
       acp: {
         agent: {
+          id: "claude-acp",
           command: process.execPath,
           args: ["-e", fakeAcpAgentSource],
           cwd: "/workspace",
@@ -67,11 +68,12 @@ describe("ACP sandbox harness", () => {
       },
       buildHarnessContext: async ({ userMessage }) => ({
         ...createContext(agent, runtime, ""),
+        session_id: "session_acp_machine",
         userMessage,
       }),
       beforeSandboxDestroy: async () => {
         checkpointBeforeDestroy = await sandbox.readFile(
-          "/workspace/.openma/acp-session-checkpoint.json",
+          "/workspace/.openma/harness-state/acp/session_acp_machine/claude-code/v1/acp-session.json",
         );
       },
       publish: () => {},
@@ -95,6 +97,38 @@ describe("ACP sandbox harness", () => {
           content: [{ type: "text", text: "sandbox-acp:2:second" }],
         }),
       ]);
+      const modelEnds = events.filter((event) => event.type === "span.model_request_end");
+      expect(modelEnds).toEqual([
+        expect.objectContaining({
+          model_usage: expect.objectContaining({
+            input_tokens: 1_200,
+            output_tokens: 20,
+            cache_read_input_tokens: 0,
+          }),
+        }),
+        expect.objectContaining({
+          model_usage: expect.objectContaining({
+            input_tokens: 120,
+            output_tokens: 12,
+            cache_read_input_tokens: 1_080,
+          }),
+        }),
+      ]);
+      const modelStarts = events.filter((event) => event.type === "span.model_request_start");
+      expect(modelEnds.map((event) =>
+        (event as { model_request_start_id?: string }).model_request_start_id
+      )).toEqual(modelStarts.map((event) => event.id));
+      await expect(sandbox.readFile("state-path.txt")).resolves.toBe(
+        join(
+          workdir,
+          ".openma/harness-state/acp/session_acp_machine/claude-code/v1/native",
+        ),
+      );
+      await expect(sandbox.readFile(
+        "/workspace/.openma/harness-state/acp/session_acp_machine/claude-code/v1/session-binding.json",
+      )).resolves.toContain(
+        '"session_artifacts":[{"path":"/workspace/.openma/harness-state/acp/session_acp_machine/claude-code/v1/native/projects","kind":"directory","requiredForResume":true}]',
+      );
     } finally {
       await machine.shutdown();
     }
@@ -162,6 +196,49 @@ describe("ACP sandbox harness", () => {
     }
   });
 
+  it("deletes the isolated native session on logical harness destruction", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "oma-acp-session-destroy-"));
+    const sandbox = new LocalSubprocessSandbox({ workdir });
+    const events: SessionEvent[] = [];
+    const runtime = createRuntime(sandbox, events);
+    registerCoreHarnesses();
+    const harness = resolveHarness("acp-sandbox");
+    const agent = {
+      id: "agent_acp_session_destroy",
+      name: "Destroyable ACP session",
+      model: "unused-by-acp",
+      system: "",
+      tools: [],
+      harness: "acp-sandbox",
+      acp: {
+        agent: {
+          id: "claude-acp",
+          command: process.execPath,
+          args: ["-e", fakeAcpAgentSource],
+          cwd: "/workspace",
+        },
+      },
+      version: 1,
+      created_at: "2026-09-03T00:00:00.000Z",
+    } as unknown as AgentConfig;
+    const root =
+      "/workspace/.openma/harness-state/acp/session_acp_sandbox/claude-code/v1";
+
+    try {
+      await harness.run(createContext(agent, runtime, "one turn"));
+      await sandbox.writeFile(`${root}/native/non-session-config.json`, "private");
+      await harness.dispose?.("destroy");
+
+      await expect(sandbox.readFile(`${root}/session-binding.json`))
+        .rejects.toMatchObject({ code: "ENOENT" });
+      await expect(sandbox.readFile(`${root}/native/non-session-config.json`))
+        .rejects.toMatchObject({ code: "ENOENT" });
+    } finally {
+      await harness.dispose?.("destroy");
+      await sandbox.destroy();
+    }
+  });
+
   it("runs the same stateful ACP harness through the E2B adapter", async () => {
     const service = new ScriptedE2BService();
     const sandbox = new E2BSandboxExecutor(service.sandbox as never, {});
@@ -208,11 +285,12 @@ describe("ACP sandbox harness", () => {
       },
       buildHarnessContext: async ({ userMessage }) => ({
         ...createContext(agent, runtime, ""),
+        session_id: "session_acp_e2b",
         userMessage,
       }),
       beforeSandboxDestroy: async () => {
         checkpointBeforeDestroy = await sandbox.readFile(
-          "/workspace/.openma/acp-session-checkpoint.json",
+          "/workspace/.openma/harness-state/acp/session_acp_e2b/opaque/v1/acp-session.json",
         );
       },
       publish: () => {},
@@ -259,6 +337,7 @@ describe("ACP sandbox harness", () => {
       harness: "acp-sandbox",
       acp: {
         agent: {
+          id: "claude-acp",
           command: process.execPath,
           args: ["-e", recoveringAcpAgentSource],
           cwd: "/workspace",
@@ -268,6 +347,7 @@ describe("ACP sandbox harness", () => {
       created_at: "2026-08-30T00:00:00.000Z",
     } as unknown as AgentConfig;
 
+    let restoredSandbox: LocalSubprocessSandbox | undefined;
     try {
       const first = createContext(agent, runtime, "first");
       await firstHarness.onSessionInit?.(first, runtime);
@@ -279,11 +359,27 @@ describe("ACP sandbox harness", () => {
       // the OS exit notification to reach the placement liveness wrapper.
       await new Promise((resolve) => setTimeout(resolve, 100));
 
+      // Materialize a provider-neutral checkpoint, delete the original
+      // sandbox, and restore it into a fresh runtime. This proves recovery
+      // from files rather than accidental reuse of either process memory or
+      // the original sandbox instance.
+      await firstHarness.dispose?.("shutdown");
+      const checkpointRoot = await mkdtemp(
+        join(tmpdir(), "oma-acp-harness-checkpoint-"),
+      );
+      const restoredWorkdir = join(checkpointRoot, "workspace");
+      await cp(workdir, restoredWorkdir, { recursive: true });
+      await sandbox.destroy();
+      restoredSandbox = new LocalSubprocessSandbox({ workdir: restoredWorkdir });
+      const restoredRuntime = createRuntime(restoredSandbox, events);
+
       // A fresh harness instance models a Worker/DO isolate restart. The old
-      // in-memory #resumeAcpSessionId is gone; recovery must come from the
-      // sandbox-persisted logical checkpoint.
+      // in-memory session id is gone; both the ACP id and the agent-native
+      // transcript must come from the restored workspace checkpoint.
       recoveredHarness = resolveHarness("acp-sandbox");
-      await recoveredHarness.run(createContext(agent, runtime, "second"));
+      await recoveredHarness.run(
+        createContext(agent, restoredRuntime, "second"),
+      );
 
       expect(events.filter((event) => event.type === "agent.message")).toEqual([
         expect.objectContaining({
@@ -292,13 +388,132 @@ describe("ACP sandbox harness", () => {
         expect.objectContaining({
           content: [{
             type: "text",
-            text: "resume:sandbox-acp-recovery:second",
+            text: "resume:sandbox-acp-recovery:native=first:second",
           }],
         }),
       ]);
+      expect(events.filter((event) => event.type === "span.model_request_end"))
+        .toEqual([
+          expect.objectContaining({
+            model_usage: expect.objectContaining({
+              input_tokens: 1_200,
+              cache_read_input_tokens: 0,
+            }),
+          }),
+          expect.objectContaining({
+            model_usage: expect.objectContaining({
+              input_tokens: 120,
+              cache_read_input_tokens: 1_080,
+            }),
+          }),
+        ]);
     } finally {
       await (recoveredHarness as { dispose?: () => Promise<void> } | undefined)
         ?.dispose?.();
+      await restoredSandbox?.destroy();
+      await sandbox.destroy();
+    }
+  });
+
+  it("falls back to one canonical recovery prompt when native ACP state is missing", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "oma-acp-semantic-recovery-"));
+    const sandbox = new LocalSubprocessSandbox({ workdir });
+    const events: SessionEvent[] = [];
+    const runtime = createRuntime(sandbox, events);
+    registerCoreHarnesses();
+    const firstHarness = resolveHarness("acp-sandbox");
+    let recoveredHarness: ReturnType<typeof resolveHarness> | undefined;
+    const agent = {
+      id: "agent_acp_semantic_recovery",
+      name: "Semantic recovery ACP sandbox agent",
+      model: "unused-by-acp",
+      system: "Recover safely without repeating completed side effects.",
+      tools: [],
+      harness: "acp-sandbox",
+      acp: {
+        agent: {
+          id: "claude-acp",
+          command: process.execPath,
+          args: ["-e", recoveringAcpAgentSource],
+          cwd: "/workspace",
+        },
+      },
+      version: 1,
+      created_at: "2026-09-03T00:00:00.000Z",
+    } as unknown as AgentConfig;
+
+    let restoredSandbox: LocalSubprocessSandbox | undefined;
+    try {
+      const first = createContext(agent, runtime, "create the report");
+      events.push(first.userMessage);
+      await firstHarness.onSessionInit?.(first, runtime);
+      await firstHarness.run(first);
+      await expect.poll(
+        () => sandbox.exec("test -f first-child-exited && echo yes || echo no"),
+      ).toBe("yes");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+
+      // Canonical events remain the recovery source of truth. A completed tool
+      // is included for continuity, but its raw input must not be replayed.
+      events.splice(1, 0,
+        {
+          type: "agent.tool_use",
+          id: "tool_write_report",
+          name: "bash",
+          input: { command: "touch /workspace/should-not-repeat" },
+        } as SessionEvent,
+        {
+          type: "agent.tool_result",
+          tool_use_id: "tool_write_report",
+          content: "created /workspace/report.md",
+        } as SessionEvent,
+      );
+
+      await firstHarness.dispose?.("shutdown");
+      const checkpointRoot = await mkdtemp(
+        join(tmpdir(), "oma-acp-semantic-checkpoint-"),
+      );
+      const restoredWorkdir = join(checkpointRoot, "workspace");
+      await cp(workdir, restoredWorkdir, { recursive: true });
+      await rm(join(
+        restoredWorkdir,
+        ".openma/harness-state/acp/session_acp_sandbox/claude-code/v1/native/projects",
+      ), { recursive: true, force: true });
+      await sandbox.destroy();
+
+      restoredSandbox = new LocalSubprocessSandbox({ workdir: restoredWorkdir });
+      const restoredRuntime = createRuntime(restoredSandbox, events);
+      recoveredHarness = resolveHarness("acp-sandbox");
+      await recoveredHarness.run(
+        createContext(agent, restoredRuntime, "continue with the next section"),
+      );
+
+      const messages = events.filter((event) => event.type === "agent.message");
+      expect(messages).toHaveLength(2);
+      const recoveredText = (messages[1] as { content: Array<{ text?: string }> })
+        .content[0]?.text ?? "";
+      expect(recoveredText).toContain(
+        'new:<openma-recovery version="1" reason="native-state-missing">',
+      );
+      expect(recoveredText).toContain("User: create the report");
+      expect(recoveredText).toContain("Assistant: new:create the report");
+      expect(recoveredText).toContain(
+        "Completed tool bash: created /workspace/report.md",
+      );
+      expect(recoveredText).toContain(
+        "Current request:\ncontinue with the next section",
+      );
+      expect(recoveredText).toContain("Do not repeat completed side effects");
+      expect(recoveredText).not.toContain("touch /workspace/should-not-repeat");
+      expect(events).toContainEqual(expect.objectContaining({
+        type: "session.warning",
+        source: "acp_semantic_recovery",
+        details: expect.objectContaining({ reason: "native-state-missing" }),
+      }));
+    } finally {
+      await (recoveredHarness as { dispose?: () => Promise<void> } | undefined)
+        ?.dispose?.();
+      await restoredSandbox?.destroy();
       await sandbox.destroy();
     }
   });
@@ -520,10 +735,14 @@ class ScriptedE2BService {
 }
 
 const fakeAcpAgentSource = String.raw`
+const fs = require("node:fs");
 const readline = require("node:readline");
 const input = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
 let promptCount = 0;
+if (process.env.CLAUDE_CONFIG_DIR) {
+  fs.writeFileSync("state-path.txt", process.env.CLAUDE_CONFIG_DIR);
+}
 input.on("line", (line) => {
   const request = JSON.parse(line);
   const result = (value) => send({ jsonrpc: "2.0", id: request.id, result: value });
@@ -548,7 +767,24 @@ input.on("line", (line) => {
           },
         },
       });
-      result({ stopReason: "end_turn" });
+      result({
+        stopReason: "end_turn",
+        usage: promptCount === 1
+          ? {
+              totalTokens: 1220,
+              inputTokens: 1200,
+              outputTokens: 20,
+              cachedReadTokens: 0,
+              cachedWriteTokens: 0,
+            }
+          : {
+              totalTokens: 1212,
+              inputTokens: 120,
+              outputTokens: 12,
+              cachedReadTokens: 1080,
+              cachedWriteTokens: 0,
+            },
+      });
       break;
     }
     default:
@@ -563,9 +799,13 @@ input.on("line", (line) => {
 
 const recoveringAcpAgentSource = String.raw`
 const fs = require("node:fs");
+const path = require("node:path");
 const readline = require("node:readline");
 const input = readline.createInterface({ input: process.stdin });
 const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+const nativeRoot = process.env.CLAUDE_CONFIG_DIR;
+if (!nativeRoot) throw new Error("missing CLAUDE_CONFIG_DIR state binding");
+const nativeTranscript = path.join(nativeRoot, "projects", "session.jsonl");
 let mode = "uninitialized";
 input.on("line", (line) => {
   const request = JSON.parse(line);
@@ -582,7 +822,11 @@ input.on("line", (line) => {
       result({ sessionId: "sandbox-acp-recovery" });
       break;
     case "session/resume":
-      mode = "resume:" + request.params.sessionId;
+      if (!fs.existsSync(nativeTranscript)) {
+        throw new Error("native transcript missing after restore");
+      }
+      mode = "resume:" + request.params.sessionId
+        + ":native=" + JSON.parse(fs.readFileSync(nativeTranscript, "utf8")).text;
       result({});
       break;
     case "session/prompt": {
@@ -598,8 +842,27 @@ input.on("line", (line) => {
           },
         },
       });
-      result({ stopReason: "end_turn" });
+      result({
+        stopReason: "end_turn",
+        usage: mode === "new"
+          ? {
+              totalTokens: 1220,
+              inputTokens: 1200,
+              outputTokens: 20,
+              cachedReadTokens: 0,
+              cachedWriteTokens: 0,
+            }
+          : {
+              totalTokens: 1212,
+              inputTokens: 120,
+              outputTokens: 12,
+              cachedReadTokens: 1080,
+              cachedWriteTokens: 0,
+            },
+      });
       if (mode === "new") {
+        fs.mkdirSync(path.dirname(nativeTranscript), { recursive: true });
+        fs.writeFileSync(nativeTranscript, JSON.stringify({ text }) + "\n");
         setTimeout(() => {
           fs.writeFileSync("first-child-exited", "yes");
           process.exit(17);
