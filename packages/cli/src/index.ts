@@ -15,6 +15,7 @@ import {
 } from "@openma/common/protocol/managed";
 import { DEFAULT_BRIDGE_SERVER_URL } from "./bridge/lib/defaults.js";
 import { currentProfile } from "./bridge/lib/platform.js";
+import { withNetworkCause } from "./network-error.js";
 
 // ─── Config ───
 
@@ -215,7 +216,9 @@ async function fetchWithRetry(
 ): Promise<Response> {
   let attempt = 0;
   while (true) {
-    const res = await fetch(url, init);
+    const res = await fetch(url, init).catch((error) => {
+      throw withNetworkCause(error);
+    });
     if (res.ok || res.status !== 503) return res;
     const retryAfter = res.headers.get("retry-after");
     if (!retryAfter || attempt >= maxRetries) return res;
