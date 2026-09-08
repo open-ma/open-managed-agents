@@ -76,6 +76,76 @@ describe("managed runtime plan", () => {
       }),
     ).toThrow(/durable workspace/i);
   });
+
+  it("covers explicit strategy preferences and every capability requirement", () => {
+    const resolveManagedRuntimePlan = exportedFunction("resolveManagedRuntimePlan");
+    const capabilities = {
+      sandbox: {
+        hardTerminate: "supported",
+        suspendResume: "supported",
+        runtimeCheckpoints: ["filesystem"],
+      },
+      workspace: { strategies: ["retained_runtime", "ephemeral"] },
+      outputs: {
+        strategies: [{ strategy: "final_collect", durability: "best_effort" }],
+      },
+      harness: { drivers: ["ama_worker"] },
+    };
+
+    expect(resolveManagedRuntimePlan({
+      workspace: {
+        requirement: "continuable",
+        preferredStrategies: ["durable_mount", "ephemeral", "retained_runtime"],
+      },
+      outputs: {
+        requirement: "best_effort",
+        preferredStrategies: ["final_collect"],
+      },
+      runtimeCheckpoint: "required",
+      driver: directDriver,
+    }, capabilities)).toMatchObject({
+      workspaceStrategy: "retained_runtime",
+      outputStrategy: "final_collect",
+      runtimeCheckpoint: "filesystem",
+    });
+
+    expect(resolveManagedRuntimePlan({
+      workspace: { requirement: "ephemeral" },
+      outputs: { requirement: "disabled" },
+      runtimeCheckpoint: "disabled",
+      driver: directDriver,
+    }, capabilities)).toMatchObject({
+      workspaceStrategy: "retained_runtime",
+      outputStrategy: null,
+      runtimeCheckpoint: null,
+    });
+
+    expect(() => resolveManagedRuntimePlan({
+      workspace: { requirement: "continuable", preferredStrategies: ["durable_mount"] },
+      outputs: { requirement: "disabled" },
+      runtimeCheckpoint: "disabled",
+      driver: directDriver,
+    }, capabilities)).toThrow(/continuable workspace/i);
+    expect(() => resolveManagedRuntimePlan({
+      workspace: { requirement: "ephemeral" },
+      outputs: { requirement: "durable" },
+      runtimeCheckpoint: "disabled",
+      driver: directDriver,
+    }, capabilities)).toThrow(/durable Session outputs/i);
+    expect(() => resolveManagedRuntimePlan({
+      workspace: { requirement: "ephemeral" },
+      outputs: { requirement: "disabled" },
+      runtimeCheckpoint: "required",
+      driver: directDriver,
+    }, { ...capabilities, sandbox: { ...capabilities.sandbox, runtimeCheckpoints: [] } }))
+      .toThrow(/runtime checkpoint/i);
+    expect(() => resolveManagedRuntimePlan({
+      workspace: { requirement: "ephemeral" },
+      outputs: { requirement: "disabled" },
+      runtimeCheckpoint: "disabled",
+      driver: { ...directDriver, type: "openma_supervised" },
+    }, capabilities)).toThrow(/openma_supervised harness driver/i);
+  });
 });
 
 describe("managed runtime lifecycle", () => {
@@ -266,8 +336,13 @@ describe("managed runtime lifecycle", () => {
       },
       harnessDriver: {
         driverCapabilities: vi.fn(async () => ({ drivers: ["ama_worker"] })),
-        run: vi.fn(async () => {
+        run: vi.fn(async (input: any) => {
           calls.push("harness.run");
+          await input.checkpoint({
+            checkpointId: "checkpoint_1",
+            sessionId: scope.sessionId,
+            turnId: "turn_1",
+          });
           return { type: "completed" };
         }),
       },
@@ -285,6 +360,10 @@ describe("managed runtime lifecycle", () => {
       "workspace.attach",
       "outputs.attach",
       "harness.run",
+      "workspace.checkpoint",
+      "outputs.collect",
+      "outputs.finalize",
+      "fence.publish",
       "workspace.checkpoint",
       "outputs.collect",
       "outputs.finalize",
@@ -617,7 +696,7 @@ describe("managed runtime lifecycle", () => {
       workspaceRevision: 1,
       harnessVersion: "ama-worker-v1",
       runtimeIdentity: JSON.stringify({
-        process: { args: ["worker.mjs"], command: "node" },
+        process: { args: ["worker.mjs"], command: "node", envKeys: [] },
         type: "ama_worker",
       }),
     };

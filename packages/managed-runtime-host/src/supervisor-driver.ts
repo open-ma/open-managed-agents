@@ -35,17 +35,17 @@ export class SupervisedSandboxHarnessDriver
     }
     const controller = new AbortController();
     const onAbort = () => controller.abort(input.signal.reason);
-    input.signal.addEventListener("abort", onAbort, { once: true });
+    if (input.signal.aborted) onAbort();
+    else input.signal.addEventListener("abort", onAbort, { once: true });
     let channel: HarnessSupervisorChannel | null = null;
-    let stopSent = false;
 
     const sendStop = async (reason: "aborted" | "failed") => {
-      if (channel === null || stopSent) return;
-      stopSent = true;
+      if (channel === null) return;
       await channel.send({ type: "stop", reason }).catch(() => {});
     };
 
     try {
+      controller.signal.throwIfAborted();
       channel = await this.#transport.open({
         scope: input.scope,
         sandbox: input.sandbox,
@@ -88,6 +88,34 @@ export class SupervisedSandboxHarnessDriver
           "harness heartbeat",
         );
         if (event.type === "heartbeat") continue;
+        if (event.type === "checkpoint") {
+          if (
+            event.checkpointId.length === 0
+            || event.sessionId !== input.scope.sessionId
+            || input.checkpoint === undefined
+          ) {
+            throw new SupervisorProtocolError("Supervisor checkpoint request is invalid");
+          }
+          try {
+            await input.checkpoint({
+              checkpointId: event.checkpointId,
+              sessionId: event.sessionId,
+              ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+            });
+            await channel.send({
+              type: "checkpoint.commit",
+              checkpointId: event.checkpointId,
+            });
+          } catch (error) {
+            await channel.send({
+              type: "checkpoint.reject",
+              checkpointId: event.checkpointId,
+              message: error instanceof Error ? error.message : String(error),
+            }).catch(() => {});
+            throw error;
+          }
+          continue;
+        }
         if (event.type === "error") throw new SupervisorProtocolError(event.message);
         if (event.type === "completed") {
           if (event.exitCode !== 0) {
@@ -116,7 +144,7 @@ export class SupervisedSandboxHarnessDriver
       );
       return { type: "completed" } as const;
     } catch (error) {
-      if (input.signal.aborted || controller.signal.aborted) {
+      if (controller.signal.aborted) {
         await sendStop("aborted");
         return { type: "aborted" } as const;
       }

@@ -27,6 +27,7 @@ const session = {
     name: "Agent",
     skills: [
       { skillId: "skill_allowed", type: "custom" as const, version: "3" },
+      { skillId: "skill_latest", type: "custom" as const, version: "latest" },
     ],
     system: null,
     tools: [],
@@ -39,6 +40,14 @@ const session = {
   metadata: {},
   outcomeEvaluations: [],
   resources: [
+    {
+      id: "resource_file_allowed",
+      type: "file" as const,
+      createdAt: "2026-08-26T09:20:00.000Z",
+      fileId: "file_allowed",
+      mountPath: "/mnt/session/uploads/file_allowed",
+      updatedAt: "2026-08-26T09:20:00.000Z",
+    },
     {
       type: "memory_store" as const,
       memoryStoreId: "mem_read_only",
@@ -112,10 +121,15 @@ describe("Environment Work Session credential issuer", () => {
     if (issued.type !== "issued") throw new Error("expected issued credential");
     expect(issued.secret.apiBaseUrl).toBe("https://openma.test");
     expect(issued.secret.sessionsToken).toMatch(/^sk-ant-req-v1\./);
+    const bound = await issuer.bindToClaim({
+      secret: issued.secret,
+      claimedAt: "2026-09-03T04:00:00.000Z",
+      generation: 1,
+    });
 
     const authorize = (method: string, path: string, at = now) =>
       authenticateEnvironmentWorkSessionBearer({
-        token: issued.secret.sessionsToken,
+        token: bound.secret.sessionsToken,
         method,
         path,
         crypto,
@@ -129,14 +143,27 @@ describe("Environment Work Session credential issuer", () => {
       ["GET", "/v1/sessions/session_01/events"],
       ["POST", "/v1/sessions/session_01/events"],
       ["GET", "/v1/sessions/session_01/events/stream"],
+      ["POST", "/v1/oma/sessions/session_01/runtime-events"],
+      ["GET", "/v1/oma/mcp-proxy/session_01/linear"],
+      ["POST", "/v1/oma/mcp-proxy/session_01/linear"],
+      ["DELETE", "/v1/oma/mcp-proxy/session_01/linear"],
       ["GET", "/v1/skills/skill_allowed/versions/3"],
       ["GET", "/v1/skills/skill_allowed/versions/3/content"],
+      ["GET", "/v1/skills/skill_latest/versions"],
+      ["GET", "/v1/skills/skill_latest/versions/1759178010641129"],
+      ["GET", "/v1/skills/skill_latest/versions/1759178010641129/content"],
+      ["GET", "/v1/files/file_allowed"],
+      ["GET", "/v1/files/file_allowed/content"],
       ["GET", "/v1/memory_stores/mem_read_only/memories"],
       ["POST", "/v1/memory_stores/mem_read_write/memories"],
       ["DELETE", "/v1/memory_stores/mem_read_write/memories/memory_01"],
     ] as const) {
       await expect(authorize(method, path)).resolves.toEqual({
+        claimedAt: "2026-09-03T04:00:00.000Z",
+        environmentId: "env_self_01",
+        generation: 1,
         sessionId: "session_01",
+        workId: "work_01",
         workspaceId: "workspace_01",
       });
     }
@@ -144,8 +171,19 @@ describe("Environment Work Session credential issuer", () => {
     for (const [method, path] of [
       ["POST", "/v1/environments/env_self_01/work/work_other/heartbeat"],
       ["GET", "/v1/sessions/session_other"],
+      ["POST", "/v1/oma/mcp-proxy/session_other/linear"],
+      ["POST", "/v1/oma/mcp-proxy/session_01"],
       ["POST", "/v1/sessions/session_01"],
+      ["GET", "/v1/oma/sessions/session_01/runtime-events"],
+      ["POST", "/v1/oma/sessions/session_other/runtime-events"],
+      ["POST", "/v1/oma/sessions/session_01/runtime-events/extra"],
       ["GET", "/v1/skills/skill_other/versions/3/content"],
+      ["GET", "/v1/skills/skill_allowed/versions/4/content"],
+      ["GET", "/v1/skills/skill_latest/versions/not-a-concrete-version/content"],
+      ["GET", "/v1/files"],
+      ["GET", "/v1/files/file_other/content"],
+      ["POST", "/v1/files/file_allowed"],
+      ["DELETE", "/v1/files/file_allowed"],
       ["POST", "/v1/memory_stores/mem_read_only/memories"],
       ["GET", "/v1/memory_stores/mem_other/memories"],
       ["GET", "/v1/agents"],
@@ -157,12 +195,78 @@ describe("Environment Work Session credential issuer", () => {
     ).resolves.toBeNull();
     await expect(
       authenticateEnvironmentWorkSessionBearer({
-        token: `${issued.secret.sessionsToken}tampered`,
+        token: `${bound.secret.sessionsToken}tampered`,
         method: "GET",
         path: "/v1/sessions/session_01",
         crypto,
         now: () => now,
       }),
     ).resolves.toBeNull();
+  });
+
+  it("rotates the sessions token for every claimed generation and consults the current lease", async () => {
+    const sealed = new Map<string, string>();
+    let counter = 0;
+    const crypto = {
+      encrypt: async (plaintext: string) => {
+        const ciphertext = `claim_cipher_${++counter}`;
+        sealed.set(ciphertext, plaintext);
+        return ciphertext;
+      },
+      decrypt: async (ciphertext: string) => {
+        const plaintext = sealed.get(ciphertext);
+        if (plaintext === undefined) throw new Error("invalid ciphertext");
+        return plaintext;
+      },
+    };
+    const now = new Date("2026-09-03T04:00:00.000Z");
+    const issuer = new SealedEnvironmentWorkSessionCredentialIssuer({
+      crypto,
+      now: () => now,
+      ttlMs: 60_000,
+    });
+    const issued = await issuer.issue({
+      workspaceId: "workspace_01",
+      environment,
+      session,
+      workId: "work_01",
+    });
+    if (issued.type !== "issued") throw new Error("expected issued credential");
+
+    const first = await issuer.bindToClaim({
+      secret: issued.secret,
+      claimedAt: "2026-09-03T04:00:01.000Z",
+      generation: 1,
+    });
+    const second = await issuer.bindToClaim({
+      secret: first.secret,
+      claimedAt: "2026-09-03T04:00:02.000Z",
+      generation: 2,
+    });
+
+    expect(first.secret.sessionsToken).not.toBe(issued.secret.sessionsToken);
+    expect(second.secret.sessionsToken).not.toBe(first.secret.sessionsToken);
+    const currentChecks: object[] = [];
+    await expect(authenticateEnvironmentWorkSessionBearer({
+      token: first.secret.sessionsToken,
+      method: "POST",
+      path: "/v1/sessions/session_01/events",
+      crypto,
+      now: () => now,
+      isCurrent: async (claim) => {
+        currentChecks.push(claim);
+        return false;
+      },
+    })).resolves.toBeNull();
+    expect(currentChecks).toEqual([
+      expect.objectContaining({
+        workspaceId: "workspace_01",
+        environmentId: "env_self_01",
+        sessionId: "session_01",
+        workId: "work_01",
+        claimedAt: "2026-09-03T04:00:01.000Z",
+        generation: 1,
+      }),
+    ]);
   });
 });

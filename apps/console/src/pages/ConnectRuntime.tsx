@@ -3,6 +3,7 @@ import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
 import { Button } from "@/components/ui/button";
 import { Logo } from "../components/Logo";
+import { LocalDebugOnlyWarning } from "../components/LocalDebugOnlyWarning";
 
 /** Browser-side handler for `oma bridge setup`. The CLI binds a random
  *  127.0.0.1 port and opens this URL with `?cb=http://127.0.0.1:<port>/cb&state=<nonce>`.
@@ -155,6 +156,7 @@ export function ConnectRuntime() {
               this machine when you bind an agent to it. Revoke any time on the
               Local Runtimes page.
             </p>
+            <LocalDebugOnlyWarning className="mb-5" />
 
             <div className="flex gap-2">
               <Button onClick={approve} disabled={working} className="flex-1">

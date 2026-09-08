@@ -24,8 +24,10 @@ interface EnvironmentWorkRow {
   sealed_secret: string;
   claim_at: number | null;
   claim_worker_id: string | null;
+  claim_generation: number;
   heartbeat_ttl_seconds: number;
   revision: number;
+  state: StoredEnvironmentWork["work"]["state"];
   created_at: number;
 }
 
@@ -57,7 +59,16 @@ export class SqlEnvironmentWorkStore
   ) {}
 
   private async toStored(row: EnvironmentWorkRow): Promise<StoredEnvironmentWork> {
-    const work = JSON.parse(row.document) as StoredEnvironmentWork["work"];
+    const document = JSON.parse(row.document) as StoredEnvironmentWork["work"];
+    const work = row.state === "queued"
+      ? {
+          ...document,
+          acknowledgedAt: null,
+          latestHeartbeatAt: null,
+          startedAt: null,
+          state: "queued" as const,
+        }
+      : { ...document, state: row.state };
     const opened = await this.cipher.open({ ciphertext: row.sealed_secret });
     const secret = JSON.parse(opened.plaintext) as StoredEnvironmentWork["secret"];
     return {
@@ -73,6 +84,7 @@ export class SqlEnvironmentWorkStore
           : {
               claimedAt: new Date(Number(row.claim_at)).toISOString(),
               workerId: row.claim_worker_id,
+              generation: Number(row.claim_generation),
             },
       heartbeatTtlSeconds: Number(row.heartbeat_ttl_seconds),
       revision: Number(row.revision),
@@ -80,8 +92,8 @@ export class SqlEnvironmentWorkStore
   }
 
   private columns(): string {
-    return `id, document, sealed_secret, claim_at, claim_worker_id,
-            heartbeat_ttl_seconds, revision, created_at`;
+    return `id, document, sealed_secret, claim_at, claim_worker_id, claim_generation,
+            heartbeat_ttl_seconds, revision, state, created_at`;
   }
 
   async insert(
@@ -95,9 +107,9 @@ export class SqlEnvironmentWorkStore
       .prepare(
         `INSERT INTO managed_environment_work
           (workspace_id, environment_id, id, session_id, document, sealed_secret,
-           claim_at, claim_worker_id, heartbeat_ttl_seconds, revision,
-           state, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+           claim_at, claim_worker_id, claim_generation, heartbeat_ttl_seconds,
+           revision, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         input.workspaceId,
@@ -108,6 +120,7 @@ export class SqlEnvironmentWorkStore
         sealed.ciphertext,
         record.claim === null ? null : timestamp(record.claim.claimedAt),
         record.claim?.workerId ?? null,
+        record.claim?.generation ?? 0,
         record.heartbeatTtlSeconds,
         1,
         record.work.state,
@@ -204,7 +217,7 @@ export class SqlEnvironmentWorkStore
       .prepare(
         `UPDATE managed_environment_work
             SET document = ?, session_id = ?, sealed_secret = ?, claim_at = ?,
-                claim_worker_id = ?, heartbeat_ttl_seconds = ?,
+                claim_worker_id = ?, claim_generation = ?, heartbeat_ttl_seconds = ?,
                 revision = revision + 1, state = ?
           WHERE workspace_id = ? AND environment_id = ? AND id = ?
             AND revision = ?`,
@@ -219,6 +232,7 @@ export class SqlEnvironmentWorkStore
           ? null
           : timestamp(input.next.claim.claimedAt),
         input.next.claim?.workerId ?? null,
+        input.next.claim?.generation ?? 0,
         input.next.heartbeatTtlSeconds,
         input.next.work.state,
         input.workspaceId,
@@ -267,30 +281,49 @@ export class SqlEnvironmentWorkStore
     const rows = await this.client
       .prepare(
         `UPDATE managed_environment_work
-            SET claim_at = ?, claim_worker_id = ?, revision = revision + 1
+            SET claim_at = ?, claim_worker_id = ?,
+                claim_generation = claim_generation + 1,
+                heartbeat_ttl_seconds = ?,
+                state = 'queued',
+                revision = revision + 1
           WHERE workspace_id = ? AND environment_id = ?
             AND id = (
               SELECT id
                 FROM managed_environment_work
                WHERE workspace_id = ? AND environment_id = ?
-                 AND state = 'queued'
-                 AND (claim_at IS NULL OR claim_at <= ?)
+                 AND (
+                   (state = 'queued' AND (claim_at IS NULL OR claim_at <= ?))
+                   OR (
+                     state IN ('starting', 'active')
+                     AND claim_at IS NOT NULL
+                     AND claim_at + heartbeat_ttl_seconds * 1000 <= ?
+                   )
+                 )
                ORDER BY created_at ASC, id ASC
                LIMIT 1
             )
-            AND state = 'queued'
-            AND (claim_at IS NULL OR claim_at <= ?)
+            AND (
+              (state = 'queued' AND (claim_at IS NULL OR claim_at <= ?))
+              OR (
+                state IN ('starting', 'active')
+                AND claim_at IS NOT NULL
+                AND claim_at + heartbeat_ttl_seconds * 1000 <= ?
+              )
+            )
           RETURNING ${this.columns()}`,
       )
       .bind(
         claimedAt,
         input.workerId,
+        input.heartbeatTtlSeconds,
         input.workspaceId,
         input.environmentId,
         input.workspaceId,
         input.environmentId,
         timestamp(input.reclaimBefore),
+        claimedAt,
         timestamp(input.reclaimBefore),
+        claimedAt,
       )
       .all<EnvironmentWorkRow>();
     const row = rows.results?.[0];

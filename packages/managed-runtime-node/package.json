@@ -8,7 +8,7 @@
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "test:chaos": "vitest run --config vitest.config.ts test/filesystem-resources.test.ts",
+    "test:chaos": "vitest run --config vitest.config.ts test/filesystem-resources.test.ts test/filesystem-resilience.test.ts test/resource-port-contract.test.ts test/docker-cli.test.ts test/docker-resilience.test.ts",
     "test:coverage": "vitest run --config vitest.coverage.config.ts",
     "test:docker": "vitest run --config vitest.docker.config.ts",
     "typecheck": "tsc --noEmit"

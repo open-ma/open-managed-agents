@@ -1,0 +1,24 @@
+{
+  "name": "@open-managed-agents/managed-runtime-sprites",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/blob-store": "workspace:*",
+    "@open-managed-agents/managed-runtime-sandbox": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*"
+  },
+  "peerDependencies": { "@fly/sprites": "^0.2.2" },
+  "peerDependenciesMeta": { "@fly/sprites": { "optional": true } },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.3"
+  }
+}

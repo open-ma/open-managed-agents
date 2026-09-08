@@ -16,6 +16,123 @@ const start = {
 };
 
 describe("in-sandbox harness supervisor", () => {
+  it("blocks a harness checkpoint until the outer Runtime Host commits it", async () => {
+    let checkpoint!: () => Promise<void>;
+    const events: unknown[] = [];
+    const supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 10_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async (input) => {
+          checkpoint = () => input.checkpoint({
+            sessionId: start.scope.sessionId,
+            turnId: "turn_1",
+          });
+          return {
+            completed: new Promise<{ exitCode: number }>(() => {}),
+            drain: vi.fn(async () => {}),
+            stop: vi.fn(async () => {}),
+          };
+        }),
+      })),
+      emit: async (event) => events.push(event),
+    });
+
+    await supervisor.dispatch(start);
+    let settled = false;
+    const pending = checkpoint().then(() => { settled = true; });
+    await vi.waitFor(() => expect(events).toContainEqual({
+      type: "checkpoint",
+      checkpointId: "checkpoint_1",
+      sessionId: start.scope.sessionId,
+      turnId: "turn_1",
+    }));
+    expect(settled).toBe(false);
+    await supervisor.dispatch({
+      type: "checkpoint.commit",
+      checkpointId: "checkpoint_1",
+    });
+    await pending;
+    expect(settled).toBe(true);
+    await supervisor.close();
+  });
+
+  it("rejects a pending harness checkpoint when the outer Runtime Host loses its fence", async () => {
+    let checkpoint!: () => Promise<void>;
+    const supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 10_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async (input) => {
+          checkpoint = () => input.checkpoint({ sessionId: start.scope.sessionId });
+          return {
+            completed: new Promise<{ exitCode: number }>(() => {}),
+            drain: vi.fn(async () => {}),
+            stop: vi.fn(async () => {}),
+          };
+        }),
+      })),
+      emit: vi.fn(async () => {}),
+    });
+    await supervisor.dispatch(start);
+    const pending = checkpoint();
+    await Promise.resolve();
+    await supervisor.dispatch({
+      type: "checkpoint.reject",
+      checkpointId: "checkpoint_1",
+      message: "resource fence lost",
+    });
+    await expect(pending).rejects.toThrow("resource fence lost");
+    await expect(supervisor.dispatch({
+      type: "checkpoint.commit",
+      checkpointId: "checkpoint_1",
+    })).rejects.toThrow("Unknown harness checkpoint");
+    await expect(supervisor.dispatch({
+      type: "checkpoint.reject",
+      checkpointId: "checkpoint_1",
+      message: "too late",
+    })).rejects.toThrow("Unknown harness checkpoint");
+    await supervisor.close();
+  });
+
+  it("rejects overlapping checkpoints and clears a failed checkpoint emission", async () => {
+    let checkpoint!: (turnId?: string) => Promise<void>;
+    const emit = vi.fn(async (event: { type: string }) => {
+      if (event.type === "checkpoint" && emit.mock.calls.length > 2) {
+        throw new Error("checkpoint transport failed");
+      }
+    });
+    const supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 10_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async (input) => {
+          checkpoint = (turnId) => input.checkpoint({
+            sessionId: start.scope.sessionId,
+            ...(turnId === undefined ? {} : { turnId }),
+          });
+          return {
+            completed: new Promise<{ exitCode: number }>(() => {}),
+            drain: vi.fn(async () => {}),
+            stop: vi.fn(async () => {}),
+          };
+        }),
+      })),
+      emit,
+    });
+
+    await supervisor.dispatch(start);
+    const first = checkpoint();
+    await vi.waitFor(() => expect(emit).toHaveBeenCalledWith(expect.objectContaining({
+      type: "checkpoint",
+      checkpointId: "checkpoint_1",
+    })));
+    await expect(checkpoint("overlap")).rejects.toThrow("already has a pending checkpoint");
+    await supervisor.dispatch({ type: "checkpoint.commit", checkpointId: "checkpoint_1" });
+    await first;
+    await expect(checkpoint("transport-failure")).rejects.toThrow(
+      "checkpoint transport failed",
+    );
+    await supervisor.close();
+  });
+
   it("owns ready, heartbeat, completion and drain around a pluggable harness", async () => {
     let complete!: (value: { exitCode: number }) => void;
     const completed = new Promise<{ exitCode: number }>((resolve) => {
@@ -296,5 +413,122 @@ describe("in-sandbox harness supervisor", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("contains a rejected heartbeat during both explicit stop and close", async () => {
+    const makeSupervisor = () => {
+      const sleep = vi.fn(async () => { throw new Error("heartbeat scheduler failed"); });
+      const run = {
+        completed: new Promise<{ exitCode: number }>(() => {}),
+        drain: vi.fn(async () => {}),
+        stop: vi.fn(async () => {}),
+      };
+      return {
+        sleep,
+        supervisor: createHarnessSupervisor({
+          heartbeatIntervalMs: 1_000,
+          scheduler: { sleep },
+          resolveHarness: vi.fn(async () => ({ start: vi.fn(async () => run) })),
+          emit: vi.fn(async () => {}),
+        }),
+      };
+    };
+
+    const stopped = makeSupervisor();
+    await stopped.supervisor.dispatch(start);
+    await vi.waitFor(() => expect(stopped.sleep).toHaveBeenCalledOnce());
+    await stopped.supervisor.dispatch({ type: "stop", reason: "failed" });
+
+    const closed = makeSupervisor();
+    await closed.supervisor.dispatch(start);
+    await vi.waitFor(() => expect(closed.sleep).toHaveBeenCalledOnce());
+    await closed.supervisor.close();
+  });
+
+  it("contains an already rejected heartbeat when closing a completed harness", async () => {
+    const supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 1_000,
+      scheduler: {
+        sleep: async () => { throw new Error("heartbeat stopped"); },
+      },
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async () => ({
+          completed: Promise.resolve({ exitCode: 0 }),
+          drain: vi.fn(async () => {}),
+          stop: vi.fn(async () => {}),
+        })),
+      })),
+      emit: vi.fn(async () => {}),
+    });
+
+    await supervisor.dispatch(start);
+    await supervisor.waitForCompletion();
+    await expect(supervisor.close()).resolves.toBeUndefined();
+  });
+
+  it("does not emit a heartbeat if stop wins while the scheduler wakes", async () => {
+    const events: unknown[] = [];
+    let supervisor!: ReturnType<typeof createHarnessSupervisor>;
+    supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 1_000,
+      scheduler: {
+        sleep: async () => {
+          queueMicrotask(() => {
+            void supervisor.dispatch({ type: "stop", reason: "aborted" });
+          });
+        },
+      },
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async () => ({
+          completed: new Promise<{ exitCode: number }>(() => {}),
+          drain: vi.fn(async () => {}),
+          stop: vi.fn(async () => {}),
+        })),
+      })),
+      emit: async (event) => events.push(event),
+    });
+
+    await supervisor.dispatch(start);
+    await vi.waitFor(() => expect(events).toHaveLength(1));
+    expect(events).toEqual([{ type: "ready", protocol: "openma-harness-supervisor-v1" }]);
+  });
+
+  it("ignores a harness rejection that arrives after an explicit stop", async () => {
+    let rejectCompletion!: (error: Error) => void;
+    const completed = new Promise<{ exitCode: number }>((_resolve, reject) => {
+      rejectCompletion = reject;
+    });
+    const supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 1_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async () => ({
+          completed,
+          drain: vi.fn(async () => {}),
+          stop: vi.fn(async () => {}),
+        })),
+      })),
+      emit: vi.fn(async () => {}),
+    });
+
+    await supervisor.dispatch(start);
+    await supervisor.dispatch({ type: "stop", reason: "aborted" });
+    rejectCompletion(new Error("late process rejection"));
+    await expect(supervisor.waitForCompletion()).resolves.toBeUndefined();
+  });
+
+  it("serializes and contains a failing event sink", async () => {
+    const supervisor = createHarnessSupervisor({
+      heartbeatIntervalMs: 1_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async () => ({
+          completed: new Promise<{ exitCode: number }>(() => {}),
+          drain: vi.fn(async () => {}),
+          stop: vi.fn(async () => {}),
+        })),
+      })),
+      emit: vi.fn(async () => { throw new Error("event sink failed"); }),
+    });
+
+    await expect(supervisor.dispatch(start)).rejects.toThrow("event sink failed");
   });
 });

@@ -30,8 +30,10 @@ export { IndeterminateCredentialValidationProbe } from "./credential-validation-
 export { CronDeploymentSchedulePlanner } from "./deployment-schedule-planner";
 export { DeduplicatingDreamCurator } from "./deduplicating-dream-curator";
 export { TimerEnvironmentWorkAvailabilityWaiter } from "./environment-work-availability-waiter";
+export * from "./environment-work-webhook-wakeup";
 export { OpaqueEnvironmentWorkSessionCredentialIssuer } from "./environment-work-session-credential-issuer";
 export * from "./environment-work-session-token";
+export * from "./environment-work-runtime-ingress";
 export {
   InProcessDreamExecutionScheduler,
   inProcessDreamExecutionSchedulerModule,
@@ -40,7 +42,16 @@ export type {
   InProcessDreamExecutionSchedulerDependencies,
   InProcessDreamExecutionSchedulerModuleOptions,
 } from "./in-process-dream-execution-scheduler";
-export { EnvironmentAwareSessionLifecycleRouter } from "./session-lifecycle-router";
+export {
+  environmentExecutionAuthority,
+  EnvironmentAwareSessionEventDispatchRouter,
+  EnvironmentAwareSessionEventStreamRouter,
+  EnvironmentAwareSessionLifecycleRouter,
+} from "./session-lifecycle-router";
+export type {
+  EnvironmentAwareSessionEventStreamRouterDependencies,
+  EnvironmentExecutionAuthority,
+} from "./session-lifecycle-router";
 export { LocalTunnelProvisioner } from "./local-tunnel-provisioner";
 export { WebCryptoMemoryContentDescriptor } from "./memory-content-descriptor";
 export { ZipSkillPackageCompiler } from "./skill-package-compiler";

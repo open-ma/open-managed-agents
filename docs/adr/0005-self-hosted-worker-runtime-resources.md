@@ -25,10 +25,12 @@ The public environment shape does not declare a sandbox provider, persistence
 mode, checkpoint support, output transport, suspend/resume behavior, or
 retention policy. The official worker protocol covers work polling and claim,
 acknowledgement, heartbeat, stop, per-work credentials, tool results, session
-events, skills, and Memory Store synchronization. For self-hosted
-environments, sandbox allocation, filesystem and repository materialization,
-runtime lifecycle, and durable delivery of generated files remain the
-operator's responsibility.
+events, skill materialization, and Memory Store synchronization. Attached
+files are addressable through the Managed Files API but are not automatically
+mounted by the official `EnvironmentWorker`; repositories likewise remain a
+runtime concern. For self-hosted environments, sandbox allocation, file and
+repository materialization, runtime lifecycle, and durable delivery of
+generated files remain the operator's responsibility.
 
 Provider integrations fill that gap independently. Cloudflare, E2B, Daytona,
 Modal, Namespace, Vercel, and other platforms expose different combinations
@@ -61,6 +63,17 @@ The Managed Agents API remains the canonical public protocol:
   `volume`, `checkpoint`, or `outputs` fields.
 - The Environment Work endpoints and state transitions remain compatible with
   the official SDK and `EnvironmentWorker`.
+- Work and webhook payloads remain scheduling signals; they do not embed the
+  Session snapshot. After claim/ACK, the worker decodes the claim's
+  `sessions_token` and retrieves exactly that Session before selecting a
+  runtime profile or starting compute.
+- `Session.metadata` is an opaque `Record<string, string>` written by the API
+  client. OpenMA preserves it and makes it available to the worker, but does
+  not invent a standard repository/file manifest schema.
+- `Session.resources` is different: the claimed Session returned by the
+  control plane includes the official `file`, `github_repository`, and
+  `memory_store` resource records, including mount paths and checkout data.
+  The worker/runtime decides how to materialize those records.
 - Official SDK workers can point their `baseURL` at OpenMA without importing an
   OpenMA runtime package.
 - Environment `metadata` may label an environment for people, but it is never
@@ -68,14 +81,24 @@ The Managed Agents API remains the canonical public protocol:
 - Provider selection and credentials are deployment/runtime configuration,
   outside the official Managed Agents lane.
 
+The per-work Session bearer is an exact capability projection of the resolved
+Session snapshot. It may retrieve the claimed Session and its events, declared
+skills, attached files, attached Memory Stores with their declared access
+mode, the bound MCP gateway, and its own Work heartbeat/stop endpoints. It may
+not list/upload/delete files, cross to another Session or resource, or mutate a
+read-only Memory Store. Claim rotation fences the previous bearer against all
+of these routes. A sandbox egress adapter may narrow the reachable route
+families further, but the API-side live-claim check remains authoritative.
+
 The Work lease is authoritative for the worker-facing control-plane
-operations. A self-hosted worker does not mutate the Session aggregate or
-produce model events: it reads Session configuration and the event stream,
-executes requested tools, and sends the matching `user.tool_result` or
-`user.custom_tool_result` event. A stale worker may still be alive briefly at
-the infrastructure level, but it must not be able to submit an accepted tool
-result, publish an active workspace checkpoint, or finalize outputs after
-losing ownership.
+operations. An unmodified AMA hands worker does not own the model loop: it
+reads Session configuration and the event stream, executes requested tools,
+and sends the matching `user.tool_result` or `user.custom_tool_result` event.
+An OpenMA-supervised in-sandbox harness may own the model loop and produce
+agent events, but it is still fenced by that same single Work claim. A stale
+worker may remain alive briefly at the infrastructure level, but it must not
+be able to submit an accepted Session event, publish an active workspace
+checkpoint, or finalize outputs after losing ownership.
 
 ### 2. OpenMA managed-runtime plane
 
@@ -85,16 +108,17 @@ Session run. The host composes narrow Ports rather than branching on provider
 names or assuming which side owns the agent loop:
 
 ```text
-AMA Environment Work queue       OpenMA Session scheduler
-       (hands)                         (brain)
-          │                              │
-          └──────── execution assignment ┘
+official Environment Work queue    OpenMA Session scheduler
+ (AMA hands or in-sandbox brain)      (application brain)
+             │                              │
+             └──────── execution assignment ┘
                          │
                          ▼
 OpenMA Managed Runtime Host
   ├─ Runtime lease + fencing
   ├─ SandboxPort
   ├─ WorkspacePersistencePort
+  ├─ SessionInputMaterializerPort
   ├─ SessionOutputPort
   └─ SandboxHarnessDriverPort
           │
@@ -108,10 +132,29 @@ There are therefore three supported execution arrangements:
 |---|---|---|---|
 | Vanilla AMA worker | Managed Agents control plane | Official Environment Work API | User/provider template |
 | AMA worker under OpenMA Runtime Host | Managed Agents control plane | Same official Environment Work API | OpenMA Ports and selected adapters |
-| OpenMA supervised harness in sandbox | Pi, ACP, or another OpenMA harness in the sandbox | OpenMA Session runtime/supervisor protocol | OpenMA Ports and selected adapters |
+| OpenMA supervised harness in sandbox | Pi, ACP, or another OpenMA harness in the sandbox | Official Environment Work externally; OpenMA supervisor internally | OpenMA Ports and selected adapters |
 
 The enhanced mode is additive. OpenMA must never require its private resource
 protocol in order to run a vanilla AMA worker.
+
+For an OpenMA-managed worker the normative activation order is:
+
+```text
+poll/claim + ACK
+  -> decode per-claim sessions_token
+  -> GET the claimed Session
+  -> validate Session id and Environment id
+  -> read official Session.resources + application-owned Session.metadata
+  -> acquire/restore and attach runtime resources
+  -> materialize declared Session inputs
+  -> start the selected harness driver
+```
+
+Session retrieval happens before runtime acquisition. Input materialization
+happens after the workspace, outputs, and credential-egress bindings are
+attached, but before the worker/harness process starts. Failure at either
+boundary never starts the harness. The failed Work is not force-stopped; its
+lease may expire and a replacement worker can reclaim it.
 
 These are two orthogonal choices, not competing definitions of a worker:
 
@@ -277,6 +320,39 @@ collection cannot duplicate a deliverable. Only the active fencing generation
 may publish the manifest. Partial files may be retained for diagnosis but are
 marked incomplete and are not silently presented as final output.
 
+### SessionInputMaterializerPort
+
+`SessionInputMaterializerPort` stages the claimed Session's official resource
+records and interprets its application-owned metadata:
+
+```ts
+interface SessionInputMaterializerPort {
+  materialize(input: {
+    session: {
+      id: string;
+      environmentId: string;
+      metadata: Readonly<Record<string, string>>;
+      resources: readonly (Readonly<Record<string, unknown>> & {
+        type: string;
+      })[];
+    };
+    workspace: WorkspaceBinding;
+    sandbox: ManagedSandboxLease;
+    activeWorkspaceCheckpoint: RuntimePublicationCandidate | null;
+    idempotencyKey: string;
+    signal: AbortSignal;
+  }): Promise<void>;
+}
+```
+
+An implementation clones/downloads the standard `github_repository` and
+`file` resources and may attach another application resource according to its
+own metadata keys. The Port does not standardize metadata keys and does not
+receive the raw Work secret. Provider SDKs, pre-signed locators, or a separately
+configured scoped API client remain behind the implementation. Materialization
+must be idempotent for the supplied Work generation and must fail closed on an
+unknown required input.
+
 ### Runtime checkpoints
 
 Process-memory snapshots are an optional optimization exposed by a runtime
@@ -367,21 +443,40 @@ need an idempotency key or compensation. A renewal transport error is treated
 as uncertain ownership: the local runtime is stopped rather than allowed to
 continue speculatively.
 
-Harness placement is below this boundary. For a harness outside the sandbox,
-the execution fence directly gates Session projection. For a supervised
-harness inside a sandbox, the same outer execution owns a nested Runtime Host
-resource fence:
+Harness placement selects exactly one execution authority:
 
 ```text
-Session execution generation (canonical Event authority)
-  └─ Runtime resource generation (sandbox/workspace/output authority)
-       └─ supervisor heartbeat (in-sandbox process health)
+harness outside sandbox
+  SessionExecution claim
+    └─ harness executor
+         └─ optional sandbox/resource publication fence
+
+harness inside self-hosted sandbox
+  official Environment Work claim
+    └─ one sandbox executor (supervisor + harness + tools)
+         └─ resource publication fence
 ```
 
-Losing the outer execution cancels the inner host. Losing the inner resource
-fence or supervisor heartbeat fails that execution attempt. The inner fence
-may never grant authority to write canonical Session Events after the outer
-generation has expired.
+The in-sandbox lane does not acquire a second `SessionExecution` claim. Its
+Environment Work lease is the sole scheduling authority for the combined
+sandbox and harness attempt. `RuntimeResourceFence` is subordinate publication
+authority for workspace/checkpoint/output candidates, not another scheduler
+or executor. The supervisor heartbeat is process-health evidence, not an
+ownership claim.
+
+Both scheduling planes use the same internal lease-controller semantics for
+serialized renewal, transient-failure deadlines, cancellation, graceful stop,
+and final renewal. Their adapters and public shapes remain distinct: Session
+execution uses `SessionExecutionStorePort`; self-hosted execution uses the
+unchanged official Environment Work API.
+
+Each Environment Work claim mints a fresh claim-bound Session bearer. The
+control plane compares that bearer with the token stored on the current Work
+record before accepting canonical Session requests. Reclaim therefore fences
+the previous executor immediately even if its sealed token has not reached its
+cryptographic expiry. The current token may still reach Work heartbeat/stop
+after TTL so the official endpoint can return `412` or complete cleanup; it
+cannot use that grace path to append Session Events.
 
 ## Capability negotiation
 
@@ -436,7 +531,36 @@ The current package split is:
 - `managed-runtime-sandbox`: adapter bridge for existing sandbox providers;
 - `managed-runtime-node`: Docker/filesystem reference composition;
 - `harness-supervisor`: optional in-sandbox lifecycle SDK for Pi/ACP/native
-  harnesses.
+  harnesses;
+- `harness-runtime-acp`: the provider-neutral in-sandbox Session command loop,
+  ACP child lifecycle, per-agent native-state capture/restore, and canonical
+  event recovery fallback.
+
+Harbor is an implementation reference only for the per-agent native Session
+artifact inventory. OpenMA owns all durable semantics: immutable candidates,
+checkpoint format/version, restore-before-ready barrier, CAS/fencing,
+publication, retries, retention and deletion. Live agent homes are isolated in
+ephemeral runtime storage; only declared Session artifacts are copied into the
+workspace candidate.
+
+The ACP checkpoint manifest also carries the last completed input event id.
+The supervisor advances that marker and captures native artifacts before it
+publishes canonical `session.status_idle`; the Runtime Host commits the outer
+workspace/output candidate afterward. On replacement, the HTTP control adapter
+derives the canonical completed-turn watermark from Managed Events and the
+native-state adapter permits resume only when the restored marker matches.
+This explicitly closes the publish-before-pointer-CAS crash window: canonical
+history remains authoritative and an older native candidate triggers one
+bounded semantic-recovery turn rather than silent context loss.
+
+Provider drivers expose the direct `ama_worker` lane plus an optional
+`HarnessSupervisorTransportPort`. The shared provider registry projects that
+transport into `openma_supervised`; individual provider packages do not repeat
+the supervisor state machine. A driver that advertises the supervised lane but
+returns neither an already-composed driver nor the transport fails capability
+admission before sandbox acquisition. Providers without streaming stdin, such
+as the current Vercel and Cloudflare Bridge adapters, expose neither the lane
+nor a misleading transport object.
 
 The Cloudflare and E2B presets currently advertise only capabilities backed by
 their adapter tests. Neither claims process-memory checkpoint support. Provider
@@ -498,6 +622,7 @@ network timeout, cancellation deadline, and termination deadline.
 | Sandbox disappears | Reacquire, restore last committed workspace, replay Session events |
 | Host crashes during checkpoint upload | Candidate remains inactive; retry or collect later |
 | Host crashes after upload but before pointer CAS | Retry CAS using the same idempotency key and fence |
+| Harness publishes turn completion before workspace pointer CAS | Compare canonical and native completed-turn watermarks; reject stale native resume and recover once from canonical Managed Events |
 | Checkpoint is corrupt | Reject during verification and fall back to the last valid revision |
 | Runtime resume fails | Cold acquire plus workspace restore and event replay |
 | Output upload is duplicated | Content-addressed finalize collapses duplicates |
@@ -536,6 +661,10 @@ OpenMA server and cover:
 
 - environment create/retrieve/list/update/archive/delete;
 - work poll, claim/ack, heartbeat, update, stop, and terminal races;
+- claimed-Session retrieval with the per-work bearer, identity mismatch, and
+  unavailable Session recovery;
+- opaque Session metadata projection and input-materialization failure before
+  harness start;
 - per-work secret scope and rejection of stale credentials;
 - tool result and Session event projection;
 - always-on polling and webhook/per-Session execution;

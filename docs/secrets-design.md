@@ -12,8 +12,11 @@
 
 ## TL;DR
 
-OMA 的 **vault** 不是通用秘钥库。它的安全模型是 **agent 永不在内存里持有明文**——`apps/oma-vault`
-按 hostname 实时查库、注入 `Authorization`、转发（见 `mcp-credential-architecture.md`）。所以 vault
+OMA 的 **vault** 不是通用秘钥库。它的目标安全模型是 **不可信 agent/sandbox 永不在内存里持有明文**。
+Managed harness-in-sandbox 的 MCP 走带当前 Work capability 的
+`/v1/oma/mcp-proxy/<session>/<server>`；Cloudflare 透明出站走 runtime-fenced handler。
+旧 `apps/oma-vault` 只按 hostname 注入，是本地/单操作员兼容路径，不是多租户安全边界。详见
+`mcp-credential-architecture.md`。所以 vault
 只覆盖一类秘钥：**agent/sandbox 代用户出站调外部服务时的凭据**（GitHub PAT、Linear/Slack OAuth、
 MCP token）。
 
@@ -147,9 +150,10 @@ Tier 0 管控）。
 
 ## 已知限制 / 不在范围内
 
-- **`oma-vault` 跨租户串 token**：两个租户都给同一 host（如 `api.github.com`）注册凭据时，后者的
-  请求可能拿到前者的 token（`apps/oma-vault/src/index.ts:194-203`）。单操作员私有化无所谓；多租户
-  **必须**设 `OMA_TENANT` 锁定查库范围，或等 per-session attribution。
+- **`oma-vault` 跨租户串 token / 可绕过**：两个租户都给同一 host（如 `api.github.com`）注册凭据时，
+  hostname-only 查询无法安全归因；进程还可以忽略 proxy env。即使设置 `OMA_TENANT`，也只适用于
+  单租户、可信本地调试。多租户必须走 Work-scoped HTTP MCP gateway，或使用经过网络隔离与 runtime
+  fence conformance 的 provider adapter。
 - **`command_secret` 仍进沙箱 env**：如 `GIT_TOKEN` 这类按命令注入 env 的，仍是沙箱内可见（AST 门控，
   但定向 prompt injection 仍可能泄）。详见 `mcp-credential-architecture.md` 的 "What this DOESN'T
   cover"。**别**把高爆炸半径的凭据（组织级 PAT、生产 DB 口令）挂到处理不可信输入的 agent 上。

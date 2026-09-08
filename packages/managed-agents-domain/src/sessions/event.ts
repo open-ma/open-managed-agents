@@ -103,6 +103,7 @@ export type SentSessionEvent =
   | (SentEventBase & {
       type: "user.message";
       content: UserMessageContentBlock[];
+      sessionThreadId?: string | null;
     })
   | (SentEventBase & {
       type: "user.interrupt";

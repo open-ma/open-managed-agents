@@ -5,11 +5,12 @@ import type {
   SessionExecutionStorePort,
   SettleSessionExecutionResult,
 } from "@open-managed-agents/session-runtime-contract/coordination";
+import {
+  ExecutionLeaseController,
+  type ExecutionLeaseTimers,
+} from "@open-managed-agents/execution-control";
 
-export interface SessionExecutionHostTimers {
-  setInterval(callback: () => void, delayMs: number): unknown;
-  clearInterval(handle: unknown): void;
-}
+export type SessionExecutionHostTimers = ExecutionLeaseTimers;
 
 export interface SessionExecutionHostDependencies {
   store: SessionExecutionStorePort;
@@ -42,11 +43,6 @@ export type SessionExecutionRun = (
   signal: AbortSignal,
 ) => Promise<void>;
 
-const defaultTimers: SessionExecutionHostTimers = {
-  setInterval: (callback, delayMs) => setInterval(callback, delayMs),
-  clearInterval: (handle) => clearInterval(handle as ReturnType<typeof setInterval>),
-};
-
 function asError(error: unknown): Error {
   return error instanceof Error ? error : new Error(String(error));
 }
@@ -60,12 +56,10 @@ function asError(error: unknown): Error {
 export class SessionExecutionHost {
   readonly #leaseTtlMs: number;
   readonly #heartbeatIntervalMs: number;
-  readonly #timers: SessionExecutionHostTimers;
 
   constructor(private readonly dependencies: SessionExecutionHostDependencies) {
     this.#leaseTtlMs = dependencies.leaseTtlMs ?? 30_000;
     this.#heartbeatIntervalMs = dependencies.heartbeatIntervalMs ?? 10_000;
-    this.#timers = dependencies.timers ?? defaultTimers;
     if (!Number.isSafeInteger(this.#leaseTtlMs) || this.#leaseTtlMs <= 0) {
       throw new Error("Session Execution leaseTtlMs must be a positive integer");
     }
@@ -93,68 +87,60 @@ export class SessionExecutionHost {
     claimed: Extract<ClaimSessionExecutionResult, { type: "claimed" }>,
     run: SessionExecutionRun,
   ): Promise<SessionExecutionHostResult> {
-    const controller = new AbortController();
-    let lost = false;
+    const lease = new ExecutionLeaseController({
+      fence: claimed.fence,
+      heartbeatIntervalMs: this.#heartbeatIntervalMs,
+      ...(this.dependencies.timers === undefined
+        ? {}
+        : { timers: this.dependencies.timers }),
+      renew: async (fence) => {
+        try {
+          const renewed = await this.dependencies.store.renew({
+            fence,
+            renewedAt: this.dependencies.clock.now().toISOString(),
+            leaseTtlMs: this.#leaseTtlMs,
+          });
+          if (renewed.type === "lost") {
+            return {
+              type: "lost" as const,
+              reason: new Error("session execution lease lost"),
+            };
+          }
+          return {
+            type: "renewed" as const,
+            fence: renewed.fence,
+            stopRequested: renewed.interruptRequestedAt !== null,
+            ...(renewed.interruptRequestedAt === null
+              ? {}
+              : { reason: new Error("session execution interrupted") }),
+          };
+        } catch (error) {
+          return { type: "lost" as const, reason: asError(error) };
+        }
+      },
+      onFenceChanged: this.dependencies.onFenceChanged,
+    });
     let interrupted = claimed.execution.interruptRequestedAt !== null;
-    let heartbeat: Promise<void> = Promise.resolve();
-    const tick = () => {
-      heartbeat = heartbeat.then(async () => {
-        if (lost) return;
-        const renewed = await this.dependencies.store.renew({
-          fence: claimed.fence,
-          renewedAt: this.dependencies.clock.now().toISOString(),
-          leaseTtlMs: this.#leaseTtlMs,
-        });
-        if (renewed.type === "lost") {
-          lost = true;
-          controller.abort(new Error("session execution lease lost"));
-          return;
-        }
-        // Keep the fence object identity stable for the running callback.
-        // Harnesses and output adapters receive the object once at run start;
-        // mutating it in place lets those long-lived references use the
-        // renewed expiry proof instead of attempting a commit with the
-        // pre-heartbeat (already expired) object.
-        Object.assign(claimed.fence, renewed.fence);
-        this.dependencies.onFenceChanged?.(claimed.fence);
-        if (renewed.interruptRequestedAt !== null) {
-          interrupted = true;
-          controller.abort(new Error("session execution interrupted"));
-        }
-      }).catch((error) => {
-        lost = true;
-        controller.abort(asError(error));
-      });
-    };
-    const timer = this.#timers.setInterval(tick, this.#heartbeatIntervalMs);
+    if (interrupted) {
+      lease.requestStop(new Error("session execution interrupted"));
+    }
+    const heartbeat = lease.start();
     try {
-      if (interrupted) controller.abort(new Error("session execution interrupted"));
       let error: Error | null = null;
       try {
-        await run(claimed.execution, claimed.fence, controller.signal);
+        await run(claimed.execution, claimed.fence, lease.signal);
       } catch (caught) {
         error = asError(caught);
       }
-      await heartbeat;
-      if (!lost) {
+      if (!lease.lost) {
         // A final renewal closes the interval→settle race. A run that ends
         // exactly as its lease expires must not write under a stale fence.
-        const renewed = await this.dependencies.store.renew({
-          fence: claimed.fence,
-          renewedAt: this.dependencies.clock.now().toISOString(),
-          leaseTtlMs: this.#leaseTtlMs,
-        });
-        if (renewed.type === "lost") {
-          lost = true;
-        } else {
-          Object.assign(claimed.fence, renewed.fence);
-          this.dependencies.onFenceChanged?.(claimed.fence);
-          interrupted ||= renewed.interruptRequestedAt !== null;
-        }
+        await lease.renewNow({ allowAborted: true });
       }
-      if (lost) {
+      if (lease.lost) {
         return { type: "lost", execution: claimed.execution, fence: claimed.fence };
       }
+      interrupted ||= lease.stopRequested;
       const outcome = interrupted ? "cancelled" : error === null ? "completed" : "failed";
       const settled: SettleSessionExecutionResult = await this.dependencies.store.settle({
         fence: claimed.fence,
@@ -176,7 +162,8 @@ export class SessionExecutionHost {
       if (error !== null) return { type: "failed", execution: settled.execution, error };
       return { type: "completed", execution: settled.execution };
     } finally {
-      this.#timers.clearInterval(timer);
+      await lease.close();
+      await heartbeat;
     }
   }
 }

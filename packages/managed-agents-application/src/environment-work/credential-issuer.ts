@@ -13,8 +13,22 @@ export type IssueEnvironmentWorkSessionCredentialResult =
   | { type: "issued"; secret: EnvironmentWorkSecret }
   | { type: "rejected"; message: string };
 
+export interface BindEnvironmentWorkSessionCredentialToClaim {
+  secret: EnvironmentWorkSecret;
+  claimedAt: string;
+  generation: number;
+}
+
+export interface BoundEnvironmentWorkSessionCredential {
+  secret: EnvironmentWorkSecret;
+}
+
 export interface EnvironmentWorkSessionCredentialIssuerPort {
   issue(
     input: IssueEnvironmentWorkSessionCredential,
   ): Promise<IssueEnvironmentWorkSessionCredentialResult>;
+  /** Rotate the bearer after every queue claim/reclaim. */
+  bindToClaim(
+    input: BindEnvironmentWorkSessionCredentialToClaim,
+  ): Promise<BoundEnvironmentWorkSessionCredential>;
 }

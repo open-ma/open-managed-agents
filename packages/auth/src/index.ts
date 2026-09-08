@@ -25,6 +25,17 @@ export interface AuthSession {
 export interface ApiKeyResolution {
   tenantId: string;
   userId?: string;
+  credential?:
+    | { type: "workspace" }
+    | { type: "environment"; environmentId: string }
+    | {
+        type: "environment_work_session";
+        environmentId: string;
+        sessionId: string;
+        workId: string;
+        claimedAt: string;
+        generation: number;
+      };
 }
 
 export interface BearerTokenRequest {
@@ -40,8 +51,8 @@ export interface AuthMiddlewareDeps {
   resolveSession(headers: Headers): Promise<AuthSession | null>;
   /** Resolve an x-api-key value → tenant + optional user. Null on miss. */
   resolveApiKey(apiKey: string): Promise<ApiKeyResolution | null>;
-  /** Resolve and scope-check a short-lived worker bearer. Existing workspace
-   * API keys are handled by resolveApiKey as a fallback. */
+  /** Resolve and scope-check a short-lived worker bearer. Workspace and
+   * environment API keys are handled by resolveApiKey as a fallback. */
   resolveBearerToken?(
     request: BearerTokenRequest,
   ): Promise<ApiKeyResolution | null>;
@@ -57,13 +68,47 @@ export interface AuthMiddlewareDeps {
   bypassPath?(path: string): boolean;
 }
 
+function environmentWorkPath(environmentId: string): string {
+  return `/v1/environments/${encodeURIComponent(environmentId)}/work`;
+}
+
+/** Environment service keys are Bearer-only and cannot escape their Work API. */
+export function allowsApiKeyRequest(
+  resolution: ApiKeyResolution,
+  request: Pick<BearerTokenRequest, "path"> & { transport: "bearer" | "x-api-key" },
+): boolean {
+  if (resolution.credential?.type === "environment") {
+    if (request.transport !== "bearer") return false;
+    const root = environmentWorkPath(resolution.credential.environmentId);
+    return request.path === root || request.path.startsWith(`${root}/`);
+  }
+  if (resolution.credential?.type === "environment_work_session") {
+    // The cryptographic Work-token resolver already validates the exact
+    // Session/Work route, method, claim generation, and expiry.
+    return request.transport === "bearer";
+  }
+
+  // A workspace key may administer Work through the normal x-api-key API,
+  // but it must never become a standing Environment Worker bearer. Embedded
+  // and external workers therefore enter through the same environment-scoped
+  // credential boundary.
+  const isEnvironmentWork = /^\/v1\/environments\/[^/]+\/work(?:\/|$)/.test(
+    request.path,
+  );
+  return !(request.transport === "bearer" && isEnvironmentWork);
+}
+
 const DEFAULT_BYPASS = (path: string) =>
   path === "/health" || path.startsWith("/auth/");
 
 export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
   const bypassPath = deps.bypassPath ?? DEFAULT_BYPASS;
   return createMiddleware<{
-    Variables: { tenant_id: string; user_id?: string };
+    Variables: {
+      tenant_id: string;
+      user_id?: string;
+      auth_credential?: ApiKeyResolution["credential"];
+    };
   }>(async (c, next) => {
     if (bypassPath(c.req.path)) return next();
 
@@ -86,15 +131,19 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
     if (apiKey) {
       const r = await deps.resolveApiKey(apiKey);
       if (!r) return c.json({ error: "Invalid API key" }, 401);
+      if (!allowsApiKeyRequest(r, { path: c.req.path, transport: "x-api-key" })) {
+        return c.json({ error: "API key is not authorized for this resource" }, 403);
+      }
       c.set("tenant_id", r.tenantId);
       if (r.userId) c.set("user_id", r.userId);
+      if (r.credential !== undefined) c.set("auth_credential", r.credential);
       return next();
     }
 
     // 2. Official Managed Agents helpers use Bearer auth for both the
     // standing environment key and the per-work sessions token. Resolve the
-    // scoped token first; a normal workspace API key remains a valid standing
-    // environment key through the existing API-key store.
+    // scoped token first; the policy guard below prevents a workspace key from
+    // masquerading as the standing Environment Worker bearer.
     const authorization = c.req.header("authorization") ?? "";
     if (authorization.startsWith("Bearer ")) {
       const token = authorization.slice("Bearer ".length);
@@ -107,8 +156,14 @@ export function createAuthMiddleware(deps: AuthMiddlewareDeps) {
           });
       const resolved = scoped ?? await deps.resolveApiKey(token);
       if (!resolved) return c.json({ error: "Invalid bearer token" }, 401);
+      if (!allowsApiKeyRequest(resolved, { path: c.req.path, transport: "bearer" })) {
+        return c.json({ error: "Bearer token is not authorized for this resource" }, 403);
+      }
       c.set("tenant_id", resolved.tenantId);
       if (resolved.userId) c.set("user_id", resolved.userId);
+      if (resolved.credential !== undefined) {
+        c.set("auth_credential", resolved.credential);
+      }
       return next();
     }
 

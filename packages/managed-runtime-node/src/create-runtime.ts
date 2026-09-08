@@ -12,7 +12,13 @@ import {
   type SqlRuntimeResourceFenceOptions,
 } from "@open-managed-agents/runtime-resource-fence-sql";
 import type { SqlClient } from "@open-managed-agents/sql-client";
-import type { RuntimeCheckpointPort } from "@open-managed-agents/runtime-resource-contract";
+import type {
+  CredentialEgressCapabilities,
+  CredentialEgressPort,
+  ManagedRuntimeProviderDriverPort,
+  RuntimeCheckpointPort,
+  SessionInputMaterializerPort,
+} from "@open-managed-agents/runtime-resource-contract";
 
 import {
   DockerManagedRuntimeAdapter,
@@ -42,6 +48,21 @@ export interface CreateNodeManagedRuntimeOptions {
   fence?: SqlRuntimeResourceFenceOptions;
   /** Optional provider-owned process checkpoint adapter. */
   runtimeCheckpoint?: RuntimeCheckpointPort;
+  /**
+   * Operator-supplied enforced/advisory egress implementation. The default
+   * Docker composition intentionally has none: proxy environment variables
+   * alone are not a credential isolation boundary.
+   */
+  credentialEgress?: CredentialEgressPort;
+  /** Optional stager for official Session resources and application metadata. */
+  sessionInputs?: SessionInputMaterializerPort;
+}
+
+export interface CreateNodeManagedRuntimeDriverOptions
+  extends CreateNodeManagedRuntimeOptions {
+  /** Explicit static admission facts. Omission stays fail-closed even when a
+   * dynamic egress Port was supplied. */
+  credentialEgressCapabilities?: CredentialEgressCapabilities;
 }
 
 /** Preinstalled Node reference composition: SQL fence + filesystem + Docker. */
@@ -64,6 +85,7 @@ export async function createNodeManagedRuntime(
       : { additionalMounts: options.additionalMounts }),
     ...(options.extraHosts === undefined ? {} : { extraHosts: options.extraHosts }),
   });
+  const sessionInputs = options.sessionInputs ?? sandbox;
   const supervisedHarness = new SupervisedSandboxHarnessDriver({
     transport: sandbox,
   });
@@ -85,6 +107,10 @@ export async function createNodeManagedRuntime(
     ...(options.runtimeCheckpoint === undefined
       ? {}
       : { runtimeCheckpoint: options.runtimeCheckpoint }),
+    ...(options.credentialEgress === undefined
+      ? {}
+      : { credentialEgress: options.credentialEgress }),
+    sessionInputs,
   });
   const orphanReconciler = createManagedRuntimeOrphanReconciler({ orphans, sandbox });
   return {
@@ -99,5 +125,60 @@ export async function createNodeManagedRuntime(
     ...(options.runtimeCheckpoint === undefined
       ? {}
       : { runtimeCheckpoint: options.runtimeCheckpoint }),
+    ...(options.credentialEgress === undefined
+      ? {}
+      : { credentialEgress: options.credentialEgress }),
+    sessionInputs,
+  };
+}
+
+/** Provider-driver projection of the preinstalled Node/Docker runtime. */
+export function createNodeManagedRuntimeDriver(
+  options: CreateNodeManagedRuntimeDriverOptions,
+): ManagedRuntimeProviderDriverPort {
+  return {
+    descriptor() {
+      return {
+        provider: "node-docker",
+        version: "1.0.0",
+        placements: ["in_process"],
+        capabilities: {
+          sandbox: {
+            suspendResume: "unsupported",
+            hardTerminate: "supported",
+            runtimeCheckpoints: [],
+          },
+          workspace: { strategies: ["checkpoint_restore"] },
+          outputs: {
+            strategies: [{ strategy: "final_collect", durability: "durable" }],
+          },
+          harness: { drivers: ["ama_worker", "openma_supervised"] },
+        },
+        credentialEgress: options.credentialEgressCapabilities ?? {
+          enforcement: "unsupported",
+          credentialMode: "snapshot",
+          interceptedProtocols: [],
+        },
+      };
+    },
+    async create(input) {
+      if (input.placement !== "in_process") {
+        throw new Error(`Node/Docker does not support ${input.placement} placement`);
+      }
+      const runtime = await createNodeManagedRuntime(options);
+      return {
+        sandbox: runtime.sandbox,
+        workspace: runtime.workspace,
+        outputs: runtime.outputs,
+        harnessDriver: runtime.harnessDriver,
+        ...(runtime.runtimeCheckpoint === undefined
+          ? {}
+          : { runtimeCheckpoint: runtime.runtimeCheckpoint }),
+        ...(runtime.credentialEgress === undefined
+          ? {}
+          : { credentialEgress: runtime.credentialEgress }),
+        sessionInputs: runtime.sessionInputs,
+      };
+    },
   };
 }

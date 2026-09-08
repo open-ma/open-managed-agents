@@ -24,5 +24,9 @@
     "postgres": {
       "optional": true
     }
+  },
+  "devDependencies": {
+    "better-sqlite3": "^13.0.3",
+    "postgres": "^3.4.0"
   }
 }

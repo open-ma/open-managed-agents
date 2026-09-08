@@ -1,6 +1,7 @@
 import type { Session } from "../domain/session";
 import type { StoredSession } from "@open-managed-agents/session-store";
 import type {
+  EnvironmentWorkExecutionFence,
   RuntimeProducedSessionEvent,
   SessionExecutionFence,
 } from "./port";
@@ -15,6 +16,7 @@ export interface ProjectSessionRuntimeState extends FindRuntimeProjectionSession
   events: RuntimeProducedSessionEvent[];
   next: Session;
   executionFence?: SessionExecutionFence;
+  environmentWorkFence?: EnvironmentWorkExecutionFence;
 }
 
 export type ProjectSessionRuntimeStateResult =

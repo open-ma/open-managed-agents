@@ -747,19 +747,106 @@ describe("main-node official Managed Agents route", () => {
       name: `worker-auth-${suffix}`,
       config: { type: "self_hosted" },
     });
+    const environmentKeyResponse = await fetch(`${baseURL}/v1/oma/api_keys`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        name: `worker-${suffix}`,
+        environment_id: environment.id,
+      }),
+    });
+    expect(environmentKeyResponse.status).toBe(201);
+    const environmentCredential = await environmentKeyResponse.json() as {
+      id: string;
+      key: string;
+    };
+    expect(environmentCredential.key).toMatch(/^oma_env_/);
+    expect((await fetch(`${baseURL}/v1/agents`, {
+      headers: { authorization: `Bearer ${environmentCredential.key}` },
+    })).status).toBe(403);
+    expect((await fetch(`${baseURL}/v1/environments/env_other/work/poll`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${environmentCredential.key}` },
+    })).status).toBe(403);
+    expect((await fetch(`${baseURL}/v1/environments/${environment.id}/work/poll`, {
+      method: "POST",
+      headers: { "x-api-key": environmentCredential.key },
+    })).status).toBe(403);
+    const attachedFile = await client.beta.files.upload({
+      file: new File(["attached work input"], "input.txt", {
+        type: "text/plain",
+      }),
+    });
+    const unrelatedFile = await client.beta.files.upload({
+      file: new File(["not attached"], "unrelated.txt", {
+        type: "text/plain",
+      }),
+    });
+    const attachedSkill = await client.beta.skills.create({
+      display_title: "Worker attached skill",
+      files: [
+        new File([SKILL_MARKDOWN], "repository-guide/SKILL.md", {
+          type: "text/markdown",
+        }),
+      ],
+    });
+    const unrelatedSkill = await client.beta.skills.create({
+      display_title: "Worker unrelated skill",
+      files: [
+        new File([SKILL_MARKDOWN], "unrelated/SKILL.md", {
+          type: "text/markdown",
+        }),
+      ],
+    });
+    const attachedMemoryStore = await client.beta.memoryStores.create({
+      name: `worker-memory-${suffix}`,
+    });
+    const unrelatedMemoryStore = await client.beta.memoryStores.create({
+      name: `worker-unrelated-memory-${suffix}`,
+    });
+    const attachedMemory = await client.beta.memoryStores.memories.create(
+      attachedMemoryStore.id,
+      {
+        content: "worker memory input",
+        path: "/input.md",
+        view: "full",
+      },
+    );
     const agent = await client.beta.agents.create({
       name: `worker-auth-${suffix}`,
       model: modelId,
+      skills: [{
+        type: "custom",
+        skill_id: attachedSkill.id,
+        version: "latest",
+      }],
     });
     const session = await client.beta.sessions.create({
       agent: { type: "agent", id: agent.id, version: agent.version },
       environment_id: environment.id,
       title: "Official worker bearer auth",
+      resources: [
+        { type: "file", file_id: attachedFile.id },
+        {
+          type: "memory_store",
+          memory_store_id: attachedMemoryStore.id,
+          access: "read_write",
+        },
+      ],
     });
 
+    const environmentClient = new Anthropic({
+      apiKey: null,
+      authToken: environmentCredential.key,
+      baseURL,
+      maxRetries: 0,
+    });
     const poller = client.beta.environments.work.poller({
       environmentId: environment.id,
-      environmentKey: "test-key",
+      environmentKey: environmentCredential.key,
       workerId: `worker-${suffix}`,
       blockMs: null,
       autoStop: false,
@@ -781,6 +868,59 @@ describe("main-node official Managed Agents route", () => {
       id: session.id,
       environment_id: environment.id,
     });
+    await expect(
+      sessionClient.beta.files.retrieveMetadata(attachedFile.id),
+    ).resolves.toMatchObject({ id: attachedFile.id, filename: "input.txt" });
+    await expect(
+      sessionClient.beta.files.download(attachedFile.id).then((file) => file.text()),
+    ).resolves.toBe("attached work input");
+    await expect(
+      sessionClient.beta.files.download(unrelatedFile.id),
+    ).rejects.toMatchObject({ status: 401 });
+
+    const attachedSkillVersions = await sessionClient.beta.skills.versions.list(
+      attachedSkill.id,
+    );
+    expect(attachedSkillVersions.data).toHaveLength(1);
+    const concreteSkillVersion = attachedSkillVersions.data[0]!.version;
+    await expect(
+      sessionClient.beta.skills.versions.retrieve(concreteSkillVersion, {
+        skill_id: attachedSkill.id,
+      }),
+    ).resolves.toMatchObject({
+      skill_id: attachedSkill.id,
+      version: concreteSkillVersion,
+    });
+    await expect(
+      sessionClient.beta.skills.versions.download(concreteSkillVersion, {
+        skill_id: attachedSkill.id,
+      }).then((file) => file.arrayBuffer()),
+    ).resolves.toBeInstanceOf(ArrayBuffer);
+    await expect(
+      sessionClient.beta.skills.versions.list(unrelatedSkill.id),
+    ).rejects.toMatchObject({ status: 401 });
+
+    const memories = await sessionClient.beta.memoryStores.memories.list(
+      attachedMemoryStore.id,
+      { view: "full" },
+    );
+    expect(memories.data).toMatchObject([{
+      id: attachedMemory.id,
+      content: "worker memory input",
+    }]);
+    await expect(
+      sessionClient.beta.memoryStores.memories.update(attachedMemory.id, {
+        memory_store_id: attachedMemoryStore.id,
+        content: "worker memory output",
+        view: "full",
+      }),
+    ).resolves.toMatchObject({
+      id: attachedMemory.id,
+      content: "worker memory output",
+    });
+    await expect(
+      sessionClient.beta.memoryStores.memories.list(unrelatedMemoryStore.id),
+    ).rejects.toMatchObject({ status: 401 });
     const unrelated = await fetch(`${baseURL}/v1/agents`, {
       headers: { Authorization: `Bearer ${sessionsToken}` },
     });
@@ -788,17 +928,95 @@ describe("main-node official Managed Agents route", () => {
     await expect(
       sessionClient.beta.environments.work.heartbeat(work.id, {
         environment_id: environment.id,
-        desired_ttl_seconds: 90,
+        desired_ttl_seconds: 0,
       }),
     ).resolves.toMatchObject({ type: "work_heartbeat", lease_extended: true });
+    poller.abort();
+    await iterator.return?.();
+    const replacement = await environmentClient.beta.environments.work.poll(
+      environment.id,
+      {
+        "Anthropic-Worker-ID": `replacement-${suffix}`,
+        reclaim_older_than_ms: 5_000,
+      },
+    );
+    expect(replacement).not.toBeNull();
+    if (replacement === null) throw new Error("expected replacement Work claim");
+    const replacementToken = String(
+      decodeWorkSecret(replacement.secret!).sessions_token,
+    );
+    expect(replacementToken).not.toBe(String(sessionsToken));
+    await environmentClient.beta.environments.work.ack(replacement.id, {
+      environment_id: environment.id,
+    });
     await expect(
-      sessionClient.beta.environments.work.stop(work.id, {
+      sessionClient.beta.sessions.retrieve(session.id),
+    ).rejects.toMatchObject({ status: 401 });
+    const replacementSessionClient = new Anthropic({
+      apiKey: null,
+      authToken: replacementToken,
+      baseURL,
+      maxRetries: 0,
+    });
+    await expect(
+      replacementSessionClient.beta.sessions.retrieve(session.id),
+    ).resolves.toMatchObject({ id: session.id });
+    await replacementSessionClient.beta.environments.work.heartbeat(
+      replacement.id,
+      {
+        environment_id: environment.id,
+        expected_last_heartbeat: "NO_HEARTBEAT",
+      },
+    );
+    const runtimeEventId = `runtime-${suffix}`;
+    const runtimeIngress = await fetch(
+      `${baseURL}/v1/oma/sessions/${session.id}/runtime-events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${replacementToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          events: [{
+            id: runtimeEventId,
+            type: "session.status_idle",
+            processed_at: new Date().toISOString(),
+            stop_reason: { type: "end_turn" },
+          }],
+        }),
+      },
+    );
+    expect(runtimeIngress.status).toBe(200);
+    await expect(runtimeIngress.json()).resolves.toEqual({
+      data: [{ id: runtimeEventId }],
+    });
+    const runtimeHistory = await replacementSessionClient.beta.sessions.events.list(
+      session.id,
+      { types: ["session.status_idle"] },
+    );
+    expect(runtimeHistory.data).toContainEqual(expect.objectContaining({
+      id: runtimeEventId,
+      type: "session.status_idle",
+    }));
+    await expect(
+      environmentClient.beta.environments.work.stop(work.id, {
         environment_id: environment.id,
         force: true,
       }),
     ).resolves.toMatchObject({ id: work.id, state: "stopped" });
-    poller.abort();
-    await iterator.return?.();
+    const revoked = await fetch(
+      `${baseURL}/v1/oma/api_keys/${environmentCredential.id}`,
+      { method: "DELETE", headers: { "x-api-key": "test-key" } },
+    );
+    expect(revoked.status).toBe(200);
+    expect((await fetch(
+      `${baseURL}/v1/environments/${environment.id}/work/poll`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${environmentCredential.key}` },
+      },
+    )).status).toBe(401);
   }, 60_000);
 });
 

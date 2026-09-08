@@ -1,4 +1,8 @@
 import type {
+  CredentialEgressCapabilities,
+  CredentialEgressPort,
+  CredentialEgressRequirement,
+  CredentialEgressRevokeReason,
   HarnessDriverType,
   HarnessSupervisorChannel,
   HarnessSupervisorCommand,
@@ -6,6 +10,7 @@ import type {
   HarnessSupervisorTransportPort,
   ManagedSandboxLease,
   ManagedSandboxPort,
+  ManagedRuntimePlan,
   RuntimeResourceScope,
   RuntimeResourceFence,
   SandboxHarnessDriverPort,
@@ -21,6 +26,7 @@ import type {
   RuntimeCheckpointKind,
   RuntimeCheckpointPort,
   RuntimeCheckpointRef,
+  SessionInputMaterializerPort,
 } from "@open-managed-agents/runtime-resource-contract";
 import type { BlobStore } from "@open-managed-agents/blob-store/ports";
 import {
@@ -34,14 +40,67 @@ import {
   type SandboxRuntimeHandle,
   type SandboxRuntimePort,
 } from "@open-managed-agents/sandbox";
+import { Effect } from "effect";
+
+import {
+  runPortEffect,
+  tryPortPromise,
+  waitForAbortableDelay,
+} from "./effect-kernel";
 
 const checkpointMetadataKey = "openma.runtime.checkpoint.v1";
+const ephemeralWorkspaceMetadataKey = "openma.workspace.ephemeral.v1";
 
 type ProviderRuntime = SandboxPort & SandboxRuntimePort;
 
+/**
+ * Generation-scoped resources selected by the OpenMA kernel for one runtime
+ * acquisition. Provider adapters receive this before allocation so native
+ * volumes, output mounts, and egress wiring can be installed atomically with
+ * sandbox creation. The context contains bindings and identities only; secret
+ * values remain behind their owning Ports.
+ */
+export interface ProviderManagedRuntimeAcquisitionContext {
+  scope: RuntimeResourceScope;
+  fence: RuntimeResourceFence;
+  plan: ManagedRuntimePlan;
+  workspace: WorkspaceBinding;
+  outputs: SessionOutputBinding | null;
+  credentialEgress: Parameters<ManagedSandboxPort["acquire"]>[0]["credentialEgress"];
+  signal: AbortSignal;
+}
+
+/**
+ * Provider SDK boundary used by the generic runtime composition. The optional
+ * acquisition argument keeps existing low-level SandboxProviderPort adapters
+ * source-compatible while allowing managed-runtime adapter packages to use
+ * create-time provider features without coupling the sandbox primitive package
+ * to OpenMA resource contracts.
+ */
+export interface ProviderManagedRuntimeProviderPort<Runtime extends ProviderRuntime>
+  extends SandboxProviderPort<Runtime> {
+  create(
+    ctx: SandboxFactoryContext,
+    env: SandboxFactoryEnv,
+    acquisition?: ProviderManagedRuntimeAcquisitionContext,
+  ): Promise<Runtime>;
+  resume(
+    handle: SandboxRuntimeHandle,
+    ctx: SandboxFactoryContext,
+    env: SandboxFactoryEnv,
+    acquisition?: ProviderManagedRuntimeAcquisitionContext,
+  ): Promise<Runtime>;
+  restore(
+    checkpoint: SandboxCheckpointHandle,
+    ctx: SandboxFactoryContext,
+    env: SandboxFactoryEnv,
+    acquisition?: ProviderManagedRuntimeAcquisitionContext,
+  ): Promise<Runtime>;
+}
+
 export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> {
   providerName: string;
-  provider: SandboxProviderPort<Runtime>;
+  provider: ProviderManagedRuntimeProviderPort<Runtime>;
   context(scope: {
     workspaceId: string;
     environmentId: string;
@@ -55,11 +114,19 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
     workId: string;
   }): SandboxFactoryEnv;
   leaseTtlMs: number;
+  /** Provider allocation is not runnable until this barrier passes. The host
+   * fence is already renewing while this runs, so slow boots cannot publish a
+   * half-ready runtime. Defaults to a 60s timeout and 250ms polling. */
+  readiness?: {
+    timeoutMs?: number;
+    pollIntervalMs?: number;
+    wait?: (milliseconds: number, signal: AbortSignal) => Promise<void>;
+  };
   sandboxCapabilities: SandboxResourceCapabilities;
   workspace: {
     strategies: readonly Extract<
       WorkspaceStrategy,
-      "retained_runtime" | "checkpoint_restore"
+      "retained_runtime" | "checkpoint_restore" | "ephemeral"
     >[];
     retainedSuspendKind?: SandboxCheckpointKind;
     portableCheckpointKind?: SandboxCheckpointKind;
@@ -84,6 +151,25 @@ export interface ProviderManagedRuntimeOptions<Runtime extends ProviderRuntime> 
         signal: AbortSignal;
       }): Promise<void>;
     };
+  };
+  /** Provider-native credential egress wire point.  The generic composition
+   * owns the binding lifecycle; adapters only implement attach/revoke against
+   * a concrete runtime. */
+  credentialEgress?: {
+    capabilities: CredentialEgressCapabilities;
+    attach(input: {
+      runtime: Runtime;
+      scope: RuntimeResourceScope;
+      fence: RuntimeResourceFence;
+      requirement: Exclude<CredentialEgressRequirement, "disabled">;
+      signal: AbortSignal;
+    }): Promise<void>;
+    revoke(input: {
+      runtime: Runtime;
+      scope: RuntimeResourceScope;
+      fence: RuntimeResourceFence;
+      reason: CredentialEgressRevokeReason;
+    }): Promise<void>;
   };
   /** Provider-specific reconnect-and-destroy path for persisted orphans. */
   reapRuntime?: (input: {
@@ -125,6 +211,10 @@ export interface ProviderManagedRuntimeComposition {
   outputs: SessionOutputPort;
   harness: SandboxHarnessDriverPort;
   supervisorTransport: HarnessSupervisorTransportPort;
+  /** Generic official Session file/repository staging over the attached
+   * provider runtime. Memory stores stay owned by the official AMA worker. */
+  sessionInputs: SessionInputMaterializerPort;
+  credentialEgress?: CredentialEgressPort;
   runtimeCheckpoint?: RuntimeCheckpointPort;
 }
 
@@ -272,6 +362,71 @@ function runtimeHandleFor(checkpoint: SandboxCheckpointHandle): SandboxRuntimeHa
   };
 }
 
+function sameScope(left: RuntimeResourceScope, right: RuntimeResourceScope): boolean {
+  return left.workspaceId === right.workspaceId
+    && left.environmentId === right.environmentId
+    && left.sessionId === right.sessionId
+    && left.workId === right.workId;
+}
+
+function requiredString(
+  resource: Readonly<Record<string, unknown>>,
+  field: string,
+): string {
+  const value = resource[field];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Session ${resource.type} resource requires ${field}`);
+  }
+  return value;
+}
+
+function safeMountPath(resource: Readonly<Record<string, unknown>>): string {
+  const path = requiredString(resource, "mount_path");
+  if (!path.startsWith("/") || path.split("/").includes("..") || path.includes("\0")) {
+    throw new Error("Session resource mount_path must be absolute and may not traverse parents");
+  }
+  return path;
+}
+
+function safeRepositoryUrl(resource: Readonly<Record<string, unknown>>): string {
+  const value = requiredString(resource, "url");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Session github_repository resource has an invalid URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Session github_repository URL must use HTTP(S)");
+  }
+  return value;
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", `'\"'\"'`)}'`;
+}
+
+function requireEgressBinding(
+  bindings: Map<string, {
+    scope: RuntimeResourceScope;
+    generation: number;
+    requirement: Exclude<CredentialEgressRequirement, "disabled">;
+    runtimeId?: string;
+  }>,
+  bindingId: string,
+  scope: RuntimeResourceScope,
+  fence: RuntimeResourceFence,
+) {
+  const state = bindings.get(bindingId);
+  if (state === undefined) {
+    throw new Error("Credential egress binding is unknown or already released");
+  }
+  if (!sameScope(state.scope, scope) || state.generation !== fence.generation) {
+    throw new Error("Credential egress binding belongs to another fenced runtime scope");
+  }
+  return state;
+}
+
 async function drain(readable: ReadableStream<Uint8Array>): Promise<void> {
   const reader = readable.getReader();
   try {
@@ -306,6 +461,21 @@ function parseSupervisorEvent(line: string): HarnessSupervisorEvent {
         throw new Error("Harness supervisor heartbeat sequence must be non-negative");
       }
       return { type: "heartbeat", sequence: Number(event.sequence) };
+    case "checkpoint":
+      if (
+        typeof event.checkpointId !== "string" || event.checkpointId.length === 0
+        || typeof event.sessionId !== "string" || event.sessionId.length === 0
+        || (event.turnId !== undefined
+          && (typeof event.turnId !== "string" || event.turnId.length === 0))
+      ) {
+        throw new Error("Harness supervisor checkpoint request is invalid");
+      }
+      return {
+        type: "checkpoint",
+        checkpointId: event.checkpointId,
+        sessionId: event.sessionId,
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+      };
     case "completed":
       if (!Number.isSafeInteger(event.exitCode)) {
         throw new Error("Harness supervisor completion exitCode must be an integer");
@@ -338,6 +508,7 @@ async function* supervisorEvents(
     while (true) {
       signal.throwIfAborted();
       const next = await reader.read();
+      signal.throwIfAborted();
       if (next.done) break;
       buffer += decoder.decode(next.value, { stream: true });
       while (true) {
@@ -360,22 +531,60 @@ async function* supervisorEvents(
 export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
   options: ProviderManagedRuntimeOptions<Runtime>,
 ): ProviderManagedRuntimeComposition {
+  const readinessTimeoutMs = options.readiness?.timeoutMs ?? 60_000;
+  const readinessPollIntervalMs = options.readiness?.pollIntervalMs ?? 250;
+  const readinessWait = options.readiness?.wait ?? waitForAbortableDelay;
+  if (!Number.isSafeInteger(readinessTimeoutMs) || readinessTimeoutMs <= 0) {
+    throw new RangeError("Provider readiness timeoutMs must be a positive integer");
+  }
+  if (
+    !Number.isSafeInteger(readinessPollIntervalMs)
+    || readinessPollIntervalMs <= 0
+  ) {
+    throw new RangeError("Provider readiness pollIntervalMs must be a positive integer");
+  }
   const runtimes = new Map<string, Runtime>();
   const bindingRestore = new Map<string, SandboxCheckpointHandle>();
   const bindingRuntime = new Map<string, string>();
   const outputRuntime = new Map<string, string>();
   const suspended = new Map<string, SandboxCheckpointHandle>();
   const terminated = new Set<string>();
+  const egressBindings = new Map<string, {
+    scope: RuntimeResourceScope;
+    generation: number;
+    requirement: Exclude<CredentialEgressRequirement, "disabled">;
+    runtimeId?: string;
+  }>();
 
-  function assertProviderRuntime(runtime: Runtime): ManagedSandboxLease {
+  function validateProviderRuntime(runtime: Runtime): ManagedSandboxLease {
     const handle = runtime.runtimeHandle();
     if (handle.provider !== options.providerName || handle.runtimeId.length === 0) {
       throw new Error(
         `Sandbox provider returned an incompatible runtime for ${options.providerName}`,
       );
     }
-    runtimes.set(handle.runtimeId, runtime);
     return { provider: handle.provider, runtimeId: handle.runtimeId };
+  }
+
+  async function waitUntilReady(runtime: Runtime, signal: AbortSignal): Promise<void> {
+    const startedAt = Date.now();
+    const hasProviderLease = runtime.runtimeCapabilities().lease;
+    for (;;) {
+      signal.throwIfAborted();
+      if (hasProviderLease) {
+        await runtime.renewLease({ ttlMs: options.leaseTtlMs });
+      }
+      signal.throwIfAborted();
+      const state = await runtime.status();
+      if (state === "running") return;
+      if (state === "stopped") {
+        throw new Error("Provider runtime stopped before it became ready");
+      }
+      if (Date.now() - startedAt >= readinessTimeoutMs) {
+        throw new Error(`Provider runtime readiness timed out after ${readinessTimeoutMs}ms`);
+      }
+      await readinessWait(readinessPollIntervalMs, signal);
+    }
   }
 
   function requireRuntime(lease: ManagedSandboxLease): Runtime {
@@ -398,24 +607,76 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
       input.signal.throwIfAborted();
       const context = options.context(input.scope);
       const environment = options.environment(input.scope);
+      const egress = input.credentialEgress === null || input.credentialEgress === undefined
+        ? undefined
+        : requireEgressBinding(
+            egressBindings,
+            input.credentialEgress.bindingId,
+            input.scope,
+            input.fence,
+          );
       const checkpoint = bindingRestore.get(input.workspace.bindingId);
-      const runtime = checkpoint === undefined
-        ? await options.provider.create(context, environment)
-        : checkpoint.scope === "runtime"
-          ? await options.provider.resume(
-              runtimeHandleFor(checkpoint),
-              context,
-              environment,
+      const { runtime, lease } = await runPortEffect(
+        tryPortPromise((effectSignal) => {
+          const acquisition: ProviderManagedRuntimeAcquisitionContext = {
+            scope: input.scope,
+            fence: input.fence,
+            plan: input.plan,
+            workspace: input.workspace,
+            outputs: input.outputs,
+            credentialEgress: input.credentialEgress ?? null,
+            signal: effectSignal,
+          };
+          return checkpoint === undefined
+            ? options.provider.create(context, environment, acquisition)
+            : checkpoint.scope === "runtime"
+              ? options.provider.resume(
+                  runtimeHandleFor(checkpoint),
+                  context,
+                  environment,
+                  acquisition,
+                )
+              : options.provider.restore(
+                  checkpoint,
+                  context,
+                  environment,
+                  acquisition,
+                );
+        }).pipe(
+          Effect.flatMap((runtime) =>
+            Effect.gen(function*() {
+              const lease = yield* Effect.try({
+                try: () => validateProviderRuntime(runtime),
+                catch: (error) => error,
+              });
+              yield* tryPortPromise((effectSignal) =>
+                waitUntilReady(runtime, effectSignal)
+              );
+              return { runtime, lease };
+            }).pipe(
+              Effect.onError(() =>
+                Effect.promise(async () => {
+                  try {
+                    await runtime.destroy?.();
+                  } catch {
+                    // Failed-acquire cleanup is best effort; the original failure wins.
+                  }
+                })
+              ),
             )
-          : await options.provider.restore(checkpoint, context, environment);
-      input.signal.throwIfAborted();
-      const lease = assertProviderRuntime(runtime);
+          ),
+        ),
+        input.signal,
+      );
+      terminated.delete(lease.runtimeId);
+      runtimes.set(lease.runtimeId, runtime);
       bindingRuntime.set(input.workspace.bindingId, lease.runtimeId);
       if (input.outputs !== null) {
         outputRuntime.set(input.outputs.bindingId, lease.runtimeId);
       }
-      await runtime.renewLease({ ttlMs: options.leaseTtlMs });
-      input.signal.throwIfAborted();
+      if (egress !== undefined) {
+        egress.runtimeId = lease.runtimeId;
+      }
       return lease;
     },
 
@@ -425,7 +686,9 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
         runtime = requireRuntime(input.lease);
         const state = await runtime.status();
         if (state === "stopped") return { type: "lost" };
-        await runtime.renewLease({ ttlMs: options.leaseTtlMs });
+        if (runtime.runtimeCapabilities().lease) {
+          await runtime.renewLease({ ttlMs: options.leaseTtlMs });
+        }
         return { type: "alive" };
       } catch {
         return { type: "lost" };
@@ -698,6 +961,88 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
     },
   };
 
+  const credentialEgress: CredentialEgressPort | undefined =
+    options.credentialEgress === undefined
+      ? undefined
+      : {
+          async capabilities() {
+            return options.credentialEgress!.capabilities;
+          },
+          async prepare(input) {
+            input.signal.throwIfAborted();
+            if (options.credentialEgress!.capabilities.enforcement === "unsupported") {
+              return null;
+            }
+            const identity = JSON.stringify([
+              options.providerName,
+              input.scope.workspaceId,
+              input.scope.environmentId,
+              input.scope.sessionId,
+              input.scope.workId,
+              input.fence.generation,
+              input.idempotencyKey,
+            ]);
+            const bindingId = `provider-egress-${await sha256(identity)}`;
+            egressBindings.set(bindingId, {
+              scope: input.scope,
+              generation: input.fence.generation,
+              requirement: input.requirement,
+            });
+            input.signal.throwIfAborted();
+            return {
+              bindingId,
+              enforcement: options.credentialEgress!.capabilities.enforcement,
+              credentialMode: options.credentialEgress!.capabilities.credentialMode,
+            };
+          },
+          async attach(input) {
+            input.signal.throwIfAborted();
+            const state = requireEgressBinding(
+              egressBindings,
+              input.binding.bindingId,
+              input.scope,
+              input.fence,
+            );
+            const runtime = requireRuntime(input.sandbox);
+            await options.credentialEgress!.attach({
+              runtime,
+              scope: input.scope,
+              fence: input.fence,
+              requirement: state.requirement,
+              signal: input.signal,
+            });
+            input.signal.throwIfAborted();
+          },
+          async revoke(input) {
+            const state = requireEgressBinding(
+              egressBindings,
+              input.binding.bindingId,
+              input.scope,
+              input.fence,
+            );
+            if (state.runtimeId === undefined) {
+              throw new Error("Credential egress binding was never attached to provider compute");
+            }
+            const runtime = requireRuntime({
+              provider: options.providerName,
+              runtimeId: state.runtimeId,
+            });
+            await options.credentialEgress!.revoke({
+              runtime,
+              scope: input.scope,
+              fence: input.fence,
+              reason: input.reason,
+            });
+          },
+          async release(input) {
+            const state = egressBindings.get(input.binding.bindingId);
+            if (state !== undefined && !sameScope(state.scope, input.scope)) {
+              throw new Error("Credential egress binding belongs to another runtime scope");
+            }
+            egressBindings.delete(input.binding.bindingId);
+          },
+        };
+
   const workspace: WorkspacePersistencePort = {
     async capabilities() {
       return { strategies: options.workspace.strategies };
@@ -706,12 +1051,12 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
     async materialize(input) {
       input.signal.throwIfAborted();
       if (!options.workspace.strategies.includes(
-        input.strategy as "retained_runtime" | "checkpoint_restore",
+        input.strategy as "retained_runtime" | "checkpoint_restore" | "ephemeral",
       )) {
         throw new Error(`Provider workspace does not support ${input.strategy}`);
       }
       const bindingId = `provider-ws-${input.scope.workId}-${input.fence.generation}`;
-      if (input.activeCheckpoint !== null) {
+      if (input.activeCheckpoint !== null && input.strategy !== "ephemeral") {
         const checkpoint = parseCheckpoint(
           input.activeCheckpoint.metadata?.[checkpointMetadataKey],
           options.providerName,
@@ -761,6 +1106,20 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
           kind,
           name: input.idempotencyKey,
         });
+      } else if (input.strategy === "ephemeral") {
+        const marker = JSON.stringify({
+          provider: options.providerName,
+          runtimeId: input.sandbox.runtimeId,
+          generation: input.fence.generation,
+        });
+        const hash = await sha256(marker);
+        input.signal.throwIfAborted();
+        return {
+          id: `wrc_${hash}`,
+          contentHash: `sha256:${hash}`,
+          revision: input.fence.generation,
+          metadata: { [ephemeralWorkspaceMetadataKey]: marker },
+        };
       } else {
         throw new Error(`Provider workspace does not support ${input.strategy}`);
       }
@@ -851,7 +1210,12 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
         ...(input.process.env === undefined ? {} : { env: { ...input.process.env } }),
         ...(input.process.cwd === undefined ? {} : { cwd: input.process.cwd }),
       });
-      input.signal.throwIfAborted();
+      try {
+        input.signal.throwIfAborted();
+      } catch (error) {
+        await process.kill("SIGTERM").catch(() => {});
+        throw error;
+      }
       const writer = process.stdin.getWriter();
       const encoder = new TextEncoder();
       let eventsClaimed = false;
@@ -884,6 +1248,89 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
           await process.kill("SIGTERM").catch(() => {});
         },
       };
+    },
+  };
+
+  const sessionInputs: SessionInputMaterializerPort = {
+    async materialize(input) {
+      const runtime = requireRuntime(input.sandbox);
+      for (const resource of input.session.resources) {
+        input.signal.throwIfAborted();
+        if (resource.type === "memory_store") {
+          if (input.resourceOwnership.memoryStore === "worker") {
+            // The official EnvironmentWorker owns memory hydration and final
+            // synchronization. Doing it here as well would create two writers.
+            continue;
+          }
+          throw new Error(
+            `${options.providerName} generic Session input materializer does not implement memory_store synchronization`,
+          );
+        }
+        if (resource.type === "file") {
+          if (input.access === undefined) {
+            throw new Error(
+              "Session file materialization requires per-claim SessionInputAccessPort",
+            );
+          }
+          if (runtime.writeFileBytes === undefined) {
+            throw new Error(
+              `${options.providerName} cannot materialize binary Session files`,
+            );
+          }
+          const fileId = requiredString(resource, "file_id");
+          const path = safeMountPath(resource);
+          const file = await input.access.downloadFile({
+            fileId,
+            signal: input.signal,
+          });
+          input.signal.throwIfAborted();
+          await runtime.writeFileBytes(path, file.content);
+          continue;
+        }
+        if (resource.type === "github_repository") {
+          // A canonical workspace checkpoint already contains the repository
+          // and all harness edits. Re-cloning here would destroy resumed state.
+          if (input.activeWorkspaceCheckpoint !== null) continue;
+          const url = safeRepositoryUrl(resource);
+          const targetDir = safeMountPath(resource);
+          const rawCheckout = resource.checkout;
+          const checkout = typeof rawCheckout === "object" && rawCheckout !== null
+            ? rawCheckout as Readonly<Record<string, unknown>>
+            : null;
+          if (runtime.gitCheckout !== undefined) {
+            await runtime.gitCheckout(url, {
+              targetDir,
+              ...(checkout?.type === "branch"
+                && typeof checkout.name === "string"
+                && checkout.name.length > 0
+                ? { branch: checkout.name }
+                : {}),
+            });
+          } else {
+            const branch = checkout?.type === "branch"
+              && typeof checkout.name === "string"
+              && checkout.name.length > 0
+              ? `--branch ${shellQuote(checkout.name)} `
+              : "";
+            await runtime.exec(
+              `git clone ${branch}-- ${shellQuote(url)} ${shellQuote(targetDir)}`,
+              120_000,
+            );
+          }
+          if (checkout?.type === "commit") {
+            const sha = typeof checkout.sha === "string" ? checkout.sha : "";
+            if (!/^[0-9a-f]{7,64}$/iu.test(sha)) {
+              throw new Error("Session github_repository commit checkout is invalid");
+            }
+            await runtime.exec(
+              `git -C ${shellQuote(targetDir)} checkout --detach ${shellQuote(sha)}`,
+              60_000,
+            );
+          }
+          continue;
+        }
+        throw new Error(`Unsupported Session resource type: ${resource.type}`);
+      }
     },
   };
 
@@ -940,8 +1387,16 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
               context: options.context(input.scope),
               environment: options.environment(input.scope),
             });
-            const lease = assertProviderRuntime(runtime);
-            await runtime.renewLease({ ttlMs: options.leaseTtlMs });
+            let lease: ManagedSandboxLease;
+            try {
+              lease = validateProviderRuntime(runtime);
+              await waitUntilReady(runtime, new AbortController().signal);
+            } catch (error) {
+              await runtime.destroy?.().catch(() => {});
+              throw error;
+            }
+            terminated.delete(lease.runtimeId);
+            runtimes.set(lease.runtimeId, runtime);
             return lease;
           },
         };
@@ -952,6 +1407,8 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
     outputs,
     harness,
     supervisorTransport,
+    sessionInputs,
+    ...(credentialEgress === undefined ? {} : { credentialEgress }),
     ...(runtimeCheckpoint === undefined ? {} : { runtimeCheckpoint }),
   };
 }

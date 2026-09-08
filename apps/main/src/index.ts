@@ -65,6 +65,7 @@ import {
   environmentWorkEnqueuerModule,
   environmentWorkEnvironmentSourcePort,
   environmentWorkSessionCredentialIssuerPort,
+  environmentWorkWakeupPort,
 } from "@open-managed-agents/app/modules/environment-work";
 import {
   memoryContentDescriptorPort,
@@ -95,12 +96,14 @@ import {
   SqlFileMetadataPersistence,
   SqlMemoryStoreSource,
   SqlManagedSessionsComposition,
+  SqlPersistedSessionEventStream,
   SqlSessionEnvironmentSource,
   SqlSessionSource,
   SqlSessionRuntimeProjectionPersistence,
 } from "@open-managed-agents/managed-agents-adapters-sql";
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { SqlRuntimeResourceFencePort } from "@open-managed-agents/runtime-resource-fence-sql";
 import {
   createCfShardPoolService,
   createCfTenantShardDirectoryService,
@@ -124,18 +127,23 @@ import {
   ModelCardCatalogSource,
   decodeRuntimeProducedSessionEvent,
   CronDeploymentSchedulePlanner,
+  EnvironmentAwareSessionEventDispatchRouter,
+  EnvironmentAwareSessionEventStreamRouter,
   EnvironmentAwareSessionLifecycleRouter,
+  ingestEnvironmentWorkRuntimeEvents,
   TimerEnvironmentWorkAvailabilityWaiter,
   IndeterminateCredentialValidationProbe,
   inProcessDreamExecutionSchedulerModule,
   LocalTunnelProvisioner,
   SealedEnvironmentWorkSessionCredentialIssuer,
+  StandardWebhookEnvironmentWorkWakeup,
   DeduplicatingDreamCurator,
   WebCryptoTunnelCertificateAuthority,
   WebCryptoTunnelTokenManager,
   WebCryptoMemoryContentDescriptor,
   ZipSkillPackageCompiler,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
+import type { ApiKeyResolution } from "@open-managed-agents/auth";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-cf";
 import {
   cfSessionLifecycle,
@@ -278,6 +286,7 @@ type AppCtx = import("hono").Context<{
   Variables: {
     tenant_id: string;
     user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
     services: import("@open-managed-agents/services").Services;
     tenantDb: D1Database;
   };
@@ -715,6 +724,12 @@ function managedSessionsCompositionFor(ctx: AppCtx): SqlManagedSessionsCompositi
       },
     }),
     runtime,
+    eventDispatch: new EnvironmentAwareSessionEventDispatchRouter({ runtime }),
+    eventStream: new EnvironmentAwareSessionEventStreamRouter({
+      environments,
+      runtime,
+      selfHosted: new SqlPersistedSessionEventStream(client),
+    }),
     sealer: new CfManagedSessionSecretSealer(ctx.env.PLATFORM_ROOT_SECRET),
     clock: { now: () => new Date() },
     ids: {
@@ -747,6 +762,53 @@ const managedSessionsRoutes = new Hono<{
       sessionThreadEvents: () => ports.sessionThreadEvents,
     }),
   );
+});
+
+const managedRuntimeIngressRoutes = new Hono<{
+  Bindings: Env;
+  Variables: {
+    tenant_id: string;
+    tenantDb: D1Database;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
+}>().post("/:sessionId/runtime-events", async (c) => {
+  const credential = c.get("auth_credential");
+  if (credential?.type !== "environment_work_session") {
+    return c.json({ error: "Environment Work session credential required" }, 403);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  const ctx = c as unknown as AppCtx;
+  const composition = managedSessionsCompositionFor(ctx);
+  const result = await ingestEnvironmentWorkRuntimeEvents({
+    claim: {
+      workspaceId: ctx.var.tenant_id,
+      environmentId: credential.environmentId,
+      sessionId: credential.sessionId,
+      workId: credential.workId,
+      generation: credential.generation,
+    },
+    sessionId: c.req.param("sessionId"),
+    body,
+    projection: new SessionRuntimeProjectionApplicationService({
+      workspaceId: ctx.var.tenant_id,
+      persistence: composition.runtimeProjection,
+    }),
+    publish: async () => {},
+  });
+  if (result.type === "recorded") {
+    return c.json({ data: result.eventIds.map((id) => ({ id })) }, 200);
+  }
+  if (result.type === "invalid_request") {
+    return c.json({ error: result.message }, 400);
+  }
+  if (result.type === "not_found") return c.json({ error: "Session not found" }, 404);
+  if (result.type === "forbidden") return c.json({ error: "Forbidden" }, 403);
+  return c.json({ error: result.type }, 409);
 });
 
 const managedDeploymentSchedulePlanner = new CronDeploymentSchedulePlanner();
@@ -817,6 +879,17 @@ function managedEnvironmentWorkApplicationFor(ctx: AppCtx) {
       "PLATFORM_ROOT_SECRET is required for managed Environment Work credentials",
     );
   }
+  const webhookUrl = ctx.env.OMA_MANAGED_AGENTS_WEBHOOK_URL;
+  const webhookKey = ctx.env.OMA_MANAGED_AGENTS_WEBHOOK_SIGNING_KEY;
+  const webhookWakeup = webhookUrl !== undefined && webhookKey !== undefined
+    ? new StandardWebhookEnvironmentWorkWakeup({
+        endpoint: webhookUrl,
+        signingKey: webhookKey,
+        organizationId: ({ workspaceId }) =>
+          ctx.env.OMA_MANAGED_AGENTS_ORGANIZATION_ID ?? workspaceId,
+        nextEventId: () => `whe_${crypto.randomUUID().replaceAll("-", "")}`,
+      })
+    : null;
   return createCloudflareManagedAgentsApp({
     workspaceId: ctx.var.tenant_id,
     sql: client,
@@ -848,6 +921,19 @@ function managedEnvironmentWorkApplicationFor(ctx: AppCtx) {
           apiBaseUrl: new URL(ctx.req.url).origin,
         }),
       ),
+      providePort(environmentWorkWakeupPort, {
+        notifyRunStarted: async (input) => {
+          if (webhookWakeup === null) return;
+          ctx.executionCtx.waitUntil(
+            webhookWakeup.notifyRunStarted(input).catch((err) => {
+              logError(
+                { op: "environment_work.webhook_failed", err },
+                "Managed Agents webhook wake-up failed; poll fallback remains active",
+              );
+            }),
+          );
+        },
+      }),
       environmentWorkEnqueuerModule(),
     ],
   });
@@ -1139,6 +1225,7 @@ app.route("/v1/environments", managedEnvironmentsRoutes);
 app.route("/v1/environments", managedEnvironmentWorkRoutes);
 app.route("/v1/oma/environments", legacyEnvironmentsRoutes);
 app.route("/v1/sessions", managedSessionsRoutes);
+app.route("/v1/oma/sessions", managedRuntimeIngressRoutes);
 app.route("/v1/oma/sessions", legacySessionsRoutes);
 app.route("/v1/vaults", managedVaultsRoutes);
 app.route("/v1/vaults", managedCredentialsRoutes);
@@ -1207,8 +1294,9 @@ app.all("/billing-api/*", async (c) => {
   };
   return meter.fetch(url.toString(), init);
 });
-// MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a
-// path-prefix skip) — auth is the Bearer oma_* the ACP child sends.
+// HTTP MCP gateway accepts either the local bridge's workspace bearer or the
+// current Work-scoped sessions_token. authMiddleware resolves both; the route
+// then validates that the requested server belongs to the same Session.
 app.route("/v1/oma/mcp-proxy", mcpProxyRoutes);
 
 // /v1/oma/* aliases — OMA-only namespaces re-mounted under an `oma/` prefix
@@ -1549,7 +1637,33 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     tenantId: string;
     sessionId: string;
     hostname: string;
+    runtimeFence?: {
+      environmentId: string;
+      workId: string;
+      ownerId: string;
+      generation: number;
+      token: string;
+    };
   }): Promise<{ type: "bearer"; token: string } | null> {
+    const fence = opts.runtimeFence === undefined
+      ? null
+      : {
+          workspaceId: opts.tenantId,
+          environmentId: opts.runtimeFence.environmentId,
+          sessionId: opts.sessionId,
+          workId: opts.runtimeFence.workId,
+          ownerId: opts.runtimeFence.ownerId,
+          generation: opts.runtimeFence.generation,
+          token: opts.runtimeFence.token,
+          // SQL validation uses the database expiry; the caller cannot choose it.
+          expiresAt: new Date(0).toISOString(),
+        };
+    const runtimeFences = fence === null
+      ? null
+      : new SqlRuntimeResourceFencePort(new CfD1SqlClient(this.env.MAIN_DB));
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
     const cred = await resolveOutboundCredentialByHost(
       this.env,
@@ -1558,6 +1672,11 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       opts.sessionId,
       opts.hostname,
     );
+    // Re-check after the tenant lookup so expiry/reclaim during a slow Vault
+    // read cannot release a credential to the stale owner.
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
     if (!cred) return null;
     return { type: "bearer", token: cred.upstreamToken };
   }
@@ -1581,15 +1700,44 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     sessionId: string;
     hostname: string;
     pathname: string;
+    runtimeFence?: {
+      environmentId: string;
+      workId: string;
+      ownerId: string;
+      generation: number;
+      token: string;
+    };
   }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null> {
+    const fence = opts.runtimeFence === undefined
+      ? null
+      : {
+          workspaceId: opts.tenantId,
+          environmentId: opts.runtimeFence.environmentId,
+          sessionId: opts.sessionId,
+          workId: opts.runtimeFence.workId,
+          ownerId: opts.runtimeFence.ownerId,
+          generation: opts.runtimeFence.generation,
+          token: opts.runtimeFence.token,
+          expiresAt: new Date(0).toISOString(),
+        };
+    const runtimeFences = fence === null
+      ? null
+      : new SqlRuntimeResourceFencePort(new CfD1SqlClient(this.env.MAIN_DB));
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
-    return resolveGithubCredentials(
+    const credential = await resolveGithubCredentials(
       services,
       opts.tenantId,
       opts.sessionId,
       opts.hostname,
       opts.pathname,
     );
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
+    return credential;
   }
 
 

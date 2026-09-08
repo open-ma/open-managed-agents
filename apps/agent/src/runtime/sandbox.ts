@@ -30,6 +30,8 @@ export class CloudflareSandbox
   private sessionId: string;
   private mounted = false;
   private commandSecrets = new Map<string, Record<string, string>>();
+  private outboundRequired = false;
+  private controlPlaneHostname: string | null = null;
 
   constructor(env: Env, sessionId: string) {
     this.env = env;
@@ -670,32 +672,144 @@ export class CloudflareSandbox
    * session's identifying context (tenantId, sessionId). The handler runs
    * in the agent worker scope; on every outbound HTTPS request the
    * sandbox makes, it RPCs to main with these identifiers, main does the
-   * vault lookup live, injects the bearer, and forwards. The agent
-   * worker's address space never holds plaintext vault credentials —
-   * mirrors Anthropic Managed Agents' "credential proxy outside the
-   * harness" pattern (see apps/agent/src/oma-sandbox.ts file header).
+   * vault lookup live and returns the bearer to this trusted handler long
+   * enough to construct the upstream request. The untrusted container never
+   * receives it in memory, env, or checkpoints (see oma-sandbox.ts).
    */
   async setOutboundContext(opts: {
     tenantId: string;
+    environmentId?: string;
     sessionId: string;
+    workId?: string;
+    ownerId?: string;
+    generation?: number;
+    fenceToken?: string;
+    required?: boolean;
+    controlPlaneBaseUrl?: string;
   }): Promise<void> {
-    if (!opts.tenantId || !opts.sessionId) return;
+    if (!opts.tenantId || !opts.sessionId) {
+      throw new Error("Cloudflare outbound context requires tenantId and sessionId");
+    }
+    this.outboundRequired = opts.required === true;
+    if (this.outboundRequired && this.env.MAIN_MCP === undefined) {
+      throw new Error("Cloudflare required credential egress needs MAIN_MCP");
+    }
+    let controlPlane: URL | null = null;
+    if (opts.controlPlaneBaseUrl) {
+      try {
+        controlPlane = new URL(opts.controlPlaneBaseUrl);
+      } catch {
+        throw new Error("Cloudflare control-plane base URL is invalid");
+      }
+      if (controlPlane.protocol !== "https:" && controlPlane.protocol !== "http:") {
+        throw new Error("Cloudflare control-plane base URL must use HTTP(S)");
+      }
+    }
+    this.controlPlaneHostname = controlPlane?.hostname ?? null;
     try {
       const sandbox = await this.getSandbox();
       const hasFn = typeof sandbox.setOutboundHandler === "function";
       console.log(
         `[sandbox] setOutboundContext tenant=${opts.tenantId.slice(0, 8)} sid=${opts.sessionId.slice(0, 12)} hasFn=${hasFn}`,
       );
-      if (!hasFn) return;
+      if (!hasFn) {
+        if (this.outboundRequired) {
+          throw new Error("Cloudflare Sandbox does not expose setOutboundHandler");
+        }
+        return;
+      }
       await sandbox.setOutboundHandler("inject_vault_creds", {
         tenantId: opts.tenantId,
+        environmentId: opts.environmentId,
         sessionId: opts.sessionId,
+        workId: opts.workId,
+        ownerId: opts.ownerId,
+        generation: opts.generation,
+        fenceToken: opts.fenceToken,
+        required: this.outboundRequired,
       });
+      if (typeof sandbox.setOutboundByHost === "function") {
+        const context = {
+          tenantId: opts.tenantId,
+          environmentId: opts.environmentId,
+          sessionId: opts.sessionId,
+          workId: opts.workId,
+          ownerId: opts.ownerId,
+          generation: opts.generation,
+          fenceToken: opts.fenceToken,
+          required: this.outboundRequired,
+          controlPlaneOrigin: controlPlane?.origin,
+        };
+        const bindings = [
+          sandbox.setOutboundByHost("api.github.com", "github_auth", context),
+          sandbox.setOutboundByHost("github.com", "github_auth", context),
+        ];
+        if (controlPlane) {
+          bindings.push(sandbox.setOutboundByHost(
+            controlPlane.hostname,
+            "openma_control_plane",
+            context,
+          ));
+        }
+        await Promise.all(bindings);
+      } else if (controlPlane && this.outboundRequired) {
+        throw new Error("Cloudflare Sandbox does not expose setOutboundByHost");
+      }
       console.log(`[sandbox] setOutboundHandler bound (RPC mode)`);
     } catch (err) {
       console.error(
         `[sandbox] setOutboundContext failed: ${(err as Error).message ?? err}`,
       );
+      if (this.outboundRequired) throw err;
+    }
+  }
+
+  /** Replace the live credential handler before compute is retained/stopped.
+   * A stale container may still run briefly after lease loss, but every
+   * intercepted request is denied once this binding lands. */
+  async revokeOutboundContext(opts: {
+    workId: string;
+    generation: number;
+    reason: "completed" | "failed" | "lease_lost";
+  }): Promise<void> {
+    try {
+      const sandbox = await this.getSandbox();
+      if (typeof sandbox.setOutboundHandler !== "function") {
+        if (this.outboundRequired) {
+          throw new Error("Cloudflare Sandbox does not expose setOutboundHandler");
+        }
+        return;
+      }
+      await sandbox.setOutboundHandler("deny_outbound", {
+        workId: opts.workId,
+        generation: opts.generation,
+        reason: opts.reason,
+      });
+      if (typeof sandbox.setOutboundByHost === "function") {
+        const denied = {
+          workId: opts.workId,
+          generation: opts.generation,
+          reason: opts.reason,
+        };
+        const bindings = [
+          sandbox.setOutboundByHost("api.github.com", "deny_outbound", denied),
+          sandbox.setOutboundByHost("github.com", "deny_outbound", denied),
+        ];
+        if (this.controlPlaneHostname) {
+          bindings.push(sandbox.setOutboundByHost(
+            this.controlPlaneHostname,
+            "deny_outbound",
+            denied,
+          ));
+        }
+        await Promise.all(bindings);
+      }
+      this.controlPlaneHostname = null;
+    } catch (err) {
+      console.error(
+        `[sandbox] revokeOutboundContext failed work=${opts.workId.slice(0, 12)} generation=${opts.generation}: ${(err as Error).message ?? err}`,
+      );
+      if (this.outboundRequired) throw err;
     }
   }
 

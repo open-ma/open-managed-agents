@@ -269,6 +269,24 @@ export class SqlRuntimeResourceFencePort implements RuntimeResourceFencePort {
       : { type: "renewed", fence: rowFence(input.fence, row) };
   }
 
+  /** Read-only authorization check for side-effect gates such as credential
+   * egress. Publication still uses its own atomic compare-and-mutate path. */
+  async isCurrent(fence: RuntimeResourceFence): Promise<boolean> {
+    const row = await this.sql.prepare(`
+      SELECT 1 AS present
+      FROM runtime_resource_fences
+      WHERE scope_key = ? AND generation = ? AND owner_id = ?
+        AND fence_token = ? AND expires_at_ms > ?
+    `).bind(
+      scopeKey(fence),
+      fence.generation,
+      fence.ownerId,
+      fence.token,
+      this.#now().getTime(),
+    ).first<{ present: number | string }>();
+    return row !== null;
+  }
+
   async publish(input: {
     fence: RuntimeResourceFence;
     workspaceCandidate: RuntimeResourcePublication["workspaceCandidate"];

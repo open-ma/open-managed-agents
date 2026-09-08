@@ -27,6 +27,8 @@ export const api_keys = pgTable(
     name: text("name").notNull(),
     prefix: text("prefix").notNull(),
     hash: text("hash").notNull().unique(),
+    credential_type: text("credential_type").notNull().default("workspace"),
+    environment_id: text("environment_id"),
     created_at: bigint("created_at", { mode: "number" }).notNull(),
     last_used_at: bigint("last_used_at", { mode: "number" }),
     revoked_at: bigint("revoked_at", { mode: "number" }),

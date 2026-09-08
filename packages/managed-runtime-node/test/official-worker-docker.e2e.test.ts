@@ -1,5 +1,7 @@
 import { createServer, type Server } from "node:http";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
+import Anthropic from "@anthropic-ai/sdk";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
@@ -9,14 +11,56 @@ import {
 } from "../../managed-agents-api/test/environment-work-fixtures";
 import { makeSessionEventsPort } from "../../managed-agents-api/test/session-event-fixtures";
 import {
+  makeMemoriesPort,
+  memoryView,
+} from "../../managed-agents-api/test/memory-fixtures";
+import {
   makeSessionsPort,
   sessionView,
 } from "../../managed-agents-api/test/session-fixtures";
+import {
+  makeSkillVersionsPort,
+  skillVersionView,
+} from "../../managed-agents-api/test/skill-fixtures";
 import { buildManagedAgentsTestApi } from "../../managed-agents-api/test/test-api";
-import { createNodeManagedRuntime } from "../src/index";
+import { makeFilesPort } from "../../managed-agents-api/test/file-fixtures";
+import { createNodeManagedEnvironmentWorker } from "../src/index";
 
 const roots: string[] = [];
 const servers: Server[] = [];
+
+function writeTarString(target: Uint8Array, offset: number, length: number, value: string) {
+  target.set(new TextEncoder().encode(value).subarray(0, length), offset);
+}
+
+function writeTarOctal(target: Uint8Array, offset: number, length: number, value: number) {
+  writeTarString(target, offset, length, `${value.toString(8).padStart(length - 1, "0")}\0`);
+}
+
+/** Minimal ustar archive used to exercise the upstream SDK's real extractor. */
+function skillArchive(name: string, content: string): Uint8Array {
+  const bytes = new TextEncoder().encode(content);
+  const paddedSize = Math.ceil(bytes.byteLength / 512) * 512;
+  const archive = new Uint8Array(512 + paddedSize + 1_024);
+  writeTarString(archive, 0, 100, name);
+  writeTarOctal(archive, 100, 8, 0o644);
+  writeTarOctal(archive, 108, 8, 0);
+  writeTarOctal(archive, 116, 8, 0);
+  writeTarOctal(archive, 124, 12, bytes.byteLength);
+  writeTarOctal(archive, 136, 12, 0);
+  archive.fill(0x20, 148, 156);
+  archive[156] = "0".charCodeAt(0);
+  writeTarString(archive, 257, 6, "ustar\0");
+  writeTarString(archive, 263, 2, "00");
+  const checksum = archive.subarray(0, 512).reduce((sum, byte) => sum + byte, 0);
+  writeTarOctal(archive, 148, 8, checksum);
+  archive.set(bytes, 512);
+  return archive;
+}
+
+function sha256(content: string): string {
+  return createHash("sha256").update(content).digest("hex");
+}
 
 afterAll(async () => {
   await Promise.all(servers.splice(0).map((server) => new Promise<void>((resolve, reject) => {
@@ -28,7 +72,7 @@ afterAll(async () => {
 
 async function serveApi(
   fetch: (request: Request) => Response | Promise<Response>,
-): Promise<{ baseUrl: string; server: Server }> {
+): Promise<{ baseUrl: string; sandboxBaseUrl: string; server: Server }> {
   const server = createServer(async (incoming, outgoing) => {
     try {
       const body: Uint8Array[] = [];
@@ -76,7 +120,11 @@ async function serveApi(
   });
   const address = server.address();
   if (address === null || typeof address === "string") throw new Error("expected TCP server");
-  return { baseUrl: `http://host.docker.internal:${address.port}`, server };
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    sandboxBaseUrl: `http://host.docker.internal:${address.port}`,
+    server,
+  };
 }
 
 describe("official EnvironmentWorker in Docker", () => {
@@ -91,11 +139,19 @@ describe("official EnvironmentWorker in Docker", () => {
     const environmentKey = "sk-ant-environment-docker";
     const sessionsToken = "sk-ant-session-docker";
     let polled = false;
-    let stopped = false;
     let acceptToolResult!: () => void;
+    let receivedToolResult: unknown = null;
     const toolResultAccepted = new Promise<void>((resolve) => {
       acceptToolResult = resolve;
     });
+    const skillMarkdown = "---\nname: repository-guide\ndescription: Docker resource contract\n---\nUse the attached project memory.\n";
+    const skillBytes = skillArchive(
+      "repository-guide/SKILL.md",
+      skillMarkdown,
+    );
+    const memoryStoreId = "memstore_docker_official_01";
+    const memoryMountPath = "/workspace/session-memory";
+    let memoryContent = "memory before tool";
     const operations: string[] = [];
     const activeWork = {
       ...environmentWorkView,
@@ -130,7 +186,6 @@ describe("official EnvironmentWorker in Docker", () => {
         },
         stopEnvironmentWork: async () => {
           operations.push("stop");
-          stopped = true;
           return {
             type: "stopped",
             work: {
@@ -149,7 +204,116 @@ describe("official EnvironmentWorker in Docker", () => {
             session: {
               ...sessionView,
               environmentId,
-              resources: [],
+              agent: {
+                ...sessionView.agent,
+                skills: [{
+                  type: "custom",
+                  skillId: skillVersionView.skillId,
+                  version: "latest",
+                }],
+              },
+              resources: [{
+                type: "memory_store",
+                memoryStoreId,
+                access: "read_write",
+                description: "Docker worker memory",
+                instructions: "Read and update the attached note.",
+                mountPath: memoryMountPath,
+                name: "session-memory",
+              }, {
+                id: "sesrsc_file_docker_01",
+                createdAt: "2026-09-03T12:00:00.000Z",
+                fileId: "file_docker_01",
+                mountPath: "/mnt/session/uploads/input.bin",
+                type: "file",
+                updatedAt: "2026-09-03T12:00:00.000Z",
+              }],
+            },
+          };
+        },
+      }),
+      files: makeFilesPort({
+        downloadFile: async (query) => {
+          operations.push("download_file");
+          expect(query).toEqual({ fileId: "file_docker_01" });
+          return {
+            type: "found",
+            file: {
+              content: new Uint8Array([0, 255, 1]),
+              filename: "input.bin",
+              mimeType: "application/octet-stream",
+            },
+          };
+        },
+      }),
+      skillVersions: makeSkillVersionsPort({
+        listSkillVersions: async (query) => {
+          operations.push("list_skill_versions");
+          expect(query).toMatchObject({ skillId: skillVersionView.skillId });
+          return {
+            type: "page",
+            page: { versions: [skillVersionView], nextCursor: null },
+          };
+        },
+        retrieveSkillVersion: async (query) => {
+          operations.push("retrieve_skill_version");
+          expect(query).toEqual({
+            skillId: skillVersionView.skillId,
+            version: skillVersionView.version,
+          });
+          return { type: "found", version: skillVersionView };
+        },
+        downloadSkillVersion: async (query) => {
+          operations.push("download_skill_version");
+          expect(query).toEqual({
+            skillId: skillVersionView.skillId,
+            version: skillVersionView.version,
+          });
+          return {
+            type: "found",
+            file: {
+              content: skillBytes,
+              mimeType: "application/x-tar",
+              filename: "repository-guide.tar",
+            },
+          };
+        },
+      }),
+      memories: makeMemoriesPort({
+        listMemories: async (query) => {
+          operations.push(`list_memories_${query.projection ?? "basic"}`);
+          expect(query.memoryStoreId).toBe(memoryStoreId);
+          return {
+            type: "page",
+            page: {
+              items: [{
+                ...memoryView,
+                memoryStoreId,
+                content: query.projection === "full" ? memoryContent : undefined,
+                contentSha256: sha256(memoryContent),
+                contentSizeBytes: Buffer.byteLength(memoryContent),
+              }],
+              nextCursor: null,
+            },
+          };
+        },
+        updateMemory: async (command) => {
+          operations.push("update_memory");
+          expect(command).toMatchObject({
+            memoryStoreId,
+            memoryId: memoryView.id,
+            content: "memory after tool",
+            contentPrecondition: { expectedSha256: sha256("memory before tool") },
+          });
+          memoryContent = command.content ?? "";
+          return {
+            type: "updated",
+            memory: {
+              ...memoryView,
+              memoryStoreId,
+              content: memoryContent,
+              contentSha256: sha256(memoryContent),
+              contentSizeBytes: Buffer.byteLength(memoryContent),
             },
           };
         },
@@ -181,11 +345,7 @@ describe("official EnvironmentWorker in Docker", () => {
         },
         sendSessionEvents: async (input) => {
           operations.push("send_events");
-          expect(input.events).toEqual([expect.objectContaining({
-            type: "user.tool_result",
-            toolUseId: "tool_use_docker",
-            content: [{ type: "text", text: "echo:docker" }],
-          })]);
+          receivedToolResult = input.events;
           acceptToolResult();
           return {
             type: "accepted",
@@ -193,7 +353,7 @@ describe("official EnvironmentWorker in Docker", () => {
               id: "tool_result_docker",
               type: "user.tool_result",
               toolUseId: "tool_use_docker",
-              content: [{ type: "text", text: "echo:docker" }],
+              content: [{ type: "text", text: "resources:ready" }],
               isError: false,
               processedAt: "2026-09-03T12:00:00.200Z",
             }],
@@ -201,16 +361,11 @@ describe("official EnvironmentWorker in Docker", () => {
         },
       }),
     });
-    const served = await serveApi((request) => {
-      const path = new URL(request.url).pathname;
-      if (stopped && path.endsWith("/work/poll")) {
-        return Response.json({ type: "error", error: { type: "authentication_error" } }, {
-          status: 401,
-        });
-      }
-      return api.fetch(request);
-    });
+    const served = await serveApi((request) => api.fetch(request));
     servers.push(served.server);
+    // The claimant runs on the host, while the claimed runtime runs inside
+    // Docker. The Work secret must remain reachable by the claimant; the
+    // sandbox-specific route is injected separately via sandboxApiBaseUrl.
     activeWork.secret.apiBaseUrl = served.baseUrl;
 
     const repositoryRoot = fileURLToPath(new URL("../../../", import.meta.url));
@@ -218,72 +373,95 @@ describe("official EnvironmentWorker in Docker", () => {
       import Anthropic from "/opt/openma/node_modules/@anthropic-ai/sdk/index.mjs";
       import { betaZodTool } from "/opt/openma/node_modules/@anthropic-ai/sdk/helpers/beta/zod.mjs";
       import { z } from "/opt/openma/node_modules/zod/index.js";
+      import { readFile, writeFile } from "node:fs/promises";
       let handled = false;
       const client = new Anthropic({
-        apiKey: "sk-ant-parent-must-not-leak",
-        baseURL: ${JSON.stringify(served.baseUrl)},
+        apiKey: null,
+        authToken: process.env.ANTHROPIC_ENVIRONMENT_KEY,
+        baseURL: process.env.ANTHROPIC_BASE_URL,
         maxRetries: 0,
       });
-      try {
-        await client.beta.environments.work.worker({
-          environmentId: ${JSON.stringify(environmentId)},
-          environmentKey: ${JSON.stringify(environmentKey)},
-          maxIdleMs: 10,
-          memorySyncIntervalMs: null,
-          tools: [betaZodTool({
-            name: "echo_contract",
-            description: "Echo a Docker contract value",
-            inputSchema: z.object({ value: z.string() }),
-            run: async ({ value }) => {
-              handled = true;
-              return "echo:" + value;
-            },
-          })],
-          workerId: "worker_docker_official_01",
-          workdir: "/workspace",
-        }).run();
-      } catch (error) {
-        if (!handled) throw error;
-      }
+      await client.beta.environments.work.worker({
+        maxIdleMs: 10,
+        tools: [betaZodTool({
+          name: "echo_contract",
+          description: "Echo a Docker contract value",
+          inputSchema: z.object({ value: z.string() }),
+          run: async ({ value }) => {
+            const skill = await readFile("/workspace/skills/repository-guide/SKILL.md", "utf8");
+            const memory = await readFile("${memoryMountPath}/notes/one.md", "utf8");
+            const input = await readFile("/mnt/session/uploads/input.bin");
+            if (!skill.includes("Docker resource contract")) {
+              throw new Error("official worker did not materialize the skill");
+            }
+            if (memory !== "memory before tool") {
+              throw new Error("official worker did not materialize the memory store: " + memory);
+            }
+            if (input.length !== 3 || input[0] !== 0 || input[1] !== 255 || input[2] !== 1) {
+              throw new Error("OpenMA did not materialize the binary Session file");
+            }
+            await writeFile("${memoryMountPath}/notes/one.md", "memory after tool");
+            handled = true;
+            return value === "docker" ? "resources:ready" : "resources:wrong-input";
+          },
+        })],
+        workdir: "/workspace",
+      }).handleItem();
       if (!handled) throw new Error("official worker did not execute the tool");
     `;
     const sql = await createBetterSqlite3SqlClient(":memory:");
-    const runtime = await createNodeManagedRuntime({
-      rootDir,
-      sql,
-      initializeFenceSchema: true,
-      ownerId: "official-worker-docker-host",
-      leaseTtlMs: 20_000,
-      heartbeatIntervalMs: 1_000,
-      image: process.env.OMA_RUNTIME_NODE_IMAGE ?? "node:24-alpine",
-      additionalMounts: [{
-        source: repositoryRoot,
-        destination: "/opt/openma",
-        readOnly: true,
-      }],
-      extraHosts: [{ hostname: "host.docker.internal", address: "host-gateway" }],
+    const cluster = await createNodeManagedEnvironmentWorker({
+      runtime: {
+        rootDir,
+        sql,
+        initializeFenceSchema: true,
+        ownerId: "official-worker-docker-host",
+        leaseTtlMs: 20_000,
+        heartbeatIntervalMs: 1_000,
+        image: process.env.OMA_RUNTIME_NODE_IMAGE ?? "node:24-alpine",
+        additionalMounts: [{
+          source: repositoryRoot,
+          destination: "/opt/openma",
+          readOnly: true,
+        }],
+        extraHosts: [{ hostname: "host.docker.internal", address: "host-gateway" }],
+      },
+      worker: {
+        client: new Anthropic({
+          apiKey: "parent-key-must-not-leak",
+          baseURL: served.baseUrl,
+          maxRetries: 0,
+        }),
+        environmentId,
+        environmentKey,
+        workspaceId: "workspace_docker_official",
+        workerId: "worker_docker_launcher_01",
+        sandboxApiBaseUrl: served.sandboxBaseUrl,
+        onError: async (error) => { throw error; },
+        onRunResult: async (_work, result) => {
+          if (result.type !== "completed") {
+            throw new Error(JSON.stringify({
+              result: "error" in result ? String(result.error) : result.type,
+              operations,
+            }));
+          }
+        },
+        profileFor: async () => ({
+          workspace: { requirement: "ephemeral" },
+          outputs: { requirement: "disabled" },
+          runtimeCheckpoint: "disabled",
+          driver: {
+            type: "ama_worker",
+            process: {
+              command: "/usr/local/bin/node",
+              args: ["--input-type=module", "--eval", script],
+            },
+          },
+        }),
+      },
     });
 
-    await expect(runtime.host.run({
-      scope: {
-        workspaceId: "workspace_docker_official",
-        environmentId,
-        sessionId: sessionView.id,
-        workId: activeWork.id,
-      },
-      profile: {
-        workspace: { requirement: "ephemeral" },
-        outputs: { requirement: "disabled" },
-        runtimeCheckpoint: "disabled",
-        driver: {
-          type: "ama_worker",
-          process: {
-            command: "/usr/local/bin/node",
-            args: ["--input-type=module", "--eval", script],
-          },
-        },
-      },
-    })).resolves.toEqual({ type: "completed", revision: 1 });
+    await expect(cluster.environmentWorker.drain()).resolves.toBeUndefined();
 
     // The official worker performs heartbeat and session retrieval from
     // independent loops. Their relative order after acknowledgement is not
@@ -295,11 +473,27 @@ describe("official EnvironmentWorker in Docker", () => {
     const indexOf = (operation: string) => operations.indexOf(operation);
     expect(indexOf("heartbeat")).toBeGreaterThan(indexOf("ack"));
     expect(indexOf("retrieve_session")).toBeGreaterThan(indexOf("ack"));
+    expect(indexOf("download_file")).toBeGreaterThan(indexOf("retrieve_session"));
+    expect(indexOf("download_file")).toBeLessThan(indexOf("stream_events"));
+    expect(indexOf("list_skill_versions")).toBeGreaterThan(indexOf("retrieve_session"));
+    expect(indexOf("retrieve_skill_version")).toBeGreaterThan(indexOf("list_skill_versions"));
+    expect(indexOf("download_skill_version")).toBeGreaterThan(indexOf("retrieve_skill_version"));
+    expect(indexOf("list_memories_full")).toBeGreaterThan(indexOf("retrieve_session"));
     expect(indexOf("stream_events")).toBeGreaterThan(indexOf("retrieve_session"));
     expect(indexOf("list_events")).toBeGreaterThan(indexOf("stream_events"));
     expect(indexOf("send_events")).toBeGreaterThan(indexOf("list_events"));
+    expect(indexOf("list_memories_basic")).toBeGreaterThan(indexOf("send_events"));
+    expect(indexOf("update_memory")).toBeGreaterThan(indexOf("list_memories_basic"));
     expect(indexOf("stop")).toBeGreaterThan(indexOf("send_events"));
     expect(indexOf("heartbeat")).toBeLessThan(indexOf("stop"));
-    expect(operations.at(-1)).toBe("stop");
+    expect(operations.at(-1)).toBe("poll");
+    expect(operations.lastIndexOf("poll")).toBeGreaterThan(indexOf("stop"));
+    expect(memoryContent).toBe("memory after tool");
+    expect(receivedToolResult).toEqual([expect.objectContaining({
+      type: "user.tool_result",
+      toolUseId: "tool_use_docker",
+      content: [{ type: "text", text: "resources:ready" }],
+      isError: false,
+    })]);
   });
 });

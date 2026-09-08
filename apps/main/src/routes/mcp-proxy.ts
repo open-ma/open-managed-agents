@@ -10,7 +10,7 @@
  *   │  (the harness — no creds)      │
  *   └─────────────┬──────────────────┘
  *                 │
- *                 ├── HTTP via Bearer oma_*  (local-runtime path)
+ *                 ├── HTTP via API key or current Work bearer
  *                 │   /v1/oma/mcp-proxy/<sid>/<server_name>
  *                 │
  *                 └── WorkerEntrypoint RPC via service binding
@@ -27,6 +27,9 @@
  * Auth surface (HTTP path):
  *   - Bearer omak_*: hashed in CONFIG_KV `apikey:<sha256>` (same row API
  *     keys created via /v1/oma/api_keys use). Resolves to (tenant_id, user_id).
+ *   - Bearer sk-ant-req-v1.*: sealed self-hosted Work capability; the top-level
+ *     middleware validates expiry, exact current claim, heartbeat TTL, and the
+ *     Session-scoped proxy path before this router runs.
  *   - sid in URL: must reference a row in `sessions` belonging to the same
  *     tenant. session.archived_at IS NULL gates "this session is still alive";
  *     deletion → proxy returns 403 immediately, no token revocation needed.
@@ -81,6 +84,15 @@ export interface ProxyTarget {
      *  pre-cap callers working unchanged. */
     tokenField?: "access_token" | "token";
   };
+}
+
+export interface ForwardHttpMcpProxyRequestInput {
+  env: Env;
+  services: Services;
+  tenantId: string;
+  sessionId: string;
+  serverName: string;
+  request: Request;
 }
 
 async function sha256(input: string): Promise<string> {
@@ -389,11 +401,18 @@ export async function forwardToUpstream(
   upstreamHeaders.delete("x-forwarded-for");
   upstreamHeaders.delete("x-forwarded-proto");
   upstreamHeaders.delete("x-real-ip");
+  upstreamHeaders.delete("x-api-key");
+  upstreamHeaders.delete("proxy-authorization");
+  upstreamHeaders.delete("cookie");
+  upstreamHeaders.delete("x-active-tenant");
 
   const upstreamReq = new Request(target.upstreamUrl, {
     method,
     headers: upstreamHeaders,
     body: ["GET", "HEAD"].includes(method) ? undefined : body,
+    // A redirect is a new destination and must be re-authorized explicitly;
+    // never let fetch replay a Vault bearer automatically.
+    redirect: "manual",
   });
 
   return fetch(upstreamReq);
@@ -695,44 +714,69 @@ async function tryRefreshOauth(
   return tokens.access_token;
 }
 
-// HTTP endpoint — used by the local-runtime ACP child via apiKey auth.
-// Cloud agent path uses the WorkerEntrypoint RPC instead (see McpProxyRpc
-// in apps/main/src/index.ts).
+// HTTP endpoint — used by local-runtime ACP via API key and by an official
+// self-hosted Work/harness-in-sandbox via its current sessions_token. Cloud
+// host-side agents may instead use the WorkerEntrypoint RPC (see McpProxyRpc).
+export async function forwardHttpMcpProxyRequest(
+  input: ForwardHttpMcpProxyRequestInput,
+): Promise<Response> {
+  const target = await resolveProxyTargetByTenant(
+    input.env,
+    input.services,
+    input.tenantId,
+    input.sessionId,
+    input.serverName,
+  );
+  if (!target) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  // Buffer the body so forwardWithRefresh can replay it after rotating an
+  // expired upstream credential.  The caller's Work/API bearer is always
+  // overwritten by forwardToUpstream and therefore never leaves OpenMA.
+  const method = input.request.method;
+  const body = ["GET", "HEAD"].includes(method)
+    ? null
+    : await input.request.text();
+  return forwardWithRefresh(
+    input.services,
+    input.tenantId,
+    target,
+    method,
+    input.request.headers,
+    body,
+    {
+      sessionId: input.sessionId,
+      serverName: input.serverName,
+      callerKind: "http",
+    },
+  );
+}
+
 app.all("/:sid/:server", async (c) => {
   const sid = c.req.param("sid");
   const serverName = c.req.param("server");
-  const auth = c.req.header("authorization") ?? "";
-  const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
-  if (!apiKey) return c.json({ error: "missing bearer" }, 401);
-
-  const tenantId = await apiKeyToTenantId(c.var.services.kv, apiKey);
-  if (!tenantId) return c.json({ error: "forbidden" }, 403);
-
+  // authMiddleware resolves both a workspace API key (local bridge) and a
+  // current sealed Work sessions_token (sandbox worker) before this route.
+  // Keep the legacy fallback for isolated route tests/embedders which mount
+  // this sub-app without the top-level middleware.
+  let tenantId = (c.var as { tenant_id?: string }).tenant_id;
+  if (!tenantId) {
+    const auth = c.req.header("authorization") ?? "";
+    const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
+    if (!apiKey) return c.json({ error: "missing bearer" }, 401);
+    tenantId = await apiKeyToTenantId(c.var.services.kv, apiKey) ?? undefined;
+    if (!tenantId) return c.json({ error: "forbidden" }, 403);
+  }
   const services = c.get("services");
-  const target = await resolveProxyTargetByTenant(
-    c.env,
+  return forwardHttpMcpProxyRequest({
+    env: c.env,
     services,
     tenantId,
-    sid,
+    sessionId: sid,
     serverName,
-  );
-  if (!target) return c.json({ error: "forbidden" }, 403);
-
-  // Buffer the body so forwardWithRefresh can replay it on a 401 retry.
-  // For typical MCP clients body is a small JSON-RPC payload — fine to
-  // hold in memory. Streamed uploads aren't a thing on this endpoint.
-  const method = c.req.method;
-  const body = ["GET", "HEAD"].includes(method) ? null : await c.req.text();
-
-  return forwardWithRefresh(
-    services,
-    tenantId,
-    target,
-    method,
-    c.req.raw.headers,
-    body,
-    { sessionId: sid, serverName: serverName, callerKind: "http" },
-  );
+    request: c.req.raw,
+  });
 });
 
 export default app;

@@ -8,7 +8,7 @@
 // promote-sandbox tests; these only need the in-process services + a
 // fake fetch.
 
-import { describe, it, expect, beforeAll } from "vitest";
+import { afterEach, describe, it, expect, beforeAll } from "vitest";
 import { bootstrapTestDb } from "./_helpers/bootstrap-test-db";
 import { createSqliteAgentService } from "@open-managed-agents/agents-store";
 import { createSqliteVaultService } from "@open-managed-agents/vaults-store";
@@ -22,9 +22,16 @@ import { NodeInstallBridge, buildNodeProvidersForRequest } from "../src/lib/node
 const SECRET = "test-platform-root-secret-padded-to-thirtytwo";
 const TENANT = "tn_smoke";
 const USER = "usr_smoke";
+const testDbCleanups = new Set<() => void>();
+
+afterEach(() => {
+  for (const cleanup of testDbCleanups) cleanup();
+  testDbCleanups.clear();
+});
 
 async function bootstrap() {
-  const { sql, db } = await bootstrapTestDb();
+  const { sql, db, cleanup } = await bootstrapTestDb();
+  testDbCleanups.add(cleanup);
   await sql
     .prepare(`INSERT INTO "tenant" (id, name, "createdAt", "updatedAt") VALUES (?, ?, ?, ?)`)
     .bind(TENANT, "Smoke", Date.now(), Date.now())
@@ -320,7 +327,8 @@ describe("NodeInstallBridge", () => {
   it("InProcessSessionCreator.resume forwards webhook → user.message via appendUserEvent", async () => {
     // Wire the bridge with an appendUserEvent callback that captures the
     // event the way NodeSessionRouter.appendEvent would on prod.
-    const { sql, db } = await bootstrapTestDb();
+    const { sql, db, cleanup } = await bootstrapTestDb();
+    testDbCleanups.add(cleanup);
     await sql
       .prepare(`INSERT INTO "tenant" (id, name, "createdAt", "updatedAt") VALUES (?, ?, ?, ?)`)
       .bind(TENANT, "Smoke", Date.now(), Date.now())

@@ -1,0 +1,27 @@
+{
+  "name": "@open-managed-agents/managed-runtime-boxlite",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "test:certification": "BOXLITE_CERTIFY=1 vitest run --config vitest.certification.config.ts",
+    "typecheck:certification": "tsc --noEmit -p tsconfig.certification.json",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/blob-store": "workspace:*",
+    "@open-managed-agents/managed-runtime-sandbox": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*"
+  },
+  "peerDependencies": { "@boxlite-ai/boxlite": "^0.9.0" },
+  "peerDependenciesMeta": { "@boxlite-ai/boxlite": { "optional": true } },
+  "devDependencies": {
+    "@boxlite-ai/boxlite": "0.9.0",
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.3"
+  }
+}

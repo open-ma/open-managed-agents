@@ -205,6 +205,103 @@ describe("ManagedAgentsSessionHost", () => {
     });
   });
 
+  it("durably records a completed turn before acknowledging it and suppresses replay after restart", async () => {
+    type Checkpoint = {
+      sessionId: string;
+      generation: number;
+      ownerId: string;
+      acpSessionId: string;
+      phase: "ready" | "recovering";
+      updatedAt: number;
+      lastCompletedTurnId?: string;
+    };
+    let saved: Checkpoint | null = null;
+    const writes: Checkpoint[] = [];
+    const checkpointStore = {
+      async load() { return saved; },
+      async compareAndSet(input: {
+        expectedGeneration: number | null;
+        checkpoint: Checkpoint;
+      }) {
+        if ((saved?.generation ?? null) !== input.expectedGeneration) return false;
+        saved = structuredClone(input.checkpoint);
+        writes.push(structuredClone(input.checkpoint));
+        return true;
+      },
+      async delete() { saved = null; },
+    };
+    const firstEvents: unknown[] = [];
+    let firstPrompts = 0;
+    const firstHost = new ManagedAgentsSessionHost({
+      runtime: {
+        async start(options) {
+          return acpSessionFixture({
+            acpSessionId: "acp-turn-checkpoint-1",
+            options,
+            async *prompt() { firstPrompts += 1; },
+          });
+        },
+      },
+      emit: (event: unknown) => firstEvents.push(event),
+      checkpointStore,
+      hostInstanceId: "turn-host-1",
+      scheduler: { now: () => 100, async sleep() {} },
+    });
+    await firstHost.start({
+      sessionId: "session-turn-checkpoint",
+      options: { agent: { command: "durable-turn-acp" } },
+    });
+    firstEvents.length = 0;
+    await firstHost.prompt({
+      sessionId: "session-turn-checkpoint",
+      turnId: "turn-checkpointed",
+      text: "mutate once",
+    });
+
+    expect(firstPrompts).toBe(1);
+    expect(writes.at(-1)?.lastCompletedTurnId).toBe("turn-checkpointed");
+    expect(firstEvents.at(-1)).toEqual({
+      type: "session.complete",
+      sessionId: "session-turn-checkpoint",
+      turnId: "turn-checkpointed",
+    });
+
+    const secondEvents: unknown[] = [];
+    let secondPrompts = 0;
+    const secondHost = new ManagedAgentsSessionHost({
+      runtime: {
+        async start(options) {
+          return acpSessionFixture({
+            acpSessionId: "acp-turn-checkpoint-2",
+            options,
+            async *prompt() { secondPrompts += 1; },
+          });
+        },
+      },
+      emit: (event: unknown) => secondEvents.push(event),
+      checkpointStore,
+      hostInstanceId: "turn-host-2",
+      scheduler: { now: () => 200, async sleep() {} },
+    });
+    await secondHost.start({
+      sessionId: "session-turn-checkpoint",
+      options: { agent: { command: "durable-turn-acp" } },
+    });
+    secondEvents.length = 0;
+    await secondHost.prompt({
+      sessionId: "session-turn-checkpoint",
+      turnId: "turn-checkpointed",
+      text: "must not mutate twice",
+    });
+
+    expect(secondPrompts).toBe(0);
+    expect(secondEvents).toEqual([{
+      type: "session.complete",
+      sessionId: "session-turn-checkpoint",
+      turnId: "turn-checkpointed",
+    }]);
+  });
+
   it("does not spawn an ACP child when checkpoint CAS fences the host claim", async () => {
     const events: unknown[] = [];
     let starts = 0;

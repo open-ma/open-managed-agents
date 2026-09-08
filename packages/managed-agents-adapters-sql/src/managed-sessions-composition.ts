@@ -114,6 +114,10 @@ export interface SqlManagedSessionsCompositionDependencies {
   environments: SessionEnvironmentSourcePort;
   lifecycle: SessionLifecycleCommandPort;
   runtime: SqlManagedSessionsRuntime;
+  /** Optional execution-authority router for accepted input events. */
+  eventDispatch?: SessionEventDispatchPort;
+  /** Optional execution-authority router for live Session and thread events. */
+  eventStream?: SessionEventStreamPort & SessionThreadEventStreamPort;
   sealer: SessionResourceSecretSealer;
   clock: { now(): Date };
   ids: SqlManagedSessionsIds;
@@ -222,7 +226,15 @@ export class SqlManagedSessionsComposition {
   }
 
   private createWorkspaceApp(workspaceId: string): SqlManagedSessionsWorkspaceApp {
-    const { clock, ids, lifecycle, runtime, environments } = this.dependencies;
+    const {
+      clock,
+      ids,
+      lifecycle,
+      runtime,
+      environments,
+      eventDispatch = runtime,
+      eventStream = runtime,
+    } = this.dependencies;
     const resources = new SessionResourceResolverService({
       files: this.files,
       memoryStores: this.memoryStores,
@@ -258,8 +270,8 @@ export class SqlManagedSessionsComposition {
         providePort(sessionEventStorePort, this.sessionEvents),
         providePort(sessionEventSourcePort, this.sessionSource),
         providePort(sessionEventExecutionContextSourcePort, this.executionContext),
-        providePort(sessionEventStreamPort, runtime),
-        providePort(sessionEventDispatchPort, runtime),
+        providePort(sessionEventStreamPort, eventStream),
+        providePort(sessionEventDispatchPort, eventDispatch),
         providePort(sessionResourceStorePort, this.sessionResources),
         providePort(sessionResourceFileSourcePort, this.files),
         providePort(sessionThreadSessionSourcePort, this.sessionSource),
@@ -267,7 +279,7 @@ export class SqlManagedSessionsComposition {
         providePort(sessionThreadLifecyclePort, runtime),
         providePort(sessionThreadEventThreadSourcePort, this.sessionThreadContext),
         providePort(sessionThreadEventStorePort, this.sessionEvents),
-        providePort(sessionThreadEventStreamPort, runtime),
+        providePort(sessionThreadEventStreamPort, eventStream),
         sessionsModule(),
         sessionEventsModule(),
         sessionResourcesModule(),

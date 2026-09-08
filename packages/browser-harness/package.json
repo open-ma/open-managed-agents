@@ -28,6 +28,8 @@
     "playwright-core": { "optional": true }
   },
   "devDependencies": {
+    "@cloudflare/playwright": "^1.3.0",
+    "playwright-core": "^1.49.0",
     "vitest": "^4.1.3"
   }
 }

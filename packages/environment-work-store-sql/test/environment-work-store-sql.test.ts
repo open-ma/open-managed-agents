@@ -22,6 +22,7 @@ CREATE TABLE managed_environment_work (
   sealed_secret text NOT NULL,
   claim_at integer,
   claim_worker_id text,
+  claim_generation integer NOT NULL DEFAULT 0,
   heartbeat_ttl_seconds integer NOT NULL,
   revision integer NOT NULL,
   state text NOT NULL,
@@ -123,6 +124,7 @@ describe("SqlEnvironmentWorkStore", () => {
       claimedAt: "2026-08-26T09:20:00.000Z",
       reclaimBefore: "2026-08-26T09:19:55.000Z",
       workerId: "worker_01",
+      heartbeatTtlSeconds: 90,
     });
     expect(claimed).toEqual({
       type: "claimed",
@@ -131,6 +133,7 @@ describe("SqlEnvironmentWorkStore", () => {
         claim: {
           claimedAt: "2026-08-26T09:20:00.000Z",
           workerId: "worker_01",
+          generation: 1,
         },
         revision: 2,
       },
@@ -142,6 +145,7 @@ describe("SqlEnvironmentWorkStore", () => {
         claimedAt: "2026-08-26T09:20:01.000Z",
         reclaimBefore: "2026-08-26T09:19:56.000Z",
         workerId: "worker_01",
+        heartbeatTtlSeconds: 90,
       }),
     ).resolves.toEqual({ type: "empty" });
     await expect(
@@ -187,5 +191,76 @@ describe("SqlEnvironmentWorkStore", () => {
         next,
       }),
     ).resolves.toEqual({ type: "revision_conflict", actualRevision: 2 });
+  });
+
+  it.each([
+    {
+      state: "starting" as const,
+      acknowledgedAt: "2026-08-26T09:20:00.000Z",
+      latestHeartbeatAt: null,
+      startedAt: null,
+    },
+    {
+      state: "active" as const,
+      acknowledgedAt: "2026-08-26T09:19:00.000Z",
+      latestHeartbeatAt: "2026-08-26T09:20:00.000Z",
+      startedAt: "2026-08-26T09:19:01.000Z",
+    },
+  ])("atomically requeues an expired $state lease for one replacement worker", async (lifecycle) => {
+    const expired: EnvironmentWorkRecord = {
+      ...record,
+      work: { ...record.work, ...lifecycle },
+      claim: {
+        claimedAt: "2026-08-26T09:20:00.000Z",
+        workerId: "worker_dead",
+        generation: 1,
+      },
+      heartbeatTtlSeconds: 30,
+    };
+    await persistence.insert({ workspaceId: "workspace_01", record: expired });
+
+    const [first, second] = await Promise.all([
+      persistence.claimAvailable({
+        workspaceId: "workspace_01",
+        environmentId: "env_self_01",
+        claimedAt: "2026-08-26T09:20:30.001Z",
+        reclaimBefore: "2026-08-26T09:20:25.001Z",
+        workerId: "worker_replacement_a",
+        heartbeatTtlSeconds: 90,
+      }),
+      persistence.claimAvailable({
+        workspaceId: "workspace_01",
+        environmentId: "env_self_01",
+        claimedAt: "2026-08-26T09:20:30.001Z",
+        reclaimBefore: "2026-08-26T09:20:25.001Z",
+        workerId: "worker_replacement_b",
+        heartbeatTtlSeconds: 90,
+      }),
+    ]);
+
+    expect([first.type, second.type].sort()).toEqual(["claimed", "empty"]);
+    const winner = first.type === "claimed" ? first.record : second.type === "claimed" ? second.record : null;
+    expect(winner).toMatchObject({
+      work: {
+        acknowledgedAt: null,
+        latestHeartbeatAt: null,
+        startedAt: null,
+        state: "queued",
+      },
+      claim: {
+        claimedAt: "2026-08-26T09:20:30.001Z",
+        generation: 2,
+      },
+      heartbeatTtlSeconds: 90,
+      revision: 2,
+    });
+    await expect(persistence.find({
+      workspaceId: "workspace_01",
+      environmentId: "env_self_01",
+      workId: "work_01",
+    })).resolves.toMatchObject({
+      work: { state: "queued", latestHeartbeatAt: null },
+      revision: 2,
+    });
   });
 });

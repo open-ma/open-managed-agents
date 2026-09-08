@@ -1,4 +1,7 @@
 import { spawn } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import { Readable, Writable } from "node:stream";
 import type {
   HarnessSupervisorChannel,
@@ -9,6 +12,7 @@ import type {
   ManagedSandboxPort,
   SandboxHarnessDriverPort,
   SandboxObservation,
+  SessionInputMaterializerPort,
 } from "@open-managed-agents/runtime-resource-contract";
 
 import { safeMetadataPath, sha256 } from "./filesystem";
@@ -52,17 +56,29 @@ export class DockerCliPort implements DockerCommandPort {
       });
       let stdout = "";
       let stderr = "";
+      let aborted = false;
       child.stdout.on("data", (chunk: Buffer) => {
         stdout += chunk.toString();
       });
       child.stderr.on("data", (chunk: Buffer) => {
         stderr += chunk.toString();
       });
-      const onAbort = () => child.kill("SIGTERM");
+      const cleanup = () => options.signal?.removeEventListener("abort", onAbort);
+      const onAbort = () => {
+        aborted = true;
+        child.kill("SIGTERM");
+      };
       options.signal?.addEventListener("abort", onAbort, { once: true });
-      child.once("error", reject);
+      child.once("error", (error) => {
+        cleanup();
+        reject(aborted ? options.signal?.reason : error);
+      });
       child.once("close", (code) => {
-        options.signal?.removeEventListener("abort", onAbort);
+        cleanup();
+        if (aborted) {
+          reject(options.signal?.reason);
+          return;
+        }
         resolve({ stdout, stderr, exitCode: code ?? 1 });
       });
     });
@@ -112,7 +128,8 @@ export interface DockerManagedRuntimeOptions {
  * one container with the already-materialized resource bindings.
  */
 export class DockerManagedRuntimeAdapter
-  implements ManagedSandboxPort, SandboxHarnessDriverPort, HarnessSupervisorTransportPort
+  implements ManagedSandboxPort, SandboxHarnessDriverPort, HarnessSupervisorTransportPort,
+    SessionInputMaterializerPort
 {
   readonly #docker: DockerCommandPort;
   readonly #options: DockerManagedRuntimeOptions;
@@ -139,6 +156,9 @@ export class DockerManagedRuntimeAdapter
     input: Parameters<ManagedSandboxPort["acquire"]>[0],
   ): Promise<ManagedSandboxLease> {
     input.signal.throwIfAborted();
+    const containerName = `oma-${sha256(
+      `${input.scope.workId}:${input.fence.generation}`,
+    ).slice(0, 24)}`;
     const workspace = this.#mount(
       safeMetadataPath(input.workspace.metadata?.hostPath, "workspace binding"),
       input.workspace.mountPath,
@@ -146,7 +166,7 @@ export class DockerManagedRuntimeAdapter
     const args = [
       "create",
       "--name",
-      `oma-${sha256(`${input.scope.workId}:${input.fence.generation}`).slice(0, 24)}`,
+      containerName,
       "--label",
       `dev.openma.work=${sha256(input.scope.workId).slice(0, 32)}`,
       "--mount",
@@ -179,24 +199,65 @@ export class DockerManagedRuntimeAdapter
     const process = input.plan.driver.type === "ama_worker"
       ? input.plan.driver.process
       : input.plan.driver.supervisor;
-    if (input.plan.driver.type === "openma_supervised") {
-      // Keep stdin open so the host can attach the JSONL supervisor channel
-      // after the workspace/output transaction has completed.
-      args.push("--interactive");
-    }
     if (process.cwd !== undefined) args.push("--workdir", process.cwd);
     for (const [name, value] of Object.entries(process.env ?? {})) {
       args.push("--env", `${name}=${value}`);
     }
-    args.push("--entrypoint", process.command);
-    args.push(this.#options.image, ...(process.args ?? []));
-    const result = await this.#docker.run(args, { signal: input.signal });
+    // Keep allocation separate from execution: Session inputs and credential
+    // egress are attached after acquire and before the worker starts.
+    args.push("--entrypoint", "/bin/sh");
+    args.push(this.#options.image, "-c", "while :; do sleep 3600; done");
+    let result: DockerCommandResult;
+    try {
+      // `docker create` is a commit operation in the daemon. Killing the CLI
+      // when the fence signal aborts can race the daemon: an early `rm` sees no
+      // container, then the detached daemon request commits an orphan. Treat
+      // create as a short non-cancellable commit barrier, then honor the abort
+      // only after its deterministic cleanup handle is known.
+      result = await this.#docker.run(args);
+    } catch (error) {
+      await this.#docker.run(["rm", "--force", containerName]).catch(() => undefined);
+      throw error;
+    }
+    if (input.signal.aborted) {
+      const committedId = result.stdout.trim();
+      await this.#docker.run([
+        "rm",
+        "--force",
+        committedId === "" ? containerName : committedId,
+      ]).catch(() => undefined);
+      input.signal.throwIfAborted();
+    }
     if (result.exitCode !== 0) {
+      // docker create can commit the daemon-side container immediately before
+      // the local CLI is interrupted. Its deterministic generation-scoped
+      // name is the only reliable cleanup handle when stdout never arrives.
+      await this.#docker.run(["rm", "--force", containerName]).catch(() => undefined);
       throw new Error(`docker create failed (${result.exitCode}): ${result.stderr.trim()}`);
     }
     const runtimeId = result.stdout.trim();
-    if (runtimeId.length === 0) throw new Error("docker create returned no container id");
+    if (runtimeId.length === 0) {
+      await this.#docker.run(["rm", "--force", containerName]).catch(() => undefined);
+      throw new Error("docker create returned no container id");
+    }
     this.#known.add(runtimeId);
+    let started: DockerCommandResult;
+    try {
+      started = await this.#docker.run(["start", runtimeId], {
+        signal: input.signal,
+      });
+    } catch (error) {
+      await this.#docker.run(["rm", "--force", runtimeId]).catch(() => undefined);
+      this.#known.delete(runtimeId);
+      throw error;
+    }
+    if (started.exitCode !== 0) {
+      await this.#docker.run(["rm", "--force", runtimeId]).catch(() => undefined);
+      this.#known.delete(runtimeId);
+      throw new Error(
+        `docker start failed (${started.exitCode}): ${started.stderr.trim()}`,
+      );
+    }
     return { provider: "docker", runtimeId };
   }
 
@@ -250,22 +311,137 @@ export class DockerManagedRuntimeAdapter
     return { state: "unknown" };
   }
 
+  async materialize(
+    input: Parameters<SessionInputMaterializerPort["materialize"]>[0],
+  ): Promise<void> {
+    this.#assertLease(input.sandbox);
+    for (const resource of input.session.resources) {
+      input.signal.throwIfAborted();
+      if (resource.type === "memory_store") {
+        if (input.resourceOwnership.memoryStore === "worker") continue;
+        throw new Error(
+          "Docker generic Session input materializer does not implement memory_store synchronization",
+        );
+      }
+      if (resource.type === "file") {
+        if (input.access === undefined) {
+          throw new Error(
+            "Session file materialization requires per-claim SessionInputAccessPort",
+          );
+        }
+        const fileId = requiredResourceString(resource, "file_id");
+        const mountPath = safeResourceMountPath(resource);
+        const file = await input.access.downloadFile({
+          fileId,
+          signal: input.signal,
+        });
+        input.signal.throwIfAborted();
+        await this.#runChecked(
+          ["exec", input.sandbox.runtimeId, "mkdir", "-p", dirname(mountPath)],
+          input.signal,
+          "create Session file parent",
+        );
+        const stage = await mkdtemp(join(tmpdir(), "oma-session-input-"));
+        const source = join(stage, "payload");
+        try {
+          await writeFile(source, file.content);
+          await this.#runChecked(
+            ["cp", source, `${input.sandbox.runtimeId}:${mountPath}`],
+            input.signal,
+            "copy Session file",
+          );
+        } finally {
+          await rm(stage, { force: true, recursive: true });
+        }
+        continue;
+      }
+      if (resource.type === "github_repository") {
+        if (input.activeWorkspaceCheckpoint !== null) continue;
+        const url = safeRepositoryUrl(resource);
+        const mountPath = safeResourceMountPath(resource);
+        const rawCheckout = resource.checkout;
+        const checkout = typeof rawCheckout === "object" && rawCheckout !== null
+          ? rawCheckout as Readonly<Record<string, unknown>>
+          : null;
+        const branch = checkout?.type === "branch"
+          && typeof checkout.name === "string"
+          && checkout.name.length > 0
+          ? checkout.name
+          : null;
+        await this.#runChecked(
+          [
+            "exec",
+            "--env",
+            "GIT_TERMINAL_PROMPT=0",
+            input.sandbox.runtimeId,
+            "git",
+            "clone",
+            ...(branch === null ? [] : ["--branch", branch]),
+            "--",
+            url,
+            mountPath,
+          ],
+          input.signal,
+          "clone Session repository",
+        );
+        if (checkout?.type === "commit") {
+          const sha = typeof checkout.sha === "string" ? checkout.sha : "";
+          if (!/^[0-9a-f]{7,64}$/iu.test(sha)) {
+            throw new Error("Session github_repository commit checkout is invalid");
+          }
+          await this.#runChecked(
+            [
+              "exec",
+              input.sandbox.runtimeId,
+              "git",
+              "-C",
+              mountPath,
+              "checkout",
+              "--detach",
+              sha,
+            ],
+            input.signal,
+            "checkout Session repository commit",
+          );
+        }
+        continue;
+      }
+      throw new Error(`Unsupported Session resource type: ${resource.type}`);
+    }
+  }
+
   async run(
     input: Parameters<SandboxHarnessDriverPort["run"]>[0],
   ): Promise<{ type: "completed" } | { type: "aborted" }> {
     this.#assertLease(input.sandbox);
+    if (input.signal.aborted) return { type: "aborted" };
     const killOnAbort = () => {
       void this.#docker.run(["kill", input.sandbox.runtimeId]).catch(() => {});
     };
     input.signal.addEventListener("abort", killOnAbort, { once: true });
     try {
-      const result = await this.#docker.run(
-        ["start", "--attach", input.sandbox.runtimeId],
-        { signal: input.signal },
-      );
+      if (input.driver.type !== "ama_worker") {
+        throw new Error(`Docker direct driver cannot run ${input.driver.type}`);
+      }
+      const process = input.driver.process;
+      let result: DockerCommandResult;
+      try {
+        result = await this.#docker.run(
+          [
+            "exec",
+            input.sandbox.runtimeId,
+            process.command,
+            ...(process.args ?? []),
+          ],
+          { signal: input.signal },
+        );
+      } catch (error) {
+        if (input.signal.aborted) return { type: "aborted" };
+        throw error;
+      }
       if (input.signal.aborted) return { type: "aborted" };
       if (result.exitCode !== 0) {
-        throw new Error(`docker start failed (${result.exitCode}): ${result.stderr.trim()}`);
+        throw new Error(`docker exec failed (${result.exitCode}): ${result.stderr.trim()}`);
       }
       return { type: "completed" };
     } finally {
@@ -283,10 +459,11 @@ export class DockerManagedRuntimeAdapter
       throw new Error("Docker command Port has no duplex process capability");
     }
     const process = spawnDuplex.call(this.#docker, [
-      "start",
-      "--attach",
+      "exec",
       "--interactive",
       input.sandbox.runtimeId,
+      input.process.command,
+      ...(input.process.args ?? []),
     ]);
     const writer = process.stdin.getWriter();
     const encoder = new TextEncoder();
@@ -328,12 +505,56 @@ export class DockerManagedRuntimeAdapter
     }
   }
 
+  async #runChecked(
+    args: readonly string[],
+    signal: AbortSignal,
+    operation: string,
+  ): Promise<void> {
+    const result = await this.#docker.run(args, { signal });
+    if (result.exitCode !== 0) {
+      throw new Error(`${operation} failed (${result.exitCode}): ${result.stderr.trim()}`);
+    }
+  }
+
   #mount(source: string, destination: string, readOnly = false): string {
     if (source.includes(",") || destination.includes(",")) {
       throw new Error("Docker bind mount paths cannot contain commas");
     }
     return `type=bind,src=${source},dst=${destination}${readOnly ? ",readonly" : ""}`;
   }
+}
+
+function requiredResourceString(
+  resource: Readonly<Record<string, unknown>>,
+  field: string,
+): string {
+  const value = resource[field];
+  if (typeof value !== "string" || value.length === 0) {
+    throw new Error(`Session ${resource.type} resource requires ${field}`);
+  }
+  return value;
+}
+
+function safeResourceMountPath(resource: Readonly<Record<string, unknown>>): string {
+  const path = requiredResourceString(resource, "mount_path");
+  if (!path.startsWith("/") || path.split("/").includes("..") || path.includes("\0")) {
+    throw new Error("Session resource mount_path must be absolute and may not traverse parents");
+  }
+  return path;
+}
+
+function safeRepositoryUrl(resource: Readonly<Record<string, unknown>>): string {
+  const value = requiredResourceString(resource, "url");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Session github_repository resource has an invalid URL");
+  }
+  if (url.protocol !== "https:" && url.protocol !== "http:") {
+    throw new Error("Session github_repository URL must use HTTP(S)");
+  }
+  return value;
 }
 
 async function drainDockerStream(stream: ReadableStream<Uint8Array>): Promise<void> {
@@ -362,6 +583,9 @@ async function* dockerSupervisorEvents(
     while (true) {
       signal.throwIfAborted();
       const next = await reader.read();
+      // A cancelled Web reader resolves a pending read as done; re-check the
+      // claim signal so lease loss is not misreported as graceful EOF.
+      signal.throwIfAborted();
       if (next.done) break;
       buffer += decoder.decode(next.value, { stream: true });
       while (true) {
@@ -403,6 +627,21 @@ function parseDockerSupervisorEvent(line: string): HarnessSupervisorEvent {
         throw new Error("Harness supervisor heartbeat sequence must be non-negative");
       }
       return { type: "heartbeat", sequence: Number(event.sequence) };
+    case "checkpoint":
+      if (
+        typeof event.checkpointId !== "string" || event.checkpointId.length === 0
+        || typeof event.sessionId !== "string" || event.sessionId.length === 0
+        || (event.turnId !== undefined
+          && (typeof event.turnId !== "string" || event.turnId.length === 0))
+      ) {
+        throw new Error("Harness supervisor checkpoint request is invalid");
+      }
+      return {
+        type: "checkpoint",
+        checkpointId: event.checkpointId,
+        sessionId: event.sessionId,
+        ...(event.turnId === undefined ? {} : { turnId: event.turnId }),
+      };
     case "completed":
       if (!Number.isSafeInteger(event.exitCode)) {
         throw new Error("Harness supervisor completion exitCode must be an integer");

@@ -5,6 +5,7 @@ import {
   buildChaosPlan,
   buildClusterEnv,
   createMockLlmServer,
+  findNewProviderResources,
   parseProviderConfig,
   redactEnvironment,
 } from "../../../scripts/provider-chaos-cluster.mjs";
@@ -58,6 +59,19 @@ test("chaos plan covers crash recovery and provider-specific optional faults", (
   );
   assert.equal(plan[1].fault, "main-process-kill");
   assert.equal(plan[3].optional, true);
+});
+
+test("resource leak comparison ignores the baseline and reports resources created by the run", () => {
+  assert.deepEqual(
+    findNewProviderResources(
+      { scratchDirs: ["existing-scratch"], runtimeIds: ["existing-runtime"] },
+      {
+        scratchDirs: ["existing-scratch", "leaked-scratch"],
+        runtimeIds: ["existing-runtime", "leaked-runtime"],
+      },
+    ),
+    { scratchDirs: ["leaked-scratch"], runtimeIds: ["leaked-runtime"] },
+  );
 });
 
 test("local Anthropic fixture serves JSON, SSE, and one-shot faults", async () => {
@@ -123,6 +137,68 @@ test("fixture can force a real sandbox tool round trip", async () => {
     const second = await followUp.json();
     assert.equal(second.stop_reason, "end_turn");
     assert.equal(second.content[0].text, "CHAOS_OK");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("fixture rejects a tool result that did not execute inside the provider sandbox", async () => {
+  const fixture = await createMockLlmServer({ toolRoundTrip: true });
+  try {
+    const response = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-chaos-local",
+        messages: [
+          { role: "user", content: "run it" },
+          {
+            role: "tool",
+            content: [{
+              type: "tool_result",
+              tool_use_id: "toolu_chaos",
+              content: "[error: provider SDK missing]",
+            }],
+          },
+        ],
+      }),
+    });
+
+    assert.equal(response.status, 422);
+    assert.match(await response.text(), /CHAOS_SANDBOX_OK/);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("fixture requires a fresh sandbox tool result for every user turn", async () => {
+  const fixture = await createMockLlmServer({ toolRoundTrip: true });
+  try {
+    const response = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-chaos-local",
+        messages: [
+          { role: "user", content: "first turn" },
+          {
+            role: "assistant",
+            content: [{ type: "tool_use", id: "toolu_old", name: "bash", input: {} }],
+          },
+          {
+            role: "user",
+            content: [{ type: "tool_result", tool_use_id: "toolu_old", content: "CHAOS_SANDBOX_OK" }],
+          },
+          { role: "assistant", content: [{ type: "text", text: "CHAOS_OK" }] },
+          { role: "user", content: "second turn" },
+        ],
+      }),
+    });
+    const body = await response.json();
+
+    assert.equal(response.status, 200);
+    assert.equal(body.stop_reason, "tool_use");
+    assert.equal(body.content[0].name, "bash");
   } finally {
     await fixture.close();
   }

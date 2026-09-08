@@ -1,0 +1,296 @@
+import type { SessionHostEvent } from "@openma/common/session-kernel";
+
+export type ManagedRuntimeEventWire = Record<string, unknown> & {
+  id: string;
+  type: string;
+  processed_at: string;
+};
+
+export interface ManagedAcpEventProjectorOptions {
+  nextEventId(): string;
+  now(): Date;
+}
+
+interface AcpUpdate {
+  sessionUpdate?: string;
+  content?: { type?: string; text?: string };
+  toolCallId?: string;
+  title?: string;
+  kind?: string;
+  rawInput?: unknown;
+  rawOutput?: unknown;
+  status?: string;
+}
+
+interface AcpTerminal {
+  type?: string;
+  response?: {
+    usage?: {
+      inputTokens?: number | null;
+      outputTokens?: number | null;
+      cachedReadTokens?: number | null;
+      cachedWriteTokens?: number | null;
+    } | null;
+  };
+  error?: string;
+}
+
+type AcpUsage = NonNullable<NonNullable<AcpTerminal["response"]>["usage"]>;
+
+interface TurnProjection {
+  modelRequestStartId: string;
+  message: { id: string; text: string } | null;
+  thinking: { id: string; text: string } | null;
+  pendingTools: Map<string, { name: string; input: Record<string, unknown> }>;
+  emittedTools: Set<string>;
+  spanClosed: boolean;
+}
+
+function record(value: unknown): Record<string, unknown> | null {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : null;
+}
+
+function nonNegative(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0
+    ? value
+    : 0;
+}
+
+/**
+ * Stateful ACP-to-Managed-Events boundary for one Work generation.
+ *
+ * The projector intentionally emits only persisted canonical events. Stream
+ * chunks stay local until their message boundary closes; retrying the HTTP
+ * publication is then safe because every projected record has a stable ID.
+ */
+export class ManagedAcpEventProjector {
+  readonly #turns = new Map<string, TurnProjection>();
+  readonly #completedTurns = new Set<string>();
+
+  constructor(private readonly options: ManagedAcpEventProjectorOptions) {}
+
+  project(event: SessionHostEvent): ManagedRuntimeEventWire[] {
+    switch (event.type) {
+      case "session.ready":
+        return [];
+      case "session.disposed":
+        return [this.#event("session.status_terminated")];
+      case "session.complete": {
+        if (this.#completedTurns.has(event.turnId)) return [];
+        const output = this.#closeTurn(event.turnId, false);
+        output.push(this.#event("session.status_idle", {
+          stop_reason: { type: "end_turn" },
+        }));
+        this.#completedTurns.add(event.turnId);
+        return output;
+      }
+      case "session.error": {
+        const output = event.turnId === undefined
+          ? []
+          : this.#closeTurn(event.turnId, true);
+        output.push(this.#event("session.error", {
+          error: {
+            type: "unknown_error",
+            message: event.message,
+            retry_status: "terminal",
+          },
+        }));
+        if (event.turnId !== undefined) this.#completedTurns.add(event.turnId);
+        return output;
+      }
+      case "session.event":
+        return this.#projectTurnEvent(event.turnId, event.event);
+    }
+  }
+
+  #projectTurnEvent(turnId: string, value: unknown): ManagedRuntimeEventWire[] {
+    if (this.#completedTurns.has(turnId)) return [];
+    const { turn, opened } = this.#turn(turnId);
+    const output = opened ? this.#openTurn(turn) : [];
+    const terminal = record(value) as AcpTerminal | null;
+    if (terminal?.type === "promptComplete") {
+      output.push(...this.#flushPendingTools(turn));
+      output.push(...this.#closeContent(turn));
+      output.push(...this.#closeSpan(turn, false, terminal.response?.usage));
+      return output;
+    }
+    if (terminal?.type === "promptError") {
+      output.push(...this.#flushPendingTools(turn));
+      output.push(...this.#closeContent(turn));
+      output.push(...this.#closeSpan(turn, true));
+      return output;
+    }
+
+    const update = record(value) as AcpUpdate | null;
+    if (update === null) return output;
+    switch (update.sessionUpdate) {
+      case "agent_message_chunk":
+        output.push(...this.#flushPendingTools(turn));
+        output.push(...this.#closeThinking(turn));
+        if (turn.message === null) {
+          turn.message = { id: this.options.nextEventId(), text: "" };
+        }
+        turn.message.text += update.content?.text ?? "";
+        break;
+      case "agent_thought_chunk":
+        output.push(...this.#flushPendingTools(turn));
+        output.push(...this.#closeMessage(turn));
+        if (turn.thinking === null) {
+          turn.thinking = { id: this.options.nextEventId(), text: "" };
+        }
+        turn.thinking.text += update.content?.text ?? "";
+        break;
+      case "tool_call":
+        output.push(...this.#closeContent(turn));
+        this.#mergeTool(turn, update);
+        break;
+      case "tool_call_update":
+        this.#mergeTool(turn, update);
+        if (
+          update.toolCallId !== undefined
+          && update.status !== undefined
+          && update.status !== "pending"
+          && update.status !== "in_progress"
+        ) {
+          output.push(...this.#flushTool(turn, update.toolCallId));
+          output.push(this.#toolResult(update));
+        }
+        break;
+    }
+    return output;
+  }
+
+  #turn(turnId: string): { turn: TurnProjection; opened: boolean } {
+    const current = this.#turns.get(turnId);
+    if (current !== undefined) return { turn: current, opened: false };
+    const turn: TurnProjection = {
+      modelRequestStartId: "",
+      message: null,
+      thinking: null,
+      pendingTools: new Map(),
+      emittedTools: new Set(),
+      spanClosed: false,
+    };
+    this.#turns.set(turnId, turn);
+    return { turn, opened: true };
+  }
+
+  #openTurn(turn: TurnProjection): ManagedRuntimeEventWire[] {
+    const running = this.#event("session.status_running");
+    turn.modelRequestStartId = this.options.nextEventId();
+    return [
+      running,
+      this.#event("span.model_request_start", {}, turn.modelRequestStartId),
+    ];
+  }
+
+  #closeTurn(turnId: string, error: boolean): ManagedRuntimeEventWire[] {
+    const { turn, opened } = this.#turn(turnId);
+    const output = opened ? this.#openTurn(turn) : [];
+    output.push(...this.#flushPendingTools(turn));
+    output.push(...this.#closeContent(turn));
+    output.push(...this.#closeSpan(turn, error));
+    this.#turns.delete(turnId);
+    return output;
+  }
+
+  #closeContent(turn: TurnProjection): ManagedRuntimeEventWire[] {
+    return [...this.#closeMessage(turn), ...this.#closeThinking(turn)];
+  }
+
+  #closeMessage(turn: TurnProjection): ManagedRuntimeEventWire[] {
+    const message = turn.message;
+    if (message === null) return [];
+    turn.message = null;
+    return [this.#event("agent.message", {
+      message_id: message.id,
+      content: [{ type: "text", text: message.text.replace(/\s+$/u, "") }],
+    }, message.id)];
+  }
+
+  #closeThinking(turn: TurnProjection): ManagedRuntimeEventWire[] {
+    const thinking = turn.thinking;
+    if (thinking === null) return [];
+    turn.thinking = null;
+    return [this.#event("agent.thinking", {}, thinking.id)];
+  }
+
+  #closeSpan(
+    turn: TurnProjection,
+    isError: boolean,
+    usage?: AcpUsage | null,
+  ): ManagedRuntimeEventWire[] {
+    if (turn.spanClosed) return [];
+    turn.spanClosed = true;
+    return [this.#event("span.model_request_end", {
+      is_error: isError,
+      model_request_start_id: turn.modelRequestStartId,
+      model_usage: {
+        input_tokens: nonNegative(usage?.inputTokens),
+        output_tokens: nonNegative(usage?.outputTokens),
+        cache_read_input_tokens: nonNegative(usage?.cachedReadTokens),
+        cache_creation_input_tokens: nonNegative(usage?.cachedWriteTokens),
+      },
+    })];
+  }
+
+  #mergeTool(turn: TurnProjection, update: AcpUpdate): void {
+    const id = update.toolCallId;
+    if (id === undefined || turn.emittedTools.has(id)) return;
+    const previous = turn.pendingTools.get(id);
+    const incomingInput = record(update.rawInput) ?? {};
+    const previousName = previous?.name ?? "";
+    const incomingName = update.title ?? update.kind ?? "";
+    turn.pendingTools.set(id, {
+      name: incomingName.length > previousName.length
+        ? incomingName
+        : previousName || "tool",
+      input: Object.keys(incomingInput).length > 0
+        ? incomingInput
+        : previous?.input ?? {},
+    });
+  }
+
+  #flushTool(turn: TurnProjection, id: string): ManagedRuntimeEventWire[] {
+    const pending = turn.pendingTools.get(id);
+    if (pending === undefined || turn.emittedTools.has(id)) return [];
+    turn.pendingTools.delete(id);
+    turn.emittedTools.add(id);
+    return [this.#event("agent.tool_use", {
+      name: pending.name,
+      input: pending.input,
+    }, id)];
+  }
+
+  #flushPendingTools(turn: TurnProjection): ManagedRuntimeEventWire[] {
+    return [...turn.pendingTools.keys()].flatMap((id) => this.#flushTool(turn, id));
+  }
+
+  #toolResult(update: AcpUpdate): ManagedRuntimeEventWire {
+    const text = typeof update.rawOutput === "string"
+      ? update.rawOutput
+      : update.rawOutput == null
+        ? `(status: ${update.status ?? "unknown"})`
+        : JSON.stringify(update.rawOutput);
+    return this.#event("agent.tool_result", {
+      tool_use_id: update.toolCallId,
+      content: [{ type: "text", text }],
+      is_error: update.status === "failed",
+    });
+  }
+
+  #event(
+    type: string,
+    fields: Record<string, unknown> = {},
+    id = this.options.nextEventId(),
+  ): ManagedRuntimeEventWire {
+    return {
+      id,
+      type,
+      processed_at: this.options.now().toISOString(),
+      ...fields,
+    };
+  }
+}

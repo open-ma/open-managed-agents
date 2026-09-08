@@ -20,6 +20,20 @@ export interface SessionExecutionFence {
   expiresAt: string;
 }
 
+/**
+ * Ownership proof carried by a self-hosted Environment Work executor.
+ * `generation` changes only when Work is claimed or reclaimed; heartbeats
+ * extend the lease without changing it. Persistence validates this proof in
+ * the same transaction that appends runtime events.
+ */
+export interface EnvironmentWorkExecutionFence {
+  workspaceId: string;
+  environmentId: string;
+  sessionId: string;
+  workId: string;
+  generation: number;
+}
+
 export type RuntimeProducedSessionEvent = Exclude<
   SessionEventView,
   SentSessionEvent
@@ -29,6 +43,7 @@ export interface RecordSessionRuntimeEventsCommand {
   sessionId: string;
   events: RuntimeProducedSessionEvent[];
   executionFence?: SessionExecutionFence;
+  environmentWorkFence?: EnvironmentWorkExecutionFence;
 }
 
 export type RecordSessionRuntimeEventsResult =

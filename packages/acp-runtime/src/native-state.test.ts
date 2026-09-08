@@ -52,11 +52,13 @@ describe("Harbor-compatible ACP native session profiles", () => {
     expect(pi).toHaveProperty("sessionArtifacts", [
       {
         path: "/workspace/.openma/harness-state/acp/session_pi/pi/v1/native/home/.pi/agent/sessions",
+        runtimePath: "/tmp/openma-harness-state/acp/session_pi/pi/v1/native/home/.pi/agent/sessions",
         kind: "directory",
         requiredForResume: true,
       },
       {
         path: "/workspace/.openma/harness-state/acp/session_pi/pi/v1/native/home/.pi/pi-acp/session-map.json",
+        runtimePath: "/tmp/openma-harness-state/acp/session_pi/pi/v1/native/home/.pi/pi-acp/session-map.json",
         kind: "file",
         requiredForResume: true,
       },
@@ -170,11 +172,12 @@ describe("Harbor-compatible ACP native session profiles", () => {
       OPENMA_ACP_STATE_ROOT: expect.stringContaining("profile%2Fsession"),
     });
     const sessionArtifacts = (binding as unknown as {
-      sessionArtifacts: Array<{ path: string }>;
+      sessionArtifacts: Array<{ path: string; runtimePath: string }>;
     }).sessionArtifacts;
     expect(sessionArtifacts.length).toBeGreaterThan(0);
     expect(sessionArtifacts.every((artifact) =>
-      artifact.path.startsWith(binding.nativePath)
+      artifact.path.startsWith(binding.checkpointNativePath)
+      && artifact.runtimePath.startsWith(binding.nativePath)
     )).toBe(true);
   });
 

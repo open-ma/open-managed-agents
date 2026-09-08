@@ -383,12 +383,31 @@ The same demo works on the Postgres compose unchanged.
 
 Read-only memory mounts: enforced via `chmod -R a-w` on the mount target where supported (LocalSubprocess, Daytona, E2B). LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
 
-## Vault credential injection (oma-vault sidecar)
+## Vault credential injection
 
-When the sandbox's bash runs `curl https://api.github.com/...`, OMA injects
+For managed harnesses inside a sandbox, use the scoped HTTP MCP gateway:
+`/v1/oma/mcp-proxy/<session>/<server>`. The ACP projection replaces each
+declared upstream MCP URL with this gateway URL and authenticates with the
+current Work `sessions_token`. The server validates the exact active claim,
+Session and server declaration, then overwrites the Work bearer with the
+upstream Vault credential. The upstream URL and credential are not given to
+the sandbox.
+
+### Legacy transparent `oma-vault` sidecar
+
+The sidecar below is retained for single-operator/local compatibility. It is
+**advisory, not a multi-tenant security boundary**: a process can ignore proxy
+environment variables, and the current CONNECT path cannot prove which
+Session/Work generation originated a request. Do not use it for an untrusted
+multi-tenant `required` credential-egress profile. A production Node/Docker
+transparent deployment needs an isolated network plus a scoped, fenced egress
+gateway that passes ADR 0007 conformance.
+
+When a cooperating sandbox bash runs `curl https://api.github.com/...`, the
+legacy sidecar injects
 the matching vault credential as an `Authorization: Bearer ...` header
-without ever exposing the token to the agent process. This mirrors the CF
-build's `outboundByHost` + `MAIN_MCP.outboundForward` zero-trust pattern.
+without exposing the token to that process. Unlike the Cloudflare fenced
+interceptor, this alone does not prevent bypass or safely attribute tenants.
 
 How it works:
 

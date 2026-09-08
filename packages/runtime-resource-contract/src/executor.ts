@@ -20,11 +20,19 @@ export type HarnessSupervisorCommand =
       outputPath: "/mnt/session/outputs" | null;
     }
   | { type: "drain" }
+  | { type: "checkpoint.commit"; checkpointId: string }
+  | { type: "checkpoint.reject"; checkpointId: string; message: string }
   | { type: "stop"; reason: "aborted" | "failed" };
 
 export type HarnessSupervisorEvent =
   | { type: "ready"; protocol: "openma-harness-supervisor-v1" }
   | { type: "heartbeat"; sequence: number }
+  | {
+      type: "checkpoint";
+      checkpointId: string;
+      sessionId: string;
+      turnId?: string;
+    }
   | { type: "completed"; exitCode: number }
   | { type: "drained" }
   | { type: "error"; message: string };
@@ -57,6 +65,12 @@ export interface SandboxHarnessDriverPort {
     workspacePath: "/workspace";
     outputPath: "/mnt/session/outputs" | null;
     driver: HarnessDriverDeclaration;
+    /** Commit a live turn boundary under the current resource fence. */
+    checkpoint?(input: {
+      checkpointId: string;
+      sessionId: string;
+      turnId?: string;
+    }): Promise<void>;
     signal: AbortSignal;
   }): Promise<ManagedWorkExecutionResult>;
 }

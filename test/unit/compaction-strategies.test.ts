@@ -9,16 +9,11 @@ import {
 } from "../../apps/agent/src/harness/compaction";
 import type { SessionEvent } from "@open-managed-agents/shared";
 
-// Mock ai-sdk's generateText so iterative-compaction tests can drive the
-// strategy's full code path without hitting a real LLM. Spread original
-// exports so tools(), z, etc. still work.
-vi.mock("ai", async (importOriginal) => {
-  const orig = await importOriginal<typeof import("ai")>();
-  return {
-    ...orig,
-    generateText: vi.fn(),
-  };
-});
+// This unit only exercises compaction, whose sole runtime import from `ai` is
+// generateText. Keep the mock self-contained: importOriginal() asks the
+// Workers pool to re-import Vite's optimized URL, a module-resolution path
+// workerd does not support reliably.
+vi.mock("ai", () => ({ generateText: vi.fn() }));
 
 import { generateText } from "ai";
 

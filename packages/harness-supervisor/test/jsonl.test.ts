@@ -94,6 +94,11 @@ describe("harness supervisor JSONL protocol", () => {
       input: input.readable,
       output: output.writable,
       heartbeatIntervalMs: 60_000,
+      scheduler: {
+        sleep: async (_milliseconds: number, signal: AbortSignal) => await new Promise<void>((_resolve, reject) => {
+          signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+        }),
+      },
       resolveHarness: vi.fn(async () => ({ start: vi.fn(async () => run) })),
     });
 
@@ -119,6 +124,90 @@ describe("harness supervisor JSONL protocol", () => {
     await serving;
     expect(run.drain).toHaveBeenCalledOnce();
     expect(run.stop).not.toHaveBeenCalled();
+  });
+
+  it("round-trips a checkpoint request and commit over JSONL", async () => {
+    let checkpoint!: () => Promise<void>;
+    const input = new TransformStream<Uint8Array, Uint8Array>();
+    const output = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = input.writable.getWriter();
+    const reader = output.readable.getReader();
+    const encoder = new TextEncoder();
+    const state = { buffer: "" };
+    const serving = jsonlServer()({
+      input: input.readable,
+      output: output.writable,
+      heartbeatIntervalMs: 60_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async (options) => {
+          checkpoint = () => options.checkpoint({
+            sessionId: start.scope.sessionId,
+            turnId: "turn_jsonl",
+          });
+          return {
+            completed: new Promise<{ exitCode: number }>(() => {}),
+            drain: vi.fn(async () => {}),
+            stop: vi.fn(async () => {}),
+          };
+        }),
+      })),
+    });
+    await writer.write(encoder.encode(`${JSON.stringify(start)}\n`));
+    await expect(nextLine(reader, state)).resolves.toMatchObject({ type: "ready" });
+    const pending = checkpoint();
+    await expect(nextLine(reader, state)).resolves.toEqual({
+      type: "checkpoint",
+      checkpointId: "checkpoint_1",
+      sessionId: start.scope.sessionId,
+      turnId: "turn_jsonl",
+    });
+    await writer.write(encoder.encode(`${JSON.stringify({
+      type: "checkpoint.commit",
+      checkpointId: "checkpoint_1",
+    })}\n`));
+    await pending;
+    await writer.close();
+    await serving;
+  });
+
+  it("round-trips a checkpoint rejection over JSONL", async () => {
+    let checkpoint!: () => Promise<void>;
+    const input = new TransformStream<Uint8Array, Uint8Array>();
+    const output = new TransformStream<Uint8Array, Uint8Array>();
+    const writer = input.writable.getWriter();
+    const reader = output.readable.getReader();
+    const encoder = new TextEncoder();
+    const state = { buffer: "" };
+    const serving = jsonlServer()({
+      input: input.readable,
+      output: output.writable,
+      heartbeatIntervalMs: 60_000,
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async (options) => {
+          checkpoint = () => options.checkpoint({ sessionId: start.scope.sessionId });
+          return {
+            completed: new Promise<{ exitCode: number }>(() => {}),
+            drain: vi.fn(async () => {}),
+            stop: vi.fn(async () => {}),
+          };
+        }),
+      })),
+    });
+    await writer.write(encoder.encode(`${JSON.stringify(start)}\n`));
+    await expect(nextLine(reader, state)).resolves.toMatchObject({ type: "ready" });
+    const pending = checkpoint();
+    await expect(nextLine(reader, state)).resolves.toMatchObject({
+      type: "checkpoint",
+      checkpointId: "checkpoint_1",
+    });
+    await writer.write(encoder.encode(`${JSON.stringify({
+      type: "checkpoint.reject",
+      checkpointId: "checkpoint_1",
+      message: "workspace fence lost",
+    })}\n`));
+    await expect(pending).rejects.toThrow("workspace fence lost");
+    await writer.close();
+    await serving;
   });
 
   it("accepts a final command without a newline and closes a running harness", async () => {
@@ -187,12 +276,52 @@ describe("harness supervisor JSONL protocol", () => {
     })).resolves.toBeUndefined();
   });
 
+  it("contains harness shutdown failure when the input stream ends", async () => {
+    const { serving } = bufferedServer(JSON.stringify(start), {
+      resolveHarness: vi.fn(async () => ({
+        start: vi.fn(async () => ({
+          completed: new Promise<never>(() => {}),
+          drain: vi.fn(async () => {}),
+          stop: vi.fn(async () => { throw new Error("shutdown failed"); }),
+        })),
+      })),
+    });
+
+    await expect(serving).resolves.toBeUndefined();
+  });
+
+  it("normalizes a non-Error input failure and contains broken cleanup transports", async () => {
+    const input = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.error("input stream failed");
+      },
+      cancel() {
+        throw new Error("cancel failed");
+      },
+    });
+    const output = new WritableStream<Uint8Array>({
+      write() {
+        throw new Error("error event write failed");
+      },
+    });
+
+    await expect(jsonlServer()({
+      input,
+      output,
+      heartbeatIntervalMs: 60_000,
+      resolveHarness: vi.fn(async () => null),
+    })).rejects.toBe("input stream failed");
+  });
+
   it.each([
     ["invalid JSON", "{", /invalid JSON/],
     ["array command", "[]", /object with a type/],
     ["missing type", "{}", /object with a type/],
     ["unknown command", '{"type":"wat"}', /Unknown harness supervisor command/],
     ["bad stop reason", '{"type":"stop","reason":"done"}', /stop reason/],
+    ["bad checkpoint commit", '{"type":"checkpoint.commit","checkpointId":""}', /checkpoint id/],
+    ["bad checkpoint rejection id", '{"type":"checkpoint.reject","checkpointId":"","message":"failed"}', /checkpoint rejection/],
+    ["bad checkpoint rejection", '{"type":"checkpoint.reject","checkpointId":"x","message":""}', /checkpoint rejection/],
     [
       "bad scope",
       JSON.stringify({ ...start, scope: { ...start.scope, workId: "" } }),

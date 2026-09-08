@@ -39,3 +39,25 @@ export type {
   AcpStatefulAgentSpec,
   HarborNativeStateCoverage,
 } from "./native-state.js";
+export {
+  captureAcpSandboxAgentState,
+  hasRequiredAcpSandboxAgentState,
+  managedMcpProxyFromWorkEnvironment,
+  materializeAcpSandboxAgentState,
+  projectAcpSandboxMcpServers,
+  prepareAcpSandboxAgent,
+  releaseAcpSandboxAgentState,
+  restoreAcpSandboxAgentState,
+  resolveAcpSandboxAgentAdapter,
+} from "./sandbox-agent.js";
+export type {
+  AcpSandboxAgentAdapterDescriptor,
+  AcpSandboxAgentLaunchSpec,
+  AcpSandboxAgentLifecyclePolicy,
+  AcpSandboxAgentPreparation,
+  AcpSandboxAgentReleaseReason,
+  AcpSandboxAgentStatePort,
+  ManagedMcpServerForSandbox,
+  ManagedMcpProxyCapability,
+  ProjectedAcpHttpMcpServer,
+} from "./sandbox-agent.js";

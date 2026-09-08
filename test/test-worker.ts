@@ -264,7 +264,13 @@ import schema0017 from "../apps/main/migrations/0017_dreams.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
 import schema0018 from "../apps/main/migrations/0018_runtime_multi_tenant.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
+import tenantRoutingSchema from "../apps/main/migrations/0019_tenant_routing_control_plane.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
 import sessionExecutionSchema from "../apps/main/migrations/0020_session_execution_store.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import environmentServiceKeysSchema from "../apps/main/migrations/0021_environment_service_keys.sql?raw";
+// @ts-expect-error vitest resolves SQL via ?raw
+import environmentWorkGenerationSchema from "../apps/main/migrations/0022_outgoing_dracula.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
 import integrationsSchema from "../apps/main/migrations-integrations/0001_consolidated.sql?raw";
 // @ts-expect-error vitest resolves SQL via ?raw
@@ -292,7 +298,10 @@ const MIGRATIONS_RAW: string[] = [
   managedTunnelsSchema as string,
   schema0017 as string,
   schema0018 as string,
+  tenantRoutingSchema as string,
   sessionExecutionSchema as string,
+  environmentServiceKeysSchema as string,
+  environmentWorkGenerationSchema as string,
 ];
 
 const INTEGRATIONS_MIGRATIONS_RAW: string[] = [integrationsSchema as string];

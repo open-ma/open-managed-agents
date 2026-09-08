@@ -10,7 +10,8 @@
     "./placement": "./src/placement.ts",
     "./registry": "./src/registry.ts",
     "./known-agents": "./src/known-agents.ts",
-    "./native-state": "./src/native-state.ts"
+    "./native-state": "./src/native-state.ts",
+    "./sandbox-agent": "./src/sandbox-agent.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",

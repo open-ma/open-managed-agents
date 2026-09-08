@@ -13,6 +13,7 @@ import { defineConfig } from "vitest/config";
 export default defineConfig({
   test: {
     pool: "threads",
+    setupFiles: ["test/_helpers/temp-hygiene.setup.ts"],
     include: ["test/**/*.test.ts"],
     // PostgreSQL/MinIO contracts own real containers and run through the
     // repository-level `test:integration:storage` project.

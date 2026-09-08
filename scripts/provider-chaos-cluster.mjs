@@ -14,9 +14,10 @@
  */
 
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createServer } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { readdir, mkdtemp, rm } from "node:fs/promises";
+import { promisify } from "node:util";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -26,6 +27,7 @@ import net from "node:net";
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const SUPPORTED_PROVIDERS = new Set(["daytona", "litebox", "boxrun"]);
 const SECRET_ENV = /(key|token|secret|password|credential)/i;
+const execFileAsync = promisify(execFile);
 
 /**
  * Resolve and validate the provider for this lab. The ordinary local
@@ -205,7 +207,27 @@ export async function createMockLlmServer(options = {}) {
     }
 
     const model = typeof body.model === "string" ? body.model : "claude-chaos-local";
-    const hasToolResult = /tool[_-]result/i.test(JSON.stringify(body.messages ?? []));
+    const messages = Array.isArray(body.messages) ? body.messages : [];
+    let currentTurnStart = -1;
+    for (let index = 0; index < messages.length; index += 1) {
+      const message = messages[index];
+      const serializedMessage = JSON.stringify(message);
+      if (message?.role === "user" && !/tool[_-]result/i.test(serializedMessage)) {
+        currentTurnStart = index;
+      }
+    }
+    const serializedCurrentTurn = JSON.stringify(messages.slice(currentTurnStart + 1));
+    const hasToolResult = /tool[_-]result/i.test(serializedCurrentTurn);
+    if (state.toolRoundTrip && hasToolResult && !serializedCurrentTurn.includes("CHAOS_SANDBOX_OK")) {
+      jsonResponse(res, 422, {
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: "provider sandbox tool result did not contain CHAOS_SANDBOX_OK",
+        },
+      });
+      return;
+    }
     const useTool = state.toolRoundTrip && !hasToolResult;
     const toolInput = { command: "printf CHAOS_SANDBOX_OK" };
     const message = useTool
@@ -389,10 +411,53 @@ async function invokeProviderKill(env, provider) {
   return { skipped: false, status: response.status };
 }
 
+async function listLiteBoxScratchDirs() {
+  const entries = await readdir(tmpdir(), { withFileTypes: true });
+  return entries
+    .filter((entry) => entry.isDirectory() && entry.name.startsWith("oma-litebox-"))
+    .map((entry) => entry.name)
+    .sort();
+}
+
+async function listLiteBoxIds() {
+  const script = [
+    'const { JsBoxlite } = await import("@boxlite-ai/boxlite");',
+    "const client = JsBoxlite.withDefaultConfig();",
+    "const ids = (await client.listInfo()).map((box) => box.id).sort();",
+    "client.close();",
+    "console.log(JSON.stringify(ids));",
+  ].join("\n");
+  const { stdout } = await execFileAsync(
+    process.execPath,
+    ["--input-type=module", "--eval", script],
+    { cwd: join(REPO_ROOT, "packages/sandbox-adapter-litebox") },
+  );
+  return JSON.parse(stdout.trim());
+}
+
+/** Capture only resources owned by a provider that can be enumerated locally. */
+export async function captureProviderResources(provider) {
+  if (provider !== "litebox") return { scratchDirs: [], runtimeIds: [] };
+  return {
+    scratchDirs: await listLiteBoxScratchDirs(),
+    runtimeIds: await listLiteBoxIds(),
+  };
+}
+
+export function findNewProviderResources(before, after) {
+  const priorScratch = new Set(before.scratchDirs);
+  const priorRuntimes = new Set(before.runtimeIds);
+  return {
+    scratchDirs: after.scratchDirs.filter((value) => !priorScratch.has(value)),
+    runtimeIds: after.runtimeIds.filter((value) => !priorRuntimes.has(value)),
+  };
+}
+
 /** Run the complete local lab. Returns a JSON-safe report for CI/logging. */
 export async function runProviderChaos(options = {}) {
   const inherited = options.env ?? process.env;
   const config = parseProviderConfig(inherited);
+  const resourceBaseline = await captureProviderResources(config.provider);
   const root = options.root ?? await mkdtemp(join(tmpdir(), "openma-provider-chaos-"));
   const keepData = options.keepData ?? inherited.OMA_CHAOS_KEEP_DATA === "1";
   const healthTimeoutMs = Number(options.healthTimeoutMs ?? inherited.OMA_CHAOS_HEALTH_TIMEOUT_MS ?? 60_000);
@@ -416,11 +481,14 @@ export async function runProviderChaos(options = {}) {
     llmBaseUrl: llm.baseUrl,
     steps: [],
     providerKill: null,
+    resourceCleanup: { status: "pending" },
   };
   let runtime = null;
   let agentId;
   let environmentId;
   let sessionId;
+  let operationError = null;
+  let cleanupError = null;
 
   try {
     report.steps.push({ id: "healthy-turn", status: "running" });
@@ -526,14 +594,52 @@ export async function runProviderChaos(options = {}) {
     } else {
       report.providerKill = { skipped: true, reason: "no explicit provider kill URL" };
     }
-    return report;
+  } catch (error) {
+    operationError = error;
   } finally {
-    await stopChild(runtime, "SIGTERM");
+    const stopped = await stopChild(runtime, "SIGTERM");
+    if (stopped?.timeout) {
+      cleanupError = new Error("OpenMA process group did not exit within the 10s cleanup deadline");
+    }
     await llm.close().catch(() => {});
     if (!keepData && !options.root) {
       await rm(root, { recursive: true, force: true }).catch(() => {});
     }
+    try {
+      const remaining = findNewProviderResources(
+        resourceBaseline,
+        await captureProviderResources(config.provider),
+      );
+      assert.deepEqual(
+        remaining,
+        { scratchDirs: [], runtimeIds: [] },
+        `provider resources leaked: ${JSON.stringify(remaining)}`,
+      );
+      report.resourceCleanup = {
+        status: "passed",
+        baselineCounts: {
+          scratchDirs: resourceBaseline.scratchDirs.length,
+          runtimeIds: resourceBaseline.runtimeIds.length,
+        },
+        remaining,
+      };
+    } catch (error) {
+      cleanupError = cleanupError
+        ? new AggregateError([cleanupError, error], "process and provider resource cleanup both failed")
+        : error;
+      report.resourceCleanup = {
+        status: "failed",
+        message: error instanceof Error ? error.message : String(error),
+      };
+    }
   }
+
+  if (operationError && cleanupError) {
+    throw new AggregateError([operationError, cleanupError], "provider chaos operation and cleanup both failed");
+  }
+  if (operationError) throw operationError;
+  if (cleanupError) throw cleanupError;
+  return report;
 }
 
 async function main() {

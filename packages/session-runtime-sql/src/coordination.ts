@@ -556,9 +556,14 @@ export class SqlSessionExecutionStore
       input.sessionId,
     );
     const results = await this.sql.batch([queued, running]);
+    const queuedResult = results[0];
+    const runningResult = results[1];
+    if (queuedResult === undefined || runningResult === undefined) {
+      throw new Error("Session cancellation SQL batch must return two results");
+    }
     return {
-      queued: results[0]?.meta.changes ?? 0,
-      running: results[1]?.meta.changes ?? 0,
+      queued: queuedResult.meta.changes,
+      running: runningResult.meta.changes,
     };
   }
 

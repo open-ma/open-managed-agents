@@ -72,6 +72,8 @@ function runtime(id: string): Runtime {
     exec: vi.fn(async () => ""),
     readFile: vi.fn(async () => ""),
     writeFile: vi.fn(async (path: string) => path),
+    writeFileBytes: vi.fn(async (path: string) => path),
+    gitCheckout: vi.fn(async () => undefined),
     destroy: vi.fn(async () => {}),
     spawnDuplexProcess: vi.fn(async () => completedProcess()),
   };
@@ -117,9 +119,520 @@ async function freshBinding(runtimeComposition: ReturnType<typeof composition>) 
 }
 
 describe("provider managed runtime adapter", () => {
+  it("materializes official file and repository resources through the attached provider runtime", async () => {
+    const created = runtime("session-input-runtime");
+    const composed = composition({
+      create: vi.fn(async () => created),
+      resume: vi.fn(),
+      restore: vi.fn(),
+    });
+    const signal = new AbortController().signal;
+    const workspace = await freshBinding(composed);
+    const sandbox = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    });
+    const sessionInputs = Reflect.get(composed, "sessionInputs") as {
+      materialize(input: Record<string, unknown>): Promise<void>;
+    } | undefined;
+    expect(sessionInputs).toBeDefined();
+    const downloadFile = vi.fn(async () => ({
+      content: new Uint8Array([0, 255, 1]),
+      filename: "input.bin",
+      mimeType: "application/octet-stream",
+    }));
+
+    await sessionInputs!.materialize({
+      scope,
+      fence,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [
+          {
+            id: "sesrsc_file_01",
+            type: "file",
+            file_id: "file_01",
+            mount_path: "/mnt/session/uploads/input.bin",
+          },
+          {
+            id: "sesrsc_repo_01",
+            type: "github_repository",
+            url: "https://github.com/openma-ai/example.git",
+            mount_path: "/workspace/example",
+            checkout: { type: "branch", name: "feature/runtime-port" },
+          },
+        ],
+      },
+      workspace,
+      sandbox,
+      activeWorkspaceCheckpoint: null,
+      resourceOwnership: { memoryStore: "worker" },
+      idempotencyKey: "session-inputs-1",
+      access: { downloadFile },
+      signal,
+    });
+
+    expect(downloadFile).toHaveBeenCalledWith({ fileId: "file_01", signal });
+    expect(created.writeFileBytes).toHaveBeenCalledWith(
+      "/mnt/session/uploads/input.bin",
+      new Uint8Array([0, 255, 1]),
+    );
+    expect(created.gitCheckout).toHaveBeenCalledWith(
+      "https://github.com/openma-ai/example.git",
+      { branch: "feature/runtime-port", targetDir: "/workspace/example" },
+    );
+  });
+
+  it("fails closed when the supervised lane assigns memory stores to the generic materializer", async () => {
+    const created = runtime("session-memory-runtime");
+    const composed = composition({
+      create: vi.fn(async () => created),
+      resume: vi.fn(),
+      restore: vi.fn(),
+    });
+    const signal = new AbortController().signal;
+    const workspace = await freshBinding(composed);
+    const sandbox = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    });
+
+    await expect(composed.sessionInputs.materialize({
+      scope,
+      fence,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      workspace,
+      sandbox,
+      activeWorkspaceCheckpoint: null,
+      resourceOwnership: { memoryStore: "materializer" },
+      idempotencyKey: "session-memory-1",
+      signal,
+    } as any)).rejects.toThrow(/does not implement memory_store/);
+  });
+
+  it("supports an explicit ephemeral workspace without inventing provider persistence", async () => {
+    const created = runtime("ephemeral-runtime");
+    const create = vi.fn(async (..._args: unknown[]) => {
+      created.runtimeHandle = () => ({
+        provider: "ephemeral-provider",
+        runtimeId: "ephemeral-runtime",
+      });
+      return created;
+    });
+    const composed = createProviderManagedRuntime({
+      providerName: "ephemeral-provider",
+      provider: {
+        create,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({
+        sessionId: inputScope.sessionId,
+        workdir: "/workspace",
+      }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      sandboxCapabilities: {
+        suspendResume: "unsupported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: [],
+      },
+      workspace: { strategies: ["ephemeral"] },
+      drivers: ["ama_worker"],
+    });
+    const signal = new AbortController().signal;
+    const binding = await composed.workspace.materialize({
+      scope,
+      fence,
+      strategy: "ephemeral",
+      activeCheckpoint: {
+        id: "previous-marker",
+        contentHash: "sha256:previous",
+      },
+      idempotencyKey: "ephemeral-materialize",
+      signal,
+    });
+    const lease = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "ephemeral",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace: binding,
+      outputs: null,
+      signal,
+    });
+    expect(create.mock.calls[0]?.[2]).toMatchObject({
+      scope,
+      fence,
+      plan: { workspaceStrategy: "ephemeral" },
+      workspace: binding,
+      outputs: null,
+      credentialEgress: null,
+      signal,
+    });
+
+    await expect(composed.workspace.checkpoint({
+      scope,
+      fence,
+      strategy: "ephemeral",
+      binding,
+      sandbox: lease,
+      idempotencyKey: "ephemeral-checkpoint",
+      signal,
+    })).resolves.toMatchObject({
+      revision: 1,
+      metadata: {
+        "openma.workspace.ephemeral.v1": expect.stringContaining("ephemeral-runtime"),
+      },
+    });
+    expect(created.checkpoint).not.toHaveBeenCalled();
+  });
+
+  it("does not invent provider lease renewal for runtimes that only expose liveness", async () => {
+    const created = runtime("liveness-only");
+    created.runtimeCapabilities = () => ({
+      lease: false,
+      suspend: [],
+      checkpoint: ["filesystem"],
+    });
+    const composed = composition({
+      create: async () => created,
+      resume: vi.fn(),
+      restore: vi.fn(),
+    });
+    const workspace = await freshBinding(composed);
+    const lease = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal: new AbortController().signal,
+    });
+
+    expect(created.status).toHaveBeenCalledOnce();
+    expect(created.renewLease).not.toHaveBeenCalled();
+    await expect(composed.sandbox.heartbeat({ scope, fence, lease })).resolves.toEqual({
+      type: "alive",
+    });
+    expect(created.renewLease).not.toHaveBeenCalled();
+  });
+
+  it("destroys provider allocations when identity validation or readiness is aborted", async () => {
+    const invalid = runtime("invalid-runtime");
+    invalid.runtimeHandle = () => ({ provider: "another-provider", runtimeId: "invalid-runtime" });
+    const aborted = runtime("aborted-runtime");
+    vi.mocked(aborted.status).mockResolvedValue("unknown");
+    const abortController = new AbortController();
+    let allocation = invalid;
+    const composed = createProviderManagedRuntime({
+      providerName: "e2b",
+      provider: {
+        create: async () => allocation,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({ sessionId: inputScope.sessionId, workdir: "/workspace" }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      readiness: {
+        timeoutMs: 1_000,
+        pollIntervalMs: 25,
+        wait: async () => {
+          abortController.abort(new Error("claim fenced"));
+        },
+      },
+      sandboxCapabilities: {
+        suspendResume: "supported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: [],
+      },
+      workspace: { strategies: ["checkpoint_restore"], portableCheckpointKind: "memory" },
+      drivers: ["ama_worker"],
+    });
+    const workspace = await composed.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace-start-failure",
+      signal: new AbortController().signal,
+    });
+    const acquire = (signal: AbortSignal) => composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    });
+
+    await expect(acquire(new AbortController().signal)).rejects.toThrow(
+      "incompatible runtime",
+    );
+    expect(invalid.destroy).toHaveBeenCalledOnce();
+
+    allocation = aborted;
+    await expect(acquire(abortController.signal)).rejects.toThrow("claim fenced");
+    expect(aborted.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("holds acquisition behind provider readiness and cleans up failed starts", async () => {
+    const created = runtime("sandbox-starting");
+    vi.mocked(created.status)
+      .mockResolvedValueOnce("unknown")
+      .mockResolvedValueOnce("running");
+    const waits: number[] = [];
+    const composed = createProviderManagedRuntime({
+      providerName: "e2b",
+      provider: {
+        create: async () => created,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({ sessionId: inputScope.sessionId, workdir: "/workspace" }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      readiness: {
+        timeoutMs: 1_000,
+        pollIntervalMs: 25,
+        wait: async (milliseconds) => {
+          waits.push(milliseconds);
+        },
+      },
+      sandboxCapabilities: {
+        suspendResume: "supported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: [],
+      },
+      workspace: { strategies: ["checkpoint_restore"], portableCheckpointKind: "memory" },
+      drivers: ["ama_worker"],
+    });
+    const workspace = await composed.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace-readiness",
+      signal: new AbortController().signal,
+    });
+
+    const lease = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal: new AbortController().signal,
+    });
+
+    expect(lease.runtimeId).toBe("sandbox-starting");
+    expect(created.status).toHaveBeenCalledTimes(2);
+    expect(created.renewLease).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([25]);
+
+    const stopped = runtime("sandbox-stopped");
+    vi.mocked(stopped.status).mockResolvedValue("stopped");
+    const stoppedComposition = createProviderManagedRuntime({
+      providerName: "e2b",
+      provider: {
+        create: async () => stopped,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({ sessionId: inputScope.sessionId, workdir: "/workspace" }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      readiness: { timeoutMs: 1_000, pollIntervalMs: 25 },
+      sandboxCapabilities: {
+        suspendResume: "supported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: [],
+      },
+      workspace: { strategies: ["checkpoint_restore"], portableCheckpointKind: "memory" },
+      drivers: ["ama_worker"],
+    });
+    const stoppedWorkspace = await stoppedComposition.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace-stopped",
+      signal: new AbortController().signal,
+    });
+
+    await expect(stoppedComposition.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace: stoppedWorkspace,
+      outputs: null,
+      signal: new AbortController().signal,
+    })).rejects.toThrow("stopped before it became ready");
+    expect(stopped.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("turns a provider wire point into an opaque credential-egress Port", async () => {
+    const created = runtime("sandbox-egress");
+    const lifecycle: string[] = [];
+    const composed = createProviderManagedRuntime({
+      providerName: "e2b",
+      provider: {
+        create: async () => created,
+        resume: vi.fn(),
+        restore: vi.fn(),
+      },
+      context: (inputScope) => ({ sessionId: inputScope.sessionId, workdir: "/workspace" }),
+      environment: () => ({}),
+      leaseTtlMs: 90_000,
+      sandboxCapabilities: {
+        suspendResume: "supported",
+        hardTerminate: "supported",
+        runtimeCheckpoints: [],
+      },
+      workspace: { strategies: ["checkpoint_restore"], portableCheckpointKind: "memory" },
+      credentialEgress: {
+        capabilities: {
+          enforcement: "enforced",
+          credentialMode: "live",
+          interceptedProtocols: ["http", "https"],
+        },
+        attach: vi.fn(async (input) => {
+          lifecycle.push("attach");
+          expect(input.runtime).toBe(created);
+          expect(input.scope).toEqual(scope);
+          expect(input.fence).toEqual(fence);
+        }),
+        revoke: vi.fn(async (input) => {
+          lifecycle.push(`revoke:${input.reason}`);
+          expect(input.runtime).toBe(created);
+          expect(input.fence.token).toBe("fence-secret");
+        }),
+      },
+      drivers: ["ama_worker"],
+    });
+
+    await expect(composed.credentialEgress!.capabilities(scope)).resolves.toEqual({
+      enforcement: "enforced",
+      credentialMode: "live",
+      interceptedProtocols: ["http", "https"],
+    });
+    const binding = await composed.credentialEgress!.prepare({
+      scope,
+      fence,
+      requirement: "required",
+      idempotencyKey: "egress-prepare",
+      signal: new AbortController().signal,
+    });
+    expect(binding).toMatchObject({
+      bindingId: expect.stringMatching(/^provider-egress-/),
+      enforcement: "enforced",
+      credentialMode: "live",
+    });
+    expect(JSON.stringify(binding)).not.toContain(fence.token);
+
+    const workspace = await composed.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace",
+      signal: new AbortController().signal,
+    });
+    const lease = await composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      credentialEgress: binding,
+      signal: new AbortController().signal,
+    });
+    await composed.credentialEgress!.attach({
+      scope,
+      fence,
+      binding: binding!,
+      sandbox: lease,
+      signal: new AbortController().signal,
+    });
+    await composed.credentialEgress!.revoke({
+      scope,
+      fence,
+      binding: binding!,
+      reason: "lease_lost",
+    });
+    await composed.credentialEgress!.release({
+      scope,
+      fence,
+      binding: binding!,
+    });
+
+    expect(lifecycle).toEqual(["attach", "revoke:lease_lost"]);
+  });
+
   it("exposes an explicit provider checkpoint port without promoting snapshots", async () => {
     const previous = runtime("checkpoint-source");
     const restored = runtime("checkpoint-restored");
+    let checkpointRestoreRuntime = restored;
     const composed = createProviderManagedRuntime({
       providerName: "e2b",
       provider: {
@@ -146,7 +659,7 @@ describe("provider managed runtime adapter", () => {
           kind: "memory",
           scope: "portable",
         }),
-        restore: async () => restored,
+        restore: async () => checkpointRestoreRuntime,
       },
     });
 
@@ -194,6 +707,16 @@ describe("provider managed runtime adapter", () => {
       fence,
       checkpoint,
     })).resolves.toEqual({ provider: "e2b", runtimeId: "checkpoint-restored" });
+
+    const failedRestore = runtime("checkpoint-failed");
+    vi.mocked(failedRestore.status).mockResolvedValue("stopped");
+    checkpointRestoreRuntime = failedRestore;
+    await expect(composed.runtimeCheckpoint!.restore({
+      scope,
+      fence,
+      checkpoint,
+    })).rejects.toThrow("stopped before it became ready");
+    expect(failedRestore.destroy).toHaveBeenCalledOnce();
   });
 
   it("exposes a provider-native Session output mount without folding it into SandboxPort", async () => {
@@ -482,11 +1005,16 @@ describe("provider managed runtime adapter", () => {
       { provider: "e2b", runtimeId: "sandbox-1" },
       expect.objectContaining({ sessionId: scope.sessionId }),
       {},
+      expect.objectContaining({
+        scope,
+        fence: nextFence,
+        workspace: nextBinding,
+      }),
     );
     expect(provider.restore).not.toHaveBeenCalled();
   });
 
-  it("restores portable checkpoint candidates and reports a stopped runtime as lost", async () => {
+  it("rejects and cleans up a portable restore that never becomes runnable", async () => {
     const first = runtime("sandbox-1");
     const restored = runtime("sandbox-2");
     vi.mocked(restored.status).mockResolvedValue("stopped");
@@ -537,7 +1065,7 @@ describe("provider managed runtime adapter", () => {
       idempotencyKey: "materialize-2",
       signal: new AbortController().signal,
     });
-    const nextLease = await composed.sandbox.acquire({
+    await expect(composed.sandbox.acquire({
       scope,
       fence: nextFence,
       plan: {
@@ -549,16 +1077,19 @@ describe("provider managed runtime adapter", () => {
       workspace: nextBinding,
       outputs: null,
       signal: new AbortController().signal,
-    });
+    })).rejects.toThrow("stopped before it became ready");
 
     expect(provider.restore).toHaveBeenCalledWith(
       expect.objectContaining({ checkpointId: "snapshot-sandbox-1" }),
       expect.any(Object),
       {},
+      expect.objectContaining({
+        scope,
+        fence: nextFence,
+        workspace: nextBinding,
+      }),
     );
-    await expect(
-      composed.sandbox.heartbeat({ scope, fence: nextFence, lease: nextLease }),
-    ).resolves.toEqual({ type: "lost" });
+    expect(restored.destroy).toHaveBeenCalledOnce();
   });
 
   it("collects binary Session outputs into immutable object candidates and detects mutation", async () => {
@@ -804,5 +1335,82 @@ describe("provider managed runtime adapter", () => {
     ).rejects.toThrow(/content hash mismatch/i);
     expect(provider.create).toHaveBeenCalledOnce();
     expect(provider.restore).not.toHaveBeenCalled();
+  });
+
+  it("destroys a runtime when cancellation races its running readiness result", async () => {
+    const created = runtime("sandbox-ready-abort-race");
+    const controller = new AbortController();
+    vi.mocked(created.status).mockImplementationOnce(async () => {
+      controller.abort(new Error("claim fenced at ready"));
+      return "running";
+    });
+    const composed = composition({
+      create: vi.fn(async () => created),
+      resume: vi.fn(),
+      restore: vi.fn(),
+    });
+    const workspace = await freshBinding(composed);
+    await expect(composed.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      signal: controller.signal,
+    })).rejects.toThrow("claim fenced at ready");
+    expect(created.destroy).toHaveBeenCalledOnce();
+  });
+
+  it("does not let a terminated marker suppress cleanup of a newly acquired runtime with the same provider id", async () => {
+    const first = runtime("stable-provider-id");
+    const second = runtime("stable-provider-id");
+    const provider = {
+      create: vi.fn()
+        .mockResolvedValueOnce(first)
+        .mockResolvedValueOnce(second),
+      resume: vi.fn(),
+      restore: vi.fn(),
+    };
+    const composed = composition(provider);
+    const acquireGeneration = async (generation: number) => {
+      const nextFence = { ...fence, generation };
+      const workspace = await composed.workspace.materialize({
+        scope,
+        fence: nextFence,
+        strategy: "retained_runtime",
+        activeCheckpoint: null,
+        idempotencyKey: `workspace-${generation}`,
+        signal: new AbortController().signal,
+      });
+      return composed.sandbox.acquire({
+        scope,
+        fence: nextFence,
+        plan: {
+          workspaceStrategy: "retained_runtime",
+          outputStrategy: null,
+          runtimeCheckpoint: null,
+          driver: { type: "ama_worker", process: { command: "worker" } },
+        },
+        workspace,
+        outputs: null,
+        signal: new AbortController().signal,
+      });
+    };
+    const firstLease = await acquireGeneration(1);
+    await composed.sandbox.terminate({ scope, fence, lease: firstLease, reason: "completed" });
+    const secondLease = await acquireGeneration(2);
+    await composed.sandbox.terminate({
+      scope,
+      fence: { ...fence, generation: 2 },
+      lease: secondLease,
+      reason: "completed",
+    });
+    expect(first.destroy).toHaveBeenCalledOnce();
+    expect(second.destroy).toHaveBeenCalledOnce();
   });
 });

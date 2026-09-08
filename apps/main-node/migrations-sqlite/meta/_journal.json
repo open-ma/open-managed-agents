@@ -162,6 +162,20 @@
       "when": 1788455360798,
       "tag": "0022_square_tarantula",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "6",
+      "when": 1788697584040,
+      "tag": "0023_wonderful_jazinda",
+      "breakpoints": true
+    },
+    {
+      "idx": 24,
+      "version": "6",
+      "when": 1788804355332,
+      "tag": "0024_cool_bromley",
+      "breakpoints": true
     }
   ]
 }

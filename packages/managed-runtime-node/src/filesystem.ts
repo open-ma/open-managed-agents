@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   copyFile,
+  link,
   lstat,
   mkdir,
   open,
@@ -112,7 +113,7 @@ export async function writeOnce(path: string, content: string | Uint8Array): Pro
       await handle.close();
     }
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    rethrowUnlessAlreadyExists(error);
   }
 }
 
@@ -122,13 +123,22 @@ export async function copyFileOnce(source: string, target: string): Promise<void
   try {
     await copyFile(source, temporary);
     try {
-      await rename(temporary, target);
+      // `rename()` replaces an existing file on POSIX, which violates the
+      // content-addressed store's write-once contract. The temporary file is
+      // created beside the target, so an atomic hard-link publication gives
+      // us exclusive-create semantics without exposing a partial target.
+      await link(temporary, target);
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      rethrowUnlessAlreadyExists(error);
     }
   } finally {
     await rm(temporary, { force: true });
   }
+}
+
+/** Normalize the one benign result of an exclusive immutable publication. */
+export function rethrowUnlessAlreadyExists(error: unknown): void {
+  if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
 }
 
 export function rooted(root: string, ...parts: string[]): string {

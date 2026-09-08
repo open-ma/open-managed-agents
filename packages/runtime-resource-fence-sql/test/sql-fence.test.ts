@@ -123,6 +123,31 @@ describe("SqlRuntimeResourceFencePort", () => {
     ).resolves.toEqual({ type: "lost" });
   });
 
+  it("authorizes credential egress only for the live exact fence", async () => {
+    const sql = await createBetterSqlite3SqlClient(":memory:");
+    await ensureRuntimeResourceFenceSchema(sql);
+    const clock = { now: Date.parse("2026-09-03T00:00:00.000Z") };
+    const fences = new SqlRuntimeResourceFencePort(sql, {
+      now: () => new Date(clock.now),
+      nextToken: () => "fence-token",
+    });
+    const acquired = await fences.acquire({ scope, ownerId: "owner_1", ttlMs: 10_000 });
+    if (acquired.type !== "acquired") throw new Error("expected acquired fence");
+
+    await expect(fences.isCurrent(acquired.fence)).resolves.toBe(true);
+    await expect(fences.isCurrent({
+      ...acquired.fence,
+      token: "forged-token",
+    })).resolves.toBe(false);
+    await expect(fences.isCurrent({
+      ...acquired.fence,
+      generation: acquired.fence.generation + 1,
+    })).resolves.toBe(false);
+
+    clock.now += 10_001;
+    await expect(fences.isCurrent(acquired.fence)).resolves.toBe(false);
+  });
+
   it("persists idempotent orphan cleanup work without fencing credentials", async () => {
     const sql = await createBetterSqlite3SqlClient(":memory:");
     await ensureRuntimeResourceFenceSchema(sql);

@@ -59,6 +59,9 @@ test("root Cloudflare test discovery excludes generated and Node-only trees", ()
       [
         "packages/acp-runtime/",
         "packages/cli/",
+        "packages/environment-activation-",
+        "packages/environment-dispatch-",
+        "packages/harness-runtime-acp/",
         "packages/managed-agents-runtime/",
         "packages/session-runtime-sql/test/",
         "packages/sandbox/test/",

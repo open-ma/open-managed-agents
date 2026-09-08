@@ -22,6 +22,56 @@ import { sessionExecutionStoreConformance } from
 const at = (seconds: number) =>
   new Date(Date.UTC(2026, 8, 4, 0, 0, seconds)).toISOString();
 
+function executionRow(overrides: Record<string, unknown> = {}) {
+  return {
+    workspace_id: "workspace_01",
+    session_id: "session_01",
+    lane_id: "sthr_primary",
+    id: "execution_row",
+    admitted_at_ms: String(Date.parse(at(1))),
+    events_json: JSON.stringify(admitted("event", "session_01", at(1)).execution.events),
+    events_fingerprint: "fingerprint",
+    state: "queued",
+    attempt_id: null,
+    owner_id: null,
+    generation: "0",
+    attempt_count: "0",
+    max_attempts: "10",
+    deadline_at_ms: String(Date.parse(at(30))),
+    claimed_at_ms: null,
+    lease_expires_at_ms: null,
+    interrupt_requested_at_ms: null,
+    settled_at_ms: null,
+    failure: null,
+    revision: "1",
+    ...overrides,
+  };
+}
+
+function fakeSql(options: {
+  row?: Record<string, unknown> | null;
+  allResults?: Array<{ name?: string }>;
+  omitAllResults?: boolean;
+  batchResults?: Array<{ meta: { changes: number } }>;
+} = {}): SqlClient {
+  const statement = {
+    bind: () => statement,
+    run: async () => ({ meta: { changes: 1 } }),
+    first: async () => options.row ?? null,
+    all: async () => options.omitAllResults
+      ? {}
+      : { results: options.allResults ?? [] },
+  };
+  return {
+    prepare: () => statement,
+    batch: async () => options.batchResults ?? [
+      { meta: { changes: 0 } },
+      { meta: { changes: 0 } },
+    ],
+    exec: async () => {},
+  } as SqlClient;
+}
+
 function admitted(
   id: string,
   sessionId: string,
@@ -73,6 +123,36 @@ describe("SqlSessionExecutionCoordinator", () => {
       claimedAt: at(1),
       leaseTtlMs: 0,
     })).rejects.toThrow("positive integer");
+    await expect(coordinator.claim({
+      ownerId: "node_a",
+      attemptId: "attempt_fractional",
+      claimedAt: at(1),
+      leaseTtlMs: 1.5,
+    })).rejects.toThrow("positive integer");
+    await expect(coordinator.admit({
+      ...admitted("bad_attempts", "session_01", at(1)),
+      policy: { maxAttempts: 0, timeoutMs: 1_000 },
+    })).rejects.toThrow("maxAttempts must be a positive integer");
+    await expect(coordinator.admit({
+      ...admitted("fractional_attempts", "session_01", at(1)),
+      policy: { maxAttempts: 1.5, timeoutMs: 1_000 },
+    })).rejects.toThrow("maxAttempts must be a positive integer");
+    await expect(coordinator.admit({
+      ...admitted("bad_timeout", "session_01", at(1)),
+      policy: { maxAttempts: 1, timeoutMs: 0 },
+    })).rejects.toThrow("timeoutMs must be a positive integer");
+    await expect(coordinator.admit({
+      ...admitted("fractional_timeout", "session_01", at(1)),
+      policy: { maxAttempts: 1, timeoutMs: 1.5 },
+    })).rejects.toThrow("timeoutMs must be a positive integer");
+    await expect(coordinator.admit({
+      ...admitted(
+        "overflow_deadline",
+        "session_01",
+        new Date(8_640_000_000_000_000).toISOString(),
+      ),
+      policy: { maxAttempts: 1, timeoutMs: Number.MAX_SAFE_INTEGER },
+    })).rejects.toThrow("deadline exceeds safe timestamp range");
     expect(() => sessionExecutionId([])).toThrow("at least one event");
     expect(sessionExecutionId(admitted("one", "session_01", at(1)).execution.events))
       .toBe("one");
@@ -86,6 +166,67 @@ describe("SqlSessionExecutionCoordinator", () => {
         expect.objectContaining({ id: "second" }),
       ]) }),
     ]);
+    expect(sessionExecutionEventBatches([{
+      ...admitted("null_lane", "session_01", at(1)).execution.events[0],
+      sessionThreadId: null,
+    }])).toEqual([
+      expect.objectContaining({ id: "null_lane", laneId: "sthr_primary" }),
+    ]);
+  });
+
+  it("handles SQL portability envelopes and rejects corrupt execution rows", async () => {
+    await expect(ensureSessionExecutionCoordinatorSchema(fakeSql({
+      omitAllResults: true,
+    }))).resolves.toBeUndefined();
+
+    const portable = new SqlSessionExecutionCoordinator(fakeSql({
+      row: executionRow(),
+    }));
+    await expect(portable.find({
+      workspaceId: "workspace_01",
+      executionId: "execution_row",
+    })).resolves.toMatchObject({
+      attemptCount: 0,
+      maxAttempts: 10,
+      revision: 1,
+    });
+
+    const corrupt = new SqlSessionExecutionCoordinator(fakeSql({
+      row: executionRow({ generation: "not-an-integer" }),
+    }));
+    await expect(corrupt.find({
+      workspaceId: "workspace_01",
+      executionId: "execution_row",
+    })).rejects.toThrow("Invalid execution generation");
+
+    const malformedClaim = new SqlSessionExecutionCoordinator(fakeSql({
+      row: executionRow(),
+    }));
+    await expect(malformedClaim.claim({
+      ownerId: "node_a",
+      attemptId: "attempt_a",
+      claimedAt: at(2),
+      leaseTtlMs: 1_000,
+    })).rejects.toThrow("Claimed Session Execution has no attempt");
+  });
+
+  it("fails admission if the inserted execution cannot be read back", async () => {
+    const store = new SqlSessionExecutionCoordinator(fakeSql());
+    store.find = async () => null;
+
+    await expect(store.admit(admitted("vanished", "session_01", at(1))))
+      .rejects.toThrow("vanished after admission");
+  });
+
+  it("rejects a malformed SQL batch response during session cancellation", async () => {
+    const store = new SqlSessionExecutionCoordinator(fakeSql({ batchResults: [] }));
+
+    await expect(store.cancelSession({
+      workspaceId: "workspace_01",
+      sessionId: "session_01",
+      cancelledAt: at(2),
+      reason: "cancel",
+    })).rejects.toThrow("two results");
   });
 
   it("upgrades an early preview table before creating the lane index", async () => {

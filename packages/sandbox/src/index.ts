@@ -26,6 +26,7 @@ export {
   supportsSandboxRuntime,
   supportsSessionOutputMount,
   supportsWorkspaceBackup,
+  readS3MemoryBucket,
 } from "./ports";
 export {
   runWithSandboxLease,

@@ -1,10 +1,11 @@
-import { cp, mkdtemp, rm } from "node:fs/promises";
+import { cp, mkdtemp, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/local-subprocess";
-import { E2BSandboxExecutor } from "@open-managed-agents/sandbox/adapters/e2b";
+import { E2BSandboxExecutor } from "@open-managed-agents/sandbox-adapter-e2b";
 import type { SandboxPort } from "@open-managed-agents/sandbox";
+import { bindAcpAgentState } from "../../../packages/acp-runtime/src/native-state";
 import type {
   AgentConfig,
   SessionEvent,
@@ -118,17 +119,17 @@ describe("ACP sandbox harness", () => {
       expect(modelEnds.map((event) =>
         (event as { model_request_start_id?: string }).model_request_start_id
       )).toEqual(modelStarts.map((event) => event.id));
+      const stateBinding = bindAcpAgentState({
+        sessionId: "session_acp_machine",
+        agent: agent.acp!.agent,
+      });
       await expect(sandbox.readFile("state-path.txt")).resolves.toBe(
-        join(
-          workdir,
-          ".openma/harness-state/acp/session_acp_machine/claude-code/v1/native",
-        ),
+        stateBinding.nativePath,
       );
-      await expect(sandbox.readFile(
+      const manifest = JSON.parse(await sandbox.readFile(
         "/workspace/.openma/harness-state/acp/session_acp_machine/claude-code/v1/session-binding.json",
-      )).resolves.toContain(
-        '"session_artifacts":[{"path":"/workspace/.openma/harness-state/acp/session_acp_machine/claude-code/v1/native/projects","kind":"directory","requiredForResume":true}]',
-      );
+      ));
+      expect(manifest.session_artifacts).toEqual(stateBinding.sessionArtifacts);
     } finally {
       await machine.shutdown();
     }
@@ -251,6 +252,12 @@ describe("ACP sandbox harness", () => {
       model: "unused-by-acp",
       system: "Keep the ACP process alive across E2B turns.",
       tools: [],
+      mcp_servers: [{
+        name: "linear",
+        type: "url",
+        url: "https://linear.example/mcp",
+        authorization_token: "must-never-reach-the-sandbox",
+      }],
       harness: "acp-sandbox",
       acp: {
         agent: {
@@ -286,6 +293,12 @@ describe("ACP sandbox harness", () => {
       buildHarnessContext: async ({ userMessage }) => ({
         ...createContext(agent, runtime, ""),
         session_id: "session_acp_e2b",
+        env: {
+          mcpProxy: {
+            gatewayBaseUrl: "https://api.openma.test",
+            sessionsToken: "sk-ant-req-v1.current-work",
+          },
+        },
         userMessage,
       }),
       beforeSandboxDestroy: async () => {
@@ -309,6 +322,18 @@ describe("ACP sandbox harness", () => {
       }),
     ]);
     expect(service.processStarts).toBe(1);
+    expect(service.sessionNewParams?.mcpServers).toEqual([{
+      type: "http",
+      name: "linear",
+      url: "https://api.openma.test/v1/oma/mcp-proxy/session_acp_e2b/linear",
+      headers: [{
+        name: "Authorization",
+        value: "Bearer sk-ant-req-v1.current-work",
+      }],
+    }]);
+    expect(JSON.stringify(service.sessionNewParams)).not.toContain(
+      "must-never-reach-the-sandbox",
+    );
     expect(service.leaseTtls).toEqual([90_000, 90_000]);
     expect(JSON.parse(checkpointBeforeDestroy ?? "null")).toEqual(
       expect.objectContaining({ acpSessionId: "e2b-acp-session" }),
@@ -348,6 +373,7 @@ describe("ACP sandbox harness", () => {
     } as unknown as AgentConfig;
 
     let restoredSandbox: LocalSubprocessSandbox | undefined;
+    let checkpointRoot: string | undefined;
     try {
       const first = createContext(agent, runtime, "first");
       await firstHarness.onSessionInit?.(first, runtime);
@@ -364,7 +390,7 @@ describe("ACP sandbox harness", () => {
       // from files rather than accidental reuse of either process memory or
       // the original sandbox instance.
       await firstHarness.dispose?.("shutdown");
-      const checkpointRoot = await mkdtemp(
+      checkpointRoot = await mkdtemp(
         join(tmpdir(), "oma-acp-harness-checkpoint-"),
       );
       const restoredWorkdir = join(checkpointRoot, "workspace");
@@ -412,6 +438,9 @@ describe("ACP sandbox harness", () => {
         ?.dispose?.();
       await restoredSandbox?.destroy();
       await sandbox.destroy();
+      if (checkpointRoot !== undefined) {
+        await rm(checkpointRoot, { recursive: true, force: true });
+      }
     }
   });
 
@@ -443,6 +472,7 @@ describe("ACP sandbox harness", () => {
     } as unknown as AgentConfig;
 
     let restoredSandbox: LocalSubprocessSandbox | undefined;
+    let checkpointRoot: string | undefined;
     try {
       const first = createContext(agent, runtime, "create the report");
       events.push(first.userMessage);
@@ -470,7 +500,7 @@ describe("ACP sandbox harness", () => {
       );
 
       await firstHarness.dispose?.("shutdown");
-      const checkpointRoot = await mkdtemp(
+      checkpointRoot = await mkdtemp(
         join(tmpdir(), "oma-acp-semantic-checkpoint-"),
       );
       const restoredWorkdir = join(checkpointRoot, "workspace");
@@ -515,14 +545,99 @@ describe("ACP sandbox harness", () => {
         ?.dispose?.();
       await restoredSandbox?.destroy();
       await sandbox.destroy();
+      if (checkpointRoot !== undefined) {
+        await rm(checkpointRoot, { recursive: true, force: true });
+      }
     }
   });
+
+  it.each(ACP_PROFILE_CASES)(
+    "launches the %s ACP adapter in a real local sandbox",
+    async (agentId, expectedAdapterId) => {
+      const sessionId = `session_acp_profile_${agentId.replaceAll("-", "_")}`;
+      const workdir = await mkdtemp(join(tmpdir(), `oma-acp-profile-${agentId}-`));
+      const sandbox = new LocalSubprocessSandbox({ workdir });
+      const events: SessionEvent[] = [];
+      const runtime = createRuntime(sandbox, events);
+      registerCoreHarnesses();
+      const harness = resolveHarness("acp-sandbox");
+      const agent = {
+        id: `agent_${agentId}`,
+        name: `${agentId} ACP adapter`,
+        model: "unused-by-acp",
+        system: "",
+        tools: [],
+        harness: "acp-sandbox",
+        acp: {
+          agent: {
+            id: agentId,
+            command: process.execPath,
+            args: ["-e", profileAcpAgentSource],
+            cwd: "/workspace",
+            env: { PROFILE_AGENT_ID: agentId },
+          },
+        },
+        version: 1,
+        created_at: "2026-09-04T00:00:00.000Z",
+      } as unknown as AgentConfig;
+
+      try {
+        await harness.run(createContext(
+          agent,
+          runtime,
+          "exercise profile",
+          sessionId,
+        ));
+
+        const binding = bindAcpAgentState({
+          sessionId,
+          agent: agent.acp!.agent,
+        });
+        const manifest = JSON.parse(await sandbox.readFile(
+          `${binding.rootPath}/session-binding.json`,
+        )) as { adapter_id: string; session_artifacts: unknown[] };
+        expect(manifest.adapter_id).toBe(expectedAdapterId);
+        expect(manifest.session_artifacts).toEqual(binding.sessionArtifacts);
+        await expect(readFile(`${binding.nativePath}/started`, "utf8"))
+          .resolves.toBe(agentId);
+        expect(events).toContainEqual(expect.objectContaining({
+          type: "agent.message",
+          content: [{ type: "text", text: `profile:${agentId}` }],
+        }));
+      } finally {
+        await harness.dispose?.("destroy");
+        await sandbox.destroy();
+      }
+    },
+  );
 });
+
+const ACP_PROFILE_CASES = [
+  ["claude-acp", "claude-code"],
+  ["codex-acp", "codex"],
+  ["gemini-cli", "gemini"],
+  ["opencode", "opencode"],
+  ["pi-acp", "pi"],
+  ["mcode", "mcode"],
+  ["github-copilot-cli", "copilot"],
+  ["cortex-code", "cortex-code"],
+  ["goose", "goose"],
+  ["junie", "junie"],
+  ["kimi-cli", "kimi"],
+  ["qwen-code", "qwen-code"],
+  ["mistral-vibe", "mistral-vibe"],
+  ["dsh-acp", "dsh"],
+  ["hermes", "hermes"],
+  ["aider-acp", "aider"],
+  ["kimi-code", "kimi-code"],
+  ["mimo", "mimo"],
+] as const;
 
 function createContext(
   agent: AgentConfig,
   runtime: HarnessRuntime,
   text: string,
+  sessionId = "session_acp_sandbox",
 ): HarnessContext {
   return {
     agent,
@@ -530,7 +645,7 @@ function createContext(
       type: "user.message",
       content: [{ type: "text", text }],
     } as UserMessageEvent,
-    session_id: "session_acp_sandbox",
+    session_id: sessionId,
     tools: {},
     model: {} as HarnessContext["model"],
     systemPrompt: agent.system,
@@ -576,6 +691,7 @@ class ScriptedE2BService {
   readonly leaseTtls: number[] = [];
   readonly lifecycle: string[] = [];
   processStarts = 0;
+  sessionNewParams: { mcpServers?: unknown[] } | null = null;
   #promptCount = 0;
   #activeProcess: { finish(): void } | null = null;
 
@@ -643,6 +759,7 @@ class ScriptedE2BService {
               });
               break;
             case "session/new":
+              this.sessionNewParams = request.params ?? null;
               await result({ sessionId: "e2b-acp-session" });
               break;
             case "session/prompt": {
@@ -870,6 +987,56 @@ input.on("line", (line) => {
       }
       break;
     }
+    default:
+      send({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32601, message: "Method not found" },
+      });
+  }
+});
+`;
+
+const profileAcpAgentSource = String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const readline = require("node:readline");
+const input = readline.createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + "\n");
+const agentId = process.env.PROFILE_AGENT_ID ?? "unknown";
+const nativeRoot = process.env.OPENMA_ACP_STATE_ROOT + "/native";
+fs.mkdirSync(nativeRoot, { recursive: true });
+fs.writeFileSync(path.join(nativeRoot, "started"), agentId);
+input.on("line", (line) => {
+  const request = JSON.parse(line);
+  const result = (value) => send({ jsonrpc: "2.0", id: request.id, result: value });
+  switch (request.method) {
+    case "initialize":
+      result({ protocolVersion: 1, agentCapabilities: {} });
+      break;
+    case "session/new":
+      result({ sessionId: "profile-session-" + agentId });
+      break;
+    case "session/prompt":
+      send({
+        jsonrpc: "2.0",
+        method: "session/update",
+        params: {
+          sessionId: request.params.sessionId,
+          update: {
+            sessionUpdate: "agent_message_chunk",
+            content: { type: "text", text: "profile:" + agentId },
+          },
+        },
+      });
+      result({ stopReason: "end_turn" });
+      break;
+    case "session/close":
+      result({});
+      break;
+    case "session/cancel":
+      result({});
+      break;
     default:
       send({
         jsonrpc: "2.0",

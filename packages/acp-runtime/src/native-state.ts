@@ -41,7 +41,10 @@ export type AcpNativeStateAdapterId =
  * portable persistence contract; the rest of the agent profile is ephemeral.
  */
 export interface AcpNativeSessionArtifact {
+  /** Durable copy included in the portable workspace checkpoint. */
   path: string;
+  /** Agent-owned source path in the ephemeral runtime filesystem. */
+  runtimePath: string;
   kind: "directory" | "file" | "sqlite";
   requiredForResume: boolean;
 }
@@ -53,7 +56,10 @@ export interface AcpAgentStateBinding {
   resume: "native-and-acp" | "acp-only";
   rootPath: string;
   checkpointPath: string;
+  /** Ephemeral root used as the agent's native HOME/config directory. */
   nativePath: string;
+  /** Durable root containing only copied native session artifacts. */
+  checkpointNativePath: string;
   /** The complete and exclusive set of native files/directories to persist. */
   sessionArtifacts: readonly AcpNativeSessionArtifact[];
   agent: AcpStatefulAgentSpec;
@@ -74,18 +80,21 @@ const directory = (
   requiredForResume = true,
 ): AcpNativeSessionArtifact => ({
   path,
+  runtimePath: path,
   kind: "directory",
   requiredForResume,
 });
 
 const file = (path: string, requiredForResume = true): AcpNativeSessionArtifact => ({
   path,
+  runtimePath: path,
   kind: "file",
   requiredForResume,
 });
 
 const sqlite = (path: string, requiredForResume = true): AcpNativeSessionArtifact => ({
   path,
+  runtimePath: path,
   kind: "sqlite",
   requiredForResume,
 });
@@ -348,14 +357,24 @@ export function bindAcpAgentState(input: {
   const rootPath =
     `/workspace/.openma/harness-state/acp/${encodeURIComponent(input.sessionId)}`
     + `/${adapterId}/v1`;
-  const nativePath = `${rootPath}/native`;
-  const sessionArtifacts = profile?.sessionArtifacts(nativePath) ?? [];
+  const runtimeRootPath =
+    `/tmp/openma-harness-state/acp/${encodeURIComponent(input.sessionId)}`
+    + `/${adapterId}/v1`;
+  const nativePath = `${runtimeRootPath}/native`;
+  const checkpointNativePath = `${rootPath}/native`;
+  const sessionArtifacts = (profile?.sessionArtifacts(nativePath) ?? []).map(
+    (artifact) => ({
+      ...artifact,
+      runtimePath: artifact.path,
+      path: `${checkpointNativePath}${artifact.path.slice(nativePath.length)}`,
+    }),
+  );
   const agent = {
     ...input.agent,
     env: {
       ...(input.agent.env ?? {}),
       ...(profile?.bindEnvironment(nativePath) ?? {}),
-      OPENMA_ACP_STATE_ROOT: rootPath,
+      OPENMA_ACP_STATE_ROOT: runtimeRootPath,
     },
   };
 
@@ -366,6 +385,7 @@ export function bindAcpAgentState(input: {
     rootPath,
     checkpointPath: `${rootPath}/acp-session.json`,
     nativePath,
+    checkpointNativePath,
     sessionArtifacts,
     agent,
   };

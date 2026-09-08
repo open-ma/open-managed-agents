@@ -111,6 +111,9 @@ export class SessionRuntimeProjectionApplicationService
       ...(command.executionFence !== undefined && {
         executionFence: command.executionFence,
       }),
+      ...(command.environmentWorkFence !== undefined && {
+        environmentWorkFence: command.environmentWorkFence,
+      }),
     });
     if (projected.type === "not_found") return { type: "not_found" };
     if (projected.type === "execution_fence_lost") {

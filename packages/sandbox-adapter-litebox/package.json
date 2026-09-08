@@ -1,0 +1,23 @@
+{
+  "name": "@open-managed-agents/sandbox-adapter-litebox",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/observability": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*"
+  },
+  "peerDependencies": { "@boxlite-ai/boxlite": "^0.9.0" },
+  "peerDependenciesMeta": { "@boxlite-ai/boxlite": { "optional": true } },
+  "devDependencies": {
+    "@boxlite-ai/boxlite": "0.9.0",
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.3"
+  }
+}

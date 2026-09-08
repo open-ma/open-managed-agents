@@ -16,6 +16,7 @@ export interface HarnessSupervisorHarness {
     harness: { id: string; version: string };
     workspacePath: "/workspace";
     outputPath: "/mnt/session/outputs" | null;
+    checkpoint(input: { sessionId: string; turnId?: string }): Promise<void>;
     signal: AbortSignal;
   }): Promise<HarnessSupervisorRun>;
 }
@@ -83,6 +84,12 @@ export function createHarnessSupervisor(
   let heartbeat: Promise<void> | null = null;
   let eventQueue = Promise.resolve();
   let stopped = false;
+  let checkpointSequence = 0;
+  let pendingCheckpoint: {
+    id: string;
+    resolve(): void;
+    reject(error: Error): void;
+  } | null = null;
 
   const emit = (event: HarnessSupervisorEvent): Promise<void> => {
     const queued = eventQueue.then(async () => {
@@ -96,8 +103,38 @@ export function createHarnessSupervisor(
     const normalized = normalizeError(error);
     state = "failed";
     controller.abort(normalized);
+    pendingCheckpoint?.reject(normalized);
+    pendingCheckpoint = null;
     await emit({ type: "error", message: normalized.message });
     throw normalized;
+  };
+
+  const checkpoint = async (input: {
+    sessionId: string;
+    turnId?: string;
+  }): Promise<void> => {
+    if (pendingCheckpoint !== null) {
+      throw new Error("Harness supervisor already has a pending checkpoint");
+    }
+    const id = `checkpoint_${++checkpointSequence}`;
+    let resolve!: () => void;
+    let reject!: (error: Error) => void;
+    const committed = new Promise<void>((resolvePromise, rejectPromise) => {
+      resolve = resolvePromise;
+      reject = rejectPromise;
+    });
+    pendingCheckpoint = { id, resolve, reject };
+    try {
+      await emit({
+        type: "checkpoint",
+        checkpointId: id,
+        sessionId: input.sessionId,
+        ...(input.turnId === undefined ? {} : { turnId: input.turnId }),
+      });
+      await committed;
+    } finally {
+      if (pendingCheckpoint?.id === id) pendingCheckpoint = null;
+    }
   };
 
   const startHeartbeat = (): Promise<void> => {
@@ -139,6 +176,7 @@ export function createHarnessSupervisor(
         harness: command.harness,
         workspacePath: command.workspacePath,
         outputPath: command.outputPath,
+        checkpoint,
         signal: controller.signal,
       });
       state = "running";
@@ -190,6 +228,8 @@ export function createHarnessSupervisor(
     }
     if (state === "stopped") return;
     controller.abort(new Error(`Harness stopped: ${reason}`));
+    pendingCheckpoint?.reject(new Error(`Harness checkpoint interrupted: ${reason}`));
+    pendingCheckpoint = null;
     stopped = true;
     await run?.stop(reason);
     state = "stopped";
@@ -205,6 +245,20 @@ export function createHarnessSupervisor(
           return;
         case "drain":
           await drain();
+          return;
+        case "checkpoint.commit":
+          if (pendingCheckpoint?.id !== command.checkpointId) {
+            throw new Error(`Unknown harness checkpoint ${command.checkpointId}`);
+          }
+          pendingCheckpoint.resolve();
+          pendingCheckpoint = null;
+          return;
+        case "checkpoint.reject":
+          if (pendingCheckpoint?.id !== command.checkpointId) {
+            throw new Error(`Unknown harness checkpoint ${command.checkpointId}`);
+          }
+          pendingCheckpoint.reject(new Error(command.message));
+          pendingCheckpoint = null;
           return;
         case "stop":
           await stop(command.reason);
@@ -224,6 +278,8 @@ export function createHarnessSupervisor(
         return;
       }
       controller.abort(new Error("Harness supervisor closed"));
+      pendingCheckpoint?.reject(new Error("Harness supervisor closed"));
+      pendingCheckpoint = null;
       await heartbeat?.catch(() => {});
       await eventQueue;
     },

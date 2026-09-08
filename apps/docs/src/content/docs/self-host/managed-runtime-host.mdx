@@ -22,6 +22,187 @@ Provider, volume, checkpoint, output, and retention settings belong to the
 Runtime Host deployment. Do not put them in `Environment.config` or
 `Environment.metadata`.
 
+## Environment Worker activation
+
+The API client creates the Session. It never creates a sandbox and a webhook
+never owns a work item. OpenMA supports three embedded activation strategies:
+
+| Strategy | Outer control plane | Runtime owner |
+|---|---|---|
+| `claim_then_acquire` | Official SDK poller claims and ACKs, then Runtime Host acquires compute | Outer Runtime Host owns heartbeat/stop |
+| `poll_unacked_then_dispatch` | Raw `work.poll` reserves delivery without ACK, then dispatches to a session runtime | Cloudflare/GKE runtime sends the first heartbeat/ACK and owns heartbeat/stop |
+| `acquire_then_session_poll` | Durable webhook intent launches compute before Work is polled | AWS in-VM worker polls, claims, heartbeats, and stops Work |
+
+The common host-owned sequence is:
+
+```text
+API client          OpenMA control plane       Environment Worker       sandbox
+    | POST Session           |                         |                    |
+    |----------------------->| durable enqueue         |                    |
+    |                        |-- signed run_started -->| wake hint          |
+    |                        |<------ work.poll -------| atomic claim       |
+    |                        |<------ work.ack --------|                    |
+    |                        |<-- GET claimed Session -| sessions_token     |
+    |                        |                         |-- acquire/restore ->|
+    |                        |                         |-- stage inputs ---->|
+    |                        |                         |---- start -------->|
+    |                        |<----- heartbeat -----------------------------|
+    |                        |<----- Session events/results ----------------|
+    |                        |<----- work.stop ------------------------------|
+```
+
+`session.status_run_started` contains the Session ID and workspace identity,
+not the queued work payload. The receiver verifies the Standard Webhooks
+signature and then calls the official Work poller. A missing, duplicate, late,
+or out-of-order webhook is harmless because work is claimed only by
+`GET /v1/environments/{environment_id}/work/poll`. `run()` polls immediately
+at startup and then every five seconds by default, so it is also the durable
+fallback when webhook delivery is lost.
+
+Only the `claim_then_acquire` lane uses the SDK poller that ACKs before yielding.
+Cloudflare and GKE use the raw poll endpoint and intentionally leave the item
+unacknowledged until the session runtime establishes ownership with its first
+heartbeat. AWS does not poll from the launcher at all. A reserved but
+unacknowledged item becomes reclaimable after `reclaim_older_than_ms`; an
+acknowledged item becomes reclaimable only after its heartbeat lease expires.
+Two replacement replicas may race, but the server-side CAS selects one. The
+old generation then receives `412 Precondition Failed` on heartbeat. OpenMA
+keeps any provider launch generation as internal fencing metadata; it does not
+add fields to the official Work response.
+
+Work and webhook payloads do not carry a Session snapshot. After a Session
+Work is claimed, the embedded OpenMA worker decodes the claim's
+`sessions_token`, calls `GET /v1/sessions/{session_id}`, and validates both the
+Session ID and Environment ID. Only then may `profileFor(work, session)` choose
+the runtime profile. `session.metadata` is the same opaque string map written
+by the Session creator; OpenMA does not assign generic meanings to keys such
+as `repo`, `commit_sha`, or `input_file`.
+
+`session.resources` is not opaque metadata. The same Session response includes
+the official `file`, `github_repository`, and `memory_store` resource records,
+including file IDs, repository URLs, mount paths, and branch/commit checkout
+data. The control plane returns these records; it does not itself write them
+into the sandbox.
+
+If the deployment supplies `SessionInputMaterializerPort`, the Runtime Host
+invokes it after workspace/output/credential-egress attachment and before the
+harness process starts. It receives both the official resource array and the
+opaque metadata map; this is where a runtime clones repositories, downloads
+files, and interprets any application keys. A Session with one or more official
+resources is rejected before compute allocation when this Port is absent;
+OpenMA never starts a harness with silently missing file/repository/memory
+inputs. Opaque metadata alone does not require a materializer. A failed Session
+GET or failed input materialization does not start the harness and leaves the
+Work reclaimable after its lease expires.
+
+Webhook delivery is an optimization with official delivery semantics: the
+event ID and body remain stable across at most three attempts, while each
+attempt receives a fresh timestamp and signature. OpenMA applies jittered
+exponential backoff from five to 120 seconds. Only a `3xx` redirect is
+non-retryable because official delivery disables that endpoint immediately;
+other non-`2xx` responses consume the three-attempt budget. The deployment
+must still operate a periodic poller because webhooks are not a durable log.
+
+Set these control-plane variables to emit the wake hint:
+
+```bash
+OMA_MANAGED_AGENTS_WEBHOOK_URL=https://worker.example/webhooks/managed-agents
+OMA_MANAGED_AGENTS_WEBHOOK_SIGNING_KEY=whsec_...
+OMA_MANAGED_AGENTS_ORGANIZATION_ID=org_... # optional; workspace ID is the fallback
+```
+
+The receiving Worker must subscribe to `session.status_run_started`, call
+`handleWebhook()` for signed requests, and keep `run()` active. For
+`claim_then_acquire` and `poll_unacked_then_dispatch`, `run()` periodically
+polls Work as the lost-webhook fallback. For `acquire_then_session_poll`, it
+reconciles a durable activation-intent queue instead; the provider runtime is
+the only Work poller. Scaling is replica-based and every state transition is
+CAS/fence protected.
+
+`createManagedEnvironmentWorkerInstallation()` is the provider-neutral entry
+point. Set `mode` to `runtime_host`, `provider_dispatch`,
+`provider_activation`, or `external_worker`. Dispatch and activation modes
+dynamically import only their selected isolated adapter package. The external
+mode starts no local scheduler: OpenMA exposes the unchanged Work API and the
+operator owns the Worker below it.
+
+For `runtime_host`, the same entry point can load a provider driver and project
+its resource Ports into the common fence/persistence/output state machine:
+
+```ts
+const installation = await createManagedEnvironmentWorkerInstallation({
+  mode: "runtime_host",
+  adapter: {
+    provider: "daytona",
+    moduleSpecifier: "@open-managed-agents/managed-runtime-daytona",
+    factoryOptions: daytonaOptions,
+  },
+  runtime: {
+    placement: "in_process",
+    providerConfig: {},
+    ownerId: processId,
+    leaseTtlMs: 90_000,
+    heartbeatIntervalMs: 30_000,
+    fences,
+    orphans,
+  },
+  worker: environmentWorkerOptions,
+});
+```
+
+`factoryOptions` is the adapter constructor. Provider-specific deployment
+facts stay there: for example GKE `namespace`/`template`/`warmPool`,
+Cloudflare backend bindings and runtime resolvers, or an AWS launcher/AMI
+configuration. Direct provider factory calls expose the corresponding strong
+TypeScript type. The shared Work and Runtime Port payloads stay
+provider-neutral; they do not erase or reinterpret those constructor fields.
+
+### One Worker credential path
+
+Embedded workers and BYOW/external workers use the same control-plane path.
+Create a dedicated Environment service key instead of reusing the workspace
+API key:
+
+```http
+POST /v1/oma/api_keys
+X-API-Key: <workspace-admin-key>
+Content-Type: application/json
+
+{"name":"production workers","environment_id":"env_..."}
+```
+
+The plaintext `oma_env_...` key is returned once. It is accepted only as a
+Bearer token on `/v1/environments/{that_environment}/work/**`; it cannot access
+another Environment, Session/Agent APIs, or the Work API through `x-api-key`.
+Every claim then receives a separate Session-scoped secret. Revoking the
+Environment key blocks subsequent poll/claim requests immediately; reclaiming
+Work rotates the Session secret and fences the old owner.
+
+```text
+Environment service key
+  -> Work poll / claim+ACK
+      -> per-claim sessions_token
+          -> Work heartbeat / stop + claimed Session APIs
+      -> external BYOW process  OR  OpenMA embedded kernel + provider driver
+```
+
+For a disposable queued Session, the repository includes a destructive
+conformance probe. It refuses to touch any Work other than the exact expected
+ID and leaves failed Work reclaimable:
+
+```bash
+OMA_BASE_URL=https://openma.example \
+OMA_ENVIRONMENT_ID=env_... \
+OMA_ENVIRONMENT_KEY=oma_env_... \
+OMA_CONFORMANCE_WORK_ID=work_... \
+pnpm test:e2e:external-worker-conformance
+```
+
+The probe uses the official WorkPoller (therefore exercising poll + ACK), then
+switches to the claim's `sessions_token` for heartbeat, claimed-Session access,
+scope-escape rejection and force-stop. Its reusable core is
+`runExternalEnvironmentWorkerConformance()`.
+
 ## Two worker lanes
 
 | Lane | Agent-loop owner | Worker requirement | Runtime behavior |
@@ -31,7 +212,11 @@ Runtime Host deployment. Do not put them in `Environment.config` or
 
 Both lanes use the same sandbox, workspace, output, and resource-fence Ports.
 The supervisor protocol is never required for an ordinary Managed Agents
-worker.
+worker. In the `ama_worker` lane, the official worker inside the sandbox owns
+Work heartbeat and `stop`, so the outer poller uses `autoStop: false`. In the
+`openma_supervised` lane, the outer Environment Worker owns the official Work
+heartbeat and `stop`; a `412` aborts the inner host and prevents a stale
+generation from publishing candidates.
 
 Harness-native session data and user-visible outputs share the Runtime Host's
 drain/checkpoint/finalize lifecycle. They do not share a namespace or a data
@@ -45,10 +230,13 @@ as native recovery state. OpenMA does not run a second continuous state-sync
 sidecar.
 
 For an ACP harness, interaction stays provider-neutral while native recovery
-is agent-specific. The ACP runtime selects a native-session profile, isolates
-the agent runtime below `/workspace/.openma/harness-state/`, declares the exact
-session artifacts needed for resume, and stores the ACP logical session id
-beside them. The Runtime Host persists them as part of the workspace candidate.
+is agent-specific. `@open-managed-agents/harness-runtime-acp` runs the Session
+command stream and ACP child inside the sandbox. It selects a native-session
+profile, isolates the live agent root under `/tmp/openma-harness-state/`,
+copies only the declared resume artifacts into
+`/workspace/.openma/harness-state/`, and stores the ACP logical session id
+beside them. The Runtime Host persists that durable copy as part of the
+workspace candidate.
 If a restored candidate lacks required native
 state, the host starts a new ACP session with one bounded semantic-recovery
 message derived from canonical Session events; it never replays old tool
@@ -78,28 +266,104 @@ Managed Agents SDK shape, add fields to `managed_sessions`, or appear in the
 Cloudflare D1 schema. Node deployments apply it through the normal generated
 PostgreSQL/SQLite migrations.
 
-For harness-in-sandbox, Session execution ownership is the outer fence. The
-Runtime Host resource generation and supervisor heartbeat are nested inside
-it. Losing the outer fence cancels the inner host; the inner host can publish
-workspace/output candidates only while both generations remain current.
+Placement selects exactly one scheduling authority:
+
+| Placement | Sole execution claim | What the claim owns |
+|---|---|---|
+| Harness outside sandbox | Session execution claim | The application-side harness attempt and any tool sandbox it drives |
+| Harness inside a self-hosted sandbox | Official Environment Work claim | One combined sandbox executor containing supervisor, harness and tools |
+
+The in-sandbox lane never acquires a nested Session execution claim. The
+Runtime Host resource generation is a subordinate publication fence for
+workspace, checkpoint and output candidates; the supervisor heartbeat is a
+process-health signal. Neither is a second scheduler.
+
+Session execution and Environment Work use a shared internal lease controller
+for serialized renewals, bounded uncertainty, cancellation and graceful stop,
+but keep separate stores and wire protocols. This preserves the official
+Environment Worker shape while giving both planes the same failure semantics.
+
+Every Work reclaim rotates its claim-bound Session bearer. Requests from the
+old sandbox are rejected even if its sealed token has not expired. An expired
+current bearer may call Work heartbeat/stop so the official endpoint can
+return `412` or finish cleanup, but it cannot append Session Events.
+
+### Session resources inside a worker
+
+`ANTHROPIC_WORK_SECRET` contains the official base64-encoded Work secret. Its
+`sessions_token` is the only credential an in-sandbox worker uses for Session
+data. OpenMA seals these exact capabilities into that token and rechecks the
+live Work claim on every request:
+
+| Session resource | Work-token capability | Filesystem behavior |
+|---|---|---|
+| Session and events | Retrieve the claimed Session; list/stream/send its events | No implicit files |
+| Agent skill | List versions and download only a skill declared by the resolved Session agent | The official `EnvironmentWorker` resolves `latest`, extracts it below `<workdir>/skills/<name>`, and removes it at teardown |
+| Memory Store | Access only an attached store; mutations require `read_write` | The official worker downloads to `mount_path`, periodically reconciles, performs a final sync, and enforces `read_only` |
+| File | Retrieve metadata/content only for a file attached to the Session | The official worker SDK does **not** auto-mount files; a custom worker downloads it or an OpenMA/provider resource mounter writes it to `mount_path` |
+| GitHub repository | No repository token appears in the Session or Work secret | The runtime/provider clones it at `mount_path`; authenticated egress resolves the Session resource credential outside the sandbox |
+| HTTP MCP server | Call only the claimed Session/server gateway path | The sandbox receives the OpenMA proxy URL, never the upstream MCP credential |
+
+File listing, upload, deletion, unrelated skills/files/stores, and another
+Session's APIs are not part of the capability. The Cloudflare egress handler
+also forwards the token only to the configured OpenMA origin and those route
+families; the API-side claim remains the final authorization boundary.
+
+For an embedded `runtime_host`, OpenMA constructs a claim-scoped
+`SessionInputAccessPort` around that Session client. The host keeps the
+`sessions_token`; the provider adapter receives only the downloaded bytes and
+verified metadata. Before the harness starts, the preinstalled generic
+materializer writes binary files exactly to `mount_path` and clones repository
+resources there. A repository resource makes credential egress mandatory, so
+admission fails before allocation when the selected provider has no verified
+wire point. When a canonical workspace checkpoint was restored, repository
+clone is skipped so resumed edits are not overwritten.
+
+The official `ama_worker` remains the owner of Skill and Memory Store
+hydration/sync. In `openma_supervised`, the host materializer owns all declared
+Session resources. The preinstalled generic materializer implements files and
+repositories only, so a supervised Session with a Memory Store requires an
+operator-supplied synchronization materializer and otherwise fails before the
+harness starts. The Port input carries this ownership explicitly; a generic
+adapter may never silently skip materializer-owned memory. In
+`provider_dispatch`, `provider_activation`, and `external_worker` modes, the
+dispatched or external Worker owns this same official resource contract because
+OpenMA does not run an embedded Runtime Host below it.
+
+<Aside type="note">
+  Skill and Memory Store materialization are behavior of the official Node
+  `EnvironmentWorker`. File and repository mounting are deliberately
+  operator/runtime behavior in the self-hosted protocol. Do not assume an
+  arbitrary community Worker mounts them merely because it can retrieve the
+  Session shape.
+</Aside>
 
 ## Resource contract
 
-The host uses four independent boundaries:
+The host uses five independent boundaries:
 
 - `ManagedSandboxPort` owns isolated compute and hard cleanup.
 - `WorkspacePersistencePort` materializes `/workspace` and creates immutable
   restore candidates.
 - `SessionOutputPort` exposes `/mnt/session/outputs`, collects files, and
   creates an immutable content-addressed manifest.
+- `SessionInputMaterializerPort` stages official claimed-Session resources and
+  interprets opaque metadata after resource attachment but before harness
+  start.
+- `SessionInputAccessPort` is the ephemeral, per-claim content reader used by
+  that materializer. It is never serialized into a lease, checkpoint, provider
+  configuration, or sandbox environment.
 - `RuntimeResourceFencePort` is the only authority allowed to publish a
   workspace/output candidate as active.
 
 The Work heartbeat, runtime resource fence, and supervised-harness heartbeat
-are separate liveness signals. Losing either authoritative lease aborts the
-execution. A stale process can remain alive briefly after a network failure,
-but it cannot publish a new canonical workspace or final output manifest.
-External tool side effects still need their own idempotency key.
+are separate liveness signals. Only the Work lease is the in-sandbox scheduling
+claim; the resource fence gates publication and the supervisor heartbeat
+reports process health. Losing an authoritative lease aborts the execution. A
+stale process can remain alive briefly after a network failure, but it cannot
+append canonical Session Events or publish a new canonical workspace/final
+output manifest. External tool side effects still need their own idempotency
+key.
 
 <Aside type="caution">
   A provider pause or retained sandbox is not durable storage. Request a
@@ -114,7 +378,14 @@ External tool side effects still need their own idempotency key.
 |---|---|---|---|---|
 | Node + Docker | portable filesystem checkpoint | filesystem final collector | Docker force remove | none |
 | Cloudflare Sandbox | portable `createBackup` / `restoreBackup` checkpoint | R2 final collector when `FILES_BUCKET` is bound | Sandbox destroy + durable orphan reaper | none |
+| Node → Cloudflare Sandbox Bridge | portable `/workspace` tar in the configured BlobStore | canonical `/mnt/session/outputs` final collector | authenticated Bridge DELETE + durable orphan reaper after handle publication | none |
 | E2B / E2B-compatible | retained runtime or portable E2B snapshot | S3-compatible final collector when `FILES_S3_*` is configured | reconnect + kill + durable orphan reaper supplied by host | not advertised |
+| Daytona | retained sandbox or portable filesystem snapshot | BlobStore final collector when configured | stable-name ownership check + delete/reap | not advertised |
+| LiteBox / BoxRun | provider-local retained box | BlobStore final collector when configured | stable-name ownership check + force remove/reap | not advertised |
+| Sprites | provider-persistent ext4 filesystem | BlobStore final collector when configured | owner-validated delete/reap | not advertised |
+| Vercel | persistent named sandbox with automatic filesystem snapshots | BlobStore final collector when configured | sandbox plus orphan snapshots delete/reap | not advertised |
+| Modal | Session-scoped Volume v2 subpath | BlobStore final collector when configured | compute terminate/reap; Volume remains canonical | experimental memory snapshot not advertised |
+| Superserve | indefinitely retained pause/resume by default | BlobStore final collector when configured | owner-validated idempotent kill/reap | provider pause is not promoted to a portable checkpoint |
 
 Cloudflare and E2B may internally capture more runtime state. OpenMA treats
 those snapshots only as workspace restore candidates until a separate
@@ -128,25 +399,69 @@ The conformance registry is intentionally stricter than the generic
 |---|---|---|
 | Node + Docker | `managed-runtime` | Docker process/stdio and filesystem workspace/output ports |
 | Cloudflare Sandbox | `managed-runtime` | Sandbox DO process/stdio, `createBackup`/`restoreBackup`, and configured R2 output mount |
-| E2B / compatible | `managed-runtime` | E2B suspend/resume, provider memory snapshot, and configured S3-compatible output collection |
-| Daytona | `sandbox-port-only` | File/process operations; optional S3FS memory and output mounts when configured |
-| LiteBox | `sandbox-port-only` | File/process operations and host bind volumes |
-| BoxRun | `sandbox-port-only` | File/process operations and best-effort file archive; no memory or output mount primitive |
+| Cloudflare Sandbox Bridge | `managed-runtime` (`ama_worker` only) | Bearer-authenticated lifecycle, argv/SSE execution, workspace files and tar persist/hydrate |
+| E2B / compatible | `managed-runtime` (`ama_worker`, `openma_supervised`) | E2B suspend/resume, provider memory snapshot, live stdin, and configured S3-compatible output collection |
+| Daytona | `managed-runtime` (`ama_worker`, `openma_supervised`) | Stable names and ownership labels, start/stop, portable snapshots, session-process stdio, and configured BlobStore output collection |
+| LiteBox | `managed-runtime` (`ama_worker`, `openma_supervised`) | Official low-level embedded client, stable get-or-create, detached filesystem, native stdio, stop/start and native network/secret creation options |
+| BoxRun | `managed-runtime` (`ama_worker`, `openma_supervised`) | Same managed BoxLite driver through the official REST client; legacy hand-written REST remains SandboxPort-only |
+| Blaxel | `managed-runtime` (`ama_worker`, `openma_supervised`) | Stable external identity, archive/unarchive retention, named full-duplex process, native network policy and optional persistent volume |
+| Sprites | `managed-runtime` (`ama_worker`, `openma_supervised`) | Stable Sprite, persistent ext4, automatic pause/wake, full-duplex process and native network policy |
+| Vercel | `managed-runtime` (`ama_worker` only) | Persistent named Sandbox, automatic filesystem snapshot restore, deny-by-default firewall and request transforms; no streaming stdin |
+| Modal | `managed-runtime` (`ama_worker`, `openma_supervised`) | Named compute over a pre-created Volume v2 Session subpath, full-duplex process and domain/CIDR allowlists |
+| Superserve | `managed-runtime` (`ama_worker`, `openma_supervised`) | Stable metadata ownership, retained pause/resume, token-rotating reconnect, full-duplex process, strict egress and provider-side secret proxy |
 
-`sandbox-port-only` is a deliberate fail-closed status. These adapters are
-usable by legacy callers that only need `SandboxPort`, but they must not be
-passed to a ManagedRuntimeHost until a composition supplies a fenced lease,
+`sandbox-port-only` remains a deliberate fail-closed status for any raw or
+future adapter that has not supplied the complete composition. Such an adapter
+must not be passed to a ManagedRuntimeHost until it supplies a fenced lease,
 workspace candidate publication, output manifest publication, orphan reaping,
 and one of the declared harness lanes. The machine-readable source is
 `MANAGED_RUNTIME_PROVIDER_CONFORMANCE` from
 `@open-managed-agents/managed-runtime-host`.
 
+Provider dependencies are isolated by package. The provider-neutral
+`@open-managed-agents/sandbox` and
+`@open-managed-agents/managed-runtime-sandbox` packages contain only Ports and
+composition code. SDKs live in `sandbox-adapter-*`, `managed-runtime-*`,
+`environment-dispatch-*`, or `environment-activation-*` provider packages, so
+a deployment installs only the adapter packages it selects. Every vendor SDK
+is an optional peer of exactly its adapter package;
+the monorepo sets `autoInstallPeers: false`, so merely checking out or building
+OpenMA does not resolve all provider dependency trees. The deployment that
+selects a provider installs its adapter and matching SDK together, then passes
+that adapter package to the lazy driver loader. For example:
+
+```sh
+pnpm add @open-managed-agents/managed-runtime-daytona @daytona/sdk
+```
+
+The host never imports a provider adapter statically. It loads only the
+configured package's `createManagedRuntimeProviderDriver()`,
+`createManagedEnvironmentWorkDispatchPort()`, or
+`createManagedEnvironmentActivationPort()` export and rejects a descriptor
+whose provider ID or lifecycle strategy does not match the selection. Unit
+tests use structural fake clients and therefore run without any provider SDK. A
+credentialed provider conformance lane installs the provider SDK explicitly.
+The architecture gate rejects an SDK placed in runtime dependencies, a source
+import without an optional peer declaration, a cross-provider runtime
+dependency, a missing uniform factory export, automatic peer installation, or
+any provider import that leaks into a neutral package.
+
 The E2B adapter also has an explicit credentialed certification lane. It is
 opt-in (to avoid spending provider credits in ordinary CI):
 
 ```sh
-E2B_API_KEY=... pnpm --filter @open-managed-agents/sandbox test:e2b:certification
+E2B_API_KEY=... pnpm --filter @open-managed-agents/sandbox-adapter-e2b test:certification
+pnpm --filter @open-managed-agents/managed-runtime-boxlite test:certification
 ```
+
+The BoxLite certification lane starts a real embedded MicroVM and verifies
+workspace creation, stop/start retention, worker stdio, ownership, and hard
+removal. On macOS its temporary runtime root deliberately uses a short path so
+nested Unix sockets remain below the platform `SUN_LEN` limit.
+Its optional SDK-dependent TypeScript project is isolated behind
+`typecheck:certification`; the default monorepo typecheck remains provider
+neutral. The architecture gate prevents credentialed certification sources
+from accidentally reintroducing optional vendor SDKs into that default lane.
 
 Set `E2B_API_URL` for an E2B-compatible control plane and
 `OMA_E2B_TEMPLATE` for the template to certify. The lane exercises real
@@ -154,47 +469,137 @@ command execution, lease renewal, memory suspend/resume, and a portable
 provider snapshot. It does not promote that snapshot to process-memory
 checkpoint semantics; that still requires an explicit `RuntimeCheckpointPort`.
 
+## Credential egress
+
+`CredentialEgressPort` is the provider-neutral lifecycle for credentials used
+by an untrusted sandbox. It prepares an opaque binding after the runtime fence
+is acquired, attaches and verifies the provider wire point before the harness
+starts, revokes it before sandbox cleanup, and finally releases it. The binding
+is scoped to `(workspace, environment, Session, Work, generation)` and never
+contains a Vault token.
+
+Profiles choose `required`, `best_effort`, or `disabled`. `required` starts only
+when the provider reports a tested, non-bypassable implementation. Missing
+ports, advisory proxy environment variables, an invalid fence, or a failed
+Vault lookup cause startup/request failure rather than a silent direct
+connection.
+
+| Provider/path | Current declaration | Notes |
+|---|---|---|
+| Cloudflare transparent HTTP/HTTPS | `enforced`, live credentials | `enableInternet = false`; every lookup checks the exact active runtime fence; revoke installs a deny handler |
+| Cloudflare or Node harness-in-sandbox HTTP MCP | scoped gateway | ACP receives proxy URLs plus the current Work `sessions_token`; the upstream URL/token are omitted |
+| Node/Docker transparent proxy | `advisory` | the legacy `oma-vault` env proxy is bypassable and not safe as a multi-tenant boundary |
+| E2B / Daytona / LiteBox | provider-dependent | current generic adapters are advisory; a deployment may inject a native enforced adapter through the Port after conformance |
+| BoxRun | `unsupported` | fail closed until its deployed API proves the required creation-time network/secret controls |
+
+The Work `sessions_token` is a short-lived capability, not a Vault credential.
+It is accepted only for the Session, events, attached files, declared skills,
+attached Memory Stores, Work heartbeat/stop, and MCP gateway paths encoded by
+its workspace/environment/Session/Work claim. It is checked against the
+current stored claim and heartbeat TTL on every request. Reclaim rotates the
+stored token, immediately fencing the old sandbox from every resource API and
+the MCP gateway. Pass it only in the `Authorization` header; never persist or
+log it.
+
+This is an OpenMA Runtime Host extension. It does not change the official
+Managed Agents Environment Worker, Work, webhook, or Session wire shapes. The
+repository's `docs/adr/0007-sandbox-credential-egress.md` contains the full
+provider and chaos matrix.
+
 ## Preinstalled composition
 
 <Tabs syncKey="runtime-provider">
   <TabItem label="Node + Docker">
     ```ts
-    import { createNodeManagedRuntime } from
+    import Anthropic from "@anthropic-ai/sdk";
+    import { createNodeManagedEnvironmentWorker } from
       "@open-managed-agents/managed-runtime-node";
 
-    const runtime = await createNodeManagedRuntime({
-      rootDir: "/var/lib/openma/runtime",
-      sql,
-      initializeFenceSchema: true,
-      ownerId: `runtime-host:${process.pid}`,
-      leaseTtlMs: 90_000,
-      heartbeatIntervalMs: 30_000,
-      image: "my-community-worker:latest",
-    });
-
-    await runtime.host.run({
-      scope: { workspaceId, environmentId, sessionId, workId },
-      profile: {
-        workspace: { requirement: "durable" },
-        outputs: { requirement: "durable" },
-        runtimeCheckpoint: "disabled",
-        driver: {
-          type: "ama_worker",
-          process: { command: "node", args: ["worker.mjs"] },
-        },
+    const cluster = await createNodeManagedEnvironmentWorker({
+      runtime: {
+        rootDir: "/var/lib/openma/runtime",
+        sql,
+        initializeFenceSchema: true,
+        ownerId: `environment-worker:${process.pid}`,
+        leaseTtlMs: 90_000,
+        heartbeatIntervalMs: 30_000,
+        image: "my-community-worker:latest",
+        sessionInputs: repoAndFileMaterializer,
+      },
+      worker: {
+        client: new Anthropic({
+          apiKey: null,
+          authToken: environmentKey,
+          baseURL: openmaBaseUrl,
+          webhookKey,
+        }),
+        environmentId,
+        environmentKey,
+        workspaceId,
+        profileFor: async (_work, session) => ({
+          workspace: { requirement: "durable" },
+          outputs: { requirement: "durable" },
+          runtimeCheckpoint: "disabled",
+          driver: {
+            type: "ama_worker",
+            process: { command: "node", args: ["worker.mjs"] },
+          },
+        }),
       },
     });
+
+    // Immediate + periodic poll fallback. Your HTTP route may concurrently
+    // call cluster.environmentWorker.handleWebhook(...).
+    await cluster.environmentWorker.run(shutdown.signal);
     ```
+
+    For the official SDK-inside-sandbox lane, `worker.mjs` can be only:
+
+    ```ts
+    import Anthropic from "@anthropic-ai/sdk";
+
+    const client = new Anthropic({
+      apiKey: null,
+      authToken: process.env.ANTHROPIC_ENVIRONMENT_KEY,
+      baseURL: process.env.ANTHROPIC_BASE_URL,
+    });
+    await client.beta.environments.work.worker({
+      workdir: "/workspace",
+    }).handleItem();
+    ```
+
+    The host injects `ANTHROPIC_ENVIRONMENT_ID`,
+    `ANTHROPIC_ENVIRONMENT_KEY`, `ANTHROPIC_SESSION_ID`,
+    `ANTHROPIC_WORK_ID`, `ANTHROPIC_WORK_SECRET`, and
+    `ANTHROPIC_BASE_URL`. It never injects the API client's parent key.
   </TabItem>
   <TabItem label="Cloudflare">
     ```ts
-    import { createCloudflareManagedRuntimeHost } from
+    import { createCloudflareManagedEnvironmentWorker } from
       "@open-managed-agents/agent/runtime/managed-runtime";
 
-    const runtime = createCloudflareManagedRuntimeHost(env, {
-      ownerId: `session-do:${sessionId}`,
-      leaseTtlMs: 90_000,
-      heartbeatIntervalMs: 30_000,
+    const cluster = createCloudflareManagedEnvironmentWorker(env, {
+      runtime: {
+        ownerId: `environment-worker:${env.INSTANCE_ID}`,
+        leaseTtlMs: 90_000,
+        heartbeatIntervalMs: 30_000,
+        sessionInputs: repoAndFileMaterializer,
+      },
+      worker: {
+        client,
+        environmentId,
+        environmentKey,
+        workspaceId,
+        profileFor: async (_work, session) => ({
+          workspace: { requirement: "durable" },
+          outputs: { requirement: "durable" },
+          runtimeCheckpoint: "disabled",
+          driver: {
+            type: "ama_worker",
+            process: { command: "node", args: ["worker.mjs"] },
+          },
+        }),
+      },
     });
     ```
 
@@ -203,10 +608,38 @@ checkpoint semantics; that still requires an explicit `RuntimeCheckpointPort`.
     runtime-resource SQL schema is an operator migration, not an on-request
     side effect.
   </TabItem>
+  <TabItem label="Node → Cloudflare Bridge">
+    ```ts
+    import { createCloudflareBridgeManagedRuntime } from
+      "@open-managed-agents/managed-runtime-cloudflare-bridge";
+
+    const resources = createCloudflareBridgeManagedRuntime({
+      baseUrl: process.env.CLOUDFLARE_SANDBOX_BRIDGE_URL!,
+      apiKey: process.env.CLOUDFLARE_SANDBOX_BRIDGE_KEY!,
+      checkpointStore,
+      outputStore,
+      leaseTtlMs: 90_000,
+    });
+    ```
+
+    This calls an operator-deployed official Sandbox Bridge Worker. The Bridge
+    key remains on the Node host; the sandbox receives only claimed Work
+    environment/session values. The adapter waits for a real liveness probe,
+    validates every SSE terminal event, stores a hashed `/workspace` tar before
+    restore, and destroys partially hydrated or failed allocations.
+
+    The stable Bridge HTTP `/exec` route has no streaming stdin, so this preset
+    advertises `ama_worker` only. Interactive `openma_supervised` requires a
+    separately implemented and tested PTY transport. The Bridge also cannot
+    give OpenMA a deterministic sandbox ID at create time; a host crash between
+    remote allocation and durable handle publication can leave an idle provider
+    orphan. Use direct Cloudflare bindings when the OpenMA kernel runs on
+    Workers and this stronger identity property is required.
+  </TabItem>
   <TabItem label="E2B">
     ```ts
     import { createE2BManagedRuntime } from
-      "@open-managed-agents/managed-runtime-sandbox/e2b";
+      "@open-managed-agents/managed-runtime-e2b";
 
     const resources = createE2BManagedRuntime({
       environment: process.env,
@@ -221,19 +654,54 @@ checkpoint semantics; that still requires an explicit `RuntimeCheckpointPort`.
     `FILES_S3_SECRET_KEY` are present. A per-scope environment function must
     pass `outputStore` explicitly.
   </TabItem>
+  <TabItem label="LiteBox / BoxRun">
+    ```ts
+    import { createBoxLiteManagedRuntimeDriver } from
+      "@open-managed-agents/managed-runtime-boxlite";
+
+    const litebox = createBoxLiteManagedRuntimeDriver({
+      providerId: "litebox",
+      connection: { type: "embedded", homeDir: "/var/lib/openma/boxlite" },
+      image: "node:22-slim",
+      leaseTtlMs: 90_000,
+      outputStore,
+    });
+
+    const boxrun = createBoxLiteManagedRuntimeDriver({
+      providerId: "boxrun",
+      connection: {
+        type: "rest",
+        url: "http://boxrun:8100",
+        prefix: "default",
+      },
+      image: "node:22-slim",
+      leaseTtlMs: 90_000,
+      outputStore,
+    });
+    ```
+
+    Both use the same official `JsBoxlite` lifecycle and stdio API. Embedded
+    mode calls the local runtime; REST mode calls `JsBoxlite.rest()`. Native
+    network allowlists, secret substitution, volumes and resource limits are
+    supplied by the provider package's `allocationOptions` Port before
+    `getOrCreate()`. They are not ordinary `providerConfig` secret values.
+  </TabItem>
 </Tabs>
 
 ## Failure and persistence behavior
 
-The commit sequence is candidate first, active pointer last:
+The activation and commit sequence is input-gated and candidate-first:
 
-1. materialize and attach workspace/output bindings;
-2. run and drain the worker or harness;
-3. create and hash an immutable workspace candidate;
-4. enumerate output files, re-read them to detect mutation, upload
+1. claim Work, retrieve the Session with its per-claim bearer, and validate
+   identity;
+2. materialize and attach workspace/output/credential-egress bindings;
+3. stage application-owned Session metadata inputs;
+4. run and drain the worker or harness;
+5. create and hash an immutable workspace candidate;
+6. enumerate output files, re-read them to detect mutation, upload
    content-addressed blobs, and create an immutable manifest;
-5. compare-and-set both candidates through the current fence generation;
-6. release compute without deleting the canonical candidates.
+7. compare-and-set both candidates through the current fence generation;
+8. release compute without deleting the canonical candidates.
 
 If hard termination fails, the host persists a token-free orphan record. The
 reconciler reconnects by the serialized provider/runtime ID and retries an
@@ -260,6 +728,17 @@ during finalization, failed hard kill, host restart/orphan reap, corrupt
 checkpoints, output mutation/collision, duplicate finalize, and seeded
 multi-owner schedules. Real provider smoke tests supplement this deterministic
 gate; they do not replace it.
+
+The resource conformance lane additionally runs an unmodified Anthropic
+`EnvironmentWorker` inside a real Docker container. It resolves a `latest`
+skill through the public API, extracts and reads its `SKILL.md`, downloads a
+Memory Store to its declared mount path, modifies a memory through a normal
+tool, and verifies the final write-back. Node and Cloudflare API tests exercise
+attached-file download, skill alias resolution, read-only/read-write Memory
+Store authorization, cross-Session rejection, Work reclaim, and stale-token
+fencing. The Cloudflare harness tests cover binary file materialization,
+repository checkout without credential injection, env secrets, and memory
+mount flags.
 
 For the exact runtime profile, Port method ownership, provider capability
 matrix, destruction/recovery transaction, and the distinction between

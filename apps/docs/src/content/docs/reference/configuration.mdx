@@ -152,6 +152,44 @@ type CredentialAuth =
 
 Binding to a host happens via the credential, not the vault: a `static_bearer` / `mcp_oauth` credential matches by parsing the request hostname against `mcp_server_url`; a `cap_cli` credential matches by `cli_id` lookup in the cap spec registry. Up to 20 credentials per vault. Tokens are AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` and never returned via the API once written.
 
+### Codex / ChatGPT subscription credentials
+
+<Aside type="caution" title="Local debugging only — high risk">
+  A Codex or ChatGPT subscription login is a local direct-host convenience, not
+  a production model integration. Provider terms, rate limits, and security
+  checks can restrict or suspend an account. Keep this path to local debugging
+  on a trusted machine only.
+</Aside>
+
+**Current status:** Model Cards currently accept static API-key credentials.
+Codex/ChatGPT subscription OAuth is a direct-host adapter contract for local
+debugging; it is not a hosted Model Card or a remote-sandbox credential type.
+
+When that direct-host adapter is enabled, it keeps the provider OAuth credential
+in the host's local Pi-compatible credentials store. It must never copy
+`~/.codex/auth.json`, a refresh token, or an access token into a sandbox,
+workspace checkpoint, output archive, Model Card, or request payload. The
+sandbox receives no subscription credential and cannot refresh it.
+
+For a remote or managed sandbox, configure an approved API key or provider
+OAuth credential behind the OMA model gateway instead. The gateway is the
+credential boundary: it authenticates the request, applies the tenant/model
+policy, and returns only the model response to the sandbox. This preserves the
+same harness endpoint shape without turning a subscription login into a
+portable secret.
+
+These paths are intentionally distinct:
+
+| Path | Credential location | Intended use |
+|---|---|---|
+| Local `direct-host` | Trusted host Pi credentials store | Local debugging only |
+| Remote/managed sandbox | OMA model gateway; approved API/OAuth credential stays in the control plane | Production/managed execution |
+
+Do not treat the local credential file as a portable session artifact. If it is
+missing after a runtime replacement, resume the ACP/native session from its
+declared session state and require the user to authenticate again on the trusted
+host; do not reconstruct or transmit the subscription token from Session events.
+
 ## Skill
 
 ```ts

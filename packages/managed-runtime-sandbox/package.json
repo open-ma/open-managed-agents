@@ -4,19 +4,19 @@
   "private": true,
   "type": "module",
   "exports": {
-    ".": "./src/index.ts",
-    "./e2b": "./src/e2b.ts"
+    ".": "./src/index.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
-    "test:chaos": "vitest run --config vitest.config.ts test/provider-runtime.test.ts",
+    "test:chaos": "vitest run --config vitest.config.ts test/provider-runtime.test.ts test/provider-runtime-lifecycle.test.ts test/provider-runtime-output-egress.test.ts test/provider-runtime-harness-inputs.test.ts test/effect-kernel.test.ts",
     "test:coverage": "vitest run --config vitest.coverage.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@open-managed-agents/blob-store": "workspace:*",
     "@open-managed-agents/runtime-resource-contract": "workspace:*",
-    "@open-managed-agents/sandbox": "workspace:*"
+    "@open-managed-agents/sandbox": "workspace:*",
+    "effect": "3.22.1"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

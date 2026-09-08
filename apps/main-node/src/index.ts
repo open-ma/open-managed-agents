@@ -144,6 +144,7 @@ import {
   environmentWorkEnqueuerModule,
   environmentWorkEnvironmentSourcePort,
   environmentWorkSessionCredentialIssuerPort,
+  environmentWorkWakeupPort,
 } from "@open-managed-agents/app/modules/environment-work";
 import {
   memoryContentDescriptorPort,
@@ -195,6 +196,7 @@ import {
   SqlFileMetadataPersistence,
   SqlMemoryStoreSource,
   SqlManagedSessionsComposition,
+  SqlPersistedSessionEventStream,
   SqlSessionEnvironmentSource,
   SqlSessionSource,
   SqlSessionRuntimeProjectionPersistence,
@@ -209,19 +211,24 @@ import {
   ApplicationDreamMemoryWorkspace,
   ModelCardCatalogSource,
   CronDeploymentSchedulePlanner,
+  EnvironmentAwareSessionEventDispatchRouter,
+  EnvironmentAwareSessionEventStreamRouter,
   EnvironmentAwareSessionLifecycleRouter,
+  ingestEnvironmentWorkRuntimeEvents,
   TimerEnvironmentWorkAvailabilityWaiter,
   IndeterminateCredentialValidationProbe,
   inProcessDreamExecutionSchedulerModule,
   LocalTunnelProvisioner,
   authenticateEnvironmentWorkSessionBearer,
   SealedEnvironmentWorkSessionCredentialIssuer,
+  StandardWebhookEnvironmentWorkWakeup,
   DeduplicatingDreamCurator,
   WebCryptoTunnelCertificateAuthority,
   WebCryptoTunnelTokenManager,
   WebCryptoMemoryContentDescriptor,
   ZipSkillPackageCompiler,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
+import { isCurrentEnvironmentWorkClaim } from "@open-managed-agents/environment-work-store";
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 import {
   buildNodeRepos,
@@ -250,7 +257,10 @@ import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
 import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
-import { createAuthMiddleware as buildAuthMw } from "@open-managed-agents/auth";
+import {
+  createAuthMiddleware as buildAuthMw,
+  type ApiKeyResolution,
+} from "@open-managed-agents/auth";
 import {
   buildBetterAuth,
   ensureTenantSqlite,
@@ -290,6 +300,10 @@ import {
 } from "./lib/node-managed-session-runtime.js";
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
 import { NodeSessionExecutionWorker } from "./lib/node-session-execution-worker.js";
+import {
+  buildNodeHttpMcpProxyRoutes,
+  type NodeMcpProxyTarget,
+} from "./lib/http-mcp-proxy.js";
 
 registerCoreHarnesses();
 
@@ -650,11 +664,11 @@ if (usePostgres) {
 
 const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
   subprocess: "@open-managed-agents/sandbox/adapters/local-subprocess",
-  litebox: "@open-managed-agents/sandbox/adapters/litebox",
-  boxlite: "@open-managed-agents/sandbox/adapters/litebox",
-  boxrun: "@open-managed-agents/sandbox/adapters/boxrun",
-  daytona: "@open-managed-agents/sandbox/adapters/daytona",
-  e2b: "@open-managed-agents/sandbox/adapters/e2b",
+  litebox: "@open-managed-agents/sandbox-adapter-litebox",
+  boxlite: "@open-managed-agents/sandbox-adapter-litebox",
+  boxrun: "@open-managed-agents/sandbox-adapter-boxrun",
+  daytona: "@open-managed-agents/sandbox-adapter-daytona",
+  e2b: "@open-managed-agents/sandbox-adapter-e2b",
 };
 
 async function buildSandbox(
@@ -997,6 +1011,14 @@ const managedSessionsComposition = new SqlManagedSessionsComposition({
   environments: nodeManagedEnvironments,
   lifecycle: managedSessionLifecycle,
   runtime: managedSessionRuntime,
+  eventDispatch: new EnvironmentAwareSessionEventDispatchRouter({
+    runtime: managedSessionRuntime,
+  }),
+  eventStream: new EnvironmentAwareSessionEventStreamRouter({
+    environments: nodeManagedEnvironments,
+    runtime: managedSessionRuntime,
+    selfHosted: new SqlPersistedSessionEventStream(sql),
+  }),
   sealer: {
     seal: async (value) => {
       if (managedResourceCipher === null) {
@@ -1078,6 +1100,11 @@ const managedEnvironmentWorkCredentials =
           type: "rejected" as const,
           message: "PLATFORM_ROOT_SECRET is required for managed Environment Work credentials",
         }),
+        bindToClaim: async () => {
+          throw new Error(
+            "PLATFORM_ROOT_SECRET is required for managed Environment Work credentials",
+          );
+        },
       }
     : new SealedEnvironmentWorkSessionCredentialIssuer({
         crypto: managedEnvironmentWorkSessionTokenCrypto,
@@ -1086,13 +1113,28 @@ const managedEnvironmentWorkCredentials =
           apiBaseUrl: process.env.PUBLIC_BASE_URL,
         }),
       });
+const managedEnvironmentWebhookUrl = process.env.OMA_MANAGED_AGENTS_WEBHOOK_URL;
+const managedEnvironmentWebhookKey =
+  process.env.OMA_MANAGED_AGENTS_WEBHOOK_SIGNING_KEY;
+const managedEnvironmentWebhook =
+  managedEnvironmentWebhookUrl !== undefined
+  && managedEnvironmentWebhookKey !== undefined
+    ? new StandardWebhookEnvironmentWorkWakeup({
+        endpoint: managedEnvironmentWebhookUrl,
+        signingKey: managedEnvironmentWebhookKey,
+        organizationId: ({ workspaceId }) =>
+          process.env.OMA_MANAGED_AGENTS_ORGANIZATION_ID ?? workspaceId,
+        nextEventId: () => `whe_${nanoid()}`,
+      })
+    : null;
+const managedEnvironmentWorkStore = new SqlEnvironmentWorkStore(
+  sql,
+  managedEnvironmentWorkCipher,
+);
 const managedEnvironmentWorkPlatform = createNodePlatform({
   features: { preset: "none", environmentWork: true },
   stores: {
-    environmentWork: new SqlEnvironmentWorkStore(
-      sql,
-      managedEnvironmentWorkCipher,
-    ),
+    environmentWork: managedEnvironmentWorkStore,
   },
   clock: { now: () => new Date() },
   ids: {
@@ -1109,6 +1151,17 @@ const managedEnvironmentWorkPlatform = createNodePlatform({
       environmentWorkSessionCredentialIssuerPort,
       managedEnvironmentWorkCredentials,
     ),
+    providePort(environmentWorkWakeupPort, {
+      notifyRunStarted: async (input) => {
+        if (managedEnvironmentWebhook === null) return;
+        void managedEnvironmentWebhook.notifyRunStarted(input).catch((err) => {
+          logger.error(
+            { err, op: "main-node.environment_work.webhook_failed" },
+            "Managed Agents webhook wake-up failed; poll fallback remains active",
+          );
+        });
+      },
+    }),
     environmentWorkEnqueuerModule(),
   ],
 });
@@ -1530,8 +1583,10 @@ const apiKeyStorage: ApiKeyStorage = {
   async insert({ id, hash, prefix, record }) {
     await sql
       .prepare(
-        `INSERT INTO api_keys (id, tenant_id, user_id, name, prefix, hash, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO api_keys (
+           id, tenant_id, user_id, name, prefix, hash,
+           credential_type, environment_id, created_at
+         ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       )
       .bind(
         id,
@@ -1540,6 +1595,10 @@ const apiKeyStorage: ApiKeyStorage = {
         record.name,
         prefix,
         hash,
+        record.credential?.type ?? "workspace",
+        record.credential?.type === "environment"
+          ? record.credential.environmentId
+          : null,
         Date.parse(record.created_at),
       )
       .run();
@@ -1547,23 +1606,33 @@ const apiKeyStorage: ApiKeyStorage = {
   async listByTenant(tenantId) {
     const r = await sql
       .prepare(
-        `SELECT id, name, prefix, created_at FROM api_keys
+        `SELECT id, name, prefix, credential_type, environment_id, created_at FROM api_keys
           WHERE tenant_id = ? AND revoked_at IS NULL
           ORDER BY created_at DESC`,
       )
       .bind(tenantId)
-      .all<{ id: string; name: string; prefix: string; created_at: number }>();
+      .all<{
+        id: string;
+        name: string;
+        prefix: string;
+        credential_type: string;
+        environment_id: string | null;
+        created_at: number;
+      }>();
     return (r.results ?? []).map<ApiKeyMeta>((row) => ({
       id: row.id,
       name: row.name,
       prefix: row.prefix,
       created_at: new Date(row.created_at).toISOString(),
+      credential: row.credential_type === "environment" && row.environment_id !== null
+        ? { type: "environment", environmentId: row.environment_id }
+        : { type: "workspace" },
     }));
   },
   async findByHash(hash) {
     const row = await sql
       .prepare(
-        `SELECT id, tenant_id, user_id, name, created_at FROM api_keys
+        `SELECT id, tenant_id, user_id, name, credential_type, environment_id, created_at FROM api_keys
           WHERE hash = ? AND revoked_at IS NULL`,
       )
       .bind(hash)
@@ -1572,6 +1641,8 @@ const apiKeyStorage: ApiKeyStorage = {
         tenant_id: string;
         user_id: string | null;
         name: string;
+        credential_type: string;
+        environment_id: string | null;
         created_at: number;
       }>();
     if (!row) return null;
@@ -1581,6 +1652,9 @@ const apiKeyStorage: ApiKeyStorage = {
       ...(row.user_id ? { user_id: row.user_id } : {}),
       name: row.name,
       created_at: new Date(row.created_at).toISOString(),
+      credential: row.credential_type === "environment" && row.environment_id !== null
+        ? { type: "environment", environmentId: row.environment_id }
+        : { type: "workspace" },
     };
     return rec;
   },
@@ -1598,7 +1672,11 @@ const apiKeyStorage: ApiKeyStorage = {
 // ─── HTTP ───────────────────────────────────────────────────────────────
 
 const app = new Hono<{
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: {
+    tenant_id: string;
+    user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
 }>();
 
 // Observability middleware first so it captures auth failures, rate-limit
@@ -1686,7 +1764,11 @@ const authMw = buildAuthMw({
     const hash = await sha256Hex(apiKey);
     const rec = await apiKeyStorage.findByHash(hash);
     if (!rec) return null;
-    return { tenantId: rec.tenant_id, userId: rec.user_id };
+    return {
+      tenantId: rec.tenant_id,
+      userId: rec.user_id,
+      credential: rec.credential,
+    };
   },
   resolveBearerToken: async ({ token, method, path }) => {
     if (managedEnvironmentWorkSessionTokenCrypto === null) return null;
@@ -1696,8 +1778,24 @@ const authMw = buildAuthMw({
       path,
       crypto: managedEnvironmentWorkSessionTokenCrypto,
       now: () => new Date(),
+      isCurrent: (claim) => isCurrentEnvironmentWorkClaim({
+        store: managedEnvironmentWorkStore,
+        now: () => new Date(),
+      }, claim),
     });
-    return scoped === null ? null : { tenantId: scoped.workspaceId };
+    return scoped === null
+      ? null
+      : {
+          tenantId: scoped.workspaceId,
+          credential: {
+            type: "environment_work_session",
+            environmentId: scoped.environmentId,
+            sessionId: scoped.sessionId,
+            workId: scoped.workId,
+            claimedAt: scoped.claimedAt,
+            generation: scoped.generation,
+          },
+        };
   },
   defaultTenantForUser: async (userId) => {
     const row = await sql
@@ -1721,9 +1819,51 @@ const authMw = buildAuthMw({
 });
 
 const v1 = new Hono<{
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: {
+    tenant_id: string;
+    user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
 }>();
 v1.use("*", authMw);
+
+v1.post("/oma/sessions/:sessionId/runtime-events", async (c) => {
+  const credential = c.get("auth_credential");
+  if (credential?.type !== "environment_work_session") {
+    return c.json({ error: "Environment Work session credential required" }, 403);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  const result = await ingestEnvironmentWorkRuntimeEvents({
+    claim: {
+      workspaceId: c.get("tenant_id"),
+      environmentId: credential.environmentId,
+      sessionId: credential.sessionId,
+      workId: credential.workId,
+      generation: credential.generation,
+    },
+    sessionId: c.req.param("sessionId"),
+    body,
+    projection: new SessionRuntimeProjectionApplicationService({
+      workspaceId: c.get("tenant_id"),
+      persistence: managedSessionsComposition.runtimeProjection,
+    }),
+    publish: async () => {},
+  });
+  if (result.type === "recorded") {
+    return c.json({ data: result.eventIds.map((id) => ({ id })) }, 200);
+  }
+  if (result.type === "invalid_request") {
+    return c.json({ error: result.message }, 400);
+  }
+  if (result.type === "not_found") return c.json({ error: "Session not found" }, 404);
+  if (result.type === "forbidden") return c.json({ error: "Forbidden" }, 403);
+  return c.json({ error: result.type }, 409);
+});
 
 // Mount route bundles. Same paths CF uses; behavior preserved. Once a tenant
 // has configured model cards, agent model handles must resolve to an active
@@ -1794,6 +1934,76 @@ v1.route("/oma/sessions", buildSessionRoutes({
       runtime: "local",
       sandbox_template: null,
     } as unknown as import("@open-managed-agents/shared").EnvironmentConfig;
+  },
+}));
+v1.route("/oma/mcp-proxy", buildNodeHttpMcpProxyRoutes({
+  resolveTarget: async ({ tenantId, sessionId, serverName }) => {
+    const session = await sessionsService.get({ tenantId, sessionId }).catch(() => null);
+    if (session === null || session.archived_at) return null;
+    const snapshot = session.agent_snapshot as {
+      mcp_servers?: Array<{
+        name: string;
+        url: string;
+        authorization_token?: string;
+      }>;
+    } | undefined;
+    const server = snapshot?.mcp_servers?.find((candidate) =>
+      candidate.name === serverName
+    );
+    if (server === undefined || !server.url) return null;
+    if (server.authorization_token) {
+      return {
+        upstreamUrl: server.url,
+        accessToken: server.authorization_token,
+      } satisfies NodeMcpProxyTarget;
+    }
+    const vaultIds = session.vault_ids ?? [];
+    if (vaultIds.length === 0) return null;
+    const groups = await credentialService.listByVaults({ tenantId, vaultIds });
+    for (const group of groups) {
+      for (const credential of group.credentials) {
+        if (credential.archived_at !== null) continue;
+        const auth = credential.auth as {
+          type?: string;
+          mcp_server_url?: string;
+          bearer_token?: string;
+          token?: string;
+          access_token?: string;
+          refresh_token?: string;
+          token_endpoint?: string;
+          client_id?: string;
+          client_secret?: string;
+        };
+        if (auth.mcp_server_url !== server.url) continue;
+        const accessToken = auth.bearer_token ?? auth.token ?? auth.access_token;
+        if (!accessToken) continue;
+        const target: NodeMcpProxyTarget = {
+          upstreamUrl: server.url,
+          accessToken,
+        };
+        if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
+          target.refresh = {
+            refreshToken: auth.refresh_token,
+            tokenEndpoint: auth.token_endpoint,
+            clientId: auth.client_id,
+            clientSecret: auth.client_secret,
+          };
+          target.onRefreshed = async (tokens) => {
+            await credentialService.refreshAuth({
+              tenantId,
+              vaultId: group.vault_id,
+              credentialId: credential.id,
+              auth: {
+                access_token: tokens.access_token,
+                refresh_token: tokens.refresh_token,
+              },
+            });
+          };
+        }
+        return target;
+      }
+    }
+    return null;
   },
 }));
 v1.route("/vaults", managedVaultsRoutes);

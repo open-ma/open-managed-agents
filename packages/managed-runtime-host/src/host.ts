@@ -1,4 +1,6 @@
 import type {
+  CredentialEgressBinding,
+  CredentialEgressPort,
   ManagedRuntimeProfile,
   ManagedRuntimePlan,
   ManagedSandboxLease,
@@ -13,6 +15,9 @@ import type {
   SessionOutputBinding,
   SessionOutputManifestCandidate,
   SessionOutputPort,
+  SessionInputAccessPort,
+  SessionInputMaterializerPort,
+  RuntimeSessionSnapshot,
   WorkspaceBinding,
   WorkspaceCheckpointCandidate,
   WorkspacePersistencePort,
@@ -37,6 +42,10 @@ export interface ManagedRuntimeHostDependencies {
   scheduler?: RuntimeSchedulerPort;
   /** Optional provider-owned process/runtime checkpoint implementation. */
   runtimeCheckpoint?: RuntimeCheckpointPort;
+  /** Optional OpenMA extension; the official Environment Work shape is unchanged. */
+  credentialEgress?: CredentialEgressPort;
+  /** Optional stager for official Session resources and application metadata. */
+  sessionInputs?: SessionInputMaterializerPort;
 }
 
 export type ManagedRuntimeRunResult =
@@ -49,16 +58,19 @@ export interface ManagedRuntimeHost {
   run(input: {
     scope: RuntimeResourceScope;
     profile: ManagedRuntimeProfile;
+    /** Session snapshot fetched after claim with the per-work bearer. */
+    session?: RuntimeSessionSnapshot;
+    /** Ephemeral per-claim content access; never persisted or copied into the
+     * runtime environment. */
+    sessionInputAccess?: SessionInputAccessPort;
+    /** Cancels this generation and prevents canonical publication. */
+    signal?: AbortSignal;
   }): Promise<ManagedRuntimeRunResult>;
 }
 
 const defaultScheduler: RuntimeSchedulerPort = {
   sleep(milliseconds, signal) {
     return new Promise<void>((resolve, reject) => {
-      if (signal.aborted) {
-        reject(signal.reason);
-        return;
-      }
       const timeout = setTimeout(resolve, milliseconds);
       signal.addEventListener(
         "abort",
@@ -95,6 +107,20 @@ function checkpointIdentity(profile: ManagedRuntimeProfile): {
   harnessVersion: string;
   runtimeIdentity: string;
 } {
+  const processIdentity = (process: {
+    command: string;
+    args?: readonly string[];
+    cwd?: string;
+    env?: Readonly<Record<string, string>>;
+  }) => ({
+    command: process.command,
+    ...(process.args === undefined ? {} : { args: process.args }),
+    ...(process.cwd === undefined ? {} : { cwd: process.cwd }),
+    // Environment values commonly contain per-work credentials. Persisting
+    // them in checkpoint metadata would be a secret leak; names are enough to
+    // reject a materially different process contract.
+    envKeys: Object.keys(process.env ?? {}).sort(),
+  });
   if (profile.driver.type === "openma_supervised") {
     return {
       harnessVersion: profile.driver.harness.version,
@@ -102,13 +128,16 @@ function checkpointIdentity(profile: ManagedRuntimeProfile): {
         type: profile.driver.type,
         id: profile.driver.harness.id,
         version: profile.driver.harness.version,
-        supervisor: profile.driver.supervisor,
+        supervisor: processIdentity(profile.driver.supervisor),
       }),
     };
   }
   return {
     harnessVersion: "ama-worker-v1",
-    runtimeIdentity: stableJson({ type: profile.driver.type, process: profile.driver.process }),
+    runtimeIdentity: stableJson({
+      type: profile.driver.type,
+      process: processIdentity(profile.driver.process),
+    }),
   };
 }
 
@@ -133,13 +162,47 @@ function reusableCheckpoint(
     && Number.isSafeInteger(checkpoint.workGeneration);
 }
 
+function requiresHostSessionInputMaterializer(
+  profile: ManagedRuntimeProfile,
+  session: RuntimeSessionSnapshot,
+): boolean {
+  if (session.resources.length === 0) return false;
+  if (profile.driver.type === "openma_supervised") return true;
+
+  // The unmodified Anthropic EnvironmentWorker owns memory-store download,
+  // mount and final synchronization inside the runtime. File and repository
+  // resources (plus any future/unknown discriminator) still belong to the
+  // OpenMA host materializer and therefore fail closed when it is absent.
+  return session.resources.some((resource) => resource.type !== "memory_store");
+}
+
+function requiresRepositoryCredentialEgress(
+  session: RuntimeSessionSnapshot | undefined,
+): boolean {
+  return session?.resources.some(
+    (resource) => resource.type === "github_repository",
+  ) ?? false;
+}
+
 export function createManagedRuntimeHost(
   dependencies: ManagedRuntimeHostDependencies,
 ): ManagedRuntimeHost {
   const scheduler = dependencies.scheduler ?? defaultScheduler;
 
   return {
-    async run({ scope, profile }) {
+    async run({ scope, profile, session, sessionInputAccess, signal }) {
+      if (
+        dependencies.sessionInputs === undefined
+        && session !== undefined
+        && requiresHostSessionInputMaterializer(profile, session)
+      ) {
+        throw new Error(
+          "Session resources require a SessionInputMaterializerPort",
+        );
+      }
+      const credentialEgressRequirement = requiresRepositoryCredentialEgress(session)
+        ? "required"
+        : profile.credentialEgress?.requirement ?? "disabled";
       const [
         sandboxCapabilities,
         workspaceCapabilities,
@@ -163,6 +226,28 @@ export function createManagedRuntimeHost(
           `The selected composition advertises ${plan.runtimeCheckpoint} runtime checkpoints but does not provide RuntimeCheckpointPort`,
         );
       }
+      if (
+        credentialEgressRequirement === "required"
+        && dependencies.credentialEgress === undefined
+      ) {
+        throw new Error(
+          "Required credential egress is unavailable: this Runtime Host has no CredentialEgressPort",
+        );
+      }
+      if (
+        credentialEgressRequirement !== "disabled"
+        && dependencies.credentialEgress !== undefined
+      ) {
+        const capabilities = await dependencies.credentialEgress.capabilities(scope);
+        if (
+          credentialEgressRequirement === "required"
+          && capabilities.enforcement !== "enforced"
+        ) {
+          throw new Error(
+            `This profile requires enforced credential egress, but the provider reports ${capabilities.enforcement}`,
+          );
+        }
+      }
       const runtimeIdentity = checkpointIdentity(profile);
 
       const acquired = await dependencies.fences.acquire({
@@ -175,12 +260,15 @@ export function createManagedRuntimeHost(
       let fence: RuntimeResourceFence = acquired.fence;
       let workspaceBinding: WorkspaceBinding | null = null;
       let outputBinding: SessionOutputBinding | null = null;
+      let credentialEgressBinding: CredentialEgressBinding | null = null;
       let sandboxLease: ManagedSandboxLease | null = null;
       let cleanupReason: "completed" | "failed" | "lease_lost" = "failed";
       let outputPublished = false;
       let runtimeCheckpoint: RuntimeCheckpointRef | null = null;
       let retainedRuntimePublished = false;
       let cleanupPersistenceError: unknown = null;
+      let publishedOutputCandidate = acquired.publication?.outputCandidate ?? null;
+      const committedCheckpointIds = new Set<string>();
       const controller = new AbortController();
       let leaseLost = false;
       let monitor: Promise<void> | null = null;
@@ -190,6 +278,9 @@ export function createManagedRuntimeHost(
         cleanupReason = "lease_lost";
         controller.abort(new Error(reason));
       };
+      const onExternalAbort = () => loseLease("Managed runtime execution cancelled");
+      if (signal?.aborted) onExternalAbort();
+      else signal?.addEventListener("abort", onExternalAbort, { once: true });
 
       // Fence ownership starts at acquire, not when the sandbox eventually
       // becomes runnable. Restore, mount and provider allocation may all take
@@ -257,6 +348,31 @@ export function createManagedRuntimeHost(
           });
           controller.signal.throwIfAborted();
         }
+        if (
+          credentialEgressRequirement !== "disabled"
+          && dependencies.credentialEgress !== undefined
+        ) {
+          credentialEgressBinding = await dependencies.credentialEgress.prepare({
+            scope,
+            fence,
+            requirement: credentialEgressRequirement,
+            idempotencyKey: idempotencyKey(
+              scope,
+              fence.generation,
+              "credential-egress-prepare",
+            ),
+            signal: controller.signal,
+          });
+          if (
+            credentialEgressRequirement === "required"
+            && credentialEgressBinding === null
+          ) {
+            throw new Error(
+              "Required credential egress could not be prepared for this Session",
+            );
+          }
+          controller.signal.throwIfAborted();
+        }
         const previousRuntimeCheckpoint = acquired.publication?.runtimeCheckpoint;
         if (
           plan.runtimeCheckpoint !== null
@@ -287,6 +403,7 @@ export function createManagedRuntimeHost(
             plan,
             workspace: workspaceBinding,
             outputs: outputBinding,
+            credentialEgress: credentialEgressBinding,
             signal: controller.signal,
           });
         }
@@ -312,6 +429,117 @@ export function createManagedRuntimeHost(
           });
           controller.signal.throwIfAborted();
         }
+        if (
+          credentialEgressBinding !== null
+          && dependencies.credentialEgress !== undefined
+        ) {
+          await dependencies.credentialEgress.attach({
+            scope,
+            fence,
+            binding: credentialEgressBinding,
+            sandbox: sandboxLease,
+            signal: controller.signal,
+          });
+          controller.signal.throwIfAborted();
+        }
+
+        if (dependencies.sessionInputs !== undefined && session !== undefined) {
+          await dependencies.sessionInputs.materialize({
+            scope,
+            fence,
+            session,
+            workspace: workspaceBinding,
+            sandbox: sandboxLease,
+            activeWorkspaceCheckpoint:
+              acquired.publication?.workspaceCandidate ?? null,
+            resourceOwnership: {
+              memoryStore: profile.driver.type === "ama_worker"
+                ? "worker"
+                : "materializer",
+            },
+            idempotencyKey: idempotencyKey(
+              scope,
+              fence.generation,
+              "session-inputs-materialize",
+            ),
+            ...(sessionInputAccess === undefined ? {} : { access: sessionInputAccess }),
+            signal: controller.signal,
+          });
+          controller.signal.throwIfAborted();
+        }
+
+        // Both bindings are established before the harness driver starts. Keep
+        // immutable references for the callback so its protocol contract does
+        // not inherit nullable setup/cleanup bookkeeping.
+        const activeWorkspace = workspaceBinding;
+        const activeSandbox = sandboxLease;
+        const checkpointLiveTurn = async (input: {
+          checkpointId: string;
+          sessionId: string;
+          turnId?: string;
+        }): Promise<void> => {
+          if (
+            input.checkpointId.length === 0
+            || input.sessionId !== scope.sessionId
+            || committedCheckpointIds.has(input.checkpointId)
+          ) {
+            throw new Error("Harness requested an invalid or duplicate live checkpoint");
+          }
+          controller.signal.throwIfAborted();
+          const workspaceCandidate = await dependencies.workspace.checkpoint({
+            scope,
+            fence,
+            strategy: plan.workspaceStrategy,
+            binding: activeWorkspace,
+            sandbox: activeSandbox,
+            idempotencyKey: idempotencyKey(
+              scope,
+              fence.generation,
+              `workspace-checkpoint-${input.checkpointId}`,
+            ),
+            signal: controller.signal,
+          });
+          controller.signal.throwIfAborted();
+          // outputBinding can only be produced by the guarded prepare step
+          // above, so its presence proves the planned strategy exists.
+          if (outputBinding !== null) {
+            const outputStrategy = plan.outputStrategy!;
+            const entries = await dependencies.outputs.collect({
+              scope,
+              fence,
+              strategy: outputStrategy,
+              binding: outputBinding,
+              signal: controller.signal,
+            });
+            controller.signal.throwIfAborted();
+            publishedOutputCandidate = await dependencies.outputs.finalize({
+              scope,
+              fence,
+              strategy: outputStrategy,
+              binding: outputBinding,
+              entries,
+              idempotencyKey: idempotencyKey(
+                scope,
+                fence.generation,
+                `outputs-finalize-${input.checkpointId}`,
+              ),
+              signal: controller.signal,
+            });
+            controller.signal.throwIfAborted();
+          }
+          const published = await dependencies.fences.publish({
+            fence,
+            workspaceCandidate,
+            outputCandidate: publishedOutputCandidate,
+            runtimeCheckpoint: null,
+          });
+          if (published.type === "lost") {
+            loseLease("Runtime resource fence lost during live checkpoint");
+            throw new Error("Runtime resource fence lost during live checkpoint");
+          }
+          committedCheckpointIds.add(input.checkpointId);
+          outputPublished = outputBinding !== null;
+        };
 
         const execution = await dependencies.harnessDriver.run({
           scope,
@@ -320,6 +548,7 @@ export function createManagedRuntimeHost(
           workspacePath: workspaceBinding.mountPath,
           outputPath: outputBinding?.mountPath ?? null,
           driver: plan.driver,
+          checkpoint: checkpointLiveTurn,
           signal: controller.signal,
         });
         if (leaseLost || execution.type === "aborted") {
@@ -352,7 +581,6 @@ export function createManagedRuntimeHost(
             signal: controller.signal,
           });
         controller.signal.throwIfAborted();
-        if (leaseLost) return { type: "lease_lost" };
         if (plan.runtimeCheckpoint !== null) {
           try {
             runtimeCheckpoint = await dependencies.runtimeCheckpoint!.create({
@@ -405,8 +633,8 @@ export function createManagedRuntimeHost(
             signal: controller.signal,
           });
           controller.signal.throwIfAborted();
+          publishedOutputCandidate = outputCandidate;
         }
-        if (leaseLost) return { type: "lease_lost" };
         const published = await dependencies.fences.publish({
           fence,
           workspaceCandidate,
@@ -426,7 +654,27 @@ export function createManagedRuntimeHost(
         cleanupReason = "failed";
         return { type: "failed", error };
       } finally {
+        signal?.removeEventListener("abort", onExternalAbort);
         controller.abort(new Error("Managed runtime cleanup"));
+        if (
+          credentialEgressBinding !== null
+          && dependencies.credentialEgress !== undefined
+        ) {
+          try {
+            await dependencies.credentialEgress.revoke({
+              scope,
+              fence,
+              binding: credentialEgressBinding,
+              reason: cleanupReason,
+            });
+          } catch (error) {
+            // Provider-native snapshot grants cannot be left attached to a
+            // retained runtime. Force termination and surface the cleanup
+            // failure after the remaining resources have been released.
+            retainedRuntimePublished = false;
+            cleanupPersistenceError = error;
+          }
+        }
         await monitor;
         if (sandboxLease !== null && !retainedRuntimePublished) {
           try {
@@ -469,6 +717,16 @@ export function createManagedRuntimeHost(
               })
               .catch(() => {});
           }
+        }
+        if (
+          credentialEgressBinding !== null
+          && dependencies.credentialEgress !== undefined
+        ) {
+          await dependencies.credentialEgress
+            .release({ scope, fence, binding: credentialEgressBinding })
+            .catch((error: unknown) => {
+              cleanupPersistenceError ??= error;
+            });
         }
         if (workspaceBinding !== null) {
           await dependencies.workspace

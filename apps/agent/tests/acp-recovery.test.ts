@@ -158,6 +158,118 @@ describe("ACP semantic recovery prompt", () => {
     expect(prompt).toContain("[current request truncated]");
     expect(prompt).toContain("</openma-recovery>");
   });
+
+  it("uses the full payload for the current request when no history remains", () => {
+    const current = user("only current", "current-only");
+
+    const prompt = buildAcpSemanticRecoveryPrompt([current], current, {
+      reason: "native-state-missing",
+      maxCharacters: 1_024,
+    });
+
+    expect(prompt).not.toContain("User: only current");
+    expect(prompt).toContain("Current request:\nonly current");
+  });
+
+  it("matches a durably reloaded current message by id rather than text", () => {
+    const persisted = user("same bytes", "durable-current");
+    const reloaded = user("same bytes", "durable-current");
+
+    const prompt = buildAcpSemanticRecoveryPrompt(
+      [user("earlier"), persisted],
+      reloaded,
+      { reason: "native-state-missing" },
+    );
+
+    expect(prompt.match(/same bytes/g)).toHaveLength(1);
+    expect(prompt).toContain("User: earlier");
+  });
+
+  it("ignores empty compaction records and uses the previous usable summary", () => {
+    const prompt = buildAcpSemanticRecoveryPrompt([
+      user("discarded"),
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 4,
+        compacted_message_count: 1,
+        summary: [{ type: "text", text: "usable summary" }],
+      },
+      user("after summary"),
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 2,
+        compacted_message_count: 0,
+        summary: [],
+      },
+    ], user("continue"), { reason: "native-state-missing" });
+
+    expect(prompt).toContain("usable summary");
+    expect(prompt).toContain("User: after summary");
+    expect(prompt).not.toContain("discarded");
+  });
+
+  it("treats a compaction record without a summary as unusable", () => {
+    const prompt = buildAcpSemanticRecoveryPrompt([
+      user("history remains"),
+      {
+        type: "agent.thread_context_compacted",
+        original_message_count: 1,
+        compacted_message_count: 0,
+      },
+    ] as SessionEvent[], user("continue"), { reason: "native-state-missing" });
+
+    expect(prompt).toContain("User: history remains");
+  });
+
+  it("omits empty tool outcomes and supports string built-in results", () => {
+    const prompt = buildAcpSemanticRecoveryPrompt([
+      {
+        type: "agent.tool_result",
+        tool_use_id: "missing-string-tool",
+        content: "string result",
+      },
+      {
+        type: "agent.tool_result",
+        tool_use_id: "empty-built-in",
+        content: "   ",
+      },
+      {
+        type: "agent.mcp_tool_result",
+        mcp_tool_use_id: "empty-mcp",
+        content: "   ",
+      },
+      {
+        type: "user.custom_tool_result",
+        custom_tool_use_id: "empty-custom",
+        content: [],
+      },
+      {
+        type: "user.custom_tool_result",
+        custom_tool_use_id: "missing-custom-tool",
+        content: [{ type: "text", text: "custom result" }],
+      },
+    ] as SessionEvent[], user("continue"), { reason: "native-state-missing" });
+
+    expect(prompt).toContain("Completed tool unknown: string result");
+    expect(prompt).toContain("Completed tool unknown: custom result");
+    expect(prompt).not.toContain("empty-built-in");
+    expect(prompt).not.toContain("empty-mcp");
+    expect(prompt).not.toContain("empty-custom");
+  });
+
+  it("keeps media type labels when an attachment has no durable reference", () => {
+    const prompt = buildAcpSemanticRecoveryPrompt([
+      {
+        type: "user.message",
+        content: [
+          { type: "image", source: { type: "file" } },
+          { type: "document", source: { type: "file" } },
+        ],
+      },
+    ] as SessionEvent[], user("continue"), { reason: "native-state-missing" });
+
+    expect(prompt).toContain("User: [image]\n[document]");
+  });
 });
 
 function user(text: string, id?: string): UserMessageEvent {

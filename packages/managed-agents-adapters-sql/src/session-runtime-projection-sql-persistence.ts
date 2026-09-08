@@ -65,24 +65,96 @@ export class SqlSessionRuntimeProjectionPersistence
       throw new Error("Projected session ID does not match the target session");
     }
     const fence = input.executionFence;
+    const environmentWorkFence = input.environmentWorkFence;
+    if (fence !== undefined && environmentWorkFence !== undefined) {
+      throw new Error("Runtime projection accepts exactly one execution fence");
+    }
     if (
       fence !== undefined &&
       (fence.workspaceId !== input.workspaceId ||
         fence.sessionId !== input.sessionId)
     ) return { type: "execution_fence_lost" };
+    if (
+      environmentWorkFence !== undefined &&
+      (environmentWorkFence.workspaceId !== input.workspaceId ||
+        environmentWorkFence.sessionId !== input.sessionId ||
+        !Number.isSafeInteger(environmentWorkFence.generation) ||
+        environmentWorkFence.generation < 1)
+    ) return { type: "execution_fence_lost" };
     const now = this.#now().getTime();
+    const fenceSql = fence !== undefined
+      ? `AND EXISTS (
+           SELECT 1 FROM managed_session_executions
+            WHERE workspace_id = ? AND id = ? AND session_id = ?
+              AND state = 'running' AND attempt_id = ? AND owner_id = ?
+              AND generation = ? AND lease_expires_at_ms > ?
+         )`
+      : environmentWorkFence !== undefined
+        ? `AND EXISTS (
+             SELECT 1 FROM managed_environment_work
+              WHERE workspace_id = ? AND environment_id = ? AND id = ?
+                AND session_id = ? AND state IN ('starting', 'active')
+                AND claim_generation = ? AND claim_at IS NOT NULL
+                AND claim_at + heartbeat_ttl_seconds * 1000 > ?
+           )`
+        : "";
+    const fenceBindings: Array<string | number> = fence !== undefined
+      ? [
+          fence.workspaceId,
+          fence.executionId,
+          fence.sessionId,
+          fence.attemptId,
+          fence.ownerId,
+          fence.generation,
+          now,
+        ]
+      : environmentWorkFence !== undefined
+        ? [
+            environmentWorkFence.workspaceId,
+            environmentWorkFence.environmentId,
+            environmentWorkFence.workId,
+            environmentWorkFence.sessionId,
+            environmentWorkFence.generation,
+            now,
+          ]
+        : [];
+    const existingEvents = await Promise.all(input.events.map((event) =>
+      this.client.prepare(
+        `SELECT document FROM managed_session_events
+          WHERE workspace_id = ? AND session_id = ? AND id = ?`,
+      ).bind(input.workspaceId, input.sessionId, event.id).first<{
+        document: string;
+      }>()
+    ));
+    if (existingEvents.some((row) => row !== null)) {
+      const exactReplay = existingEvents.every((row, index) =>
+        row?.document === JSON.stringify(input.events[index])
+      );
+      if (!exactReplay) {
+        throw new Error(
+          "Runtime projection event IDs collide with a different or partial batch",
+        );
+      }
+      if (!await this.isFenceActive(input, now)) {
+        return { type: "execution_fence_lost" };
+      }
+      const current = await this.findCurrent(input);
+      return current === null
+        ? { type: "not_found" }
+        : { type: "projected", record: current };
+    }
     const eventStatements = input.events.map((event) => {
-      const statement = fence === undefined
-        ? this.client.prepare(
-            `INSERT INTO managed_session_events
+      return this.client.prepare(
+          `INSERT INTO managed_session_events
             (workspace_id, session_id, thread_id, id, type, document, processed_at)
            SELECT ?, ?, ?, ?, ?, ?, ?
             WHERE EXISTS (
               SELECT 1 FROM managed_sessions
                WHERE workspace_id = ? AND id = ? AND revision = ?
             )
+              ${fenceSql}
            ON CONFLICT (workspace_id, session_id, id) DO NOTHING`,
-          ).bind(
+        ).bind(
           input.workspaceId,
           input.sessionId,
           "sessionThreadId" in event ? event.sessionThreadId ?? null : null,
@@ -93,52 +165,18 @@ export class SqlSessionRuntimeProjectionPersistence
           input.workspaceId,
           input.sessionId,
           input.expectedRevision,
-        )
-        : this.client.prepare(
-            `INSERT INTO managed_session_events
-              (workspace_id, session_id, thread_id, id, type, document, processed_at)
-             SELECT ?, ?, ?, ?, ?, ?, ?
-              WHERE EXISTS (
-                SELECT 1 FROM managed_sessions
-                 WHERE workspace_id = ? AND id = ? AND revision = ?
-              )
-                AND EXISTS (
-                  SELECT 1 FROM managed_session_executions
-                   WHERE workspace_id = ? AND id = ? AND session_id = ?
-                     AND state = 'running' AND attempt_id = ? AND owner_id = ?
-                     AND generation = ? AND lease_expires_at_ms > ?
-                )
-             ON CONFLICT (workspace_id, session_id, id) DO NOTHING`,
-          ).bind(
-            input.workspaceId,
-            input.sessionId,
-            "sessionThreadId" in event ? event.sessionThreadId ?? null : null,
-            event.id,
-            event.type,
-            JSON.stringify(event),
-            timestamp(event.processedAt),
-            input.workspaceId,
-            input.sessionId,
-            input.expectedRevision,
-            fence.workspaceId,
-            fence.executionId,
-            fence.sessionId,
-            fence.attemptId,
-            fence.ownerId,
-            fence.generation,
-            now,
-          );
-      return statement;
+          ...fenceBindings,
+        );
     });
     const next = input.next;
-    const update = fence === undefined
-      ? this.client.prepare(
-          `UPDATE managed_sessions
+    const update = this.client.prepare(
+        `UPDATE managed_sessions
             SET document = ?, revision = revision + 1, agent_id = ?,
                 agent_version = ?, environment_id = ?, deployment_id = ?,
                 status = ?, updated_at = ?, archived_at = ?
-          WHERE workspace_id = ? AND id = ? AND revision = ?`,
-        ).bind(
+          WHERE workspace_id = ? AND id = ? AND revision = ?
+            ${fenceSql}`,
+      ).bind(
         JSON.stringify(next),
         next.agent.id,
         next.agent.version,
@@ -150,61 +188,16 @@ export class SqlSessionRuntimeProjectionPersistence
         input.workspaceId,
         input.sessionId,
         input.expectedRevision,
-      )
-      : this.client.prepare(
-          `UPDATE managed_sessions
-              SET document = ?, revision = revision + 1, agent_id = ?,
-                  agent_version = ?, environment_id = ?, deployment_id = ?,
-                  status = ?, updated_at = ?, archived_at = ?
-            WHERE workspace_id = ? AND id = ? AND revision = ?
-              AND EXISTS (
-                SELECT 1 FROM managed_session_executions
-                 WHERE workspace_id = ? AND id = ? AND session_id = ?
-                   AND state = 'running' AND attempt_id = ? AND owner_id = ?
-                   AND generation = ? AND lease_expires_at_ms > ?
-              )`,
-        ).bind(
-          JSON.stringify(next),
-          next.agent.id,
-          next.agent.version,
-          next.environmentId,
-          next.deploymentId ?? null,
-          next.status,
-          timestamp(next.updatedAt),
-          next.archivedAt === null ? null : timestamp(next.archivedAt),
-          input.workspaceId,
-          input.sessionId,
-          input.expectedRevision,
-          fence.workspaceId,
-          fence.executionId,
-          fence.sessionId,
-          fence.attemptId,
-          fence.ownerId,
-          fence.generation,
-          now,
-        );
+        ...fenceBindings,
+      );
     const results = await this.client.batch([...eventStatements, update]);
     const updateResult = results[results.length - 1];
     if (updateResult === undefined) {
       throw new Error("Runtime projection batch returned no update result");
     }
     if (updateResult.meta.changes === 0) {
-      if (fence !== undefined) {
-        const active = await this.client.prepare(
-          `SELECT 1 AS active FROM managed_session_executions
-            WHERE workspace_id = ? AND id = ? AND session_id = ?
-              AND state = 'running' AND attempt_id = ? AND owner_id = ?
-              AND generation = ? AND lease_expires_at_ms > ?`,
-        ).bind(
-          fence.workspaceId,
-          fence.executionId,
-          fence.sessionId,
-          fence.attemptId,
-          fence.ownerId,
-          fence.generation,
-          now,
-        ).first<{ active: number }>();
-        if (active === null) return { type: "execution_fence_lost" };
+      if (!await this.isFenceActive(input, now)) {
+        return { type: "execution_fence_lost" };
       }
       const current = await this.findCurrent(input);
       return current === null
@@ -224,5 +217,48 @@ export class SqlSessionRuntimeProjectionPersistence
       throw new Error("Session vanished after runtime projection");
     }
     return { type: "projected", record: projected };
+  }
+
+  private async isFenceActive(
+    input: ProjectSessionRuntimeState,
+    now: number,
+  ): Promise<boolean> {
+    const fence = input.executionFence;
+    if (fence !== undefined) {
+      const active = await this.client.prepare(
+        `SELECT 1 AS active FROM managed_session_executions
+          WHERE workspace_id = ? AND id = ? AND session_id = ?
+            AND state = 'running' AND attempt_id = ? AND owner_id = ?
+            AND generation = ? AND lease_expires_at_ms > ?`,
+      ).bind(
+        fence.workspaceId,
+        fence.executionId,
+        fence.sessionId,
+        fence.attemptId,
+        fence.ownerId,
+        fence.generation,
+        now,
+      ).first<{ active: number }>();
+      return active !== null;
+    }
+    const environmentWorkFence = input.environmentWorkFence;
+    if (environmentWorkFence !== undefined) {
+      const active = await this.client.prepare(
+        `SELECT 1 AS active FROM managed_environment_work
+          WHERE workspace_id = ? AND environment_id = ? AND id = ?
+            AND session_id = ? AND state IN ('starting', 'active')
+            AND claim_generation = ? AND claim_at IS NOT NULL
+            AND claim_at + heartbeat_ttl_seconds * 1000 > ?`,
+      ).bind(
+        environmentWorkFence.workspaceId,
+        environmentWorkFence.environmentId,
+        environmentWorkFence.workId,
+        environmentWorkFence.sessionId,
+        environmentWorkFence.generation,
+        now,
+      ).first<{ active: number }>();
+      return active !== null;
+    }
+    return true;
   }
 }

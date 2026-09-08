@@ -1,4 +1,5 @@
 import type { SandboxResourceCapabilities } from "./capabilities";
+import type { CredentialEgressBinding } from "./credential-egress";
 import type { RuntimeResourceFence } from "./fence";
 import type { SessionOutputBinding } from "./outputs";
 import type { ManagedRuntimePlan } from "./profile";
@@ -29,6 +30,9 @@ export interface ManagedSandboxPort {
     plan: ManagedRuntimePlan;
     workspace: WorkspaceBinding;
     outputs: SessionOutputBinding | null;
+    /** Transient identity only. Provider-specific secret material remains
+     * behind the composed CredentialEgressPort. */
+    credentialEgress?: CredentialEgressBinding | null;
     signal: AbortSignal;
   }): Promise<ManagedSandboxLease>;
   heartbeat(input: {

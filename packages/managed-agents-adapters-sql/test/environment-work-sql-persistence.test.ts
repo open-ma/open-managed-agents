@@ -22,6 +22,7 @@ CREATE TABLE managed_environment_work (
   sealed_secret text NOT NULL,
   claim_at integer,
   claim_worker_id text,
+  claim_generation integer NOT NULL DEFAULT 0,
   heartbeat_ttl_seconds integer NOT NULL,
   revision integer NOT NULL,
   state text NOT NULL,
@@ -123,6 +124,7 @@ describe("SQL Environment Work persistence", () => {
       claimedAt: "2026-08-26T09:20:00.000Z",
       reclaimBefore: "2026-08-26T09:19:55.000Z",
       workerId: "worker_01",
+      heartbeatTtlSeconds: 90,
     });
     expect(claimed).toEqual({
       type: "claimed",
@@ -130,6 +132,7 @@ describe("SQL Environment Work persistence", () => {
         ...record,
         claim: {
           claimedAt: "2026-08-26T09:20:00.000Z",
+          generation: 1,
           workerId: "worker_01",
         },
         revision: 2,
@@ -142,6 +145,7 @@ describe("SQL Environment Work persistence", () => {
         claimedAt: "2026-08-26T09:20:01.000Z",
         reclaimBefore: "2026-08-26T09:19:56.000Z",
         workerId: "worker_01",
+        heartbeatTtlSeconds: 90,
       }),
     ).resolves.toEqual({ type: "empty" });
     await expect(

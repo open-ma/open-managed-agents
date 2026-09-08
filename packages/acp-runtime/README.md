@@ -65,6 +65,7 @@ src/
   runtime.ts          Thin re-export from @openma/common/acp-runtime
   session.ts          Thin re-export from @openma/common/acp-runtime
   placement.ts        Composition helper for local vs sandbox placement
+  sandbox-agent.ts    Per-agent prepare/state plan; Harbor informs artifact paths
   registry.ts         KNOWN_ACP_AGENTS catalog + detect()
   spawners/
     node.ts           Thin re-export of the shared NodeSpawner
@@ -74,6 +75,50 @@ src/
 The spawners are subpath exports so a host can pull only the implementation it
 needs. A sandbox host must explicitly provide the live-stdio capability; a
 command/log-polling sandbox cannot be composed with ACP by accident.
+
+## Harness-in-sandbox preparation
+
+`./sandbox-agent` is the adapter boundary for installed coding agents. It
+does not replace ACP or start a process itself. `prepareAcpSandboxAgent()`
+selects the Harbor-derived native-session profile, returns the isolated launch
+environment and the exact session artifact manifest, and declares the
+lifecycle policy used by the host:
+
+```ts
+import {
+  materializeAcpSandboxAgentState,
+  prepareAcpSandboxAgent,
+} from "@open-managed-agents/acp-runtime/sandbox-agent";
+
+const preparation = prepareAcpSandboxAgent({
+  sessionId,
+  agent: { id: "pi-acp", command: "pi-acp" },
+});
+
+await materializeAcpSandboxAgentState(sandbox, preparation);
+// ACP runtime starts preparation.launch and owns initialize/resume/prompt.
+// preparation.lifecycle is retain on shutdown/crash, delete on destroy.
+```
+
+Unknown agents deliberately produce an `opaque` ACP-only plan. The host can
+still run them through ACP and canonical-event recovery, but must not claim
+native resume. Credentials and model endpoints are supplied by the host/vault
+composition; they are never inferred from or persisted as native session
+artifacts.
+
+The lifecycle helpers consume only `AcpSandboxAgentStatePort` (`writeFile` and
+`exec`). Cloudflare Sandbox, Docker, E2B-compatible providers, and test fakes
+all implement this narrow Port structurally; the ACP package never imports a
+provider SDK. The live native root is ephemeral under `/tmp`; capture copies
+only the declared Session artifacts into
+`/workspace/.openma/harness-state/`. Harbor supplies useful path knowledge,
+not OpenMA's durability semantics.
+
+For a complete whole-brain in-sandbox loop, compose this package with
+`@open-managed-agents/harness-runtime-acp`. That package owns command dispatch,
+checkpoint-before-completion ordering, restore-before-resume, canonical-event
+semantic recovery, and the supervisor lifecycle. The outer Runtime Host owns
+durable candidate publication and fencing.
 
 ## Status
 

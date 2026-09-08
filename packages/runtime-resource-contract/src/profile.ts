@@ -38,6 +38,11 @@ export interface ManagedRuntimeProfile {
     preferredStrategies?: readonly OutputStrategy[];
   };
   runtimeCheckpoint: "required" | "optional" | "disabled";
+  /** OpenMA Runtime Host extension. Omitted means disabled so an unmodified
+   * official/community Environment Worker remains protocol-compatible. */
+  credentialEgress?: {
+    requirement: "required" | "best_effort" | "disabled";
+  };
   driver: HarnessDriverDeclaration;
 }
 

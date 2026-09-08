@@ -84,6 +84,23 @@ CREATE TABLE managed_session_resource_secrets (
   updated_at integer NOT NULL,
   PRIMARY KEY (workspace_id, session_id, resource_id)
 );
+
+CREATE TABLE managed_environment_work (
+  workspace_id text NOT NULL,
+  environment_id text NOT NULL,
+  id text NOT NULL,
+  session_id text,
+  document text NOT NULL,
+  sealed_secret text NOT NULL,
+  claim_at integer,
+  claim_worker_id text,
+  claim_generation integer NOT NULL DEFAULT 0,
+  heartbeat_ttl_seconds integer NOT NULL,
+  revision integer NOT NULL,
+  state text NOT NULL,
+  created_at integer NOT NULL,
+  PRIMARY KEY (workspace_id, id)
+);
 `;
 
 const session: Session = {
@@ -399,6 +416,198 @@ describe("SqlSessionPersistence", () => {
     await expect(client.prepare(
       "SELECT id FROM managed_session_events WHERE id = ?",
     ).bind(event.id).first()).resolves.toBeNull();
+  });
+
+  it("treats an exact runtime event replay as idempotent without advancing revision", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session,
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    const projection = new SqlSessionRuntimeProjectionPersistence(client);
+    const event = {
+      id: "runtime_replay_01",
+      type: "session.status_idle" as const,
+      processedAt: "2026-08-26T03:00:00.000Z",
+      stopReason: { type: "end_turn" as const },
+    };
+    const next = {
+      ...session,
+      status: "idle" as const,
+      updatedAt: event.processedAt,
+    };
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 1,
+      events: [event],
+      next,
+    })).resolves.toMatchObject({
+      type: "projected",
+      record: { revision: 2 },
+    });
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 2,
+      events: [event],
+      next,
+    })).resolves.toEqual({
+      type: "projected",
+      record: { revision: 2, session: next },
+    });
+    await expect(client.prepare(
+      `SELECT COUNT(*) AS count FROM managed_session_events
+        WHERE workspace_id = ? AND session_id = ? AND id = ?`,
+    ).bind("workspace_01", session.id, event.id).first<{ count: number }>())
+      .resolves.toEqual({ count: 1 });
+  });
+
+  it("atomically fences an in-sandbox runtime projection against a reclaimed Environment Work", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session: { ...session, status: "idle" },
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    await client.prepare(
+      `INSERT INTO managed_environment_work
+        (workspace_id, environment_id, id, session_id, document, sealed_secret,
+         claim_at, claim_worker_id, claim_generation, heartbeat_ttl_seconds,
+         revision, state, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "workspace_01",
+      "env_01",
+      "work_01",
+      session.id,
+      "{}",
+      "sealed",
+      Date.parse("2026-08-26T02:00:03.000Z"),
+      "worker_new",
+      2,
+      90,
+      8,
+      "active",
+      Date.parse("2026-08-26T02:00:00.000Z"),
+    ).run();
+    const current = await sessions.findCurrent({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+    });
+    expect(current).not.toBeNull();
+    if (current === null) return;
+    const projection = new SqlSessionRuntimeProjectionPersistence(client, {
+      now: () => new Date("2026-08-26T02:00:04.000Z"),
+    });
+    const event = {
+      id: "stale_sandbox_output_01",
+      type: "session.status_running" as const,
+      processedAt: "2026-08-26T02:00:04.000Z",
+    };
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: current.revision,
+      environmentWorkFence: {
+        workspaceId: "workspace_01",
+        environmentId: "env_01",
+        sessionId: session.id,
+        workId: "work_01",
+        generation: 1,
+      },
+      events: [event],
+      next: {
+        ...current.session,
+        status: "running",
+        updatedAt: event.processedAt,
+      },
+    })).resolves.toEqual({ type: "execution_fence_lost" });
+    await expect(client.prepare(
+      "SELECT id FROM managed_session_events WHERE id = ?",
+    ).bind(event.id).first()).resolves.toBeNull();
+  });
+
+  it("rejects an exact runtime event replay after its Environment Work generation is fenced", async () => {
+    const sessions = new SqlSessionPersistence(client, testSealer);
+    await sessions.insert({
+      workspaceId: "workspace_01",
+      session: { ...session, status: "idle" },
+      initialEvents: [],
+      resourceSecrets: [],
+    });
+    await client.prepare(
+      `INSERT INTO managed_environment_work
+        (workspace_id, environment_id, id, session_id, document, sealed_secret,
+         claim_at, claim_worker_id, claim_generation, heartbeat_ttl_seconds,
+         revision, state, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).bind(
+      "workspace_01",
+      "env_01",
+      "work_replay_01",
+      session.id,
+      "{}",
+      "sealed",
+      Date.parse("2026-08-26T02:00:03.000Z"),
+      "worker_old",
+      1,
+      90,
+      7,
+      "active",
+      Date.parse("2026-08-26T02:00:00.000Z"),
+    ).run();
+    const projection = new SqlSessionRuntimeProjectionPersistence(client, {
+      now: () => new Date("2026-08-26T02:00:04.000Z"),
+    });
+    const event = {
+      id: "runtime_fenced_replay_01",
+      type: "session.status_running" as const,
+      processedAt: "2026-08-26T02:00:04.000Z",
+    };
+    const next = {
+      ...session,
+      status: "running" as const,
+      updatedAt: event.processedAt,
+    };
+    const fence = {
+      workspaceId: "workspace_01",
+      environmentId: "env_01",
+      sessionId: session.id,
+      workId: "work_replay_01",
+      generation: 1,
+    };
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 1,
+      environmentWorkFence: fence,
+      events: [event],
+      next,
+    })).resolves.toMatchObject({
+      type: "projected",
+      record: { revision: 2 },
+    });
+    await client.prepare(
+      `UPDATE managed_environment_work
+          SET claim_worker_id = ?, claim_generation = ?, revision = revision + 1
+        WHERE workspace_id = ? AND id = ?`,
+    ).bind("worker_new", 2, "workspace_01", "work_replay_01").run();
+
+    await expect(projection.project({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      expectedRevision: 2,
+      environmentWorkFence: fence,
+      events: [event],
+      next,
+    })).resolves.toEqual({ type: "execution_fence_lost" });
   });
 
   it("archives lifecycle state and increments the internal revision", async () => {

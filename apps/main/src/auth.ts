@@ -3,7 +3,17 @@ import type { Env } from "@open-managed-agents/shared";
 import { logWarn, logError } from "@open-managed-agents/shared";
 import { CfKvStore } from "@open-managed-agents/kv-store";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-cf";
-import { authenticateEnvironmentWorkSessionBearer } from "@open-managed-agents/managed-agents-adapters-runtime";
+import {
+  authenticateEnvironmentWorkSessionBearer,
+} from "@open-managed-agents/managed-agents-adapters-runtime";
+import { isCurrentEnvironmentWorkClaim } from "@open-managed-agents/environment-work-store";
+import { SqlEnvironmentWorkStore } from "@open-managed-agents/environment-work-store-sql";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { buildCfTenantDbProvider } from "@open-managed-agents/services";
+import {
+  allowsApiKeyRequest,
+  type ApiKeyResolution,
+} from "@open-managed-agents/auth";
 
 async function sha256(data: string): Promise<string> {
   const encoded = new TextEncoder().encode(data);
@@ -16,6 +26,7 @@ async function sha256(data: string): Promise<string> {
 async function resolveWorkspaceApiKey(env: Env, apiKey: string): Promise<{
   tenantId: string;
   userId?: string;
+  credential?: ApiKeyResolution["credential"];
 } | null> {
   if (env.API_KEY && env.API_KEY !== "" && apiKey === env.API_KEY) {
     return { tenantId: "default" };
@@ -23,50 +34,55 @@ async function resolveWorkspaceApiKey(env: Env, apiKey: string): Promise<{
   const hash = await sha256(apiKey);
   const keyData = await new CfKvStore(env.CONFIG_KV).get(`apikey:${hash}`);
   if (!keyData) return null;
-  const { tenant_id, user_id } = JSON.parse(keyData) as {
+  const { tenant_id, user_id, credential } = JSON.parse(keyData) as {
     tenant_id: string;
     user_id?: string;
+    credential?: ApiKeyResolution["credential"];
   };
-  if (user_id) return { tenantId: tenant_id, userId: user_id };
-  if (!env.MAIN_DB) return { tenantId: tenant_id };
+  if (user_id) return { tenantId: tenant_id, userId: user_id, credential };
+  if (!env.MAIN_DB) return { tenantId: tenant_id, credential };
   try {
     const result = await env.MAIN_DB
       .prepare(`SELECT id FROM "user" WHERE tenantId = ? LIMIT 2`)
       .bind(tenant_id)
       .all<{ id: string }>();
     return result.results?.length === 1
-      ? { tenantId: tenant_id, userId: result.results[0].id }
-      : { tenantId: tenant_id };
+      ? { tenantId: tenant_id, userId: result.results[0].id, credential }
+      : { tenantId: tenant_id, credential };
   } catch (err) {
     logWarn(
       { op: "auth.tenant_user_lookup", tenant_id, err },
       "MAIN_DB user lookup failed; proceeding without user_id",
     );
-    return { tenantId: tenant_id };
+    return { tenantId: tenant_id, credential };
   }
 }
 
 export const authMiddleware = createMiddleware<{
   Bindings: Env;
-  Variables: { tenant_id: string; user_id?: string };
+  Variables: {
+    tenant_id: string;
+    user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
 }>(async (c, next) => {
   // Internal endpoints have their own header-secret auth (see routes/internal.ts)
   if (c.req.path.startsWith("/v1/oma/internal/")) {
     return next();
   }
-  // MCP proxy authenticates via Bearer oma_* on every request — its own
-  // resolveProxyTarget validates token + session ownership in one shot.
-  if (c.req.path.startsWith("/v1/oma/mcp-proxy/")) {
-    return next();
-  }
-
   // 1. Try API Key authentication (for CLI / SDK)
   const apiKey = c.req.header("x-api-key");
-  if (apiKey) {
-    const resolved = await resolveWorkspaceApiKey(c.env, apiKey);
-    if (!resolved) return c.json({ error: "Invalid API key" }, 401);
+    if (apiKey) {
+      const resolved = await resolveWorkspaceApiKey(c.env, apiKey);
+      if (!resolved) return c.json({ error: "Invalid API key" }, 401);
+      if (!allowsApiKeyRequest(resolved, { path: c.req.path, transport: "x-api-key" })) {
+        return c.json({ error: "API key is not authorized for this resource" }, 403);
+      }
     c.set("tenant_id", resolved.tenantId);
     if (resolved.userId) c.set("user_id", resolved.userId);
+    if (resolved.credential !== undefined) {
+      c.set("auth_credential", resolved.credential);
+    }
     return next();
   }
 
@@ -76,25 +92,68 @@ export const authMiddleware = createMiddleware<{
   const authorization = c.req.header("authorization") ?? "";
   if (authorization.startsWith("Bearer ")) {
     const token = authorization.slice("Bearer ".length);
-    let resolved: { tenantId: string; userId?: string } | null = null;
+    let resolved: ApiKeyResolution | null = null;
     if (token.startsWith("sk-ant-req-v1.") && c.env.PLATFORM_ROOT_SECRET) {
+      const platformRootSecret = c.env.PLATFORM_ROOT_SECRET;
       const scoped = await authenticateEnvironmentWorkSessionBearer({
         token,
         method: c.req.method,
         path: c.req.path,
         crypto: new WebCryptoAesGcm(
-          c.env.PLATFORM_ROOT_SECRET,
+          platformRootSecret,
           "managed.environment-work.session-token",
         ),
         now: () => new Date(),
+        isCurrent: async (claim) => {
+          const tenantDb = await buildCfTenantDbProvider(c.env).resolve(
+            claim.workspaceId,
+          );
+          const secretCrypto = new WebCryptoAesGcm(
+            platformRootSecret,
+            "managed.environment-work.secret",
+          );
+          const store = new SqlEnvironmentWorkStore(
+            new CfD1SqlClient(tenantDb),
+            {
+              seal: async ({ plaintext }) => ({
+                ciphertext: await secretCrypto.encrypt(plaintext),
+              }),
+              open: async ({ ciphertext }) => ({
+                plaintext: await secretCrypto.decrypt(ciphertext),
+              }),
+            },
+          );
+          return isCurrentEnvironmentWorkClaim(
+            { store, now: () => new Date() },
+            claim,
+          );
+        },
       });
-      if (scoped !== null) resolved = { tenantId: scoped.workspaceId };
+      if (scoped !== null) {
+        resolved = {
+          tenantId: scoped.workspaceId,
+          credential: {
+            type: "environment_work_session",
+            environmentId: scoped.environmentId,
+            sessionId: scoped.sessionId,
+            workId: scoped.workId,
+            claimedAt: scoped.claimedAt,
+            generation: scoped.generation,
+          },
+        };
+      }
     } else {
       resolved = await resolveWorkspaceApiKey(c.env, token);
     }
     if (resolved === null) return c.json({ error: "Invalid bearer token" }, 401);
+    if (!allowsApiKeyRequest(resolved, { path: c.req.path, transport: "bearer" })) {
+      return c.json({ error: "Bearer token is not authorized for this resource" }, 403);
+    }
     c.set("tenant_id", resolved.tenantId);
     if (resolved.userId) c.set("user_id", resolved.userId);
+    if (resolved.credential !== undefined) {
+      c.set("auth_credential", resolved.credential);
+    }
     return next();
   }
 

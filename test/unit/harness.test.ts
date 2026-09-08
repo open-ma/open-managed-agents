@@ -7,7 +7,9 @@ import { resolveSkills, registerSkill } from "../../apps/agent/src/harness/skill
 import { SummarizeCompaction } from "../../apps/agent/src/harness/compaction";
 import { TestSandbox, createSandbox, CloudflareSandbox } from "../../apps/agent/src/runtime/sandbox";
 import {
+  createCloudflareManagedEnvironmentWorker,
   createCloudflareManagedRuntime,
+  createCloudflareManagedRuntimeDriver,
   createCloudflareManagedRuntimeHost,
 } from "../../apps/agent/src/runtime/managed-runtime";
 import { buildTools } from "../../apps/agent/src/harness/tools";
@@ -437,6 +439,93 @@ describe("Sandbox lifecycle", () => {
     });
   });
 
+  it("projects the configured Cloudflare runtime through the swappable provider driver Port", async () => {
+    const driver = createCloudflareManagedRuntimeDriver({
+      SANDBOX: {},
+      FILES_BUCKET: {},
+      R2_ENDPOINT: "https://example.r2.cloudflarestorage.com",
+      R2_ACCESS_KEY_ID: "access",
+      R2_SECRET_ACCESS_KEY: "secret",
+    } as any);
+
+    expect(driver.descriptor()).toEqual({
+      provider: "cloudflare",
+      version: "1.0.0",
+      placements: ["in_process"],
+      capabilities: {
+        sandbox: {
+          suspendResume: "unsupported",
+          hardTerminate: "supported",
+          runtimeCheckpoints: [],
+        },
+        workspace: { strategies: ["checkpoint_restore"] },
+        outputs: {
+          strategies: [
+            { strategy: "durable_mount", durability: "durable" },
+            { strategy: "final_collect", durability: "durable" },
+          ],
+        },
+        harness: { drivers: ["ama_worker", "openma_supervised"] },
+      },
+      credentialEgress: {
+        enforcement: "enforced",
+        credentialMode: "live",
+        interceptedProtocols: ["http", "https"],
+      },
+    });
+
+    const resources = await driver.create({
+      environmentId: "environment-1",
+      placement: "in_process",
+      profile: {
+        workspace: { requirement: "durable" },
+        outputs: { requirement: "durable" },
+        runtimeCheckpoint: "disabled",
+        credentialEgress: { requirement: "required" },
+        driver: {
+          type: "openma_supervised",
+          protocol: "openma-harness-supervisor-v1",
+          supervisor: { command: "openma-harness-supervisor" },
+          harness: { id: "pi", version: "1" },
+          readyTimeoutMs: 30_000,
+          heartbeatTimeoutMs: 30_000,
+          drainTimeoutMs: 30_000,
+        },
+      },
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: "durable_mount",
+        runtimeCheckpoint: null,
+        driver: {
+          type: "openma_supervised",
+          protocol: "openma-harness-supervisor-v1",
+          supervisor: { command: "openma-harness-supervisor" },
+          harness: { id: "pi", version: "1" },
+          readyTimeoutMs: 30_000,
+          heartbeatTimeoutMs: 30_000,
+          drainTimeoutMs: 30_000,
+        },
+      },
+      providerConfig: {},
+    });
+    const scope = {
+      workspaceId: "workspace-1",
+      environmentId: "environment-1",
+      sessionId: "session-1",
+      workId: "work-1",
+    };
+
+    await expect(resources.outputs.capabilities(scope)).resolves.toEqual(
+      driver.descriptor().capabilities.outputs,
+    );
+    await expect(resources.harnessDriver.driverCapabilities(scope)).resolves.toEqual(
+      driver.descriptor().capabilities.harness,
+    );
+    await expect(resources.credentialEgress?.capabilities(scope)).resolves.toEqual(
+      driver.descriptor().credentialEgress,
+    );
+  });
+
   it("Cloudflare managed runtime mounts Session outputs through the dedicated output Port", async () => {
     const mounted: Array<{ tenantId: string; sessionId: string }> = [];
     const fakeSandbox = {
@@ -530,6 +619,122 @@ describe("Sandbox lifecycle", () => {
     expect(mounted).toEqual([{ tenantId: "tenant-1", sessionId: "session-1" }]);
   });
 
+  it("Cloudflare managed runtime fences and revokes credential egress", async () => {
+    const outboundContexts: unknown[] = [];
+    const revocations: unknown[] = [];
+    const fakeSandbox = {
+      runtimeHandle: () => ({ provider: "cloudflare", runtimeId: "session-1" }),
+      runtimeCapabilities: () => ({
+        lease: true,
+        suspend: [],
+        checkpoint: ["filesystem"],
+      }),
+      status: async () => "running",
+      renewLease: async () => {},
+      suspend: async () => { throw new Error("not supported"); },
+      resume: async () => {},
+      checkpoint: async () => ({
+        provider: "cloudflare",
+        checkpointId: "backup-1",
+        sourceRuntimeId: "session-1",
+        kind: "filesystem",
+        scope: "portable",
+      }),
+      exec: async () => "",
+      readFile: async () => "",
+      writeFile: async (path: string) => path,
+      destroy: async () => {},
+      async setOutboundContext(input: unknown) { outboundContexts.push(input); },
+      async revokeOutboundContext(input: unknown) { revocations.push(input); },
+    };
+    const runtime = createCloudflareManagedRuntime(
+      { SANDBOX: {} } as any,
+      {
+        createSandbox: () => fakeSandbox as any,
+        controlPlaneBaseUrl: "https://api.openma.test/v1",
+      },
+    );
+    const scope = {
+      workspaceId: "tenant-1",
+      environmentId: "environment-1",
+      sessionId: "session-1",
+      workId: "work-1",
+    };
+    const fence = {
+      ...scope,
+      ownerId: "worker-1",
+      generation: 7,
+      token: "secret-fence",
+      expiresAt: "2026-09-06T12:00:00.000Z",
+    };
+    const signal = new AbortController().signal;
+
+    await expect(runtime.credentialEgress!.capabilities(scope)).resolves.toEqual({
+      enforcement: "enforced",
+      credentialMode: "live",
+      interceptedProtocols: ["http", "https"],
+    });
+    const egress = await runtime.credentialEgress!.prepare({
+      scope,
+      fence,
+      requirement: "required",
+      idempotencyKey: "egress",
+      signal,
+    });
+    const workspace = await runtime.workspace.materialize({
+      scope,
+      fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "workspace",
+      signal,
+    });
+    const lease = await runtime.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker" } },
+      },
+      workspace,
+      outputs: null,
+      credentialEgress: egress,
+      signal,
+    });
+    await runtime.credentialEgress!.attach({
+      scope,
+      fence,
+      binding: egress!,
+      sandbox: lease,
+      signal,
+    });
+    await runtime.credentialEgress!.revoke({
+      scope,
+      fence,
+      binding: egress!,
+      reason: "lease_lost",
+    });
+
+    expect(outboundContexts).toEqual([{
+      tenantId: "tenant-1",
+      environmentId: "environment-1",
+      sessionId: "session-1",
+      workId: "work-1",
+      ownerId: "worker-1",
+      generation: 7,
+      fenceToken: "secret-fence",
+      required: true,
+      controlPlaneBaseUrl: "https://api.openma.test/v1",
+    }]);
+    expect(revocations).toEqual([{
+      workId: "work-1",
+      generation: 7,
+      reason: "lease_lost",
+    }]);
+  });
+
   it("CloudflareSandbox surfaces an output mount failure to its Port caller", async () => {
     const sandbox = new CloudflareSandbox({
       SANDBOX: {},
@@ -566,6 +771,66 @@ describe("Sandbox lifecycle", () => {
     });
     expect(runtime.host).toBeDefined();
     expect(runtime.orphanReconciler).toBeDefined();
+  });
+
+  it("Cloudflare host preset exposes the operator Session metadata materializer", () => {
+    const sessionInputs = {
+      materialize: vi.fn(async () => undefined),
+    };
+    const runtime = createCloudflareManagedRuntimeHost(
+      { SANDBOX: {}, FILES_BUCKET: {}, MAIN_DB: {} } as any,
+      {
+        ownerId: "environment-worker:one",
+        sessionInputs,
+      },
+    );
+
+    expect(runtime.sessionInputs).toBe(sessionInputs);
+  });
+
+  it("Cloudflare Environment Worker preset composes the official queue runner with the fenced host", () => {
+    const client = {
+      baseURL: "https://api.example.test",
+      beta: {
+        environments: { work: { poller: vi.fn() } },
+        webhooks: { unwrap: vi.fn() },
+      },
+      withOptions: () => ({
+        beta: {
+          environments: {
+            work: { heartbeat: vi.fn(), stop: vi.fn() },
+          },
+        },
+      }),
+    };
+    const cluster = createCloudflareManagedEnvironmentWorker(
+      { SANDBOX: {}, FILES_BUCKET: {}, MAIN_DB: {} } as any,
+      {
+        runtime: { ownerId: "environment-worker:one" },
+        worker: {
+          client,
+          environmentId: "env_01",
+          environmentKey: "environment-key",
+          workspaceId: "workspace_01",
+          profileFor: async () => ({
+            workspace: { requirement: "ephemeral" },
+            outputs: { requirement: "disabled" },
+            runtimeCheckpoint: "disabled",
+            driver: {
+              type: "ama_worker",
+              process: { command: "node", args: ["worker.mjs"] },
+            },
+          }),
+        },
+      },
+    );
+
+    expect(cluster.host).toBeDefined();
+    expect(cluster.environmentWorker).toMatchObject({
+      drain: expect.any(Function),
+      handleWebhook: expect.any(Function),
+      run: expect.any(Function),
+    });
   });
 
   it("TestSandbox exec works with various commands", async () => {

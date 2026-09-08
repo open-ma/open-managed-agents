@@ -179,7 +179,7 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
     const polling = this.#fillCapacity();
     this.#polling = polling;
     const clear = () => {
-      if (this.#polling === polling) this.#polling = null;
+      this.#polling = null;
     };
     // `finally()` would create a second rejected Promise when polling fails.
     // Observe both branches explicitly so the background caller owns the only
@@ -299,7 +299,6 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
 
   async #loseLease(active: ActiveExecution, error: unknown): Promise<void> {
     this.#reportError(error);
-    if (active.leaseLost) return;
     active.leaseLost = true;
     try {
       await this.#cancel(active, "lease_lost");

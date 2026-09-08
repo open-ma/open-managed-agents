@@ -23,5 +23,8 @@
   },
   "peerDependenciesMeta": {
     "croner": { "optional": true }
+  },
+  "devDependencies": {
+    "croner": "^9.0.0"
   }
 }

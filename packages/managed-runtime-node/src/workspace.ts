@@ -124,7 +124,7 @@ export class NodeFilesystemWorkspacePort implements WorkspacePersistencePort {
       try {
         await rename(stageRoot, finalRoot);
       } catch (renameError) {
-        if ((renameError as NodeJS.ErrnoException).code !== "EEXIST") throw renameError;
+        rethrowUnlessCheckpointPublicationConflict(renameError);
         await rm(stageRoot, { recursive: true, force: true });
       }
     }
@@ -150,4 +150,12 @@ export class NodeFilesystemWorkspacePort implements WorkspacePersistencePort {
     );
     await rm(bindingRoot, { recursive: true, force: true });
   }
+}
+
+/** Normalize platform-specific results of racing immutable directory publishes. */
+export function rethrowUnlessCheckpointPublicationConflict(error: unknown): void {
+  const code = (error as NodeJS.ErrnoException).code;
+  // POSIX commonly reports ENOTEMPTY when two publishers race to install the
+  // same non-empty directory; Windows may report EEXIST.
+  if (code !== "EEXIST" && code !== "ENOTEMPTY") throw error;
 }

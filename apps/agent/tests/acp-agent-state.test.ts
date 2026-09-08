@@ -58,11 +58,15 @@ describe("ACP agent-native session state", () => {
         "/workspace/.openma/harness-state/acp/session%2F..%2Funsafe/claude-code/v1",
       checkpointPath:
         "/workspace/.openma/harness-state/acp/session%2F..%2Funsafe/claude-code/v1/acp-session.json",
-      nativePath:
+      checkpointNativePath:
         "/workspace/.openma/harness-state/acp/session%2F..%2Funsafe/claude-code/v1/native",
+      nativePath:
+        "/tmp/openma-harness-state/acp/session%2F..%2Funsafe/claude-code/v1/native",
       sessionArtifacts: [{
         path:
           "/workspace/.openma/harness-state/acp/session%2F..%2Funsafe/claude-code/v1/native/projects",
+        runtimePath:
+          "/tmp/openma-harness-state/acp/session%2F..%2Funsafe/claude-code/v1/native/projects",
         kind: "directory",
         requiredForResume: true,
       }],
@@ -72,10 +76,10 @@ describe("ACP agent-native session state", () => {
         args: ["--stdio"],
         env: {
           CLAUDE_CONFIG_DIR:
-            "/workspace/.openma/harness-state/acp/session%2F..%2Funsafe/claude-code/v1/native",
+            "/tmp/openma-harness-state/acp/session%2F..%2Funsafe/claude-code/v1/native",
           KEEP: "yes",
           OPENMA_ACP_STATE_ROOT:
-            "/workspace/.openma/harness-state/acp/session%2F..%2Funsafe/claude-code/v1",
+            "/tmp/openma-harness-state/acp/session%2F..%2Funsafe/claude-code/v1",
         },
       },
     });
@@ -91,7 +95,14 @@ describe("ACP agent-native session state", () => {
     expect(binding.durability).toBe("native");
     expect(binding.agent.env).toMatchObject({
       CODEX_HOME:
-        "/workspace/.openma/harness-state/acp/session_1/codex/v1/native",
+        "/tmp/openma-harness-state/acp/session_1/codex/v1/native",
+    });
+    expect(binding.checkpointNativePath).toBe(
+      "/workspace/.openma/harness-state/acp/session_1/codex/v1/native",
+    );
+    expect(binding.sessionArtifacts[0]).toMatchObject({
+      path: "/workspace/.openma/harness-state/acp/session_1/codex/v1/native/sessions",
+      runtimePath: "/tmp/openma-harness-state/acp/session_1/codex/v1/native/sessions",
     });
   });
 
@@ -113,7 +124,7 @@ describe("ACP agent-native session state", () => {
       agent: {
         env: {
           GEMINI_CLI_HOME:
-            "/workspace/.openma/harness-state/acp/session_gemini/gemini/v1/native",
+            "/tmp/openma-harness-state/acp/session_gemini/gemini/v1/native",
         },
       },
     });
@@ -140,9 +151,9 @@ describe("ACP agent-native session state", () => {
       agent: {
         env: {
           XDG_DATA_HOME:
-            "/workspace/.openma/harness-state/acp/session_opencode/opencode/v1/native/xdg-data",
+            "/tmp/openma-harness-state/acp/session_opencode/opencode/v1/native/xdg-data",
           XDG_STATE_HOME:
-            "/workspace/.openma/harness-state/acp/session_opencode/opencode/v1/native/xdg-state",
+            "/tmp/openma-harness-state/acp/session_opencode/opencode/v1/native/xdg-state",
         },
       },
     });
@@ -168,9 +179,9 @@ describe("ACP agent-native session state", () => {
       agent: {
         env: {
           HOME:
-            "/workspace/.openma/harness-state/acp/session_pi/pi/v1/native/home",
+            "/tmp/openma-harness-state/acp/session_pi/pi/v1/native/home",
           PI_CODING_AGENT_DIR:
-            "/workspace/.openma/harness-state/acp/session_pi/pi/v1/native/home/.pi/agent",
+            "/tmp/openma-harness-state/acp/session_pi/pi/v1/native/home/.pi/agent",
         },
       },
     });
@@ -194,7 +205,7 @@ describe("ACP agent-native session state", () => {
       agent: {
         env: {
           MINIMAX_DATA_DIR:
-            "/workspace/.openma/harness-state/acp/session_mcode/mcode/v1/native",
+            "/tmp/openma-harness-state/acp/session_mcode/mcode/v1/native",
         },
       },
     });
@@ -206,7 +217,7 @@ describe("ACP agent-native session state", () => {
       adapterId: "copilot",
       env: {
         HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/copilot/v1/native/home",
+          "/tmp/openma-harness-state/acp/session_matrix/copilot/v1/native/home",
       },
     },
     {
@@ -214,7 +225,7 @@ describe("ACP agent-native session state", () => {
       adapterId: "cortex-code",
       env: {
         HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/cortex-code/v1/native/home",
+          "/tmp/openma-harness-state/acp/session_matrix/cortex-code/v1/native/home",
       },
     },
     {
@@ -222,9 +233,9 @@ describe("ACP agent-native session state", () => {
       adapterId: "goose",
       env: {
         XDG_DATA_HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/goose/v1/native/xdg-data",
+          "/tmp/openma-harness-state/acp/session_matrix/goose/v1/native/xdg-data",
         XDG_STATE_HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/goose/v1/native/xdg-state",
+          "/tmp/openma-harness-state/acp/session_matrix/goose/v1/native/xdg-state",
       },
     },
     {
@@ -232,7 +243,7 @@ describe("ACP agent-native session state", () => {
       adapterId: "junie",
       env: {
         HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/junie/v1/native/home",
+          "/tmp/openma-harness-state/acp/session_matrix/junie/v1/native/home",
       },
     },
     {
@@ -240,7 +251,7 @@ describe("ACP agent-native session state", () => {
       adapterId: "kimi",
       env: {
         KIMI_SHARE_DIR:
-          "/workspace/.openma/harness-state/acp/session_matrix/kimi/v1/native/share",
+          "/tmp/openma-harness-state/acp/session_matrix/kimi/v1/native/share",
       },
     },
     {
@@ -248,7 +259,7 @@ describe("ACP agent-native session state", () => {
       adapterId: "qwen-code",
       env: {
         HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/qwen-code/v1/native/home",
+          "/tmp/openma-harness-state/acp/session_matrix/qwen-code/v1/native/home",
       },
     },
     {
@@ -256,7 +267,7 @@ describe("ACP agent-native session state", () => {
       adapterId: "mistral-vibe",
       env: {
         VIBE_HOME:
-          "/workspace/.openma/harness-state/acp/session_matrix/mistral-vibe/v1/native",
+          "/tmp/openma-harness-state/acp/session_matrix/mistral-vibe/v1/native",
       },
     },
   ])("binds Harbor's native session contract for $id", ({ id, adapterId, env }) => {
@@ -270,6 +281,20 @@ describe("ACP agent-native session state", () => {
       durability: "native",
       agent: { env },
     });
+    expect(binding.nativePath).toBe(
+      `/tmp/openma-harness-state/acp/session_matrix/${adapterId}/v1/native`,
+    );
+    expect(binding.checkpointNativePath).toBe(
+      `/workspace/.openma/harness-state/acp/session_matrix/${adapterId}/v1/native`,
+    );
+    for (const artifact of binding.sessionArtifacts) {
+      expect(artifact.runtimePath).toMatch(
+        new RegExp(`^/tmp/openma-harness-state/acp/session_matrix/${adapterId}/v1/native(?:/|$)`),
+      );
+      expect(artifact.path).toMatch(
+        new RegExp(`^/workspace/\\.openma/harness-state/acp/session_matrix/${adapterId}/v1/native(?:/|$)`),
+      );
+    }
   });
 
   it("binds Hermes' SQLite session store through HERMES_HOME", () => {
@@ -285,7 +310,7 @@ describe("ACP agent-native session state", () => {
       agent: {
         env: {
           HERMES_HOME:
-            "/workspace/.openma/harness-state/acp/session_hermes/hermes/v1/native",
+            "/tmp/openma-harness-state/acp/session_hermes/hermes/v1/native",
         },
       },
     });
@@ -335,7 +360,7 @@ describe("ACP agent-native session state", () => {
         env: {
           KEEP: "yes",
           OPENMA_ACP_STATE_ROOT:
-            "/workspace/.openma/harness-state/acp/session_1/opaque/v1",
+            "/tmp/openma-harness-state/acp/session_1/opaque/v1",
         },
       },
     });

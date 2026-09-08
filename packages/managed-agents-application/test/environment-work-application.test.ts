@@ -104,6 +104,10 @@ function makeDependencies(overrides: {
       wait: unexpected("wait for work availability"),
       ...overrides.availability,
     } satisfies EnvironmentWorkAvailabilityWaiterPort,
+    credentials: {
+      issue: unexpected("issue credential"),
+      bindToClaim: async ({ secret }: { secret: typeof stored.secret }) => ({ secret }),
+    },
     clock: { now: () => new Date("2026-08-26T09:20:00.000Z") },
   };
 }
@@ -112,6 +116,7 @@ describe("Environment Work application", () => {
   it("enqueues a complete self-hosted Session work aggregate with an issued credential", async () => {
     const credentialCalls: object[] = [];
     const insertCalls: object[] = [];
+    const wakeupCalls: object[] = [];
     const queuedWork: EnvironmentWork = {
       ...work,
       createdAt: "2026-08-26T09:20:00.000Z",
@@ -130,6 +135,12 @@ describe("Environment Work application", () => {
         issue: async (input) => {
           credentialCalls.push(input);
           return { type: "issued", secret: stored.secret };
+        },
+        bindToClaim: async ({ secret }) => ({ secret }),
+      },
+      wakeup: {
+        notifyRunStarted: async (input) => {
+          wakeupCalls.push(input);
         },
       },
       clock: { now: () => new Date("2026-08-26T09:20:00.000Z") },
@@ -157,6 +168,48 @@ describe("Environment Work application", () => {
         },
       },
     ]);
+    expect(wakeupCalls).toEqual([{
+      workspaceId: "workspace_01",
+      environmentId: "env_self_01",
+      sessionId: "session_01",
+      workId: "work_01",
+      occurredAt: "2026-08-26T09:20:00.000Z",
+    }]);
+  });
+
+  it("keeps durable work queued when the best-effort webhook delivery fails", async () => {
+    let inserted = false;
+    const enqueuer = new EnvironmentWorkEnqueuerService({
+      workspaceId: "workspace_01",
+      store: {
+        ...makeDependencies().store,
+        insert: async (input) => {
+          inserted = true;
+          return { ...input.record, revision: 1 };
+        },
+      },
+      credentials: {
+        issue: async () => ({ type: "issued", secret: stored.secret }),
+        bindToClaim: async ({ secret }) => ({ secret }),
+      },
+      wakeup: {
+        notifyRunStarted: async () => {
+          throw new Error("injected webhook outage");
+        },
+      },
+      clock: { now: () => new Date("2026-08-26T09:20:00.000Z") },
+      ids: { nextEnvironmentWorkId: () => "work_01" },
+    });
+
+    await expect(enqueuer.enqueue({
+      workspaceId: "workspace_01",
+      environment,
+      session,
+    })).resolves.toMatchObject({
+      type: "queued",
+      work: { id: "work_01", state: "queued" },
+    });
+    expect(inserted).toBe(true);
   });
 
   it("requests graceful shutdown for the active work of a stopped Session", async () => {
@@ -184,7 +237,9 @@ describe("Environment Work application", () => {
         issue: async () => {
           throw new Error("unexpected credential issue");
         },
+        bindToClaim: async ({ secret }) => ({ secret }),
       },
+      wakeup: { notifyRunStarted: async () => {} },
       clock: { now: () => new Date("2026-08-26T09:20:00.000Z") },
       ids: { nextEnvironmentWorkId: () => "work_unexpected" },
     });
@@ -313,6 +368,10 @@ describe("Environment Work application", () => {
               ? { type: "empty" }
               : { type: "claimed", record: claimed };
           },
+          replace: async (input) => ({
+            type: "replaced",
+            record: { ...input.next, revision: input.expectedRevision + 1 },
+          }),
         },
         availability: {
           wait: async (input) => {
@@ -340,6 +399,7 @@ describe("Environment Work application", () => {
         claimedAt: "2026-08-26T09:20:00.000Z",
         reclaimBefore: "2026-08-26T09:19:55.000Z",
         workerId: "worker_01",
+        heartbeatTtlSeconds: 90,
       },
       {
         workspaceId: "workspace_01",
@@ -347,6 +407,7 @@ describe("Environment Work application", () => {
         claimedAt: "2026-08-26T09:20:00.000Z",
         reclaimBefore: "2026-08-26T09:19:55.000Z",
         workerId: "worker_01",
+        heartbeatTtlSeconds: 90,
       },
     ]);
     expect(waitCalls).toEqual([
@@ -356,6 +417,73 @@ describe("Environment Work application", () => {
         maximumWaitMilliseconds: 500,
       },
     ]);
+  });
+
+  it("binds a fresh sessions token to the claimed Work before exposing it", async () => {
+    const claimed = {
+      ...stored,
+      claim: {
+        claimedAt: "2026-08-26T09:20:00.000Z",
+        workerId: "worker_01",
+      },
+      revision: 4,
+    } satisfies StoredEnvironmentWork;
+    const replacementCalls: object[] = [];
+    const service = new EnvironmentWorkApplicationService({
+      ...makeDependencies({
+        environments: { find: async () => environment },
+        store: {
+          claimAvailable: async () => ({ type: "claimed", record: claimed }),
+          replace: async (input) => {
+            replacementCalls.push(input);
+            return {
+              type: "replaced" as const,
+              record: { ...input.next, revision: 5 },
+            };
+          },
+        },
+      }),
+      credentials: {
+        issue: async () => {
+          throw new Error("unexpected initial credential issue");
+        },
+        bindToClaim: async () => ({
+          secret: {
+            ...stored.secret,
+            sessionsToken: "sk-ant-req-claim-bound-token",
+          },
+        }),
+      },
+    } as never);
+
+    await expect(service.pollEnvironmentWork({
+      environmentId: "env_self_01",
+      workerId: "worker_01",
+    })).resolves.toEqual({
+      type: "work",
+      work: {
+        ...work,
+        secret: {
+          ...stored.secret,
+          sessionsToken: "sk-ant-req-claim-bound-token",
+        },
+      },
+    });
+    expect(replacementCalls).toEqual([{
+      workspaceId: "workspace_01",
+      environmentId: "env_self_01",
+      workId: "work_01",
+      expectedRevision: 4,
+      next: {
+        work,
+        secret: {
+          ...stored.secret,
+          sessionsToken: "sk-ant-req-claim-bound-token",
+        },
+        claim: claimed.claim,
+        heartbeatTtlSeconds: 90,
+      },
+    }]);
   });
 
   it("acknowledges a claimed item under optimistic concurrency", async () => {

@@ -16,6 +16,8 @@ import type {
 import { LocalSubprocessSandbox } from "@open-managed-agents/sandbox/adapters/local-subprocess";
 import { buildTools } from "@open-managed-agents/agent/harness/tools";
 import { PiHarness } from "@open-managed-agents/agent/harness/pi-loop";
+import { registerCoreHarnesses } from "@open-managed-agents/agent/harness/builtins";
+import { resolveHarness } from "@open-managed-agents/agent/harness/registry";
 import type {
   HarnessContext,
   HarnessRuntime,
@@ -112,7 +114,8 @@ describe(
           runtime,
         } satisfies HarnessContext;
 
-        await new PiHarness().run(context);
+        registerCoreHarnesses();
+        await resolveHarness("pi").run(context);
 
         expect(await sandbox.readFile("/workspace/openma-pi-harness.txt")).toBe(
           "pi-harness-sandbox-port-ok",

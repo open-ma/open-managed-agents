@@ -1,0 +1,194 @@
+import { PassThrough } from "node:stream";
+import { describe, expect, it, vi } from "vitest";
+
+import {
+  createSpritesManagedRuntime,
+  createSpritesManagedRuntimeDriver,
+  createSpritesProvider,
+  type SpriteFilesystemPort,
+  type SpriteSdkPort,
+  type SpritesClientPort,
+} from "../src/sprites";
+
+const scope = {
+  workspaceId: "workspace_1",
+  environmentId: "environment_1",
+  sessionId: "session_1",
+  workId: "work_1",
+};
+const fence = {
+  ...scope,
+  ownerId: "owner_1",
+  generation: 1,
+  token: "secret",
+  expiresAt: "2026-09-07T12:00:00.000Z",
+};
+
+class FakeFilesystem implements SpriteFilesystemPort {
+  readFile(_path: string, encoding: "utf8"): Promise<string>;
+  readFile(_path: string, encoding?: null): Promise<Buffer>;
+  async readFile(_path: string, encoding: "utf8" | null = null): Promise<string | Buffer> {
+    return encoding === "utf8" ? "content" : Buffer.from("content");
+  }
+  readonly writeFile = vi.fn(async () => {});
+  readonly mkdir = vi.fn(async () => {});
+}
+
+class FakeSprite implements SpriteSdkPort {
+  readonly id = "sprite-id";
+  status = "running";
+  labels: string[] = [];
+  readonly filesystemPort = new FakeFilesystem();
+  readonly filesystem = vi.fn(() => this.filesystemPort);
+  readonly execFileHTTP = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+  readonly closeControlConnection = vi.fn();
+  readonly check = vi.fn(async () => ({ status: this.status }));
+  readonly delete = vi.fn(async () => {});
+  readonly updateNetworkPolicy = vi.fn(async () => {});
+  readonly spawn = vi.fn(() => {
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const stderr = new PassThrough();
+    return {
+      stdin,
+      stdout,
+      stderr,
+      start: vi.fn(async () => { stdout.end("worker output"); stderr.end(); }),
+      wait: vi.fn(async () => 0),
+      kill: vi.fn(),
+      close: vi.fn(),
+    };
+  });
+
+  constructor(readonly name: string) {}
+}
+
+function client(sprite: FakeSprite): SpritesClientPort {
+  return {
+    getSprite: vi.fn(async () => sprite),
+    createSprite: vi.fn(async () => sprite),
+    deleteSprite: vi.fn(async () => {}),
+  };
+}
+
+describe("Sprites managed runtime provider", () => {
+  it("uses stable identity, persistent filesystem, auto-pause handoff, and duplex execution", async () => {
+    const sprite = new FakeSprite("placeholder");
+    const sdk = client(sprite);
+    (sdk.getSprite as ReturnType<typeof vi.fn>).mockRejectedValueOnce(
+      Object.assign(new Error("not found"), { statusCode: 404 }),
+    );
+    const runtime = createSpritesManagedRuntime({
+      client: sdk,
+      leaseTtlMs: 90_000,
+      outputStore: null,
+      createOptions: async (input) => {
+        Object.defineProperty(sprite, "name", { value: input.name });
+        sprite.labels = input.ownershipLabels;
+        return { config: { ramMB: 2048 }, waitForCapacity: true };
+      },
+    });
+    const signal = new AbortController().signal;
+    const workspace = await runtime.workspace.materialize({
+      scope,
+      fence,
+      strategy: "retained_runtime",
+      activeCheckpoint: null,
+      idempotencyKey: "materialize-1",
+      signal,
+    });
+    const lease = await runtime.sandbox.acquire({
+      scope,
+      fence,
+      plan: {
+        workspaceStrategy: "retained_runtime",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "worker", args: ["--poll"] } },
+      },
+      workspace,
+      outputs: null,
+      signal,
+    });
+
+    expect(sdk.createSprite).toHaveBeenCalledWith(
+      expect.stringMatching(/^oma-[a-f0-9]{32}$/),
+      expect.objectContaining({
+        config: { ramMB: 2048 },
+        waitForCapacity: true,
+        labels: expect.arrayContaining(["openma-managed"]),
+      }),
+    );
+    expect(sprite.execFileHTTP).toHaveBeenCalledWith(
+      "/bin/mkdir",
+      ["-p", "/workspace"],
+      expect.objectContaining({ timeout: 60_000 }),
+    );
+
+    await expect(runtime.harness.run({
+      scope,
+      fence,
+      sandbox: lease,
+      workspacePath: "/workspace",
+      outputPath: null,
+      driver: { type: "ama_worker", process: { command: "worker", args: ["--poll"] } },
+      signal,
+    })).resolves.toEqual({ type: "completed" });
+    expect(sprite.spawn).toHaveBeenCalledWith("worker", ["--poll"], expect.objectContaining({
+      cwd: "/workspace",
+      tty: false,
+    }));
+
+    const suspended = await runtime.sandbox.suspend({ scope, fence, lease, signal });
+    expect(sprite.execFileHTTP).toHaveBeenCalledWith("/bin/sync", [], expect.any(Object));
+    expect(sprite.closeControlConnection).toHaveBeenCalledOnce();
+    await runtime.sandbox.reap({ scope, lease: suspended, reason: "completed" });
+    expect(sdk.deleteSprite).toHaveBeenCalledWith(sprite.name);
+  });
+
+  it("rejects a same-name Sprite without OpenMA ownership labels", async () => {
+    const sprite = new FakeSprite("oma-foreign");
+    const provider = createSpritesProvider({ client: client(sprite) });
+    await expect(provider.resume(
+      { provider: "sprites", runtimeId: sprite.name },
+      { sessionId: scope.sessionId, workdir: "/workspace" },
+      {},
+      {
+        scope,
+        fence,
+        plan: {
+          workspaceStrategy: "retained_runtime",
+          outputStrategy: null,
+          runtimeCheckpoint: null,
+          driver: { type: "ama_worker", process: { command: "worker" } },
+        },
+        workspace: { bindingId: "binding", mountPath: "/workspace" },
+        outputs: null,
+        credentialEgress: null,
+        signal: new AbortController().signal,
+      },
+    )).rejects.toThrow("ownership labels");
+  });
+
+  it("advertises provider-retained workspace without inventing process checkpoints", () => {
+    const driver = createSpritesManagedRuntimeDriver({
+      client: client(new FakeSprite("unused")),
+      leaseTtlMs: 90_000,
+      outputStore: null,
+    });
+    expect(driver.descriptor()).toMatchObject({
+      provider: "sprites",
+      placements: ["in_process"],
+      capabilities: {
+        sandbox: {
+          suspendResume: "supported",
+          hardTerminate: "supported",
+          runtimeCheckpoints: [],
+        },
+        workspace: { strategies: ["retained_runtime"] },
+        outputs: { strategies: [] },
+        harness: { drivers: ["ama_worker", "openma_supervised"] },
+      },
+    });
+  });
+});

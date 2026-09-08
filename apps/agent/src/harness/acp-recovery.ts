@@ -176,7 +176,6 @@ function contentToText(content: readonly ContentBlock[]): string {
 }
 
 function takeRecentLines(lines: readonly string[], budget: number): string {
-  if (budget <= 0) return "";
   const selected: string[] = [];
   let remaining = budget;
   for (let index = lines.length - 1; index >= 0; index -= 1) {
@@ -208,7 +207,6 @@ function takeRecentLines(lines: readonly string[], budget: number): string {
 function truncateCurrentRequest(text: string, budget: number): string {
   if (text.length <= budget) return text;
   const marker = "\n… [current request truncated] …\n";
-  if (budget <= marker.length) return marker.slice(0, budget);
   const remaining = budget - marker.length;
   const head = Math.ceil(remaining / 2);
   const tail = Math.floor(remaining / 2);

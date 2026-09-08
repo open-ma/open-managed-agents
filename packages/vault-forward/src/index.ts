@@ -208,6 +208,12 @@ const DEFAULT_SCRUB = [
   "x-forwarded-for",
   "x-forwarded-proto",
   "x-real-ip",
+  // Control-plane and proxy credentials authenticate the caller to OpenMA,
+  // never the upstream MCP server.
+  "x-api-key",
+  "proxy-authorization",
+  "cookie",
+  "x-active-tenant",
 ];
 
 function buildUpstreamHeaders(
@@ -232,6 +238,10 @@ export async function forwardWithRefresh(opts: ForwardOpts): Promise<Response> {
       method: opts.method,
       headers,
       body: isGetHead ? undefined : (opts.body as BodyInit | null | undefined),
+      // Never replay a Vault bearer to a redirect target. The caller may
+      // resolve/authorize the new destination explicitly if redirects are a
+      // required part of a provider protocol.
+      redirect: "manual",
     };
     return fetcher(opts.upstreamUrl, init);
   };

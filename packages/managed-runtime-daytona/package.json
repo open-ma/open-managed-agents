@@ -1,0 +1,36 @@
+{
+  "name": "@open-managed-agents/managed-runtime-daytona",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/blob-store": "workspace:*",
+    "@open-managed-agents/managed-runtime-sandbox": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*"
+  },
+  "peerDependencies": {
+    "@daytona/sdk": "^0.210.0",
+    "@daytonaio/sdk": "^0.171.0"
+  },
+  "peerDependenciesMeta": {
+    "@daytona/sdk": {
+      "optional": true
+    },
+    "@daytonaio/sdk": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.3"
+  }
+}

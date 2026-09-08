@@ -340,6 +340,9 @@ describe("NodeSessionExecutionWorker", () => {
     expect(() => worker("node_01", { maxConcurrent: 0 })).toThrow(
       "maxConcurrent must be a positive integer",
     );
+    expect(() => worker("node_01", { maxConcurrent: 1.5 })).toThrow(
+      "maxConcurrent must be a positive integer",
+    );
 
     const errors: Error[] = [];
     const executor = worker("node_01", {
@@ -353,7 +356,7 @@ describe("NodeSessionExecutionWorker", () => {
         find: coordinator.find.bind(coordinator),
         requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
         cancelSession: coordinator.cancelSession.bind(coordinator),
-        claim: async () => { throw new Error("poll failed"); },
+        claim: async () => { throw "poll failed"; },
       },
     });
     executor.start();
@@ -362,6 +365,207 @@ describe("NodeSessionExecutionWorker", () => {
     executor.stop();
     executor.stop();
     expect(errors.some((error) => error.message === "poll failed")).toBe(true);
+  });
+
+  it("applies the documented scheduler defaults", () => {
+    expect(() => new NodeSessionExecutionWorker({
+      coordinator,
+      context,
+      runtime,
+      ownerId: "default_worker",
+      clock: { now: () => now },
+      ids: { nextAttemptId: () => "default_attempt" },
+    })).not.toThrow();
+  });
+
+  it("timestamps unprocessed input and interrupts with the worker clock", async () => {
+    const executor = worker();
+    await executor.sessionEventsAccepted({
+      ...accepted("untimestamped"),
+      events: [{
+        id: "untimestamped",
+        type: "user.message",
+        content: [{ type: "text", text: "untimestamped" }],
+      }],
+    } as Parameters<typeof executor.sessionEventsAccepted>[0]);
+    await executor.waitForIdle();
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: "untimestamped",
+    })).resolves.toMatchObject({ admittedAt: now.toISOString() });
+
+    await executor.sessionEventsAccepted({
+      ...accepted("untimestamped_interrupt", "user.interrupt"),
+      events: [{ id: "untimestamped_interrupt", type: "user.interrupt" }],
+    } as Parameters<typeof executor.sessionEventsAccepted>[0]);
+  });
+
+  it("does not cancel active work belonging to another session", async () => {
+    let release: (() => void) | undefined;
+    runtime.run = async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    };
+    const executor = worker();
+    await executor.sessionEventsAccepted(accepted("event_other_session"));
+    await Promise.resolve();
+
+    await executor.cancelSession({
+      workspaceId: "workspace_01",
+      sessionId: "different_session",
+      reason: "unrelated cancellation",
+    });
+
+    expect(cancellations).toEqual([]);
+    release?.();
+    await executor.waitForIdle();
+  });
+
+  it("settles a runtime rejection caused by cancellation as cancelled", async () => {
+    let rejectRun: ((error: Error) => void) | undefined;
+    runtime.run = async () => await new Promise<void>((_resolve, reject) => {
+      rejectRun = reject;
+    });
+    runtime.cancel = async (input) => {
+      cancellations.push(input.reason);
+      rejectRun?.(new Error("runtime cancelled"));
+    };
+    const executor = worker();
+    await executor.sessionEventsAccepted(accepted("event_cancel_reject"));
+    await Promise.resolve();
+
+    await executor.cancelSession({
+      workspaceId: "workspace_01",
+      sessionId: "session_01",
+      reason: "stop",
+    });
+    await executor.waitForIdle();
+
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: "event_cancel_reject",
+    })).resolves.toMatchObject({ state: "cancelled" });
+  });
+
+  it("reports non-Error polling failures without trusting observability hooks", async () => {
+    const executor = worker("node_report", {
+      onError: () => { throw new Error("observer failed"); },
+      coordinator: {
+        ...coordinator,
+        admit: coordinator.admit.bind(coordinator),
+        renew: coordinator.renew.bind(coordinator),
+        settle: coordinator.settle.bind(coordinator),
+        find: coordinator.find.bind(coordinator),
+        requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+        cancelSession: coordinator.cancelSession.bind(coordinator),
+        claim: async () => { throw "string polling failure"; },
+      },
+    });
+
+    await expect(executor.poll()).rejects.toBe("string polling failure");
+  });
+
+  it("reports cancellation failure after an indeterminate heartbeat", async () => {
+    let release: (() => void) | undefined;
+    const errors: Error[] = [];
+    runtime.run = async () => {
+      await new Promise<void>((resolve) => { release = resolve; });
+    };
+    runtime.cancel = async () => { throw new Error("cancel failed"); };
+    const executor = worker("node_cancel_failure", {
+      heartbeatIntervalMs: 5,
+      leaseTtlMs: 50,
+      onError: (error) => errors.push(error),
+      coordinator: {
+        ...coordinator,
+        admit: coordinator.admit.bind(coordinator),
+        claim: coordinator.claim.bind(coordinator),
+        find: coordinator.find.bind(coordinator),
+        requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+        cancelSession: coordinator.cancelSession.bind(coordinator),
+        settle: coordinator.settle.bind(coordinator),
+        renew: async () => { throw new Error("renew failed"); },
+      },
+    });
+    await executor.sessionEventsAccepted(accepted("event_cancel_failure"));
+    await new Promise((resolve) => setTimeout(resolve, 15));
+
+    expect(errors.map((error) => error.message)).toEqual(
+      expect.arrayContaining(["renew failed", "cancel failed"]),
+    );
+    release?.();
+    await executor.waitForIdle();
+  });
+
+  it("keeps the newer active handle if a faulty coordinator duplicates a claim", async () => {
+    await coordinator.admit({
+      execution: {
+        id: "duplicate_claim",
+        workspaceId: "workspace_01",
+        sessionId: "session_01",
+        admittedAt: "2026-09-04T00:00:01.000Z",
+        events: [...accepted("duplicate_claim").events],
+      },
+    });
+    const claimed = await coordinator.claim({
+      ownerId: "seed",
+      attemptId: "seed_attempt",
+      claimedAt: "2026-09-04T00:00:02.000Z",
+      leaseTtlMs: 30_000,
+    });
+    expect(claimed.type).toBe("claimed");
+    if (claimed.type !== "claimed") return;
+
+    let claimCount = 0;
+    const releases: Array<() => void> = [];
+    runtime.run = async () => await new Promise<void>((resolve) => releases.push(resolve));
+    const executor = worker("duplicate_worker", {
+      maxConcurrent: 2,
+      coordinator: {
+        ...coordinator,
+        admit: coordinator.admit.bind(coordinator),
+        find: coordinator.find.bind(coordinator),
+        requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+        cancelSession: coordinator.cancelSession.bind(coordinator),
+        renew: coordinator.renew.bind(coordinator),
+        claim: async () => ++claimCount <= 2 ? claimed : { type: "empty" },
+        settle: async () => ({ type: "settled", execution: claimed.execution }),
+      },
+    });
+
+    await executor.poll();
+    expect(releases).toHaveLength(2);
+    releases[0]?.();
+    await Promise.resolve();
+    releases[1]?.();
+    await executor.waitForIdle();
+  });
+
+  it("contains background polling errors when no observer is configured", async () => {
+    let observedClaim: (() => void) | undefined;
+    const claimStarted = new Promise<void>((resolve) => { observedClaim = resolve; });
+    const executor = worker("no_observer", {
+      pollIntervalMs: 2,
+      onError: undefined,
+      coordinator: {
+        ...coordinator,
+        admit: coordinator.admit.bind(coordinator),
+        renew: coordinator.renew.bind(coordinator),
+        settle: coordinator.settle.bind(coordinator),
+        find: coordinator.find.bind(coordinator),
+        requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+        cancelSession: coordinator.cancelSession.bind(coordinator),
+        claim: async () => {
+          observedClaim?.();
+          throw new Error("unobserved poll failure");
+        },
+      },
+    });
+
+    executor.start();
+    await claimStarted;
+    await Promise.resolve();
+    await Promise.resolve();
+    executor.stop();
   });
 
   it("ignores empty and control-only batches and exposes admission conflicts", async () => {

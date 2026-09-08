@@ -35,6 +35,8 @@ export const api_keys = sqliteTable(
     name: text("name").notNull(),
     prefix: text("prefix").notNull(),
     hash: text("hash").notNull().unique(),
+    credential_type: text("credential_type").notNull().default("workspace"),
+    environment_id: text("environment_id"),
     created_at: integer("created_at").notNull(),
     last_used_at: integer("last_used_at"),
     revoked_at: integer("revoked_at"),

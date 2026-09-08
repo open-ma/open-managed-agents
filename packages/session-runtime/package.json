@@ -16,6 +16,7 @@
     "test": "vitest run --config vitest.config.ts"
   },
   "dependencies": {
+    "@open-managed-agents/execution-control": "workspace:*",
     "@open-managed-agents/event-log": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*",
     "@open-managed-agents/session-runtime-contract": "workspace:*",

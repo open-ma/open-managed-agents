@@ -29,6 +29,7 @@ describe("Managed Agents SQL adapter boundary", () => {
       "../src/memory-store-sql-source.ts",
       "../src/memory-stores-sql-persistence.ts",
       "../src/session-environment-sql-source.ts",
+      "../src/session-event-polling-stream.ts",
       "../src/session-events-sql-persistence.ts",
       "../src/session-execution-context-sql-source.ts",
       "../src/session-resource-secret-sealer.ts",
