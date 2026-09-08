@@ -16,13 +16,13 @@
     "@astrojs/rss": "^4.0.10",
     "@astrojs/sitemap": "^3.4.1",
     "@fontsource-variable/geist": "^5.2.8",
-    "@tailwindcss/vite": "^4.1.0",
     "@openma/common": "github:openma-ai/openma-common#00358ff9c1e4a694171f5617a4715602c61433e7",
+    "@tailwindcss/vite": "^4.1.0",
     "astro": "^5.13.0",
     "tailwindcss": "^4.1.0",
     "typescript": "npm:@typescript/typescript6@^6.0.2"
   },
   "devDependencies": {
-    "wrangler": "^4.125.0"
+    "wrangler": "^4.129.1"
   }
 }

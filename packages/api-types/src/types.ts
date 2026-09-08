@@ -43,7 +43,11 @@ export type ToolConfig = ToolsetConfig | CustomToolConfig;
 export interface AgentConfig {
   id: string;
   name: string;
-  model: string | { id: string; speed?: "standard" | "fast" };
+  model: string | {
+    id: string;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    speed?: "standard" | "fast";
+  };
   system: string;
   tools: ToolConfig[];
   mcp_servers?: Array<{

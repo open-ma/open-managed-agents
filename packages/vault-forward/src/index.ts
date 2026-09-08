@@ -214,6 +214,11 @@ const DEFAULT_SCRUB = [
   "proxy-authorization",
   "cookie",
   "x-active-tenant",
+  // Internal routing metadata belongs to the OpenMA proxy boundary and must
+  // never be disclosed to an upstream MCP server.
+  "x-oma-tenant",
+  "x-oma-session",
+  "x-oma-mcp-server",
 ];
 
 function buildUpstreamHeaders(

@@ -160,11 +160,25 @@ function anthropicMessage(model, text, inputTokens = 12, outputTokens = 2) {
  * runner uses the delay to create a reliable in-flight crash window.
  */
 export async function createMockLlmServer(options = {}) {
+  const responseText = options.responseText ?? "CHAOS_OK";
+  const toolPlan = Array.isArray(options.toolPlan)
+    ? options.toolPlan.map((step) => ({
+        name: String(step.name),
+        input: step.input ?? {},
+        expectedResult: String(step.expectedResult),
+      }))
+    : options.toolRoundTrip === true
+      ? [{
+          name: "bash",
+          input: { command: "printf CHAOS_SANDBOX_OK" },
+          expectedResult: "CHAOS_SANDBOX_OK",
+        }]
+      : [];
   const state = {
     delayMs: Number(options.delayMs ?? 0),
     delayNext: false,
     errorNext: null,
-    toolRoundTrip: options.toolRoundTrip === true,
+    toolRoundTrip: toolPlan.length > 0,
     requests: 0,
     aborted: 0,
   };
@@ -216,27 +230,41 @@ export async function createMockLlmServer(options = {}) {
         currentTurnStart = index;
       }
     }
-    const serializedCurrentTurn = JSON.stringify(messages.slice(currentTurnStart + 1));
-    const hasToolResult = /tool[_-]result/i.test(serializedCurrentTurn);
-    if (state.toolRoundTrip && hasToolResult && !serializedCurrentTurn.includes("CHAOS_SANDBOX_OK")) {
+    const toolResults = messages
+      .slice(currentTurnStart + 1)
+      .flatMap((message) => Array.isArray(message?.content) ? message.content : [])
+      .filter((block) => /tool[_-]result/i.test(String(block?.type ?? "")));
+    const invalidResult = toolResults.find((result, index) => {
+      const expected = toolPlan[index]?.expectedResult;
+      return expected !== undefined && !JSON.stringify(result).includes(expected);
+    });
+    if (invalidResult !== undefined) {
+      const expected = toolPlan[toolResults.indexOf(invalidResult)]?.expectedResult;
       jsonResponse(res, 422, {
         type: "error",
         error: {
           type: "invalid_request_error",
-          message: "provider sandbox tool result did not contain CHAOS_SANDBOX_OK",
+          message: `provider tool result did not contain ${expected}`,
         },
       });
       return;
     }
-    const useTool = state.toolRoundTrip && !hasToolResult;
-    const toolInput = { command: "printf CHAOS_SANDBOX_OK" };
+    const nextTool = toolPlan[toolResults.length];
+    const useTool = nextTool !== undefined;
+    const toolInput = nextTool?.input ?? {};
+    const toolUseId = `toolu_chaos_${toolResults.length}`;
     const message = useTool
       ? {
           ...anthropicMessage(model, ""),
-          content: [{ type: "tool_use", id: "toolu_chaos", name: "bash", input: toolInput }],
+          content: [{
+            type: "tool_use",
+            id: toolUseId,
+            name: nextTool.name,
+            input: toolInput,
+          }],
           stop_reason: "tool_use",
         }
-      : anthropicMessage(model, "CHAOS_OK");
+      : anthropicMessage(model, responseText);
     if (body.stream === true) {
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
       const send = (event, payload) => {
@@ -247,7 +275,12 @@ export async function createMockLlmServer(options = {}) {
         send("content_block_start", {
           type: "content_block_start",
           index: 0,
-          content_block: { type: "tool_use", id: "toolu_chaos", name: "bash", input: {} },
+          content_block: {
+            type: "tool_use",
+            id: toolUseId,
+            name: nextTool.name,
+            input: {},
+          },
         });
         send("content_block_delta", {
           type: "content_block_delta",
@@ -256,7 +289,7 @@ export async function createMockLlmServer(options = {}) {
         });
       } else {
         send("content_block_start", { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } });
-        send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "CHAOS_OK" } });
+        send("content_block_delta", { type: "content_block_delta", index: 0, delta: { type: "text_delta", text: responseText } });
       }
       send("content_block_stop", { type: "content_block_stop", index: 0 });
       send("message_delta", { type: "message_delta", delta: { stop_reason: useTool ? "tool_use" : "end_turn", stop_sequence: null }, usage: { output_tokens: message.usage.output_tokens } });

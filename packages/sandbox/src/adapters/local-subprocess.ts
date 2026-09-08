@@ -21,6 +21,7 @@
 // or CloudflareSandbox.
 
 import {
+  execFile,
   spawn,
   type ChildProcess,
   type ChildProcessWithoutNullStreams,
@@ -230,6 +231,33 @@ export class LocalSubprocessSandbox
 
   async setEnvVars(envVars: Record<string, string>): Promise<void> {
     this.envVars = { ...this.envVars, ...envVars };
+  }
+
+  async gitCheckout(
+    repoUrl: string,
+    options: { branch?: string; targetDir?: string },
+  ): Promise<void> {
+    const targetDir = this.resolvePath(options.targetDir ?? "/workspace");
+    await fs.mkdir(dirname(targetDir), { recursive: true });
+    const args = [
+      "clone",
+      ...(options.branch ? ["--branch", options.branch] : []),
+      "--",
+      repoUrl,
+      targetDir,
+    ];
+    await new Promise<void>((resolveCheckout, reject) => {
+      execFile(
+        "git",
+        args,
+        {
+          cwd: this.workdir,
+          env: this.buildEnv("git"),
+          timeout: this.defaultTimeoutMs,
+        },
+        (error) => error ? reject(error) : resolveCheckout(),
+      );
+    });
   }
 
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {

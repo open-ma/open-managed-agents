@@ -109,6 +109,21 @@ test("local Anthropic fixture serves JSON, SSE, and one-shot faults", async () =
   }
 });
 
+test("local Anthropic fixture can certify a caller-specific exact reply", async () => {
+  const fixture = await createMockLlmServer({ responseText: "E2E_OK" });
+  try {
+    const response = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-chaos-local", stream: true }),
+    });
+    assert.equal(response.status, 200);
+    assert.match(await response.text(), /E2E_OK/);
+  } finally {
+    await fixture.close();
+  }
+});
+
 test("fixture can force a real sandbox tool round trip", async () => {
   const fixture = await createMockLlmServer({ toolRoundTrip: true });
   try {
@@ -137,6 +152,105 @@ test("fixture can force a real sandbox tool round trip", async () => {
     const second = await followUp.json();
     assert.equal(second.stop_reason, "end_turn");
     assert.equal(second.content[0].text, "CHAOS_OK");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("fixture can drive and verify a caller-defined sequence of tool round trips", async () => {
+  const fixture = await createMockLlmServer({
+    responseText: "ALL_INPUTS_OK",
+    toolPlan: [
+      {
+        name: "bash",
+        input: { command: "verify-inputs" },
+        expectedResult: "FILES_REPO_SKILL_OK",
+      },
+      {
+        name: "mcp__certification__echo",
+        input: { value: "MCP_INPUT_OK" },
+        expectedResult: "MCP_PROXY_OK",
+      },
+    ],
+  });
+  try {
+    const messages = [{ role: "user", content: "certify all inputs" }];
+    const firstResponse = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-chaos-local", messages }),
+    });
+    const first = await firstResponse.json();
+    assert.equal(first.content[0].name, "bash");
+    assert.deepEqual(first.content[0].input, { command: "verify-inputs" });
+
+    messages.push(
+      { role: "assistant", content: first.content },
+      {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: first.content[0].id,
+          content: "FILES_REPO_SKILL_OK",
+        }],
+      },
+    );
+    const secondResponse = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-chaos-local", messages }),
+    });
+    const second = await secondResponse.json();
+    assert.equal(second.content[0].name, "mcp__certification__echo");
+    assert.deepEqual(second.content[0].input, { value: "MCP_INPUT_OK" });
+
+    messages.push(
+      { role: "assistant", content: second.content },
+      {
+        role: "user",
+        content: [{
+          type: "tool_result",
+          tool_use_id: second.content[0].id,
+          content: "MCP_PROXY_OK",
+        }],
+      },
+    );
+    const finalResponse = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ model: "claude-chaos-local", messages }),
+    });
+    const final = await finalResponse.json();
+    assert.equal(final.stop_reason, "end_turn");
+    assert.equal(final.content[0].text, "ALL_INPUTS_OK");
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("fixture rejects a caller-defined tool result that misses its marker", async () => {
+  const fixture = await createMockLlmServer({
+    toolPlan: [{
+      name: "bash",
+      input: { command: "verify-inputs" },
+      expectedResult: "FILES_REPO_SKILL_OK",
+    }],
+  });
+  try {
+    const response = await fetch(`${fixture.baseUrl}/v1/messages`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        model: "claude-chaos-local",
+        messages: [
+          { role: "user", content: "certify" },
+          { role: "assistant", content: [{ type: "tool_use", id: "toolu_0", name: "bash", input: {} }] },
+          { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_0", content: "wrong" }] },
+        ],
+      }),
+    });
+    assert.equal(response.status, 422);
+    assert.match(await response.text(), /FILES_REPO_SKILL_OK/);
   } finally {
     await fixture.close();
   }

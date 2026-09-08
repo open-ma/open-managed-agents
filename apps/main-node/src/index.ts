@@ -60,7 +60,10 @@ import {
 } from "@open-managed-agents/shared";
 import { registerCoreHarnesses } from "@open-managed-agents/agent/harness/builtins";
 import { resolveHarness } from "@open-managed-agents/agent/harness/registry";
-import { buildTools } from "@open-managed-agents/agent/harness/tools";
+import {
+  buildTools,
+  disposeTools,
+} from "@open-managed-agents/agent/harness/tools";
 import {
   createPiModelRuntime,
   toAiSdkLanguageModel,
@@ -299,9 +302,11 @@ import {
   NodeManagedSessionRuntimeAdapter,
 } from "./lib/node-managed-session-runtime.js";
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
+import { NodeManagedSessionInputPreparer } from "./lib/node-managed-session-inputs.js";
 import { NodeSessionExecutionWorker } from "./lib/node-session-execution-worker.js";
 import {
   buildNodeHttpMcpProxyRoutes,
+  createNodeMcpProxyBinding,
   type NodeMcpProxyTarget,
 } from "./lib/http-mcp-proxy.js";
 
@@ -833,6 +838,157 @@ await sessionRegistry.bootstrap();
 
 // ─── Official Managed Sessions composition ─────────────────────────────
 
+async function resolveNodeMcpProxyTarget(input: {
+  tenantId: string;
+  sessionId: string;
+  serverName: string;
+}): Promise<NodeMcpProxyTarget | null> {
+  const managedContext = await managedRuntimeReaders.executionContext.find({
+    workspaceId: input.tenantId,
+    sessionId: input.sessionId,
+  });
+  if (managedContext !== null) {
+    const server = managedContext.session.agent.mcpServers.find(
+      (candidate) => candidate.name === input.serverName,
+    );
+    if (server === undefined || !server.url) return null;
+    for (const vaultId of managedContext.session.vaultIds) {
+      const records = await managedCredentialStore.list({
+        workspaceId: input.tenantId,
+        vaultId,
+        includeArchived: false,
+        limit: 100,
+      });
+      for (const record of records) {
+        const credential = record.credential;
+        const auth = credential.auth;
+        if (
+          (auth.type !== "static_bearer" && auth.type !== "mcp_oauth")
+          || auth.mcpServerUrl !== server.url
+        ) continue;
+        const accessToken = auth.type === "static_bearer"
+          ? auth.token
+          : auth.accessToken;
+        if (!accessToken) continue;
+        const target: NodeMcpProxyTarget = {
+          upstreamUrl: server.url,
+          accessToken,
+        };
+        if (auth.type === "mcp_oauth" && auth.refresh?.refreshToken) {
+          const tokenEndpointAuth = auth.refresh.tokenEndpointAuth;
+          target.refresh = {
+            refreshToken: auth.refresh.refreshToken,
+            tokenEndpoint: auth.refresh.tokenEndpoint,
+            clientId: auth.refresh.clientId,
+            clientSecret: tokenEndpointAuth.type === "none"
+              ? undefined
+              : tokenEndpointAuth.clientSecret ?? undefined,
+          };
+          target.onRefreshed = async (tokens) => {
+            await managedCredentialStore.replace({
+              workspaceId: input.tenantId,
+              vaultId,
+              credentialId: credential.id,
+              expectedRevision: record.revision,
+              next: {
+                ...credential,
+                auth: {
+                  ...auth,
+                  accessToken: tokens.access_token,
+                  refresh: {
+                    ...auth.refresh!,
+                    refreshToken: tokens.refresh_token,
+                  },
+                },
+                updatedAt: new Date().toISOString(),
+              },
+            });
+          };
+        }
+        return target;
+      }
+    }
+    return null;
+  }
+
+  const session = await sessionsService.get({
+    tenantId: input.tenantId,
+    sessionId: input.sessionId,
+  }).catch(() => null);
+  if (session === null || session.archived_at) return null;
+  const snapshot = session.agent_snapshot as {
+    mcp_servers?: Array<{
+      name: string;
+      url: string;
+      authorization_token?: string;
+    }>;
+  } | undefined;
+  const server = snapshot?.mcp_servers?.find((candidate) =>
+    candidate.name === input.serverName
+  );
+  if (server === undefined || !server.url) return null;
+  if (server.authorization_token) {
+    return {
+      upstreamUrl: server.url,
+      accessToken: server.authorization_token,
+    };
+  }
+  const vaultIds = session.vault_ids ?? [];
+  if (vaultIds.length === 0) return null;
+  const groups = await credentialService.listByVaults({
+    tenantId: input.tenantId,
+    vaultIds,
+  });
+  for (const group of groups) {
+    for (const credential of group.credentials) {
+      if (credential.archived_at !== null) continue;
+      const auth = credential.auth as {
+        type?: string;
+        mcp_server_url?: string;
+        bearer_token?: string;
+        token?: string;
+        access_token?: string;
+        refresh_token?: string;
+        token_endpoint?: string;
+        client_id?: string;
+        client_secret?: string;
+      };
+      if (auth.mcp_server_url !== server.url) continue;
+      const accessToken = auth.bearer_token ?? auth.token ?? auth.access_token;
+      if (!accessToken) continue;
+      const target: NodeMcpProxyTarget = {
+        upstreamUrl: server.url,
+        accessToken,
+      };
+      if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
+        target.refresh = {
+          refreshToken: auth.refresh_token,
+          tokenEndpoint: auth.token_endpoint,
+          clientId: auth.client_id,
+          clientSecret: auth.client_secret,
+        };
+        target.onRefreshed = async (tokens) => {
+          await credentialService.refreshAuth({
+            tenantId: input.tenantId,
+            vaultId: group.vault_id,
+            credentialId: credential.id,
+            auth: {
+              access_token: tokens.access_token,
+              refresh_token: tokens.refresh_token,
+            },
+          });
+        };
+      }
+      return target;
+    }
+  }
+  return null;
+}
+
+const nodeMcpProxyBinding = createNodeMcpProxyBinding({
+  resolveTarget: resolveNodeMcpProxyTarget,
+});
+
 const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   confirmedTools: new NodeManagedConfirmedToolExecutor({
     buildExecutableTools: async ({ workspaceId, session, sandbox }) => {
@@ -846,6 +1002,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         toMarkdown: toMarkdownProvider,
         tenantId: workspaceId,
         sessionId: session.id,
+        mcpBinding: nodeMcpProxyBinding,
       });
     },
   }),
@@ -873,6 +1030,17 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       session.id,
       join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", session.id),
     ),
+  prepareSandbox: async ({ workspaceId, session, sandbox }) => {
+    const preparer = new NodeManagedSessionInputPreparer({
+      files: managedAgentsPlatform
+        .app({ workspaceId })
+        .port(managedAgentsPortTokens.files),
+      skillVersions: managedSkillsPlatform
+        .app({ workspaceId })
+        .port(managedAgentsPortTokens.skillVersions),
+    });
+    await preparer.prepare({ workspaceId, session, sandbox });
+  },
   buildModel: ({ workspaceId, session }) =>
     buildNodeLanguageModel(workspaceId, session.agent.model),
   buildTools: async ({ workspaceId, session, sandbox }) => {
@@ -884,8 +1052,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       toMarkdown: toMarkdownProvider,
       tenantId: workspaceId,
       sessionId: session.id,
+      mcpBinding: nodeMcpProxyBinding,
     });
   },
+  disposeTools,
   buildHarness: () => new ManagedNodeDefaultHarness(),
   buildHarnessContext: async (input) => {
     const agent = toLegacyHarnessAgentConfig(input.session);
@@ -1489,6 +1659,7 @@ const managedCredentialCipher: CredentialDocumentCipher = {
   },
 };
 const managedCredentialValidation = new IndeterminateCredentialValidationProbe();
+const managedCredentialStore = new SqlCredentialStore(sql, managedCredentialCipher);
 const managedCredentialsPlatform = createNodePlatform({
   features: {
     preset: "none",
@@ -1496,7 +1667,7 @@ const managedCredentialsPlatform = createNodePlatform({
     vaults: true,
   },
   stores: {
-    credentials: new SqlCredentialStore(sql, managedCredentialCipher),
+    credentials: managedCredentialStore,
     vaults: new SqlVaultStore(sql),
   },
   credentialValidation: managedCredentialValidation,
@@ -1937,74 +2108,7 @@ v1.route("/oma/sessions", buildSessionRoutes({
   },
 }));
 v1.route("/oma/mcp-proxy", buildNodeHttpMcpProxyRoutes({
-  resolveTarget: async ({ tenantId, sessionId, serverName }) => {
-    const session = await sessionsService.get({ tenantId, sessionId }).catch(() => null);
-    if (session === null || session.archived_at) return null;
-    const snapshot = session.agent_snapshot as {
-      mcp_servers?: Array<{
-        name: string;
-        url: string;
-        authorization_token?: string;
-      }>;
-    } | undefined;
-    const server = snapshot?.mcp_servers?.find((candidate) =>
-      candidate.name === serverName
-    );
-    if (server === undefined || !server.url) return null;
-    if (server.authorization_token) {
-      return {
-        upstreamUrl: server.url,
-        accessToken: server.authorization_token,
-      } satisfies NodeMcpProxyTarget;
-    }
-    const vaultIds = session.vault_ids ?? [];
-    if (vaultIds.length === 0) return null;
-    const groups = await credentialService.listByVaults({ tenantId, vaultIds });
-    for (const group of groups) {
-      for (const credential of group.credentials) {
-        if (credential.archived_at !== null) continue;
-        const auth = credential.auth as {
-          type?: string;
-          mcp_server_url?: string;
-          bearer_token?: string;
-          token?: string;
-          access_token?: string;
-          refresh_token?: string;
-          token_endpoint?: string;
-          client_id?: string;
-          client_secret?: string;
-        };
-        if (auth.mcp_server_url !== server.url) continue;
-        const accessToken = auth.bearer_token ?? auth.token ?? auth.access_token;
-        if (!accessToken) continue;
-        const target: NodeMcpProxyTarget = {
-          upstreamUrl: server.url,
-          accessToken,
-        };
-        if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
-          target.refresh = {
-            refreshToken: auth.refresh_token,
-            tokenEndpoint: auth.token_endpoint,
-            clientId: auth.client_id,
-            clientSecret: auth.client_secret,
-          };
-          target.onRefreshed = async (tokens) => {
-            await credentialService.refreshAuth({
-              tenantId,
-              vaultId: group.vault_id,
-              credentialId: credential.id,
-              auth: {
-                access_token: tokens.access_token,
-                refresh_token: tokens.refresh_token,
-              },
-            });
-          };
-        }
-        return target;
-      }
-    }
-    return null;
-  },
+  resolveTarget: resolveNodeMcpProxyTarget,
 }));
 v1.route("/vaults", managedVaultsRoutes);
 v1.route("/vaults", managedCredentialsRoutes);

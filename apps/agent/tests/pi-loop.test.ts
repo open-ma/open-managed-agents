@@ -75,6 +75,40 @@ function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
 }
 
 describe("PiHarness", () => {
+  it("keeps thinking off by default even when the model supports reasoning", async () => {
+    const { ctx, faux } = makeContext([]);
+    ctx.pi!.model = { ...ctx.pi!.model, reasoning: true };
+    let reasoning: unknown = "not-called";
+    faux.setResponses([
+      (_context, options) => {
+        reasoning = options?.reasoning;
+        return fauxAssistantMessage("thinking stayed off");
+      },
+    ]);
+
+    await new PiHarness().run(ctx);
+
+    // Pi encodes the portable "off" level by omitting provider reasoning.
+    expect(reasoning).toBeUndefined();
+  });
+
+  it("projects an explicit Managed Agents effort into Pi's thinking level", async () => {
+    const { ctx, faux } = makeContext([]);
+    ctx.pi!.model = { ...ctx.pi!.model, reasoning: true };
+    ctx.agent.model = { id: ctx.pi!.model.id, effort: "high" };
+    let reasoning: unknown;
+    faux.setResponses([
+      (_context, options) => {
+        reasoning = options?.reasoning;
+        return fauxAssistantMessage("explicit effort applied");
+      },
+    ]);
+
+    await new PiHarness().run(ctx);
+
+    expect(reasoning).toBe("high");
+  });
+
   it("runs an injected compaction policy and persists its canonical boundary before the turn", async () => {
     const { ctx, events, faux } = makeContext([fauxAssistantMessage("after compact")]);
     events.unshift(

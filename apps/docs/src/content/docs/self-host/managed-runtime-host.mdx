@@ -446,13 +446,142 @@ import without an optional peer declaration, a cross-provider runtime
 dependency, a missing uniform factory export, automatic peer installation, or
 any provider import that leaks into a neutral package.
 
-The E2B adapter also has an explicit credentialed certification lane. It is
-opt-in (to avoid spending provider credits in ordinary CI):
+Offline adapter certification is part of ordinary CI and requires no provider
+account, network access, or secret. It runs the complete adapter suites for
+Blaxel, Cloudflare, Modal, Sprites, Superserve, and Vercel against structural
+implementations of their SDK boundaries. Every lane must execute: there is no
+credential-based skip path, one failed lane does not prevent the remaining
+lanes from running, and any failure makes the command fail. The report is
+written with mode `0600` to
+`artifacts/certification/offline-certification.json`:
+
+```sh
+# Run every keyless provider-adapter lane.
+pnpm test:certification:offline
+
+# Focus one or more adapters while retaining the same reporting contract.
+pnpm test:certification:offline -- --providers cloudflare,vercel
+```
+
+This gate proves OpenMA's mapping of provider SDK semantics: stable identity,
+ownership validation, lifecycle/status mapping, ready-before-publish barriers,
+stdio and filesystem behavior, deny-by-default egress, suspend/resume or
+recreation behavior, fencing failures, idempotent destruction, and orphan
+reaping where supported. It does **not** prove provider availability, deployed
+images, account policy, regional behavior, or compatibility with a live vendor
+control plane.
+
+Credentialed certification therefore remains separate from the offline gate;
+unit and contract tests cannot masquerade as real-provider evidence. The live
+gate always
+prints one of `PASS`, `FAIL`, or `NOT_RUN_NO_CREDENTIAL` for every selected
+provider and writes a redacted JSON report to
+`artifacts/certification/live-certification.json`:
+
+```sh
+# Configure local credentials once; this file is ignored by Git.
+cp .env.certification.example .env.certification.local
+$EDITOR .env.certification.local
+
+# Audit every registered provider. Missing credentials make the gate fail.
+pnpm test:certification:live
+
+# Run only configured providers. This remains strict for the selected set.
+E2B_API_KEY=... pnpm test:certification:live -- --providers e2b
+
+# Cloudflare also accepts the local Wrangler OAuth profile; no API token copy
+# is required after `pnpm exec wrangler login`.
+pnpm test:certification:live -- --providers cloudflare
+
+# Production R2 checkpoint/restore is a separate lane and requires S3 keys.
+pnpm test:certification:live -- --providers cloudflare-r2
+
+# Exercise Node, the official SDK, CLI, Console browser, and a real local
+# subprocess sandbox against one isolated local cluster.
+pnpm test:certification:local-release
+
+# If ~/.dsh contains a DeepSeek credential, certify harness-out tool use,
+# compaction/prefix-cache behavior, and harness-in ACP native resume.
+pnpm test:certification:live -- --providers deepseek-model
+
+# Inventory mode is explicit; it never changes FAIL into success.
+pnpm test:certification:live -- --allow-missing
+```
+
+The live runner automatically loads `.env.certification.local`; an already
+exported environment variable wins over the file value. Use
+`--credentials-file /absolute/path/to/provider.env` to select a different file. CI
+should inject the same variable names from its secret manager instead of
+creating this local file. GitHub Actions Secrets are write-only from the
+runner's perspective and cannot be downloaded for local reuse; use a password
+manager or secret broker as the source of truth if local and CI must share one
+managed copy.
+
+Both reports record the exact Git revision and dirty state, timestamps,
+per-provider duration and sanitized diagnostics. Credential values are never
+written to stdout or the report. Exit code `1` means a provider test failed;
+exit code `2` means at least one provider was not run because required
+credentials or provider configuration were absent. The latter is deliberately
+non-zero in the default/release-gate mode, so a skipped real-provider lane
+cannot be reported as a successful certification.
+
+The executable live lanes are Cloudflare lifecycle/egress, Cloudflare R2
+checkpoint/restore, E2B, BoxLite, the isolated local release stack, and the
+DeepSeek model matrix. Other registered providers already appear in the matrix
+and remain `NOT_RUN_NO_CREDENTIAL` when not configured; if configured before
+their credentialed test is implemented, the missing package script becomes an
+explicit `FAIL`, not a silent pass.
+
+Individual provider lanes remain available for focused diagnosis:
 
 ```sh
 E2B_API_KEY=... pnpm --filter @open-managed-agents/sandbox-adapter-e2b test:certification
 pnpm --filter @open-managed-agents/managed-runtime-boxlite test:certification
+pnpm --filter @open-managed-agents/managed-runtime-cloudflare test:certification
+pnpm --filter @open-managed-agents/managed-runtime-cloudflare test:certification:r2
 ```
+
+The Cloudflare lane accepts either `CLOUDFLARE_API_TOKEN` plus
+`CLOUDFLARE_ACCOUNT_ID`, or a successful local `wrangler whoami` OAuth probe.
+It deploys a uniquely named Worker and `standard-1` Sandbox application, then
+tests the actual OpenMA `CloudflareSandbox` wrapper: command and file I/O,
+stable sandbox identity across Worker requests, Worker-side outbound handler
+attachment and revocation, absence of the proxy secret from the container
+process environment, hard destruction, and fresh state after re-creation. The
+Worker, Container application, and local mode-`0600` secrets file are removed
+in the test cleanup, and any residual Container application fails the lane.
+Transient Cloudflare 429/502/503/504 and post-push manifest-visibility errors
+are retried at most three times.
+
+That lane does not claim production R2 backup/restore coverage. The separate
+`cloudflare-r2` lane binds an R2 bucket as `BACKUP_BUCKET`, writes a workspace
+marker, creates a portable filesystem checkpoint, destroys the Sandbox,
+restores it into a new container, and proves the marker survived. It requires
+`CLOUDFLARE_ACCOUNT_ID`, `R2_ACCESS_KEY_ID`, and `R2_SECRET_ACCESS_KEY` from a
+dedicated R2 Object Read & Write token; Wrangler OAuth can authorize Worker and
+bucket management but cannot replace those S3 credentials.
+
+By default the lane creates, empties, and deletes a uniquely named temporary
+bucket. Set `OMA_CLOUDFLARE_R2_BUCKET` to reuse an existing dedicated bucket
+with least-privilege bucket-scoped credentials. In reuse mode the cleanup never
+lists or deletes unrelated objects: it deletes only the two keys emitted for
+each checkpoint created by the run,
+`backups/<checkpoint-id>/data.sqsh` and
+`backups/<checkpoint-id>/meta.json`, and leaves the bucket intact. Keeping
+persistence separate prevents a lifecycle pass from being mistaken for
+checkpoint certification.
+
+The `local-release` lane builds the Console, starts an isolated Node deployment
+with SQLite and the real local-subprocess sandbox, exercises the official
+Managed Agents SDK through a complete streamed turn, verifies the CLI managed
+projection, and drives the Console with Playwright through the same API. It
+also asserts that child processes and temporary state are removed.
+
+The `deepseek-model` lane uses the local DSH credential without printing or
+copying it. It verifies Pi harness-out execution with a real sandbox tool call,
+explicit no-thinking model behavior, active compaction at a low test threshold,
+prefix-cache hit ratios before and after compaction, and harness-in ACP native
+session restore with cache usage preserved.
 
 The BoxLite certification lane starts a real embedded MicroVM and verifies
 workspace creation, stop/start retention, worker stdio, ownership, and hard

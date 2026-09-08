@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type {
@@ -59,6 +59,12 @@ interface RunnerConstructor {
       session: Session;
       environment: Environment;
     }): Promise<SandboxExecutor>;
+    prepareSandbox?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+    }): Promise<void>;
     buildModel(input: {
       workspaceId: string;
       session: Session;
@@ -70,6 +76,7 @@ interface RunnerConstructor {
       environment: Environment;
       sandbox: SandboxExecutor;
     }): Promise<unknown>;
+    disposeTools?(tools: unknown): Promise<void>;
     buildHarness(): { run(context: unknown): Promise<void> };
     buildHarnessContext(input: {
       workspaceId: string;
@@ -132,6 +139,84 @@ interface RunnerConstructor {
 }
 
 describe("DefaultNodeManagedSessionRunner", () => {
+  it("prepares Session inputs after sandbox creation and before it becomes executable", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    const order: string[] = [];
+    const sandbox = {
+      destroy: vi.fn(async () => { order.push("destroy"); }),
+    } as unknown as SandboxExecutor;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => {
+        order.push("build");
+        return sandbox;
+      },
+      prepareSandbox: async (input) => {
+        expect(input).toMatchObject({
+          workspaceId: "workspace_01",
+          session,
+          environment,
+          sandbox,
+        });
+        order.push("prepare");
+      },
+      buildModel: async () => {
+        order.push("model");
+        return {};
+      },
+      buildTools: async () => {
+        order.push("tools");
+        return {};
+      },
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
+      ids: { nextEventId: () => "event_inputs" },
+    });
+
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    expect(order).toEqual(["build", "prepare"]);
+  });
+
+  it("destroys a new sandbox when Session input preparation fails", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    const destroy = vi.fn(async () => undefined);
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => ({ destroy } as unknown as SandboxExecutor),
+      prepareSandbox: async () => { throw new Error("input staging failed"); },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
+      ids: { nextEventId: () => "event_inputs" },
+    });
+
+    await expect(runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    })).rejects.toThrow("input staging failed");
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it("runs a user message between official lifecycle events", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath).catch(
@@ -145,15 +230,22 @@ describe("DefaultNodeManagedSessionRunner", () => {
     } as RunnerConstructor;
     const sandbox = {} as SandboxExecutor;
     const contexts: unknown[] = [];
+    const lifecycle: string[] = [];
+    const builtTools = { bash: { type: "tool" } };
     let nextId = 0;
     const runner = new Runner({
       outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
       confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
       buildSandbox: async () => sandbox,
       buildModel: async () => ({ type: "model" }),
-      buildTools: async () => ({ bash: { type: "tool" } }),
+      buildTools: async () => builtTools,
+      disposeTools: async (tools) => {
+        expect(tools).toBe(builtTools);
+        lifecycle.push("dispose");
+      },
       buildHarness: () => ({
         run: async (context) => {
+          lifecycle.push("run");
           const runtime = (context as {
             runtime: { broadcast(event: SessionEvent): void };
           }).runtime;
@@ -192,7 +284,12 @@ describe("DefaultNodeManagedSessionRunner", () => {
       initialEvents: [],
       events: [event],
       historyEvents: [event],
-      output: async (frame) => { output.push(frame); },
+      output: async (frame) => {
+        output.push(frame);
+        if ((frame as { type?: string }).type === "session.status_idle") {
+          lifecycle.push("idle");
+        }
+      },
     });
 
     expect(contexts).toEqual([
@@ -226,6 +323,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
         processed_at: "2026-08-26T02:00:00.000Z",
       },
     ]);
+    expect(lifecycle).toEqual(["run", "dispose", "idle"]);
   });
 
   it("projects a terminal session error before returning a harness failure", async () => {

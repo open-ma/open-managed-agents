@@ -12,6 +12,7 @@
     "start": "tsx src/index.ts",
     "test": "vitest run --config vitest.config.ts",
     "test:e2e:acp-deepseek-cache": "tsx scripts/acp-deepseek-native-cache.e2e.ts",
+    "test:e2e:pi-deepseek": "tsx scripts/pi-deepseek-harness.e2e.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

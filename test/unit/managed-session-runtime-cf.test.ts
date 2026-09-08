@@ -183,7 +183,7 @@ describe("CfManagedSessionRuntimeAdapter", () => {
             id: "agent_01",
             name: "Coding agent",
             description: "Runtime snapshot",
-            model: { id: "claude-opus-5", speed: "fast" },
+            model: { id: "claude-opus-5", effort: "high", speed: "fast" },
             system: "Work carefully",
             tools: [
               {

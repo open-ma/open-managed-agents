@@ -65,6 +65,27 @@ describe("Managed session runtime codec", () => {
     ).toEqual([]);
   });
 
+  it.each(["agent.tool_result", "agent.mcp_tool_result"] as const)(
+    "normalizes legacy string content on %s into official content blocks",
+    (type) => {
+      expect(
+        decodeRuntimeProducedSessionEvent({
+          id: "event_result_01",
+          type,
+          ...(type === "agent.tool_result"
+            ? { tool_use_id: "event_use_01" }
+            : { mcp_tool_use_id: "event_use_01" }),
+          content: "tool output",
+          processed_at: "2026-08-26T00:00:01.000Z",
+        }),
+      ).toMatchObject({
+        id: "event_result_01",
+        type,
+        content: [{ type: "text", text: "tool output" }],
+      });
+    },
+  );
+
   it("normalizes a failed model span that has no usage payload", () => {
     expect(
       decodeRuntimeEvent(
@@ -308,6 +329,11 @@ describe("Managed session runtime codec", () => {
 
     expect(encodeRuntimeSessionStart(input)).toMatchObject({
       agent_snapshot: {
+        model: {
+          id: "claude-opus-5",
+          effort: "high",
+          speed: "fast",
+        },
         skills: [
           { type: "custom", skill_id: "skill_review", version: "3" },
         ],

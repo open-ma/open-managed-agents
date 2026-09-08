@@ -6,6 +6,7 @@
   "exports": { ".": "./src/index.ts" },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
+    "test:certification:offline": "vitest run --config vitest.config.ts",
     "test:coverage": "vitest run --config vitest.coverage.config.ts",
     "typecheck": "tsc --noEmit"
   },

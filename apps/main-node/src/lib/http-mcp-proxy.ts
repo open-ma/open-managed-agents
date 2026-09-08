@@ -21,6 +21,49 @@ export interface NodeHttpMcpProxyDependencies {
   fetcher?: typeof fetch;
 }
 
+export interface NodeMcpProxyBinding {
+  fetch(request: Request): Promise<Response>;
+}
+
+/** In-process counterpart of the public HTTP route. Host-side harnesses use
+ * this binding so credential resolution and refresh remain in the control
+ * plane while no standing API key or Vault secret is exposed to the harness. */
+export function createNodeMcpProxyBinding(
+  dependencies: NodeHttpMcpProxyDependencies,
+): NodeMcpProxyBinding {
+  return {
+    async fetch(request) {
+      const tenantId = request.headers.get("x-oma-tenant");
+      const sessionId = request.headers.get("x-oma-session");
+      const serverName = request.headers.get("x-oma-mcp-server");
+      if (!tenantId || !sessionId || !serverName) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      const target = await dependencies.resolveTarget({
+        tenantId,
+        sessionId,
+        serverName,
+      });
+      if (target === null) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      const body = ["GET", "HEAD"].includes(request.method.toUpperCase())
+        ? null
+        : await request.arrayBuffer();
+      return forwardWithRefresh({
+        upstreamUrl: target.upstreamUrl,
+        method: request.method,
+        inboundHeaders: new Headers(request.headers),
+        body,
+        accessToken: target.accessToken,
+        refresh: target.refresh,
+        onRefreshed: target.onRefreshed,
+        fetcher: dependencies.fetcher,
+      });
+    },
+  };
+}
+
 /** Node/self-host equivalent of the Cloudflare HTTP MCP gateway. Authentication
  * stays in the parent v1 middleware; this route consumes only its tenant
  * projection and never accepts tenant identity from request headers. */

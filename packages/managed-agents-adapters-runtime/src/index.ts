@@ -249,6 +249,16 @@ export function decodeRuntimeEvent(
   if (raw.type === "span.outcome_evaluation_end") {
     decoded.usage = normalizeModelUsage(raw.usage);
   }
+  if (
+    (raw.type === "agent.tool_result" || raw.type === "agent.mcp_tool_result")
+    && typeof raw.content === "string"
+  ) {
+    // The legacy harness wire emits scalar tool output while the official
+    // Managed Agents history contract requires an array of content blocks.
+    // Normalize at the runtime boundary so every store/transport sees the
+    // same canonical application shape.
+    decoded.content = [{ type: "text", text: raw.content }];
+  }
   return [decoded as unknown as StreamSessionEvent];
 }
 
@@ -549,7 +559,11 @@ interface RuntimeAgentSnapshot {
   id: string;
   name: string;
   description: string | null;
-  model: { id: string; speed?: "standard" | "fast" };
+  model: {
+    id: string;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    speed?: "standard" | "fast";
+  };
   system: string;
   tools: RuntimeAgentTool[];
   mcp_servers: AgentMcpServer[];
@@ -693,6 +707,7 @@ function runtimeAgentSnapshot(input: StartSessionExecution): RuntimeAgentSnapsho
     description: agent.description,
     model: {
       id: agent.model.id,
+      ...(agent.model.effort !== undefined && { effort: agent.model.effort }),
       ...(agent.model.speed !== undefined && { speed: agent.model.speed }),
     },
     system: agent.system ?? "",

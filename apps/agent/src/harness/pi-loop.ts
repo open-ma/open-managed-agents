@@ -114,7 +114,14 @@ export class PiHarness implements HarnessInterface {
         model: ctx.pi!.model,
         messages,
         tools: toolsToPi(ctx),
-        thinkingLevel: ctx.pi!.model.reasoning ? "medium" : "off",
+        // `model.reasoning` describes capability, not user intent. Managed
+        // Agents effort is opt-in; an omitted effort must remain non-thinking.
+        // Pi owns provider-specific validation and maps the portable effort to
+        // the concrete request payload.
+        thinkingLevel:
+          typeof ctx.agent.model === "object"
+            ? (ctx.agent.model.effort ?? "off")
+            : "off",
       },
       sessionId: ctx.session_id,
       streamFn: (model, context, options) =>

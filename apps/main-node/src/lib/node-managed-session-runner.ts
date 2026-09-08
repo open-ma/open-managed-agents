@@ -91,10 +91,14 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
   confirmedTools: ManagedNodeConfirmedToolExecutionPort;
   outcomes: ManagedNodeOutcomeEvaluationPort;
   buildSandbox(input: ManagedRunnerContext): Promise<SandboxExecutor>;
+  prepareSandbox?(input: ManagedRunnerContext & {
+    sandbox: SandboxExecutor;
+  }): Promise<void>;
   buildModel(input: ManagedRunnerContext): Promise<HarnessContext["model"]>;
   buildTools(
     input: ManagedRunnerContext & { sandbox: SandboxExecutor },
   ): Promise<HarnessContext["tools"]>;
+  disposeTools?(tools: HarnessContext["tools"]): Promise<void>;
   buildHarness(): HarnessInterface;
   buildHarnessContext(input: ManagedRunnerContext & {
     acceptedEvents: NodeManagedSessionRunnerAcceptInput["events"];
@@ -128,6 +132,17 @@ export class DefaultNodeManagedSessionRunner
       session: input.session,
       environment: input.environment,
     });
+    try {
+      await this.dependencies.prepareSandbox?.({
+        workspaceId: input.workspaceId,
+        session: input.session,
+        environment: input.environment,
+        sandbox,
+      });
+    } catch (error) {
+      await sandbox.destroy?.().catch(() => undefined);
+      throw error;
+    }
     this.sandboxes.set(input, sandbox);
   }
 
@@ -186,6 +201,7 @@ export class DefaultNodeManagedSessionRunner
       ids: this.dependencies.ids,
     });
     runtime.broadcastProducedEvent({ type: "session.status_running" });
+    let turnTools: HarnessContext["tools"] | undefined;
     try {
       if (event.type === "user.tool_confirmation") {
         const toolUse = input.historyEvents.findLast(
@@ -235,9 +251,15 @@ export class DefaultNodeManagedSessionRunner
         session: input.session,
         environment: input.environment,
       };
+      const toolsPromise = this.dependencies
+        .buildTools({ ...context, sandbox })
+        .then((tools) => {
+          turnTools = tools;
+          return tools;
+        });
       const [model, tools] = await Promise.all([
         this.dependencies.buildModel(context),
-        this.dependencies.buildTools({ ...context, sandbox }),
+        toolsPromise,
       ]);
       const runHarness = async (): Promise<void> => {
         const harnessContext = await this.dependencies.buildHarnessContext({
@@ -334,6 +356,9 @@ export class DefaultNodeManagedSessionRunner
       });
       throw error;
     } finally {
+      if (turnTools !== undefined) {
+        await this.dependencies.disposeTools?.(turnTools);
+      }
       runtime.broadcastProducedEvent({
         type: "session.status_idle",
         stopReason: { type: "end_turn" },
