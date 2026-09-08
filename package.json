@@ -85,7 +85,7 @@
     "@changesets/changelog-git": "^1.0.0",
     "@changesets/cli": "^3.0.1",
     "@cloudflare/vitest-pool-workers": "^0.22.0",
-    "@cloudflare/workers-types": "^5.20260822.1",
+    "@cloudflare/workers-types": "^5.20260905.1",
     "@playwright/test": "^1.59.1",
     "@testcontainers/minio": "^12.1.0",
     "@testcontainers/postgresql": "^12.1.0",
@@ -96,7 +96,7 @@
     "jsonc-parser": "^3.3.1",
     "typescript": "^7.0.2",
     "vitest": "^4.1.3",
-    "wrangler": "^4.125.0"
+    "wrangler": "^4.129.0"
   },
   "dependencies": {
     "@ai-sdk/anthropic": "4.0.40",
