@@ -78,62 +78,12 @@ export default {
       const body = await req.json<Record<string, unknown>>().catch(() => ({}));
       const model = typeof body.model === "string" ? body.model : "openma-e2e-mock";
       const messageId = `msg_mock_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
+      const planned = buildModelMessage(body, model, messageId);
+      if (planned instanceof Response) return planned;
       if (body.stream === true) {
-        const events = [
-          ["message_start", {
-            type: "message_start",
-            message: {
-              id: messageId,
-              type: "message",
-              role: "assistant",
-              content: [],
-              model,
-              stop_reason: null,
-              stop_sequence: null,
-              usage: { input_tokens: 4, output_tokens: 0 },
-            },
-          }],
-          ["content_block_start", {
-            type: "content_block_start",
-            index: 0,
-            content_block: { type: "text", text: "" },
-          }],
-          ["content_block_delta", {
-            type: "content_block_delta",
-            index: 0,
-            delta: { type: "text_delta", text: "E2E_OK" },
-          }],
-          ["content_block_stop", { type: "content_block_stop", index: 0 }],
-          ["message_delta", {
-            type: "message_delta",
-            delta: { stop_reason: "end_turn", stop_sequence: null },
-            usage: { output_tokens: 2 },
-          }],
-          ["message_stop", { type: "message_stop" }],
-        ] as const;
-        return new Response(
-          events.map(([event, data]) =>
-            `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
-          ).join(""),
-          {
-            status: 200,
-            headers: {
-              "content-type": "text/event-stream; charset=utf-8",
-              "cache-control": "no-cache",
-            },
-          },
-        );
+        return anthropicSse(planned);
       }
-      return json({
-        id: messageId,
-        type: "message",
-        role: "assistant",
-        content: [{ type: "text", text: "E2E_OK" }],
-        model,
-        stop_reason: "end_turn",
-        stop_sequence: null,
-        usage: { input_tokens: 4, output_tokens: 2 },
-      });
+      return json(planned);
     }
 
     // ─── OAuth: /oauth/authorize ──────────────────────────────────────
@@ -295,7 +245,7 @@ export class MockStateDO {
 
     switch (this.scenario) {
       case "ok":
-        return mcpToolsList();
+        return mcpProtocolResponse(req, this.scenario);
 
       case "401-once":
         if (entry.callCount === 1) {
@@ -310,7 +260,7 @@ export class MockStateDO {
             },
           );
         }
-        return mcpToolsList();
+        return mcpProtocolResponse(req, this.scenario);
 
       case "403-always":
         return new Response(
@@ -340,7 +290,7 @@ export class MockStateDO {
             },
           );
         }
-        return mcpToolsList();
+        return mcpProtocolResponse(req, this.scenario);
       }
 
       default:
@@ -349,29 +299,244 @@ export class MockStateDO {
   }
 }
 
-function mcpToolsList(): Response {
-  // Minimal MCP `tools/list` JSON-RPC response so a real MCP client treats
-  // this as a valid server. The agent's MCP transport doesn't care about the
-  // actual tools for these tests — what we're verifying is the gateway's
-  // 401/403/expiry handling and refresh-token round-trip.
-  return new Response(
-    JSON.stringify({
-      jsonrpc: "2.0",
-      id: 1,
-      result: {
-        tools: [
-          {
-            name: "mock_echo",
-            description: "Returns its input verbatim",
-            inputSchema: {
-              type: "object",
-              properties: { message: { type: "string" } },
-              required: ["message"],
-            },
-          },
-        ],
+type AnthropicContent =
+  | { type: "text"; text: string }
+  | { type: "tool_use"; id: string; name: string; input: Record<string, unknown> };
+
+interface AnthropicMessage {
+  id: string;
+  type: "message";
+  role: "assistant";
+  content: AnthropicContent[];
+  model: string;
+  stop_reason: "end_turn" | "tool_use";
+  stop_sequence: null;
+  usage: { input_tokens: number; output_tokens: number };
+}
+
+function buildModelMessage(
+  body: Record<string, unknown>,
+  model: string,
+  messageId: string,
+): AnthropicMessage | Response {
+  const base = {
+    id: messageId,
+    type: "message" as const,
+    role: "assistant" as const,
+    model,
+    stop_sequence: null,
+    usage: { input_tokens: 4, output_tokens: 2 },
+  };
+  if (model !== "openma-e2e-inputs") {
+    return {
+      ...base,
+      content: [{ type: "text", text: "E2E_OK" }],
+      stop_reason: "end_turn",
+    };
+  }
+
+  const messages = Array.isArray(body.messages) ? body.messages : [];
+  let currentTurnStart = -1;
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index] as Record<string, unknown> | null;
+    if (
+      message?.role === "user"
+      && !/tool[_-]result/iu.test(JSON.stringify(message))
+    ) {
+      currentTurnStart = index;
+    }
+  }
+  const turn = messages.slice(Math.max(currentTurnStart, 0));
+  const repositorySha = /Expected repository SHA:\s*([0-9a-f]{7,64})/iu.exec(
+    JSON.stringify(messages[currentTurnStart] ?? {}),
+  )?.[1];
+  if (!repositorySha) {
+    return json({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: "input certification requires an expected repository SHA",
       },
-    }),
-    { status: 200, headers: { "content-type": "application/json" } },
+    }, 422);
+  }
+  const toolResults = turn
+    .flatMap((message) => {
+      const content = (message as Record<string, unknown> | null)?.content;
+      return Array.isArray(content) ? content : [];
+    })
+    .filter((block) => {
+      const type = (block as Record<string, unknown> | null)?.type;
+      return /tool[_-]result/iu.test(String(type ?? ""));
+    });
+  const plan = [
+    {
+      name: "bash",
+      input: {
+        command: [
+          "set -eu",
+          'test "$(cat /workspace/inputs/attached.txt)" = "FILE_INPUT_OK"',
+          'skill_file="$(find /workspace/.openma/skills -name SKILL.md -type f | head -n 1)"',
+          'test -n "$skill_file"',
+          'grep -q "SKILL_INPUT_OK" "$skill_file"',
+          'test "$(cat "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/input.txt")" = "MEMORY_INPUT_OK"',
+          'test -f /workspace/repository/README.md',
+          `test "$(git -C /workspace/repository rev-parse HEAD)" = "${repositorySha}"`,
+          'printf "OUTPUT_OK" > "$OMA_OUTPUTS_DIR/certification.txt"',
+          "printf FILES_REPO_SKILL_MEMORY_OUTPUT_OK",
+        ].join("; "),
+      },
+      expectedResult: "FILES_REPO_SKILL_MEMORY_OUTPUT_OK",
+    },
+    {
+      name: "mcp__certification__echo",
+      input: { value: "MCP_INPUT_OK" },
+      expectedResult: "MCP_PROXY_OK",
+    },
+  ] as const;
+  const invalidIndex = toolResults.findIndex((result, index) =>
+    !JSON.stringify(result).includes(plan[index]?.expectedResult ?? ""));
+  if (invalidIndex >= 0) {
+    return json({
+      type: "error",
+      error: {
+        type: "invalid_request_error",
+        message: `tool result did not contain ${plan[invalidIndex]?.expectedResult}`,
+      },
+    }, 422);
+  }
+  const next = plan[toolResults.length];
+  if (next) {
+    return {
+      ...base,
+      content: [{
+        type: "tool_use",
+        id: `toolu_mock_${toolResults.length}`,
+        name: next.name,
+        input: next.input,
+      }],
+      stop_reason: "tool_use",
+    };
+  }
+  return {
+    ...base,
+    content: [{ type: "text", text: "ALL_INPUTS_OK" }],
+    stop_reason: "end_turn",
+  };
+}
+
+function anthropicSse(message: AnthropicMessage): Response {
+  const block = message.content[0]!;
+  const events: Array<readonly [string, unknown]> = [
+    ["message_start", {
+      type: "message_start",
+      message: {
+        ...message,
+        content: [],
+        stop_reason: null,
+        usage: { ...message.usage, output_tokens: 0 },
+      },
+    }],
+    ["content_block_start", {
+      type: "content_block_start",
+      index: 0,
+      content_block: block.type === "tool_use"
+        ? { ...block, input: {} }
+        : { type: "text", text: "" },
+    }],
+    ["content_block_delta", {
+      type: "content_block_delta",
+      index: 0,
+      delta: block.type === "tool_use"
+        ? { type: "input_json_delta", partial_json: JSON.stringify(block.input) }
+        : { type: "text_delta", text: block.text },
+    }],
+    ["content_block_stop", { type: "content_block_stop", index: 0 }],
+    ["message_delta", {
+      type: "message_delta",
+      delta: { stop_reason: message.stop_reason, stop_sequence: null },
+      usage: { output_tokens: message.usage.output_tokens },
+    }],
+    ["message_stop", { type: "message_stop" }],
+  ];
+  return new Response(
+    events.map(([event, data]) =>
+      `event: ${event}\ndata: ${JSON.stringify(data)}\n\n`
+    ).join(""),
+    {
+      status: 200,
+      headers: {
+        "content-type": "text/event-stream; charset=utf-8",
+        "cache-control": "no-cache",
+      },
+    },
   );
+}
+
+async function mcpProtocolResponse(req: Request, scenario: string): Promise<Response> {
+  if (req.method === "DELETE") return new Response(null, { status: 200 });
+  const message = await req.json<Record<string, unknown>>().catch(() => ({}));
+  const id = message.id ?? null;
+  const method = String(message.method ?? "");
+  const sessionId = `openma-mock-${scenario}-session`;
+  if (method === "server/discover") {
+    return mcpJson(id, undefined, { code: -32601, message: "Method not found" });
+  }
+  if (method === "initialize") {
+    const params = message.params as Record<string, unknown> | undefined;
+    return mcpJson(id, {
+      protocolVersion: String(params?.protocolVersion ?? "2025-06-18"),
+      capabilities: { tools: {} },
+      serverInfo: { name: "openma-mock-services", version: "1.0.0" },
+    }, undefined, { "mcp-session-id": sessionId });
+  }
+  if (method === "notifications/initialized") {
+    return new Response(null, { status: 202 });
+  }
+  if (method && req.headers.get("mcp-session-id") !== sessionId) {
+    return new Response("unknown MCP session", { status: 404 });
+  }
+  if (method === "tools/call") {
+    const params = message.params as Record<string, unknown> | undefined;
+    const args = params?.arguments as Record<string, unknown> | undefined;
+    if (params?.name !== "echo" || args?.value !== "MCP_INPUT_OK") {
+      return mcpJson(id, undefined, {
+        code: -32602,
+        message: "echo requires the MCP_INPUT_OK certification marker",
+      });
+    }
+    return mcpJson(id, {
+      content: [{ type: "text", text: "MCP_PROXY_OK" }],
+      structuredContent: { marker: "MCP_PROXY_OK" },
+    });
+  }
+  if (method === "tools/list" || method === "") {
+    return mcpJson(id, {
+      tools: [{
+        name: "echo",
+        description: "Return the certification marker",
+        inputSchema: {
+          type: "object",
+          properties: { value: { type: "string" } },
+          required: ["value"],
+        },
+      }],
+    });
+  }
+  return mcpJson(id, undefined, { code: -32601, message: "Method not found" });
+}
+
+function mcpJson(
+  id: unknown,
+  result?: unknown,
+  error?: unknown,
+  headers: Record<string, string> = {},
+): Response {
+  return new Response(JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    ...(error === undefined ? { result } : { error }),
+  }), {
+    status: 200,
+    headers: { "content-type": "application/json", ...headers },
+  });
 }

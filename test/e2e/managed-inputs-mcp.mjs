@@ -212,7 +212,10 @@ try {
     await client.beta.sessions.events.send(session.id, {
       events: [{
         type: "user.message",
-        content: [{ type: "text", text: "Run the complete input and MCP certification." }],
+        content: [{
+          type: "text",
+          text: `Run the complete input and MCP certification. Expected repository SHA: ${repositorySha}.`,
+        }],
       }],
     });
     const events = await eventsPromise;

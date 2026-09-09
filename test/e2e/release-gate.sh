@@ -17,6 +17,9 @@
 # Optional:
 #   OMA_E2E_MODEL          real model-card id (only when no mock URL is used)
 #   OMA_E2E_MOCK_SERVICES_BASE_URL  deployed OAuth/MCP fixture Worker
+#   OMA_E2E_INPUT_MODEL_BASE_URL, OMA_E2E_MCP_URL,
+#   OMA_E2E_REPO_URL, OMA_E2E_REPO_SHA, OMA_E2E_REPO_TOKEN
+#                          complete mounted-input/MCP lane (all-or-none)
 #   OMA_E2E_RUN_BRIDGE=1   opt-in destructive local bridge lifecycle lane
 #
 # Usage:
@@ -46,6 +49,29 @@ fi
 
 echo "== Managed Agents SDK + SSE =="
 node test/e2e/managed-agents-sdk.mjs
+
+input_lane_vars=(
+  OMA_E2E_INPUT_MODEL_BASE_URL
+  OMA_E2E_MCP_URL
+  OMA_E2E_REPO_URL
+  OMA_E2E_REPO_SHA
+  OMA_E2E_REPO_TOKEN
+)
+configured_input_lane_vars=0
+for name in "${input_lane_vars[@]}"; do
+  if [[ -n "${!name:-}" ]]; then
+    configured_input_lane_vars=$((configured_input_lane_vars + 1))
+  fi
+done
+if [[ "$configured_input_lane_vars" -eq "${#input_lane_vars[@]}" ]]; then
+  echo "== Managed Files/Repo/Skill/Memory/MCP + durable output =="
+  node test/e2e/managed-inputs-mcp.mjs
+elif [[ "$configured_input_lane_vars" -eq 0 ]]; then
+  echo "== Managed Files/Repo/Skill/Memory/MCP + durable output: NOT_RUN_NO_REPO_CREDENTIAL =="
+else
+  echo "managed input lane is partially configured; provide all of: ${input_lane_vars[*]}" >&2
+  exit 2
+fi
 
 echo "== Deployed Console =="
 pnpm exec playwright test test/e2e/deployed-console.spec.ts --config=playwright.config.ts
