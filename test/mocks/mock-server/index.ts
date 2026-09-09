@@ -77,9 +77,30 @@ export default {
       }
       const body = await req.json<Record<string, unknown>>().catch(() => ({}));
       const model = typeof body.model === "string" ? body.model : "openma-e2e-mock";
+      console.log(JSON.stringify({
+        event: "mock_llm_request",
+        model,
+        stream: body.stream === true,
+        messages: Array.isArray(body.messages) ? body.messages.length : 0,
+        tools: Array.isArray(body.tools) ? body.tools.length : 0,
+        bodyBytes: JSON.stringify(body).length,
+      }));
       const messageId = `msg_mock_${crypto.randomUUID().replaceAll("-", "").slice(0, 12)}`;
       const planned = buildModelMessage(body, model, messageId);
-      if (planned instanceof Response) return planned;
+      if (planned instanceof Response) {
+        console.warn(JSON.stringify({
+          event: "mock_llm_rejected",
+          model,
+          status: planned.status,
+        }));
+        return planned;
+      }
+      console.log(JSON.stringify({
+        event: "mock_llm_response",
+        model,
+        stopReason: planned.stop_reason,
+        contentType: planned.content[0]?.type ?? "empty",
+      }));
       if (body.stream === true) {
         return anthropicSse(planned);
       }

@@ -316,6 +316,12 @@ async function collectTurnEvents(sessionId) {
       if (event.type === "session.error") {
         throw new Error(`session.error: ${JSON.stringify(event)}`);
       }
+      if (
+        event.type === "session.warning"
+        && /MCP setup failed/iu.test(String(event.message ?? ""))
+      ) {
+        throw new Error(`MCP setup failed: ${JSON.stringify(event)}`);
+      }
       if (event.type === "session.status_idle") return events;
     }
     throw new Error(`SSE ended before idle: ${events.map(({ type }) => type).join(", ")}`);

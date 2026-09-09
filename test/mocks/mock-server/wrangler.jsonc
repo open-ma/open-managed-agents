@@ -4,6 +4,7 @@
   "compatibility_date": "2025-09-01",
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
+  "observability": { "enabled": true },
   "durable_objects": {
     "bindings": [
       { "name": "MOCK_STATE", "class_name": "MockStateDO" }

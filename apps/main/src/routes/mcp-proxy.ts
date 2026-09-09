@@ -54,12 +54,31 @@ import { log, logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import type { KvStore } from "@open-managed-agents/kv-store";
 import { builtinSpecs, createSpecRegistry } from "@open-managed-agents/cap";
+import { SqlSessionSource } from "@open-managed-agents/managed-agents-adapters-sql";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
 
 // Module-level: the cap spec registry is pure data + immutable. Building
 // once amortises validation across every outbound request.
 const capRegistry = createSpecRegistry(builtinSpecs);
 
-const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { services: Services; tenantDb: D1Database };
+}>();
+
+export interface McpProxySessionSource {
+  find(input: { workspaceId: string; sessionId: string }): Promise<{
+    archivedAt: string | null;
+    vaultIds: string[];
+    agent: {
+      mcpServers: Array<{
+        name: string;
+        url: string;
+        authorizationToken?: string;
+      }>;
+    };
+  } | null>;
+}
 
 export interface ProxyTarget {
   /** Real upstream MCP server URL (e.g. https://integrations.openma.dev/.../mcp). */
@@ -89,6 +108,8 @@ export interface ProxyTarget {
 export interface ForwardHttpMcpProxyRequestInput {
   env: Env;
   services: Services;
+  /** Current v1 Session source. Omit only for legacy embedders/tests. */
+  sessionSource?: McpProxySessionSource;
   tenantId: string;
   sessionId: string;
   serverName: string;
@@ -129,31 +150,52 @@ export async function resolveProxyTargetByTenant(
   tenantId: string,
   sid: string,
   serverName: string,
+  sessionSource?: McpProxySessionSource,
 ): Promise<ProxyTarget | null> {
   // 1. Session must exist, belong to the same tenant, not archived.
-  const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
+  const session = sessionSource
+    ? await sessionSource.find({ workspaceId: tenantId, sessionId: sid }).catch(() => null)
+    : await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
   if (!session) return null;
-  const sessionAny = session as {
+  const legacySession = session as {
     archived_at?: string | null;
     vault_ids?: string[] | null;
     agent_snapshot?: AgentConfig;
   };
-  if (sessionAny.archived_at) return null;
+  const managedSession = session as {
+    archivedAt?: string | null;
+    vaultIds?: string[] | null;
+    agent?: {
+      mcpServers?: Array<{
+        name: string;
+        url: string;
+        authorizationToken?: string;
+      }>;
+    };
+  };
+  if (legacySession.archived_at || managedSession.archivedAt) return null;
 
   // 2. agent_snapshot must declare the requested mcp server.
-  const agent = sessionAny.agent_snapshot;
-  if (!agent) return null;
-  const server = (agent.mcp_servers ?? []).find((s) => s.name === serverName);
+  const legacyAgent = legacySession.agent_snapshot;
+  const server = legacyAgent
+    ? (legacyAgent.mcp_servers ?? []).find((candidate) => candidate.name === serverName)
+    : (managedSession.agent?.mcpServers ?? []).find(
+        (candidate) => candidate.name === serverName,
+      );
   if (!server || !server.url) return null;
 
   // 3. Resolve credential. agent.mcp_servers[].authorization_token, if set,
   //    is the literal token we should inject. Otherwise look up an active
   //    credential matching the server URL across the session's vault_ids.
-  if (server.authorization_token) {
-    return { upstreamUrl: server.url, upstreamToken: server.authorization_token };
+  const inlineToken = (server as {
+    authorization_token?: string;
+    authorizationToken?: string;
+  }).authorization_token ?? (server as { authorizationToken?: string }).authorizationToken;
+  if (inlineToken) {
+    return { upstreamUrl: server.url, upstreamToken: inlineToken };
   }
 
-  const vaultIds = sessionAny.vault_ids ?? [];
+  const vaultIds = legacySession.vault_ids ?? managedSession.vaultIds ?? [];
   if (vaultIds.length === 0) return null;
   const grouped = await services.credentials
     .listByVaults({ tenantId, vaultIds })
@@ -219,16 +261,23 @@ export async function resolveOutboundCredentialByHost(
   tenantId: string,
   sid: string,
   hostname: string,
+  sessionSource?: McpProxySessionSource,
 ): Promise<ProxyTarget | null> {
-  const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
+  const session = sessionSource
+    ? await sessionSource.find({ workspaceId: tenantId, sessionId: sid }).catch(() => null)
+    : await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
   if (!session) return null;
-  const sessionAny = session as {
+  const legacySession = session as {
     archived_at?: string | null;
     vault_ids?: string[] | null;
   };
-  if (sessionAny.archived_at) return null;
+  const managedSession = session as {
+    archivedAt?: string | null;
+    vaultIds?: string[] | null;
+  };
+  if (legacySession.archived_at || managedSession.archivedAt) return null;
 
-  const vaultIds = sessionAny.vault_ids ?? [];
+  const vaultIds = legacySession.vault_ids ?? managedSession.vaultIds ?? [];
   if (vaultIds.length === 0) return null;
   const grouped = await services.credentials
     .listByVaults({ tenantId, vaultIds })
@@ -726,6 +775,7 @@ export async function forwardHttpMcpProxyRequest(
     input.tenantId,
     input.sessionId,
     input.serverName,
+    input.sessionSource,
   );
   if (!target) {
     return Response.json({ error: "forbidden" }, { status: 403 });
@@ -769,9 +819,11 @@ app.all("/:sid/:server", async (c) => {
     if (!tenantId) return c.json({ error: "forbidden" }, 403);
   }
   const services = c.get("services");
+  const sessionSource = new SqlSessionSource(new CfD1SqlClient(c.get("tenantDb")));
   return forwardHttpMcpProxyRequest({
     env: c.env,
     services,
+    sessionSource,
     tenantId,
     sessionId: sid,
     serverName,

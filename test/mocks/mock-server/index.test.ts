@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
+import { createAnthropic } from "@ai-sdk/anthropic";
+import { stepCountIs, streamText, tool, wrapLanguageModel } from "ai";
+import { z } from "zod";
 import worker, { MockStateDO, type Env } from "./index";
+import { llmLoggingMiddleware } from "../../../apps/agent/src/harness/llm-logging-middleware";
 
 const REPOSITORY_SHA = "9e79e0dd41e23a8900b0b4adec5f55e4ecf24529";
 
@@ -135,6 +139,83 @@ describe("mock-services input certification model", () => {
     expect(body).toContain('"type":"input_json_delta"');
     expect(body).toContain(REPOSITORY_SHA);
     expect(body).toContain('"stop_reason":"tool_use"');
+  });
+
+  it("is consumable as a tool call by the production AI SDK", async () => {
+    const anthropic = createAnthropic({
+      apiKey: "fixture",
+      baseURL: "https://mock.test/v1",
+      fetch: (input, init) => worker.fetch(new Request(input, init), {} as Env),
+    });
+    const result = streamText({
+      model: anthropic("openma-e2e-inputs"),
+      messages: [{
+        role: "user",
+        content: `Expected repository SHA: ${REPOSITORY_SHA}`,
+      }],
+      tools: {
+        bash: tool({
+          inputSchema: z.object({ command: z.string() }),
+          execute: async () => "FILES_REPO_SKILL_MEMORY_OUTPUT_OK",
+        }),
+      },
+      stopWhen: stepCountIs(1),
+    });
+
+    await result.consumeStream();
+
+    await expect(result.toolCalls).resolves.toMatchObject([{
+      toolName: "bash",
+      input: { command: expect.stringContaining(REPOSITORY_SHA) },
+    }]);
+  });
+
+  it("remains consumable through the production LLM logging middleware", async () => {
+    const writes: Array<{ key: string; body: string }> = [];
+    const anthropic = createAnthropic({
+      apiKey: "fixture",
+      baseURL: "https://mock.test/v1",
+      fetch: (input, init) => worker.fetch(new Request(input, init), {} as Env),
+    });
+    const model = wrapLanguageModel({
+      model: anthropic("openma-e2e-inputs"),
+      middleware: llmLoggingMiddleware({
+        tenant_id: "workspace_01",
+        session_id: "session_01",
+        r2: {
+          put: async (key: string, body: string) => {
+            writes.push({ key, body });
+            return {};
+          },
+        } as unknown as R2Bucket,
+        spanIdResolver: () => "sevt_model_01",
+      }),
+    });
+    const result = streamText({
+      model,
+      messages: [{
+        role: "user",
+        content: `Expected repository SHA: ${REPOSITORY_SHA}`,
+      }],
+      tools: {
+        bash: tool({
+          inputSchema: z.object({ command: z.string() }),
+          execute: async () => "FILES_REPO_SKILL_MEMORY_OUTPUT_OK",
+        }),
+      },
+      stopWhen: stepCountIs(1),
+    });
+
+    await result.consumeStream();
+
+    await expect(result.toolCalls).resolves.toHaveLength(1);
+    expect(writes).toHaveLength(1);
+    expect(writes[0]?.key).toBe(
+      "t/workspace_01/sessions/session_01/llm/sevt_model_01.json",
+    );
+    expect(JSON.parse(writes[0]!.body).response.stream_parts).toEqual(
+      expect.arrayContaining([expect.objectContaining({ type: "tool-call" })]),
+    );
   });
 });
 
