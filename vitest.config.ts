@@ -422,6 +422,7 @@ export default defineConfig({
       "scripts/offline-certification.test.mjs",
       "scripts/local-release-certification.test.mjs",
       "scripts/deepseek-live-certification.test.mjs",
+      "scripts/harness-in-sandbox-live-certification.test.mjs",
       "test/e2e/**",
       "apps/agent/build-*/**",
       "apps/console/**",

@@ -15,6 +15,8 @@
     "test:e2e:acp-deepseek-cache": "tsx scripts/acp-deepseek-native-cache.e2e.ts",
     "test:e2e:pi-deepseek": "tsx scripts/pi-deepseek-harness.e2e.ts",
     "test:e2e:pi-acp-docker": "tsx scripts/pi-acp-deepseek-docker.e2e.ts",
+    "test:e2e:codex-acp-docker": "tsx scripts/harness-in-sandbox/live.e2e.ts codex-acp",
+    "test:e2e:mcode-acp-docker": "tsx scripts/harness-in-sandbox/live.e2e.ts mcode",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

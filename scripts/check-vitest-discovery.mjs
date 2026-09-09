@@ -59,7 +59,8 @@ test("root Cloudflare test discovery excludes generated and Node-only trees", ()
       path === "scripts/live-certification.test.mjs" ||
       path === "scripts/offline-certification.test.mjs" ||
       path === "scripts/local-release-certification.test.mjs" ||
-      path === "scripts/deepseek-live-certification.test.mjs" || [
+      path === "scripts/deepseek-live-certification.test.mjs" ||
+      path === "scripts/harness-in-sandbox-live-certification.test.mjs" || [
         "packages/acp-runtime/",
         "packages/cli/",
         "packages/environment-activation-",
