@@ -97,7 +97,7 @@ importers:
         specifier: ^1.3.6
         version: 1.3.6(playwright-core@1.59.1)
       '@cloudflare/sandbox':
-        specifier: ^0.12.7
+        specifier: 0.12.7
         version: 0.12.7
       '@earendil-works/pi-agent-core':
         specifier: 0.84.4
@@ -498,7 +498,7 @@ importers:
         specifier: ^0.3.7
         version: 0.3.7
       '@cloudflare/sandbox':
-        specifier: ^0.12.7
+        specifier: 0.12.7
         version: 0.12.7
       '@open-managed-agents/acp-runtime':
         specifier: workspace:*

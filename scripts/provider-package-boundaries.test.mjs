@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -184,4 +185,42 @@ test("the workspace does not auto-install every optional provider SDK", async ()
     "packages: ['packages/*']\nautoInstallPeers: false\n",
   );
   assert.deepEqual(await providerWorkspaceBoundaryViolations(root), []);
+});
+
+test("Cloudflare sandbox SDK, container runtime, and deployment image stay lock-step", async () => {
+  const agentPackage = JSON.parse(await readFile("apps/agent/package.json", "utf8"));
+  const mainPackage = JSON.parse(await readFile("apps/main/package.json", "utf8"));
+  const imageDockerfile = await readFile("apps/agent/Dockerfile", "utf8");
+  const deploymentDockerfile = await readFile("apps/agent/Dockerfile.sandbox", "utf8");
+  const imageWorkflow = await readFile(".github/workflows/build-sandbox-image.yml", "utf8");
+
+  const sdkVersion = agentPackage.dependencies["@cloudflare/sandbox"];
+  assert.match(sdkVersion, /^\d+\.\d+\.\d+$/, "agent must pin the Sandbox SDK exactly");
+  assert.equal(
+    mainPackage.dependencies["@cloudflare/sandbox"],
+    sdkVersion,
+    "main and agent must use the same Sandbox SDK version",
+  );
+  assert.match(
+    imageDockerfile,
+    new RegExp(`^FROM docker\\.io/cloudflare/sandbox:${sdkVersion}$`, "m"),
+    "custom container must extend the matching Cloudflare runtime",
+  );
+
+  const contentHash = createHash("sha256").update(imageDockerfile).digest("hex");
+  assert.match(
+    deploymentDockerfile,
+    new RegExp(`^FROM docker\\.io/openma/sandbox-base:${contentHash}$`, "m"),
+    "deployment must pin the custom image by Dockerfile content hash",
+  );
+  assert.match(
+    imageWorkflow,
+    /CONTENT_HASH=\$\(sha256sum apps\/agent\/Dockerfile/,
+    "image workflow must derive the immutable tag from Dockerfile content",
+  );
+  assert.match(
+    imageWorkflow,
+    /steps\.ver\.outputs\.content_hash/,
+    "image workflow must publish the content-addressed tag",
+  );
 });

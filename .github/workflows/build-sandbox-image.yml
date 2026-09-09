@@ -32,8 +32,11 @@ jobs:
         run: |
           V=$(grep -oE 'cloudflare/sandbox:[0-9]+\.[0-9]+\.[0-9]+' apps/agent/Dockerfile | head -1 | cut -d: -f2)
           test -n "$V" || { echo "Could not extract version"; exit 1; }
+          CONTENT_HASH=$(sha256sum apps/agent/Dockerfile | cut -d' ' -f1)
           echo "version=$V" >> "$GITHUB_OUTPUT"
+          echo "content_hash=$CONTENT_HASH" >> "$GITHUB_OUTPUT"
           echo "Extracted: $V"
+          echo "Dockerfile content hash: $CONTENT_HASH"
 
       - name: Build and push
         uses: docker/build-push-action@v6
@@ -45,6 +48,7 @@ jobs:
             docker.io/${{ env.IMAGE_NAME }}:latest
             docker.io/${{ env.IMAGE_NAME }}:${{ github.sha }}
             docker.io/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.version }}
+            docker.io/${{ env.IMAGE_NAME }}:${{ steps.ver.outputs.content_hash }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
