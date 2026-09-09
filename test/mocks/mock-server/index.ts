@@ -350,6 +350,16 @@ function buildModelMessage(
   const repositorySha = /Expected repository SHA:\s*([0-9a-f]{7,64})/iu.exec(
     JSON.stringify(messages[currentTurnStart] ?? {}),
   )?.[1];
+  // Model-card creation verifies provider reachability with a one-token
+  // request before any Session/repository exists. Keep that probe cheap and
+  // side-effect free; only a normal turn enters the certification tool plan.
+  if (!repositorySha && Number(body.max_tokens) === 1) {
+    return {
+      ...base,
+      content: [{ type: "text", text: "E2E_OK" }],
+      stop_reason: "end_turn",
+    };
+  }
   if (!repositorySha) {
     return json({
       type: "error",

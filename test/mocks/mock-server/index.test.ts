@@ -51,6 +51,23 @@ describe("mock-services default Anthropic model", () => {
 });
 
 describe("mock-services input certification model", () => {
+  it("accepts the one-token model-card probe before a repository exists", async () => {
+    const response = await worker.fetch(new Request("https://mock.test/v1/messages", {
+      method: "POST",
+      headers: { "content-type": "application/json", "x-api-key": "fixture" },
+      body: JSON.stringify({
+        model: "openma-e2e-inputs",
+        max_tokens: 1,
+        messages: [{ role: "user", content: "hi" }],
+      }),
+    }), {} as Env);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      stop_reason: "end_turn",
+      content: [{ type: "text", text: "E2E_OK" }],
+    });
+  });
+
   it("drives bash, MCP, and final-answer rounds from one turn", async () => {
     const messages: Array<Record<string, unknown>> = [{
       role: "user",
