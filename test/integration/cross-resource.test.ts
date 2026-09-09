@@ -706,11 +706,8 @@ describe("Event type combinations", () => {
     });
 
     const events = await waitForReplayedEvents(sessionId, (replayed) => {
-      const texts = replayed
-        .filter((event: any) => event.type === "user.message")
-        .map((event: any) => event.content[0].text);
-      return Array.from({ length: 5 }, (_, index) => `multi-${index}`)
-        .every((text) => texts.includes(text));
+      const types = replayed.map((event: any) => event.type);
+      return types.includes("user.message") && types.includes("user.interrupt");
     });
     const types = events.map((e: any) => e.type);
     expect(types).toContain("user.message");
@@ -728,8 +725,10 @@ describe("Event type combinations", () => {
       events: [{ type: "user.message", content: [{ type: "text", text: "after outcome" }] }],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const types = replayed.map((event: any) => event.type);
+      return types.includes("user.define_outcome") && types.includes("user.message");
+    });
     const types = events.map((e: any) => e.type);
     expect(types).toContain("user.define_outcome");
     expect(types).toContain("user.message");
@@ -773,8 +772,16 @@ describe("Event type combinations", () => {
       events: [{ type: "user.define_outcome", outcome: { description: "all-types" } }],
     });
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const types = replayed.map((event: any) => event.type);
+      return [
+        "user.message",
+        "user.interrupt",
+        "user.tool_confirmation",
+        "user.custom_tool_result",
+        "user.define_outcome",
+      ].every((type) => types.includes(type));
+    });
     const types = events.map((e: any) => e.type);
     expect(types).toContain("user.message");
     expect(types).toContain("user.interrupt");
@@ -793,8 +800,13 @@ describe("Event type combinations", () => {
       });
     }
 
-    await new Promise((r) => setTimeout(r, 200));
-    const events = await collectReplayedEvents(sessionId, 100);
+    const events = await waitForReplayedEvents(sessionId, (replayed) => {
+      const texts = replayed
+        .filter((event: any) => event.type === "user.message")
+        .map((event: any) => event.content[0].text);
+      return Array.from({ length: 5 }, (_, index) => `multi-${index}`)
+        .every((text) => texts.includes(text));
+    });
     const texts = events
       .filter((e: any) => e.type === "user.message")
       .map((e: any) => e.content[0].text);
