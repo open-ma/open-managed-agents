@@ -15,6 +15,7 @@ export function buildDeepSeekCertificationPlan() {
     { id: "pi-harness-out", mode: "harness-out-sandbox" },
     { id: "pi-compaction-cache", mode: "harness-out-sandbox" },
     { id: "acp-native-resume-cache", mode: "harness-in-sandbox" },
+    { id: "pi-acp-docker", mode: "harness-in-sandbox" },
   ];
 }
 
@@ -42,6 +43,7 @@ export async function runDeepSeekCertification(options = {}) {
     ["pi-harness-out", ["pnpm", ["--filter", "@open-managed-agents/main-node", "test:e2e:pi-deepseek"]]],
     ["pi-compaction-cache", ["pnpm", ["exec", "tsx", "scripts/probe-pi-deepseek-compaction-cache.ts"]]],
     ["acp-native-resume-cache", ["pnpm", ["--filter", "@open-managed-agents/main-node", "test:e2e:acp-deepseek-cache"]]],
+    ["pi-acp-docker", ["pnpm", ["--filter", "@open-managed-agents/main-node", "test:e2e:pi-acp-docker"]]],
   ]);
   const report = {
     ok: false,

@@ -927,6 +927,9 @@ importers:
       '@earendil-works/pi-ai':
         specifier: 0.84.4
         version: 0.84.4(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
+      '@open-managed-agents/acp-runtime':
+        specifier: workspace:*
+        version: link:../../packages/acp-runtime
       '@testcontainers/mysql':
         specifier: ^12.1.0
         version: 12.1.0

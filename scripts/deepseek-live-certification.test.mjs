@@ -6,11 +6,12 @@ import {
   parseDeepSeekCredential,
 } from "./deepseek-live-certification.mjs";
 
-test("DeepSeek certification covers harness-out, compaction, and harness-in native resume", () => {
+test("DeepSeek certification covers Pi both outside and inside a real Docker sandbox", () => {
   assert.deepEqual(buildDeepSeekCertificationPlan(), [
     { id: "pi-harness-out", mode: "harness-out-sandbox" },
     { id: "pi-compaction-cache", mode: "harness-out-sandbox" },
     { id: "acp-native-resume-cache", mode: "harness-in-sandbox" },
+    { id: "pi-acp-docker", mode: "harness-in-sandbox" },
   ]);
 });
 
