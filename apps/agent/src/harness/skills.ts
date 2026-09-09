@@ -19,6 +19,21 @@ export interface SkillFilesResult {
   files: SkillFile[];
 }
 
+export interface ManagedSkillVersionSource {
+  resolveManagedSkillVersion(input: {
+    skillId: string;
+    requestedVersion: string;
+  }): Promise<
+    | {
+        type: "found";
+        version: string;
+        name: string;
+        archive: Uint8Array;
+      }
+    | { type: "not_found" }
+  >;
+}
+
 function safeSkillArchivePath(value: string): string {
   const normalized = value.replaceAll("\\", "/");
   if (
@@ -88,6 +103,7 @@ export async function mountSkillFiles(
 }
 
 import { skillFileR2Key } from "@open-managed-agents/shared";
+import { unzipSync } from "fflate";
 
 const skillRegistry = new Map<string, Skill>();
 
@@ -261,6 +277,46 @@ export async function getSkillFiles(
     });
   }
 
+  return results;
+}
+
+/** Resolve immutable Skill archives through the main control-plane Port. */
+export async function getSkillFilesFromManagedSource(
+  skillConfigs: Array<{ skill_id: string; type?: string; version?: string }>,
+  source: ManagedSkillVersionSource,
+): Promise<SkillFilesResult[]> {
+  const results: SkillFilesResult[] = [];
+  for (const cfg of skillConfigs) {
+    if (cfg.type !== "custom" || skillRegistry.has(cfg.skill_id)) continue;
+    const requestedVersion = cfg.version ?? "latest";
+    const resolved = await source.resolveManagedSkillVersion({
+      skillId: cfg.skill_id,
+      requestedVersion,
+    });
+    if (resolved.type !== "found") {
+      throw new Error(`Managed Skill ${cfg.skill_id}@${requestedVersion} was not found`);
+    }
+    const archive = unzipSync(resolved.archive);
+    const files: SkillFile[] = [];
+    let foundManifest = false;
+    for (const [rawPath, bytes] of Object.entries(archive)) {
+      if (rawPath.endsWith("/")) continue;
+      const filename = safeSkillArchivePath(rawPath);
+      if (filename.split("/").at(-1) === "SKILL.md") foundManifest = true;
+      files.push({ filename, bytes });
+    }
+    if (!foundManifest) {
+      throw new Error(
+        `Managed Skill ${cfg.skill_id}@${resolved.version} archive has no SKILL.md`,
+      );
+    }
+    results.push({
+      skillId: cfg.skill_id,
+      skillName: resolved.name || cfg.skill_id,
+      requestedVersion,
+      files,
+    });
+  }
   return results;
 }
 

@@ -84,6 +84,7 @@ import {
 import {
   userProfileEnrollmentIssuerPort,
 } from "@open-managed-agents/app/modules/user-profiles";
+import { resolveManagedSkillArchive } from "./lib/managed-skill-source";
 import {
   createCloudflareManagedAgentsApp,
 } from "@open-managed-agents/platform-cloudflare";
@@ -458,10 +459,13 @@ function nextManagedSkillVersion(): string {
     : lastManagedSkillVersion + 1n;
   return lastManagedSkillVersion.toString();
 }
-function managedSkillsApplicationFor(ctx: AppCtx) {
-  const client = new CfD1SqlClient(ctx.var.tenantDb);
+function managedSkillsApplication(
+  workspaceId: string,
+  tenantDb: D1Database,
+) {
+  const client = new CfD1SqlClient(tenantDb);
   return createCloudflareManagedAgentsApp({
-    workspaceId: ctx.var.tenant_id,
+    workspaceId,
     sql: client,
   }, {
     features: {
@@ -480,6 +484,9 @@ function managedSkillsApplicationFor(ctx: AppCtx) {
       providePort(skillPackageCompilerPort, managedSkillCompiler),
     ],
   });
+}
+function managedSkillsApplicationFor(ctx: AppCtx) {
+  return managedSkillsApplication(ctx.var.tenant_id, ctx.var.tenantDb);
 }
 const managedSkillsRoutes = buildManagedSkillRoutes((context) =>
   managedSkillsApplicationFor(context as unknown as AppCtx)
@@ -1452,6 +1459,17 @@ export { RuntimeRoom } from "./runtime-room";
  * `forwardToUpstream` helpers in routes/mcp-proxy.ts.
  */
 export class McpProxyRpc extends WorkerEntrypoint<Env> {
+  async resolveManagedSkillVersion(opts: {
+    tenantId: string;
+    skillId: string;
+    requestedVersion: string;
+  }) {
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const versions = managedSkillsApplication(opts.tenantId, tenantDb)
+      .port(managedAgentsPortTokens.skillVersions);
+    return resolveManagedSkillArchive(versions, opts);
+  }
+
   async managedSessionEventProduced(opts: {
     workspaceId: string;
     sessionId: string;

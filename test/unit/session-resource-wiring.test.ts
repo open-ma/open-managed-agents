@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
+import { zipSync } from "fflate";
 
 import {
+  getSkillFilesFromManagedSource,
   getSkillFiles,
   skillFileMountPaths,
   resolveCustomSkills,
@@ -268,6 +270,38 @@ describe("in-sandbox Session resource wiring", () => {
       bucket as unknown as R2Bucket,
       "tenant-1",
     )).rejects.toThrow(/skill-missing-object.*SKILL\.md.*not found/i);
+  });
+
+  it("materializes a custom Skill archive from the main control-plane Port", async () => {
+    const archive = zipSync({
+      "repository-guide/SKILL.md": new TextEncoder().encode("SKILL_INPUT_OK"),
+      "repository-guide/assets/logo.bin": new Uint8Array([0, 255]),
+    });
+    const resolveManagedSkillVersion = vi.fn(async () => ({
+      type: "found" as const,
+      version: "42",
+      name: "repository-guide",
+      archive,
+    }));
+
+    const files = await getSkillFilesFromManagedSource(
+      [{ type: "custom", skill_id: "skill-1", version: "latest" }],
+      { resolveManagedSkillVersion },
+    );
+
+    expect(resolveManagedSkillVersion).toHaveBeenCalledWith({
+      skillId: "skill-1",
+      requestedVersion: "latest",
+    });
+    expect(files).toEqual([{
+      skillId: "skill-1",
+      skillName: "repository-guide",
+      requestedVersion: "latest",
+      files: [
+        expect.objectContaining({ filename: "repository-guide/SKILL.md" }),
+        expect.objectContaining({ filename: "repository-guide/assets/logo.bin" }),
+      ],
+    }]);
   });
 
   it("clones a repository into its declared mount path without persisting its credential", async () => {

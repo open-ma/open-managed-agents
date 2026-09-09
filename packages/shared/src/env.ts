@@ -153,6 +153,19 @@ export interface Env {
   // and routed through here for vault-credential injection by hostname
   // match. Same "credentials only ever live in main" property.
   MAIN_MCP?: {
+    resolveManagedSkillVersion?(opts: {
+      tenantId: string;
+      skillId: string;
+      requestedVersion: string;
+    }): Promise<
+      | {
+          type: "found";
+          version: string;
+          name: string;
+          archive: Uint8Array;
+        }
+      | { type: "not_found" }
+    >;
     managedSessionEventProduced(opts: {
       workspaceId: string;
       sessionId: string;

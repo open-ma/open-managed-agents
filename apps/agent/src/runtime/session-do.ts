@@ -93,7 +93,13 @@ import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { ensureSetupApplied } from "./setup-on-warmup";
-import { resolveSkills, resolveCustomSkills, getSkillFiles, mountSkillFiles } from "../harness/skills";
+import {
+  resolveSkills,
+  resolveCustomSkills,
+  getSkillFiles,
+  getSkillFilesFromManagedSource,
+  mountSkillFiles,
+} from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createCfBrowserHarness } from "@open-managed-agents/browser-harness/cf";
 import type { BrowserHarness, BrowserBillingHook, BrowserSession } from "@open-managed-agents/browser-harness";
@@ -4912,12 +4918,20 @@ export class SessionDO extends DurableObject<Env> {
       // model to read on demand via skill tools.
       if (this.env.CONFIG_KV) {
         try {
-          const skillFilesResults = await getSkillFiles(
-            agent.skills,
-            this.env.CONFIG_KV,
-            this.env.FILES_BUCKET,
-            this.state.tenant_id,
-          );
+          const managedSkillBinding = this.env.MAIN_MCP;
+          const skillFilesResults = managedSkillBinding?.resolveManagedSkillVersion
+            ? await getSkillFilesFromManagedSource(agent.skills, {
+                resolveManagedSkillVersion: (input) => managedSkillBinding.resolveManagedSkillVersion!({
+                  tenantId: this.state.tenant_id,
+                  ...input,
+                }),
+              })
+            : await getSkillFiles(
+                agent.skills,
+                this.env.CONFIG_KV,
+                this.env.FILES_BUCKET,
+                this.state.tenant_id,
+              );
           // The canonical location is shared with Node and ACP Managed
           // Runtimes. A compatibility mirror keeps historical prompts valid.
           // Requested skills are required inputs, so a failed write aborts
