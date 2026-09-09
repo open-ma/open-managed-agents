@@ -827,6 +827,12 @@ importers:
       '@open-managed-agents/session-realtime-memory':
         specifier: workspace:*
         version: link:../../packages/session-realtime-memory
+      '@open-managed-agents/session-resource-store':
+        specifier: workspace:*
+        version: link:../../packages/session-resource-store
+      '@open-managed-agents/session-resource-store-sql':
+        specifier: workspace:*
+        version: link:../../packages/session-resource-store-sql
       '@open-managed-agents/session-runtime':
         specifier: workspace:*
         version: link:../../packages/session-runtime
@@ -2513,6 +2519,9 @@ importers:
       better-sqlite3:
         specifier: ^13.0.3
         version: 13.0.3
+      esbuild:
+        specifier: ^0.28.1
+        version: 0.28.1
       vitest:
         specifier: ^4.1.3
         version: 4.1.4(@opentelemetry/api@1.9.0)(@types/node@26.3.0)(@vitest/coverage-v8@4.1.4)(jiti@2.6.1)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)(msw@2.14.6(@types/node@26.3.0)(typescript@7.0.2))(tsx@4.21.0)(yaml@2.9.0)

@@ -22,6 +22,7 @@ describe("Managed Agents HTTP application-port boundary", () => {
       "../src/routes/memory-versions.ts",
       "../src/routes/models.ts",
       "../src/routes/session-events.ts",
+      "../src/routes/session-outputs.ts",
       "../src/routes/session-resources.ts",
       "../src/routes/session-threads.ts",
       "../src/routes/sessions.ts",

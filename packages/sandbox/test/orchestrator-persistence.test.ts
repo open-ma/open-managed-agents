@@ -33,4 +33,29 @@ describe("SandboxOrchestrator persistence boundaries", () => {
       restoreWorkspaceBackup: async () => ({ ok: true }),
     })).hasWorkspaceBackup).toBe(true);
   });
+
+  it("fails closed when durable outputs are requested without a mount capability", async () => {
+    const orchestrator = new DefaultSandboxOrchestrator({ backups });
+
+    await expect(orchestrator.provision(sandbox(), {
+      sessionId: "session-1",
+      tenantId: "tenant-1",
+      mountOutputs: true,
+    })).rejects.toThrow(/session output mount/i);
+  });
+
+  it("surfaces output mount failures instead of silently degrading", async () => {
+    const orchestrator = new DefaultSandboxOrchestrator({ backups });
+
+    await expect(orchestrator.provision(sandbox({
+      sessionOutputMountCapabilities: () => ({ durability: "durable" }),
+      mountSessionOutputs: async () => {
+        throw new Error("mount unavailable");
+      },
+    }), {
+      sessionId: "session-1",
+      tenantId: "tenant-1",
+      mountOutputs: true,
+    })).rejects.toThrow("mount unavailable");
+  });
 });

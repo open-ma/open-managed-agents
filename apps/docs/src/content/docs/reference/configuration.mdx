@@ -91,7 +91,7 @@ type ToolDefinition =
 interface McpServerConfig {
   name: string;                 // becomes the prefix: mcp__<name>__<tool>
   type: 'url' | 'stdio';
-  url?: string;                 // required for HTTP/SSE; derived for stdio
+  url?: string;                 // required by host-side OpenMA harnesses
   authorization_token?: string; // inline bearer (otherwise: matched vault credential)
   stdio?: {
     command: string;
@@ -103,7 +103,7 @@ interface McpServerConfig {
 }
 ```
 
-For `type: 'stdio'`, OMA spawns the process **inside the sandbox container**, waits for the port to bind, and proxies the existing HTTP-based MCP tool wiring at it. Tool discovery is bounded at 15 s per server; up to 20 servers per agent.
+`stdio` is an adapter-owned declaration. It works only when an external Worker or a harness running inside the sandbox owns the child process and transport. The built-in Node and Cloudflare host-side harnesses require `url` and reject stdio-only declarations, because sandbox-local `127.0.0.1` is not automatically reachable from the control plane. URL MCP discovery is bounded at 15 s per server; up to 20 servers per agent.
 
 ## Environment
 

@@ -77,6 +77,8 @@
     "@open-managed-agents/session-runtime": "workspace:*",
     "@open-managed-agents/session-runtime-contract": "workspace:*",
     "@open-managed-agents/session-runtime-sql": "workspace:*",
+    "@open-managed-agents/session-resource-store": "workspace:*",
+    "@open-managed-agents/session-resource-store-sql": "workspace:*",
     "@open-managed-agents/session-thread-store-sql": "workspace:*",
     "@open-managed-agents/session-realtime": "workspace:*",
     "@open-managed-agents/session-realtime-memory": "workspace:*",

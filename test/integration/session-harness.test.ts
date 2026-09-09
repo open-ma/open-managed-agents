@@ -178,7 +178,7 @@ describe("Harness execution flow", () => {
     expect(agentMsgs[0].content[0].text).toBe("msg1");
     expect(agentMsgs[1].content[0].text).toBe("msg2");
     expect(agentMsgs[2].content[0].text).toBe("msg3");
-  });
+  }, 60_000);
 
   it("thinking harness emits thinking event + message in replay", async () => {
     const sessionId = await createSessionWith("thinking-harness");

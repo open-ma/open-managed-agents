@@ -57,10 +57,10 @@ export interface AgentConfig {
      *  in that case the URL is derived from the spawned process's localhost port. */
     url?: string;
     authorization_token?: string;
-    /** Spawn this MCP server in the sandbox container. The process binds to
-     *  127.0.0.1:port using its built-in SSE transport, and OMA routes the
-     *  existing HTTP-based MCP tool wiring at it. Lets us host stdio-only
-     *  third-party MCP servers without a separate gateway. */
+    /** Provider-specific stdio declaration for an external/in-sandbox
+     *  runtime that owns the process and transport. Host-side OpenMA
+     *  harnesses require `url`: a sandbox's 127.0.0.1 is not implicitly
+     *  reachable from the control-plane process. */
     stdio?: {
       command: string;             // e.g. "uvx"
       args?: string[];             // e.g. ["my-mcp-server", "--transport", "sse", "--port", "8765"]

@@ -338,6 +338,32 @@ OpenMA does not run an embedded Runtime Host below it.
   Session shape.
 </Aside>
 
+### Built-in entrypoint ownership and current boundaries
+
+The same public Session shape does not mean every process owns resource
+materialization. Use this matrix when choosing an entrypoint:
+
+| Entrypoint | Files and repositories | Skills and Memory Stores | MCP and Environment policy | Outputs | Dynamic changes |
+|---|---|---|---|---|---|
+| Node local Managed Session (`apps/main-node`, harness outside sandbox) | OpenMA downloads binary Files, clones the exact branch/commit, scopes a private-repository header to `git`, and validates a retained repository before preserving edits | OpenMA mounts custom Skills and tells the model their exact `SKILL.md` root. Managed Memory is projected to an immutable **read-only** snapshot; `read_write` is rejected before materialization | URL MCP supports toolset enablement/per-tool permission. A limited Environment with `allow_mcp_servers !== true` never contacts MCP. Sandbox-local stdio without a host-reachable URL is rejected | Durable local mount plus `GET /v1/sessions/:id/outputs[/:filename]` | File/resource, Skill, and Environment changes are fingerprinted at each turn boundary; a changed snapshot rebuilds and prepares the sandbox before execution |
+| Cloudflare local Managed Session (`apps/main` + `SessionDO`) | Session resources are mounted during sandbox warmup; any declared File, Memory, env, or repository that cannot be prepared now fails warmup instead of being skipped | SessionDO resolves and mounts the configured resources and Skills using Cloudflare bindings | The same URL-MCP checks apply; Vault-backed MCP and HTTPS use fenced Worker/DO egress. Sandbox-local stdio is not host-reachable and is rejected | Required R2 mount and the same OpenMA output endpoints when `FILES_BUCKET` is bound. Local workerd without bucket-mount support creates an explicitly non-durable test directory | A warm sandbox uses its warmup snapshot. Resource changes are guaranteed after a cold/recreated sandbox, not as live injection into an already-running turn |
+| Embedded `runtime_host` + `ama_worker` | OpenMA materializes Files/repositories before start | The unmodified official Worker owns Skill and Memory hydration/final sync | The Worker uses the official claim-scoped token and configured gateway | Runtime Host output Port | One immutable claimed-Session snapshot per Work item |
+| Embedded `runtime_host` + `openma_supervised` | The generic materializer supports Files/repositories | The selected harness/agent adapter owns Skills. Materializer-owned Memory requires an operator synchronization Port and otherwise fails closed | Supervisor/runtime profile owns wiring | Runtime Host output Port | Re-acquire/restart boundary; no mid-turn mutation |
+| `external_worker` / provider dispatch | External Worker owns all materialization | External Worker owns all synchronization | Official Work API is exposed unchanged | External Worker/deployment owns it | Defined by that Worker |
+
+The output endpoints are an OpenMA REST extension, not a method currently
+projected by `@anthropic-ai/sdk`. They still require the Managed Agents beta
+header, authenticate through the normal API middleware, verify that the
+Session exists in the current workspace, reject traversal filenames, and
+stream from the selected Node or Cloudflare output adapter.
+
+Private Git credentials have different security strengths in the two local
+lanes. Cloudflare uses its enforced outbound handler. Node local execution
+uses command-scoped Git configuration and is appropriate for trusted local
+or isolated deployments; it is not advertised as non-bypassable transparent
+egress. Select a Runtime Host provider that passes required credential-egress
+conformance when the repository credential is high blast radius.
+
 ## Resource contract
 
 The host uses five independent boundaries:

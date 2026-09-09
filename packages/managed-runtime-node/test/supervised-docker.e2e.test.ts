@@ -1,9 +1,8 @@
-import { execFile } from "node:child_process";
 import { readFile, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { promisify } from "node:util";
+import { build } from "esbuild";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
@@ -73,14 +72,14 @@ describe("openma_supervised in Docker", () => {
     const fixtureSource = join(rootDir, "supervisor-fixture.ts");
     const fixtureBundle = join(rootDir, "supervisor-fixture.mjs");
     await writeFile(fixtureSource, fixture);
-    await promisify(execFile)(join(repositoryRoot, "node_modules/.bin/esbuild"), [
-      fixtureSource,
-      "--bundle",
-      "--format=esm",
-      "--platform=node",
-      "--target=node24",
-      `--outfile=${fixtureBundle}`,
-    ]);
+    await build({
+      entryPoints: [fixtureSource],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node24",
+      outfile: fixtureBundle,
+    });
     const sql = await createBetterSqlite3SqlClient(":memory:");
     const runtime = await createNodeManagedRuntime({
       rootDir,

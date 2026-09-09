@@ -219,17 +219,16 @@ export class DefaultSandboxOrchestrator implements SandboxOrchestrator {
     }
 
     // 4. Mount session outputs.
-    if (input.mountOutputs && supportsSessionOutputMount(sandbox)) {
-      try {
-        await sandbox.mountSessionOutputs({
-          tenantId: input.tenantId,
-          sessionId: input.sessionId,
-        });
-      } catch (err) {
-        this.deps.logger?.warn(
-          `[sandbox-orchestrator] mountSessionOutputs failed: ${(err as Error).message}`,
+    if (input.mountOutputs) {
+      if (!supportsSessionOutputMount(sandbox)) {
+        throw new Error(
+          "Session output mount was requested but the sandbox does not provide it",
         );
       }
+      await sandbox.mountSessionOutputs({
+        tenantId: input.tenantId,
+        sessionId: input.sessionId,
+      });
     }
   }
 

@@ -100,7 +100,6 @@ import type { BrowserHarness, BrowserBillingHook, BrowserSession } from "@open-m
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox } from "./sandbox";
 import { mountResources } from "./resource-mounter";
-import { spawnStdioMcpServers, type StdioMcpConfig } from "./mcp-spawner";
 import {
   findLatestBackup as findWorkspaceBackup,
 } from "./workspace-backups";
@@ -616,13 +615,6 @@ export class SessionDO extends DurableObject<Env> {
    * /destroy). Built lazily on first getBrowserHarness() call.
    */
   private browserHarness: BrowserHarness | null = null;
-  /**
-   * Localhost URLs of stdio MCP servers spawned in the sandbox during warmup.
-   * Indexed by mcp_servers[].name. Used to fix up the agent.mcp_servers entry
-   * before each buildTools() call so the official Streamable HTTP client
-   * talks to the right port.
-   */
-  private spawnedMcpUrls: Map<string, string> = new Map();
   private threads = new Map<string, { agentId: string; agentConfig: AgentConfig }>();
   /** In-flight LLM stream state — separate from the events log so chunk
    *  deltas don't pollute history (the eventual `agent.message` is the
@@ -3045,11 +3037,10 @@ export class SessionDO extends DurableObject<Env> {
 
   /**
    * Returns a Proxy of the sandbox where any "real-work" method (exec,
-   * readFile, etc.) awaits sandboxWarmupPromise before delegating. Lets us
-   * remove the blocking `await warmUpSandbox()` from the user-message hot
-   * path: turns that never touch the sandbox (e.g. cron-only flows, pure
-   * answer turns) skip the 3s container cold-start entirely; turns that do
-   * use tools overlap the warmup with model fetch/TTFT.
+   * readFile, etc.) awaits sandboxWarmupPromise before delegating. The main
+   * turn also awaits warmup before tool/harness construction; this proxy is
+   * the second safety barrier for confirmation callbacks, background work,
+   * and container recycle between calls.
    *
    * Container-recycle detection: CF Sandbox container has its own idle
    * lifecycle independent of SessionDO. If it dies (sleepAfter, OOM, host
@@ -3199,49 +3190,6 @@ export class SessionDO extends DurableObject<Env> {
       };
     }
     return this.browserHarness;
-  }
-
-  /**
-   * Spawn any stdio-mode MCP servers declared on the session's agent config.
-   * Idempotent — if the spawned URL is already recorded for a server name,
-   * we skip. Records each spawned server's localhost URL on this.spawnedMcpUrls
-   * so applyMcpUrlFixups can patch agent.mcp_servers before buildTools.
-   */
-  private async spawnSessionStdioMcps(sandbox: SandboxExecutor): Promise<void> {
-    const agentId = this.state.agent_id;
-    if (!agentId || !this.env.CONFIG_KV) return;
-    const agent = await this.getAgentConfig(agentId);
-    if (!agent) return;
-    const mcps = agent.mcp_servers || [];
-    const stdios: StdioMcpConfig[] = [];
-    for (const s of mcps) {
-      if (!s.stdio) continue;
-      if (this.spawnedMcpUrls.has(s.name)) continue;
-      stdios.push({ name: s.name, ...s.stdio });
-    }
-    if (stdios.length === 0) return;
-    try {
-      const spawned = await spawnStdioMcpServers(sandbox, stdios);
-      for (const sp of spawned) this.spawnedMcpUrls.set(sp.name, sp.url);
-    } catch (err) {
-      // Best-effort: log but don't fail the whole warmup.
-      console.error("[mcp-spawner]", err);
-    }
-  }
-
-  /**
-   * Mutate agent.mcp_servers in place so any stdio entry has its `url` set
-   * to the localhost URL we spawned it on. No-op if no spawned URLs are
-   * recorded yet (warmup hasn't run, or no stdio MCPs configured).
-   */
-  private applyMcpUrlFixups(agent: AgentConfig): AgentConfig {
-    if (this.spawnedMcpUrls.size === 0) return agent;
-    if (!agent.mcp_servers) return agent;
-    const patched = agent.mcp_servers.map((s) => {
-      const url = this.spawnedMcpUrls.get(s.name);
-      return url ? { ...s, url } : s;
-    });
-    return { ...agent, mcp_servers: patched };
   }
 
   /**
@@ -3458,6 +3406,7 @@ export class SessionDO extends DurableObject<Env> {
       // httpx/pandas/pytest/Go/Rust pre-baked, so envs without extra
       // packages skip install entirely.
       const envId = this.state.environment_id;
+      const environmentConfig = envId ? await this.getEnvConfig(envId) : null;
       const imagePathHandled = false;
 
       // Install environment packages if configured. Replaces the old
@@ -3470,8 +3419,7 @@ export class SessionDO extends DurableObject<Env> {
       // On the next cold restart the "restored" path skips them and only
       // re-runs apt (which can't be backed up via SDK whitelist).
       if (envId && !imagePathHandled) {
-        const envConfig = await this.getEnvConfig(envId);
-        const pkgs = envConfig?.config?.packages;
+        const pkgs = environmentConfig?.config?.packages;
         if (pkgs) {
           const result = await ensureSetupApplied(
             { exec: (cmd: string, timeout?: number) => sandbox.exec(cmd, timeout) },
@@ -3489,10 +3437,9 @@ export class SessionDO extends DurableObject<Env> {
             },
           );
           if (result.error) {
-            console.error(`[setup-on-warmup] failed path=${result.path}: ${result.error}`);
-            // Don't throw — the agent can still try to run with whatever
-            // packages survived. Surfaced via tool exec failure if a
-            // missing dep is needed.
+            throw new Error(
+              `Environment setup failed at ${result.path}: ${result.error}`,
+            );
           }
         }
       }
@@ -3501,30 +3448,20 @@ export class SessionDO extends DurableObject<Env> {
       // writes there immediately appears via the caller-facing
       // GET /v1/sessions/:id/outputs endpoint. Mirrors AMA's `/mnt/session
       // /outputs/` magic dir contract — agent uses the standard `write` tool,
-      // platform takes care of persistence + listing. Best-effort: mount
-      // failure logs but doesn't block warmup; agent can still write to
-      // /workspace, just not callable-retrievable.
-      if (
-        this.state.session_id
-        && this.state.tenant_id
-        && supportsSessionOutputMount(sandbox)
-      ) {
-        try {
-          await sandbox.mountSessionOutputs({
-            tenantId: this.state.tenant_id,
-            sessionId: this.state.session_id,
-          });
-        } catch (err) {
-          console.warn(
-            `[session-do] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
+      // platform takes care of persistence + listing. When FILES_BUCKET is
+      // configured this is required: a failed mount aborts warmup so the
+      // session never falsely advertises durable, caller-visible outputs.
+      if (this.state.session_id && this.state.tenant_id && this.env.FILES_BUCKET) {
+        if (!supportsSessionOutputMount(sandbox)) {
+          throw new Error(
+            "Session outputs are enabled but the sandbox has no output mount capability",
           );
         }
+        await sandbox.mountSessionOutputs({
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+        });
       }
-
-      // Spawn stdio MCP servers in the sandbox if the agent uses any. The
-      // spawned process binds on 127.0.0.1 + records the URL so subsequent
-      // buildTools calls point the official MCP HTTP adapter at it.
-      await this.spawnSessionStdioMcps(sandbox);
 
       // Mount all session resources (files, git repos, env secrets)
       const sessionId = this.state.session_id;
@@ -3558,8 +3495,9 @@ export class SessionDO extends DurableObject<Env> {
             this.env.FILES_BUCKET,
             this.state.tenant_id,
             // Memory-store name lookup for mount paths (Anthropic mounts as
-            // /mnt/memory/<name>/, not /mnt/memory/<id>/). The lookup falls
-            // back to the id if the store can't be resolved.
+            // /mnt/memory/<name>/, not /mnt/memory/<id>/). A missing lookup
+            // result fails warmup; mounting under an undeclared id path would
+            // silently change the public contract.
             async (storeId: string) => {
               try {
                 const memSvc = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
@@ -4092,9 +4030,13 @@ export class SessionDO extends DurableObject<Env> {
           }
         }
 
+        // Tool definitions must reflect the fully prepared runtime. Resource
+        // mount failures must stop the confirmation continuation.
+        await this.warmUpSandbox();
+
         // Build tools with execute functions intact (not stripped for always_ask)
         const auxResolved = await this.resolveAuxModel(agent);
-        const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
+        const allTools = await buildTools(agent, sandbox, {
           ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
           ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
           TAVILY_API_KEY: this.env.TAVILY_API_KEY,
@@ -4531,12 +4473,16 @@ export class SessionDO extends DurableObject<Env> {
 
     // Build sub-agent tools and model (platform prepares context for sub-agent too)
     let childSignal: AbortSignal | undefined = abortController.signal;
+    const subEnvironment = this.state.environment_id
+      ? await this.getEnvConfig(this.state.environment_id)
+      : null;
     const subAuxResolved = await this.resolveAuxModel(subAgent);
-    const subTools = await buildTools(this.applyMcpUrlFixups(subAgent), childSandbox, {
+    const subTools = await buildTools(subAgent, childSandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,
       toMarkdown: cfWorkersAiToMarkdown(this.env.AI),
+      environmentConfig: subEnvironment?.config,
       mcpBinding: this.env.MAIN_MCP,
       tenantId: this.state.tenant_id,
       sessionId: this.state.session_id,
@@ -4745,10 +4691,9 @@ export class SessionDO extends DurableObject<Env> {
     let idleEmitted = false;
 
     // Reuse session-level sandbox (singleton) — files persist across turns.
-    // Returned object is a lazy proxy: the underlying container is warmed up
-    // on first method call, in parallel with model fetch / TTFT. Cron-only
-    // turns or pure-answer turns skip the cold-start entirely. Errors from
-    // warmup will surface from the first sandbox tool's execute().
+    // Returned object is a lazy proxy. Warmup starts concurrently with the
+    // control-plane reads below, then is awaited before tools/harness are
+    // built so declared resources are present on the first model request.
     let sandbox = this.bindSandboxToExecution(
       this.getOrCreateSandbox(),
       parentSignal,
@@ -4757,10 +4702,10 @@ export class SessionDO extends DurableObject<Env> {
     );
 
     // Kick off warmup so it overlaps with the rest of pre-streamText setup
-    // and the first model fetch. Result is cached on sandboxWarmupPromise,
-    // so the proxy's per-method `await this.warmUpSandbox()` becomes free
-    // once this resolves. Catch detached so the unhandled-rejection logger
-    // doesn't yell — the per-method await re-throws to the caller.
+    // Result is cached on sandboxWarmupPromise and awaited below before any
+    // tool or model can observe the runtime. Catch detached here only avoids
+    // an unhandled rejection during the overlap window; the later await
+    // propagates the same error into the turn lifecycle.
     void this.warmUpSandbox().catch(() => { /* surfaces via tool exec */ });
 
     // Fetch environment config for networking restrictions
@@ -4802,6 +4747,12 @@ export class SessionDO extends DurableObject<Env> {
     }
     const memoryStoreIds = memoryAttachments.map((a) => a.store_id);
 
+    // Warmup may overlap the preceding control-plane reads, but it must
+    // finish before harness/tool construction. This closes the first-turn
+    // race where files, repositories or skills were absent from the model's
+    // initial capability snapshot and only appeared on a later sandbox call.
+    await this.warmUpSandbox();
+
     // Resolve harness via registry — SessionDO never imports a concrete harness
     let harness: HarnessInterface;
     let resolvedHarnessName = agent.harness || "default";
@@ -4842,7 +4793,7 @@ export class SessionDO extends DurableObject<Env> {
 
     // Build tools from agent config
     const auxResolved = await this.resolveAuxModel(agent);
-    const allTools = await buildTools(this.applyMcpUrlFixups(agent), sandbox, {
+    const allTools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: this.env.ANTHROPIC_API_KEY,
       ANTHROPIC_BASE_URL: this.env.ANTHROPIC_BASE_URL,
       TAVILY_API_KEY: this.env.TAVILY_API_KEY,

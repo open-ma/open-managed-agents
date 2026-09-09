@@ -386,11 +386,11 @@ describe("Edge cases - concurrent and complex operations", () => {
     expect(tools.call_agent_agent_w2).toBeDefined();
   });
 
-  it("agent created with mcp_servers generates MCP tools via buildTools", async () => {
+  it("agent created with mcp_servers requires explicit runtime routing", async () => {
     const { buildTools } = await import("../../apps/agent/src/harness/tools");
     const { TestSandbox } = await import("../../apps/agent/src/runtime/sandbox");
     const sandbox = new TestSandbox();
-    const tools = await buildTools({
+    await expect(buildTools({
       id: "agent_test_mcp",
       name: "MCP Agent",
       model: "claude-sonnet-4-6",
@@ -402,12 +402,9 @@ describe("Edge cases - concurrent and complex operations", () => {
       ],
       version: 1,
       created_at: new Date().toISOString(),
-    }, sandbox);
-    // MCP tools now expand inline as `mcp__<server>__<tool>`; legacy
-    // `mcp_<srv>_list_tools` / `mcp_<srv>_call` were removed. The
-    // buildTools call still succeeds and returns a populated ToolSet.
-    expect(tools).toBeDefined();
-    expect(typeof tools).toBe("object");
+    }, sandbox)).rejects.toThrow(
+      "Declared MCP servers require mcpBinding, tenantId, and sessionId",
+    );
   });
 
   it("resolveSkills returns empty for non-registered skills (all skills via KV now)", async () => {

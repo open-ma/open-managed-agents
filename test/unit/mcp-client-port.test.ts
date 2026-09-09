@@ -134,6 +134,103 @@ describe("OpenMA MCP client port", () => {
     expect(fake.state.counts.DELETE).toBe(1);
   });
 
+  it("does not expose a remote MCP tool disabled by its server toolset", async () => {
+    const fake = createFakeMcpFetch();
+    const tools = await harnessTools.buildTools({
+      id: "agent_mcp_disabled",
+      name: "MCP Disabled Agent",
+      model: "claude-sonnet-4-6",
+      system: "",
+      tools: [
+        { type: "agent_toolset_20260401" },
+        {
+          type: "mcp_toolset",
+          mcp_server_name: "demo",
+          default_config: { enabled: true, permission_policy: { type: "always_allow" } },
+          configs: [{ name: "echo", enabled: false }],
+        },
+      ],
+      mcp_servers: [{ name: "demo", type: "sse", url: "https://mcp.example.test/rpc" }],
+      version: 1,
+      created_at: new Date().toISOString(),
+    }, new TestSandbox(), {
+      mcpBinding: { fetch: fake.fetch },
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+    });
+
+    expect(tools.mcp__demo__echo).toBeUndefined();
+    await harnessTools.disposeTools(tools);
+  });
+
+  it("does not contact or expose MCP servers when the Environment policy disables them", async () => {
+    const fake = createFakeMcpFetch();
+    const tools = await harnessTools.buildTools({
+      id: "agent_mcp_environment_denied",
+      name: "MCP Environment Denied Agent",
+      model: "claude-sonnet-4-6",
+      system: "",
+      tools: [{ type: "agent_toolset_20260401" }],
+      mcp_servers: [{ name: "demo", type: "sse", url: "https://mcp.example.test/rpc" }],
+      version: 1,
+      created_at: new Date().toISOString(),
+    }, new TestSandbox(), {
+      mcpBinding: { fetch: fake.fetch },
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+      environmentConfig: {
+        networking: {
+          type: "limited",
+          allow_mcp_servers: false,
+          allowed_hosts: [],
+        },
+      },
+    });
+
+    expect(tools.mcp__demo__echo).toBeUndefined();
+    expect(fake.state.requests).toHaveLength(0);
+  });
+
+  it("fails closed when a declared MCP server has no routing context", async () => {
+    await expect(harnessTools.buildTools({
+      id: "agent_mcp_missing_route",
+      name: "MCP Missing Route Agent",
+      model: "claude-sonnet-4-6",
+      system: "",
+      tools: [{ type: "agent_toolset_20260401" }],
+      mcp_servers: [{ name: "demo", type: "sse", url: "https://mcp.example.test/rpc" }],
+      version: 1,
+      created_at: new Date().toISOString(),
+    }, new TestSandbox())).rejects.toThrow(
+      "Declared MCP servers require mcpBinding, tenantId, and sessionId",
+    );
+  });
+
+  it("fails closed when a declared stdio MCP server has not been prepared", async () => {
+    const fake = createFakeMcpFetch();
+    await expect(harnessTools.buildTools({
+      id: "agent_mcp_missing_stdio_url",
+      name: "MCP Missing Stdio URL Agent",
+      model: "claude-sonnet-4-6",
+      system: "",
+      tools: [{ type: "agent_toolset_20260401" }],
+      mcp_servers: [{
+        name: "local",
+        type: "stdio",
+        stdio: { command: "demo", port: 43123 },
+      }],
+      version: 1,
+      created_at: new Date().toISOString(),
+    }, new TestSandbox(), {
+      mcpBinding: { fetch: fake.fetch },
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+    })).rejects.toThrow(
+      'Declared MCP server "local" has no prepared URL',
+    );
+    expect(fake.state.requests).toHaveLength(0);
+  });
+
   it("bounds remote session termination so local disposal cannot hang", async () => {
     const connectHttpMcpClient = (
       harnessTools as Record<string, unknown>

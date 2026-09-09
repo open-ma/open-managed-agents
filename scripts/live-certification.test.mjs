@@ -234,6 +234,17 @@ test("matrix runs real commands and redacts credentials from failed diagnostics"
 test("matrix records Git identity, safe runtime metadata, and spawn failures", async () => {
   const root = await fixtureRoot();
   const passCommand = await fixtureCommand(root, "metadata-pass", "process.exit(0);");
+  assert.equal(spawnSync("git", ["init"], { cwd: root }).status, 0);
+  assert.equal(spawnSync("git", ["config", "user.email", "certification@example.invalid"], { cwd: root }).status, 0);
+  assert.equal(spawnSync("git", ["config", "user.name", "Certification Test"], { cwd: root }).status, 0);
+  assert.equal(spawnSync("git", ["add", "metadata-pass.mjs"], { cwd: root }).status, 0);
+  assert.equal(
+    spawnSync("git", ["-c", "core.hooksPath=/dev/null", "commit", "-m", "fixture"], {
+      cwd: root,
+    }).status,
+    0,
+  );
+  await writeFile(join(root, "dirty-marker"), "dirty\n");
   const report = await runLiveCertification({
     lanes: [
       {
@@ -257,7 +268,7 @@ test("matrix records Git identity, safe runtime metadata, and spawn failures", a
       ACTIVE_TOKEN: "active-token-value",
       UNUSED_API_KEY: "short-secret",
     },
-    cwd: repoRoot,
+    cwd: root,
   });
 
   assert.match(report.commit.sha, /^[0-9a-f]{40}$/);

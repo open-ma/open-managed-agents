@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
+import { build } from "esbuild";
 import { afterAll, describe, expect, it } from "vitest";
 
 import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
@@ -202,14 +203,14 @@ input.on("line", (line) => {
     await writeFile(agentPath, agentSource);
     await writeFile(wrapperPath, `#!/bin/sh\nexec /usr/local/bin/node /opt/openma-fixture/production-acp-agent.cjs\n`);
     await chmod(wrapperPath, 0o755);
-    await promisify(execFile)(join(repositoryRoot, "node_modules/.bin/esbuild"), [
-      join(repositoryRoot, "packages/harness-runtime-acp/src/node-cli.ts"),
-      "--bundle",
-      "--format=esm",
-      "--platform=node",
-      "--target=node24",
-      `--outfile=${supervisorBundle}`,
-    ]);
+    await build({
+      entryPoints: [join(repositoryRoot, "packages/harness-runtime-acp/src/node-cli.ts")],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node24",
+      outfile: supervisorBundle,
+    });
 
     const sql = await createBetterSqlite3SqlClient(":memory:");
     const runtime = await createNodeManagedRuntime({
@@ -466,14 +467,14 @@ input.on("line", (line) => {
     const fixtureBundle = join(rootDir, "supervisor-acp-fixture.mjs");
     await writeFile(agentPath, agentSource);
     await writeFile(fixtureSource, fixture);
-    await promisify(execFile)(join(repositoryRoot, "node_modules/.bin/esbuild"), [
-      fixtureSource,
-      "--bundle",
-      "--format=esm",
-      "--platform=node",
-      "--target=node24",
-      `--outfile=${fixtureBundle}`,
-    ]);
+    await build({
+      entryPoints: [fixtureSource],
+      bundle: true,
+      format: "esm",
+      platform: "node",
+      target: "node24",
+      outfile: fixtureBundle,
+    });
     const sql = await createBetterSqlite3SqlClient(":memory:");
     const runtime = await createNodeManagedRuntime({
       rootDir,

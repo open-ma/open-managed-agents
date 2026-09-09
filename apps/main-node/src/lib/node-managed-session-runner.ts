@@ -115,6 +115,7 @@ export class DefaultNodeManagedSessionRunner
   implements NodeManagedSessionRunner
 {
   private readonly sandboxes = new ScopedSessionMap<SandboxExecutor>();
+  private readonly sandboxConfigurationFingerprints = new ScopedSessionMap<string>();
   private readonly abortControllers = new ScopedSessionMap<AbortController>();
 
   constructor(
@@ -126,7 +127,23 @@ export class DefaultNodeManagedSessionRunner
   }
 
   async start(input: StartNodeManagedSessionRuntime): Promise<void> {
-    if (this.sandboxes.has(input)) return;
+    const fingerprint = JSON.stringify({
+      resources: input.session.resources,
+      skills: input.session.agent.skills,
+      environment: input.environment.config,
+    });
+    const existing = this.sandboxes.get(input);
+    if (
+      existing !== undefined &&
+      this.sandboxConfigurationFingerprints.get(input) === fingerprint
+    ) return;
+    if (existing !== undefined) {
+      this.abortControllers.get(input)?.abort();
+      this.abortControllers.delete(input);
+      this.sandboxes.delete(input);
+      this.sandboxConfigurationFingerprints.delete(input);
+      await existing.destroy?.();
+    }
     const sandbox = await this.dependencies.buildSandbox({
       workspaceId: input.workspaceId,
       session: input.session,
@@ -144,6 +161,7 @@ export class DefaultNodeManagedSessionRunner
       throw error;
     }
     this.sandboxes.set(input, sandbox);
+    this.sandboxConfigurationFingerprints.set(input, fingerprint);
   }
 
   async stop(input: StopNodeManagedSessionRuntime): Promise<void> {
@@ -151,6 +169,7 @@ export class DefaultNodeManagedSessionRunner
     this.abortControllers.delete(input);
     const sandbox = this.sandboxes.get(input);
     this.sandboxes.delete(input);
+    this.sandboxConfigurationFingerprints.delete(input);
     await sandbox?.destroy?.();
   }
 

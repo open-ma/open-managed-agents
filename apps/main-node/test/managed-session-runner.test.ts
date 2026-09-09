@@ -217,6 +217,65 @@ describe("DefaultNodeManagedSessionRunner", () => {
     expect(destroy).toHaveBeenCalledOnce();
   });
 
+  it("replaces a prepared sandbox when the Session resource snapshot changes", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    const destroyed: number[] = [];
+    const preparedResourceCounts: number[] = [];
+    let generation = 0;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => {
+        generation += 1;
+        const current = generation;
+        return {
+          destroy: async () => { destroyed.push(current); },
+        } as SandboxExecutor;
+      },
+      prepareSandbox: async ({ session }) => {
+        preparedResourceCounts.push(session.resources.length);
+      },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => undefined }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
+      ids: { nextEventId: () => "event_resource_refresh" },
+    });
+    const changedSession: Session = {
+      ...session,
+      resources: [{
+        id: "sesrsc_file_01",
+        type: "file",
+        createdAt: "2026-08-26T03:00:00.000Z",
+        fileId: "file_01",
+        mountPath: "/mnt/session/uploads/file_01",
+        updatedAt: "2026-08-26T03:00:00.000Z",
+      }],
+    };
+
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session: changedSession,
+      environment,
+      initialEvents: [],
+    });
+
+    expect(preparedResourceCounts).toEqual([0, 1]);
+    expect(destroyed).toEqual([1]);
+  });
+
   it("runs a user message between official lifecycle events", async () => {
     const modulePath = "../src/lib/node-managed-session-runner.ts";
     const runnerModule = await import(/* @vite-ignore */ modulePath).catch(

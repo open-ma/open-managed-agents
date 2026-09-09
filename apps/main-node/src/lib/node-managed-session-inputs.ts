@@ -1,11 +1,16 @@
 import { posix } from "node:path";
 import { unzipSync } from "fflate";
-import type { SandboxExecutor } from "@open-managed-agents/sandbox";
+import {
+  supportsSessionOutputMount,
+  type SandboxExecutor,
+} from "@open-managed-agents/sandbox";
 import type {
   FilesApplicationPort,
   Session,
   SkillVersionsApplicationPort,
 } from "@open-managed-agents/managed-agents-application";
+import type { SessionResourceSecretSource } from "@open-managed-agents/session-resource-store";
+import type { NodeManagedMemorySnapshotPort } from "./node-managed-memory-snapshots.js";
 
 type FileSource = Pick<FilesApplicationPort, "downloadFile">;
 type SkillVersionSource = Pick<
@@ -22,6 +27,22 @@ export interface PrepareNodeManagedSessionInputs {
 export interface NodeManagedSessionInputPreparerDependencies {
   files: FileSource;
   skillVersions: SkillVersionSource;
+  repositoryCredentials: Pick<SessionResourceSecretSource, "findGithubToken">;
+  memorySnapshots: NodeManagedMemorySnapshotPort;
+}
+
+export function buildNodeManagedSkillReminders(
+  session: Session,
+): Array<{ source: string; text: string }> {
+  return session.agent.skills.flatMap((skill) => {
+    if (skill.type !== "custom") return [];
+    const requestedVersion = skill.version ?? "latest";
+    const mountRoot = `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(requestedVersion)}/`;
+    return [{
+      source: `skill:${skill.skillId}`,
+      text: `Custom skill ${skill.skillId} is mounted at ${mountRoot}. Locate and read its SKILL.md before applying it.`,
+    }];
+  });
 }
 
 function shellQuote(value: string): string {
@@ -36,9 +57,18 @@ function shellWorkspacePath(value: string): string {
 }
 
 function assertCommandSucceeded(command: string, output: string): void {
-  if (/\[(?:error:|exit (?!exit=0\]))/u.test(output)) {
+  const prefixedExit = /^exit=(-?\d+)\n/u.exec(output);
+  if (
+    (prefixedExit !== null && Number(prefixedExit[1]) !== 0)
+    || /\[(?:error:|exit (?!exit=0\]))/u.test(output)
+  ) {
     throw new Error(`${command} failed: ${output}`);
   }
+}
+
+function commandStdout(command: string, output: string): string {
+  assertCommandSucceeded(command, output);
+  return output.replace(/^exit=0\n/u, "").trim();
 }
 
 function safeArchivePath(value: string): string {
@@ -64,11 +94,77 @@ export class NodeManagedSessionInputPreparer {
   ) {}
 
   async prepare(input: PrepareNodeManagedSessionInputs): Promise<void> {
-    void input.workspaceId;
+    if (!supportsSessionOutputMount(input.sandbox)) {
+      throw new Error(
+        "Managed Session runtime requires durable session outputs, but the selected sandbox does not provide them",
+      );
+    }
+    await input.sandbox.mountSessionOutputs({
+      tenantId: input.workspaceId,
+      sessionId: input.session.id,
+    });
+
+    const memoryStores = input.session.resources.filter(
+      (resource) => resource.type === "memory_store",
+    );
+    if (memoryStores.length > 0 && input.sandbox.mountMemoryStore === undefined) {
+      throw new Error(
+        "Managed Session has memory stores, but the selected sandbox does not support memory store mounts",
+      );
+    }
+    for (const resource of memoryStores) {
+      if (resource.access !== "read_only") {
+        throw new Error(
+          `Managed Node runtime does not support read-write Memory Store ${resource.memoryStoreId}; use read_only until reverse synchronization is configured`,
+        );
+      }
+      const snapshot = await this.dependencies.memorySnapshots.materialize({
+        workspaceId: input.workspaceId,
+        sessionId: input.session.id,
+        memoryStoreId: resource.memoryStoreId,
+      });
+      await input.sandbox.mountMemoryStore!({
+        storeName: resource.name ?? resource.memoryStoreId,
+        storeId: snapshot.mountStoreId,
+        readOnly: true,
+      });
+    }
+
+    const repositories = input.session.resources.filter(
+      (resource) => resource.type === "github_repository",
+    );
+    if (repositories.length > 0) {
+      if (input.sandbox.registerCommandSecrets === undefined) {
+        throw new Error(
+          "Managed Session has GitHub repositories, but the selected sandbox cannot scope repository credentials",
+        );
+      }
+      const gitCredentialEnv: Record<string, string> = {
+        GIT_CONFIG_COUNT: String(repositories.length),
+      };
+      for (const [index, resource] of repositories.entries()) {
+        const token = await this.dependencies.repositoryCredentials.findGithubToken({
+          workspaceId: input.workspaceId,
+          sessionId: input.session.id,
+          resourceId: resource.id,
+        });
+        if (token === null) {
+          throw new Error(
+            `Managed Session GitHub credential for resource ${resource.id} was not found`,
+          );
+        }
+        gitCredentialEnv[`GIT_CONFIG_KEY_${index}`] =
+          `http.${resource.url}.extraHeader`;
+        gitCredentialEnv[`GIT_CONFIG_VALUE_${index}`] =
+          `Authorization: Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+      }
+      input.sandbox.registerCommandSecrets("git", gitCredentialEnv);
+    }
+
     const writeFileBytes = input.sandbox.writeFileBytes;
     const needsBinaryWrites = input.session.resources.some(
       (resource) => resource.type === "file",
-    ) || input.session.agent.skills.length > 0;
+    ) || input.session.agent.skills.some((skill) => skill.type === "custom");
     if (needsBinaryWrites && writeFileBytes === undefined) {
       throw new Error("Managed Session inputs require sandbox binary file writes");
     }
@@ -140,13 +236,38 @@ export class NodeManagedSessionInputPreparer {
   ): Promise<void> {
     // A restarted Node process can reopen a retained workspace. Preserve its
     // edits instead of destructively cloning over the repository again.
+    let retained = true;
     try {
       await sandbox.readFile(`${resource.mountPath}/.git/HEAD`);
-      return;
     } catch {
-      // First acquisition: clone below.
+      retained = false;
     }
+    if (!retained) return this.cloneRepository(sandbox, resource);
 
+    const repositoryDir = shellQuote(shellWorkspacePath(resource.mountPath));
+    const remoteCommand = `git -C ${repositoryDir} remote get-url origin`;
+    const remote = commandStdout(
+      remoteCommand,
+      await sandbox.exec(remoteCommand, 30_000),
+    );
+    if (remote !== resource.url) {
+      throw new Error(
+        `Retained repository at ${resource.mountPath} does not match Session resource ${resource.id}: expected ${resource.url}, found ${remote || "no origin"}`,
+      );
+    }
+    if (resource.checkout?.type === "commit") {
+      const commitCommand = `git -C ${repositoryDir} cat-file -e ${shellQuote(`${resource.checkout.sha}^{commit}`)}`;
+      commandStdout(
+        commitCommand,
+        await sandbox.exec(commitCommand, 30_000),
+      );
+    }
+  }
+
+  private async cloneRepository(
+    sandbox: SandboxExecutor,
+    resource: Extract<Session["resources"][number], { type: "github_repository" }>,
+  ): Promise<void> {
     if (sandbox.gitCheckout !== undefined) {
       await sandbox.gitCheckout(resource.url, {
         targetDir: resource.mountPath,

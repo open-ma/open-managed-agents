@@ -754,6 +754,27 @@ describe("Sandbox lifecycle", () => {
     })).rejects.toThrow("r2 mount unavailable");
   });
 
+  it("CloudflareSandbox creates an explicit non-durable output directory in local dev", async () => {
+    const exec = vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 }));
+    const sandbox = new CloudflareSandbox({
+      SANDBOX: {},
+      FILES_BUCKET: {},
+    } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve({ exec });
+
+    await expect(sandbox.mountSessionOutputs({
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+    })).resolves.toBeUndefined();
+    expect(exec).toHaveBeenCalledWith(
+      "mkdir -p /mnt/session/outputs",
+      { timeout: 5000 },
+    );
+    expect(sandbox.sessionOutputMountCapabilities()).toEqual({
+      durability: "best_effort",
+    });
+  });
+
   it("Cloudflare host preset preinstalls fencing, orphan cleanup, and both harness lanes", async () => {
     const runtime = createCloudflareManagedRuntimeHost(
       { SANDBOX: {}, FILES_BUCKET: {}, MAIN_DB: {} } as any,

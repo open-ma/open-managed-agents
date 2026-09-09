@@ -673,6 +673,56 @@ describe("DefaultNodeManagedSessionRuntimeDriver", () => {
     ]);
   });
 
+  it("refreshes the engine with the current resource snapshot before accepting a turn", async () => {
+    const starts: Session[] = [];
+    const engine: RuntimeEngine = {
+      start: async (input) => { starts.push(input.session); },
+      stop: async () => {},
+      accept: async () => {},
+      archiveThread: async () => {},
+    };
+    const driver = new runtimeModule.DefaultNodeManagedSessionRuntimeDriver({
+      engine,
+      realtime: new MemorySessionRealtimeHub(),
+      projectionFor: () => ({
+        recordSessionRuntimeEvents: async () => ({ type: "recorded", session }),
+      }),
+    });
+    await driver.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    const currentSession: Session = {
+      ...session,
+      resources: [{
+        id: "sesrsc_file_01",
+        type: "file",
+        createdAt: "2026-08-26T04:00:00.000Z",
+        fileId: "file_01",
+        mountPath: "/mnt/session/uploads/file_01",
+        updatedAt: "2026-08-26T04:00:00.000Z",
+      }],
+    };
+
+    await driver.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session: currentSession,
+      environment,
+      events: [{
+        id: "event_after_resource_change",
+        type: "user.message",
+        content: [{ type: "text", text: "Use the new file" }],
+        processedAt: "2026-08-26T04:00:00.000Z",
+      }],
+    });
+
+    expect(starts).toEqual([session, currentSession]);
+  });
+
   it("clears runtime ownership when engine stop fails", async () => {
     let starts = 0;
     let failStop = true;

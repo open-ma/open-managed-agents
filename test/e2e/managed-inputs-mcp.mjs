@@ -7,12 +7,14 @@ const modelBaseURL = requiredEnv("OMA_E2E_INPUT_MODEL_BASE_URL").replace(/\/$/, 
 const mcpURL = requiredEnv("OMA_E2E_MCP_URL");
 const repositoryURL = requiredEnv("OMA_E2E_REPO_URL");
 const repositorySha = requiredEnv("OMA_E2E_REPO_SHA");
+const repositoryToken = requiredEnv("OMA_E2E_REPO_TOKEN");
 const suffix = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 const modelId = `e2e-inputs-${suffix}`;
 const client = new Anthropic({ apiKey, baseURL, maxRetries: 0, timeout: 60_000 });
 
 let modelCard;
 let file;
+let memoryStore;
 let skill;
 let vault;
 let credential;
@@ -46,6 +48,21 @@ try {
       file: new File(["FILE_INPUT_OK"], "attached.txt", { type: "text/plain" }),
     });
     assert.match(created.id, /^file_/);
+    return created;
+  });
+
+  memoryStore = await step("create Memory Store input", async () => {
+    const created = await client.beta.memoryStores.create({
+      name: "certification-memory",
+      description: "Managed runtime mount certification",
+    });
+    assert.match(created.id, /^memstore_/);
+    const memory = await client.beta.memoryStores.memories.create(created.id, {
+      path: "/notes/input.txt",
+      content: "MEMORY_INPUT_OK",
+      view: "full",
+    });
+    assert.equal(memory.content, "MEMORY_INPUT_OK");
     return created;
   });
 
@@ -143,23 +160,23 @@ try {
     return created;
   });
 
-  session = await step("create session with File and pinned repository resources", async () => {
+  session = await step("create session with Memory Store and private pinned repository resources", async () => {
     const created = await client.beta.sessions.create({
       agent: { type: "agent", id: agent.id, version: agent.version },
       environment_id: environment.id,
       vault_ids: [vault.id],
       resources: [
         {
-          type: "file",
-          file_id: file.id,
-          mount_path: "/workspace/inputs/attached.txt",
-        },
-        {
           type: "github_repository",
           url: repositoryURL,
-          authorization_token: "local-fixture-does-not-require-auth",
+          authorization_token: repositoryToken,
           checkout: { type: "commit", sha: repositorySha },
           mount_path: "/workspace/repository",
+        },
+        {
+          type: "memory_store",
+          memory_store_id: memoryStore.id,
+          access: "read_only",
         },
       ],
       title: `e2e-inputs-session-${suffix}`,
@@ -167,8 +184,18 @@ try {
     });
     assert.match(created.id, /^session_/);
     assert.equal(created.resources.length, 2);
-    assert.ok(!JSON.stringify(created).includes("local-fixture-does-not-require-auth"));
+    assert.ok(!JSON.stringify(created).includes(repositoryToken));
     return created;
+  });
+
+  await step("add File resource after Session startup", async () => {
+    const resource = await client.beta.sessions.resources.add(session.id, {
+      type: "file",
+      file_id: file.id,
+      mount_path: "/workspace/inputs/attached.txt",
+    });
+    assert.equal(resource.type, "file");
+    assert.equal(resource.file_id, file.id);
   });
 
   await step("run one turn through mounted inputs and Vault-backed MCP", async () => {
@@ -200,7 +227,7 @@ try {
 
     assert.ok(bashUse, `missing bash use: ${JSON.stringify(events)}`);
     assert.ok(
-      JSON.stringify(bashResult?.content).includes("FILES_REPO_SKILL_OK"),
+      JSON.stringify(bashResult?.content).includes("FILES_REPO_SKILL_MEMORY_OUTPUT_OK"),
       `mounted input assertion failed: ${JSON.stringify(bashResult)}`,
     );
     assert.ok(mcpUse, `missing MCP use: ${JSON.stringify(events)}`);
@@ -212,6 +239,23 @@ try {
       JSON.stringify(finalMessage?.content).includes("ALL_INPUTS_OK"),
       `missing final marker: ${JSON.stringify(finalMessage)}`,
     );
+  });
+
+  await step("read durable Session output through the public Node extension", async () => {
+    const listedResponse = await omaFetch(`/v1/sessions/${encodeURIComponent(session.id)}/outputs`);
+    const listedBody = await listedResponse.text();
+    assert.equal(listedResponse.status, 200, listedBody);
+    const listed = JSON.parse(listedBody);
+    assert.ok(
+      listed.data.some((output) => output.filename === "certification.txt"),
+      listedBody,
+    );
+    const outputResponse = await omaFetch(
+      `/v1/sessions/${encodeURIComponent(session.id)}/outputs/certification.txt`,
+    );
+    const outputBody = await outputResponse.text();
+    assert.equal(outputResponse.status, 200, outputBody);
+    assert.equal(outputBody, "OUTPUT_OK");
   });
 } finally {
   if (session) await cleanup("delete session", () => client.beta.sessions.delete(session.id));
@@ -225,6 +269,9 @@ try {
   }
   if (vault) await cleanup("delete Vault", () => client.beta.vaults.delete(vault.id));
   if (skill) await cleanup("delete Skill", () => client.beta.skills.delete(skill.id));
+  if (memoryStore) {
+    await cleanup("delete Memory Store", () => client.beta.memoryStores.delete(memoryStore.id));
+  }
   if (file) await cleanup("delete File", () => client.beta.files.delete(file.id));
   if (modelCard) {
     await cleanup("delete deterministic tool-driving model", async () => {
@@ -288,6 +335,7 @@ function omaFetch(path, init = {}) {
     ...init,
     headers: {
       "content-type": "application/json",
+      "anthropic-beta": "managed-agents-2026-04-01",
       "x-api-key": apiKey,
       ...init.headers,
     },

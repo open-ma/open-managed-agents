@@ -195,14 +195,15 @@ Sandbox sides (Daytona / E2B) already mount the bucket via s3fs using
 the same env vars; the loop "agent writes via FUSE → S3 PUT → poller
 upserts SQL index" is the multi-replica analog of the chokidar path.
 
-Limitation: `local-subprocess` sandboxes still need
-`MEMORY_BLOB_DIR` for their `/mnt/memory` symlinks — the local subprocess
-adapter doesn't speak s3fs. Use S3 mode together with a remote sandbox
-provider. Inside the `openma/main-node` container the adapter creates a
-real `/mnt/memory/<storeName>` symlink (visible to bash that hardcodes
-the path); on hosts without a writable `/mnt`, it transparently rewrites
-`/mnt/memory/...` to the workdir-relative `.mnt/memory/...` so harness
-read/write/edit/glob/grep tools still land on the right files.
+Limitation: `local-subprocess` sandboxes still need `MEMORY_BLOB_DIR`; the
+adapter does not speak s3fs. It exposes session-scoped workdir projections
+through `OMA_MEMORY_DIR`, `OMA_MEMORY_<NAME>`, and `OMA_OUTPUTS_DIR`, while
+harness filesystem tools translate the canonical `/mnt/...` paths into that
+workdir. It deliberately does not create process-global `/mnt` symlinks,
+because concurrent Sessions would overwrite one another. The low-level
+adapter has an explicit `rootMountBase` option only for callers that own an
+exclusive mount namespace. Use S3 mode with an isolated remote sandbox when
+arbitrary agent commands must see canonical `/mnt/...` paths directly.
 
 ### Pointing at an existing Postgres cluster
 
@@ -342,7 +343,7 @@ The same demo works on the Postgres compose unchanged.
 | `web_fetch` tool (HTML → markdown via turndown) | ✓ |
 | `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
 | `browser` tool | ✗  CF-only (uses @cloudflare/playwright) |
-| Memory stores (mount + agent fs writes → SQL index) | ✓ symlink + chokidar watcher |
+| Memory stores | ✓ legacy `/v1/oma` mount + watcher; official `/v1/sessions` local harness mounts immutable read-only snapshots and rejects `read_write` until reverse sync is configured |
 | `/v1/vaults` + `/v1/vaults/:id/credentials` full CRUD + `mcp_oauth_validate` | ✓ via package |
 | Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar (uses `@open-managed-agents/vault-forward`) |
 | `/v1/api_keys` mint / list / revoke (SHA-256 hashed in `api_keys` table) | ✓ |
@@ -374,14 +375,14 @@ The same demo works on the Postgres compose unchanged.
 
 | Provider | bash | fs | net | `/mnt/memory` | `/mnt/outputs` | vault CA | workspace backup |
 |---|---|---|---|---|---|---|---|
-| `LocalSubprocess` | ✓ | ✓ | ✓ | ✓ (real symlink at /mnt/memory inside the container; falls back to workdir-relative `.mnt/memory` when /mnt isn't writable) | ✓ (same pattern) | ✓ | ✓ (tar+upload to BlobStore) |
+| `LocalSubprocess` | ✓ | ✓ | ✓ | ✓ for harness tools and `OMA_MEMORY_*`; arbitrary commands use the env path (canonical root mount requires an exclusive namespace) | ✓ via `OMA_OUTPUTS_DIR` (same root-mount boundary) | ✓ | ✓ (tar+upload to BlobStore) |
 | `LiteBox` | ✓ | ✓ | ✓ | ✓ (host bind-mount via SimpleBox volumes) | ✓ | ✓ (CA copyIn on first exec) | ✓ (tar via exec + readFileBytes) |
 | `Daytona` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*`) | ✓ (single-bucket layout: outputs under `session-outputs/<tenant>/<session>/`) | ✓ (CA upload on box create) | ✓ (tar via exec + readFileBytes) |
 | `E2B` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*` + template with s3fs) | ✓ (same bucket, session-outputs prefix) | ⚠ (template must allow sudo writes to /etc/ssl/) | ✓ (tar via exec + readFileBytes) |
 | `BoxRun` | ✓ | ✓ | ✓ | ✗ (HTTP API has no mount primitive — use a custom image with s3fs preinstalled) | ✗ (same — no host-bind primitive) | ✓ (CA upload via tar PUT) | ⚠ (best-effort tar via exec) |
 | `CloudflareSandbox` | ✓ | ✓ | ✓ | ✓ (R2 + FUSE) | ✓ | ✓ (interceptHttps + outboundHandlers) | ✓ (squashfs to R2 backup bucket) |
 
-Read-only memory mounts: enforced via `chmod -R a-w` on the mount target where supported (LocalSubprocess, Daytona, E2B). LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
+Read-only memory mounts: LocalSubprocess creates a sandbox-owned copy and removes write bits recursively, so it never changes permissions on the backing blob/checkpoint tree; Daytona and E2B enforce read-only on their mounted view. LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
 
 ## Vault credential injection
 

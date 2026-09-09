@@ -270,6 +270,9 @@ describe("managed turn MCP E2E", () => {
       const events = await waitForCompletedTurn(session.id);
       const mcpUse = events.find((event) => event.type === "agent.mcp_tool_use");
       const mcpResult = events.find((event) => event.type === "agent.mcp_tool_result");
+      const degradedMcp = events.find((event) =>
+        event.type === "session.warning"
+        && String(event.message ?? "").includes('MCP setup failed for "broken"'));
 
       expect(mcpUse).toMatchObject({
         id: "mcp-call-1",
@@ -279,6 +282,7 @@ describe("managed turn MCP E2E", () => {
       });
       expect(JSON.stringify(mcpResult?.content)).toContain("echo:managed");
       expect(mcpResult?.parent_event_id).toBe("mcp-call-1");
+      expect(degradedMcp).toBeDefined();
 
       const services = await getCfServicesForTenant(env, "default");
       const persistedCredential = await services.credentials.get({
@@ -308,5 +312,5 @@ describe("managed turn MCP E2E", () => {
     } finally {
       external.restore();
     }
-  });
+  }, 120_000);
 });

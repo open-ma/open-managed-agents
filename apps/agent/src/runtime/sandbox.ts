@@ -322,8 +322,9 @@ export class CloudflareSandbox
    * Caller list:    GET /v1/sessions/:id/outputs   (R2 list_objects by prefix)
    * Caller fetch:   GET /v1/sessions/:id/outputs/:filename
    *
-   * Best-effort: any failure logs and proceeds (the agent can still
-   * write to /workspace as a fallback, just not callable-retrievable).
+   * Mount failures are surfaced to the Port caller. A managed-runtime caller
+   * that declares outputs must fail preparation rather than advertise a
+   * durable output path that is not actually connected.
    */
   sessionOutputMountCapabilities(): {
     durability: "durable" | "best_effort";
@@ -353,6 +354,20 @@ export class CloudflareSandbox
     const prefix = `/${sessionOutputsPrefix(opts.tenantId, opts.sessionId)}`;
     const fuse = this.fuseR2ConfigOrNull();
     const bucketName = "managed-agents-files";
+
+    // workerd's local Sandbox stub does not implement bucket mounts. Keep
+    // the filesystem contract testable without claiming durability: create
+    // the directory explicitly and advertise `best_effort` via the
+    // capability method above. Production (FUSE configured) never takes
+    // this branch and still fails hard when the mount primitive is absent.
+    if (!fuse && typeof sandbox.mountBucket !== "function") {
+      await sandbox.exec("mkdir -p /mnt/session/outputs", { timeout: 5000 });
+      console.warn(
+        "[sandbox] mountSessionOutputs: local dev stub has no bucket mount; " +
+        "created a non-durable /mnt/session/outputs directory",
+      );
+      return;
+    }
 
     // Defensive cleanup before mount — see mountMemoryStore for details.
     // Real prod symptom: container restart after sleepAfter teardown
@@ -390,9 +405,9 @@ export class CloudflareSandbox
       console.error(
         `[sandbox] mountSessionOutputs failed: ${(err as Error).message ?? err}`,
       );
-      // The Port caller decides whether this is best-effort (SessionDO) or a
-      // required managed-runtime capability. Swallowing here made a failed
-      // mount indistinguishable from a durable attachment.
+      // The Port caller decides whether this capability is required.
+      // Swallowing here made a failed mount indistinguishable from a durable
+      // attachment.
       throw err;
     }
   }

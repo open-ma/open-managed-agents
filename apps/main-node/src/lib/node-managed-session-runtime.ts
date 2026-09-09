@@ -230,17 +230,17 @@ export class DefaultNodeManagedSessionRuntimeDriver
   }
 
   async start(input: StartNodeManagedSessionRuntime): Promise<void> {
-    let start = this.starts.get(input);
-    if (start === undefined) {
-      start = this.dependencies.engine.start(input, (frame) =>
+    const previous = this.starts.get(input);
+    const start = (previous ?? Promise.resolve()).then(() =>
+      this.dependencies.engine.start(input, (frame) =>
         this.enqueueOutput(
           input.workspaceId,
           input.sessionId,
           frame,
           this.executionFences.get(input),
-        ));
-      this.starts.set(input, start);
-    }
+        )),
+    );
+    this.starts.set(input, start);
     try {
       await start;
     } catch (error) {
@@ -272,15 +272,13 @@ export class DefaultNodeManagedSessionRuntimeDriver
     }
     if (fence !== undefined) this.executionFences.set(input, fence);
     try {
-      if (!this.starts.has(input)) {
-        await this.start({
-          workspaceId: input.workspaceId,
-          sessionId: input.sessionId,
-          session: input.session,
-          environment: input.environment,
-          initialEvents: [],
-        });
-      }
+      await this.start({
+        workspaceId: input.workspaceId,
+        sessionId: input.sessionId,
+        session: input.session,
+        environment: input.environment,
+        initialEvents: [],
+      });
       const { executionFence: _executionFence, ...accepted } = input;
       await this.dependencies.engine.accept({
         ...accepted,

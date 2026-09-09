@@ -59,6 +59,13 @@ export function buildLocalReleaseEnvironment(baseEnv, options) {
   };
 }
 
+export function hasMountedSkillReminder(requestBodies) {
+  return requestBodies.some((body) =>
+    String(JSON.stringify(body?.system) ?? "").includes(
+      "/workspace/.openma/skills/",
+    ));
+}
+
 export async function runLocalReleaseCertification(options = {}) {
   const repoRoot = options.repoRoot ?? REPO_ROOT;
   const root = options.root ?? await mkdtemp(join(tmpdir(), "openma-local-release-"));
@@ -79,12 +86,14 @@ export async function runLocalReleaseCertification(options = {}) {
             'skill_file="$(find .openma/skills -name SKILL.md -type f | head -n 1)"',
             'test -n "$skill_file"',
             'grep -q "SKILL_INPUT_OK" "$skill_file"',
+            'test "$(cat "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/input.txt")" = "MEMORY_INPUT_OK"',
             'test "$(cat repository/repo-marker.txt)" = "REPO_REVISION_OK"',
             `test "$(git -C repository rev-parse HEAD)" = "${repository.commitSha}"`,
-            "printf FILES_REPO_SKILL_OK",
+            'printf "OUTPUT_OK" > "$OMA_OUTPUTS_DIR/certification.txt"',
+            "printf FILES_REPO_SKILL_MEMORY_OUTPUT_OK",
           ].join("; "),
         },
-        expectedResult: "FILES_REPO_SKILL_OK",
+        expectedResult: "FILES_REPO_SKILL_MEMORY_OUTPUT_OK",
       },
       {
         name: "mcp__certification__echo",
@@ -136,6 +145,7 @@ export async function runLocalReleaseCertification(options = {}) {
       OMA_E2E_MCP_URL: mcp.url,
       OMA_E2E_REPO_URL: repository.url,
       OMA_E2E_REPO_SHA: repository.commitSha,
+      OMA_E2E_REPO_TOKEN: repository.token,
     };
     await runStep(report, "managed-agents-sdk", () => runCommand(
       process.execPath,
@@ -149,6 +159,11 @@ export async function runLocalReleaseCertification(options = {}) {
     ));
     assert.equal(mcp.state.unauthorized, 0, "MCP proxy sent a request without the Vault bearer");
     assert.equal(mcp.state.calls, 1, "MCP tool must be called exactly once");
+    assert.equal(repository.state.unauthorized, 0, "Git clone did not use its Session-scoped credential");
+    assert.ok(
+      hasMountedSkillReminder(inputLlm.state.requestBodies),
+      "model request did not describe the mounted custom Skill",
+    );
     assert.deepEqual(mcp.state.counts, {
       "server/discover": 1,
       initialize: 1,
@@ -274,9 +289,16 @@ async function createGitHttpFixture(root) {
     timeout: 30_000,
   });
 
-  const state = { requests: 0 };
+  const token = "openma-local-release-github-token";
+  const expectedAuthorization = `Basic ${Buffer.from(`x-access-token:${token}`).toString("base64")}`;
+  const state = { requests: 0, unauthorized: 0 };
   const server = createHttpServer(async (request, response) => {
     state.requests += 1;
+    if (request.headers.authorization !== expectedAuthorization) {
+      state.unauthorized += 1;
+      response.writeHead(401, { "www-authenticate": "Basic realm=OpenMA" }).end("missing repository credential");
+      return;
+    }
     try {
       const pathname = decodeURIComponent(new URL(request.url ?? "/", "http://fixture").pathname);
       const prefix = "/repository.git/";
@@ -309,6 +331,7 @@ async function createGitHttpFixture(root) {
   return {
     url: `http://127.0.0.1:${address.port}/repository.git`,
     commitSha,
+    token,
     state,
     close: () => closeServer(server),
   };

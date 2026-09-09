@@ -2,6 +2,7 @@ import type {
   AgentCustomToolInputSchema,
   AgentTool,
   AgentToolConfig,
+  Environment,
   AgentToolDefaultConfig,
   Session,
 } from "@open-managed-agents/managed-agents-application";
@@ -72,6 +73,34 @@ export interface LegacyManagedHarnessAgentConfig
   skills: Array<{ type: "anthropic" | "custom"; skill_id: string; version: string }>;
   callable_agents?: Array<{ type: "agent"; id: string; version: number }>;
   multiagent?: LegacyMultiagent;
+}
+
+export interface LegacyHarnessEnvironmentConfig {
+  networking?:
+    | { type: "unrestricted" }
+    | {
+        type: "limited";
+        allow_mcp_servers: boolean;
+        allow_package_managers: boolean;
+        allowed_hosts: string[];
+      };
+}
+
+export function toLegacyHarnessEnvironmentConfig(
+  environment: Environment,
+): LegacyHarnessEnvironmentConfig {
+  if (environment.config.type === "self_hosted") return {};
+  const networking = environment.config.networking;
+  return {
+    networking: networking.type === "unrestricted"
+      ? { type: "unrestricted" }
+      : {
+          type: "limited",
+          allow_mcp_servers: networking.allowMcpServers,
+          allow_package_managers: networking.allowPackageManagers,
+          allowed_hosts: [...networking.allowedHosts],
+        },
+  };
 }
 
 function legacyPermissionPolicy(

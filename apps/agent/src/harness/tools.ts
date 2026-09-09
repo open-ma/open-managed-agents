@@ -352,16 +352,46 @@ function jsonSchemaPropertyToZod(prop: Record<string, unknown>): z.ZodTypeAny {
  * Checks per-tool config first, then falls back to default_config, then "always_allow".
  */
 export function getToolPermission(agentConfig: AgentConfig, toolName: string): string {
-  for (const t of agentConfig.tools) {
-    if (t.type === "custom") continue;
-    const ts = t as ToolsetConfig;
-    // Per-tool config takes priority
-    const cfg = ts.configs?.find(c => c.name === toolName);
+  const mcpPrefix = "mcp__";
+  if (toolName.startsWith(mcpPrefix)) {
+    for (const toolset of agentConfig.tools) {
+      if (toolset.type !== "mcp_toolset") continue;
+      const ts = toolset as ToolsetConfig & { mcp_server_name?: string };
+      if (!ts.mcp_server_name) continue;
+      const serverPrefix = `${mcpPrefix}${ts.mcp_server_name}__`;
+      if (!toolName.startsWith(serverPrefix)) continue;
+      const remoteToolName = toolName.slice(serverPrefix.length);
+      const cfg = ts.configs?.find((candidate) => candidate.name === remoteToolName);
+      if (cfg?.permission_policy?.type) return cfg.permission_policy.type;
+      return ts.default_config?.permission_policy?.type ?? "always_allow";
+    }
+    return "always_allow";
+  }
+
+  const toolset = agentConfig.tools.find((tool) => tool.type === "agent_toolset_20260401");
+  if (toolset) {
+    const ts = toolset as ToolsetConfig;
+    const cfg = ts.configs?.find((candidate) => candidate.name === toolName);
     if (cfg?.permission_policy?.type) return cfg.permission_policy.type;
-    // Fall back to default config
     if (ts.default_config?.permission_policy?.type) return ts.default_config.permission_policy.type;
   }
   return "always_allow";
+}
+
+function isMcpToolEnabled(
+  agentConfig: AgentConfig,
+  serverName: string,
+  remoteToolName: string,
+): boolean {
+  const toolset = agentConfig.tools.find((tool) => {
+    if (tool.type !== "mcp_toolset") return false;
+    return (tool as ToolsetConfig & { mcp_server_name?: string }).mcp_server_name === serverName;
+  });
+  if (!toolset) return true;
+
+  const ts = toolset as ToolsetConfig;
+  const configured = ts.configs?.find((candidate) => candidate.name === remoteToolName);
+  return configured?.enabled ?? ts.default_config?.enabled ?? true;
 }
 
 function getEnabledTools(tools: AgentConfig["tools"]): Set<string> {
@@ -413,7 +443,14 @@ export async function buildTools(
      *  back to raw curl + a warning to the model. */
     toMarkdown?: ToMarkdownProvider;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
-    environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
+    environmentConfig?: {
+      networking?: {
+        type: string;
+        allowed_hosts?: string[];
+        allow_mcp_servers?: boolean;
+        allow_package_managers?: boolean;
+      };
+    };
     /** MCP routing context — wired from SessionDO. The official MCP HTTP
      *  client gets a custom `fetch` that calls
      *  `env.mcpBinding.fetch(req)` with three metadata headers stamped
@@ -424,9 +461,9 @@ export async function buildTools(
      *  through unchanged so the MCP SDK owns the protocol details. Vault
      *  credentials remain main-only — agent worker sees only the
      *  Response. Omitting any of the three (binding, tenantId, sessionId)
-     *  silently disables MCP tool registration — the loop below logs
-     *  nothing because in legacy callsites this is the expected "no MCP"
-     *  path. */
+     *  while an enabled MCP server is declared is a configuration error.
+     *  The builder fails closed instead of silently changing the Agent's
+     *  declared capabilities. */
     mcpBinding?: { fetch: (request: Request) => Promise<Response> };
     tenantId?: string;
     sessionId?: string;
@@ -1175,24 +1212,23 @@ export async function buildTools(
   // Network policy ("model can only call declared mcp_servers"): enforced
   // at the tool-registration layer below — only declared servers get
   // registered, and the model has no other tool that takes an arbitrary URL.
-  if (agentConfig.mcp_servers?.length) {
+  const mcpDisabledByEnvironment =
+    env?.environmentConfig?.networking?.type === "limited"
+    && env.environmentConfig.networking.allow_mcp_servers !== true;
+  if (agentConfig.mcp_servers?.length && !mcpDisabledByEnvironment) {
     if (!env?.mcpBinding || !env?.tenantId || !env?.sessionId) {
-      // Wiring missing — buildTools called from a context that didn't
-      // thread the binding through (legacy path or test harness). Skip MCP
-      // setup silently rather than crash; the model just won't see the
-      // tools and will report "I don't have that available". Caller logs
-      // are responsible for surfacing this misconfiguration in real
-      // deployments — see SessionDO callsites which always thread it.
+      throw new Error(
+        "Declared MCP servers require mcpBinding, tenantId, and sessionId",
+      );
     } else {
       const mcpBinding = env.mcpBinding;
       const tenantId = env.tenantId;
       const sessionId = env.sessionId;
       for (const server of agentConfig.mcp_servers) {
         if (!server.url) {
-          // stdio MCP whose sandbox-side spawn hasn't recorded a URL yet
-          // (warmup hasn't run, or spawn failed). Skip silently — re-attempt
-          // when the next buildTools fires after warmup.
-          continue;
+          throw new Error(
+            `Declared MCP server "${server.name}" has no prepared URL`,
+          );
         }
         const serverName = server.name;
         // Custom fetch the protocol client calls for every MCP request. We stamp
@@ -1219,6 +1255,7 @@ export async function buildTools(
           const remoteTools = await mcpClient.listTools({ timeoutMs: MCP_SETUP_TIMEOUT_MS });
           for (const definition of remoteTools) {
             const toolName = definition.name;
+            if (!isMcpToolEnabled(agentConfig, server.name, toolName)) continue;
             tools[`mcp__${server.name}__${toolName}`] = dynamicTool({
               title: definition.title,
               description: definition.description,
@@ -1249,14 +1286,17 @@ export async function buildTools(
           mcpClientsByToolSet.set(tools, clients);
         } catch (err) {
           if (mcpClient) await mcpClient.close().catch(() => undefined);
-          // Connection / handshake / tools/list failure for one server
-          // (e.g. main worker unreachable, vault credential missing,
-          // upstream MCP server down, our timeout fired). Log + skip so
-          // a single misconfiguration doesn't take the whole turn down.
-          const msg = err instanceof Error ? err.message : String(err);
-          console.error(
-            `[mcp] cloud MCP setup failed for "${server.name}" (${server.url}): ${msg}`,
-          );
+          // An upstream MCP outage removes that server's tools for this
+          // turn, but must be visible in the managed event stream. This is
+          // an explicit degraded state rather than the previous silent skip.
+          const message =
+            `MCP setup failed for "${server.name}" (${server.url}): `
+            + (err instanceof Error ? err.message : String(err));
+          console.error(`[mcp] ${message}`);
+          env.broadcastEvent?.({
+            type: "session.warning",
+            message,
+          } as SessionEvent);
         }
       }
     }

@@ -760,6 +760,11 @@ const managedSessionsRoutes = new Hono<{
       sessionResources: () => ports.sessionResources,
       sessionThreads: () => ports.sessionThreads,
       sessionThreadEvents: () => ports.sessionThreadEvents,
+    }, {
+      outputs: {
+        workspaceId: () => ctx.var.tenant_id,
+        store: cfOutputsAdapter(ctx.env),
+      },
     }),
   );
 });

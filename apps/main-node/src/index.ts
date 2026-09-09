@@ -258,6 +258,7 @@ import {
 } from "./lib/feishu-agent-tools.js";
 import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
 import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
+import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
 import { DefaultSandboxOrchestrator } from "@open-managed-agents/sandbox/orchestrator";
 import {
@@ -293,6 +294,7 @@ import { ManagedNodeDefaultHarness } from "./lib/node-managed-default-harness.js
 import {
   allowAllLegacyHarnessTools,
   toLegacyHarnessAgentConfig,
+  toLegacyHarnessEnvironmentConfig,
 } from "./lib/node-managed-agent-codec.js";
 import { NodeManagedConfirmedToolExecutor } from "./lib/node-managed-confirmed-tool-executor.js";
 import { NodeManagedOutcomeEvaluator } from "./lib/node-managed-outcome-evaluator.js";
@@ -302,7 +304,11 @@ import {
   NodeManagedSessionRuntimeAdapter,
 } from "./lib/node-managed-session-runtime.js";
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
-import { NodeManagedSessionInputPreparer } from "./lib/node-managed-session-inputs.js";
+import {
+  buildNodeManagedSkillReminders,
+  NodeManagedSessionInputPreparer,
+} from "./lib/node-managed-session-inputs.js";
+import { NodeManagedMemorySnapshotMaterializer } from "./lib/node-managed-memory-snapshots.js";
 import { NodeSessionExecutionWorker } from "./lib/node-session-execution-worker.js";
 import {
   buildNodeHttpMcpProxyRoutes,
@@ -989,9 +995,20 @@ const nodeMcpProxyBinding = createNodeMcpProxyBinding({
   resolveTarget: resolveNodeMcpProxyTarget,
 });
 
+const managedSessionResourceSecrets = new SqlSessionResourceSecretSource(sql, {
+  open: async (value) => {
+    if (managedResourceCipher === null) {
+      throw new Error(
+        "PLATFORM_ROOT_SECRET is required for managed Session repository credentials",
+      );
+    }
+    return managedResourceCipher.decrypt(value);
+  },
+});
+
 const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   confirmedTools: new NodeManagedConfirmedToolExecutor({
-    buildExecutableTools: async ({ workspaceId, session, sandbox }) => {
+    buildExecutableTools: async ({ workspaceId, session, environment, sandbox }) => {
       const agent = allowAllLegacyHarnessTools(
         toLegacyHarnessAgentConfig(session),
       );
@@ -1003,6 +1020,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         tenantId: workspaceId,
         sessionId: session.id,
         mcpBinding: nodeMcpProxyBinding,
+        environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
       });
     },
   }),
@@ -1038,12 +1056,18 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       skillVersions: managedSkillsPlatform
         .app({ workspaceId })
         .port(managedAgentsPortTokens.skillVersions),
+      repositoryCredentials: managedSessionResourceSecrets,
+      memorySnapshots: new NodeManagedMemorySnapshotMaterializer(
+        managedMemoriesApplicationForWorkspace(workspaceId)
+          .port(managedAgentsPortTokens.memories),
+        memoryBlobs,
+      ),
     });
     await preparer.prepare({ workspaceId, session, sandbox });
   },
   buildModel: ({ workspaceId, session }) =>
     buildNodeLanguageModel(workspaceId, session.agent.model),
-  buildTools: async ({ workspaceId, session, sandbox }) => {
+  buildTools: async ({ workspaceId, session, environment, sandbox }) => {
     const agent = toLegacyHarnessAgentConfig(session);
     const creds = await resolveNodeModelCreds(workspaceId, agent.model);
     return buildTools(agent, sandbox, {
@@ -1053,6 +1077,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       tenantId: workspaceId,
       sessionId: session.id,
       mcpBinding: nodeMcpProxyBinding,
+      environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
     });
   },
   disposeTools,
@@ -1061,6 +1086,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     const agent = toLegacyHarnessAgentConfig(input.session);
     const creds = await resolveNodeModelCreds(input.workspaceId, agent.model);
     const rawSystemPrompt = input.session.agent.system ?? "";
+    const platformReminders = buildNodeManagedSkillReminders(input.session);
     const feishuTools = await resolveFeishuAgentTools(input.session.id);
     return {
       agent,
@@ -1069,8 +1095,9 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       tenant_id: input.workspaceId,
       tools: { ...input.tools, ...feishuTools },
       model: input.model,
-      systemPrompt: composeSystemPrompt(rawSystemPrompt),
+      systemPrompt: composeSystemPrompt(rawSystemPrompt, platformReminders),
       rawSystemPrompt,
+      platformReminders,
       env: {
         ANTHROPIC_API_KEY: creds.apiKey,
         ANTHROPIC_BASE_URL: creds.baseURL,
@@ -1123,7 +1150,6 @@ const managedSessionExecutionWorker = new NodeSessionExecutionWorker({
     "managed Session execution background operation failed",
   ),
 });
-managedSessionExecutionWorker.start();
 const managedSessionRuntime = new NodeManagedSessionRuntimeAdapter(
   managedRuntimeDriver,
   managedSessionExecutionWorker,
@@ -1556,8 +1582,17 @@ function managedMemoriesApplicationFor(context: unknown) {
   const request = (context as {
     var: { tenant_id: string; user_id?: string };
   }).var;
+  return managedMemoriesApplicationForWorkspace(
+    request.tenant_id,
+    request.user_id,
+  );
+}
+function managedMemoriesApplicationForWorkspace(
+  workspaceId: string,
+  userId?: string,
+) {
   return createNodeManagedAgentsApp({
-    workspaceId: request.tenant_id,
+    workspaceId,
     features: {
       preset: "none",
       memories: true,
@@ -1585,7 +1620,7 @@ function managedMemoriesApplicationFor(context: unknown) {
       providePort(memoryContentDescriptorPort, managedMemoryContent),
       providePort(
         memoryVersionActorPort,
-        managedMemoryActor(request.user_id),
+        managedMemoryActor(userId),
       ),
     ],
   });
@@ -2089,6 +2124,12 @@ v1.route("/sessions", buildManagedSessionsApi({
     managedSessionsComposition.portsFor(
       (context.var as { tenant_id: string }).tenant_id,
     ).sessionThreadEvents,
+}, {
+  outputs: {
+    workspaceId: (context) =>
+      (context.var as { tenant_id: string }).tenant_id,
+    store: nodeOutputsAdapter(outputsRoot),
+  },
 }));
 v1.route("/oma/sessions", buildSessionRoutes({
   services,
@@ -2640,6 +2681,9 @@ app.onError((err, c) => {
 
 const port = Number(process.env.PORT ?? 8787);
 const host = process.env.HOST ?? "0.0.0.0";
+// Start the execution poller only after every runtime dependency below its
+// declaration (Managed Memory/Skill applications included) has initialized.
+managedSessionExecutionWorker.start();
 serve({ fetch: app.fetch, port, hostname: host }, (info) => {
   logger.info(
     { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },

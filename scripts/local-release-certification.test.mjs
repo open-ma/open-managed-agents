@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   buildLocalReleaseEnvironment,
   buildLocalReleasePlan,
+  hasMountedSkillReminder,
 } from "./local-release-certification.mjs";
 
 test("local release environment isolates durable state and serves the built console", () => {
@@ -44,4 +45,12 @@ test("local release plan covers every public interface with real product process
     { id: "cli-projection", interface: "cli" },
     { id: "console-browser", interface: "console" },
   ]);
+});
+
+test("skill-reminder certification tolerates model requests without a system prompt", () => {
+  assert.equal(hasMountedSkillReminder([
+    { messages: [] },
+    { system: [{ type: "text", text: "Read /workspace/.openma/skills/demo/SKILL.md" }] },
+  ]), true);
+  assert.equal(hasMountedSkillReminder([{ messages: [] }]), false);
 });

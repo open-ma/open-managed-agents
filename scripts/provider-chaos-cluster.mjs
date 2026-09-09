@@ -181,6 +181,7 @@ export async function createMockLlmServer(options = {}) {
     toolRoundTrip: toolPlan.length > 0,
     requests: 0,
     aborted: 0,
+    requestBodies: [],
   };
 
   const server = createServer(async (req, res) => {
@@ -207,6 +208,7 @@ export async function createMockLlmServer(options = {}) {
     await new Promise((resolveRequest) => req.on("end", resolveRequest));
     let body = {};
     try { body = JSON.parse(raw || "{}"); } catch { /* malformed requests still get a protocol error */ }
+    state.requestBodies.push(body);
 
     req.on("aborted", () => { state.aborted += 1; });
     const status = state.errorNext;
