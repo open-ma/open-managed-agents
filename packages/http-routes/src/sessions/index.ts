@@ -39,6 +39,7 @@ import {
 import type { SessionRouter, SessionInitParams } from "@open-managed-agents/session-runtime";
 import type { RouteServicesArg } from "../types";
 import { resolveServices } from "../types";
+import { createSseStream } from "./sse-stream";
 
 interface Vars {
   Variables: { tenant_id: string; user_id?: string };
@@ -1264,63 +1265,10 @@ async function openSse(
     replay,
     include,
   });
-  const enc = new TextEncoder();
-  let closed = false;
-  const closeHandle = () => {
-    if (closed) return;
-    closed = true;
-    handle.close();
-  };
-  const safeEnqueue = (controller: ReadableStreamDefaultController<Uint8Array>, chunk: string) => {
-    if (closed) return false;
-    try {
-      controller.enqueue(enc.encode(chunk));
-      return true;
-    } catch {
-      closeHandle();
-      return false;
-    }
-  };
-  const stream = new ReadableStream<Uint8Array>({
-    async start(controller) {
-      try {
-        if (!safeEnqueue(controller, "retry: 1000\n\n")) return;
-        for await (const frame of handle) {
-          let seq: number | undefined;
-          let evType: string | undefined;
-          try {
-            const parsed = JSON.parse(frame.data) as { seq?: number; type?: string };
-            seq = parsed.seq;
-            evType = parsed.type;
-          } catch {
-            /* ignore */
-          }
-          // Emit SSE-named events ("event: <type>") in addition to the
-          // data line. Anthropic's official SDKs use the SSE event-name
-          // field as the discriminator (see anthropic-sdk-python
-          // _streaming.py:84-130) and never yield frames where it's
-          // missing — without this line the SDK's iterator hangs forever
-          // even though the wire is delivering events.
-          const eventLine = evType ? `event: ${evType}\n` : "";
-          const idLine = seq !== undefined ? `id: ${seq}\n` : "";
-          if (!safeEnqueue(controller, `${eventLine}${idLine}data: ${frame.data}\n\n`)) return;
-        }
-      } finally {
-        closeHandle();
-        try {
-          controller.close();
-        } catch {
-          /* ignore */
-        }
-      }
-    },
-    cancel: () => {
-      closeHandle();
-    },
-  });
-  c.req.raw.signal?.addEventListener("abort", () => {
-    closeHandle();
-  });
+  // SSE comments keep intermediary idle timers from terminating a healthy
+  // stream while a model request, sandbox restore, or tool call is silent.
+  // The official SDK parser ignores comments and continues parsing events.
+  const stream = createSseStream(handle, { signal: c.req.raw.signal });
   return new Response(stream, {
     headers: {
       "content-type": "text/event-stream",
