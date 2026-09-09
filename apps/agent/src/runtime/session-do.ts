@@ -110,6 +110,7 @@ import {
   mountResources,
 } from "./resource-mounter";
 import { createSandboxWarmupFailureEvent } from "./warmup-failure-event";
+import { prepareSandboxEgress } from "./sandbox-warmup-egress";
 import {
   findLatestBackup as findWorkspaceBackup,
 } from "./workspace-backups";
@@ -3280,6 +3281,17 @@ export class SessionDO extends DurableObject<Env> {
         throw new Error(`Sandbox container failed to start after 10 attempts. Last error: ${lastError}`);
       }
 
+      // Network egress is a warmup prerequisite, not a post-mount concern.
+      // Cloudflare sandboxes run with direct internet disabled; this installs
+      // the TLS interception handler and the GitHub host routes before package
+      // installation or repository materialization makes its first request.
+      if (this.state.session_id && this.state.tenant_id) {
+        await prepareSandboxEgress(sandbox, {
+          tenantId: this.state.tenant_id,
+          sessionId: this.state.session_id,
+        });
+      }
+
       // Restore the most recent workspace backup for (tenant, environment)
       // BEFORE mountResources runs, so the agent picks up where it left
       // off. Per CF's recommended pattern (changelog 2026-02-23, "pick up
@@ -3545,61 +3557,6 @@ export class SessionDO extends DurableObject<Env> {
             `[session-do] cap sentinel env injection failed (continuing without): ${(err as Error).message}`,
           );
         }
-      }
-
-      // Bind the outbound handler with this session's identifying context.
-      // Per-call vault lookup happens in main via env.MAIN_MCP.lookupOutboundCredential
-      // — the agent worker briefly holds the bearer token to inject the
-      // Authorization header. Container never sees plaintext (auth is
-      // added on agent worker side; SDK's TLS-MITM re-encrypts to
-      // container). The handler is a transparent HTTP proxy: body
-      // streams through, response is returned unchanged.
-      //
-      // **MUST call this for every session, vault or not.** Cloudflare's
-      // sandbox-container PID 1 runs trustRuntimeCert() at startup which
-      // polls /etc/cloudflare/certs/cloudflare-containers-ca.crt for 5s.
-      // The cert is only pushed by the platform once `setOutboundHandler`
-      // has been called from the worker side. Skipping this call for
-      // no-vault sessions made every such container exit(1) at the 5s
-      // mark with "Certificate not found, refusing to start without
-      // HTTPS interception enabled" — see cf-sandbox-cert-demo bisection
-      // 2026-05-04. The handler itself is a no-op transparent proxy when
-      // no vault credentials match the request host (oma-sandbox.ts:82-97).
-      //
-      // R2 traffic (createBackup / restoreBackup squashfs PUT/GET/HEAD)
-      // is routed away from this catch-all by the static `outboundByHost`
-      // entry in oma-sandbox.ts — without that bypass the materialize-and-
-      // re-PUT flow corrupts the squashfs blob (sandbox-sdk#619).
-      if (sandbox.setOutboundContext && this.state.session_id && this.state.tenant_id) {
-        await sandbox.setOutboundContext({
-          tenantId: this.state.tenant_id,
-          sessionId: this.state.session_id,
-        });
-      }
-
-      // Per-host github handler binding. Without this, the static
-      // `outboundByHost` map only carries the function reference — CF
-      // Containers SDK invokes it with `ctx.params = undefined`, so
-      // githubAuthHandler's `if (params.tenantId && ...)` guard always
-      // fails, MAIN_MCP credential lookups never fire, and gh / git
-      // requests sail past unauthenticated. setOutboundByHost binds the
-      // params for this specific (host, methodName) pair at runtime.
-      // Wrapped in optional check because older sandbox SDK versions
-      // don't expose this method (self-host running 0.8.x). On those,
-      // github cap_cli still won't work, but neither did it before.
-      const sandboxHost = sandbox as unknown as {
-        setOutboundByHost?: (
-          hostname: string,
-          methodName: string,
-          params: { tenantId: string; sessionId: string },
-        ) => Promise<void>;
-      };
-      if (sandboxHost.setOutboundByHost && this.state.session_id && this.state.tenant_id) {
-        const ctx = { tenantId: this.state.tenant_id, sessionId: this.state.session_id };
-        await Promise.all([
-          sandboxHost.setOutboundByHost("api.github.com", "github_auth", ctx),
-          sandboxHost.setOutboundByHost("github.com", "github_auth", ctx),
-        ]);
       }
 
       // Hand backup context to OmaSandbox so its onActivityExpired hook
