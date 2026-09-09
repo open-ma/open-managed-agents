@@ -24,6 +24,7 @@ describe("Managed runtime adapter boundary", () => {
       "../src/in-process-dream-execution-scheduler.ts",
       "../src/index.ts",
       "../src/local-tunnel-provisioner.ts",
+      "../src/managed-memory-snapshot.ts",
       "../src/memory-content-descriptor.ts",
       "../src/model-card-catalog.ts",
       "../src/session-lifecycle-router.ts",

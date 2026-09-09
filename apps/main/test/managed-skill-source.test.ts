@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import { resolveManagedSkillArchive } from "../src/lib/managed-skill-source";
 import {
   downloadManagedSessionInputFile,
+  materializeManagedSessionMemorySnapshot,
   resolveManagedSessionInputs,
   withMissingManagedSessionSchemaFallback,
 } from "../src/lib/managed-session-runtime-source";
@@ -120,6 +121,37 @@ describe("Managed Session runtime source", () => {
       fileId: "file-not-attached",
     })).resolves.toEqual({ type: "not_found" });
     expect(files.downloadFile).toHaveBeenCalledTimes(1);
+  });
+
+  it("materializes only attached read-only Memory Stores", async () => {
+    const source = { find: vi.fn(async () => session) };
+    const materialize = vi.fn(async () => ({ mountStoreId: "snapshot-prefix" }));
+
+    await expect(materializeManagedSessionMemorySnapshot(source, { materialize }, {
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-1",
+      access: "read_only",
+    })).resolves.toEqual({ type: "found", mountStoreId: "snapshot-prefix" });
+    expect(materialize).toHaveBeenCalledWith({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-1",
+    });
+
+    await expect(materializeManagedSessionMemorySnapshot(source, { materialize }, {
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-not-attached",
+      access: "read_only",
+    })).resolves.toEqual({ type: "not_found" });
+    await expect(materializeManagedSessionMemorySnapshot(source, { materialize }, {
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-1",
+      access: "read_write",
+    })).rejects.toThrow(/read-write.*reverse synchronization/i);
+    expect(materialize).toHaveBeenCalledTimes(1);
   });
 
   it("uses the migration fallback only when the canonical Session table is absent", async () => {

@@ -58,6 +58,68 @@ describe("in-sandbox Session resource wiring", () => {
     });
   });
 
+  it("resolves canonical Memory content to a sandbox-mountable snapshot prefix", async () => {
+    const materializeManagedMemorySnapshot = vi.fn(async () => ({
+      type: "found" as const,
+      mountStoreId: ".openma-managed-memory-snapshots/tenant-1/memory-1/digest",
+    }));
+    const source = {
+      resolveManagedSessionInputs: vi.fn(async () => ({
+        type: "found" as const,
+        session: {
+          id: "session-1",
+          environmentId: "environment-1",
+          metadata: {},
+          resources: [{
+            type: "memory_store",
+            memoryStoreId: "memory-1",
+            name: "certification",
+            access: "read_only",
+          }],
+        },
+      })),
+      downloadManagedSessionFile: vi.fn(),
+      materializeManagedMemorySnapshot,
+    };
+
+    const loaded = await loadManagedSessionResources(source, {
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+    });
+
+    expect(materializeManagedMemorySnapshot).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-1",
+      access: "read_only",
+    });
+    expect(loaded.resources).toEqual([{
+      type: "memory_store",
+      memoryStoreId: "memory-1",
+      name: "certification",
+      access: "read_only",
+      runtimeMountStoreId:
+        ".openma-managed-memory-snapshots/tenant-1/memory-1/digest",
+    }]);
+
+    const sandbox = {
+      exec: vi.fn(),
+      mountMemoryStore: vi.fn(),
+      setEnvVars: vi.fn(),
+    };
+    await mountResources(
+      sandbox as unknown as SandboxExecutor,
+      loaded.resources,
+      {} as KVNamespace,
+      new Map(),
+    );
+    expect(sandbox.mountMemoryStore).toHaveBeenCalledWith({
+      storeId: ".openma-managed-memory-snapshots/tenant-1/memory-1/digest",
+      storeName: "certification",
+      readOnly: true,
+    });
+  });
+
   it.each([
     {
       name: "a File without object storage",

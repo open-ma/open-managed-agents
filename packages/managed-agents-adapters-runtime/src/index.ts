@@ -54,6 +54,7 @@ export type {
 } from "./session-lifecycle-router";
 export { LocalTunnelProvisioner } from "./local-tunnel-provisioner";
 export { WebCryptoMemoryContentDescriptor } from "./memory-content-descriptor";
+export * from "./managed-memory-snapshot";
 export { ZipSkillPackageCompiler } from "./skill-package-compiler";
 export { WebCryptoTunnelCertificateAuthority } from "./webcrypto-tunnel-certificate-authority";
 export { WebCryptoTunnelTokenManager } from "./webcrypto-tunnel-token-manager";

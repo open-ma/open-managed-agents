@@ -27,6 +27,15 @@ export interface ManagedSessionResourceSource {
     | { type: "found"; content: Uint8Array }
     | { type: "not_found" }
   >;
+  materializeManagedMemorySnapshot(input: {
+    tenantId: string;
+    sessionId: string;
+    memoryStoreId: string;
+    access: "read_only" | "read_write";
+  }): Promise<
+    | { type: "found"; mountStoreId: string }
+    | { type: "not_found" }
+  >;
 }
 
 export async function loadManagedSessionResources(
@@ -40,9 +49,36 @@ export async function loadManagedSessionResources(
   if (resolved.type !== "found") {
     throw new Error(`Managed Session ${input.sessionId} was not found`);
   }
+  const resources: Array<Record<string, unknown>> = [];
+  for (const resource of resolved.session.resources) {
+    if (resource.type !== "memory_store") {
+      resources.push({ ...resource });
+      continue;
+    }
+    const memoryStoreId = typeof resource.memoryStoreId === "string"
+      ? resource.memoryStoreId
+      : typeof resource.memory_store_id === "string"
+        ? resource.memory_store_id
+        : "";
+    if (memoryStoreId.length === 0) {
+      throw new Error("Managed Session Memory Store resource requires memory_store_id");
+    }
+    const access = resource.access === "read_only" ? "read_only" : "read_write";
+    const snapshot = await source.materializeManagedMemorySnapshot({
+      ...input,
+      memoryStoreId,
+      access,
+    });
+    if (snapshot.type !== "found") {
+      throw new Error(`Managed Session Memory Store ${memoryStoreId} was not found`);
+    }
+    resources.push({
+      ...resource,
+      runtimeMountStoreId: snapshot.mountStoreId,
+    });
+  }
   return {
-    resources: resolved.session.resources
-      .map((resource) => ({ ...resource })) as Array<Record<string, unknown>>,
+    resources,
     fileSource: {
       downloadFile: async (fileId) => {
         const downloaded = await source.downloadManagedSessionFile({
@@ -283,6 +319,9 @@ async function mountMemoryStore(
   const storeId = (res.memoryStoreId as string | undefined)
     ?? (res.memory_store_id as string | undefined)
     ?? (res.id as string);
+  const mountStoreId = typeof res.runtimeMountStoreId === "string"
+    ? res.runtimeMountStoreId
+    : storeId;
 
   // The public contract mounts by store name, not id. Falling back to the id
   // makes the attachment exist at a path the prompt/user never declared, so
@@ -310,7 +349,7 @@ async function mountMemoryStore(
 
   await sandbox.mountMemoryStore!({
     storeName,
-    storeId,
+    storeId: mountStoreId,
     readOnly,
   });
   const mountPath = (res.mountPath as string | undefined)

@@ -181,6 +181,15 @@ export interface Env {
         }
       | { type: "not_found" }
     >;
+    materializeManagedMemorySnapshot(opts: {
+      tenantId: string;
+      sessionId: string;
+      memoryStoreId: string;
+      access: "read_only" | "read_write";
+    }): Promise<
+      | { type: "found"; mountStoreId: string }
+      | { type: "not_found" }
+    >;
     resolveManagedSkillVersion?(opts: {
       tenantId: string;
       skillId: string;

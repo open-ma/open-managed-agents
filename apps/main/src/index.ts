@@ -87,6 +87,7 @@ import {
 import { resolveManagedSkillArchive } from "./lib/managed-skill-source";
 import {
   downloadManagedSessionInputFile,
+  materializeManagedSessionMemorySnapshot,
   resolveManagedSessionInputs,
   withMissingManagedSessionSchemaFallback,
 } from "./lib/managed-session-runtime-source";
@@ -143,6 +144,7 @@ import {
   IndeterminateCredentialValidationProbe,
   inProcessDreamExecutionSchedulerModule,
   LocalTunnelProvisioner,
+  ManagedMemorySnapshotMaterializer,
   SealedEnvironmentWorkSessionCredentialIssuer,
   StandardWebhookEnvironmentWorkWakeup,
   DeduplicatingDreamCurator,
@@ -438,9 +440,21 @@ const managedMemoryVersionsRoutes = buildManagedMemoryVersionRoutes((context) =>
 });
 
 function managedMemoriesApplicationFor(ctx: AppCtx) {
-  const client = new CfD1SqlClient(ctx.var.tenantDb);
+  return managedMemoriesApplication(
+    ctx.var.tenant_id,
+    ctx.var.tenantDb,
+    ctx.var.user_id,
+  );
+}
+
+function managedMemoriesApplication(
+  workspaceId: string,
+  tenantDb: D1Database,
+  userId?: string,
+) {
+  const client = new CfD1SqlClient(tenantDb);
   return createCloudflareManagedAgentsApp({
-    workspaceId: ctx.var.tenant_id,
+    workspaceId,
     sql: client,
   }, {
     features: {
@@ -466,7 +480,7 @@ function managedMemoriesApplicationFor(ctx: AppCtx) {
       providePort(memoryContentDescriptorPort, managedMemoryContent),
       providePort(
         memoryVersionActorPort,
-        managedMemoryActor(ctx.var.user_id),
+        managedMemoryActor(userId),
       ),
     ],
   });
@@ -1574,6 +1588,60 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       content: await object.bytes(),
       mimeType: object.httpMetadata?.contentType ?? "application/octet-stream",
     };
+  }
+
+  async materializeManagedMemorySnapshot(opts: {
+    tenantId: string;
+    sessionId: string;
+    memoryStoreId: string;
+    access: "read_only" | "read_write";
+  }) {
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const client = new CfD1SqlClient(tenantDb);
+    const sessionSource = new SqlSessionSource(client);
+    const canonicalSession = await withMissingManagedSessionSchemaFallback(
+      () => resolveManagedSessionInputs(sessionSource, {
+        workspaceId: opts.tenantId,
+        sessionId: opts.sessionId,
+      }),
+      async () => ({ type: "not_found" as const }),
+    );
+    if (canonicalSession.type === "found") {
+      if (this.env.MEMORY_BUCKET === undefined) {
+        throw new Error("MEMORY_BUCKET binding is required for Managed Memory snapshots");
+      }
+      const memories = managedMemoriesApplication(opts.tenantId, tenantDb)
+        .port(managedAgentsPortTokens.memories);
+      const snapshots = new ManagedMemorySnapshotMaterializer(memories, {
+        put: async (key, content) => {
+          const object = await this.env.MEMORY_BUCKET!.put(key, content);
+          return object ?? { key };
+        },
+      });
+      return materializeManagedSessionMemorySnapshot(
+        sessionSource,
+        snapshots,
+        {
+          workspaceId: opts.tenantId,
+          sessionId: opts.sessionId,
+          memoryStoreId: opts.memoryStoreId,
+          access: opts.access,
+        },
+      );
+    }
+
+    // Legacy `/v1/oma` Memory Stores already use their mutable R2 prefix as
+    // bytes-of-truth, so no canonical snapshot projection is required.
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const resources = await services.sessions
+      .listResources({ tenantId: opts.tenantId, sessionId: opts.sessionId })
+      .catch(() => []);
+    return resources.some(
+      (row) => row.resource.type === "memory_store"
+        && row.resource.memory_store_id === opts.memoryStoreId,
+    )
+      ? { type: "found" as const, mountStoreId: opts.memoryStoreId }
+      : { type: "not_found" as const };
   }
 
   async resolveManagedSkillVersion(opts: {

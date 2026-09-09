@@ -19,6 +19,14 @@ interface ManagedSessionRuntimeSource {
 
 type ManagedSessionFileSource = Pick<FilesApplicationPort, "downloadFile">;
 
+interface ManagedMemorySnapshotSource {
+  materialize(input: {
+    workspaceId: string;
+    sessionId: string;
+    memoryStoreId: string;
+  }): Promise<{ mountStoreId: string }>;
+}
+
 /** During a rolling migration some tenants can still be backed by the
  * legacy Session schema. Only that known absence is allowed to fall back;
  * operational database failures must remain visible. */
@@ -104,4 +112,47 @@ export async function downloadManagedSessionInputFile(
       ? {}
       : { filename: downloaded.file.filename }),
   };
+}
+
+export type ManagedSessionMemorySnapshotResult =
+  | { type: "found"; mountStoreId: string }
+  | { type: "not_found" };
+
+/** Authorizes a canonical Memory snapshot against the current Session.
+ * Canonical Memory content lives in the application store, so sandbox mounts
+ * consume an immutable blob projection rather than assuming the API wrote the
+ * legacy mutable R2 prefix. */
+export async function materializeManagedSessionMemorySnapshot(
+  source: ManagedSessionRuntimeSource,
+  snapshots: ManagedMemorySnapshotSource,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    memoryStoreId: string;
+    access: "read_only" | "read_write";
+  },
+): Promise<ManagedSessionMemorySnapshotResult> {
+  const session = await source.find({
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  const attached = session?.resources.find(
+    (resource) =>
+      resource.type === "memory_store"
+      && resource.memoryStoreId === input.memoryStoreId,
+  );
+  if (attached === undefined || attached.type !== "memory_store") {
+    return { type: "not_found" };
+  }
+  if (input.access === "read_write" || attached.access === "read_write") {
+    throw new Error(
+      `Managed Memory Store ${input.memoryStoreId} is read-write, but canonical reverse synchronization is not configured`,
+    );
+  }
+  const snapshot = await snapshots.materialize({
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+    memoryStoreId: input.memoryStoreId,
+  });
+  return { type: "found", mountStoreId: snapshot.mountStoreId };
 }
