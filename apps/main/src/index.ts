@@ -169,6 +169,7 @@ import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
 import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
+  createManagedMcpProxyCredentialSource,
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
   forwardWithRefresh,
@@ -745,9 +746,12 @@ function managedSessionsCompositionFor(ctx: AppCtx): SqlManagedSessionsCompositi
   });
 }
 
-async function managedMcpSessionSource(env: Env, workspaceId: string) {
+async function managedMcpSources(env: Env, workspaceId: string) {
   const tenantDb = await buildCfTenantDbProvider(env).resolve(workspaceId);
-  return new SqlSessionSource(new CfD1SqlClient(tenantDb));
+  return {
+    sessionSource: new SqlSessionSource(new CfD1SqlClient(tenantDb)),
+    credentialSource: createManagedMcpProxyCredentialSource(env, tenantDb),
+  };
 }
 
 const managedSessionsRoutes = new Hono<{
@@ -1508,7 +1512,10 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     body: string;
   }> {
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
-    const sessionSource = await managedMcpSessionSource(this.env, opts.tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      opts.tenantId,
+    );
     const target = await resolveProxyTargetByTenant(
       this.env,
       services,
@@ -1516,6 +1523,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       opts.sessionId,
       opts.serverName,
       sessionSource,
+      credentialSource,
     );
     if (!target) {
       return {
@@ -1586,7 +1594,10 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       );
     }
     const services = await getCfServicesForTenant(this.env, tenantId);
-    const sessionSource = await managedMcpSessionSource(this.env, tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      tenantId,
+    );
     const target = await resolveProxyTargetByTenant(
       this.env,
       services,
@@ -1594,6 +1605,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       sessionId,
       serverName,
       sessionSource,
+      credentialSource,
     );
     if (!target) {
       return new Response('{"error":"forbidden"}', {
@@ -1679,7 +1691,10 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       throw new Error("stale runtime credential-egress fence");
     }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
-    const sessionSource = await managedMcpSessionSource(this.env, opts.tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      opts.tenantId,
+    );
     const cred = await resolveOutboundCredentialByHost(
       this.env,
       services,
@@ -1687,6 +1702,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       opts.sessionId,
       opts.hostname,
       sessionSource,
+      credentialSource,
     );
     // Re-check after the tenant lookup so expiry/reclaim during a slow Vault
     // read cannot release a credential to the stale owner.
@@ -1805,7 +1821,10 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     }
 
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
-    const sessionSource = await managedMcpSessionSource(this.env, opts.tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      opts.tenantId,
+    );
     const cred = await resolveOutboundCredentialByHost(
       this.env,
       services,
@@ -1813,6 +1832,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       opts.sessionId,
       parsedUrl.hostname,
       sessionSource,
+      credentialSource,
     );
 
     const inboundHeaders = new Headers(opts.headers);

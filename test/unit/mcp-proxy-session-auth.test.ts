@@ -57,11 +57,33 @@ describe("HTTP MCP proxy with a managed Work claim", () => {
         };
       }),
     };
+    const credentialSource = {
+      listByVaults: vi.fn(async ({ workspaceId, vaultIds }: any) => {
+        expect(workspaceId).toBe("workspace_01");
+        expect(vaultIds).toEqual(["vault_01"]);
+        return [{
+          revision: 1,
+          credential: {
+            id: "cred_01",
+            vaultId: "vault_01",
+            archivedAt: null,
+            createdAt: "2026-09-10T00:00:00.000Z",
+            updatedAt: "2026-09-10T00:00:00.000Z",
+            auth: {
+              type: "static_bearer",
+              mcpServerUrl: "https://linear.example/mcp",
+              token: "managed-vault-token",
+            },
+          },
+        }];
+      }),
+    };
 
     const response = await forwardHttpMcpProxyRequest({
       env: {} as any,
       services: services as any,
       sessionSource,
+      credentialSource,
       tenantId: "workspace_01",
       sessionId: "session_01",
       serverName: "linear",
@@ -75,7 +97,9 @@ describe("HTTP MCP proxy with a managed Work claim", () => {
     expect(response.status).toBe(200);
     expect(await response.text()).toBe("proxied-v1");
     expect(sessionSource.find).toHaveBeenCalledTimes(1);
+    expect(credentialSource.listByVaults).toHaveBeenCalledTimes(1);
     expect(services.sessions.get).not.toHaveBeenCalled();
+    expect(services.credentials.listByVaults).not.toHaveBeenCalled();
   });
 
   it("uses the tenant authenticated by middleware and never forwards the Work bearer upstream", async () => {
