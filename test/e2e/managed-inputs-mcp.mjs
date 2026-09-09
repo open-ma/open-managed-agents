@@ -47,6 +47,7 @@ try {
     const created = await client.beta.files.upload({
       file: new File(["FILE_INPUT_OK"], "attached.txt", { type: "text/plain" }),
     });
+    file = created;
     assert.match(created.id, /^file_/);
     return created;
   });
@@ -56,6 +57,7 @@ try {
       name: "certification-memory",
       description: "Managed runtime mount certification",
     });
+    memoryStore = created;
     assert.match(created.id, /^memstore_/);
     const memory = await client.beta.memoryStores.memories.create(created.id, {
       path: "/notes/input.txt",
@@ -85,6 +87,7 @@ try {
         ),
       ],
     });
+    skill = created;
     assert.match(created.id, /^skill_/);
     assert.ok(created.latest_version);
     return created;
@@ -95,6 +98,7 @@ try {
       display_name: `Input certification vault ${suffix}`,
       metadata: { source: "managed-inputs-mcp-e2e" },
     });
+    vault = created;
     assert.match(created.id, /^vlt_/);
     return created;
   });
@@ -108,6 +112,7 @@ try {
         mcp_server_url: mcpURL,
       },
     });
+    credential = created;
     assert.match(created.id, /^vcrd_/);
     assert.ok(!JSON.stringify(created).includes("openma-local-release-mcp-token"));
     return created;
@@ -124,6 +129,7 @@ try {
       },
       metadata: { source: "managed-inputs-mcp-e2e" },
     });
+    environment = created;
     assert.match(created.id, /^env_/);
     return created;
   });
@@ -156,6 +162,7 @@ try {
       ],
       metadata: { source: "managed-inputs-mcp-e2e" },
     });
+    agent = created;
     assert.match(created.id, /^agent_/);
     return created;
   });
@@ -182,6 +189,7 @@ try {
       title: `e2e-inputs-session-${suffix}`,
       metadata: { source: "managed-inputs-mcp-e2e" },
     });
+    session = created;
     assert.match(created.id, /^session_/);
     assert.equal(created.resources.length, 2);
     assert.ok(!JSON.stringify(created).includes(repositoryToken));

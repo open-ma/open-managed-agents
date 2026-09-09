@@ -95,6 +95,9 @@ try {
       },
       metadata: { source: "managed-agents-sdk-e2e" },
     });
+    // Take ownership immediately after the remote create succeeds. If any
+    // assertion or follow-up read below fails, finally must still delete it.
+    environment = created;
     assert.match(created.id, /^env_/);
     assert.equal(created.type, "environment");
     assert.deepEqual(await client.beta.environments.retrieve(created.id), created);
@@ -109,6 +112,7 @@ try {
       system: "Reply concisely and do not use tools unless explicitly asked.",
       metadata: { source: "managed-agents-sdk-e2e" },
     });
+    agent = created;
     assert.match(created.id, /^agent_/);
     assert.equal(created.type, "agent");
     assert.equal(created.model.id, model);
@@ -126,6 +130,7 @@ try {
       title: `e2e-session-${suffix}`,
       metadata: { source: "managed-agents-sdk-e2e" },
     });
+    session = created;
     assert.match(created.id, /^session_/);
     assert.equal(created.type, "session");
     assert.equal(created.agent.id, agent.id);
