@@ -7,7 +7,10 @@ import {
   skillFileMountPaths,
   resolveCustomSkills,
 } from "../../apps/agent/src/harness/skills";
-import { mountResources } from "../../apps/agent/src/runtime/resource-mounter";
+import {
+  loadManagedSessionResources,
+  mountResources,
+} from "../../apps/agent/src/runtime/resource-mounter";
 import type { SandboxExecutor } from "../../apps/agent/src/harness/interface";
 import { fileR2Key, skillFileR2Key } from "@open-managed-agents/shared";
 
@@ -19,6 +22,42 @@ function objectBody(bytes: Uint8Array) {
 }
 
 describe("in-sandbox Session resource wiring", () => {
+  it("loads the current resource snapshot and scopes file access to the Session", async () => {
+    const source = {
+      resolveManagedSessionInputs: vi.fn(async () => ({
+        type: "found" as const,
+        session: {
+          id: "session-1",
+          environmentId: "environment-1",
+          metadata: {},
+          resources: [{ type: "file", fileId: "file-1", mountPath: "/workspace/input" }],
+        },
+      })),
+      downloadManagedSessionFile: vi.fn(async () => ({
+        type: "found" as const,
+        content: new Uint8Array([1, 2, 3]),
+        mimeType: "application/octet-stream",
+      })),
+    };
+
+    const loaded = await loadManagedSessionResources(source, {
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+    });
+
+    expect(loaded.resources).toEqual([
+      { type: "file", fileId: "file-1", mountPath: "/workspace/input" },
+    ]);
+    await expect(loaded.fileSource.downloadFile("file-1")).resolves.toEqual({
+      content: new Uint8Array([1, 2, 3]),
+    });
+    expect(source.downloadManagedSessionFile).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+      fileId: "file-1",
+    });
+  });
+
   it.each([
     {
       name: "a File without object storage",
@@ -138,8 +177,82 @@ describe("in-sandbox Session resource wiring", () => {
       storeName: "Project memory",
       readOnly: true,
     });
-    expect(sandbox.setEnvVars).toHaveBeenCalledOnce();
+    expect(sandbox.setEnvVars).toHaveBeenCalledWith({
+      OMA_MEMORY_DIR: "/mnt/memory",
+      OMA_MEMORY_PROJECT_MEMORY: "/mnt/memory/Project memory",
+    });
     expect(sandbox.setEnvVars).toHaveBeenCalledWith({ SERVICE_TOKEN: "secret-value" });
+  });
+
+  it("materializes canonical Managed Session resources through the injected file Port", async () => {
+    const fileBytes = new TextEncoder().encode("FILE_INPUT_OK");
+    const downloadFile = vi.fn(async () => ({ content: fileBytes }));
+    const sandbox = {
+      exec: vi.fn(async () => "OK"),
+      writeFileBytes: vi.fn(),
+      mountMemoryStore: vi.fn(),
+      setEnvVars: vi.fn(),
+    };
+
+    await mountResources(
+      sandbox as unknown as SandboxExecutor,
+      [
+        {
+          id: "resource-file",
+          type: "file",
+          fileId: "file-1",
+          mountPath: "/workspace/inputs/attached.txt",
+        },
+        {
+          type: "memory_store",
+          memoryStoreId: "memory-1",
+          name: "certification",
+          mountPath: "/mnt/memory/certification",
+          access: "read_only",
+        },
+      ],
+      {} as KVNamespace,
+      new Map(),
+      undefined,
+      "tenant-1",
+      undefined,
+      { downloadFile },
+    );
+
+    expect(downloadFile).toHaveBeenCalledWith("file-1");
+    expect(sandbox.writeFileBytes).toHaveBeenCalledWith(
+      "/workspace/inputs/attached.txt",
+      fileBytes,
+    );
+    expect(sandbox.mountMemoryStore).toHaveBeenCalledWith({
+      storeId: "memory-1",
+      storeName: "certification",
+      readOnly: true,
+    });
+    expect(sandbox.setEnvVars).toHaveBeenCalledWith({
+      OMA_MEMORY_DIR: "/mnt/memory",
+      OMA_MEMORY_CERTIFICATION: "/mnt/memory/certification",
+    });
+  });
+
+  it("rejects an empty canonical File id before asking the control plane to download it", async () => {
+    const downloadFile = vi.fn(async () => ({ content: new Uint8Array() }));
+    const sandbox = {
+      exec: vi.fn(),
+      writeFileBytes: vi.fn(),
+    };
+
+    await expect(mountResources(
+      sandbox as unknown as SandboxExecutor,
+      [{ id: "resource-file", type: "file", fileId: "" }],
+      {} as KVNamespace,
+      new Map(),
+      undefined,
+      "tenant-1",
+      undefined,
+      { downloadFile },
+    )).rejects.toThrow(/requires file_id/i);
+    expect(downloadFile).not.toHaveBeenCalled();
   });
 
   it("fails closed when a Memory Store name cannot be resolved", async () => {

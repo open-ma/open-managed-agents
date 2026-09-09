@@ -30,6 +30,7 @@ export class CloudflareSandbox
   private sessionId: string;
   private mounted = false;
   private commandSecrets = new Map<string, Record<string, string>>();
+  private processEnv: Record<string, string> = {};
   private outboundRequired = false;
   private controlPlaneHostname: string | null = null;
 
@@ -432,10 +433,11 @@ export class CloudflareSandbox
     const sandbox = await this.getSandbox();
     const timeoutMs = timeout || 120000;
     const injectedSecrets = this.getSecretsForCommand(command);
+    const processEnv = this.processEnvironmentForCommand(command);
     try {
       const execPromise = sandbox.exec(command, {
         timeout: timeoutMs,
-        env: injectedSecrets,
+        env: processEnv,
       }).then((result: { stdout?: string; stderr?: string; exitCode?: number }) => {
         const out = result.stdout || "";
         const err = result.stderr || "";
@@ -459,7 +461,7 @@ export class CloudflareSandbox
     if (typeof sandbox.startProcess !== "function") return null;
     try {
       const proc = await sandbox.startProcess(command, {
-        env: this.getSecretsForCommand(command),
+        env: this.processEnvironmentForCommand(command),
       });
       if (!proc?.id) return null;
       return {
@@ -561,6 +563,7 @@ export class CloudflareSandbox
         {
           cwd: spec.cwd,
           env: {
+            ...this.processEnv,
             ...this.getSecretsForCommand(spec.command),
             ...spec.env,
           },
@@ -674,8 +677,11 @@ export class CloudflareSandbox
   }
 
   async setEnvVars(envVars: Record<string, string>): Promise<void> {
+    Object.assign(this.processEnv, envVars);
     const sandbox = await this.getSandbox();
-    await sandbox.setEnvVars(envVars);
+    if (typeof sandbox.setEnvVars === "function") {
+      await sandbox.setEnvVars(envVars);
+    }
   }
 
   registerCommandSecrets(commandPrefix: string, secrets: Record<string, string>): void {
@@ -964,6 +970,16 @@ export class CloudflareSandbox
       if (commandName === prefix) return secrets;
     }
     return undefined;
+  }
+
+  private processEnvironmentForCommand(
+    command: string,
+  ): Record<string, string> | undefined {
+    const secrets = this.getSecretsForCommand(command);
+    if (Object.keys(this.processEnv).length === 0 && secrets === undefined) {
+      return undefined;
+    }
+    return { ...this.processEnv, ...secrets };
   }
 
 

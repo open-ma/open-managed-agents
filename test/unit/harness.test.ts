@@ -344,6 +344,20 @@ describe("Sandbox lifecycle", () => {
     expect(calls[1].options?.env).toBeUndefined();
   });
 
+  it("CloudflareSandbox preserves runtime env when the provider stub has no setEnvVars", async () => {
+    const exec = vi.fn(async () => ({ stdout: "ok", stderr: "", exitCode: 0 }));
+    const sandbox = new CloudflareSandbox({ SANDBOX: {} } as any, "test-session-id") as any;
+    sandbox.sandboxPromise = Promise.resolve({ exec });
+
+    await sandbox.setEnvVars({ OMA_OUTPUTS_DIR: "/mnt/session/outputs" });
+    await sandbox.exec("printf ready");
+
+    expect(exec).toHaveBeenCalledWith("printf ready", {
+      timeout: 120000,
+      env: { OMA_OUTPUTS_DIR: "/mnt/session/outputs" },
+    });
+  });
+
   it("CloudflareSandbox does not inject secrets for prefixed chained commands", async () => {
     const calls: Array<{ command: string; options?: { env?: Record<string, string> } }> = [];
     const fakeSandbox = {

@@ -153,6 +153,34 @@ export interface Env {
   // and routed through here for vault-credential injection by hostname
   // match. Same "credentials only ever live in main" property.
   MAIN_MCP?: {
+    resolveManagedSessionInputs(opts: {
+      tenantId: string;
+      sessionId: string;
+    }): Promise<
+      | {
+          type: "found";
+          session: {
+            id: string;
+            environmentId: string;
+            metadata: Readonly<Record<string, string>>;
+            resources: readonly (Readonly<Record<string, unknown>> & { type: string })[];
+          };
+        }
+      | { type: "not_found" }
+    >;
+    downloadManagedSessionFile(opts: {
+      tenantId: string;
+      sessionId: string;
+      fileId: string;
+    }): Promise<
+      | {
+          type: "found";
+          content: Uint8Array;
+          filename?: string;
+          mimeType: string;
+        }
+      | { type: "not_found" }
+    >;
     resolveManagedSkillVersion?(opts: {
       tenantId: string;
       skillId: string;

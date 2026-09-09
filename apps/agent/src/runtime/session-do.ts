@@ -105,7 +105,10 @@ import { createCfBrowserHarness } from "@open-managed-agents/browser-harness/cf"
 import type { BrowserHarness, BrowserBillingHook, BrowserSession } from "@open-managed-agents/browser-harness";
 import { SqliteHistory, InMemoryHistory } from "./history";
 import { createSandbox } from "./sandbox";
-import { mountResources } from "./resource-mounter";
+import {
+  loadManagedSessionResources,
+  mountResources,
+} from "./resource-mounter";
 import {
   findLatestBackup as findWorkspaceBackup,
 } from "./workspace-backups";
@@ -3457,7 +3460,7 @@ export class SessionDO extends DurableObject<Env> {
       // platform takes care of persistence + listing. When FILES_BUCKET is
       // configured this is required: a failed mount aborts warmup so the
       // session never falsely advertises durable, caller-visible outputs.
-      if (this.state.session_id && this.state.tenant_id && this.env.FILES_BUCKET) {
+      if (this.state.session_id && this.state.tenant_id) {
         if (!supportsSessionOutputMount(sandbox)) {
           throw new Error(
             "Session outputs are enabled but the sandbox has no output mount capability",
@@ -3467,55 +3470,42 @@ export class SessionDO extends DurableObject<Env> {
           tenantId: this.state.tenant_id,
           sessionId: this.state.session_id,
         });
+        if (sandbox.setEnvVars === undefined) {
+          throw new Error(
+            "Session outputs are mounted but the sandbox cannot publish their environment contract",
+          );
+        }
+        await sandbox.setEnvVars({ OMA_OUTPUTS_DIR: "/mnt/session/outputs" });
       }
 
-      // Mount all session resources (files, git repos, env secrets)
+      // Materialize the current canonical Managed Session resources. The
+      // main worker owns the Session/source Ports; this execution worker only
+      // consumes a service-binding projection and performs provider I/O.
+      // Resolve on every warmup so files added after Session creation are
+      // visible before the first model request.
       const sessionId = this.state.session_id;
       if (sessionId) {
-        // Sessions-store reads via the session_id PRIMARY KEY index, no
-        // tenant prefix needed — fixes the staging-kv namespace mismatch
-        // the legacy CONFIG_KV.list path tripped over.
-        const services = await getCfServicesForTenant(this.env, this.state.tenant_id);
-        const rows = await services.sessions.listResourcesBySession({ sessionId });
-        const resources: Array<Record<string, unknown>> = [];
-        const secretStore = new Map<string, string>();
-
-        for (const row of rows) {
-          resources.push(row.resource as unknown as Record<string, unknown>);
-          // Secret payloads (env_secret.value, github_repository.token) live
-          // in the per-session secret store, keyed by (tenant, session, resource).
-          const secretData = await services.sessionSecrets.get({
-            tenantId: this.state.tenant_id,
-            sessionId,
-            resourceId: row.id,
-          });
-          if (secretData) secretStore.set(row.id, secretData);
+        const source = this.env.MAIN_MCP;
+        if (source === undefined) {
+          throw new Error(
+            "Managed Session input source service binding is unavailable",
+          );
         }
+        const loaded = await loadManagedSessionResources(source, {
+          tenantId: this.state.tenant_id,
+          sessionId,
+        });
 
-        if (resources.length) {
+        if (loaded.resources.length) {
           await mountResources(
             sandbox,
-            resources,
+            loaded.resources,
             this.env.CONFIG_KV,
-            secretStore,
-            this.env.FILES_BUCKET,
+            new Map(),
+            undefined,
             this.state.tenant_id,
-            // Memory-store name lookup for mount paths (Anthropic mounts as
-            // /mnt/memory/<name>/, not /mnt/memory/<id>/). A missing lookup
-            // result fails warmup; mounting under an undeclared id path would
-            // silently change the public contract.
-            async (storeId: string) => {
-              try {
-                const memSvc = (await getCfServicesForTenant(this.env, this.state.tenant_id)).memory;
-                const store = await memSvc.getStore({
-                  tenantId: this.state.tenant_id,
-                  storeId,
-                });
-                return store ? { name: store.name } : null;
-              } catch {
-                return null;
-              }
-            },
+            undefined,
+            loaded.fileSource,
           );
         }
       }
@@ -3665,6 +3655,9 @@ export class SessionDO extends DurableObject<Env> {
       }
     } catch (err) {
       this.currentWarmupGen = null;
+      console.error(
+        `[warmup] failed session=${this.state.session_id ?? "unknown"}: ${err instanceof Error ? err.message : String(err)}`,
+      );
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
       this.broadcastEvent({
         type: "agent.message",

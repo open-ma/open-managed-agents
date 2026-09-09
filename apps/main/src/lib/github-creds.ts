@@ -124,6 +124,71 @@ export interface GithubCandidate {
   slug: string;
 }
 
+interface ManagedGithubSessionSource {
+  find(input: { workspaceId: string; sessionId: string }): Promise<{
+    archivedAt: string | null;
+    resources: ReadonlyArray<{
+      id?: string;
+      type: string;
+      url?: string;
+    }>;
+  } | null>;
+}
+
+interface ManagedGithubSecretSource {
+  findGithubToken(input: {
+    workspaceId: string;
+    sessionId: string;
+    resourceId: string;
+  }): Promise<string | null>;
+}
+
+/** Canonical Managed Sessions credential resolver used by runtime egress.
+ * It deliberately consumes source Ports rather than the legacy Services
+ * session tables, so dynamic resource updates become visible immediately. */
+export async function resolveManagedGithubCredentials(
+  sessions: ManagedGithubSessionSource,
+  secrets: ManagedGithubSecretSource,
+  input: {
+    workspaceId: string;
+    sessionId: string;
+    hostname: string;
+    pathname: string;
+  },
+): Promise<GithubCandidate | null> {
+  if (!isGithubHost(input.hostname)) return null;
+  const session = await sessions.find({
+    workspaceId: input.workspaceId,
+    sessionId: input.sessionId,
+  });
+  if (session === null || session.archivedAt !== null) return null;
+
+  const requestSlug = parseRepoSlug(
+    `https://${input.hostname}${input.pathname}`,
+  );
+  const scheme = authSchemeFor(input.hostname);
+  let fallback: GithubCandidate | null = null;
+  for (const resource of session.resources) {
+    if (
+      resource.type !== "github_repository"
+      || typeof resource.id !== "string"
+      || typeof resource.url !== "string"
+    ) continue;
+    const slug = parseRepoSlug(resource.url);
+    if (slug === null) continue;
+    const token = await secrets.findGithubToken({
+      workspaceId: input.workspaceId,
+      sessionId: input.sessionId,
+      resourceId: resource.id,
+    });
+    if (token === null) continue;
+    const candidate = { scheme, token, slug };
+    if (slug === requestSlug) return candidate;
+    fallback ??= candidate;
+  }
+  return fallback;
+}
+
 /**
  * Pick a GitHub token for an outbound call.
  *

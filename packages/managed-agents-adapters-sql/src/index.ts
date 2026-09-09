@@ -37,6 +37,7 @@ export {
   SqlSessionResourcePersistence,
 } from "./session-resources-sql-persistence";
 export { SqlSessionResourceStore } from "@open-managed-agents/session-resource-store-sql";
+export { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 export { SqlSessionThreadEventPersistence } from "./session-thread-events-sql-persistence";
 export { SqlSessionThreadContextSource } from "./session-thread-context-sql-source";
 export { SqlSessionThreadPersistence } from "./session-threads-sql-persistence";

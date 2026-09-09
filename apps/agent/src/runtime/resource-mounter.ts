@@ -2,6 +2,62 @@ import type { SandboxExecutor } from "../harness/interface";
 import { fileR2Key } from "@open-managed-agents/shared";
 import { logWarn } from "@open-managed-agents/shared";
 
+export interface ManagedSessionFileSource {
+  downloadFile(fileId: string): Promise<{ content: Uint8Array }>;
+}
+
+export interface ManagedSessionResourceSource {
+  resolveManagedSessionInputs(input: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<
+    | {
+        type: "found";
+        session: {
+          resources: readonly (Readonly<Record<string, unknown>> & { type: string })[];
+        };
+      }
+    | { type: "not_found" }
+  >;
+  downloadManagedSessionFile(input: {
+    tenantId: string;
+    sessionId: string;
+    fileId: string;
+  }): Promise<
+    | { type: "found"; content: Uint8Array }
+    | { type: "not_found" }
+  >;
+}
+
+export async function loadManagedSessionResources(
+  source: ManagedSessionResourceSource,
+  input: { tenantId: string; sessionId: string },
+): Promise<{
+  resources: Array<Record<string, unknown>>;
+  fileSource: ManagedSessionFileSource;
+}> {
+  const resolved = await source.resolveManagedSessionInputs(input);
+  if (resolved.type !== "found") {
+    throw new Error(`Managed Session ${input.sessionId} was not found`);
+  }
+  return {
+    resources: resolved.session.resources
+      .map((resource) => ({ ...resource })) as Array<Record<string, unknown>>,
+    fileSource: {
+      downloadFile: async (fileId) => {
+        const downloaded = await source.downloadManagedSessionFile({
+          ...input,
+          fileId,
+        });
+        if (downloaded.type !== "found") {
+          throw new Error(`Managed Session file ${fileId} was not found`);
+        }
+        return { content: downloaded.content };
+      },
+    },
+  };
+}
+
 /**
  * Mount session resources into the sandbox during warmup.
  *
@@ -29,6 +85,7 @@ export async function mountResources(
   filesBucket?: R2Bucket,
   tenantId?: string,
   memoryStoreLookup?: (storeId: string) => Promise<{ name: string } | null>,
+  fileSource?: ManagedSessionFileSource,
 ): Promise<void> {
   validateResourcesBeforeMount(
     sandbox,
@@ -36,6 +93,7 @@ export async function mountResources(
     secretStore,
     filesBucket,
     tenantId,
+    fileSource,
   );
   let hasGitRepo = false;
   // Buffer env vars across the loop so we make a single setEnvVars call
@@ -46,7 +104,7 @@ export async function mountResources(
   for (const res of resources) {
     switch (res.type) {
       case "file":
-        await mountFile(sandbox, res, filesBucket!, tenantId!);
+        await mountFile(sandbox, res, filesBucket, tenantId, fileSource);
         break;
       case "github_repository":
       case "github_repo": {
@@ -103,14 +161,18 @@ function validateResourcesBeforeMount(
   secretStore: Map<string, string> | undefined,
   filesBucket: R2Bucket | undefined,
   tenantId: string | undefined,
+  fileSource: ManagedSessionFileSource | undefined,
 ): void {
   for (const resource of resources) {
     switch (resource.type) {
       case "file":
-        if (typeof resource.file_id !== "string" || resource.file_id.length === 0) {
+        if (
+          typeof (resource.fileId ?? resource.file_id) !== "string"
+          || String(resource.fileId ?? resource.file_id).trim().length === 0
+        ) {
           throw new Error("Session file resource requires file_id");
         }
-        if (filesBucket === undefined || tenantId === undefined) {
+        if (fileSource === undefined && (filesBucket === undefined || tenantId === undefined)) {
           throw new Error("Session file resource requires tenant-scoped FILES_BUCKET storage");
         }
         if (sandbox.writeFileBytes === undefined) {
@@ -157,6 +219,7 @@ function validateResourcesBeforeMount(
       case "memory_store":
         if (
           typeof resource.memory_store_id !== "string"
+          && typeof resource.memoryStoreId !== "string"
           && typeof resource.id !== "string"
         ) {
           throw new Error("Session Memory Store resource requires memory_store_id");
@@ -186,17 +249,23 @@ function validateResourcesBeforeMount(
 async function mountFile(
   sandbox: SandboxExecutor,
   res: Record<string, unknown>,
-  filesBucket: R2Bucket,
-  tenantId: string,
+  filesBucket: R2Bucket | undefined,
+  tenantId: string | undefined,
+  fileSource: ManagedSessionFileSource | undefined,
 ): Promise<void> {
-  const obj = await filesBucket.get(fileR2Key(tenantId, res.file_id as string));
-  if (!obj) {
-    throw new Error(`Session file ${String(res.file_id)} was not found`);
-  }
+  const fileId = (res.fileId as string | undefined) ?? (res.file_id as string);
+  const bytes = fileSource === undefined
+    ? await (async () => {
+        const obj = await filesBucket!.get(fileR2Key(tenantId!, fileId));
+        if (!obj) return null;
+        return new Uint8Array(await obj.arrayBuffer());
+      })()
+    : (await fileSource.downloadFile(fileId)).content;
+  if (bytes === null) throw new Error(`Session file ${fileId} was not found`);
   // Default mount path matches Anthropic Managed Agents convention.
-  const path = (res.mount_path as string) || `/mnt/session/uploads/${res.file_id}`;
-  const buf = await obj.arrayBuffer();
-  const bytes = new Uint8Array(buf);
+  const path = (res.mountPath as string | undefined)
+    ?? (res.mount_path as string | undefined)
+    ?? `/mnt/session/uploads/${fileId}`;
   await sandbox.writeFileBytes!(path, bytes);
 }
 
@@ -211,24 +280,30 @@ async function mountMemoryStore(
   res: Record<string, unknown>,
   lookup: ((storeId: string) => Promise<{ name: string } | null>) | undefined,
 ): Promise<void> {
-  const storeId = (res.memory_store_id as string) || (res.id as string);
+  const storeId = (res.memoryStoreId as string | undefined)
+    ?? (res.memory_store_id as string | undefined)
+    ?? (res.id as string);
 
   // The public contract mounts by store name, not id. Falling back to the id
   // makes the attachment exist at a path the prompt/user never declared, so
   // treat missing metadata as a preparation failure.
-  if (!lookup) {
+  const declaredName = typeof res.name === "string" ? res.name : undefined;
+  if (!declaredName && !lookup) {
     throw new Error(`Memory Store ${storeId} requires a metadata lookup Port`);
   }
-  let meta: { name: string } | null;
-  try {
-    meta = await lookup(storeId);
-  } catch (err) {
-    throw new Error(
-      `Memory Store ${storeId} metadata lookup failed: ${err instanceof Error ? err.message : String(err)}`,
-    );
+  let storeName = declaredName;
+  if (!storeName) {
+    let meta: { name: string } | null;
+    try {
+      meta = await lookup!(storeId);
+    } catch (err) {
+      throw new Error(
+        `Memory Store ${storeId} metadata lookup failed: ${err instanceof Error ? err.message : String(err)}`,
+      );
+    }
+    if (!meta?.name) throw new Error(`Memory Store ${storeId} was not found`);
+    storeName = meta.name;
   }
-  if (!meta?.name) throw new Error(`Memory Store ${storeId} was not found`);
-  const storeName = meta.name;
 
   const access = res.access as string | undefined;
   const readOnly = access === "read_only";
@@ -237,6 +312,13 @@ async function mountMemoryStore(
     storeName,
     storeId,
     readOnly,
+  });
+  const mountPath = (res.mountPath as string | undefined)
+    ?? (res.mount_path as string | undefined)
+    ?? `/mnt/memory/${storeName}`;
+  await sandbox.setEnvVars?.({
+    OMA_MEMORY_DIR: "/mnt/memory",
+    [`OMA_MEMORY_${storeName.toUpperCase().replace(/[^A-Z0-9]/g, "_")}`]: mountPath,
   });
 }
 
@@ -271,7 +353,9 @@ async function mountGitRepo(
 ): Promise<void> {
   const repoUrl = res.url as string || res.repo_url as string;
 
-  const targetDir = (res.mount_path as string) || "/workspace";
+  const targetDir = (res.mountPath as string | undefined)
+    ?? (res.mount_path as string | undefined)
+    ?? "/workspace";
 
   // Disable interactive credential prompting BEFORE any git network call.
   // The network-layer proxy (apps/agent/src/oma-sandbox.ts githubAuthHandler)
