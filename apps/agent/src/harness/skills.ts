@@ -13,8 +13,78 @@ export interface SkillFile {
 }
 
 export interface SkillFilesResult {
+  skillId: string;
   skillName: string;
+  requestedVersion: string;
   files: SkillFile[];
+}
+
+function safeSkillArchivePath(value: string): string {
+  const normalized = value.replaceAll("\\", "/");
+  if (
+    value.includes("\0")
+    || normalized.startsWith("/")
+    || /^[A-Za-z]:\//u.test(normalized)
+    || normalized.split("/").some((segment) =>
+      segment.length === 0 || segment === "." || segment === "..")
+  ) {
+    throw new Error(`Unsafe skill archive path: ${value}`);
+  }
+  return normalized;
+}
+
+function safeLegacySkillName(value: string, fallback: string): string {
+  if (
+    value.length === 0
+    || value.includes("\0")
+    || value.includes("/")
+    || value.includes("\\")
+    || value === "."
+    || value === ".."
+  ) return encodeURIComponent(fallback);
+  return value;
+}
+
+/**
+ * Return both the Managed Runtime canonical path and the historical
+ * Cloudflare path. The latter is a compatibility mirror; new harnesses must
+ * use the canonical /workspace path shared by Node and ACP runtimes.
+ */
+export function skillFileMountPaths(
+  skill: Pick<SkillFilesResult, "skillId" | "skillName" | "requestedVersion">,
+  filename: string,
+): [string, string] {
+  const path = safeSkillArchivePath(filename);
+  const legacyName = safeLegacySkillName(skill.skillName, skill.skillId);
+  const legacyPath = path.startsWith(`${legacyName}/`)
+    ? path.slice(legacyName.length + 1)
+    : path;
+  return [
+    `/workspace/.openma/skills/${encodeURIComponent(skill.skillId)}/${encodeURIComponent(skill.requestedVersion)}/${path}`,
+    `/home/user/.skills/${legacyName}/${legacyPath}`,
+  ];
+}
+
+export async function mountSkillFiles(
+  sandbox: {
+    exec(command: string, timeout?: number): Promise<string>;
+    writeFileBytes?: (path: string, bytes: Uint8Array) => Promise<unknown>;
+  },
+  skills: readonly SkillFilesResult[],
+): Promise<void> {
+  if (skills.length === 0) return;
+  if (!sandbox.writeFileBytes) {
+    throw new Error("Managed Skill files require sandbox binary file writes");
+  }
+  for (const skill of skills) {
+    for (const file of skill.files) {
+      for (const path of skillFileMountPaths(skill, file.filename)) {
+        const parent = path.slice(0, path.lastIndexOf("/"));
+        await sandbox.exec(`mkdir -p '${parent.replaceAll("'", `'\\''`)}'`, 5_000);
+        await sandbox.writeFileBytes(path, file.bytes);
+      }
+    }
+  }
 }
 
 import { skillFileR2Key } from "@open-managed-agents/shared";
@@ -96,9 +166,10 @@ export async function resolveCustomSkills(
         }
       }
 
+      const requestedVersion = cfg.version ?? "latest";
       const addition = body
         ? `<skill name="${name}">\n${body}\n</skill>`
-        : `[Skill: ${name}] ${description}. Read /home/user/.skills/${name}/SKILL.md for instructions.`;
+        : `[Skill: ${name}] ${description}. Locate its SKILL.md under /workspace/.openma/skills/${encodeURIComponent(cfg.skill_id)}/${encodeURIComponent(requestedVersion)}/.`;
 
       skills.push({
         id: cfg.skill_id,
@@ -128,53 +199,66 @@ export async function getSkillFiles(
   filesBucket: R2Bucket | undefined,
   tenantId: string,
 ): Promise<SkillFilesResult[]> {
-  if (!filesBucket) return [];
   const customConfigs = skillConfigs.filter(
     s => s.type === "custom" && !skillRegistry.has(s.skill_id),
   );
+  if (customConfigs.length === 0) return [];
+  if (!filesBucket) {
+    throw new Error("Managed Skill files require FILES_BUCKET storage");
+  }
 
   const results: SkillFilesResult[] = [];
   for (const cfg of customConfigs) {
-    try {
-      const metaRaw = await kv.get(`t:${tenantId}:skill:${cfg.skill_id}`);
-      if (!metaRaw) continue;
-
-      const meta = JSON.parse(metaRaw) as {
-        name?: string;
-        latest_version?: string;
-      };
-
-      const version = (cfg.version && cfg.version !== "latest") ? cfg.version : meta.latest_version;
-      if (!version) continue;
-
-      const verRaw = await kv.get(`t:${tenantId}:skillver:${cfg.skill_id}:${version}`);
-      if (!verRaw) continue;
-
-      const verData = JSON.parse(verRaw) as {
-        files?: Array<{ filename: string; size_bytes?: number; encoding?: string }>;
-      };
-
-      if (!verData.files?.length) continue;
-
-      const files: SkillFile[] = [];
-      for (const entry of verData.files) {
-        const obj = await filesBucket.get(
-          skillFileR2Key(tenantId, cfg.skill_id, version, entry.filename),
-        );
-        if (!obj) continue;
-        const buf = await obj.arrayBuffer();
-        files.push({ filename: entry.filename, bytes: new Uint8Array(buf) });
-      }
-
-      if (files.length > 0) {
-        results.push({
-          skillName: meta.name || cfg.skill_id,
-          files,
-        });
-      }
-    } catch {
-      // Skip skills whose files can't be fetched
+    const metaRaw = await kv.get(`t:${tenantId}:skill:${cfg.skill_id}`);
+    if (!metaRaw) {
+      throw new Error(`Managed Skill ${cfg.skill_id} metadata was not found`);
     }
+    const meta = JSON.parse(metaRaw) as {
+      name?: string;
+      latest_version?: string;
+    };
+    const version = (cfg.version && cfg.version !== "latest")
+      ? cfg.version
+      : meta.latest_version;
+    if (!version) {
+      throw new Error(`Managed Skill ${cfg.skill_id} has no version`);
+    }
+    const verRaw = await kv.get(`t:${tenantId}:skillver:${cfg.skill_id}:${version}`);
+    if (!verRaw) {
+      throw new Error(`Managed Skill ${cfg.skill_id}@${version} manifest was not found`);
+    }
+    const verData = JSON.parse(verRaw) as {
+      files?: Array<{ filename: string; size_bytes?: number; encoding?: string }>;
+    };
+    if (!verData.files?.length) {
+      throw new Error(`Managed Skill ${cfg.skill_id}@${version} has no files`);
+    }
+
+    const files: SkillFile[] = [];
+    let foundManifest = false;
+    for (const entry of verData.files) {
+      const filename = safeSkillArchivePath(entry.filename);
+      if (filename.split("/").at(-1) === "SKILL.md") foundManifest = true;
+      const obj = await filesBucket.get(
+        skillFileR2Key(tenantId, cfg.skill_id, version, filename),
+      );
+      if (!obj) {
+        throw new Error(
+          `Managed Skill ${cfg.skill_id}@${version} file ${filename} was not found`,
+        );
+      }
+      const buf = await obj.arrayBuffer();
+      files.push({ filename, bytes: new Uint8Array(buf) });
+    }
+    if (!foundManifest) {
+      throw new Error(`Managed Skill ${cfg.skill_id}@${version} has no SKILL.md`);
+    }
+    results.push({
+      skillId: cfg.skill_id,
+      skillName: meta.name || cfg.skill_id,
+      requestedVersion: cfg.version ?? "latest",
+      files,
+    });
   }
 
   return results;

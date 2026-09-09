@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 
 import {
   getSkillFiles,
+  skillFileMountPaths,
   resolveCustomSkills,
 } from "../../apps/agent/src/harness/skills";
 import { mountResources } from "../../apps/agent/src/runtime/resource-mounter";
@@ -211,18 +212,62 @@ describe("in-sandbox Session resource wiring", () => {
       system_prompt_addition: expect.stringContaining("Use rg first."),
     })]);
     expect(mountedSkills).toEqual([{
+      skillId,
       skillName: "repository-guide",
+      requestedVersion: "latest",
       files: [
         { filename: "SKILL.md", bytes: markdown },
         { filename: "assets/logo.bin", bytes: binary },
       ],
     }]);
+    expect(skillFileMountPaths(mountedSkills[0]!, "assets/logo.bin")).toEqual([
+      "/workspace/.openma/skills/skill-1/latest/assets/logo.bin",
+      "/home/user/.skills/repository-guide/assets/logo.bin",
+    ]);
     expect(bucket.get).toHaveBeenCalledWith(
       skillFileR2Key("tenant-1", skillId, version, "SKILL.md"),
     );
     expect(bucket.get).toHaveBeenCalledWith(
       skillFileR2Key("tenant-1", skillId, version, "assets/logo.bin"),
     );
+  });
+
+  it.each([
+    "../outside",
+    "nested/../../outside",
+    "/absolute/path",
+    "nul\0byte",
+  ])("rejects unsafe custom Skill archive path %s", (filename) => {
+    expect(() => skillFileMountPaths({
+      skillId: "skill-1",
+      skillName: "repository-guide",
+      requestedVersion: "latest",
+      files: [],
+    }, filename)).toThrow(/unsafe skill archive path/i);
+  });
+
+  it("fails closed when a declared custom Skill object is missing", async () => {
+    const skillId = "skill-missing-object";
+    const version = "1";
+    const kvValues = new Map([
+      [`t:tenant-1:skill:${skillId}`, JSON.stringify({
+        id: skillId,
+        name: "missing-object",
+        latest_version: version,
+      })],
+      [`t:tenant-1:skillver:${skillId}:${version}`, JSON.stringify({
+        files: [{ filename: "SKILL.md" }],
+      })],
+    ]);
+    const kv = { get: vi.fn(async (key: string) => kvValues.get(key) ?? null) };
+    const bucket = { get: vi.fn(async () => null) };
+
+    await expect(getSkillFiles(
+      [{ type: "custom", skill_id: skillId, version: "latest" }],
+      kv as unknown as KVNamespace,
+      bucket as unknown as R2Bucket,
+      "tenant-1",
+    )).rejects.toThrow(/skill-missing-object.*SKILL\.md.*not found/i);
   });
 
   it("clones a repository into its declared mount path without persisting its credential", async () => {

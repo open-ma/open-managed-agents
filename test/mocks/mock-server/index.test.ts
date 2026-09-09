@@ -85,6 +85,11 @@ describe("mock-services input certification model", () => {
     expect(first.content[0].input.command).toContain("SKILL_INPUT_OK");
     expect(first.content[0].input.command).toContain("MEMORY_INPUT_OK");
     expect(first.content[0].input.command).toContain(REPOSITORY_SHA);
+    expect(first.content[0].input.command).toContain("FILE_INPUT_FAIL");
+    expect(first.content[0].input.command).toContain("SKILL_INPUT_FAIL");
+    expect(first.content[0].input.command).toContain("MEMORY_INPUT_FAIL");
+    expect(first.content[0].input.command).toContain("REPOSITORY_INPUT_FAIL");
+    expect(first.content[0].input.command).toContain("OUTPUT_INPUT_FAIL");
 
     messages.push(
       { role: "assistant", content: first.content },

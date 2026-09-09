@@ -93,7 +93,7 @@ import { MemoryStoreService } from "@open-managed-agents/memory-store";
 import { buildCfServices, buildCfTenantDbProvider, getCfServicesForTenant } from "@open-managed-agents/services";
 import { toEnvironmentConfig } from "@open-managed-agents/environments-store";
 import { ensureSetupApplied } from "./setup-on-warmup";
-import { resolveSkills, resolveCustomSkills, getSkillFiles } from "../harness/skills";
+import { resolveSkills, resolveCustomSkills, getSkillFiles, mountSkillFiles } from "../harness/skills";
 import { resolveAppendablePrompts } from "./appendable-prompts";
 import { createCfBrowserHarness } from "@open-managed-agents/browser-harness/cf";
 import type { BrowserHarness, BrowserBillingHook, BrowserSession } from "@open-managed-agents/browser-harness";
@@ -4918,39 +4918,17 @@ export class SessionDO extends DurableObject<Env> {
             this.env.FILES_BUCKET,
             this.state.tenant_id,
           );
-          for (const sf of skillFilesResults) {
-            const skillDir = `/home/user/.skills/${sf.skillName}`;
-            try {
-              await sandbox.exec(`mkdir -p ${skillDir}`, 5000);
-            } catch {}
-            for (const file of sf.files) {
-              try {
-                if (sandbox.writeFileBytes) {
-                  await sandbox.writeFileBytes(
-                    `${skillDir}/${file.filename}`,
-                    file.bytes,
-                  );
-                } else {
-                  await sandbox.writeFile(
-                    `${skillDir}/${file.filename}`,
-                    new TextDecoder("utf-8").decode(file.bytes),
-                  );
-                }
-              } catch (err) {
-                // Best-effort: skip individual file write failures
-                logWarn(
-                  { op: "session_do.skill_file.write", session_id: this.state.session_id, skill: sf.skillName, filename: file.filename, err },
-                  "skill file write failed; skipping",
-                );
-              }
-            }
-          }
+          // The canonical location is shared with Node and ACP Managed
+          // Runtimes. A compatibility mirror keeps historical prompts valid.
+          // Requested skills are required inputs, so a failed write aborts
+          // warmup instead of silently starting a weaker agent.
+          await mountSkillFiles(sandbox, skillFilesResults);
         } catch (err) {
-          // Best-effort
           logWarn(
             { op: "session_do.skill_files.mount", session_id: this.state.session_id, agent_id: agent.id, err },
             "skill files mount failed",
           );
+          throw err;
         }
       }
     }
