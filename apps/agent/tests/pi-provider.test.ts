@@ -9,6 +9,7 @@ import { generateText, stepCountIs, streamText, tool } from "ai";
 import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import * as piProviderModule from "../src/harness/pi-provider";
+import mockServices, { type Env as MockServicesEnv } from "../../../test/mocks/mock-server/index";
 
 const { createPiModelRuntime } = piProviderModule;
 
@@ -155,5 +156,49 @@ describe("createPiModelRuntime", () => {
       { value: "through pi" },
       expect.objectContaining({ toolCallId: "tool-1" }),
     );
+  });
+
+  it("completes a streamed Anthropic tool loop through the real Pi protocol adapter", async () => {
+    const repositorySha = "9e79e0dd41e23a8900b0b4adec5f55e4ecf24529";
+    vi.stubGlobal("fetch", (input: RequestInfo | URL, init?: RequestInit) =>
+      mockServices.fetch(new Request(input, init), {} as MockServicesEnv));
+    try {
+      const runtime = createPiModelRuntime({
+        model: "openma-e2e-inputs",
+        apiKey: "fixture",
+        provider: "ant-compatible",
+        baseURL: "https://mock.test",
+      });
+      const candidate = Reflect.get(piProviderModule, "toAiSdkLanguageModel");
+      expect(typeof candidate).toBe("function");
+      if (typeof candidate !== "function") return;
+      const executeBash = vi.fn(async () => "FILES_REPO_SKILL_MEMORY_OUTPUT_OK");
+      const executeMcp = vi.fn(async () => "MCP_PROXY_OK");
+      const model = candidate(runtime) as LanguageModel;
+      const result = streamText({
+        model,
+        prompt: `Expected repository SHA: ${repositorySha}`,
+        tools: {
+          bash: tool({
+            inputSchema: z.object({ command: z.string() }),
+            execute: executeBash,
+          }),
+          mcp__certification__echo: tool({
+            inputSchema: z.object({ value: z.string() }),
+            execute: executeMcp,
+          }),
+        },
+        stopWhen: stepCountIs(3),
+      });
+
+      await expect(result.text).resolves.toBe("ALL_INPUTS_OK");
+      expect(executeBash).toHaveBeenCalledOnce();
+      expect(executeMcp).toHaveBeenCalledWith(
+        { value: "MCP_INPUT_OK" },
+        expect.objectContaining({ toolCallId: "toolu_mock_1" }),
+      );
+    } finally {
+      vi.unstubAllGlobals();
+    }
   });
 });

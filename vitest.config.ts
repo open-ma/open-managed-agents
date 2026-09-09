@@ -416,6 +416,7 @@ export default defineConfig({
       // This is a node:test architecture suite and is run explicitly by
       // test:architecture, not inside workerd/Vitest.
       "scripts/provider-package-boundaries.test.mjs",
+      "scripts/migration-compatibility.test.mjs",
       // Credential certification orchestrates real Node child processes and
       // is run explicitly by test:certification:runner.
       "scripts/live-certification.test.mjs",

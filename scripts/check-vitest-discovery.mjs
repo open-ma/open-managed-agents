@@ -56,6 +56,7 @@ test("root Cloudflare test discovery excludes generated and Node-only trees", ()
       `generated test artifact was collected by the root Cloudflare test project: ${relativeFixturePath}`,
     );
     const nodeOnlyPackageTests = collectedFiles.filter((path) =>
+      path === "scripts/migration-compatibility.test.mjs" ||
       path === "scripts/live-certification.test.mjs" ||
       path === "scripts/offline-certification.test.mjs" ||
       path === "scripts/local-release-certification.test.mjs" ||
