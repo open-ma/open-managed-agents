@@ -130,96 +130,6 @@ If the page is an error/404/login wall/empty result, output exactly one line sta
 
 
 /**
- * Poll a started process. SIGTERM on timeout, return partial output.
- *
- * Auto-background-on-timeout was REMOVED 2026-05-13 — see commit msg.
- * The bash tool no longer surfaces a `run_in_background` flag either.
- * Net effect: every bash call has bounded duration; agent always sees
- * either a clean exit or a "timed out, here's partial" string. No
- * synthetic notifications ever inject into the conversation.
- *
- * If/when we re-enable backgrounding, the missing piece is robust
- * cleanup of completion notifications + R2 mount lifecycle (the two
- * bugs that motivated this disable).
- */
-async function pollWithStrategies(
-  proc: ProcessHandle,
-  command: string,
-  timeoutMs: number,
-): Promise<string> {
-  return new Promise<string>((resolve) => {
-    let settled = false;
-
-    const timer = setTimeout(async () => {
-      if (settled) return;
-      settled = true;
-
-      let partial = "";
-      try {
-        const logs = await proc.getLogs();
-        partial = (logs.stdout || "") + (logs.stderr ? "\nstderr: " + logs.stderr : "");
-      } catch {}
-
-      try { await proc.kill("SIGTERM"); } catch {}
-      resolve(truncateResult(
-        `exit=143\nCommand timed out after ${Math.round(timeoutMs / 1000)}s\n${partial}`.trim()
-      ));
-    }, timeoutMs);
-
-    // Poll for normal completion
-    const poll = async () => {
-      while (!settled) {
-        try {
-          const status = await proc.getStatus();
-          // SDK ProcessStatus union (sandbox-Bb3n0SeC.d.ts:655):
-          //   'starting' | 'running' | 'completed' | 'failed' | 'killed' | 'error'
-          // All four non-{starting, running} states are terminal — proc.getLogs()
-          // has the final output and exitCode is set.
-          //
-          // Pre-fix this only checked completed/error/killed; 'failed' (any
-          // non-zero exit, e.g. `git commit` with no identity → exit 128,
-          // npm install missing pkg → exit 1) was NOT in the set, so the
-          // poll loop kept looping until the bash timeout fired. Result:
-          // every error case returned `exit=143 / Command timed out after
-          // 120s` after a 2-minute hang, even when the underlying command
-          // had exited cleanly within milliseconds. Caught 2026-05-13
-          // testing `git commit` (Author identity unknown).
-          if (
-            status === "completed"
-            || status === "failed"
-            || status === "killed"
-            || status === "error"
-          ) {
-            if (settled) return;
-            settled = true;
-            clearTimeout(timer);
-            const logs = await proc.getLogs();
-            let out = logs.stdout || "";
-            if (logs.stderr) out += (out ? "\n" : "") + "stderr: " + logs.stderr;
-            // Prefer SDK-reported exitCode (carries the real signal — 1
-            // for npm error, 128 for git, etc.). Fall back to status-based
-            // shorthand only when the SDK didn't surface a code.
-            const sdkExit = (proc as { exitCode?: number }).exitCode;
-            const exitCode =
-              typeof sdkExit === "number"
-                ? sdkExit
-                : status === "killed" ? 137
-                : (status === "error" || status === "failed") ? 1
-                : 0;
-            resolve(truncateResult(`exit=${exitCode}\n${out}`));
-            return;
-          }
-        } catch {}
-        await new Promise(r => setTimeout(r, 500));
-      }
-    };
-    poll().catch(() => {
-      if (!settled) { settled = true; clearTimeout(timer); resolve("exit=1\nProcess polling failed"); }
-    });
-  });
-}
-
-/**
  * Wrap a tool execute function so errors are returned as strings to the LLM
  * instead of crashing the entire harness (matching Claude Code's behavior).
  * The LLM sees the error and can retry, try a different approach, or inform the user.
@@ -539,24 +449,12 @@ export async function buildTools(
       execute: safe(async ({ command, timeout }) => {
         const timeoutMs = Math.min(timeout || DEFAULT_BASH_TIMEOUT, MAX_BASH_TIMEOUT);
 
-        // Auto-background-on-timeout was REMOVED 2026-05-13. The
-        // explicit `run_in_background` flag is gone too. Both surfaced
-        // a synthetic <task_notification> as user.message via
-        // pollBackgroundTasks → drainEventQueue, which (a) duplicated
-        // the agent's prior reply when the model treated the
-        // notification as a new user turn, (b) rendered as a confusing
-        // red "You" bubble in console, and (c) returned stale partial
-        // output because the snapshot was taken at backgrounding time
-        // and never refreshed. Hard SIGTERM is the universal contract
-        // now — bounded duration, no notification surface.
-        if (sandbox.startProcess) {
-          const proc = await sandbox.startProcess(command);
-          if (proc) {
-            return await pollWithStrategies(proc, command, timeoutMs);
-          }
-        }
-
-        // Fallback: simple exec (test env, no startProcess)
+        // Auto-background-on-timeout and the explicit
+        // `run_in_background` flag were removed. Foreground bash must use
+        // the Sandbox Port's bounded exec primitive directly: providers
+        // implement command timeout/cancellation at the process boundary,
+        // while startProcess + host polling keeps a long-lived capability
+        // open and can outlive the turn when transport/status polling stalls.
         return truncateResult(await sandbox.exec(command, timeoutMs));
       }),
     });
