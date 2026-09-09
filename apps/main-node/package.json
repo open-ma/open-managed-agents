@@ -11,6 +11,7 @@
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
     "test": "vitest run --config vitest.config.ts",
+    "test:integration:mysql": "vitest run --config vitest.mysql.config.ts",
     "test:e2e:acp-deepseek-cache": "tsx scripts/acp-deepseek-native-cache.e2e.ts",
     "test:e2e:pi-deepseek": "tsx scripts/pi-deepseek-harness.e2e.ts",
     "typecheck": "tsc --noEmit"
@@ -102,6 +103,7 @@
     "pg": "^8.20.0",
     "pino": "^9.5.0",
     "pino-pretty": "^11.2.2",
+    "mysql2": "^3.24.4",
     "postgres": "^3.4.0",
     "prom-client": "^15.1.3",
     "turndown": "^7.2.0"
@@ -109,6 +111,7 @@
   "devDependencies": {
     "@anthropic-ai/sdk": "0.120.0",
     "@earendil-works/pi-ai": "0.84.4",
+    "@testcontainers/mysql": "^12.1.0",
     "@types/better-sqlite3": "^9.6.0",
     "@types/pg": "^8.20.0",
     "@types/turndown": "^5.0.5",

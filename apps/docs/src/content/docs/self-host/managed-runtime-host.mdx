@@ -252,7 +252,7 @@ The application talks to `SessionEventDispatchPort` in both deployments:
 | Preset | Single-owner mechanism | Durable pending work |
 |---|---|---|
 | Cloudflare | One `SessionDO` identity per Session | DO SQLite event queue |
-| Node PostgreSQL/SQLite | Renewable SQL claim with owner, attempt and generation fence | `managed_session_executions` outbox |
+| Node PostgreSQL/SQLite/MySQL | Renewable SQL claim with owner, attempt and generation fence | `managed_session_executions` outbox |
 
 The Node server is therefore horizontally scalable. Every accepted actionable
 Event batch and its execution row commit under the same Session revision CAS;
@@ -264,7 +264,7 @@ runtime instead of assuming it still owns the Session.
 The execution table is Node-only infrastructure. It does not change the
 Managed Agents SDK shape, add fields to `managed_sessions`, or appear in the
 Cloudflare D1 schema. Node deployments apply it through the normal generated
-PostgreSQL/SQLite migrations.
+PostgreSQL/SQLite migrations or the MySQL schema adapter.
 
 Placement selects exactly one scheduling authority:
 

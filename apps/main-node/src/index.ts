@@ -29,6 +29,7 @@ import {
 } from "@open-managed-agents/observability";
 import {
   createBetterSqlite3SqlClient,
+  createMysql2SqlClient,
   createPostgresSqlClient,
   type SqlClient,
 } from "@open-managed-agents/sql-client";
@@ -74,6 +75,7 @@ import type { HarnessContext } from "@open-managed-agents/agent/harness/interfac
 import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { applyBetterAuthSchema } from "@open-managed-agents/schema";
 import type { OmaDb } from "@open-managed-agents/db-schema";
+import { migrateNodeMysqlSchema } from "@open-managed-agents/db-schema/node-mysql";
 import { ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 import {
   buildAgentRoutes as buildLegacyAgentRoutes,
@@ -342,10 +344,13 @@ const tracer: NodeTracerHandle = await createNodeTracer({
 
 const dbUrl = process.env.DATABASE_URL ?? "";
 const usePostgres = dbUrl.startsWith("postgres://") || dbUrl.startsWith("postgresql://");
-const dialect = usePostgres ? "postgres" : "sqlite";
+const useMysql = dbUrl.startsWith("mysql://") || dbUrl.startsWith("mysql2://");
+const dialect = usePostgres ? "postgres" : useMysql ? "mysql" : "sqlite";
 
 let sql: SqlClient;
 let backendDescription: string;
+let mysqlPool: import("mysql2/promise").Pool | null = null;
+let databaseShutdown: (() => Promise<void>) | null = null;
 // drizzleDb is the dependency-inversion seam new-style adapters take.
 // Constructed once at the composition root from the right concrete driver.
 // Existing SqlClient is still built alongside for the legacy applySchema /
@@ -359,6 +364,23 @@ if (usePostgres) {
   drizzleDb = drizzlePostgresJs(pgClient as never) as unknown as OmaDb<Record<string, unknown>>;
   const u = new URL(dbUrl);
   backendDescription = `postgres ${u.hostname}:${u.port || 5432}${u.pathname}`;
+} else if (useMysql) {
+  sql = await createMysql2SqlClient(dbUrl);
+  const mysql = await import("mysql2/promise");
+  mysqlPool = mysql.createPool({
+    uri: dbUrl,
+    supportBigNumbers: true,
+    bigNumberStrings: false,
+    timezone: "Z",
+  });
+  const { drizzle: drizzleMysql2 } = await import("drizzle-orm/mysql2");
+  drizzleDb = drizzleMysql2(mysqlPool) as unknown as OmaDb<Record<string, unknown>>;
+  const u = new URL(dbUrl);
+  backendDescription = `mysql ${u.hostname}:${u.port || 3306}${u.pathname}`;
+  databaseShutdown = async () => {
+    await mysqlPool?.end();
+    await (sql as import("@open-managed-agents/sql-client").Mysql2SqlClient).close();
+  };
 } else {
   const dbPath = process.env.DATABASE_PATH ?? "./data/oma.db";
   mkdirSync(dirname(dbPath), { recursive: true });
@@ -389,11 +411,13 @@ const migrationsFolder = usePostgres
 if (usePostgres) {
   const { migrate } = await import("drizzle-orm/postgres-js/migrator");
   await migrate(drizzleDb as never, { migrationsFolder });
+} else if (useMysql) {
+  await migrateNodeMysqlSchema(sql, migrationsFolder);
 } else {
   const { migrate } = await import("drizzle-orm/better-sqlite3/migrator");
   migrate(drizzleDb as never, { migrationsFolder });
 }
-await ensureEventLogSchema(sql, dialect);
+if (!useMysql) await ensureEventLogSchema(sql, dialect);
 const managedAgentsPersistence = new SqlAgentPersistence(sql);
 const managedAgentsPlatform = createNodePlatform({
   features: {
@@ -463,6 +487,22 @@ if (!authDisabled) {
     authShutdown = async () => {
       await pgPool.end();
     };
+  } else if (useMysql) {
+    if (mysqlPool === null) throw new Error("MySQL pool was not initialized");
+    await applyBetterAuthSchema({ sql, dialect: "mysql" });
+    auth = buildBetterAuth({
+      database: mysqlPool,
+      sender,
+      secret: process.env.BETTER_AUTH_SECRET ?? randomFallback(),
+      baseURL: process.env.PUBLIC_BASE_URL,
+      googleClientId: process.env.GOOGLE_CLIENT_ID,
+      googleClientSecret: process.env.GOOGLE_CLIENT_SECRET,
+      githubClientId: process.env.GITHUB_CLIENT_ID,
+      githubClientSecret: process.env.GITHUB_CLIENT_SECRET,
+      requireEmailVerify: process.env.AUTH_REQUIRE_EMAIL_VERIFY === "1",
+      cookieDomain: process.env.AUTH_COOKIE_DOMAIN,
+      ensureTenant: (u) => ensureTenantSqlite(sql, u.id, u.name, u.email),
+    });
   } else {
     mkdirSync(dirname(authDbPath), { recursive: true });
     const BetterSqlite3 = (await import("better-sqlite3")).default;
@@ -1916,7 +1956,9 @@ app.get("/health", (c) =>
       ? "disabled"
       : usePostgres
         ? "better-auth-pg"
-        : "better-auth-sqlite",
+        : useMysql
+          ? "better-auth-mysql"
+          : "better-auth-sqlite",
     backends: {
       agents: dialect,
       events: dialect,
@@ -2730,6 +2772,9 @@ const shutdown = async (signal: string) => {
   }
   if (authShutdown) {
     try { await authShutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.auth_failed" }, "auth shutdown failed"); }
+  }
+  if (databaseShutdown) {
+    try { await databaseShutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.database_failed" }, "database shutdown failed"); }
   }
   try { await sessionRegistry.shutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.session_registry_failed" }, "session registry shutdown failed"); }
   try { await tracer.shutdown(); } catch { /* tracer shutdown is best-effort */ }

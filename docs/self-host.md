@@ -2,7 +2,7 @@
 
 A Node-side build of Open Managed Agents that runs on a single VPS / Mac /
 Docker host without any Cloudflare account, Workers, Durable Objects, or
-Containers. Storage is SQLite or Postgres + local filesystem. Sandboxes
+Containers. Storage is SQLite, Postgres, or MySQL + local filesystem. Sandboxes
 are local subprocesses by default; switch to E2B for Firecracker isolation
 when you're past trusted-developer territory.
 
@@ -16,25 +16,23 @@ when you're past trusted-developer territory.
 
 ## Choose a backend
 
-One image, two compose files — pick the one that matches your durability
-& concurrency story. You can switch later (see [Migrating between
+One image, multiple SQL adapters — pick the one that matches your durability
+and concurrency story. You can switch later (see [Migrating between
 backends](#migrating-between-backends) below).
 
-| | SQLite + LocalFs (default) | Postgres + LocalFs |
-|---|---|---|
-| Compose file | `docker-compose.yml` | `docker-compose.postgres.yml` |
-| Best for | Single-user self-host, dev, demo, ≤10 GB sessions | Multi-instance, ≥50M sessions/events rows, share existing PG |
-| Concurrency | One writer (single oma-server) | Many writers; HA-able |
-| Backups | `cp ./data/*.db` or [litestream](https://litestream.io) → S3 | `pg_dump` / managed PG snapshots |
-| Extra services | None | + `postgres:16-alpine` (or external PG) |
-| When to switch | "I want PG already" / "want to scale out" | — |
+| | SQLite + LocalFs (default) | Postgres + LocalFs | MySQL + LocalFs |
+|---|---|---|---|
+| Bundled compose | `docker-compose.yml` | `docker-compose.postgres.yml` | Bring an external MySQL 8.x DSN |
+| Best for | Single-user self-host, dev, demo, ≤10 GB sessions | Multi-instance, ≥50M sessions/events rows, share existing PG | Existing MySQL 8.x infrastructure |
+| SQL concurrency | One writer (single oma-server) | Many writers; HA-able | Many writers; CAS-backed claims |
+| Backups | `cp ./data/*.db` or litestream → S3 | `pg_dump` / managed PG snapshots | `mysqldump` / managed MySQL snapshots |
 
 **Same Docker image either way** (`openma/main-node:dev` built from
 `apps/main-node/Dockerfile`) — `DATABASE_URL` env at runtime decides.
-SQLite needs only `DATABASE_PATH`; Postgres needs `DATABASE_URL=
-postgres://…`. In Postgres mode better-auth's tables live in the same
-PG database (no separate `auth.db` file); in SQLite mode they live in
-`./data/auth.db`.
+SQLite needs only `DATABASE_PATH`; server databases use
+`DATABASE_URL=postgres://…` or `DATABASE_URL=mysql://…`. In Postgres and
+MySQL modes better-auth's tables live in the same database (no separate
+`auth.db` file); in SQLite mode they live in `./data/auth.db`.
 
 ## Quick start (Docker, SQLite)
 
@@ -134,6 +132,29 @@ What changes vs the SQLite stack:
   a small `pg.Pool` (max 10) for better-auth's kysely PostgresDialect
   — the main store stays on `postgres.js`. `AUTH_DATABASE_PATH` is
   ignored in PG mode.
+
+## MySQL backend
+
+Point the same main-node image at a fresh MySQL 8.x database:
+
+```bash
+DATABASE_URL=mysql://oma:password@mysql.example.internal:3306/oma \
+  pnpm --filter @open-managed-agents/main-node start
+
+curl localhost:8787/health
+# → {"auth":"better-auth-mysql","backends":{"agents":"mysql","events":"mysql",...}}
+```
+
+The composition root only selects the backend. MySQL-native DDL, ANSI
+identifier normalization, optimistic CAS, and transactional result readback
+live below the SQL Port; v1 Agent, Session, Environment Work, lease/fence, and
+auth code do not branch on MySQL.
+
+MySQL schema bootstrap is idempotent for the same canonical snapshot and
+fails closed if a newer application snapshot needs an explicit migration; it
+never marks an un-applied schema upgrade as successful. The current
+in-process realtime hub means a MySQL deployment should remain one main-node
+replica until a shared realtime adapter is configured.
 
 ### Running multiple oma-server replicas (PG mode only)
 
@@ -249,15 +270,15 @@ both sides).
 
 ### Backups & operations
 
-| | SQLite + LocalFs | Postgres + LocalFs |
-|---|---|---|
-| Hot backup | [litestream](https://litestream.io) replicates `./data/*.db` to S3 continuously | `pg_dump` cron / managed PG snapshots / WAL streaming |
-| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it |
-| Sandbox workdirs | Always on local FS — back up `./data/sandboxes/` separately | Same |
-| Memory blobs | `./data/memory-blobs/` — back up separately or set `MEMORY_S3_*` (s3fs mount) | Same |
-| auth.db | Always SQLite — back up `./data/auth.db` | Same |
+| | SQLite + LocalFs | Postgres + LocalFs | MySQL + LocalFs |
+|---|---|---|---|
+| Hot backup | litestream replicates `./data/*.db` to S3 continuously | `pg_dump` / managed PG snapshots / WAL streaming | `mysqldump` / managed MySQL snapshots |
+| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it | Restore into fresh MySQL, point `DATABASE_URL` at it |
+| Sandbox workdirs | Back up `./data/sandboxes/` separately | Same | Same |
+| Memory blobs | Back up `./data/memory-blobs/` or set `MEMORY_S3_*` | Same | Same |
+| Auth | Separate `./data/auth.db` | In the Postgres database | In the MySQL database |
 
-Both backends pass the same crash-recovery test surface (55 tests across
+The backends pass the same crash-recovery test surface (55 tests across
 adapter / recovery-logic / SIGKILL bootstrap / CF DO eviction).
 
 ## Operator gotchas
@@ -490,7 +511,7 @@ Eight runtime-agnostic ports separate "what" from "how":
 
   - `BlobStore`  — files/memory/workspace bytes (R2 / S3 / local FS)
   - `KvStore`    — config/snapshot key-value (CONFIG_KV / pg table / memory)
-  - `SqlClient`  — SQL with batch (D1 / better-sqlite3 / postgres.js)
+  - `SqlClient`  — SQL with batch (D1 / better-sqlite3 / postgres.js / mysql2)
   - `EventLogRepo`+`StreamRepo` — per-session event durability
   - `SandboxExecutor` — code execution sandbox (CF / E2B / subprocess)
   - `ToMarkdownProvider` — web_fetch HTML→md (Workers AI / turndown)

@@ -29,9 +29,9 @@ optional sidecar (`oma-vault`) for outbound credential injection.
               │  oma-server (apps/main-node)                 │
               │                                              │
               │  • Hono on Node, port 8787                   │
-              │  • better-auth (sqlite-backed) → /api/auth/* │
+              │  • better-auth (selected SQL backend)        │
               │  • REST + SSE → /v1/*                        │
-              │  • SqlClient (better-sqlite3 OR postgres.js) │
+              │  • SqlClient (sqlite / postgres / mysql)     │
               │  • SqlEventLog + InProcessEventStreamHub     │
               │  • LocalFsBlobStore + chokidar watcher       │
               │  • DefaultHarness (apps/agent shared code)   │
@@ -58,12 +58,12 @@ optional sidecar (`oma-vault`) for outbound credential injection.
 | Concern | Implementation |
 |---|---|
 | HTTP server | Hono on `@hono/node-server`, port 8787 |
-| SQL store | `better-sqlite3` (default, `./data/oma.db`) OR `postgres.js` (set `DATABASE_URL=postgres://...`) |
+| SQL store | `better-sqlite3` (default), `postgres.js` (`DATABASE_URL=postgres://...`), or `mysql2` (`DATABASE_URL=mysql://...`, MySQL 8.x) |
 | KV | not used at the API layer — agents/env config lives in the SQL `agents`/`environments` tables |
 | Blob store | `LocalFsBlobStore` (`./data/memory-blobs/<storeId>/<path>`); operator can swap in an S3 adapter when scaling |
 | Event log | `SqlEventLog` (per-session events in shared `session_events` table) + `InProcessEventStreamHub` (sqlite mode) or `PgEventStreamHub` (pg mode, LISTEN/NOTIFY-backed) for SSE fan-out |
 | Sandbox | `SANDBOX_PROVIDER=subprocess` (default, no isolation), `litebox` (Firecracker μVM), `daytona`, `e2b` |
-| Auth | `better-auth` on a separate `./data/auth.db` (sqlite). Email + password by default; Google OAuth optional. `AUTH_DISABLED=1` bypasses for single-user demos |
+| Auth | `better-auth`; separate `auth.db` in SQLite mode, same server DB in Postgres/MySQL mode. `AUTH_DISABLED=1` bypasses for local demos |
 | Vault credential injection | Work-scoped HTTP MCP gateway for managed sandbox MCP; optional legacy `apps/oma-vault` sidecar is single-operator/advisory only |
 | Memory mount | sandbox symlinks `/mnt/memory/<storeName>` → `<MEMORY_BLOB_DIR>/<storeId>/`. chokidar watcher reflects fs writes back into the SQL `memories` index |
 | Cron | `croner` per-minute scheduler; memory-version retention and eval/webhook sweeps run in-process |
@@ -287,13 +287,13 @@ pnpm deploy
 |---|---|---|---|
 | Process count | 1 (oma-server) + 1 sidecar (oma-vault) | 2 wrangler dev (main + agent) | 3 workers (main + agent + integrations) |
 | HTTP runtime | Hono on Node | workerd | workerd at edge |
-| SQL store | better-sqlite3 / postgres.js | D1 local sim | D1 (with optional shard router) |
+| SQL store | better-sqlite3 / postgres.js / mysql2 | D1 local sim | D1 (with optional shard router) |
 | KV / cache | none — SQL covers it | wrangler KV sim | CONFIG_KV |
 | Blob | LocalFsBlobStore (`./data`) | R2 local sim | R2 buckets |
 | Event log | SqlEventLog (shared SQL) | DO sqlite | DO sqlite |
 | Stream broadcast | InProcessEventStreamHub (sqlite) or PgEventStreamHub (pg, LISTEN/NOTIFY) for SSE | DO WS hibernation → SSE bridge | DO WS hibernation → SSE bridge |
 | Sandbox | subprocess / litebox / daytona / e2b | Container DO via Docker | Container DO on CF Containers |
-| Auth | better-auth + sqlite (own file) | better-auth + D1 local sim | better-auth + D1 + Email Workers + OAuth |
+| Auth | better-auth + selected SQL backend | better-auth + D1 local sim | better-auth + D1 + Email Workers + OAuth |
 | Vault inject | Work-scoped HTTP MCP gateway; legacy oma-vault is advisory | fenced outbound handler + HTTP MCP gateway | fenced outbound handler + HTTP MCP gateway |
 | Memory mount | symlink to LocalFsBlobStore + chokidar | R2 sim + mountBucket(localBucket:true) | R2 + s3fs + R2 Events → Queue → D1 |
 | Cron | `croner` per-minute scheduler (memory/eval/webhook jobs) | wrangler dev `--test-scheduled` | CF cron `* * * * *` |
@@ -307,7 +307,7 @@ pnpm deploy
 | Start cmd | `docker compose up` | `pnpm dev` | n/a (run-as-deployed) |
 | Deploy cmd | `docker compose up -d` | n/a (dev only) | `pnpm deploy` |
 | Multi-tenant | better-auth + tenant/membership tables | better-auth + tenant/membership tables | better-auth + tenant/membership tables + shard router |
-| Multi-instance | sqlite: no — single writer. pg: yes — LISTEN/NOTIFY fanout (shared `MEMORY_BLOB_DIR` required; auth.db + oma-vault still 1-proc) | n/a | scales by default |
+| Multi-instance | sqlite: no; pg: yes with LISTEN/NOTIFY; mysql: one replica until a shared realtime hub is configured | n/a | scales by default |
 
 ## Picking a topology
 
