@@ -311,18 +311,32 @@ async function collectTurnEvents(sessionId) {
       {},
       { signal: controller.signal },
     );
-    for await (const event of stream) {
-      events.push(event);
-      if (event.type === "session.error") {
-        throw new Error(`session.error: ${JSON.stringify(event)}`);
+    try {
+      for await (const event of stream) {
+        events.push(event);
+        if (event.type === "session.error") {
+          throw new Error(`session.error: ${JSON.stringify(event)}`);
+        }
+        if (
+          event.type === "session.warning"
+          && /MCP setup failed/iu.test(String(event.message ?? ""))
+        ) {
+          throw new Error(`MCP setup failed: ${JSON.stringify(event)}`);
+        }
+        if (event.type === "session.status_idle") return events;
       }
-      if (
-        event.type === "session.warning"
-        && /MCP setup failed/iu.test(String(event.message ?? ""))
-      ) {
-        throw new Error(`MCP setup failed: ${JSON.stringify(event)}`);
-      }
-      if (event.type === "session.status_idle") return events;
+    } catch (error) {
+      const persisted = await omaFetch(
+        `/v1/sessions/${encodeURIComponent(sessionId)}/events?limit=100&order=asc`,
+        { method: "GET", headers: {} },
+      ).then(async (response) => `${response.status} ${(await response.text()).slice(0, 8_000)}`)
+        .catch((diagnosticError) =>
+          `<diagnostic failed: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}>`
+        );
+      throw new Error(
+        `${error instanceof Error ? error.message : String(error)}; streamed before failure: ${JSON.stringify(events)}; persisted: ${persisted}`,
+        { cause: error },
+      );
     }
     throw new Error(`SSE ended before idle: ${events.map(({ type }) => type).join(", ")}`);
   } finally {

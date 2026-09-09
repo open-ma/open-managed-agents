@@ -1533,7 +1533,8 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
   }) {
     const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
-    if (services.filesBlob === null) {
+    const filesBlob = services.filesBlob;
+    if (filesBlob === null) {
       throw new Error("FILES_BUCKET binding is required for managed Files");
     }
     const client = new CfD1SqlClient(tenantDb);
@@ -1543,7 +1544,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
         managedFilesApplicationFor({
           workspaceId: opts.tenantId,
           tenantDb,
-          blobs: services.filesBlob,
+          blobs: filesBlob,
         }),
         {
           workspaceId: opts.tenantId,
@@ -1564,7 +1565,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     )) {
       return { type: "not_found" as const };
     }
-    const object = await services.filesBlob.get(
+    const object = await filesBlob.get(
       fileR2Key(opts.tenantId, opts.fileId),
     );
     if (object === null) return { type: "not_found" as const };

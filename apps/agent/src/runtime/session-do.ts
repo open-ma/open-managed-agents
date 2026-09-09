@@ -109,6 +109,7 @@ import {
   loadManagedSessionResources,
   mountResources,
 } from "./resource-mounter";
+import { createSandboxWarmupFailureEvent } from "./warmup-failure-event";
 import {
   findLatestBackup as findWorkspaceBackup,
 } from "./workspace-backups";
@@ -3659,10 +3660,7 @@ export class SessionDO extends DurableObject<Env> {
         `[warmup] failed session=${this.state.session_id ?? "unknown"}: ${err instanceof Error ? err.message : String(err)}`,
       );
       // Warmup failed — broadcast error event and re-throw to prevent harness from running
-      this.broadcastEvent({
-        type: "agent.message",
-        content: [{ type: "text", text: `Sandbox warmup failed: ${err instanceof Error ? err.message : String(err)}` }],
-      });
+      this.broadcastEvent(createSandboxWarmupFailureEvent(err));
       throw err;
     }
   }
