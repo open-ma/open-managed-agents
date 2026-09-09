@@ -504,6 +504,18 @@ function anthropicSse(message: AnthropicMessage): Response {
 }
 
 async function mcpProtocolResponse(req: Request, scenario: string): Promise<Response> {
+  // This fixture is response-only Streamable HTTP: every JSON-RPC request is
+  // answered by its POST response and it does not offer the optional
+  // standalone server-to-client SSE stream. Per the MCP transport contract a
+  // server must reject that GET with 405. Returning a short JSON response here
+  // makes the official client parse it as an empty SSE stream and reconnect
+  // forever, leaking one subrequest roughly every second for the whole turn.
+  if (req.method === "GET") {
+    return new Response(null, {
+      status: 405,
+      headers: { allow: "POST, DELETE" },
+    });
+  }
   if (req.method === "DELETE") return new Response(null, { status: 200 });
   const message = await req.json<Record<string, unknown>>().catch(() => ({}));
   const id = message.id ?? null;

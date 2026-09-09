@@ -220,6 +220,19 @@ describe("mock-services input certification model", () => {
 });
 
 describe("mock-services MCP fixture", () => {
+  it("declines the optional standalone SSE stream instead of triggering reconnects", async () => {
+    const response = await worker.fetch(new Request("https://mock.test/mcp/ok/", {
+      method: "GET",
+      headers: {
+        authorization: "Bearer openma-local-release-mcp-token",
+        accept: "text/event-stream",
+        "mcp-session-id": "openma-mock-ok-session",
+      },
+    }), mockEnv("ok"));
+
+    expect(response.status).toBe(405);
+  });
+
   it("implements initialize, tools/list, and tools/call with bearer auth", async () => {
     const env = mockEnv("ok");
     const initialize = await mcpRequest(env, {
