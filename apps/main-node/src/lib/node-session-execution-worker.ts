@@ -61,6 +61,26 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+async function withHeartbeatDeadline<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`Session execution renewal timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
+
 /**
  * Durable Node execution scheduler. Only in-flight cancellation handles live
  * in this process; admission, ordering, ownership and recovery live behind the
@@ -278,11 +298,14 @@ export class NodeSessionExecutionWorker implements SessionEventDispatchPort {
 
   async #heartbeat(active: ActiveExecution): Promise<void> {
     if (active.leaseLost) return;
-    const renewed = await this.dependencies.coordinator.renew({
-      fence: active.fence,
-      renewedAt: this.dependencies.clock.now().toISOString(),
-      leaseTtlMs: this.#leaseTtlMs,
-    });
+    const renewed = await withHeartbeatDeadline(
+      this.dependencies.coordinator.renew({
+        fence: active.fence,
+        renewedAt: this.dependencies.clock.now().toISOString(),
+        leaseTtlMs: this.#leaseTtlMs,
+      }),
+      this.#heartbeatIntervalMs,
+    );
     if (renewed.type === "lost") {
       active.leaseLost = true;
       await this.#cancel(active, "lease_lost");

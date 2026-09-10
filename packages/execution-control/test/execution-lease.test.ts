@@ -99,6 +99,35 @@ describe("ExecutionLeaseController", () => {
     expect(controller.signal.aborted).toBe(true);
   });
 
+  it("self-fences when a partition leaves lease renewal hanging", async () => {
+    vi.useFakeTimers();
+    try {
+      let renewalStarted!: () => void;
+      const started = new Promise<void>((resolve) => { renewalStarted = resolve; });
+      let renewalSignal: AbortSignal | undefined;
+      const controller = new ExecutionLeaseController({
+        fence: { generation: 2, expiresAtMs: 100 },
+        heartbeatIntervalMs: 5_000,
+        renew: async (_fence, signal) => {
+          renewalSignal = signal;
+          renewalStarted();
+          return await new Promise<never>(() => {});
+        },
+      });
+
+      const renewing = controller.renewNow();
+      await started;
+      await vi.advanceTimersByTimeAsync(5_000);
+      await renewing;
+
+      expect(renewalSignal?.aborted).toBe(true);
+      expect(controller.lost).toBe(true);
+      expect(controller.signal.aborted).toBe(true);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("treats a scheduler abort during close as normal monitor shutdown", async () => {
     const sleeping = deferred<void>();
     const controller = new ExecutionLeaseController({

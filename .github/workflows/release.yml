@@ -77,6 +77,12 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Storage integration tests
+        run: pnpm test:integration:storage
+
+      - name: MySQL integration tests
+        run: pnpm test:integration:mysql
+
       - name: Create / update Version Packages PR
         # No `publish-script` input → action only opens the Version PR. Publishing
         # is in the next job, gated on environment approval.

@@ -7,6 +7,15 @@ import { MySqlContainer, type StartedMySqlContainer } from "@testcontainers/mysq
 import Anthropic from "@anthropic-ai/sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import mysql from "mysql2/promise";
+import {
+  createSqlQueue,
+  ensureSqlQueueSchema,
+} from "@open-managed-agents/queue";
+import {
+  createMysql2SqlClient,
+  type SqlClient,
+  type SqlStatement,
+} from "@open-managed-agents/sql-client";
 
 import { detachedProcessOptions, killProcessTree } from "./helpers/process-tree";
 
@@ -62,6 +71,214 @@ afterAll(async () => {
 });
 
 describe.sequential("main-node MySQL composition root", () => {
+  it("installs the shared durable queue schema on MySQL", async () => {
+    const sql = await createMysql2SqlClient(mysqlContainer.getConnectionUri());
+    try {
+      await expect(ensureSqlQueueSchema(sql, "mysql")).resolves.toBeUndefined();
+      await expect(
+        sql.prepare(
+          `SELECT id, queue_name, claim_token
+             FROM queue_messages`,
+        ).all(),
+      ).resolves.toEqual({ results: [], meta: { changes: 0 } });
+      const indexes = await sql.prepare(
+        `SELECT DISTINCT index_name AS name
+           FROM information_schema.statistics
+          WHERE table_schema = DATABASE() AND table_name = 'queue_messages'`,
+      ).all<{ name: string }>();
+      expect(new Set(indexes.results?.map((index) => index.name))).toEqual(
+        new Set([
+          "PRIMARY",
+          "idx_queue_messages_pending",
+          "idx_queue_messages_processing",
+          "idx_queue_messages_dlq",
+        ]),
+      );
+    } finally {
+      await sql.close();
+    }
+  });
+
+  it("enqueues and consumes through the shared MySQL lease contract", async () => {
+    const sql = await createMysql2SqlClient(mysqlContainer.getConnectionUri());
+    const name = `mysql-queue-${Date.now()}`;
+    try {
+      await ensureSqlQueueSchema(sql, "mysql");
+      const queue = createSqlQueue<{ id: string }>({
+        name,
+        sql,
+        dialect: "mysql",
+        workerId: "mysql-worker",
+        pollIntervalMs: 10,
+      });
+      let receive!: (id: string) => void;
+      const received = new Promise<string>((resolve) => {
+        receive = resolve;
+      });
+      const stop = queue.subscribe(async (message) => {
+        receive(message.body.id);
+      });
+      try {
+        await queue.enqueue({ id: "mysql-message" });
+        await expect(withTimeout(received, 2_000)).resolves.toBe("mysql-message");
+      } finally {
+        await Promise.resolve(stop());
+      }
+    } finally {
+      await sql.prepare(`DELETE FROM queue_messages WHERE queue_name = ?`)
+        .bind(name).run();
+      await sql.close();
+    }
+  });
+
+  it("reclaims an expired MySQL owner and fences its stale acknowledgement", async () => {
+    const sql = await createMysql2SqlClient(mysqlContainer.getConnectionUri());
+    const name = `mysql-fencing-${Date.now()}`;
+    let releaseStale!: () => void;
+    const staleBlocked = new Promise<void>((resolve) => {
+      releaseStale = resolve;
+    });
+    let staleStarted!: () => void;
+    const staleClaimed = new Promise<void>((resolve) => {
+      staleStarted = resolve;
+    });
+    let replacementStarted!: () => void;
+    const replacementClaimed = new Promise<void>((resolve) => {
+      replacementStarted = resolve;
+    });
+    let releaseReplacement!: () => void;
+    const replacementBlocked = new Promise<void>((resolve) => {
+      releaseReplacement = resolve;
+    });
+    let staleMutationFinished!: () => void;
+    const staleMutation = new Promise<void>((resolve) => {
+      staleMutationFinished = resolve;
+    });
+    const staleSql = dropMutations(
+      observeMutation(
+        sql,
+        (statement) => statement.includes("DELETE FROM queue_messages"),
+        staleMutationFinished,
+      ),
+      isLeaseHeartbeat,
+    );
+    const stale = createSqlQueue<{ id: string }>({
+      name,
+      sql: staleSql,
+      dialect: "mysql",
+      workerId: "stale",
+      pollIntervalMs: 5,
+      batchSize: 1,
+      visibilityTimeoutMs: 100,
+    });
+    const replacement = createSqlQueue<{ id: string }>({
+      name,
+      sql,
+      dialect: "mysql",
+      workerId: "replacement",
+      pollIntervalMs: 5,
+      batchSize: 1,
+      visibilityTimeoutMs: 1_000,
+    });
+
+    try {
+      await ensureSqlQueueSchema(sql, "mysql");
+      await stale.enqueue({ id: "recover-me" });
+      const stopStale = stale.subscribe(async () => {
+        staleStarted();
+        await staleBlocked;
+      });
+      await staleClaimed;
+      const stoppingStale = Promise.resolve(stopStale());
+
+      const stopReplacement = replacement.subscribe(async () => {
+        replacementStarted();
+        await replacementBlocked;
+      });
+      try {
+        await withTimeout(replacementClaimed, 2_000);
+        releaseStale();
+        await withTimeout(staleMutation, 2_000);
+        const row = await sql.prepare(
+          `SELECT status, locked_by
+             FROM queue_messages
+            WHERE queue_name = ?`,
+        ).bind(name).first<{ status: string; locked_by: string | null }>();
+        expect(row).toEqual({
+          status: "processing",
+          locked_by: "replacement",
+        });
+      } finally {
+        releaseStale();
+        releaseReplacement();
+        await Promise.all([
+          stoppingStale,
+          Promise.resolve(stopReplacement()),
+        ]);
+      }
+    } finally {
+      await sql.prepare(`DELETE FROM queue_messages WHERE queue_name = ?`)
+        .bind(name).run();
+      await sql.close();
+    }
+  });
+
+  it("atomically distributes one MySQL queue across concurrent subscribers", async () => {
+    const sql = await createMysql2SqlClient(mysqlContainer.getConnectionUri());
+    const name = `mysql-concurrency-${Date.now()}`;
+    const seenA: string[] = [];
+    const seenB: string[] = [];
+    try {
+      await ensureSqlQueueSchema(sql, "mysql");
+      const queueA = createSqlQueue<{ id: string }>({
+        name,
+        sql,
+        dialect: "mysql",
+        workerId: "mysql-a",
+        pollIntervalMs: 5,
+        batchSize: 4,
+      });
+      const queueB = createSqlQueue<{ id: string }>({
+        name,
+        sql,
+        dialect: "mysql",
+        workerId: "mysql-b",
+        pollIntervalMs: 5,
+        batchSize: 4,
+      });
+      const producer = createSqlQueue<{ id: string }>({
+        name,
+        sql,
+        dialect: "mysql",
+        workerId: "mysql-producer",
+      });
+      await producer.enqueueBatch(
+        Array.from({ length: 16 }, (_, index) => ({ id: `m${index}` })),
+      );
+      const stopA = queueA.subscribe(async (message) => {
+        seenA.push(message.body.id);
+      });
+      const stopB = queueB.subscribe(async (message) => {
+        seenB.push(message.body.id);
+      });
+      try {
+        await waitFor(() => seenA.length + seenB.length === 16, 3_000);
+      } finally {
+        await Promise.all([
+          Promise.resolve(stopA()),
+          Promise.resolve(stopB()),
+        ]);
+      }
+      const all = [...seenA, ...seenB];
+      expect(new Set(all).size).toBe(16);
+      expect(all).toHaveLength(16);
+    } finally {
+      await sql.prepare(`DELETE FROM queue_messages WHERE queue_name = ?`)
+        .bind(name).run();
+      await sql.close();
+    }
+  });
+
   it("boots the real server against MySQL and reports the selected backend", async () => {
     const response = await fetch(`${baseUrl}/health`);
     expect(response.status).toBe(200);
@@ -265,4 +482,106 @@ function availablePort(): Promise<number> {
       server.close(() => resolvePort(address.port));
     });
   });
+}
+
+async function withTimeout<T>(promise: Promise<T>, timeoutMs: number): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`timed out after ${timeoutMs}ms`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs: number): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`waitFor timed out after ${timeoutMs}ms`);
+}
+
+function observeMutation(
+  client: SqlClient,
+  matches: (statement: string) => boolean,
+  afterRun: () => void,
+): SqlClient {
+  return {
+    prepare(statement) {
+      let delegate = client.prepare(statement);
+      const observed: SqlStatement = {
+        bind(...params) {
+          delegate = delegate.bind(...params);
+          return observed;
+        },
+        async run<T>() {
+          const result = await delegate.run<T>();
+          if (matches(statement)) afterRun();
+          return result;
+        },
+        first<T>() {
+          return delegate.first<T>();
+        },
+        all<T>() {
+          return delegate.all<T>();
+        },
+      };
+      return observed;
+    },
+    batch(statements) {
+      return client.batch(statements);
+    },
+    exec(statement) {
+      return client.exec(statement);
+    },
+  };
+}
+
+function dropMutations(
+  client: SqlClient,
+  matches: (statement: string) => boolean,
+): SqlClient {
+  return {
+    prepare(statement) {
+      let delegate = client.prepare(statement);
+      const intercepted: SqlStatement = {
+        bind(...params) {
+          delegate = delegate.bind(...params);
+          return intercepted;
+        },
+        run<T>() {
+          return matches(statement)
+            ? Promise.resolve({ meta: { changes: 0 } })
+            : delegate.run<T>();
+        },
+        first<T>() {
+          return delegate.first<T>();
+        },
+        all<T>() {
+          return delegate.all<T>();
+        },
+      };
+      return intercepted;
+    },
+    batch(statements) {
+      return client.batch(statements);
+    },
+    exec(statement) {
+      return client.exec(statement);
+    },
+  };
+}
+
+function isLeaseHeartbeat(statement: string): boolean {
+  return statement.includes("SET locked_until = ?")
+    && statement.includes("AND locked_until > ?");
 }

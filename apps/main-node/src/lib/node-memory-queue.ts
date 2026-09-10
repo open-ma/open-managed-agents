@@ -4,11 +4,11 @@
 // Why: keeps a single canonical "what to do when a memory blob changes"
 // implementation in packages/queue/handlers/memory-events. Differences:
 //   - CF source: R2 Event Notifications → CF Queue → batch handler
-//   - Node source: chokidar fs watcher (this file) → in-memory or PG
+//   - Node source: chokidar fs watcher (this file) → in-memory or SQL
 //     queue → same handler
 //
-// SQLite single-instance: in-memory queue. PG multi-replica: PG-table
-// queue with FOR UPDATE SKIP LOCKED so two replicas don't double-process.
+// SQL deployments use one durable queue contract across PostgreSQL, MySQL,
+// and SQLite. Process-local delivery remains an explicit opt-in.
 //
 // Loop avoidance + idempotency are inherited from the handler — same
 // (storeId, path, etag) dedupe.
@@ -26,27 +26,29 @@ import type { SqlClient } from "@open-managed-agents/sql-client";
 import {
   createInMemoryQueue,
   createInMemoryDlq,
-  createPgQueue,
-  createPgDlq,
-  ensureQueueSchema,
+  createSqlQueue,
+  createSqlDlq,
+  ensureSqlQueueSchema,
   type Queue,
   type DeadLetterQueue,
+  type SqlQueueDialect,
 } from "@open-managed-agents/queue";
 import {
   processMemoryEvent,
   type MemoryEvent,
 } from "@open-managed-agents/queue/handlers/memory-events";
 
-export interface NodeMemoryQueueDeps {
-  /** "in-memory" for SQLite single-instance; "pg" for multi-replica.
-   *  PG-mode requires `sql` to be a PG SqlClient. */
-  mode: "in-memory" | "pg";
-  sql?: SqlClient;
+interface NodeMemoryQueueCommonDeps {
   memoryRepo: MemoryRepo;
   memoryBlobs: MemoryBlobStore;
   memoryRoot: string;
   logger?: { log: (m: string, c?: unknown) => void; warn: (m: string, c?: unknown) => void };
 }
+
+export type NodeMemoryQueueDeps = NodeMemoryQueueCommonDeps & (
+  | { mode: "in-memory"; sql?: never; sqlDialect?: never }
+  | { mode: "sql"; sql: SqlClient; sqlDialect: SqlQueueDialect }
+);
 
 export interface NodeMemoryQueueHandle {
   queue: Queue<MemoryEvent>;
@@ -59,23 +61,25 @@ export async function startNodeMemoryQueue(
 ): Promise<NodeMemoryQueueHandle> {
   const log = deps.logger ?? console;
 
-  // Ensure the queue table exists in PG mode. SQLite single-instance
-  // uses the in-memory queue, no schema needed.
-  if (deps.mode === "pg") {
-    if (!deps.sql) throw new Error("startNodeMemoryQueue: PG mode requires sql");
-    await ensureQueueSchema(deps.sql);
+  if (deps.mode === "sql") {
+    await ensureSqlQueueSchema(deps.sql, deps.sqlDialect);
   }
 
   const dlq: DeadLetterQueue<MemoryEvent> =
-    deps.mode === "pg"
-      ? createPgDlq<MemoryEvent>({ name: "memory-events", sql: deps.sql! })
+    deps.mode === "sql"
+      ? createSqlDlq<MemoryEvent>({
+          name: "memory-events",
+          sql: deps.sql,
+          dialect: deps.sqlDialect,
+        })
       : createInMemoryDlq<MemoryEvent>();
 
   const queue: Queue<MemoryEvent> =
-    deps.mode === "pg"
-      ? createPgQueue<MemoryEvent>({
+    deps.mode === "sql"
+      ? createSqlQueue<MemoryEvent>({
           name: "memory-events",
-          sql: deps.sql!,
+          sql: deps.sql,
+          dialect: deps.sqlDialect,
           maxRetries: 5,
         })
       : createInMemoryQueue<MemoryEvent>({ dlq, maxRetries: 5 });

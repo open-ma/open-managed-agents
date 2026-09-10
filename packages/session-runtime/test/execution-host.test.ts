@@ -87,8 +87,7 @@ function manualTimers() {
     },
     tick: async () => {
       callback?.();
-      await Promise.resolve();
-      await Promise.resolve();
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
     },
   };
 }

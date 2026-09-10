@@ -332,6 +332,46 @@ describe("NodeSessionExecutionWorker", () => {
     await executor.waitForIdle();
   });
 
+  it("self-fences when a database partition leaves renewal hanging", async () => {
+    let release: (() => void) | undefined;
+    const running = new Promise<void>((resolve) => { release = resolve; });
+    let renewalStarted!: () => void;
+    const renewing = new Promise<void>((resolve) => { renewalStarted = resolve; });
+    runtime.run = async (input) => {
+      runs.push(structuredClone(input));
+      await running;
+    };
+    const executor = worker("node_01", {
+      heartbeatIntervalMs: 5,
+      leaseTtlMs: 50,
+      coordinator: {
+        ...coordinator,
+        admit: coordinator.admit.bind(coordinator),
+        claim: coordinator.claim.bind(coordinator),
+        find: coordinator.find.bind(coordinator),
+        requestInterrupt: coordinator.requestInterrupt.bind(coordinator),
+        cancelSession: coordinator.cancelSession.bind(coordinator),
+        settle: coordinator.settle.bind(coordinator),
+        renew: async () => {
+          renewalStarted();
+          await new Promise<never>(() => {});
+        },
+      },
+    });
+
+    await executor.sessionEventsAccepted(accepted("event_partitioned"));
+    await renewing;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+
+    expect(cancellations).toContain("lease_lost");
+    release?.();
+    await executor.waitForIdle();
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: "event_partitioned",
+    })).resolves.toMatchObject({ state: "running" });
+  });
+
   it("validates scheduler bounds and makes start/stop idempotent", async () => {
     expect(() => worker("node_01", {
       heartbeatIntervalMs: 30_000,

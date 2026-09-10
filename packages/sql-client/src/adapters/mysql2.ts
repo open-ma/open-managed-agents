@@ -339,7 +339,7 @@ function updateCasGuard(
       (_, index) => parameterOffset + index,
     );
     parameterOffset += parameterCount;
-    const candidateSelector = /^\s*(?:\([^)]*\)|`?[A-Za-z_][A-Za-z0-9_]*`?)\s*=\s*\(\s*SELECT\b/i
+    const candidateSelector = /^\s*(?:\([^)]*\)|`?[A-Za-z_][A-Za-z0-9_]*`?)\s*(?:=|IN)\s*\(\s*SELECT\b/i
       .test(term) && sourceTable.test(term);
     if (candidateSelector) {
       removedCandidate = true;

@@ -144,10 +144,29 @@ export class ExecutionLeaseController<Fence extends object> {
     const next = this.#renewal.then(async () => {
       if (this.signal.aborted && input.allowAborted !== true) return;
       let renewal: ExecutionLeaseRenewal<Fence>;
+      const renewalController = new AbortController();
+      const abortRenewal = () => renewalController.abort(this.signal.reason);
+      if (this.signal.aborted) abortRenewal();
+      else this.signal.addEventListener("abort", abortRenewal, { once: true });
+      let timeout: ReturnType<typeof setTimeout> | undefined;
       try {
-        renewal = await this.options.renew(this.fence, this.signal);
+        renewal = await Promise.race([
+          this.options.renew(this.fence, renewalController.signal),
+          new Promise<never>((_resolve, reject) => {
+            timeout = setTimeout(() => {
+              const error = new Error(
+                `Execution lease renewal timed out after ${this.options.heartbeatIntervalMs}ms`,
+              );
+              renewalController.abort(error);
+              reject(error);
+            }, this.options.heartbeatIntervalMs);
+          }),
+        ]);
       } catch (error) {
         renewal = { type: "lost", reason: error };
+      } finally {
+        if (timeout !== undefined) clearTimeout(timeout);
+        this.signal.removeEventListener("abort", abortRenewal);
       }
       if (renewal.type === "lost") {
         this.#lose(renewal.reason);

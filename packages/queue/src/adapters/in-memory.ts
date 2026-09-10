@@ -1,8 +1,8 @@
 // In-memory Queue + DLQ. For SQLite single-instance deployments and unit
-// tests. Messages are dispatched synchronously via setImmediate after
+// tests. Messages are dispatched asynchronously via setImmediate after
 // enqueue so the consumer runs before the next event-loop tick — gives
 // queue.subscribe consumers the same "fire then process" causal order
-// they get from the CF / PG adapters.
+// they get from the CF / SQL adapters.
 //
 // On handler throw, attempts increments and the message re-enqueues
 // (also via setImmediate). After `maxRetries` failures it lands in the

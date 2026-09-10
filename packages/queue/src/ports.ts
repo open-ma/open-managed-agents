@@ -5,7 +5,7 @@
 // in-memory dispatch all collapse onto the same four methods.
 
 export interface QueueMessage<T> {
-  /** Message id (CF: from the Queues binding; PG: row pkey). */
+  /** Message id (CF: from the Queues binding; SQL: row primary key). */
   id: string;
   body: T;
   /** 1-based delivery attempt count. The consumer reports >maxRetries
@@ -17,7 +17,7 @@ export interface QueueMessage<T> {
 
 export interface EnqueueOptions {
   /** Delay in seconds before the message becomes visible to consumers.
-   *  CF supports it natively; the PG adapter uses next_visible_at. */
+   *  CF supports it natively; the SQL adapter uses next_visible_at. */
   delaySec?: number;
 }
 
@@ -26,7 +26,7 @@ export type QueueHandler<T> = (
 ) => Promise<void> | void;
 
 export interface QueueStats {
-  /** Inflight = currently locked or being processed. PG adapter knows;
+  /** Inflight = currently locked or being processed. SQL adapter knows;
    *  CF returns 0 (CF Queues doesn't expose it cheaply). */
   inflight: number;
   /** Backlog of pending messages. Same caveat. */
@@ -36,7 +36,7 @@ export interface QueueStats {
 export interface Queue<T> {
   enqueue(message: T, opts?: EnqueueOptions): Promise<void>;
   enqueueBatch(messages: T[], opts?: EnqueueOptions): Promise<void>;
-  /** Register the consumer. The PG / in-memory adapters start a polling
+  /** Register the consumer. The SQL / in-memory adapters start a polling
    *  loop here; the CF adapter wires the handler so dispatchCfBatch can
    *  invoke it from the runtime's `queue(batch, env)` entry. Returns a
    *  function to stop the subscription. */

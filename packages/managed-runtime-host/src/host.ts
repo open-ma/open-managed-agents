@@ -36,6 +36,9 @@ export interface ManagedRuntimeHostDependencies {
   /** Cadence for materializer-owned writable Memory Stores. Defaults to 15s,
    * matching the official Environment Worker's synchronization interval. */
   sessionInputSyncIntervalMs?: number;
+  /** Upper bound for provider sandbox destruction before durable orphan
+   * reconciliation takes ownership. Defaults to 30s. */
+  sandboxTerminationTimeoutMs?: number;
   fences: RuntimeResourceFencePort;
   sandbox: ManagedSandboxPort;
   workspace: WorkspacePersistencePort;
@@ -86,6 +89,24 @@ const defaultScheduler: RuntimeSchedulerPort = {
     });
   },
 };
+
+async function withDeadline<T>(
+  operation: Promise<T>,
+  timeoutMs: number,
+  message: string,
+): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      operation,
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(() => reject(new Error(message)), timeoutMs);
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
+}
 
 function idempotencyKey(
   scope: RuntimeResourceScope,
@@ -192,8 +213,12 @@ export function createManagedRuntimeHost(
 ): ManagedRuntimeHost {
   const scheduler = dependencies.scheduler ?? defaultScheduler;
   const sessionInputSyncIntervalMs = dependencies.sessionInputSyncIntervalMs ?? 15_000;
+  const sandboxTerminationTimeoutMs = dependencies.sandboxTerminationTimeoutMs ?? 30_000;
   if (!Number.isSafeInteger(sessionInputSyncIntervalMs) || sessionInputSyncIntervalMs <= 0) {
     throw new Error("sessionInputSyncIntervalMs must be a positive integer");
+  }
+  if (!Number.isSafeInteger(sandboxTerminationTimeoutMs) || sandboxTerminationTimeoutMs <= 0) {
+    throw new Error("sandboxTerminationTimeoutMs must be a positive integer");
   }
 
   return {
@@ -304,10 +329,14 @@ export function createManagedRuntimeHost(
             controller.signal,
           );
           if (controller.signal.aborted) return;
-          const renewed = await dependencies.fences.renew({
-            fence,
-            ttlMs: dependencies.leaseTtlMs,
-          });
+          const renewed = await withDeadline(
+            dependencies.fences.renew({
+              fence,
+              ttlMs: dependencies.leaseTtlMs,
+            }),
+            dependencies.heartbeatIntervalMs,
+            `Runtime fence heartbeat timed out after ${dependencies.heartbeatIntervalMs}ms`,
+          );
           if (renewed.type === "lost") {
             loseLease("Runtime resource fence lost");
             return;
@@ -315,11 +344,15 @@ export function createManagedRuntimeHost(
           fence = renewed.fence;
           const activeSandboxLease = sandboxLease;
           if (activeSandboxLease === null) continue;
-          const sandboxHeartbeat = await dependencies.sandbox.heartbeat({
-            scope,
-            fence,
-            lease: activeSandboxLease,
-          });
+          const sandboxHeartbeat = await withDeadline(
+            dependencies.sandbox.heartbeat({
+              scope,
+              fence,
+              lease: activeSandboxLease,
+            }),
+            dependencies.heartbeatIntervalMs,
+            `Sandbox heartbeat timed out after ${dependencies.heartbeatIntervalMs}ms`,
+          );
           if (sandboxHeartbeat.type === "lost") {
             loseLease("Sandbox lease lost");
             return;
@@ -767,12 +800,16 @@ export function createManagedRuntimeHost(
         await monitor;
         if (sandboxLease !== null && !retainedRuntimePublished) {
           try {
-            await dependencies.sandbox.terminate({
-              scope,
-              fence,
-              lease: sandboxLease,
-              reason: cleanupReason,
-            });
+            await withDeadline(
+              dependencies.sandbox.terminate({
+                scope,
+                fence,
+                lease: sandboxLease,
+                reason: cleanupReason,
+              }),
+              sandboxTerminationTimeoutMs,
+              `Sandbox termination timed out after ${sandboxTerminationTimeoutMs}ms`,
+            );
           } catch (error) {
             try {
               await dependencies.orphans.enqueue({

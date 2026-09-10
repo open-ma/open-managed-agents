@@ -122,6 +122,16 @@ describe("Managed Runtime Host fault matrix", () => {
     },
   );
 
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid sandbox termination timeout %s",
+    (sandboxTerminationTimeoutMs) => {
+      const { dependencies } = fixture({ sandboxTerminationTimeoutMs });
+      expect(() => createManagedRuntimeHost(dependencies)).toThrow(
+        "sandboxTerminationTimeoutMs must be a positive integer",
+      );
+    },
+  );
+
   it("fences and aborts outputs when a live turn checkpoint loses ownership", async () => {
     const { dependencies } = fixture({
       fences: {
@@ -360,6 +370,104 @@ describe("Managed Runtime Host fault matrix", () => {
     });
     await expect(createManagedRuntimeHost(dependencies).run({ scope, profile }))
       .resolves.toEqual({ type: "lease_lost" });
+  });
+
+  it("self-fences when a partition leaves runtime fence renewal hanging", async () => {
+    vi.useFakeTimers();
+    try {
+      let wakeHeartbeat!: () => void;
+      const mayHeartbeat = new Promise<void>((resolve) => { wakeHeartbeat = resolve; });
+      let renewalStarted!: () => void;
+      const renewing = new Promise<void>((resolve) => { renewalStarted = resolve; });
+      const { dependencies } = fixture({
+        heartbeatIntervalMs: 5_000,
+        scheduler: {
+          sleep: async (_milliseconds: number, signal: AbortSignal) => {
+            await Promise.race([
+              mayHeartbeat,
+              new Promise<never>((_resolve, reject) =>
+                signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+            ]);
+          },
+        },
+        fences: {
+          renew: vi.fn(async () => {
+            renewalStarted();
+            await new Promise<never>(() => {});
+          }),
+        },
+        harnessDriver: {
+          run: vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+            wakeHeartbeat();
+            if (!signal.aborted) {
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true }));
+            }
+            return { type: "aborted" };
+          }),
+        },
+      });
+
+      const running = createManagedRuntimeHost(dependencies).run({ scope, profile });
+      await renewing;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(running).resolves.toEqual({ type: "lease_lost" });
+      expect(dependencies.sandbox.terminate).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "lease_lost" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("self-fences when a partition leaves sandbox heartbeat hanging", async () => {
+    vi.useFakeTimers();
+    try {
+      let wakeHeartbeat!: () => void;
+      const mayHeartbeat = new Promise<void>((resolve) => { wakeHeartbeat = resolve; });
+      let sandboxHeartbeatStarted!: () => void;
+      const heartbeating = new Promise<void>((resolve) => { sandboxHeartbeatStarted = resolve; });
+      const { dependencies } = fixture({
+        heartbeatIntervalMs: 5_000,
+        scheduler: {
+          sleep: async (_milliseconds: number, signal: AbortSignal) => {
+            await Promise.race([
+              mayHeartbeat,
+              new Promise<never>((_resolve, reject) =>
+                signal.addEventListener("abort", () => reject(signal.reason), { once: true })),
+            ]);
+          },
+        },
+        sandbox: {
+          heartbeat: vi.fn(async () => {
+            sandboxHeartbeatStarted();
+            await new Promise<never>(() => {});
+          }),
+        },
+        harnessDriver: {
+          run: vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+            wakeHeartbeat();
+            if (!signal.aborted) {
+              await new Promise<void>((resolve) =>
+                signal.addEventListener("abort", () => resolve(), { once: true }));
+            }
+            return { type: "aborted" };
+          }),
+        },
+      });
+
+      const running = createManagedRuntimeHost(dependencies).run({ scope, profile });
+      await heartbeating;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(running).resolves.toEqual({ type: "lease_lost" });
+      expect(dependencies.sandbox.terminate).toHaveBeenCalledWith(
+        expect.objectContaining({ reason: "lease_lost" }),
+      );
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("passes an omitted Session content accessor through the materializer boundary", async () => {
@@ -948,6 +1056,40 @@ describe("Managed Runtime Host fault matrix", () => {
     expect(enqueue).toHaveBeenCalledWith(expect.objectContaining({
       error: "provider disconnected",
     }));
+  });
+
+  it("bounds a partitioned sandbox termination and persists it for orphan reap", async () => {
+    vi.useFakeTimers();
+    try {
+      let terminationStarted!: () => void;
+      const started = new Promise<void>((resolve) => { terminationStarted = resolve; });
+      const orphans = new MemoryRuntimeOrphanPort();
+      const { dependencies } = fixture({
+        sandboxTerminationTimeoutMs: 5_000,
+        sandbox: {
+          terminate: vi.fn(async () => {
+            terminationStarted();
+            await new Promise<never>(() => {});
+          }),
+        },
+      });
+      dependencies.orphans = orphans;
+
+      const running = createManagedRuntimeHost(dependencies).run({ scope, profile });
+      await started;
+      await vi.advanceTimersByTimeAsync(5_000);
+
+      await expect(running).resolves.toEqual({ type: "completed", revision: 1 });
+      await expect(orphans.list({ limit: 10 })).resolves.toEqual([
+        expect.objectContaining({
+          sandbox: { provider: "fake", runtimeId: "runtime-fault" },
+          reason: "completed",
+          lastError: "Sandbox termination timed out after 5000ms",
+        }),
+      ]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("surfaces failure to persist an orphan after completing all remaining cleanup", async () => {

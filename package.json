@@ -80,6 +80,7 @@
     "test:coverage:session-coordination": "vitest run --config vitest.session-coordination.config.ts --coverage",
     "test:chaos:runtime": "pnpm --filter @open-managed-agents/execution-control test:chaos && pnpm --filter @open-managed-agents/managed-runtime-host test:chaos && pnpm --filter @open-managed-agents/managed-runtime-sandbox test:chaos && pnpm --filter @open-managed-agents/managed-runtime-node test:chaos",
     "test:integration:storage": "vitest run --config vitest.storage.config.ts",
+    "test:integration:mysql": "pnpm --filter @open-managed-agents/main-node test:integration:mysql",
     "test:integration:runtime": "pnpm --filter @open-managed-agents/managed-runtime-node test:docker",
     "db:generate:cf-auth": "drizzle-kit generate --config=drizzle.cf-auth.config.ts",
     "db:generate:cf-integrations": "drizzle-kit generate --config=drizzle.cf-integrations.config.ts",

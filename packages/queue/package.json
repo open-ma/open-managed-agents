@@ -6,6 +6,7 @@
   "exports": {
     ".": "./src/index.ts",
     "./cf": "./src/adapters/cf.ts",
+    "./sql": "./src/adapters/pg.ts",
     "./pg": "./src/adapters/pg.ts",
     "./in-memory": "./src/adapters/in-memory.ts",
     "./handlers/memory-events": "./src/handlers/memory-events.ts"

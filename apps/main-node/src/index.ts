@@ -615,14 +615,15 @@ const dreamsService = createSqliteDreamService({
 const memoryRepo = new SqlMemoryRepo(drizzleDb);
 // Memory blob watcher — wires chokidar fs events through
 // packages/queue's processMemoryEvent so CF + Node share one upsert
-// code path. PG mode uses the multi-replica-safe PG queue table; SQLite
-// single-instance uses an in-memory queue. Set MEMORY_QUEUE=disabled to
-// skip wiring and fall back to the legacy direct-call watcher.
+// code path. Every SQL backend uses the same durable lease/fence contract.
+// Set MEMORY_QUEUE=disabled to skip wiring and fall back to the legacy
+// direct-call watcher.
 const useQueue = (process.env.MEMORY_QUEUE ?? "auto") !== "disabled";
 const memoryWatcher = memoryBlobLocalDir && useQueue
   ? await startNodeMemoryQueue({
-      mode: usePostgres ? "pg" : "in-memory",
-      sql: usePostgres ? sql : undefined,
+      mode: "sql",
+      sql,
+      sqlDialect: dialect,
       memoryRepo,
       memoryBlobs,
       memoryRoot: memoryBlobLocalDir,
