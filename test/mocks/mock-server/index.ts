@@ -412,6 +412,7 @@ function buildModelMessage(
           'memory_root="${OMA_MEMORY_CERTIFICATION_MEMORY:-}"',
           'memory_value="$(cat "$memory_root/notes/input.txt" 2>&1)"',
           'if [ -n "$memory_root" ] && [ "$memory_value" = "MEMORY_INPUT_OK" ]; then printf "MEMORY_INPUT_OK\\n"; else printf "MEMORY_INPUT_FAIL root=%s value=%s\\n" "$memory_root" "$memory_value"; failed=1; fi',
+          'if [ "$failed" -eq 0 ] && printf "MEMORY_UPDATED_OK" > "$memory_root/notes/input.txt" && printf "MEMORY_CREATED_OK" > "$memory_root/notes/created.txt" && mv "$memory_root/notes/rename-source.txt" "$memory_root/notes/renamed.txt" && rm "$memory_root/notes/delete.txt"; then printf "MEMORY_MUTATION_OK\\n"; else printf "MEMORY_MUTATION_FAIL root=%s\\n" "$memory_root"; failed=1; fi',
           'repository_sha="$(git -C /workspace/repository rev-parse HEAD 2>&1)"',
           `if [ -f /workspace/repository/README.md ] && [ "$repository_sha" = "${repositorySha}" ]; then printf "REPOSITORY_INPUT_OK\\n"; else printf "REPOSITORY_INPUT_FAIL sha=%s\\n" "$repository_sha"; failed=1; fi`,
           'outputs_dir="${OMA_OUTPUTS_DIR:-}"',

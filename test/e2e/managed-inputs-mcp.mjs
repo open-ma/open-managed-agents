@@ -65,6 +65,14 @@ try {
       view: "full",
     });
     assert.equal(memory.content, "MEMORY_INPUT_OK");
+    await client.beta.memoryStores.memories.create(created.id, {
+      path: "/notes/delete.txt",
+      content: "MEMORY_DELETE_ME",
+    });
+    await client.beta.memoryStores.memories.create(created.id, {
+      path: "/notes/rename-source.txt",
+      content: "MEMORY_RENAMED_OK",
+    });
     return created;
   });
 
@@ -183,7 +191,7 @@ try {
         {
           type: "memory_store",
           memory_store_id: memoryStore.id,
-          access: "read_only",
+          access: "read_write",
         },
       ],
       title: `e2e-inputs-session-${suffix}`,
@@ -267,6 +275,24 @@ try {
     const outputBody = await outputResponse.text();
     assert.equal(outputResponse.status, 200, outputBody);
     assert.equal(outputBody, "OUTPUT_OK");
+  });
+
+  await step("observe create, update, delete, and rename in canonical Memory after idle", async () => {
+    const canonical = new Map();
+    for await (const item of client.beta.memoryStores.memories.list(memoryStore.id, {
+      view: "full",
+      limit: 100,
+    })) {
+      if (item.type === "memory") canonical.set(item.path, item.content);
+    }
+    assert.deepEqual(
+      [...canonical.entries()].sort(([left], [right]) => left.localeCompare(right)),
+      [
+        ["/notes/created.txt", "MEMORY_CREATED_OK"],
+        ["/notes/input.txt", "MEMORY_UPDATED_OK"],
+        ["/notes/renamed.txt", "MEMORY_RENAMED_OK"],
+      ],
+    );
   });
 } finally {
   if (session) await cleanup("delete session", () => client.beta.sessions.delete(session.id));
