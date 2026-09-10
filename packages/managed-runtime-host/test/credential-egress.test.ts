@@ -228,7 +228,10 @@ describe("ManagedRuntimeHost credential egress", () => {
   it("treats a repository resource as requiring credential egress even when the profile omits it", async () => {
     const fixture = createFixture({
       egress: null,
-      sessionInputs: { materialize: vi.fn(async () => undefined) },
+      sessionInputs: {
+        materialize: vi.fn(async () => undefined),
+        synchronize: vi.fn(async () => undefined),
+      },
     });
 
     await expect(fixture.host.run({
@@ -258,7 +261,7 @@ describe("ManagedRuntimeHost credential egress", () => {
     });
     const fixture = createFixture({
       calls,
-      sessionInputs: { materialize },
+      sessionInputs: { materialize, synchronize: vi.fn(async () => undefined) },
     });
 
     await expect(fixture.host.run({
@@ -311,7 +314,9 @@ describe("ManagedRuntimeHost credential egress", () => {
 
   it("marks memory stores as materializer-owned for a supervised harness", async () => {
     const materialize = vi.fn(async () => undefined);
-    const fixture = createFixture({ sessionInputs: { materialize } });
+    const fixture = createFixture({
+      sessionInputs: { materialize, synchronize: vi.fn(async () => undefined) },
+    });
 
     await expect(fixture.host.run({
       scope,

@@ -130,6 +130,7 @@ import { CfSessionRouter } from "./lib/cf-session-router";
 import { CfManagedRuntimeFetcher } from "./lib/cf-managed-runtime-fetcher";
 import { CfManagedSessionRuntimeAdapter } from "./lib/cf-managed-session-runtime";
 import { CfManagedSessionSecretSealer } from "./lib/cf-managed-session-secret-sealer";
+import { synchronizeManagedSessionMemoryWorkspaces } from "./lib/managed-memory-workspace-sync";
 import {
   AnthropicMessagesDreamCurator,
   ApplicationDreamMemoryWorkspace,
@@ -1595,6 +1596,7 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     sessionId: string;
     memoryStoreId: string;
     access: "read_only" | "read_write";
+    runtimeGeneration?: string;
   }) {
     const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
     const client = new CfD1SqlClient(tenantDb);
@@ -1613,6 +1615,10 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       const memories = managedMemoriesApplication(opts.tenantId, tenantDb)
         .port(managedAgentsPortTokens.memories);
       const snapshots = new ManagedMemorySnapshotMaterializer(memories, {
+        getText: async (key) => {
+          const object = await this.env.MEMORY_BUCKET!.get(key);
+          return object === null ? null : object.text();
+        },
         put: async (key, content) => {
           const object = await this.env.MEMORY_BUCKET!.put(key, content);
           return object ?? { key };
@@ -1626,6 +1632,9 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
           sessionId: opts.sessionId,
           memoryStoreId: opts.memoryStoreId,
           access: opts.access,
+          ...(opts.runtimeGeneration === undefined
+            ? {}
+            : { runtimeGeneration: opts.runtimeGeneration }),
         },
       );
     }
@@ -1642,6 +1651,74 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     )
       ? { type: "found" as const, mountStoreId: opts.memoryStoreId }
       : { type: "not_found" as const };
+  }
+
+  async synchronizeManagedMemorySnapshots(opts: {
+    tenantId: string;
+    sessionId: string;
+    runtimeGeneration: string;
+    executionFence: import("@open-managed-agents/session-runtime-contract/coordination").SessionExecutionFence;
+  }) {
+    if (this.env.MEMORY_BUCKET === undefined) {
+      throw new Error("MEMORY_BUCKET binding is required for Managed Memory synchronization");
+    }
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const client = new CfD1SqlClient(tenantDb);
+    const memories = managedMemoriesApplication(opts.tenantId, tenantDb)
+      .port(managedAgentsPortTokens.memories);
+    const bucket = this.env.MEMORY_BUCKET;
+    return synchronizeManagedSessionMemoryWorkspaces(
+      new SqlSessionSource(client),
+      memories,
+      {
+        getText: async (key) => {
+          const object = await bucket.get(key);
+          return object === null ? null : object.text();
+        },
+        list: async (prefix, cursor) => {
+          const page = await bucket.list({
+            prefix,
+            limit: 1_000,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          return {
+            keys: page.objects.map((object) => object.key),
+            nextCursor: page.truncated ? page.cursor : null,
+          };
+        },
+        put: async (key, content) => (await bucket.put(key, content)) ?? { key },
+        delete: async (key) => bucket.delete(key),
+      },
+      {
+        workspaceId: opts.tenantId,
+        sessionId: opts.sessionId,
+        runtimeGeneration: opts.runtimeGeneration,
+        executionFence: opts.executionFence,
+        isFenceActive: async (fence) => {
+          if (
+            fence.workspaceId !== opts.tenantId
+            || fence.sessionId !== opts.sessionId
+            || !Number.isSafeInteger(fence.generation)
+            || fence.generation < 1
+          ) return false;
+          const active = await client.prepare(
+            `SELECT 1 AS active FROM managed_session_executions
+              WHERE workspace_id = ? AND id = ? AND session_id = ?
+                AND state = 'running' AND attempt_id = ? AND owner_id = ?
+                AND generation = ? AND lease_expires_at_ms > ?`,
+          ).bind(
+            fence.workspaceId,
+            fence.executionId,
+            fence.sessionId,
+            fence.attemptId,
+            fence.ownerId,
+            fence.generation,
+            Date.now(),
+          ).first<{ active: number }>();
+          return active !== null;
+        },
+      },
+    );
   }
 
   async resolveManagedSkillVersion(opts: {

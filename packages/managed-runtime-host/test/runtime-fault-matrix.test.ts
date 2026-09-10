@@ -48,6 +48,7 @@ function fixture(overrides: Record<string, any> = {}) {
     orphans: new MemoryRuntimeOrphanPort(),
     fences: {
       acquire: vi.fn(async () => ({ type: "acquired", fence, publication: null })),
+      isCurrent: vi.fn(async () => true),
       renew: vi.fn(async () => ({ type: "renewed", fence })),
       publish: vi.fn(async () => ({ type: "published", revision: 1 })),
       release: vi.fn(async ({ reason }: { reason: string }) => calls.push(`release:${reason}`)),
@@ -113,6 +114,14 @@ function fixture(overrides: Record<string, any> = {}) {
 }
 
 describe("Managed Runtime Host fault matrix", () => {
+  it.each([0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1])(
+    "rejects invalid Session input sync interval %s",
+    (sessionInputSyncIntervalMs) => {
+      const { dependencies } = fixture({ sessionInputSyncIntervalMs });
+      expect(() => createManagedRuntimeHost(dependencies)).toThrow(/positive integer/u);
+    },
+  );
+
   it("fences and aborts outputs when a live turn checkpoint loses ownership", async () => {
     const { dependencies } = fixture({
       fences: {
@@ -356,7 +365,7 @@ describe("Managed Runtime Host fault matrix", () => {
   it("passes an omitted Session content accessor through the materializer boundary", async () => {
     const materialize = vi.fn(async () => undefined);
     const { dependencies } = fixture({
-      sessionInputs: { materialize },
+      sessionInputs: { materialize, synchronize: vi.fn(async () => undefined) },
     });
     await expect(createManagedRuntimeHost(dependencies).run({
       scope,
@@ -379,7 +388,9 @@ describe("Managed Runtime Host fault matrix", () => {
   it("passes a provided Session content accessor through unchanged", async () => {
     const access = { downloadFile: vi.fn() };
     const materialize = vi.fn(async () => undefined);
-    const { dependencies } = fixture({ sessionInputs: { materialize } });
+    const { dependencies } = fixture({
+      sessionInputs: { materialize, synchronize: vi.fn(async () => undefined) },
+    });
     await createManagedRuntimeHost(dependencies).run({
       scope,
       profile,
@@ -392,6 +403,334 @@ describe("Managed Runtime Host fault matrix", () => {
       sessionInputAccess: access,
     });
     expect(materialize).toHaveBeenCalledWith(expect.objectContaining({ access }));
+  });
+
+  it("checks the active fence through both Session input mutation boundaries", async () => {
+    const materialize = vi.fn(async (input: { authorize: () => Promise<boolean> }) => {
+      expect(await input.authorize()).toBe(true);
+    });
+    const synchronize = vi.fn(async (input: { authorize: () => Promise<boolean> }) => {
+      expect(await input.authorize()).toBe(true);
+    });
+    const { dependencies } = fixture({
+      sessionInputs: { materialize, synchronize },
+    });
+
+    await expect(createManagedRuntimeHost(dependencies).run({
+      scope,
+      profile,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [],
+      },
+    })).resolves.toEqual({ type: "completed", revision: 1 });
+
+    expect(dependencies.fences.isCurrent).toHaveBeenCalledTimes(2);
+  });
+
+  it.each(["materialize", "synchronize"] as const)(
+    "loses the lease when the Session input fence is stale during %s",
+    async (stage) => {
+      let fenceChecks = 0;
+      const { dependencies } = fixture({
+        fences: {
+          isCurrent: vi.fn(async () => {
+            fenceChecks += 1;
+            return stage === "materialize" ? false : fenceChecks === 1;
+          }),
+        },
+        sessionInputs: {
+          materialize: vi.fn(async (input: { authorize: () => Promise<boolean> }) => {
+            await input.authorize();
+          }),
+          synchronize: vi.fn(async (input: { authorize: () => Promise<boolean> }) => {
+            await input.authorize();
+          }),
+        },
+      });
+
+      await expect(createManagedRuntimeHost(dependencies).run({
+        scope,
+        profile,
+        session: {
+          id: scope.sessionId,
+          environmentId: scope.environmentId,
+          metadata: {},
+          resources: [],
+        },
+      })).resolves.toEqual({ type: "lease_lost" });
+    },
+  );
+
+  it("synchronizes materializer-owned Session inputs before the final workspace checkpoint", async () => {
+    const order: string[] = [];
+    const materialize = vi.fn(async () => undefined);
+    const synchronize = vi.fn(async () => {
+      order.push("session-inputs.synchronize");
+    });
+    const { dependencies } = fixture({
+      sessionInputs: { materialize, synchronize },
+      workspace: {
+        checkpoint: vi.fn(async () => {
+          order.push("workspace.checkpoint");
+          return {
+            id: "workspace-candidate",
+            contentHash: "sha256:workspace",
+            revision: 1,
+          };
+        }),
+      },
+      harnessDriver: {
+        driverCapabilities: vi.fn(async () => ({
+          drivers: ["openma_supervised"],
+        })),
+      },
+    });
+
+    await expect(createManagedRuntimeHost(dependencies).run({
+      scope,
+      profile: {
+        ...profile,
+        driver: {
+          type: "openma_supervised",
+          protocol: "openma-harness-supervisor-v1",
+          harness: { id: "pi", version: "1" },
+          supervisor: { command: "openma-supervisor" },
+          readyTimeoutMs: 1_000,
+          heartbeatTimeoutMs: 1_000,
+          drainTimeoutMs: 1_000,
+        },
+      },
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      sessionInputAccess: { downloadFile: vi.fn() },
+    })).resolves.toEqual({ type: "completed", revision: 1 });
+
+    expect(synchronize).toHaveBeenCalledOnce();
+    expect(synchronize).toHaveBeenCalledWith(expect.objectContaining({
+      scope,
+      fence,
+      resourceOwnership: { memoryStore: "materializer" },
+    }));
+    expect(order).toEqual([
+      "session-inputs.synchronize",
+      "workspace.checkpoint",
+    ]);
+  });
+
+  it("periodically synchronizes writable supervised Memory Stores during a long run", async () => {
+    let periodicSynced!: () => void;
+    const periodic = new Promise<void>((resolve) => { periodicSynced = resolve; });
+    const synchronize = vi.fn(async (input: { idempotencyKey: string }) => {
+      if (input.idempotencyKey.includes("periodic")) periodicSynced();
+    });
+    let periodicTicked = false;
+    const { dependencies } = fixture({
+      heartbeatIntervalMs: 60_000,
+      sessionInputSyncIntervalMs: 5,
+      scheduler: {
+        sleep(milliseconds: number, signal: AbortSignal) {
+          if (milliseconds === 5 && !periodicTicked) {
+            periodicTicked = true;
+            return Promise.resolve();
+          }
+          return new Promise<void>((_resolve, reject) =>
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        },
+      },
+      sessionInputs: {
+        materialize: vi.fn(async () => undefined),
+        synchronize,
+      },
+      harnessDriver: {
+        driverCapabilities: vi.fn(async () => ({ drivers: ["openma_supervised"] })),
+        run: vi.fn(async () => {
+          await periodic;
+          return { type: "completed" };
+        }),
+      },
+    });
+
+    await expect(createManagedRuntimeHost(dependencies).run({
+      scope,
+      profile: {
+        ...profile,
+        driver: {
+          type: "openma_supervised",
+          protocol: "openma-harness-supervisor-v1",
+          supervisor: { command: "openma-supervisor" },
+          harness: { id: "pi", version: "1" },
+          readyTimeoutMs: 1_000,
+          heartbeatTimeoutMs: 1_000,
+          drainTimeoutMs: 1_000,
+        },
+      },
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      sessionInputAccess: { downloadFile: vi.fn() },
+    })).resolves.toEqual({ type: "completed", revision: 1 });
+
+    expect(synchronize.mock.calls.map(([input]) => input.idempotencyKey))
+      .toEqual(expect.arrayContaining([
+        expect.stringContaining("periodic-1"),
+        expect.stringContaining("final"),
+      ]));
+  });
+
+  it("fails the run when periodic Session input synchronization fails", async () => {
+    const failure = new Error("periodic synchronization failed");
+    let ticked = false;
+    const { dependencies } = fixture({
+      sessionInputSyncIntervalMs: 5,
+      scheduler: {
+        sleep(milliseconds: number, signal: AbortSignal) {
+          if (milliseconds === 5 && !ticked) {
+            ticked = true;
+            return Promise.resolve();
+          }
+          return new Promise<void>((_resolve, reject) =>
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        },
+      },
+      sessionInputs: {
+        materialize: vi.fn(async () => undefined),
+        synchronize: vi.fn(async (input: { idempotencyKey: string }) => {
+          if (input.idempotencyKey.includes("periodic")) throw failure;
+        }),
+      },
+      harnessDriver: {
+        driverCapabilities: vi.fn(async () => ({ drivers: ["openma_supervised"] })),
+        run: vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+          if (!signal.aborted) {
+            await new Promise<void>((resolve) =>
+              signal.addEventListener("abort", () => resolve(), { once: true }));
+          }
+          return { type: "aborted" };
+        }),
+      },
+    });
+
+    await expect(createManagedRuntimeHost(dependencies).run({
+      scope,
+      profile: {
+        ...profile,
+        driver: {
+          type: "openma_supervised",
+          protocol: "openma-harness-supervisor-v1",
+          supervisor: { command: "supervisor" },
+          harness: { id: "pi", version: "1" },
+          readyTimeoutMs: 1_000,
+          heartbeatTimeoutMs: 1_000,
+          drainTimeoutMs: 1_000,
+        },
+      },
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+    })).resolves.toEqual({ type: "failed", error: failure });
+  });
+
+  it("stops periodic synchronization when a scheduler resolves an aborted sleep", async () => {
+    let periodicStarted!: () => void;
+    const started = new Promise<void>((resolve) => { periodicStarted = resolve; });
+    const external = new AbortController();
+    const { dependencies } = fixture({
+      sessionInputSyncIntervalMs: 5,
+      scheduler: {
+        sleep(milliseconds: number, signal: AbortSignal) {
+          if (milliseconds === 5) {
+            periodicStarted();
+            return new Promise<void>((resolve) =>
+              signal.addEventListener("abort", () => resolve(), { once: true }));
+          }
+          return new Promise<void>((_resolve, reject) =>
+            signal.addEventListener("abort", () => reject(signal.reason), { once: true }));
+        },
+      },
+      sessionInputs: {
+        materialize: vi.fn(async () => undefined),
+        synchronize: vi.fn(async () => undefined),
+      },
+      harnessDriver: {
+        driverCapabilities: vi.fn(async () => ({ drivers: ["openma_supervised"] })),
+        run: vi.fn(async ({ signal }: { signal: AbortSignal }) => {
+          if (!signal.aborted) {
+            await new Promise<void>((resolve) =>
+              signal.addEventListener("abort", () => resolve(), { once: true }));
+          }
+          return { type: "aborted" };
+        }),
+      },
+    });
+    const running = createManagedRuntimeHost(dependencies).run({
+      scope,
+      profile: {
+        ...profile,
+        driver: {
+          type: "openma_supervised",
+          protocol: "openma-harness-supervisor-v1",
+          supervisor: { command: "supervisor" },
+          harness: { id: "pi", version: "1" },
+          readyTimeoutMs: 1_000,
+          heartbeatTimeoutMs: 1_000,
+          drainTimeoutMs: 1_000,
+        },
+      },
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      signal: external.signal,
+    });
+    await started;
+    external.abort(new Error("claim cancelled"));
+
+    await expect(running).resolves.toEqual({ type: "lease_lost" });
+  });
+
+  it("returns lease_lost when the harness reports an aborted execution", async () => {
+    const { dependencies } = fixture({
+      harnessDriver: {
+        run: vi.fn(async () => ({ type: "aborted" })),
+      },
+    });
+    await expect(createManagedRuntimeHost(dependencies).run({ scope, profile }))
+      .resolves.toEqual({ type: "lease_lost" });
   });
 
   it("uses the default heartbeat scheduler for both timer wake and cleanup cancellation", async () => {

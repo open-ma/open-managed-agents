@@ -3,6 +3,7 @@ import type { BetaSelfHostedWork } from "@anthropic-ai/sdk/resources/beta/enviro
 import type { BetaManagedAgentsSession } from "@anthropic-ai/sdk/resources/beta/sessions/sessions";
 import { Webhook } from "standardwebhooks";
 import { describe, expect, it, vi } from "vitest";
+import type { SessionInputAccessPort } from "@open-managed-agents/runtime-resource-contract";
 
 import {
   createManagedEnvironmentWorker,
@@ -223,6 +224,7 @@ function structuralClient(input: {
   const clientOptions: unknown[] = [];
   const stops: unknown[] = [];
   const downloads: unknown[] = [];
+  const memoryCalls: unknown[] = [];
   const heartbeats: unknown[] = [];
   const unwrapOptions: unknown[] = [];
   const runner = {
@@ -256,6 +258,49 @@ function structuralClient(input: {
         async download(fileId: string, params: unknown, options: unknown) {
           downloads.push({ fileId, params, options });
           return input.download ?? new Response(new Uint8Array([1]));
+        },
+      },
+      memoryStores: {
+        memories: {
+          list(memoryStoreId: string, params: unknown, options: unknown) {
+            memoryCalls.push({ operation: "list", memoryStoreId, params, options });
+            return {
+              async *[Symbol.asyncIterator]() {
+                yield {
+                  type: "memory",
+                  id: "mem_01",
+                  path: "/notes.md",
+                  content: "canonical",
+                  content_sha256: "sha-canonical",
+                };
+                yield { type: "memory_prefix", path: "/archive/" };
+              },
+            };
+          },
+          async create(memoryStoreId: string, params: unknown, options: unknown) {
+            memoryCalls.push({ operation: "create", memoryStoreId, params, options });
+            return {
+              type: "memory",
+              id: "mem_created",
+              path: "/created.md",
+              content: "created",
+              content_sha256: "sha-created",
+            };
+          },
+          async update(memoryId: string, params: any, options: unknown) {
+            memoryCalls.push({ operation: "update", memoryId, params, options });
+            return {
+              type: "memory",
+              id: memoryId,
+              path: params.path,
+              content: params.content,
+              content_sha256: "sha-updated",
+            };
+          },
+          async delete(memoryId: string, params: unknown, options: unknown) {
+            memoryCalls.push({ operation: "delete", memoryId, params, options });
+            return { type: "memory_deleted", id: memoryId };
+          },
         },
       },
     },
@@ -298,9 +343,11 @@ function structuralClient(input: {
     clientOptions,
     downloads,
     heartbeats,
+    memoryCalls,
     pollerOptions,
     stops,
     unwrapOptions,
+    runner,
   };
 }
 
@@ -389,7 +436,7 @@ describe("managed Environment Worker activation", () => {
         api_base_url: "https://claim.example",
       })).toString("base64url"),
     };
-    const { client, clientOptions, pollerOptions } = structuralClient({ work });
+    const { client, clientOptions, memoryCalls, pollerOptions } = structuralClient({ work });
     const { host, runs } = hostHarness();
     const worker = createManagedEnvironmentWorker({
       client,
@@ -410,13 +457,230 @@ describe("managed Environment Worker activation", () => {
     expect(runs[0]?.profile.driver).toMatchObject({
       process: { env: { ANTHROPIC_BASE_URL: "https://sandbox-gateway.example" } },
     });
-    const access = Reflect.get(runs[0]!, "sessionInputAccess") as {
-      downloadFile(input: { fileId: string; signal: AbortSignal }): Promise<unknown>;
-    };
+    const access = Reflect.get(runs[0]!, "sessionInputAccess") as SessionInputAccessPort;
+    const accessSignal = new AbortController().signal;
     await expect(access.downloadFile({
       fileId: "file_01",
-      signal: new AbortController().signal,
+      signal: accessSignal,
     })).resolves.toEqual({ content: new Uint8Array([1]) });
+
+    await expect(access.memories!.list({
+      memoryStoreId: "memstore_01",
+      projection: "full",
+      signal: accessSignal,
+    })).resolves.toEqual([{
+      id: "mem_01",
+      path: "/notes.md",
+      content: "canonical",
+      contentSha256: "sha-canonical",
+    }]);
+    await expect(access.memories!.create({
+      memoryStoreId: "memstore_01",
+      path: "/created.md",
+      content: "created",
+      signal: accessSignal,
+    })).resolves.toMatchObject({ type: "applied" });
+    await expect(access.memories!.update({
+      memoryStoreId: "memstore_01",
+      memoryId: "mem_01",
+      path: "/renamed.md",
+      content: "updated",
+      expectedContentSha256: "sha-canonical",
+      signal: accessSignal,
+    })).resolves.toMatchObject({ type: "applied" });
+    await expect(access.memories!.delete({
+      memoryStoreId: "memstore_01",
+      memoryId: "mem_01",
+      expectedContentSha256: "sha-updated",
+      signal: accessSignal,
+    })).resolves.toEqual({ type: "applied" });
+    expect(memoryCalls).toEqual([
+      expect.objectContaining({
+        operation: "list",
+        memoryStoreId: "memstore_01",
+        params: { view: "full", limit: 20 },
+      }),
+      expect.objectContaining({
+        operation: "create",
+        memoryStoreId: "memstore_01",
+        params: { path: "/created.md", content: "created" },
+      }),
+      expect.objectContaining({
+        operation: "update",
+        memoryId: "mem_01",
+        params: expect.objectContaining({
+          memory_store_id: "memstore_01",
+          path: "/renamed.md",
+          precondition: {
+            type: "content_sha256",
+            content_sha256: "sha-canonical",
+          },
+        }),
+      }),
+      expect.objectContaining({
+        operation: "delete",
+        memoryId: "mem_01",
+        params: {
+          memory_store_id: "memstore_01",
+          expected_content_sha256: "sha-updated",
+        },
+      }),
+    ]);
+  });
+
+  it("validates Memory projections and maps optimistic-concurrency API failures", async () => {
+    const fixture = structuralClient();
+    const { host, runs } = hostHarness();
+    const worker = createManagedEnvironmentWorker({
+      client: fixture.client,
+      environmentId: "env_01",
+      environmentKey: "environment-key",
+      workspaceId: "workspace_01",
+      host,
+      profileFor: async () => profile,
+    });
+    await worker.drain();
+    const access = Reflect.get(runs[0]!, "sessionInputAccess") as SessionInputAccessPort;
+    const memories = access.memories!;
+    const signal = new AbortController().signal;
+    const api = fixture.runner.beta.memoryStores.memories;
+
+    vi.spyOn(api, "list").mockReturnValueOnce({
+      async *[Symbol.asyncIterator]() {
+        yield {
+          type: "memory",
+          id: "mem_basic",
+          path: "/basic.md",
+          content: null,
+          content_sha256: "sha-basic",
+        };
+      },
+    } as any);
+    await expect(memories.list({
+      memoryStoreId: "memstore_01",
+      projection: "basic",
+      signal,
+    })).resolves.toEqual([{
+      id: "mem_basic",
+      path: "/basic.md",
+      contentSha256: "sha-basic",
+    }]);
+
+    vi.spyOn(api, "list").mockReturnValueOnce({
+      async *[Symbol.asyncIterator]() {
+        yield { type: "memory", id: 1, path: "/bad", content_sha256: "sha" };
+      },
+    } as any);
+    await expect(memories.list({
+      memoryStoreId: "memstore_01",
+      projection: "full",
+      signal,
+    })).rejects.toThrow(/invalid memory record/u);
+
+    const create = vi.spyOn(api, "create");
+    create.mockRejectedValueOnce({ status: 409 });
+    await expect(memories.create({
+      memoryStoreId: "memstore_01",
+      path: "/created.md",
+      content: "created",
+      signal,
+    })).resolves.toEqual({ type: "conflict" });
+    const createFailure = new Error("create transport failure");
+    create.mockRejectedValueOnce(createFailure);
+    await expect(memories.create({
+      memoryStoreId: "memstore_01",
+      path: "/created.md",
+      content: "created",
+      signal,
+    })).rejects.toBe(createFailure);
+    create.mockResolvedValueOnce({
+      type: "memory",
+      id: "mem_no_content",
+      path: "/created.md",
+      content: null,
+      content_sha256: "sha-created",
+    } as any);
+    await expect(memories.create({
+      memoryStoreId: "memstore_01",
+      path: "/created.md",
+      content: "created",
+      signal,
+    })).resolves.toEqual({
+      type: "applied",
+      memory: {
+        id: "mem_no_content",
+        path: "/created.md",
+        contentSha256: "sha-created",
+      },
+    });
+
+    const update = vi.spyOn(api, "update");
+    for (const [status, result] of [
+      [404, "not_found"],
+      [409, "conflict"],
+      [412, "conflict"],
+    ] as const) {
+      update.mockRejectedValueOnce({ status });
+      await expect(memories.update({
+        memoryStoreId: "memstore_01",
+        memoryId: "mem_01",
+        path: "/updated.md",
+        content: "updated",
+        expectedContentSha256: "sha-before",
+        signal,
+      })).resolves.toEqual({ type: result });
+    }
+    const updateFailure = Object.assign(new Error("update failure"), { status: "bad" });
+    update.mockRejectedValueOnce(updateFailure);
+    await expect(memories.update({
+      memoryStoreId: "memstore_01",
+      memoryId: "mem_01",
+      path: "/updated.md",
+      content: "updated",
+      expectedContentSha256: "sha-before",
+      signal,
+    })).rejects.toBe(updateFailure);
+    update.mockResolvedValueOnce({
+      type: "memory",
+      id: "mem_01",
+      path: "/updated.md",
+      content: undefined,
+      content_sha256: "sha-updated",
+    } as any);
+    await expect(memories.update({
+      memoryStoreId: "memstore_01",
+      memoryId: "mem_01",
+      path: "/updated.md",
+      content: "updated",
+      expectedContentSha256: "sha-before",
+      signal,
+    })).resolves.toMatchObject({
+      type: "applied",
+      memory: { id: "mem_01", path: "/updated.md", contentSha256: "sha-updated" },
+    });
+
+    const remove = vi.spyOn(api, "delete");
+    for (const [status, result] of [
+      [404, "not_found"],
+      [409, "conflict"],
+      [412, "conflict"],
+    ] as const) {
+      remove.mockRejectedValueOnce({ status });
+      await expect(memories.delete({
+        memoryStoreId: "memstore_01",
+        memoryId: "mem_01",
+        expectedContentSha256: "sha-before",
+        signal,
+      })).resolves.toEqual({ type: result });
+    }
+    const deleteFailure = new Error("delete transport failure");
+    remove.mockRejectedValueOnce(deleteFailure);
+    await expect(memories.delete({
+      memoryStoreId: "memstore_01",
+      memoryId: "mem_01",
+      expectedContentSha256: "sha-before",
+      signal,
+    })).rejects.toBe(deleteFailure);
   });
 
   it("force-stops non-Session healthcheck work without constructing a Session", async () => {

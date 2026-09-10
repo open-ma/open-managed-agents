@@ -387,7 +387,7 @@ describe("Blaxel provider boundary contracts", () => {
       attach: vi.fn(),
       revoke: vi.fn(),
     };
-    const sessionInputs = { materialize: vi.fn() };
+    const sessionInputs = { materialize: vi.fn(), synchronize: vi.fn() };
     const driver = createBlaxelManagedRuntimeDriver({
       client: client(value),
       image: "image",

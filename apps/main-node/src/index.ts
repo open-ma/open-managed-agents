@@ -1100,7 +1100,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       memorySnapshots: new NodeManagedMemorySnapshotMaterializer(
         managedMemoriesApplicationForWorkspace(workspaceId)
           .port(managedAgentsPortTokens.memories),
-        memoryBlobs,
+        {
+          getText: async (key) => (await memoryBlobs.getText(key))?.text ?? null,
+          put: (key, content) => memoryBlobs.put(key, content),
+        },
       ),
     });
     await preparer.prepare({ workspaceId, session, sandbox });

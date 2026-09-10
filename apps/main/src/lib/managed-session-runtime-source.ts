@@ -24,6 +24,8 @@ interface ManagedMemorySnapshotSource {
     workspaceId: string;
     sessionId: string;
     memoryStoreId: string;
+    access: "read_only" | "read_write";
+    runtimeGeneration?: string;
   }): Promise<{ mountStoreId: string }>;
 }
 
@@ -130,6 +132,7 @@ export async function materializeManagedSessionMemorySnapshot(
     sessionId: string;
     memoryStoreId: string;
     access: "read_only" | "read_write";
+    runtimeGeneration?: string;
   },
 ): Promise<ManagedSessionMemorySnapshotResult> {
   const session = await source.find({
@@ -144,15 +147,19 @@ export async function materializeManagedSessionMemorySnapshot(
   if (attached === undefined || attached.type !== "memory_store") {
     return { type: "not_found" };
   }
-  if (input.access === "read_write" || attached.access === "read_write") {
+  if (input.access === "read_write" && attached.access !== "read_write") {
     throw new Error(
-      `Managed Memory Store ${input.memoryStoreId} is read-write, but canonical reverse synchronization is not configured`,
+      `Managed Memory Store ${input.memoryStoreId} is not attached read-write`,
     );
   }
   const snapshot = await snapshots.materialize({
     workspaceId: input.workspaceId,
     sessionId: input.sessionId,
     memoryStoreId: input.memoryStoreId,
+    access: input.access,
+    ...(input.runtimeGeneration === undefined
+      ? {}
+      : { runtimeGeneration: input.runtimeGeneration }),
   });
   return { type: "found", mountStoreId: snapshot.mountStoreId };
 }

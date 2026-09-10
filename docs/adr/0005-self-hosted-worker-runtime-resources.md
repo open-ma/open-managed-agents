@@ -90,6 +90,26 @@ read-only Memory Store. Claim rotation fences the previous bearer against all
 of these routes. A sandbox egress adapter may narrow the reachable route
 families further, but the API-side live-claim check remains authoritative.
 
+Memory Store ownership has exactly two lanes. An unmodified `ama_worker` owns
+download and read-write synchronization through Anthropic's SDK; OpenMA does
+not mount or write the same Store. An `openma_supervised` harness delegates the
+same responsibility to `SessionInputMaterializerPort`: `materialize` prepares
+the mount and baseline, while `synchronize` runs periodically and immediately
+before workspace publication. The Port sees Session-scoped operations, never
+the raw bearer. A writable attachment uses create/update/delete CAS, treats a
+rename as create-before-delete, and rechecks `RuntimeResourceFencePort` before
+each canonical mutation. A reclaimed process can reuse the baseline saved in
+the durable workspace; retries after partial success are idempotent because the
+next pass re-lists and rebases to the canonical winner.
+
+This protocol persists filesystem and Memory documents, not process memory.
+If both a sandbox and its last unpublished workspace checkpoint disappear,
+edits made after the most recent periodic sync can still be lost; the default
+exposure window is 15 seconds plus provider termination/detection latency.
+Conversely, a stale sandbox may keep changing its private filesystem briefly,
+but Session-token rotation and per-mutation resource fencing prevent it from
+committing Memory or publishing workspace/output candidates after reclaim.
+
 The Work lease is authoritative for the worker-facing control-plane
 operations. An unmodified AMA hands worker does not own the model loop: it
 reads Session configuration and the event stream, executes requested tools,

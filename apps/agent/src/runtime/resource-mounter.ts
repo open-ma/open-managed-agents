@@ -32,6 +32,7 @@ export interface ManagedSessionResourceSource {
     sessionId: string;
     memoryStoreId: string;
     access: "read_only" | "read_write";
+    runtimeGeneration?: string;
   }): Promise<
     | { type: "found"; mountStoreId: string }
     | { type: "not_found" }
@@ -40,7 +41,11 @@ export interface ManagedSessionResourceSource {
 
 export async function loadManagedSessionResources(
   source: ManagedSessionResourceSource,
-  input: { tenantId: string; sessionId: string },
+  input: {
+    tenantId: string;
+    sessionId: string;
+    runtimeGeneration?: string;
+  },
 ): Promise<{
   resources: Array<Record<string, unknown>>;
   fileSource: ManagedSessionFileSource;

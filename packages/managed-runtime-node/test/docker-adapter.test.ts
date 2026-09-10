@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { readFile, writeFile } from "node:fs/promises";
 
 import * as nodeRuntimeModule from "../src/index";
 
@@ -22,6 +23,41 @@ function DockerAdapter(): new (options: any) => any {
   ];
   expect(candidate).toBeTypeOf("function");
   return candidate as new (options: any) => any;
+}
+
+function statefulDocker(initial: Record<string, string> = {}) {
+  const files = new Map(Object.entries(initial));
+  const run = vi.fn(async (args: string[]) => {
+    if (args[0] === "exec" && args[2] === "test" && args[3] === "-f") {
+      return { stdout: "", stderr: "", exitCode: files.has(args[4]!) ? 0 : 1 };
+    }
+    if (args[0] === "exec" && args[2] === "find") {
+      const root = args[3]!;
+      const paths = [...files.keys()].filter((path) => path.startsWith(`${root}/`));
+      return { stdout: paths.length === 0 ? "" : `${paths.join("\0")}\0`, stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "exec" && args[2] === "rm" && args[3] === "-rf") {
+      const root = args.at(-1)!;
+      for (const path of [...files.keys()]) {
+        if (path === root || path.startsWith(`${root}/`)) files.delete(path);
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }
+    if (args[0] === "cp") {
+      const source = args[1]!;
+      const target = args[2]!;
+      const sourcePrefix = "container-memory:";
+      const targetPrefix = "container-memory:";
+      if (source.startsWith(sourcePrefix)) {
+        await writeFile(target, files.get(source.slice(sourcePrefix.length)) ?? "", "utf8");
+      } else if (target.startsWith(targetPrefix)) {
+        files.set(target.slice(targetPrefix.length), await readFile(source, "utf8"));
+      }
+      return { stdout: "", stderr: "", exitCode: 0 };
+    }
+    return { stdout: "", stderr: "", exitCode: 0 };
+  });
+  return { files, run };
 }
 
 describe("DockerManagedRuntimeAdapter", () => {
@@ -169,9 +205,16 @@ describe("DockerManagedRuntimeAdapter", () => {
     ]);
   });
 
-  it("fails closed when supervised memory materialization has no Node adapter", async () => {
+  it("hydrates supervised memory through the shared Session input lifecycle", async () => {
+    const calls: string[][] = [];
     const docker = {
-      run: vi.fn(async () => ({ stdout: "", stderr: "", exitCode: 0 })),
+      run: vi.fn(async (args: string[]) => {
+        calls.push(args);
+        if (args.includes("test") && args.includes("-f")) {
+          return { stdout: "", stderr: "", exitCode: 1 };
+        }
+        return { stdout: "", stderr: "", exitCode: 0 };
+      }),
     };
     const adapter = new (DockerAdapter())({ docker, image: "node:24-alpine" });
 
@@ -194,8 +237,237 @@ describe("DockerManagedRuntimeAdapter", () => {
       activeWorkspaceCheckpoint: null,
       resourceOwnership: { memoryStore: "materializer" },
       idempotencyKey: "inputs-memory-1",
+      access: {
+        downloadFile: vi.fn(),
+        memories: {
+          list: vi.fn(async () => [{
+            id: "mem_01",
+            path: "/notes.md",
+            content: "canonical",
+            contentSha256: "sha-canonical",
+          }]),
+          create: vi.fn(),
+          update: vi.fn(),
+          delete: vi.fn(),
+        },
+      },
+      authorize: vi.fn(async () => true),
       signal: new AbortController().signal,
-    })).rejects.toThrow(/does not implement memory_store/);
+    })).resolves.toBeUndefined();
+    expect(calls).toContainEqual(expect.arrayContaining([
+      "cp",
+      expect.any(String),
+      "container-memory:/workspace/memory/notes.md",
+    ]));
+    expect(calls).toContainEqual(expect.arrayContaining([
+      "cp",
+      expect.any(String),
+      "container-memory:/workspace/memory/.openma-memory-store",
+    ]));
+  });
+
+  it("round-trips container Memory edits through the canonical CAS boundary", async () => {
+    const docker = statefulDocker();
+    const adapter = new (DockerAdapter())({ docker, image: "node:24-alpine" });
+    let content = "base";
+    let sha = "sha-base";
+    const list = vi.fn(async () => [{
+      id: "mem_01",
+      path: "/notes.md",
+      content,
+      contentSha256: sha,
+    }]);
+    const update = vi.fn(async (input: { content: string }) => {
+      content = input.content;
+      sha = "sha-local";
+      return {
+        type: "applied" as const,
+        memory: { id: "mem_01", path: "/notes.md", content, contentSha256: sha },
+      };
+    });
+    const context = {
+      scope,
+      fence,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      workspace: { bindingId: "workspace", mountPath: "/workspace" },
+      sandbox: { provider: "docker", runtimeId: "container-memory" },
+      activeWorkspaceCheckpoint: null,
+      resourceOwnership: { memoryStore: "materializer" as const },
+      idempotencyKey: "inputs-memory-roundtrip",
+      access: {
+        downloadFile: vi.fn(),
+        memories: {
+          list,
+          create: vi.fn(),
+          update,
+          delete: vi.fn(),
+        },
+      },
+      authorize: vi.fn(async () => true),
+      signal: new AbortController().signal,
+    };
+
+    await adapter.materialize(context);
+    docker.files.set("/workspace/memory/notes.md", "local");
+    await adapter.synchronize(context);
+
+    expect(update).toHaveBeenCalledWith(expect.objectContaining({
+      memoryId: "mem_01",
+      content: "local",
+      expectedContentSha256: "sha-base",
+    }));
+    expect(docker.files.get("/workspace/memory/notes.md")).toBe("local");
+  });
+
+  it("treats an absent or empty Memory directory as untrusted and rehydrates it", async () => {
+    for (const findResult of [
+      { stdout: "", stderr: "no such file", exitCode: 1 },
+      { stdout: "", stderr: "", exitCode: 0 },
+      { stdout: "/workspace/memory/vanished.md\0", stderr: "", exitCode: 0 },
+    ]) {
+      const docker = statefulDocker();
+      const adapter = new (DockerAdapter())({ docker, image: "node:24-alpine" });
+      const context = {
+        scope,
+        fence,
+        session: {
+          id: scope.sessionId,
+          environmentId: scope.environmentId,
+          metadata: {},
+          resources: [{
+            type: "memory_store",
+            memory_store_id: "memstore_01",
+            mount_path: "/workspace/memory",
+            access: "read_write",
+          }],
+        },
+        workspace: { bindingId: "workspace", mountPath: "/workspace" },
+        sandbox: { provider: "docker", runtimeId: "container-memory" },
+        activeWorkspaceCheckpoint: null,
+        resourceOwnership: { memoryStore: "materializer" as const },
+        idempotencyKey: "inputs-memory-rehydrate",
+        access: {
+          downloadFile: vi.fn(),
+          memories: {
+            list: vi.fn(async () => []),
+            create: vi.fn(),
+            update: vi.fn(),
+            delete: vi.fn(),
+          },
+        },
+        authorize: vi.fn(async () => true),
+        signal: new AbortController().signal,
+      };
+      await adapter.materialize(context);
+      const original = docker.run.getMockImplementation()!;
+      docker.run.mockImplementation(async (args: string[]) =>
+        args[0] === "exec" && args[2] === "find" ? findResult : original(args));
+      await expect(adapter.synchronize(context)).resolves.toBeUndefined();
+      docker.run.mockImplementation(original);
+    }
+  });
+
+  it.each([
+    [{ stdout: "", stderr: "permission denied", exitCode: 2 }, /scan Session Memory failed/u],
+    [{ stdout: "/outside/a.md\0", stderr: "", exitCode: 0 }, /escaped its mount root/u],
+    [{ stdout: "/workspace/memory/\0", stderr: "", exitCode: 0 }, /unsafe path/u],
+    [{ stdout: "/workspace/memory/../a.md\0", stderr: "", exitCode: 0 }, /unsafe path/u],
+  ])("rejects an invalid Docker Memory scan %#", async (findResult, expected) => {
+    const docker = statefulDocker();
+    const adapter = new (DockerAdapter())({ docker, image: "node:24-alpine" });
+    const context = {
+      scope,
+      fence,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      workspace: { bindingId: "workspace", mountPath: "/workspace" },
+      sandbox: { provider: "docker", runtimeId: "container-memory" },
+      activeWorkspaceCheckpoint: null,
+      resourceOwnership: { memoryStore: "materializer" as const },
+      idempotencyKey: "inputs-memory-invalid-scan",
+      access: {
+        downloadFile: vi.fn(),
+        memories: {
+          list: vi.fn(async () => []),
+          create: vi.fn(),
+          update: vi.fn(),
+          delete: vi.fn(),
+        },
+      },
+      authorize: vi.fn(async () => true),
+      signal: new AbortController().signal,
+    };
+    await adapter.materialize(context);
+    const original = docker.run.getMockImplementation()!;
+    docker.run.mockImplementation(async (args: string[]) =>
+      args[0] === "exec" && args[2] === "find" ? findResult : original(args));
+
+    await expect(adapter.synchronize(context)).rejects.toThrow(expected);
+  });
+
+  it("rejects a Docker file probe failure during Memory reconciliation", async () => {
+    const docker = statefulDocker();
+    const adapter = new (DockerAdapter())({ docker, image: "node:24-alpine" });
+    const context = {
+      scope,
+      fence,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      workspace: { bindingId: "workspace", mountPath: "/workspace" },
+      sandbox: { provider: "docker", runtimeId: "container-memory" },
+      activeWorkspaceCheckpoint: null,
+      resourceOwnership: { memoryStore: "materializer" as const },
+      idempotencyKey: "inputs-memory-bad-probe",
+      access: {
+        downloadFile: vi.fn(),
+        memories: {
+          list: vi.fn(async () => []),
+          create: vi.fn(),
+          update: vi.fn(),
+          delete: vi.fn(),
+        },
+      },
+      authorize: vi.fn(async () => true),
+      signal: new AbortController().signal,
+    };
+    await adapter.materialize(context);
+    const original = docker.run.getMockImplementation()!;
+    docker.run.mockImplementation(async (args: string[]) => {
+      if (args[0] === "exec" && args[2] === "test" && args[4] === "/workspace/memory/.openma-memory-store") {
+        return { stdout: "", stderr: "daemon failure", exitCode: 2 };
+      }
+      return original(args);
+    });
+
+    await expect(adapter.synchronize(context)).rejects.toThrow(/probe Session Memory file failed/u);
   });
 
   it("reaps a deterministic container name when create is interrupted after the daemon side effect", async () => {

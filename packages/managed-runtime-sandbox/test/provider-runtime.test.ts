@@ -11,6 +11,7 @@ import type {
 } from "@open-managed-agents/sandbox";
 
 import { createProviderManagedRuntime } from "../src/index";
+import { createSandboxSessionMemoryFilePort } from "../src/provider-runtime";
 
 const scope = {
   workspaceId: "workspace_1",
@@ -79,6 +80,66 @@ function runtime(id: string): Runtime {
   };
 }
 
+describe("sandbox Session Memory filesystem adapter", () => {
+  it("scans nested files and preserves their mount-relative paths", async () => {
+    const live = runtime("memory-files");
+    vi.mocked(live.exec).mockResolvedValueOnce(btoa(
+      "/workspace/memory/a.md\0/workspace/memory/nested/b.md\0",
+    ));
+    vi.mocked(live.readFile)
+      .mockResolvedValueOnce("a")
+      .mockResolvedValueOnce("b");
+    const files = createSandboxSessionMemoryFilePort(live);
+
+    await expect(files.scan("/workspace/memory/", new AbortController().signal))
+      .resolves.toEqual(new Map([
+        ["a.md", "a"],
+        ["nested/b.md", "b"],
+      ]));
+  });
+
+  it.each([
+    ["/outside/a.md\0", /escaped its mount root/u],
+    ["/workspace/memory/\0", /unsafe path/u],
+    ["/workspace/memory/../a.md\0", /unsafe path/u],
+  ])("rejects an unsafe scan result %#", async (paths, expected) => {
+    const live = runtime("unsafe-memory-files");
+    vi.mocked(live.exec).mockResolvedValueOnce(btoa(paths));
+    const files = createSandboxSessionMemoryFilePort(live);
+
+    await expect(files.scan("/workspace/memory", new AbortController().signal))
+      .rejects.toThrow(expected);
+  });
+
+  it("reads present files and rejects an invalid existence probe", async () => {
+    const live = runtime("memory-read");
+    vi.mocked(live.exec)
+      .mockResolvedValueOnce("1")
+      .mockResolvedValueOnce("unexpected");
+    vi.mocked(live.readFile).mockResolvedValueOnce("value");
+    const files = createSandboxSessionMemoryFilePort(live);
+
+    await expect(files.read("/workspace/memory/a.md", new AbortController().signal))
+      .resolves.toBe("value");
+    await expect(files.read("/workspace/memory/b.md", new AbortController().signal))
+      .rejects.toThrow(/invalid output/u);
+  });
+
+  it("writes and replaces through the runtime while handling root-level paths", async () => {
+    const live = runtime("memory-write");
+    const files = createSandboxSessionMemoryFilePort(live);
+    const signal = new AbortController().signal;
+
+    await files.write("leaf", "value", signal);
+    await files.replace("", new Map([["", "root"], ["nested/a.md", "a"]]), signal);
+
+    expect(live.exec).toHaveBeenCalledWith("mkdir -p -- '/'", 10_000);
+    expect(live.writeFile).toHaveBeenCalledWith("leaf", "value");
+    expect(live.writeFile).toHaveBeenCalledWith("/", "root");
+    expect(live.writeFile).toHaveBeenCalledWith("/nested/a.md", "a");
+  });
+});
+
 function composition(
   provider: SandboxProviderPort<Runtime>,
   outputs?: { store: InMemoryBlobStore },
@@ -141,17 +202,14 @@ describe("provider managed runtime adapter", () => {
       outputs: null,
       signal,
     });
-    const sessionInputs = Reflect.get(composed, "sessionInputs") as {
-      materialize(input: Record<string, unknown>): Promise<void>;
-    } | undefined;
-    expect(sessionInputs).toBeDefined();
+    const sessionInputs = composed.sessionInputs;
     const downloadFile = vi.fn(async () => ({
       content: new Uint8Array([0, 255, 1]),
       filename: "input.bin",
       mimeType: "application/octet-stream",
     }));
 
-    await sessionInputs!.materialize({
+    await sessionInputs.materialize({
       scope,
       fence,
       session: {
@@ -180,6 +238,7 @@ describe("provider managed runtime adapter", () => {
       resourceOwnership: { memoryStore: "worker" },
       idempotencyKey: "session-inputs-1",
       access: { downloadFile },
+      authorize: vi.fn(async () => true),
       signal,
     });
 
@@ -194,8 +253,10 @@ describe("provider managed runtime adapter", () => {
     );
   });
 
-  it("fails closed when the supervised lane assigns memory stores to the generic materializer", async () => {
+  it("hydrates materializer-owned memory stores for the supervised lane", async () => {
     const created = runtime("session-memory-runtime");
+    created.exec = vi.fn(async (command: string) =>
+      command.startsWith("if [ -f") ? "0" : "");
     const composed = composition({
       create: vi.fn(async () => created),
       resume: vi.fn(),
@@ -217,6 +278,12 @@ describe("provider managed runtime adapter", () => {
       signal,
     });
 
+    const list = vi.fn(async () => [{
+      id: "mem_01",
+      path: "/notes.md",
+      content: "canonical",
+      contentSha256: "sha-canonical",
+    }]);
     await expect(composed.sessionInputs.materialize({
       scope,
       fence,
@@ -236,8 +303,45 @@ describe("provider managed runtime adapter", () => {
       activeWorkspaceCheckpoint: null,
       resourceOwnership: { memoryStore: "materializer" },
       idempotencyKey: "session-memory-1",
+      access: {
+        downloadFile: vi.fn(),
+        memories: {
+          list,
+          create: vi.fn(),
+          update: vi.fn(),
+          delete: vi.fn(),
+        },
+      },
+      authorize: vi.fn(async () => true),
       signal,
-    } as any)).rejects.toThrow(/does not implement memory_store/);
+    } as any)).resolves.toBeUndefined();
+    expect(created.writeFile).toHaveBeenCalledWith(
+      "/workspace/memory/notes.md",
+      "canonical",
+    );
+    expect(created.writeFile).toHaveBeenCalledWith(
+      "/workspace/memory/.openma-memory-store",
+      "openma-memory-store-v1\nmemstore_01",
+    );
+
+    await expect(composed.sessionInputs.synchronize({
+      scope,
+      fence,
+      session: {
+        id: scope.sessionId,
+        environmentId: scope.environmentId,
+        metadata: {},
+        resources: [],
+      },
+      workspace,
+      sandbox,
+      activeWorkspaceCheckpoint: null,
+      resourceOwnership: { memoryStore: "worker" },
+      idempotencyKey: "session-memory-worker-owned-sync",
+      access: { downloadFile: vi.fn() },
+      authorize: vi.fn(async () => true),
+      signal,
+    } as any)).resolves.toBeUndefined();
   });
 
   it("supports an explicit ephemeral workspace without inventing provider persistence", async () => {

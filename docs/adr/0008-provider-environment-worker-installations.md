@@ -288,11 +288,18 @@ claim-scoped access Port downloads attached files without exposing the
 exact bytes, repository resources are cloned after credential egress is
 attached, and a restored canonical workspace suppresses a destructive
 re-clone. The official AMA Worker continues to own Skill and Memory Store
-hydration. A supervised harness instead assigns Memory Store ownership to the
-materializer. The generic implementation deliberately rejects that case; a
-provider constructor must inject a synchronization-capable materializer. The
-host rejects missing required resource or credential-egress capabilities
-before allocation and never treats a skipped resource as successful staging.
+hydration and uses the SDK's `SessionMemoryStores` loop. A supervised harness
+instead assigns Memory Store ownership to the shared OpenMA materializer. That
+implementation hydrates a dedicated mount, records a durable private CAS
+baseline, syncs every 15 seconds and at live/final checkpoint boundaries, and
+performs a three-way merge through the Work token's Session-scoped Memory API.
+Every create, update, delete, and rename revalidates the runtime fence; remote
+state wins a two-sided conflict. Missing markers and bulk deletes fail safe and
+trigger a canonical rebase rather than a mass server delete. Docker and all
+generic provider drivers consume this same Port, while a provider may replace
+only the filesystem projection. The host rejects missing required resource or
+credential-egress capabilities before allocation and never treats a skipped
+resource as successful staging.
 
 On a Cloudflare deployment, the OpenMA Worker can call `getSandbox()` through
 its configured `DurableObjectNamespace` binding in-process. A generic Node

@@ -114,6 +114,142 @@ describe("Node/Docker managed runtime", () => {
     ).resolves.toBe("final artifact");
   });
 
+  it("round-trips supervised Memory Store edits through a real Docker filesystem", async () => {
+    const rootDir = await mkdtemp(join(tmpdir(), "oma-docker-memory-e2e-"));
+    roots.push(rootDir);
+    const runtime = await createNodeManagedRuntime({
+      rootDir,
+      sql: await createBetterSqlite3SqlClient(":memory:"),
+      initializeFenceSchema: true,
+      ownerId: "docker-memory-worker",
+      leaseTtlMs: 90_000,
+      heartbeatIntervalMs: 30_000,
+      image: process.env.OMA_RUNTIME_DOCKER_TEST_IMAGE ?? "alpine:3.20",
+      network: "none",
+    });
+    const acquired = await runtime.fences.acquire({
+      scope: { ...scope, sessionId: "session_docker_memory", workId: "work_docker_memory" },
+      ownerId: "docker-memory-worker",
+      ttlMs: 90_000,
+    });
+    if (acquired.type !== "acquired") throw new Error("expected Memory E2E fence");
+    const memoryScope = acquired.fence;
+    const workspace = await runtime.workspace.materialize({
+      scope: memoryScope,
+      fence: acquired.fence,
+      strategy: "checkpoint_restore",
+      activeCheckpoint: null,
+      idempotencyKey: "docker-memory-workspace",
+      signal: new AbortController().signal,
+    });
+    const sandbox = await runtime.sandbox.acquire({
+      scope: memoryScope,
+      fence: acquired.fence,
+      plan: {
+        workspaceStrategy: "checkpoint_restore",
+        outputStrategy: null,
+        runtimeCheckpoint: null,
+        driver: { type: "ama_worker", process: { command: "/bin/true" } },
+      },
+      workspace,
+      outputs: null,
+      credentialEgress: null,
+      signal: new AbortController().signal,
+    });
+    const sha = (content: string) => createHash("sha256").update(content).digest("hex");
+    const canonical = new Map([
+      ["/delete.md", { id: "mem_delete", path: "/delete.md", content: "delete", contentSha256: sha("delete") }],
+      ["/update.md", { id: "mem_update", path: "/update.md", content: "before", contentSha256: sha("before") }],
+    ]);
+    const memories = {
+      async list({ projection }: { projection: "basic" | "full" }) {
+        return [...canonical.values()].map((item) => projection === "full"
+          ? { ...item }
+          : { id: item.id, path: item.path, contentSha256: item.contentSha256 });
+      },
+      async create(input: { path: string; content: string }) {
+        const item = { id: "mem_created", path: input.path, content: input.content, contentSha256: sha(input.content) };
+        canonical.set(input.path, item);
+        return { type: "applied" as const, memory: item };
+      },
+      async update(input: { memoryId: string; path: string; content: string; expectedContentSha256: string }) {
+        const current = [...canonical.values()].find(({ id }) => id === input.memoryId);
+        if (current === undefined) return { type: "not_found" as const };
+        if (current.contentSha256 !== input.expectedContentSha256) return { type: "conflict" as const };
+        const item = { ...current, path: input.path, content: input.content, contentSha256: sha(input.content) };
+        canonical.delete(current.path);
+        canonical.set(item.path, item);
+        return { type: "applied" as const, memory: item };
+      },
+      async delete(input: { memoryId: string; expectedContentSha256: string }) {
+        const current = [...canonical.values()].find(({ id }) => id === input.memoryId);
+        if (current === undefined) return { type: "not_found" as const };
+        if (current.contentSha256 !== input.expectedContentSha256) return { type: "conflict" as const };
+        canonical.delete(current.path);
+        return { type: "applied" as const };
+      },
+    };
+    const lifecycle = {
+      scope: memoryScope,
+      fence: acquired.fence,
+      session: {
+        id: memoryScope.sessionId,
+        environmentId: memoryScope.environmentId,
+        metadata: {},
+        resources: [{
+          type: "memory_store",
+          memory_store_id: "memstore_01",
+          mount_path: "/workspace/memory",
+          access: "read_write",
+        }],
+      },
+      sandbox,
+      resourceOwnership: { memoryStore: "materializer" as const },
+      access: { downloadFile: async () => ({ content: new Uint8Array() }), memories },
+      authorize: () => runtime.fences.isCurrent(acquired.fence),
+      signal: new AbortController().signal,
+    };
+    try {
+      await runtime.sessionInputs.materialize({
+        ...lifecycle,
+        workspace,
+        activeWorkspaceCheckpoint: null,
+        idempotencyKey: "docker-memory-materialize",
+      });
+      const docker = new DockerCliPort();
+      const mutation = await docker.run([
+        "exec",
+        sandbox.runtimeId,
+        "/bin/sh",
+        "-c",
+        "rm /workspace/memory/delete.md && " +
+          "printf after > /workspace/memory/update.md && " +
+          "printf created > /workspace/memory/create.md",
+      ]);
+      expect(mutation.exitCode).toBe(0);
+
+      await runtime.sessionInputs.synchronize({
+        ...lifecycle,
+        idempotencyKey: "docker-memory-synchronize",
+      });
+
+      expect([...canonical].map(([path, item]) => [path, item.content])).toEqual([
+        ["/create.md", "created"],
+        ["/update.md", "after"],
+      ]);
+    } finally {
+      await runtime.sandbox.terminate({
+        scope: memoryScope,
+        fence: acquired.fence,
+        lease: sandbox,
+        reason: "completed",
+      });
+      await runtime.workspace.release({ scope: memoryScope, fence: acquired.fence, binding: workspace });
+      await runtime.fences.release({ fence: acquired.fence, reason: "completed" });
+    }
+    await expect(dockerContainersForWork(memoryScope.workId)).resolves.toEqual([]);
+  });
+
   it("kills a real Docker hand on fence loss and excludes its workspace and outputs from recovery", async () => {
     const rootDir = await mkdtemp(join(tmpdir(), "oma-docker-chaos-e2e-"));
     roots.push(rootDir);
@@ -131,6 +267,7 @@ describe("Node/Docker managed runtime", () => {
     let renewals = 0;
     const revokedFence: RuntimeResourceFencePort = {
       acquire: (input) => first.fences.acquire(input),
+      isCurrent: (input) => first.fences.isCurrent(input),
       renew: async (input) => {
         renewals += 1;
         return renewals === 1

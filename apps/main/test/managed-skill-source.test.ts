@@ -123,7 +123,7 @@ describe("Managed Session runtime source", () => {
     expect(files.downloadFile).toHaveBeenCalledTimes(1);
   });
 
-  it("materializes only attached read-only Memory Stores", async () => {
+  it("materializes attached Memory Stores with the requested access and runtime generation", async () => {
     const source = { find: vi.fn(async () => session) };
     const materialize = vi.fn(async () => ({ mountStoreId: "snapshot-prefix" }));
 
@@ -137,6 +137,7 @@ describe("Managed Session runtime source", () => {
       workspaceId: "workspace-1",
       sessionId: "session-1",
       memoryStoreId: "memory-1",
+      access: "read_only",
     });
 
     await expect(materializeManagedSessionMemorySnapshot(source, { materialize }, {
@@ -145,13 +146,29 @@ describe("Managed Session runtime source", () => {
       memoryStoreId: "memory-not-attached",
       access: "read_only",
     })).resolves.toEqual({ type: "not_found" });
-    await expect(materializeManagedSessionMemorySnapshot(source, { materialize }, {
+    const writableSession = {
+      ...session,
+      resources: session.resources.map((resource) => resource.type === "memory_store"
+        ? { ...resource, access: "read_write" as const }
+        : resource),
+    };
+    await expect(materializeManagedSessionMemorySnapshot(
+      { find: vi.fn(async () => writableSession) },
+      { materialize }, {
       workspaceId: "workspace-1",
       sessionId: "session-1",
       memoryStoreId: "memory-1",
       access: "read_write",
-    })).rejects.toThrow(/read-write.*reverse synchronization/i);
-    expect(materialize).toHaveBeenCalledTimes(1);
+      runtimeGeneration: "sandbox-7",
+    })).resolves.toEqual({ type: "found", mountStoreId: "snapshot-prefix" });
+    expect(materialize).toHaveBeenLastCalledWith({
+      workspaceId: "workspace-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-1",
+      access: "read_write",
+      runtimeGeneration: "sandbox-7",
+    });
+    expect(materialize).toHaveBeenCalledTimes(2);
   });
 
   it("uses the migration fallback only when the canonical Session table is absent", async () => {

@@ -120,6 +120,49 @@ describe("in-sandbox Session resource wiring", () => {
     });
   });
 
+  it("scopes a writable Memory snapshot to the concrete sandbox generation", async () => {
+    const materializeManagedMemorySnapshot = vi.fn(async () => ({
+      type: "found" as const,
+      mountStoreId: ".openma-managed-memory-workspaces/tenant-1/session-1/gen-7/memory-1/data",
+    }));
+    const source = {
+      resolveManagedSessionInputs: vi.fn(async () => ({
+        type: "found" as const,
+        session: {
+          id: "session-1",
+          environmentId: "environment-1",
+          metadata: {},
+          resources: [{
+            type: "memory_store",
+            memoryStoreId: "memory-1",
+            name: "certification",
+            access: "read_write",
+          }],
+        },
+      })),
+      downloadManagedSessionFile: vi.fn(),
+      materializeManagedMemorySnapshot,
+    };
+
+    const loaded = await loadManagedSessionResources(source, {
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+      runtimeGeneration: "gen-7",
+    });
+
+    expect(materializeManagedMemorySnapshot).toHaveBeenCalledWith({
+      tenantId: "tenant-1",
+      sessionId: "session-1",
+      memoryStoreId: "memory-1",
+      access: "read_write",
+      runtimeGeneration: "gen-7",
+    });
+    expect(loaded.resources[0]).toMatchObject({
+      runtimeMountStoreId:
+        ".openma-managed-memory-workspaces/tenant-1/session-1/gen-7/memory-1/data",
+    });
+  });
+
   it.each([
     {
       name: "a File without object storage",

@@ -66,6 +66,54 @@ export interface ManagedEnvironmentWorkerRunnerClient {
         options?: { signal?: AbortSignal },
       ): PromiseLike<Response>;
     };
+    memoryStores: {
+      memories: {
+        list(
+          memoryStoreId: string,
+          params: { view: "basic" | "full"; limit: number },
+          options?: { signal?: AbortSignal },
+        ): AsyncIterable<{
+          type: string;
+          id?: string;
+          path: string;
+          content?: string | null;
+          content_sha256?: string;
+        }>;
+        create(
+          memoryStoreId: string,
+          params: { path: string; content: string },
+          options?: { signal?: AbortSignal },
+        ): PromiseLike<{
+          id: string;
+          path: string;
+          content?: string | null;
+          content_sha256: string;
+        }>;
+        update(
+          memoryId: string,
+          params: {
+            memory_store_id: string;
+            path: string;
+            content: string;
+            precondition: { type: "content_sha256"; content_sha256: string };
+          },
+          options?: { signal?: AbortSignal },
+        ): PromiseLike<{
+          id: string;
+          path: string;
+          content?: string | null;
+          content_sha256: string;
+        }>;
+        delete(
+          memoryId: string,
+          params: {
+            memory_store_id: string;
+            expected_content_sha256: string;
+          },
+          options?: { signal?: AbortSignal },
+        ): PromiseLike<unknown>;
+      };
+    };
   };
 }
 
@@ -231,6 +279,12 @@ function hasStatus(error: unknown, status: number): boolean {
   return isRecord(error) && error.status === status;
 }
 
+function apiErrorStatus(error: unknown): number | undefined {
+  return isRecord(error) && typeof error.status === "number"
+    ? error.status
+    : undefined;
+}
+
 interface ClaimedSessionCredential {
   sessionsToken: string;
   workSecret: string;
@@ -372,6 +426,137 @@ export function createManagedEnvironmentWorker(
           content: new Uint8Array(await response.arrayBuffer()),
           ...(mimeType === undefined ? {} : { mimeType }),
         };
+      },
+      memories: {
+        async list(input: {
+          memoryStoreId: string;
+          projection: "basic" | "full";
+          signal: AbortSignal;
+        }) {
+          const memories: Array<{
+            id: string;
+            path: string;
+            contentSha256: string;
+            content?: string;
+          }> = [];
+          for await (const item of sessionClient.beta.memoryStores.memories.list(
+            input.memoryStoreId,
+            {
+              view: input.projection,
+              limit: input.projection === "basic" ? 100 : 20,
+            },
+            { signal: input.signal },
+          )) {
+            if (item.type !== "memory") continue;
+            if (
+              typeof item.id !== "string"
+              || typeof item.content_sha256 !== "string"
+              || typeof item.path !== "string"
+            ) {
+              throw new Error("Session Memory API returned an invalid memory record");
+            }
+            memories.push({
+              id: item.id,
+              path: item.path,
+              contentSha256: item.content_sha256,
+              ...(item.content === null || item.content === undefined
+                ? {}
+                : { content: item.content }),
+            });
+          }
+          return memories;
+        },
+        async create(input: {
+          memoryStoreId: string;
+          path: string;
+          content: string;
+          signal: AbortSignal;
+        }) {
+          try {
+            const item = await sessionClient.beta.memoryStores.memories.create(
+              input.memoryStoreId,
+              { path: input.path, content: input.content },
+              { signal: input.signal },
+            );
+            return {
+              type: "applied" as const,
+              memory: {
+                id: item.id,
+                path: item.path,
+                contentSha256: item.content_sha256,
+                ...(item.content === null || item.content === undefined
+                  ? {}
+                  : { content: item.content }),
+              },
+            };
+          } catch (error) {
+            if (apiErrorStatus(error) === 409) return { type: "conflict" as const };
+            throw error;
+          }
+        },
+        async update(input: {
+          memoryStoreId: string;
+          memoryId: string;
+          path: string;
+          content: string;
+          expectedContentSha256: string;
+          signal: AbortSignal;
+        }) {
+          try {
+            const item = await sessionClient.beta.memoryStores.memories.update(
+              input.memoryId,
+              {
+                memory_store_id: input.memoryStoreId,
+                path: input.path,
+                content: input.content,
+                precondition: {
+                  type: "content_sha256",
+                  content_sha256: input.expectedContentSha256,
+                },
+              },
+              { signal: input.signal },
+            );
+            return {
+              type: "applied" as const,
+              memory: {
+                id: item.id,
+                path: item.path,
+                contentSha256: item.content_sha256,
+                ...(item.content === null || item.content === undefined
+                  ? {}
+                  : { content: item.content }),
+              },
+            };
+          } catch (error) {
+            const status = apiErrorStatus(error);
+            if (status === 404) return { type: "not_found" as const };
+            if (status === 409 || status === 412) return { type: "conflict" as const };
+            throw error;
+          }
+        },
+        async delete(input: {
+          memoryStoreId: string;
+          memoryId: string;
+          expectedContentSha256: string;
+          signal: AbortSignal;
+        }) {
+          try {
+            await sessionClient.beta.memoryStores.memories.delete(
+              input.memoryId,
+              {
+                memory_store_id: input.memoryStoreId,
+                expected_content_sha256: input.expectedContentSha256,
+              },
+              { signal: input.signal },
+            );
+            return { type: "applied" as const };
+          } catch (error) {
+            const status = apiErrorStatus(error);
+            if (status === 404) return { type: "not_found" as const };
+            if (status === 409 || status === 412) return { type: "conflict" as const };
+            throw error;
+          }
+        },
       },
     };
     if (profile.driver.type === "ama_worker") {

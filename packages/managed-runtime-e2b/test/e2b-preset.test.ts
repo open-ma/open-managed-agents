@@ -100,7 +100,10 @@ describe("E2B managed runtime provider package", () => {
   });
 
   it("exposes the operator Session resource materializer through the driver package", async () => {
-    const sessionInputs = { materialize: async () => undefined };
+    const sessionInputs = {
+      materialize: async () => undefined,
+      synchronize: async () => undefined,
+    };
     const driver = e2bPreset.createE2BManagedRuntimeDriver({
       environment: { E2B_API_KEY: "test-only" },
       leaseTtlMs: 90_000,

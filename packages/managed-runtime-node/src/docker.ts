@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { Readable, Writable } from "node:stream";
@@ -14,6 +14,10 @@ import type {
   SandboxObservation,
   SessionInputMaterializerPort,
 } from "@open-managed-agents/runtime-resource-contract";
+import {
+  SessionMemoryWorkspaceLifecycle,
+  type SessionMemoryWorkspaceFilePort,
+} from "@open-managed-agents/managed-runtime-sandbox";
 
 import { safeMetadataPath, sha256 } from "./filesystem";
 
@@ -315,13 +319,13 @@ export class DockerManagedRuntimeAdapter
     input: Parameters<SessionInputMaterializerPort["materialize"]>[0],
   ): Promise<void> {
     this.#assertLease(input.sandbox);
+    await new SessionMemoryWorkspaceLifecycle(
+      this.#sessionMemoryFiles(input.sandbox),
+    ).materialize(input);
     for (const resource of input.session.resources) {
       input.signal.throwIfAborted();
       if (resource.type === "memory_store") {
-        if (input.resourceOwnership.memoryStore === "worker") continue;
-        throw new Error(
-          "Docker generic Session input materializer does not implement memory_store synchronization",
-        );
+        continue;
       }
       if (resource.type === "file") {
         if (input.access === undefined) {
@@ -408,6 +412,15 @@ export class DockerManagedRuntimeAdapter
       }
       throw new Error(`Unsupported Session resource type: ${resource.type}`);
     }
+  }
+
+  async synchronize(
+    input: Parameters<SessionInputMaterializerPort["synchronize"]>[0],
+  ): Promise<void> {
+    this.#assertLease(input.sandbox);
+    await new SessionMemoryWorkspaceLifecycle(
+      this.#sessionMemoryFiles(input.sandbox),
+    ).synchronize(input);
   }
 
   async run(
@@ -502,6 +515,125 @@ export class DockerManagedRuntimeAdapter
   #assertLease(lease: ManagedSandboxLease): void {
     if (lease.provider !== "docker" || lease.runtimeId.length === 0) {
       throw new Error("Docker adapter received an incompatible sandbox lease");
+    }
+  }
+
+  #sessionMemoryFiles(
+    lease: ManagedSandboxLease,
+  ): SessionMemoryWorkspaceFilePort {
+    const runtimeId = lease.runtimeId;
+    return {
+      scan: async (root, signal) => {
+        signal.throwIfAborted();
+        const result = await this.#docker.run([
+          "exec",
+          runtimeId,
+          "find",
+          root,
+          "-type",
+          "f",
+          "-print0",
+        ], { signal });
+        if (result.exitCode !== 0) {
+          if (/no such file|not found/iu.test(result.stderr)) return null;
+          throw new Error(`scan Session Memory failed (${result.exitCode}): ${result.stderr.trim()}`);
+        }
+        const paths = result.stdout.split("\0").filter((path) => path.length > 0);
+        if (paths.length === 0) return null;
+        const prefix = `${root.replace(/\/+$/u, "")}/`;
+        const entries = new Map<string, string>();
+        for (const path of paths) {
+          if (!path.startsWith(prefix)) {
+            throw new Error("Session Memory scan escaped its mount root");
+          }
+          const relative = path.slice(prefix.length);
+          if (relative.length === 0 || relative.split("/").includes("..")) {
+            throw new Error("Session Memory scan returned an unsafe path");
+          }
+          const content = await this.#readContainerText(runtimeId, path, signal);
+          if (content !== null) entries.set(relative, content);
+        }
+        return entries.size === 0 ? null : entries;
+      },
+      read: (path, signal) => this.#readContainerText(runtimeId, path, signal),
+      write: (path, content, signal) =>
+        this.#writeContainerText(runtimeId, path, content, signal),
+      replace: async (root, entries, signal) => {
+        await this.#runChecked(
+          ["exec", runtimeId, "rm", "-rf", "--", root],
+          signal,
+          "clear Session Memory directory",
+        );
+        await this.#runChecked(
+          ["exec", runtimeId, "mkdir", "-p", "--", root],
+          signal,
+          "create Session Memory directory",
+        );
+        for (const [relative, content] of entries) {
+          signal.throwIfAborted();
+          await this.#writeContainerText(
+            runtimeId,
+            `${root}/${relative}`,
+            content,
+            signal,
+          );
+        }
+      },
+    };
+  }
+
+  async #readContainerText(
+    runtimeId: string,
+    path: string,
+    signal: AbortSignal,
+  ): Promise<string | null> {
+    signal.throwIfAborted();
+    const probe = await this.#docker.run(
+      ["exec", runtimeId, "test", "-f", path],
+      { signal },
+    );
+    if (probe.exitCode === 1) return null;
+    if (probe.exitCode !== 0) {
+      throw new Error(`probe Session Memory file failed (${probe.exitCode}): ${probe.stderr.trim()}`);
+    }
+    const stage = await mkdtemp(join(tmpdir(), "oma-session-memory-read-"));
+    const target = join(stage, "payload");
+    try {
+      await this.#runChecked(
+        ["cp", `${runtimeId}:${path}`, target],
+        signal,
+        "copy Session Memory file from container",
+      );
+      return await readFile(target, "utf8");
+    } finally {
+      await rm(stage, { force: true, recursive: true });
+    }
+  }
+
+  async #writeContainerText(
+    runtimeId: string,
+    path: string,
+    content: string,
+    signal: AbortSignal,
+  ): Promise<void> {
+    signal.throwIfAborted();
+    const parent = dirname(path);
+    await this.#runChecked(
+      ["exec", runtimeId, "mkdir", "-p", "--", parent],
+      signal,
+      "create Session Memory parent",
+    );
+    const stage = await mkdtemp(join(tmpdir(), "oma-session-memory-write-"));
+    const source = join(stage, "payload");
+    try {
+      await writeFile(source, content, "utf8");
+      await this.#runChecked(
+        ["cp", source, `${runtimeId}:${path}`],
+        signal,
+        "copy Session Memory file into container",
+      );
+    } finally {
+      await rm(stage, { force: true, recursive: true });
     }
   }
 

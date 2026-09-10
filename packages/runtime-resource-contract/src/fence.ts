@@ -56,6 +56,9 @@ export type PublishRuntimeResourcesResult =
  */
 export interface RuntimeResourceFencePort {
   acquire(input: AcquireRuntimeFenceInput): Promise<AcquireRuntimeFenceResult>;
+  /** Read-only ownership check used immediately before external mutations
+   * that cannot participate in the final publication transaction. */
+  isCurrent(fence: RuntimeResourceFence): Promise<boolean>;
   renew(input: {
     fence: RuntimeResourceFence;
     ttlMs: number;

@@ -602,6 +602,7 @@ export class SessionDO extends DurableObject<Env> {
    *  host migration). On mismatch we re-warm so restoreWorkspaceBackup
    *  runs and /workspace gets repopulated from the latest backup. */
   private currentWarmupGen: string | null = null;
+  private hasWritableManagedMemoryMount = false;
   /**
    * Per-turn dedup of `agent.message` broadcasts. Recovery's
    * `loadRecoveryContext` reads prior agent messages out of SQL so the
@@ -3115,6 +3116,7 @@ export class SessionDO extends DurableObject<Env> {
       );
       this.sandboxWarmupPromise = null;
       this.currentWarmupGen = null;
+      this.hasWritableManagedMemoryMount = false;
       await this.warmUpSandbox();
     };
     return new Proxy(raw, {
@@ -3414,6 +3416,25 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
+      // A writable Memory workspace must be private to one concrete sandbox
+      // incarnation. Reuse the marker when this DO reconnects to a live
+      // container; mint it only after workspace restore has decided whether
+      // the container is fresh, otherwise the marker would incorrectly make
+      // the first warmup look retained.
+      if (this.currentWarmupGen === null) {
+        try {
+          const probed = await sandbox.exec("cat /tmp/.oma-warm 2>/dev/null");
+          const match = /^exit=(-?\d+)\n([\s\S]*)$/.exec(probed);
+          const retained = match?.[1] === "0" ? match[2].trim() : "";
+          if (retained.length > 0) this.currentWarmupGen = retained;
+        } catch { /* fresh container */ }
+      }
+      if (this.currentWarmupGen === null) {
+        const generation = crypto.randomUUID().slice(0, 12);
+        await sandbox.exec(`echo ${generation} > /tmp/.oma-warm`);
+        this.currentWarmupGen = generation;
+      }
+
       // image_strategy fast path REMOVED. Was a base_snapshot lazy-prepare
       // path that ran a multi-minute install + tar + R2 upload via a single
       // sandbox.exec — the SDK wraps each exec in blockConcurrencyWhile,
@@ -3507,7 +3528,11 @@ export class SessionDO extends DurableObject<Env> {
         const loaded = await loadManagedSessionResources(source, {
           tenantId: this.state.tenant_id,
           sessionId,
+          runtimeGeneration: this.currentWarmupGen,
         });
+        this.hasWritableManagedMemoryMount = loaded.resources.some((resource) =>
+          resource.type === "memory_store" && resource.access !== "read_only"
+        );
 
         if (loaded.resources.length) {
           await mountResources(
@@ -3597,22 +3622,9 @@ export class SessionDO extends DurableObject<Env> {
         });
       }
 
-      // Drop a per-warmup marker so the proxy can detect a recycled
-      // container later (just check `cat /tmp/.oma-warm` matches the
-      // gen we set). /tmp clears on restart so the absence IS the signal.
-      const gen = crypto.randomUUID().slice(0, 12);
-      try {
-        await sandbox.exec(`echo ${gen} > /tmp/.oma-warm`);
-        this.currentWarmupGen = gen;
-      } catch (err) {
-        logWarn(
-          { op: "session_do.warmup.write_marker", session_id: this.state.session_id, err },
-          "warmup marker write failed; proxy will pessimistically re-warm",
-        );
-        this.currentWarmupGen = null;
-      }
     } catch (err) {
       this.currentWarmupGen = null;
+      this.hasWritableManagedMemoryMount = false;
       console.error(
         `[warmup] failed session=${this.state.session_id ?? "unknown"}: ${err instanceof Error ? err.message : String(err)}`,
       );
@@ -3620,6 +3632,69 @@ export class SessionDO extends DurableObject<Env> {
       this.broadcastEvent(createSandboxWarmupFailureEvent(err));
       throw err;
     }
+  }
+
+  /** Commit writable canonical Memory mounts before the public idle boundary.
+   * The main worker revalidates the durable execution fence before every CAS
+   * mutation, so a stale SessionDO may keep running briefly but cannot publish
+   * its filesystem view after ownership moves. */
+  private async synchronizeManagedMemoryStores(
+    executionFence: SessionExecutionFence | undefined,
+  ): Promise<void> {
+    const binding = this.env.MAIN_MCP;
+    const tenantId = this.state.tenant_id;
+    const sessionId = this.state.session_id;
+    const runtimeGeneration = this.currentWarmupGen;
+    if (
+      !this.hasWritableManagedMemoryMount
+      || binding === undefined
+      || executionFence === undefined
+      || tenantId.length === 0
+      || sessionId.length === 0
+      || runtimeGeneration === null
+    ) return;
+    let lastError: unknown;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      try {
+        const result = await binding.synchronizeManagedMemorySnapshots({
+          tenantId,
+          sessionId,
+          runtimeGeneration,
+          executionFence,
+        });
+        if (result.type === "fence_lost") {
+          const error = new Error("Managed Memory synchronization lost its execution fence");
+          error.name = "ExecutionFenceLostError";
+          throw error;
+        }
+        if (result.type === "not_found") {
+          throw new Error(`Managed Session ${sessionId} was not found during Memory synchronization`);
+        }
+        if (result.conflicts.length > 0 || result.recoveredWipes.length > 0) {
+          logWarn(
+            {
+              op: "session_do.memory_sync.rebased",
+              session_id: sessionId,
+              conflicts: result.conflicts,
+              recovered_wipes: result.recoveredWipes,
+            },
+            "canonical Memory won one or more workspace reconciliation conflicts",
+          );
+        }
+        return;
+      } catch (error) {
+        if (error instanceof Error && error.name === "ExecutionFenceLostError") {
+          throw error;
+        }
+        lastError = error;
+        if (attempt < 2) {
+          await new Promise((resolve) => setTimeout(resolve, 100 * (attempt + 1)));
+        }
+      }
+    }
+    throw lastError instanceof Error
+      ? lastError
+      : new Error(`Managed Memory synchronization failed: ${String(lastError)}`);
   }
 
   private broadcastEvent(
@@ -4643,6 +4718,7 @@ export class SessionDO extends DurableObject<Env> {
     // polling). Tracked via this flag — finally emits if no earlier
     // path did.
     let idleEmitted = false;
+    let managedMemorySynchronized = false;
 
     // Reuse session-level sandbox (singleton) — files persist across turns.
     // Returned object is a lazy proxy. Warmup starts concurrently with the
@@ -5174,6 +5250,11 @@ export class SessionDO extends DurableObject<Env> {
         }
       }
 
+      // Memory mutations are part of turn completion, not an asynchronous
+      // afterthought. This barrier precedes status_idle and execution settle.
+      await this.synchronizeManagedMemoryStores(activeFence);
+      managedMemorySynchronized = true;
+
       // Determine stop reason based on pending tool confirmations or custom tool results
       const pendingConfirmations = ctx.runtime.pendingConfirmations || [];
 
@@ -5310,6 +5391,25 @@ export class SessionDO extends DurableObject<Env> {
       // Client can send a new user.message to retry.
     } finally {
       await disposeTools(allTools);
+      if (!managedMemorySynchronized) {
+        try {
+          // Error/cancel rescue pass. Reconciliation is idempotent, so a
+          // partially committed prior attempt is safe to retry here.
+          await this.synchronizeManagedMemoryStores(activeFence);
+          managedMemorySynchronized = true;
+        } catch (error) {
+          if (!(error instanceof Error && error.name === "ExecutionFenceLostError")) {
+            logWarn(
+              {
+                op: "session_do.memory_sync.rescue",
+                session_id: this.state.session_id,
+                error: error instanceof Error ? error.message : String(error),
+              },
+              "writable Managed Memory rescue sync failed",
+            );
+          }
+        }
+      }
       // Only delete if it's still ours — a sub-agent run within the same
       // thread may have temporarily replaced it. Same-thread re-entry is
       // mutex'd by _draining so this is theoretical safety only.

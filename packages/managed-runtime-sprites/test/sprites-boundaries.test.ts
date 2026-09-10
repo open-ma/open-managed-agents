@@ -325,7 +325,7 @@ describe("Sprites provider boundary contracts", () => {
       capabilities: { enforcement: "enforced" as const, credentialMode: "live" as const, interceptedProtocols: ["https" as const] },
       attach: async () => undefined, revoke: async () => undefined,
     };
-    const sessionInputs = { materialize: vi.fn() };
+    const sessionInputs = { materialize: vi.fn(), synchronize: vi.fn() };
     const driver = createSpritesManagedRuntimeDriver({
       client: client(value), leaseTtlMs: 100, outputStore: new InMemoryBlobStore(), credentialEgress: egress, sessionInputs,
       readiness: { timeoutMs: 500 },

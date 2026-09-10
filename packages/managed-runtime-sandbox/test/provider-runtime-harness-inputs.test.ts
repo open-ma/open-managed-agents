@@ -411,6 +411,7 @@ describe("official Session input materialization", () => {
       resourceOwnership: { memoryStore: options.owner ?? "worker" },
       idempotencyKey: "inputs",
       ...(options.access === undefined ? {} : { access: options.access }),
+      authorize: vi.fn(async () => true),
       signal: options.signal ?? new AbortController().signal,
     });
   }

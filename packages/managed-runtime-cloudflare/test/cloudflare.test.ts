@@ -181,7 +181,10 @@ describe("isolated Cloudflare managed runtime package", () => {
   });
 
   it("validates placement and preserves an explicit Session input materializer", async () => {
-    const sessionInputs = { materialize: vi.fn(async () => {}) };
+    const sessionInputs = {
+      materialize: vi.fn(async () => {}),
+      synchronize: vi.fn(async () => {}),
+    };
     const driver = createCloudflareManagedRuntimeDriver(env, { createSandbox: () => new FakeSandbox(), sessionInputs });
     await expect(driver.create({ placement: "external_worker" } as never)).rejects.toThrow("does not support external_worker");
     await expect(driver.create({ placement: "in_process" } as never)).resolves.toMatchObject({ sessionInputs, credentialEgress: expect.any(Object) });
@@ -190,7 +193,10 @@ describe("isolated Cloudflare managed runtime package", () => {
   it("constructs host/orphan and environment-worker compositions with URL precedence", () => {
     const createSandbox = () => new FakeSandbox();
     const runtimeCheckpoint = { kind: "memory", create: vi.fn(), restore: vi.fn() } as never;
-    const sessionInputs = { materialize: vi.fn(async () => {}) };
+    const sessionInputs = {
+      materialize: vi.fn(async () => {}),
+      synchronize: vi.fn(async () => {}),
+    };
     const host = createCloudflareManagedRuntimeHost(env, { ownerId: "owner", createSandbox, leaseTtlMs: 1000, heartbeatIntervalMs: 200, runtimeCheckpoint, sessionInputs });
     expect(host).toMatchObject({ fences: expect.any(Object), orphans: expect.any(Object), host: expect.any(Object), orphanReconciler: expect.any(Object), sessionInputs });
     expect(createCloudflareManagedRuntimeHost(env, { ownerId: "owner-defaults", createSandbox })).toMatchObject({ host: expect.any(Object) });

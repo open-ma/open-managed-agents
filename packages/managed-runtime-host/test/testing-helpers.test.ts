@@ -20,6 +20,8 @@ describe("managed runtime deterministic test Ports", () => {
     if (acquired.type !== "acquired") return;
 
     expect(acquired.fence.token).toMatch(/^1:/u);
+    await expect(fences.isCurrent(acquired.fence)).resolves.toBe(true);
+    await expect(fences.isCurrent({ ...acquired.fence, token: "stale" })).resolves.toBe(false);
     expect(fences.inspect(scope)).toMatchObject({ generation: 1 });
     expect(fences.inspect({ ...scope, workId: "missing" })).toBeNull();
     await expect(fences.publish({

@@ -47,6 +47,10 @@ import {
   tryPortPromise,
   waitForAbortableDelay,
 } from "./effect-kernel";
+import {
+  SessionMemoryWorkspaceLifecycle,
+  type SessionMemoryWorkspaceFilePort,
+} from "./session-memory-workspace";
 
 const checkpointMetadataKey = "openma.runtime.checkpoint.v1";
 const ephemeralWorkspaceMetadataKey = "openma.workspace.ephemeral.v1";
@@ -404,6 +408,76 @@ function safeRepositoryUrl(resource: Readonly<Record<string, unknown>>): string 
 
 function shellQuote(value: string): string {
   return `'${value.replaceAll("'", `'\"'\"'`)}'`;
+}
+
+function parentDirectory(path: string): string {
+  const separator = path.lastIndexOf("/");
+  return separator <= 0 ? "/" : path.slice(0, separator);
+}
+
+/** Filesystem adapter used by the canonical Session Memory lifecycle. */
+export function createSandboxSessionMemoryFilePort(
+  runtime: SandboxPort & SandboxRuntimePort,
+): SessionMemoryWorkspaceFilePort {
+  return {
+    async scan(root, signal) {
+      signal.throwIfAborted();
+      const encoded = (await runtime.exec(
+        `if [ -d ${shellQuote(root)} ]; then find ${shellQuote(root)} -type f -print0 | base64 | tr -d '\\n'; fi`,
+        30_000,
+      )).trim();
+      signal.throwIfAborted();
+      if (encoded === "") return null;
+      const paths = atob(encoded).split("\0").filter((path) => path.length > 0);
+      const prefix = `${root.replace(/\/+$/u, "")}/`;
+      const entries = new Map<string, string>();
+      for (const path of paths) {
+        if (!path.startsWith(prefix)) {
+          throw new Error("Session Memory scan escaped its mount root");
+        }
+        const relative = path.slice(prefix.length);
+        if (relative.length === 0 || relative.split("/").includes("..")) {
+          throw new Error("Session Memory scan returned an unsafe path");
+        }
+        entries.set(relative, await runtime.readFile(path));
+      }
+      return entries;
+    },
+    async read(path, signal) {
+      signal.throwIfAborted();
+      const exists = (await runtime.exec(
+        `if [ -f ${shellQuote(path)} ]; then printf 1; else printf 0; fi`,
+        10_000,
+      )).trim();
+      if (exists === "0") return null;
+      if (exists !== "1") {
+        throw new Error("Session Memory file probe returned invalid output");
+      }
+      signal.throwIfAborted();
+      return runtime.readFile(path);
+    },
+    async write(path, content, signal) {
+      signal.throwIfAborted();
+      const parent = parentDirectory(path);
+      await runtime.exec(`mkdir -p -- ${shellQuote(parent)}`, 10_000);
+      signal.throwIfAborted();
+      await runtime.writeFile(path, content);
+    },
+    async replace(root, entries, signal) {
+      signal.throwIfAborted();
+      await runtime.exec(
+        `rm -rf -- ${shellQuote(root)} && mkdir -p -- ${shellQuote(root)}`,
+        30_000,
+      );
+      for (const [relative, content] of entries) {
+        signal.throwIfAborted();
+        const path = `${root}/${relative}`;
+        const parent = parentDirectory(path);
+        await runtime.exec(`mkdir -p -- ${shellQuote(parent)}`, 10_000);
+        await runtime.writeFile(path, content);
+      }
+    },
+  };
 }
 
 function requireEgressBinding(
@@ -1254,17 +1328,14 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
   const sessionInputs: SessionInputMaterializerPort = {
     async materialize(input) {
       const runtime = requireRuntime(input.sandbox);
+      await new SessionMemoryWorkspaceLifecycle(createSandboxSessionMemoryFilePort(runtime))
+        .materialize(input);
       for (const resource of input.session.resources) {
         input.signal.throwIfAborted();
         if (resource.type === "memory_store") {
-          if (input.resourceOwnership.memoryStore === "worker") {
-            // The official EnvironmentWorker owns memory hydration and final
-            // synchronization. Doing it here as well would create two writers.
-            continue;
-          }
-          throw new Error(
-            `${options.providerName} generic Session input materializer does not implement memory_store synchronization`,
-          );
+          // The worker-owned lane is handled by the official SDK; the
+          // materializer-owned lane was hydrated once above.
+          continue;
         }
         if (resource.type === "file") {
           if (input.access === undefined) {
@@ -1331,6 +1402,11 @@ export function createProviderManagedRuntime<Runtime extends ProviderRuntime>(
         }
         throw new Error(`Unsupported Session resource type: ${resource.type}`);
       }
+    },
+    async synchronize(input) {
+      const runtime = requireRuntime(input.sandbox);
+      await new SessionMemoryWorkspaceLifecycle(createSandboxSessionMemoryFilePort(runtime))
+        .synchronize(input);
     },
   };
 

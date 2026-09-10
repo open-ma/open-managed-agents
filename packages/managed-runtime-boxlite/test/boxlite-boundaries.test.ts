@@ -332,7 +332,7 @@ describe("BoxLite provider boundary contracts", () => {
       attach: async () => undefined,
       revoke: async () => undefined,
     };
-    const sessionInputs = { materialize: vi.fn() };
+    const sessionInputs = { materialize: vi.fn(), synchronize: vi.fn() };
     const driver = createBoxLiteManagedRuntimeDriver({
       providerId: "boxrun", client: client(value), image: "image", leaseTtlMs: 100,
       outputStore: new InMemoryBlobStore(), credentialEgress: egress, sessionInputs,

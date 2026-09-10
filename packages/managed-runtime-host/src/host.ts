@@ -33,6 +33,9 @@ export interface ManagedRuntimeHostDependencies {
   ownerId: string;
   leaseTtlMs: number;
   heartbeatIntervalMs: number;
+  /** Cadence for materializer-owned writable Memory Stores. Defaults to 15s,
+   * matching the official Environment Worker's synchronization interval. */
+  sessionInputSyncIntervalMs?: number;
   fences: RuntimeResourceFencePort;
   sandbox: ManagedSandboxPort;
   workspace: WorkspacePersistencePort;
@@ -188,6 +191,10 @@ export function createManagedRuntimeHost(
   dependencies: ManagedRuntimeHostDependencies,
 ): ManagedRuntimeHost {
   const scheduler = dependencies.scheduler ?? defaultScheduler;
+  const sessionInputSyncIntervalMs = dependencies.sessionInputSyncIntervalMs ?? 15_000;
+  if (!Number.isSafeInteger(sessionInputSyncIntervalMs) || sessionInputSyncIntervalMs <= 0) {
+    throw new Error("sessionInputSyncIntervalMs must be a positive integer");
+  }
 
   return {
     async run({ scope, profile, session, sessionInputAccess, signal }) {
@@ -272,6 +279,10 @@ export function createManagedRuntimeHost(
       const controller = new AbortController();
       let leaseLost = false;
       let monitor: Promise<void> | null = null;
+      let sessionInputSyncAbort: AbortController | null = null;
+      let sessionInputSyncLoop: Promise<void> | null = null;
+      let sessionInputSyncFailure: unknown = null;
+      let sessionInputSyncTail: Promise<void> = Promise.resolve();
 
       const loseLease = (reason: string) => {
         leaseLost = true;
@@ -463,6 +474,11 @@ export function createManagedRuntimeHost(
               "session-inputs-materialize",
             ),
             ...(sessionInputAccess === undefined ? {} : { access: sessionInputAccess }),
+            authorize: async () => {
+              const current = await dependencies.fences.isCurrent(fence);
+              if (!current) loseLease("Runtime resource fence lost during Session input materialization");
+              return current;
+            },
             signal: controller.signal,
           });
           controller.signal.throwIfAborted();
@@ -473,6 +489,65 @@ export function createManagedRuntimeHost(
         // not inherit nullable setup/cleanup bookkeeping.
         const activeWorkspace = workspaceBinding;
         const activeSandbox = sandboxLease;
+        const sessionInputOwnership = {
+          memoryStore: profile.driver.type === "ama_worker"
+            ? "worker" as const
+            : "materializer" as const,
+        };
+        const synchronizeSessionInputs = async (stage: string): Promise<void> => {
+          if (dependencies.sessionInputs === undefined || session === undefined) return;
+          const operation = sessionInputSyncTail.then(async () => {
+            await dependencies.sessionInputs!.synchronize({
+              scope,
+              fence,
+              session,
+              sandbox: activeSandbox,
+              resourceOwnership: sessionInputOwnership,
+              idempotencyKey: idempotencyKey(
+                scope,
+                fence.generation,
+                `session-inputs-synchronize-${stage}`,
+              ),
+              authorize: async () => {
+                const current = await dependencies.fences.isCurrent(fence);
+                if (!current) loseLease("Runtime resource fence lost during Session input synchronization");
+                return current;
+              },
+              ...(sessionInputAccess === undefined ? {} : { access: sessionInputAccess }),
+              signal: controller.signal,
+            });
+            controller.signal.throwIfAborted();
+          });
+          sessionInputSyncTail = operation.catch(() => {});
+          await operation;
+        };
+        const needsPeriodicSessionInputSync =
+          sessionInputOwnership.memoryStore === "materializer"
+          && session?.resources.some((resource) =>
+            resource.type === "memory_store" && resource.access !== "read_only") === true;
+        if (needsPeriodicSessionInputSync) {
+          sessionInputSyncAbort = new AbortController();
+          const periodicAbort = sessionInputSyncAbort;
+          const abortPeriodic = () => periodicAbort.abort(controller.signal.reason);
+          controller.signal.addEventListener("abort", abortPeriodic, { once: true });
+          sessionInputSyncLoop = (async () => {
+            let sequence = 0;
+            try {
+              while (!periodicAbort.signal.aborted) {
+                await scheduler.sleep(sessionInputSyncIntervalMs, periodicAbort.signal);
+                if (periodicAbort.signal.aborted) return;
+                sequence += 1;
+                await synchronizeSessionInputs(`periodic-${sequence}`);
+              }
+            } catch (error) {
+              if (periodicAbort.signal.aborted) return;
+              sessionInputSyncFailure = error;
+              controller.abort(error);
+            } finally {
+              controller.signal.removeEventListener("abort", abortPeriodic);
+            }
+          })();
+        }
         const checkpointLiveTurn = async (input: {
           checkpointId: string;
           sessionId: string;
@@ -486,6 +561,7 @@ export function createManagedRuntimeHost(
             throw new Error("Harness requested an invalid or duplicate live checkpoint");
           }
           controller.signal.throwIfAborted();
+          await synchronizeSessionInputs(`checkpoint-${input.checkpointId}`);
           const workspaceCandidate = await dependencies.workspace.checkpoint({
             scope,
             fence,
@@ -551,10 +627,20 @@ export function createManagedRuntimeHost(
           checkpoint: checkpointLiveTurn,
           signal: controller.signal,
         });
-        if (leaseLost || execution.type === "aborted") {
+        sessionInputSyncAbort?.abort(new Error("Managed runtime harness settled"));
+        await sessionInputSyncLoop;
+        await sessionInputSyncTail;
+        if (leaseLost) {
           cleanupReason = "lease_lost";
           return { type: "lease_lost" };
         }
+        if (sessionInputSyncFailure !== null) throw sessionInputSyncFailure;
+        if (execution.type === "aborted") {
+          cleanupReason = "lease_lost";
+          return { type: "lease_lost" };
+        }
+
+        await synchronizeSessionInputs("final");
 
         if (plan.workspaceStrategy === "retained_runtime") {
           sandboxLease = await dependencies.sandbox.suspend({
@@ -655,6 +741,9 @@ export function createManagedRuntimeHost(
         return { type: "failed", error };
       } finally {
         signal?.removeEventListener("abort", onExternalAbort);
+        sessionInputSyncAbort?.abort(new Error("Managed runtime cleanup"));
+        await sessionInputSyncLoop;
+        await sessionInputSyncTail;
         controller.abort(new Error("Managed runtime cleanup"));
         if (
           credentialEgressBinding !== null

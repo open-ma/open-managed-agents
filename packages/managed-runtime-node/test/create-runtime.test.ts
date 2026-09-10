@@ -59,6 +59,7 @@ describe("createNodeManagedRuntime", () => {
     };
     const sessionInputs: SessionInputMaterializerPort = {
       materialize: vi.fn(async () => undefined),
+      synchronize: vi.fn(async () => undefined),
     };
 
     const options = {
@@ -201,6 +202,7 @@ describe("createNodeManagedRuntime", () => {
     roots.push(rootDir);
     const sessionInputs: SessionInputMaterializerPort = {
       materialize: vi.fn(async () => undefined),
+      synchronize: vi.fn(async () => undefined),
     };
 
     const runtime = await createNodeManagedRuntime({

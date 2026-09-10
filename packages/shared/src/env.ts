@@ -186,9 +186,39 @@ export interface Env {
       sessionId: string;
       memoryStoreId: string;
       access: "read_only" | "read_write";
+      runtimeGeneration?: string;
     }): Promise<
       | { type: "found"; mountStoreId: string }
       | { type: "not_found" }
+    >;
+    synchronizeManagedMemorySnapshots(opts: {
+      tenantId: string;
+      sessionId: string;
+      runtimeGeneration: string;
+      executionFence: {
+        executionId: string;
+        workspaceId: string;
+        sessionId: string;
+        attemptId: string;
+        ownerId: string;
+        generation: number;
+        expiresAt: string;
+      };
+    }): Promise<
+      | {
+          type: "synchronized";
+          created: number;
+          updated: number;
+          deleted: number;
+          conflicts: Array<{
+            memoryStoreId: string;
+            path: string;
+            reason: "changed_both";
+          }>;
+          recoveredWipes: string[];
+        }
+      | { type: "not_found" }
+      | { type: "fence_lost" }
     >;
     resolveManagedSkillVersion?(opts: {
       tenantId: string;

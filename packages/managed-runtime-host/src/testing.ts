@@ -126,6 +126,10 @@ export class MemoryRuntimeResourceFencePort implements RuntimeResourceFencePort 
     return { type: "renewed", fence: { ...renewed } } as const;
   }
 
+  async isCurrent(fence: RuntimeResourceFence): Promise<boolean> {
+    return this.#isCurrent(this.#records.get(scopeKey(fence)), fence);
+  }
+
   async publish(input: {
     fence: RuntimeResourceFence;
     workspaceCandidate: RuntimePublicationCandidate;

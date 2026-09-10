@@ -134,7 +134,10 @@ describe("Cloudflare Sandbox Bridge managed runtime provider package", () => {
 
   it("exposes the operator Session resource materializer through the driver package", async () => {
     const store = new InMemoryBlobStore();
-    const sessionInputs = { materialize: async () => undefined };
+    const sessionInputs = {
+      materialize: async () => undefined,
+      synchronize: async () => undefined,
+    };
     const driver = cloudflareBridge.createCloudflareBridgeManagedRuntimeDriver({
       baseUrl: "https://bridge.example.test",
       apiKey: "bridge-secret",

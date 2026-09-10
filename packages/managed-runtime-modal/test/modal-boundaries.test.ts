@@ -406,7 +406,7 @@ describe("Modal provider boundary contracts", () => {
       attach: async () => undefined,
       revoke: async () => undefined,
     };
-    const sessionInputs = { materialize: vi.fn() };
+    const sessionInputs = { materialize: vi.fn(), synchronize: vi.fn() };
     const driver = createModalManagedRuntimeDriver({
       ...providerOptions, client: sdk(value), leaseTtlMs: 100,
       outputStore: new InMemoryBlobStore(), credentialEgress: egress, sessionInputs,

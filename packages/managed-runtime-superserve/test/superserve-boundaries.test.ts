@@ -340,7 +340,7 @@ describe("Superserve provider boundary contracts", () => {
       capabilities: { enforcement: "enforced" as const, credentialMode: "live" as const, interceptedProtocols: ["https" as const] },
       attach: async () => undefined, revoke: async () => undefined,
     };
-    const sessionInputs = { materialize: vi.fn() };
+    const sessionInputs = { materialize: vi.fn(), synchronize: vi.fn() };
     const driver = createSuperserveManagedRuntimeDriver({
       client: sdk(value), leaseTtlMs: 100, outputStore: new InMemoryBlobStore(), credentialEgress: egress,
       sessionInputs, readiness: { timeoutMs: 500 },
