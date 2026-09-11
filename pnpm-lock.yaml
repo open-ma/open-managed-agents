@@ -2602,6 +2602,9 @@ importers:
         specifier: workspace:*
         version: link:../sandbox
     devDependencies:
+      '@fly/sprites':
+        specifier: 0.2.2
+        version: 0.2.2
       '@types/node':
         specifier: ^26.2.0
         version: 26.3.0
@@ -5408,6 +5411,12 @@ packages:
 
   '@floating-ui/utils@0.2.11':
     resolution: {integrity: sha512-RiB/yIh78pcIxl6lLMG0CgBXAZ2Y0eVHqMPYugu+9U0AeT6YBeiJpf7lbdJNIugFP5SIjwNRgo4DhR1Qxi26Gg==}
+
+  '@fly/sprites@0.2.2':
+    resolution: {integrity: sha512-qlVLIvBBmS/c/i8Ah9ydcdkho/kEW2w5pX7UaUjp4Ye5mBD3eJi53lXBg33F0Rwna+U6fuEELLrDWxGe/Vk97A==}
+    engines: {node: '>=24.0.0'}
+    bundledDependencies:
+      - '@fly/client-signals'
 
   '@fontsource-variable/geist@5.2.8':
     resolution: {integrity: sha512-cJ6m9e+8MQ5dCYJsLylfZrgBh6KkG4bOLckB35Tr9J/EqdkEM6QllH5PxqP1dhTvFup+HtMRPuz9xOjxXJggxw==}
@@ -14738,6 +14747,8 @@ snapshots:
       react-dom: 19.2.8(react@19.2.8)
 
   '@floating-ui/utils@0.2.11': {}
+
+  '@fly/sprites@0.2.2': {}
 
   '@fontsource-variable/geist@5.2.8': {}
 

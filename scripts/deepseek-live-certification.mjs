@@ -41,7 +41,13 @@ export async function runDeepSeekCertification(options = {}) {
   const plan = buildDeepSeekCertificationPlan();
   const commands = new Map([
     ["pi-harness-out", ["pnpm", ["--filter", "@open-managed-agents/main-node", "test:e2e:pi-deepseek"]]],
-    ["pi-compaction-cache", ["pnpm", ["exec", "tsx", "scripts/probe-pi-deepseek-compaction-cache.ts"]]],
+    ["pi-compaction-cache", ["pnpm", [
+      "--filter",
+      "@open-managed-agents/main-node",
+      "exec",
+      "tsx",
+      "../../scripts/probe-pi-deepseek-compaction-cache.ts",
+    ]]],
     ["acp-native-resume-cache", ["pnpm", ["--filter", "@open-managed-agents/main-node", "test:e2e:acp-deepseek-cache"]]],
     ["pi-acp-docker", ["pnpm", ["--filter", "@open-managed-agents/main-node", "test:e2e:pi-acp-docker"]]],
   ]);
