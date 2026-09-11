@@ -44,3 +44,6 @@ jobs:
 
       - name: Storage integration tests
         run: pnpm test:integration:storage
+
+      - name: MySQL integration tests
+        run: pnpm test:integration:mysql

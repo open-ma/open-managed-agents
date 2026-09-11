@@ -26,3 +26,38 @@ export {
 } from "./placement.js";
 
 export { KNOWN_ACP_AGENTS, detect, detectAll, type KnownAgentEntry } from "./registry.js";
+export {
+  ACP_NATIVE_STATE_PROFILES,
+  HARBOR_NATIVE_STATE_COVERAGE,
+  bindAcpAgentState,
+} from "./native-state.js";
+export type {
+  AcpAgentStateBinding,
+  AcpNativeSessionArtifact,
+  AcpNativeStateAdapterId,
+  AcpNativeStateProfile,
+  AcpStatefulAgentSpec,
+  HarborNativeStateCoverage,
+} from "./native-state.js";
+export {
+  captureAcpSandboxAgentState,
+  hasRequiredAcpSandboxAgentState,
+  managedMcpProxyFromWorkEnvironment,
+  materializeAcpSandboxAgentState,
+  projectAcpSandboxMcpServers,
+  prepareAcpSandboxAgent,
+  releaseAcpSandboxAgentState,
+  restoreAcpSandboxAgentState,
+  resolveAcpSandboxAgentAdapter,
+} from "./sandbox-agent.js";
+export type {
+  AcpSandboxAgentAdapterDescriptor,
+  AcpSandboxAgentLaunchSpec,
+  AcpSandboxAgentLifecyclePolicy,
+  AcpSandboxAgentPreparation,
+  AcpSandboxAgentReleaseReason,
+  AcpSandboxAgentStatePort,
+  ManagedMcpServerForSandbox,
+  ManagedMcpProxyCapability,
+  ProjectedAcpHttpMcpServer,
+} from "./sandbox-agent.js";

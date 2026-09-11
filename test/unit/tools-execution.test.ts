@@ -82,6 +82,33 @@ describe("Built-in tool execution", () => {
     expect(capturedTimeout).toBe(60000);
   });
 
+  it("bash tool uses bounded exec even when the sandbox exposes background processes", async () => {
+    let capturedTimeout: number | undefined;
+    let startProcessCalls = 0;
+    const sandbox: any = {
+      exec: async (_cmd: string, timeout?: number) => {
+        capturedTimeout = timeout;
+        return "exit=0\nforeground-complete";
+      },
+      startProcess: async () => {
+        startProcessCalls += 1;
+        throw new Error("background process path must not be used for foreground bash");
+      },
+      readFile: async () => "",
+      writeFile: async () => "ok",
+    };
+    const tools = await buildTools(makeAgentConfig(), sandbox);
+
+    const result = await tools.bash.execute(
+      { command: "echo foreground-complete", timeout: 25_000 },
+      TOOL_EXEC_OPTS,
+    );
+
+    expect(result).toBe("exit=0\nforeground-complete");
+    expect(capturedTimeout).toBe(25_000);
+    expect(startProcessCalls).toBe(0);
+  });
+
   it("bash tool appends a retry hint after chained secret-backed command failure", async () => {
     const sandbox: any = {
       exec: async () =>

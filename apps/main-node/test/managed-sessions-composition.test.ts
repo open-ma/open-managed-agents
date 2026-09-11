@@ -138,6 +138,62 @@ describe("SqlManagedSessionsComposition", () => {
     expect(other.sessions).not.toBe(first.sessions);
   });
 
+  it("uses an explicitly composed event stream independently from runtime dispatch", async () => {
+    const streamCalls: object[] = [];
+    const composition = new SqlManagedSessionsComposition({
+      client,
+      environments: new SqlSessionEnvironmentSource(client),
+      lifecycle: {
+        sessionStarted: async () => {},
+        sessionStopped: async () => {},
+      },
+      runtime: {
+        sessionEventsAccepted: async () => {},
+        sessionThreadArchived: async () => {},
+        subscribe: () => {
+          throw new Error("runtime stream must not be selected");
+        },
+      },
+      eventStream: {
+        subscribe: (input) => {
+          streamCalls.push(input);
+          return (async function* () {
+            yield { type: "event_start", eventId: "stream_01" } as never;
+          })();
+        },
+      },
+      sealer: { seal: async (value) => `sealed:${value}` },
+      clock: { now: () => new Date("2026-08-26T01:00:00.000Z") },
+      ids: {
+        nextSessionId: () => "session_01",
+        nextEventId: () => "sevt_01",
+        nextOutcomeId: () => "outc_01",
+        nextResourceId: () => "sesrsc_01",
+      },
+    });
+    const ports = composition.portsFor("workspace_01");
+    await ports.sessions.createSession({
+      agent: { type: "latest", agentId: agent.id },
+      environmentId: environment.id,
+    });
+
+    const streamed = await ports.sessionEvents.streamSessionEvents({
+      sessionId: "session_01",
+    });
+    expect(streamed.type).toBe("stream");
+    if (streamed.type !== "stream") throw new Error("expected stream");
+    await expect(streamed.events[Symbol.asyncIterator]().next()).resolves.toEqual({
+      done: false,
+      value: { type: "event_start", eventId: "stream_01" },
+    });
+    expect(streamCalls).toEqual([
+      expect.objectContaining({
+        workspaceId: "workspace_01",
+        sessionId: "session_01",
+      }),
+    ]);
+  });
+
   it("dispatches events with an archived Environment snapshot already referenced by the Session", async () => {
     const dispatches: unknown[] = [];
     const lifecycleStarts: unknown[] = [];

@@ -4,7 +4,6 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { spawn, type ChildProcess } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, rmSync } from "node:fs";
-import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import {
@@ -721,6 +720,304 @@ describe("main-node official Managed Agents route", () => {
       prefix: `node-${suffix}`,
     });
   }, 60_000);
+
+  it("runs official worker bearer auth with scoped per-work credentials when auth is enabled", async () => {
+    handle = await startMainNode(dataDirectory, {
+      authDisabled: false,
+      apiKey: "test-key",
+    });
+    const baseURL = `http://127.0.0.1:${handle.port}`;
+    const client = new Anthropic({ apiKey: "test-key", baseURL, maxRetries: 0 });
+    const suffix = randomBytes(8).toString("hex");
+    const modelId = `worker-auth-${suffix}`;
+    const modelCard = await fetch(`${baseURL}/v1/oma/model_cards`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        provider: "ant",
+        model_id: modelId,
+        api_key: "sk-ant-worker-auth-test-key",
+      }),
+    });
+    expect(modelCard.status).toBe(201);
+    const environment = await client.beta.environments.create({
+      name: `worker-auth-${suffix}`,
+      config: { type: "self_hosted" },
+    });
+    const environmentKeyResponse = await fetch(`${baseURL}/v1/oma/api_keys`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        name: `worker-${suffix}`,
+        environment_id: environment.id,
+      }),
+    });
+    expect(environmentKeyResponse.status).toBe(201);
+    const environmentCredential = await environmentKeyResponse.json() as {
+      id: string;
+      key: string;
+    };
+    expect(environmentCredential.key).toMatch(/^oma_env_/);
+    expect((await fetch(`${baseURL}/v1/agents`, {
+      headers: { authorization: `Bearer ${environmentCredential.key}` },
+    })).status).toBe(403);
+    expect((await fetch(`${baseURL}/v1/environments/env_other/work/poll`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${environmentCredential.key}` },
+    })).status).toBe(403);
+    expect((await fetch(`${baseURL}/v1/environments/${environment.id}/work/poll`, {
+      method: "POST",
+      headers: { "x-api-key": environmentCredential.key },
+    })).status).toBe(403);
+    const attachedFile = await client.beta.files.upload({
+      file: new File(["attached work input"], "input.txt", {
+        type: "text/plain",
+      }),
+    });
+    const unrelatedFile = await client.beta.files.upload({
+      file: new File(["not attached"], "unrelated.txt", {
+        type: "text/plain",
+      }),
+    });
+    const attachedSkill = await client.beta.skills.create({
+      display_title: "Worker attached skill",
+      files: [
+        new File([SKILL_MARKDOWN], "repository-guide/SKILL.md", {
+          type: "text/markdown",
+        }),
+      ],
+    });
+    const unrelatedSkill = await client.beta.skills.create({
+      display_title: "Worker unrelated skill",
+      files: [
+        new File([SKILL_MARKDOWN], "unrelated/SKILL.md", {
+          type: "text/markdown",
+        }),
+      ],
+    });
+    const attachedMemoryStore = await client.beta.memoryStores.create({
+      name: `worker-memory-${suffix}`,
+    });
+    const unrelatedMemoryStore = await client.beta.memoryStores.create({
+      name: `worker-unrelated-memory-${suffix}`,
+    });
+    const attachedMemory = await client.beta.memoryStores.memories.create(
+      attachedMemoryStore.id,
+      {
+        content: "worker memory input",
+        path: "/input.md",
+        view: "full",
+      },
+    );
+    const agent = await client.beta.agents.create({
+      name: `worker-auth-${suffix}`,
+      model: modelId,
+      skills: [{
+        type: "custom",
+        skill_id: attachedSkill.id,
+        version: "latest",
+      }],
+    });
+    const session = await client.beta.sessions.create({
+      agent: { type: "agent", id: agent.id, version: agent.version },
+      environment_id: environment.id,
+      title: "Official worker bearer auth",
+      resources: [
+        { type: "file", file_id: attachedFile.id },
+        {
+          type: "memory_store",
+          memory_store_id: attachedMemoryStore.id,
+          access: "read_write",
+        },
+      ],
+    });
+
+    const environmentClient = new Anthropic({
+      apiKey: null,
+      authToken: environmentCredential.key,
+      baseURL,
+      maxRetries: 0,
+    });
+    const poller = client.beta.environments.work.poller({
+      environmentId: environment.id,
+      environmentKey: environmentCredential.key,
+      workerId: `worker-${suffix}`,
+      blockMs: null,
+      autoStop: false,
+    });
+    const iterator = poller[Symbol.asyncIterator]();
+    const next = await iterator.next();
+    expect(next.done).toBe(false);
+    const work = next.value!;
+    const sessionsToken = decodeWorkSecret(work.secret!).sessions_token;
+    expect(sessionsToken).toMatch(/^sk-ant-req-v1\./);
+    const sessionClient = new Anthropic({
+      apiKey: null,
+      authToken: String(sessionsToken),
+      baseURL,
+      maxRetries: 0,
+    });
+
+    await expect(sessionClient.beta.sessions.retrieve(session.id)).resolves.toMatchObject({
+      id: session.id,
+      environment_id: environment.id,
+    });
+    await expect(
+      sessionClient.beta.files.retrieveMetadata(attachedFile.id),
+    ).resolves.toMatchObject({ id: attachedFile.id, filename: "input.txt" });
+    await expect(
+      sessionClient.beta.files.download(attachedFile.id).then((file) => file.text()),
+    ).resolves.toBe("attached work input");
+    await expect(
+      sessionClient.beta.files.download(unrelatedFile.id),
+    ).rejects.toMatchObject({ status: 401 });
+
+    const attachedSkillVersions = await sessionClient.beta.skills.versions.list(
+      attachedSkill.id,
+    );
+    expect(attachedSkillVersions.data).toHaveLength(1);
+    const concreteSkillVersion = attachedSkillVersions.data[0]!.version;
+    await expect(
+      sessionClient.beta.skills.versions.retrieve(concreteSkillVersion, {
+        skill_id: attachedSkill.id,
+      }),
+    ).resolves.toMatchObject({
+      skill_id: attachedSkill.id,
+      version: concreteSkillVersion,
+    });
+    await expect(
+      sessionClient.beta.skills.versions.download(concreteSkillVersion, {
+        skill_id: attachedSkill.id,
+      }).then((file) => file.arrayBuffer()),
+    ).resolves.toBeInstanceOf(ArrayBuffer);
+    await expect(
+      sessionClient.beta.skills.versions.list(unrelatedSkill.id),
+    ).rejects.toMatchObject({ status: 401 });
+
+    const memories = await sessionClient.beta.memoryStores.memories.list(
+      attachedMemoryStore.id,
+      { view: "full" },
+    );
+    expect(memories.data).toMatchObject([{
+      id: attachedMemory.id,
+      content: "worker memory input",
+    }]);
+    await expect(
+      sessionClient.beta.memoryStores.memories.update(attachedMemory.id, {
+        memory_store_id: attachedMemoryStore.id,
+        content: "worker memory output",
+        view: "full",
+      }),
+    ).resolves.toMatchObject({
+      id: attachedMemory.id,
+      content: "worker memory output",
+    });
+    await expect(
+      sessionClient.beta.memoryStores.memories.list(unrelatedMemoryStore.id),
+    ).rejects.toMatchObject({ status: 401 });
+    const unrelated = await fetch(`${baseURL}/v1/agents`, {
+      headers: { Authorization: `Bearer ${sessionsToken}` },
+    });
+    expect(unrelated.status).toBe(401);
+    await expect(
+      sessionClient.beta.environments.work.heartbeat(work.id, {
+        environment_id: environment.id,
+        desired_ttl_seconds: 0,
+      }),
+    ).resolves.toMatchObject({ type: "work_heartbeat", lease_extended: true });
+    poller.abort();
+    await iterator.return?.();
+    const replacement = await environmentClient.beta.environments.work.poll(
+      environment.id,
+      {
+        "Anthropic-Worker-ID": `replacement-${suffix}`,
+        reclaim_older_than_ms: 5_000,
+      },
+    );
+    expect(replacement).not.toBeNull();
+    if (replacement === null) throw new Error("expected replacement Work claim");
+    const replacementToken = String(
+      decodeWorkSecret(replacement.secret!).sessions_token,
+    );
+    expect(replacementToken).not.toBe(String(sessionsToken));
+    await environmentClient.beta.environments.work.ack(replacement.id, {
+      environment_id: environment.id,
+    });
+    await expect(
+      sessionClient.beta.sessions.retrieve(session.id),
+    ).rejects.toMatchObject({ status: 401 });
+    const replacementSessionClient = new Anthropic({
+      apiKey: null,
+      authToken: replacementToken,
+      baseURL,
+      maxRetries: 0,
+    });
+    await expect(
+      replacementSessionClient.beta.sessions.retrieve(session.id),
+    ).resolves.toMatchObject({ id: session.id });
+    await replacementSessionClient.beta.environments.work.heartbeat(
+      replacement.id,
+      {
+        environment_id: environment.id,
+        expected_last_heartbeat: "NO_HEARTBEAT",
+      },
+    );
+    const runtimeEventId = `runtime-${suffix}`;
+    const runtimeIngress = await fetch(
+      `${baseURL}/v1/oma/sessions/${session.id}/runtime-events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${replacementToken}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          events: [{
+            id: runtimeEventId,
+            type: "session.status_idle",
+            processed_at: new Date().toISOString(),
+            stop_reason: { type: "end_turn" },
+          }],
+        }),
+      },
+    );
+    expect(runtimeIngress.status).toBe(200);
+    await expect(runtimeIngress.json()).resolves.toEqual({
+      data: [{ id: runtimeEventId }],
+    });
+    const runtimeHistory = await replacementSessionClient.beta.sessions.events.list(
+      session.id,
+      { types: ["session.status_idle"] },
+    );
+    expect(runtimeHistory.data).toContainEqual(expect.objectContaining({
+      id: runtimeEventId,
+      type: "session.status_idle",
+    }));
+    await expect(
+      environmentClient.beta.environments.work.stop(work.id, {
+        environment_id: environment.id,
+        force: true,
+      }),
+    ).resolves.toMatchObject({ id: work.id, state: "stopped" });
+    const revoked = await fetch(
+      `${baseURL}/v1/oma/api_keys/${environmentCredential.id}`,
+      { method: "DELETE", headers: { "x-api-key": "test-key" } },
+    );
+    expect(revoked.status).toBe(200);
+    expect((await fetch(
+      `${baseURL}/v1/environments/${environment.id}/work/poll`,
+      {
+        method: "POST",
+        headers: { authorization: `Bearer ${environmentCredential.key}` },
+      },
+    )).status).toBe(401);
+  }, 60_000);
 });
 
 function decodeWorkSecret(secret: string): Record<string, unknown> {
@@ -749,21 +1046,27 @@ function testCertificatePem(): string {
   ].join("\n");
 }
 
-async function startMainNode(dataDirectory: string): Promise<ProcessHandle> {
-  const port = await pickPort();
+async function startMainNode(
+  dataDirectory: string,
+  options: { authDisabled?: boolean; apiKey?: string } = {},
+): Promise<ProcessHandle> {
   const child = spawn(TSX_BIN, [MAIN_NODE_ENTRY], {
     ...detachedProcessOptions,
     cwd: REPO_ROOT,
     env: {
       ...process.env,
-      PORT: String(port),
+      // Let the server bind port 0 itself. Picking and releasing an ephemeral
+      // port before spawning leaves a TOCTOU window where another process can
+      // claim it and made this state-model E2E intermittently fail EADDRINUSE.
+      PORT: "0",
       DATABASE_PATH: join(dataDirectory, "oma.db"),
       AUTH_DATABASE_PATH: join(dataDirectory, "auth.db"),
       SANDBOX_WORKDIR: join(dataDirectory, "sandboxes"),
       MEMORY_BLOB_DIR: join(dataDirectory, "memory-blobs"),
       FILES_BLOB_DIR: join(dataDirectory, "file-blobs"),
       SESSION_OUTPUTS_DIR: join(dataDirectory, "outputs"),
-      AUTH_DISABLED: "1",
+      AUTH_DISABLED: options.authDisabled === false ? "0" : "1",
+      ...(options.apiKey === undefined ? {} : { API_KEY: options.apiKey }),
       BETTER_AUTH_SECRET: "managed-agents-node-test-secret",
       PLATFORM_ROOT_SECRET: "managed-agents-node-credential-test-root-secret",
       DREAM_CURATOR_MODE: "dedup",
@@ -777,11 +1080,17 @@ async function startMainNode(dataDirectory: string): Promise<ProcessHandle> {
 
   const deadline = Date.now() + 30_000;
   while (Date.now() < deadline) {
-    try {
-      const response = await fetch(`http://127.0.0.1:${port}/health`);
-      if (response.ok) return { child, port, logBuffer };
-    } catch {
-      // Process is still booting.
+    if (child.exitCode !== null || child.signalCode !== null) {
+      throw new Error(`main-node exited before becoming ready:\n${logBuffer.join("")}`);
+    }
+    const port = listeningPort(logBuffer);
+    if (port !== null) {
+      try {
+        const response = await fetch(`http://127.0.0.1:${port}/health`);
+        if (response.ok) return { child, port, logBuffer };
+      } catch {
+        // The listener was announced but the health route is still booting.
+      }
     }
     await new Promise((resolveReady) => setTimeout(resolveReady, 200));
   }
@@ -789,22 +1098,24 @@ async function startMainNode(dataDirectory: string): Promise<ProcessHandle> {
   throw new Error(`main-node did not become ready:\n${logBuffer.join("")}`);
 }
 
-function killHard(handle: ProcessHandle): Promise<void> {
-  return killProcessTree(handle.child);
+function listeningPort(chunks: readonly string[]): number | null {
+  for (const line of chunks.join("").split("\n")) {
+    try {
+      const event = JSON.parse(line) as { op?: unknown; port?: unknown };
+      if (
+        event.op === "main-node.listening"
+        && Number.isSafeInteger(event.port)
+        && Number(event.port) > 0
+      ) {
+        return Number(event.port);
+      }
+    } catch {
+      // Startup can include non-JSON dependency logs; ignore those lines.
+    }
+  }
+  return null;
 }
 
-function pickPort(): Promise<number> {
-  return new Promise((resolvePort, rejectPort) => {
-    const server = createServer();
-    server.unref();
-    server.on("error", rejectPort);
-    server.listen(0, "127.0.0.1", () => {
-      const address = server.address();
-      if (typeof address !== "object" || address === null) {
-        rejectPort(new Error("Could not allocate a test port"));
-        return;
-      }
-      server.close(() => resolvePort(address.port));
-    });
-  });
+function killHard(handle: ProcessHandle): Promise<void> {
+  return killProcessTree(handle.child);
 }

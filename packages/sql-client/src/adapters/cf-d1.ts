@@ -71,7 +71,19 @@ export class CfD1SqlClient implements SqlClient {
   }
 
   async exec(sql: string): Promise<void> {
-    await this.db.exec(sql);
+    // D1's `exec()` parser treats newlines inside a CREATE statement as a
+    // statement boundary in workerd (and returns SQLITE_ERROR: incomplete
+    // input).  All callers already use this method for migration/DDL SQL, so
+    // execute each complete statement through the prepared-statement path.
+    // Keep quoted semicolons intact; this is intentionally a tiny migration
+    // splitter rather than a general SQL parser.
+    const statements = sql
+      .split(/;(?=(?:[^']|'[^']*')*$)/u)
+      .map((statement) => statement.trim())
+      .filter(Boolean);
+    for (const statement of statements) {
+      await this.db.prepare(statement).run();
+    }
   }
 }
 

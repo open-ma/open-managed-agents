@@ -278,7 +278,6 @@ export function RuntimesList() {
             <ul className="text-xs text-fg-muted space-y-1 ml-4 list-disc font-mono">
               <li><span className="text-fg">claude-acp</span> · <code className="bg-bg-surface px-1 rounded">npx -y @agentclientprotocol/claude-agent-acp</code> (auto-installed if <code className="bg-bg-surface px-1 rounded">claude</code> is on PATH)</li>
               <li><span className="text-fg">codex-acp</span> · download from <a href="https://github.com/zed-industries/codex-acp/releases" target="_blank" rel="noreferrer" className="underline">zed-industries/codex-acp releases</a></li>
-              <li><span className="text-fg">openclaw</span> · <code className="bg-bg-surface px-1 rounded">npm i -g openclaw</code> (uses <code className="bg-bg-surface px-1 rounded">openclaw acp</code> bridge)</li>
               <li><span className="text-fg">hermes</span> · <code className="bg-bg-surface px-1 rounded">curl -fsSL https://raw.githubusercontent.com/NousResearch/hermes-agent/main/scripts/install.sh | bash</code></li>
             </ul>
           </div>

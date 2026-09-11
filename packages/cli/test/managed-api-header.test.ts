@@ -52,6 +52,43 @@ describe("Managed Agents CLI transport", () => {
     expect(receivedBeta).toBe("managed-agents-2026-04-01");
   });
 
+  it("keeps agents list machine-readable in json mode even when the page is empty", async () => {
+    const baseURL = await listen((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify({ data: [], has_more: false, next_page: null }));
+    });
+
+    const result = await runCli(baseURL, "agents", "list", "--json");
+
+    expect(JSON.parse(result.stdout)).toEqual({
+      data: [],
+      has_more: false,
+      next_page: null,
+    });
+  });
+
+  it("prints the complete agents page in json mode", async () => {
+    const page = {
+      data: [{
+        id: "agent_123",
+        type: "agent",
+        name: "Contract agent",
+        model: { id: "deepseek-v4-pro" },
+        created_at: "2026-09-01T00:00:00Z",
+      }],
+      has_more: false,
+      next_page: null,
+    };
+    const baseURL = await listen((_request, response) => {
+      response.writeHead(200, { "content-type": "application/json" });
+      response.end(JSON.stringify(page));
+    });
+
+    const result = await runCli(baseURL, "agents", "list", "--json");
+
+    expect(JSON.parse(result.stdout)).toEqual(page);
+  });
+
   it("archives agents with the official action endpoint", async () => {
     let requestShape = "";
     const baseURL = await listen((request, response) => {

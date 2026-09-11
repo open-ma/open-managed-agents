@@ -9,6 +9,12 @@
 - v0 and v1 coexist during migration. New v1 packages may not import an app,
   route, Durable Object, or service container from v0.
 
+The self-hosted worker boundary, workspace/output persistence semantics,
+provider capabilities, fencing rules, and adapter rollout are normative in
+[`ADR 0005`](adr/0005-self-hosted-worker-runtime-resources.md). The official
+Managed Agents `self_hosted` shape and OpenMA's managed-runtime resource Ports
+are deliberately separate planes.
+
 ## Package model
 
 v1 follows an interface-package plus implementation-package model. A domain
@@ -26,7 +32,7 @@ that interface.
 agent-store-memory   agent-store-sql ──> sql-client
                                       ▲
                                       │
-                              D1 / SQLite / Postgres drivers
+                              D1 / SQLite / Postgres / MySQL drivers
 ```
 
 The first extracted domain families are now:
@@ -214,8 +220,8 @@ There is no universal `Store` service locator.
 
 Database relationships belong to the domain implementation. For example,
 agent current/version tables, optimistic replacement, workspace isolation,
-ordering, and transaction semantics live in `agent-store-sql`. A D1 or
-Postgres driver only implements the generic SQL client and knows nothing about
+ordering, and transaction semantics live in `agent-store-sql`. A D1,
+Postgres, or MySQL driver implements the generic SQL client and knows nothing about
 Agents.
 
 Cross-domain business relationships are different: they are expressed as
@@ -265,8 +271,8 @@ state machine, SQL queries, protocol conversion, or business decisions.
 
 | v0 responsibility | v1 interface/domain package | Cloudflare implementation | Other implementation |
 | --- | --- | --- | --- |
-| Session state, threads, usage, pending callbacks | per-domain Session Stores | domain SQL Stores over DO SQLite/D1 | SQLite/Postgres Stores |
-| Canonical event append/list and pending queue | Session Event Store | SQL Store over DO SQLite | SQL Store over SQLite/Postgres |
+| Session state, threads, usage, pending callbacks | per-domain Session Stores | domain SQL Stores over DO SQLite/D1 | SQLite/Postgres/MySQL Stores |
+| Canonical event append/list and pending queue | Session Event Store | SQL Store over DO SQLite | SQL Store over SQLite/Postgres/MySQL |
 | Turn begin/end, interruption, recovery | Session Runtime | thin CF runtime host | Node runtime host |
 | One-turn-at-a-time and per-thread coordination | Turn Coordinator | DO single-writer coordinator | process/distributed lock coordinator |
 | Scheduled wakeups and recovery polling | Wakeup Scheduler | DO alarm adapter | timer/queue scheduler |

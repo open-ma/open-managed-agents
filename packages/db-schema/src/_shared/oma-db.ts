@@ -49,7 +49,7 @@ export type OmaDb<TSchema extends Record<string, unknown> = Record<string, unkno
  * Prefer NOT using this. If you find yourself reaching for it, ask
  * whether the divergence belongs in this `_shared/` module instead.
  */
-export type OmaDialect = "sqlite" | "pg";
+export type OmaDialect = "sqlite" | "pg" | "mysql";
 
 /**
  * Structural alias of the chain-builder methods every Drizzle dialect

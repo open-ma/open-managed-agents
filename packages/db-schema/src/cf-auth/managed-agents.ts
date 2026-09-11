@@ -292,6 +292,7 @@ export const managed_environment_work = sqliteTable(
     sealed_secret: text("sealed_secret").notNull(),
     claim_at: integer("claim_at"),
     claim_worker_id: text("claim_worker_id"),
+    claim_generation: integer("claim_generation").notNull().default(0),
     heartbeat_ttl_seconds: integer("heartbeat_ttl_seconds").notNull(),
     revision: integer("revision").notNull(),
     state: text("state").notNull(),

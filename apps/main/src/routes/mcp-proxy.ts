@@ -10,7 +10,7 @@
  *   │  (the harness — no creds)      │
  *   └─────────────┬──────────────────┘
  *                 │
- *                 ├── HTTP via Bearer oma_*  (local-runtime path)
+ *                 ├── HTTP via API key or current Work bearer
  *                 │   /v1/oma/mcp-proxy/<sid>/<server_name>
  *                 │
  *                 └── WorkerEntrypoint RPC via service binding
@@ -27,6 +27,9 @@
  * Auth surface (HTTP path):
  *   - Bearer omak_*: hashed in CONFIG_KV `apikey:<sha256>` (same row API
  *     keys created via /v1/oma/api_keys use). Resolves to (tenant_id, user_id).
+ *   - Bearer sk-ant-req-v1.*: sealed self-hosted Work capability; the top-level
+ *     middleware validates expiry, exact current claim, heartbeat TTL, and the
+ *     Session-scoped proxy path before this router runs.
  *   - sid in URL: must reference a row in `sessions` belonging to the same
  *     tenant. session.archived_at IS NULL gates "this session is still alive";
  *     deletion → proxy returns 403 immediately, no token revocation needed.
@@ -51,12 +54,125 @@ import { log, logWarn } from "@open-managed-agents/shared";
 import type { Services } from "@open-managed-agents/services";
 import type { KvStore } from "@open-managed-agents/kv-store";
 import { builtinSpecs, createSpecRegistry } from "@open-managed-agents/cap";
+import { SqlSessionSource } from "@open-managed-agents/managed-agents-adapters-sql";
+import { SqlCredentialStore } from "@open-managed-agents/credential-store-sql";
+import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-cf";
 
 // Module-level: the cap spec registry is pure data + immutable. Building
 // once amortises validation across every outbound request.
 const capRegistry = createSpecRegistry(builtinSpecs);
 
-const app = new Hono<{ Bindings: Env; Variables: { services: Services } }>();
+const app = new Hono<{
+  Bindings: Env;
+  Variables: { services: Services; tenantDb: D1Database };
+}>();
+
+export interface McpProxySessionSource {
+  find(input: { workspaceId: string; sessionId: string }): Promise<{
+    archivedAt: string | null;
+    vaultIds: string[];
+    agent: {
+      mcpServers: Array<{
+        name: string;
+        url: string;
+        authorizationToken?: string;
+      }>;
+    };
+  } | null>;
+}
+
+interface ManagedProxyCredential {
+  id: string;
+  vaultId: string;
+  archivedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  auth: Record<string, unknown> & { type: string };
+}
+
+interface ManagedProxyCredentialRecord {
+  revision: number;
+  credential: ManagedProxyCredential;
+}
+
+/**
+ * Credential half of the managed MCP boundary. The official v1 Vault API
+ * persists encrypted documents in `managed_credentials`; the legacy
+ * `Services.credentials` adapter reads a different table and encryption
+ * context. Keeping this as a narrow Port prevents either storage shape from
+ * leaking into the MCP protocol code.
+ */
+export interface McpProxyCredentialSource {
+  listByVaults(input: {
+    workspaceId: string;
+    vaultIds: string[];
+  }): Promise<ManagedProxyCredentialRecord[]>;
+  find?(input: {
+    workspaceId: string;
+    vaultId: string;
+    credentialId: string;
+  }): Promise<ManagedProxyCredentialRecord | null>;
+  replace?(input: {
+    workspaceId: string;
+    vaultId: string;
+    credentialId: string;
+    expectedRevision: number;
+    next: ManagedProxyCredential;
+  }): Promise<
+    | { type: "replaced"; record: ManagedProxyCredentialRecord }
+    | { type: "not_found" }
+    | { type: "revision_conflict"; actualRevision: number }
+  >;
+}
+
+export function createManagedMcpProxyCredentialSource(
+  env: Env,
+  tenantDb: D1Database,
+): McpProxyCredentialSource {
+  if (!env.PLATFORM_ROOT_SECRET) {
+    throw new Error("PLATFORM_ROOT_SECRET is required for managed Vault credentials");
+  }
+  const crypto = new WebCryptoAesGcm(
+    env.PLATFORM_ROOT_SECRET,
+    "managed.vault.credentials",
+  );
+  const store = new SqlCredentialStore(new CfD1SqlClient(tenantDb), {
+    seal: async ({ plaintext }) => ({ ciphertext: await crypto.encrypt(plaintext) }),
+    open: async ({ ciphertext }) => ({ plaintext: await crypto.decrypt(ciphertext) }),
+  });
+  return {
+    async listByVaults({ workspaceId, vaultIds }) {
+      const records: ManagedProxyCredentialRecord[] = [];
+      for (const vaultId of vaultIds) {
+        let position: { createdAt: string; credentialId: string } | undefined;
+        for (;;) {
+          const page = await store.list({
+            workspaceId,
+            vaultId,
+            includeArchived: true,
+            limit: 100,
+            ...(position !== undefined && { position }),
+          });
+          records.push(...page as ManagedProxyCredentialRecord[]);
+          if (page.length < 100) break;
+          const last = page.at(-1)!;
+          position = {
+            createdAt: last.credential.createdAt,
+            credentialId: last.credential.id,
+          };
+        }
+      }
+      return records;
+    },
+    find: (input) => store.find(input) as Promise<ManagedProxyCredentialRecord | null>,
+    replace: (input) => store.replace(input as never) as Promise<
+      | { type: "replaced"; record: ManagedProxyCredentialRecord }
+      | { type: "not_found" }
+      | { type: "revision_conflict"; actualRevision: number }
+    >,
+  };
+}
 
 export interface ProxyTarget {
   /** Real upstream MCP server URL (e.g. https://integrations.openma.dev/.../mcp). */
@@ -80,7 +196,22 @@ export interface ProxyTarget {
      *  cap_cli uses `token`. Defaults to `access_token` to keep
      *  pre-cap callers working unchanged. */
     tokenField?: "access_token" | "token";
+    /** Present for credentials created through the official v1 Vault API. */
+    credentialSource?: McpProxyCredentialSource;
   };
+}
+
+export interface ForwardHttpMcpProxyRequestInput {
+  env: Env;
+  services: Services;
+  /** Current v1 Session source. Omit only for legacy embedders/tests. */
+  sessionSource?: McpProxySessionSource;
+  /** Current v1 managed Credential source. Omit for legacy callers. */
+  credentialSource?: McpProxyCredentialSource;
+  tenantId: string;
+  sessionId: string;
+  serverName: string;
+  request: Request;
 }
 
 async function sha256(input: string): Promise<string> {
@@ -117,52 +248,103 @@ export async function resolveProxyTargetByTenant(
   tenantId: string,
   sid: string,
   serverName: string,
+  sessionSource?: McpProxySessionSource,
+  credentialSource?: McpProxyCredentialSource,
 ): Promise<ProxyTarget | null> {
   // 1. Session must exist, belong to the same tenant, not archived.
-  const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
+  const managedSessionRecord = sessionSource
+    ? await sessionSource.find({ workspaceId: tenantId, sessionId: sid }).catch(() => null)
+    : null;
+  const session = managedSessionRecord
+    ?? await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
   if (!session) return null;
-  const sessionAny = session as {
+  const legacySession = session as {
     archived_at?: string | null;
     vault_ids?: string[] | null;
     agent_snapshot?: AgentConfig;
   };
-  if (sessionAny.archived_at) return null;
+  const managedSession = session as {
+    archivedAt?: string | null;
+    vaultIds?: string[] | null;
+    agent?: {
+      mcpServers?: Array<{
+        name: string;
+        url: string;
+        authorizationToken?: string;
+      }>;
+    };
+  };
+  if (legacySession.archived_at || managedSession.archivedAt) return null;
 
   // 2. agent_snapshot must declare the requested mcp server.
-  const agent = sessionAny.agent_snapshot;
-  if (!agent) return null;
-  const server = (agent.mcp_servers ?? []).find((s) => s.name === serverName);
+  const legacyAgent = legacySession.agent_snapshot;
+  const server = legacyAgent
+    ? (legacyAgent.mcp_servers ?? []).find((candidate) => candidate.name === serverName)
+    : (managedSession.agent?.mcpServers ?? []).find(
+        (candidate) => candidate.name === serverName,
+      );
   if (!server || !server.url) return null;
 
   // 3. Resolve credential. agent.mcp_servers[].authorization_token, if set,
   //    is the literal token we should inject. Otherwise look up an active
   //    credential matching the server URL across the session's vault_ids.
-  if (server.authorization_token) {
-    return { upstreamUrl: server.url, upstreamToken: server.authorization_token };
+  const inlineToken = (server as {
+    authorization_token?: string;
+    authorizationToken?: string;
+  }).authorization_token ?? (server as { authorizationToken?: string }).authorizationToken;
+  if (inlineToken) {
+    return { upstreamUrl: server.url, upstreamToken: inlineToken };
   }
 
-  const vaultIds = sessionAny.vault_ids ?? [];
+  const vaultIds = legacySession.vault_ids ?? managedSession.vaultIds ?? [];
   if (vaultIds.length === 0) return null;
-  const grouped = await services.credentials
-    .listByVaults({ tenantId, vaultIds })
-    .catch(() => []);
+  const useManagedCredentialSource = managedSessionRecord !== null && credentialSource !== undefined;
+  const managedCredentials = useManagedCredentialSource
+    ? await credentialSource
+      .listByVaults({ workspaceId: tenantId, vaultIds })
+      .catch(() => [])
+    : [];
+  const grouped = useManagedCredentialSource
+    ? [{ vault_id: "managed", credentials: managedCredentials.map((record) => record.credential) }]
+    : await services.credentials.listByVaults({ tenantId, vaultIds }).catch(() => []);
   for (const g of grouped) {
     for (const c of g.credentials) {
-      const auth = (c as unknown as CredentialConfig).auth as
+      const credential = c as unknown as {
+        id: string;
+        archivedAt?: string | null;
+        archived_at?: string | null;
+        vaultId?: string;
+        vault_id?: string;
+        auth?: Record<string, unknown>;
+      };
+      if (credential.archivedAt || credential.archived_at) continue;
+      const auth = credential.auth as
         | {
             type?: string;
             mcp_server_url?: string;
+            mcpServerUrl?: string;
             bearer_token?: string;
             token?: string;
             access_token?: string;
+            accessToken?: string;
             refresh_token?: string;
             token_endpoint?: string;
             client_id?: string;
             client_secret?: string;
+            refresh?: {
+              refreshToken?: string | null;
+              tokenEndpoint?: string;
+              clientId?: string;
+              tokenEndpointAuth?: {
+                type?: string;
+                clientSecret?: string | null;
+              };
+            } | null;
           }
         | undefined;
-      if (auth?.mcp_server_url !== server.url) continue;
-      const token = auth?.bearer_token ?? auth?.token ?? auth?.access_token;
+      if (!auth) continue;
+      if ((auth.mcp_server_url ?? auth.mcpServerUrl) !== server.url) continue;
+      const token = auth.bearer_token ?? auth.token ?? auth.access_token ?? auth.accessToken;
       if (!token) continue;
       const target: ProxyTarget = { upstreamUrl: server.url, upstreamToken: token };
       // Surface refresh metadata for mcp_oauth so 401 can trigger an
@@ -175,6 +357,22 @@ export async function resolveProxyTargetByTenant(
           clientSecret: auth.client_secret,
           credentialId: (c as { id: string }).id,
           vaultId: g.vault_id,
+        };
+      }
+      if (
+        credentialSource
+        && auth.type === "mcp_oauth"
+        && auth.refresh?.refreshToken
+        && auth.refresh.tokenEndpoint
+      ) {
+        target.refresh = {
+          refreshToken: auth.refresh.refreshToken,
+          tokenEndpoint: auth.refresh.tokenEndpoint,
+          clientId: auth.refresh.clientId,
+          clientSecret: auth.refresh.tokenEndpointAuth?.clientSecret ?? undefined,
+          credentialId: credential.id,
+          vaultId: credential.vaultId ?? credential.vault_id ?? "",
+          credentialSource,
         };
       }
       return target;
@@ -207,20 +405,36 @@ export async function resolveOutboundCredentialByHost(
   tenantId: string,
   sid: string,
   hostname: string,
+  sessionSource?: McpProxySessionSource,
+  credentialSource?: McpProxyCredentialSource,
 ): Promise<ProxyTarget | null> {
-  const session = await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
+  const managedSessionRecord = sessionSource
+    ? await sessionSource.find({ workspaceId: tenantId, sessionId: sid }).catch(() => null)
+    : null;
+  const session = managedSessionRecord
+    ?? await services.sessions.get({ tenantId, sessionId: sid }).catch(() => null);
   if (!session) return null;
-  const sessionAny = session as {
+  const legacySession = session as {
     archived_at?: string | null;
     vault_ids?: string[] | null;
   };
-  if (sessionAny.archived_at) return null;
+  const managedSession = session as {
+    archivedAt?: string | null;
+    vaultIds?: string[] | null;
+  };
+  if (legacySession.archived_at || managedSession.archivedAt) return null;
 
-  const vaultIds = sessionAny.vault_ids ?? [];
+  const vaultIds = legacySession.vault_ids ?? managedSession.vaultIds ?? [];
   if (vaultIds.length === 0) return null;
-  const grouped = await services.credentials
-    .listByVaults({ tenantId, vaultIds })
-    .catch(() => []);
+  const useManagedCredentialSource = managedSessionRecord !== null && credentialSource !== undefined;
+  const managedCredentials = useManagedCredentialSource
+    ? await credentialSource
+      .listByVaults({ workspaceId: tenantId, vaultIds })
+      .catch(() => [])
+    : [];
+  const grouped = useManagedCredentialSource
+    ? [{ vault_id: "managed", credentials: managedCredentials.map((record) => record.credential) }]
+    : await services.credentials.listByVaults({ tenantId, vaultIds }).catch(() => []);
 
   // First pass: cap_cli credentials matched via cap's spec registry.
   // Cap owns the per-CLI knowledge — endpoints (`api.github.com`,
@@ -240,7 +454,10 @@ export async function resolveOutboundCredentialByHost(
     let best: { c: typeof grouped[number]["credentials"][number]; vaultId: string; ts: number } | null = null;
     for (const g of grouped) {
       for (const c of g.credentials) {
-        if ((c as { archived_at?: string | null }).archived_at) continue;
+        if (
+          (c as { archived_at?: string | null }).archived_at
+          || (c as { archivedAt?: string | null }).archivedAt
+        ) continue;
         const auth = (c as unknown as CredentialConfig).auth as
           | {
               type?: string;
@@ -305,51 +522,83 @@ export async function resolveOutboundCredentialByHost(
   } | null = null;
   for (const g of grouped) {
     for (const c of g.credentials) {
-      if ((c as { archived_at?: string | null }).archived_at) continue;
+      const credential = c as unknown as {
+        vaultId?: string;
+        vault_id?: string;
+        archivedAt?: string | null;
+        archived_at?: string | null;
+        updatedAt?: string | number;
+        updated_at?: string | number;
+        createdAt?: string | number;
+        created_at?: string | number;
+      };
+      if (credential.archived_at || credential.archivedAt) continue;
       const auth = (c as unknown as CredentialConfig).auth as
         | {
             type?: string;
             mcp_server_url?: string;
+            mcpServerUrl?: string;
             bearer_token?: string;
             token?: string;
             access_token?: string;
+            accessToken?: string;
           }
         | undefined;
-      if (!auth?.mcp_server_url) continue;
+      if (!auth) continue;
+      const mcpServerUrl = auth.mcp_server_url ?? auth.mcpServerUrl;
+      if (!mcpServerUrl) continue;
       let credUrl: URL;
       try {
-        credUrl = new URL(auth.mcp_server_url);
+        credUrl = new URL(mcpServerUrl);
       } catch {
         continue;
       }
       if (credUrl.hostname !== hostname) continue;
-      const token = auth.bearer_token ?? auth.token ?? auth.access_token;
+      const token = auth.bearer_token ?? auth.token ?? auth.access_token ?? auth.accessToken;
       if (!token) continue;
-      const meta = c as { updated_at?: string | number; created_at?: string | number };
-      const tsRaw = meta.updated_at ?? meta.created_at ?? 0;
+      const tsRaw = credential.updated_at
+        ?? credential.updatedAt
+        ?? credential.created_at
+        ?? credential.createdAt
+        ?? 0;
       const ts = typeof tsRaw === "number" ? tsRaw : Date.parse(String(tsRaw)) || 0;
-      if (!bestMcp || ts > bestMcp.ts) bestMcp = { c, vaultId: g.vault_id, ts };
+      if (!bestMcp || ts > bestMcp.ts) {
+        bestMcp = {
+          c,
+          vaultId: credential.vaultId ?? credential.vault_id ?? g.vault_id,
+          ts,
+        };
+      }
     }
   }
   if (bestMcp) {
     const auth = (bestMcp.c as unknown as CredentialConfig).auth as {
       type?: string;
-      mcp_server_url: string;
+      mcp_server_url?: string;
+      mcpServerUrl?: string;
       bearer_token?: string;
       token?: string;
       access_token?: string;
+      accessToken?: string;
       refresh_token?: string;
       token_endpoint?: string;
       client_id?: string;
       client_secret?: string;
+      refresh?: {
+        refreshToken?: string | null;
+        tokenEndpoint?: string;
+        clientId?: string;
+        tokenEndpointAuth?: { clientSecret?: string | null };
+      } | null;
     };
-    const token = auth.bearer_token ?? auth.token ?? auth.access_token!;
+    const token = auth.bearer_token ?? auth.token ?? auth.access_token ?? auth.accessToken!;
+    const mcpServerUrl = auth.mcp_server_url ?? auth.mcpServerUrl!;
     // upstreamUrl on this target is just for forward bookkeeping; the
     // outbound RPC caller passes the actual destination URL it wants
     // hit. We thread the cred's mcp_server_url through so log messages
     // / refresh persistence can correlate, but it's not used by
     // forwardWithRefresh's fetch (which uses caller's URL).
-    const target: ProxyTarget = { upstreamUrl: auth.mcp_server_url, upstreamToken: token };
+    const target: ProxyTarget = { upstreamUrl: mcpServerUrl, upstreamToken: token };
     if (auth.type === "mcp_oauth" && auth.refresh_token && auth.token_endpoint) {
       target.refresh = {
         refreshToken: auth.refresh_token,
@@ -358,6 +607,22 @@ export async function resolveOutboundCredentialByHost(
         clientSecret: auth.client_secret,
         credentialId: (bestMcp.c as { id: string }).id,
         vaultId: bestMcp.vaultId,
+      };
+    }
+    if (
+      credentialSource
+      && auth.type === "mcp_oauth"
+      && auth.refresh?.refreshToken
+      && auth.refresh.tokenEndpoint
+    ) {
+      target.refresh = {
+        refreshToken: auth.refresh.refreshToken,
+        tokenEndpoint: auth.refresh.tokenEndpoint,
+        clientId: auth.refresh.clientId,
+        clientSecret: auth.refresh.tokenEndpointAuth?.clientSecret ?? undefined,
+        credentialId: (bestMcp.c as { id: string }).id,
+        vaultId: bestMcp.vaultId,
+        credentialSource,
       };
     }
     return target;
@@ -389,11 +654,18 @@ export async function forwardToUpstream(
   upstreamHeaders.delete("x-forwarded-for");
   upstreamHeaders.delete("x-forwarded-proto");
   upstreamHeaders.delete("x-real-ip");
+  upstreamHeaders.delete("x-api-key");
+  upstreamHeaders.delete("proxy-authorization");
+  upstreamHeaders.delete("cookie");
+  upstreamHeaders.delete("x-active-tenant");
 
   const upstreamReq = new Request(target.upstreamUrl, {
     method,
     headers: upstreamHeaders,
     body: ["GET", "HEAD"].includes(method) ? undefined : body,
+    // A redirect is a new destination and must be re-authorized explicitly;
+    // never let fetch replay a Vault bearer automatically.
+    redirect: "manual",
   });
 
   return fetch(upstreamReq);
@@ -544,6 +816,18 @@ async function tryRefreshOauth(
   staleAccessToken: string,
 ): Promise<string | null> {
   const tokenField = refresh.tokenField ?? "access_token";
+  let managedCurrent: ManagedProxyCredentialRecord | null = null;
+  if (refresh.credentialSource?.find) {
+    managedCurrent = await refresh.credentialSource.find({
+      workspaceId: tenantId,
+      vaultId: refresh.vaultId,
+      credentialId: refresh.credentialId,
+    }).catch(() => null);
+    const liveAccessToken = managedCurrent?.credential.auth.accessToken;
+    if (typeof liveAccessToken === "string" && liveAccessToken !== staleAccessToken) {
+      return liveAccessToken;
+    }
+  }
   // Double-checked locking against concurrent refresh: if N parallel
   // calls all 401 at the same instant (typical when access_token TTL
   // hits boundary mid-multi-tool-call), they'll all enter this path.
@@ -608,6 +892,15 @@ async function tryRefreshOauth(
     //       invalid. The winner persisted a fresh access_token to D1.
     //       Re-read and route the caller's retry through it.
     try {
+      if (refresh.credentialSource?.find) {
+        const after = await refresh.credentialSource.find({
+          workspaceId: tenantId,
+          vaultId: refresh.vaultId,
+          credentialId: refresh.credentialId,
+        });
+        const winner = after?.credential.auth.accessToken;
+        if (typeof winner === "string" && winner !== staleAccessToken) return winner;
+      }
       const after = await services.credentials
         .get({ tenantId, vaultId: refresh.vaultId, credentialId: refresh.credentialId })
         .catch(() => null);
@@ -629,6 +922,53 @@ async function tryRefreshOauth(
     return null;
   }
   if (!tokens.access_token) return null;
+
+  if (
+    refresh.credentialSource?.replace
+    && managedCurrent !== null
+    && managedCurrent.credential.auth.type === "mcp_oauth"
+  ) {
+    const currentAuth = managedCurrent.credential.auth;
+    const currentRefresh = currentAuth.refresh;
+    if (typeof currentRefresh === "object" && currentRefresh !== null) {
+      const next: ManagedProxyCredential = {
+        ...managedCurrent.credential,
+        updatedAt: new Date().toISOString(),
+        auth: {
+          ...currentAuth,
+          accessToken: tokens.access_token,
+          ...(tokens.expires_in !== undefined && {
+            expiresAt: new Date(Date.now() + tokens.expires_in * 1_000).toISOString(),
+          }),
+          refresh: {
+            ...currentRefresh,
+            refreshToken: tokens.refresh_token ?? refresh.refreshToken,
+          },
+        },
+      };
+      const replaced = await refresh.credentialSource.replace({
+        workspaceId: tenantId,
+        vaultId: refresh.vaultId,
+        credentialId: refresh.credentialId,
+        expectedRevision: managedCurrent.revision,
+        next,
+      }).catch(() => null);
+      if (replaced?.type === "replaced") return tokens.access_token;
+      if (replaced?.type === "revision_conflict") {
+        const winner = await refresh.credentialSource.find?.({
+          workspaceId: tenantId,
+          vaultId: refresh.vaultId,
+          credentialId: refresh.credentialId,
+        }).catch(() => null);
+        const winnerToken = winner?.credential.auth.accessToken;
+        if (typeof winnerToken === "string") return winnerToken;
+      }
+      // The provider already issued a valid token. A transient persistence
+      // failure must not throw away the current request; the next 401 retries
+      // refresh and exposes the storage problem through normal logs.
+      return tokens.access_token;
+    }
+  }
 
   // Persist back to D1 via CAS. Two parallel refreshes that both made it
   // through token_endpoint successfully (the provider didn't one-shot
@@ -695,44 +1035,75 @@ async function tryRefreshOauth(
   return tokens.access_token;
 }
 
-// HTTP endpoint — used by the local-runtime ACP child via apiKey auth.
-// Cloud agent path uses the WorkerEntrypoint RPC instead (see McpProxyRpc
-// in apps/main/src/index.ts).
+// HTTP endpoint — used by local-runtime ACP via API key and by an official
+// self-hosted Work/harness-in-sandbox via its current sessions_token. Cloud
+// host-side agents may instead use the WorkerEntrypoint RPC (see McpProxyRpc).
+export async function forwardHttpMcpProxyRequest(
+  input: ForwardHttpMcpProxyRequestInput,
+): Promise<Response> {
+  const target = await resolveProxyTargetByTenant(
+    input.env,
+    input.services,
+    input.tenantId,
+    input.sessionId,
+    input.serverName,
+    input.sessionSource,
+    input.credentialSource,
+  );
+  if (!target) {
+    return Response.json({ error: "forbidden" }, { status: 403 });
+  }
+
+  // Buffer the body so forwardWithRefresh can replay it after rotating an
+  // expired upstream credential.  The caller's Work/API bearer is always
+  // overwritten by forwardToUpstream and therefore never leaves OpenMA.
+  const method = input.request.method;
+  const body = ["GET", "HEAD"].includes(method)
+    ? null
+    : await input.request.text();
+  return forwardWithRefresh(
+    input.services,
+    input.tenantId,
+    target,
+    method,
+    input.request.headers,
+    body,
+    {
+      sessionId: input.sessionId,
+      serverName: input.serverName,
+      callerKind: "http",
+    },
+  );
+}
+
 app.all("/:sid/:server", async (c) => {
   const sid = c.req.param("sid");
   const serverName = c.req.param("server");
-  const auth = c.req.header("authorization") ?? "";
-  const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
-  if (!apiKey) return c.json({ error: "missing bearer" }, 401);
-
-  const tenantId = await apiKeyToTenantId(c.var.services.kv, apiKey);
-  if (!tenantId) return c.json({ error: "forbidden" }, 403);
-
+  // authMiddleware resolves both a workspace API key (local bridge) and a
+  // current sealed Work sessions_token (sandbox worker) before this route.
+  // Keep the legacy fallback for isolated route tests/embedders which mount
+  // this sub-app without the top-level middleware.
+  let tenantId = (c.var as { tenant_id?: string }).tenant_id;
+  if (!tenantId) {
+    const auth = c.req.header("authorization") ?? "";
+    const apiKey = auth.startsWith("Bearer ") ? auth.slice(7) : auth;
+    if (!apiKey) return c.json({ error: "missing bearer" }, 401);
+    tenantId = await apiKeyToTenantId(c.var.services.kv, apiKey) ?? undefined;
+    if (!tenantId) return c.json({ error: "forbidden" }, 403);
+  }
   const services = c.get("services");
-  const target = await resolveProxyTargetByTenant(
-    c.env,
+  const sessionSource = new SqlSessionSource(new CfD1SqlClient(c.get("tenantDb")));
+  const credentialSource = createManagedMcpProxyCredentialSource(c.env, c.get("tenantDb"));
+  return forwardHttpMcpProxyRequest({
+    env: c.env,
     services,
+    sessionSource,
+    credentialSource,
     tenantId,
-    sid,
+    sessionId: sid,
     serverName,
-  );
-  if (!target) return c.json({ error: "forbidden" }, 403);
-
-  // Buffer the body so forwardWithRefresh can replay it on a 401 retry.
-  // For typical MCP clients body is a small JSON-RPC payload — fine to
-  // hold in memory. Streamed uploads aren't a thing on this endpoint.
-  const method = c.req.method;
-  const body = ["GET", "HEAD"].includes(method) ? null : await c.req.text();
-
-  return forwardWithRefresh(
-    services,
-    tenantId,
-    target,
-    method,
-    c.req.raw.headers,
-    body,
-    { sessionId: sid, serverName: serverName, callerKind: "http" },
-  );
+    request: c.req.raw,
+  });
 });
 
 export default app;

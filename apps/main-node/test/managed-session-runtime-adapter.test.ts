@@ -84,6 +84,50 @@ const thread: SessionThread = {
 };
 
 describe("NodeManagedSessionRuntimeAdapter", () => {
+  it("uses durable coordination without eagerly binding a Session to this process", async () => {
+    const calls: string[] = [];
+    const driver: NodeManagedSessionRuntimeDriver = {
+      start: async () => { calls.push("start"); },
+      stop: async () => { calls.push("stop"); },
+      accept: async () => { calls.push("direct_accept"); },
+      archiveThread: async () => {},
+      subscribe: () => (async function* () {})(),
+    };
+    const coordination = {
+      sessionEventsAccepted: async () => { calls.push("coordinated_accept"); },
+      cancelSession: async () => { calls.push("cancel_session"); },
+    };
+    const adapter = new NodeManagedSessionRuntimeAdapter(driver, coordination);
+
+    await adapter.sessionStarted({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    await adapter.sessionEventsAccepted({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      events: [{
+        id: "event_01",
+        type: "user.message",
+        content: [{ type: "text", text: "Go" }],
+        processedAt: "2026-08-26T01:00:00.000Z",
+      }],
+    });
+    await adapter.sessionStopped({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      reason: "deleted",
+    });
+
+    expect(calls).toEqual(["coordinated_accept", "cancel_session", "stop"]);
+  });
+
   it("drives Node runtime commands from complete application context", async () => {
     const calls: object[] = [];
     const driver: NodeManagedSessionRuntimeDriver = {

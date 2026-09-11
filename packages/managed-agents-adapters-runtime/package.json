@@ -16,9 +16,11 @@
     "@open-managed-agents/managed-agents-application": "workspace:*",
     "@open-managed-agents/session-runtime-contract": "workspace:*",
     "croner": "^9.1.0",
-    "fflate": "^0.8.2"
+    "fflate": "^0.8.2",
+    "standardwebhooks": "1.0.0"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "0.120.0",
     "vitest": "^4.1.3"
   }
 }

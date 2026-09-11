@@ -6,7 +6,7 @@
  *
  * The view shows three buckets:
  *   1. **Built-in ACP** — agents the user has installed that ship with
- *      ACP themselves (gemini, hermes, opencode, openclaw, …). Already
+ *      ACP themselves (gemini, hermes, opencode, …). Already
  *      detected, no action needed; rendered as info-only entries so
  *      the user knows OMA sees them.
  *   2. **Wrapped, ready** — wrappers that are already installed AND

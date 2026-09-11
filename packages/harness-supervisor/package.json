@@ -1,0 +1,20 @@
+{
+  "name": "@open-managed-agents/harness-supervisor",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/runtime-resource-contract": "workspace:*"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
+  }
+}

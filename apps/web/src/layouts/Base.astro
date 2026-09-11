@@ -43,7 +43,7 @@ const hasBrandTreatment =
 const fullTitle = hasBrandTreatment
   ? title
   : `${title} — Open Managed Agents`;
-const desc = description ?? "Open-source alternative to Claude Managed Agents. Run Claude agents yourself on Cloudflare Workers or Docker. MCP + Claude Code skills built in. Apache 2.0.";
+const desc = description ?? "Self-host agents with the Claude and OpenAI SDKs. OpenMA handles sessions, tools and recovery. OpenAI Agents API is available on Node.";
 const url = canonical ? `${SITE}${canonical}` : Astro.url.toString();
 const finalOgImage = ogImage ?? `${SITE}/og-default.png`;
 

@@ -2,7 +2,7 @@
 
 A Node-side build of Open Managed Agents that runs on a single VPS / Mac /
 Docker host without any Cloudflare account, Workers, Durable Objects, or
-Containers. Storage is SQLite or Postgres + local filesystem. Sandboxes
+Containers. Storage is SQLite, Postgres, or MySQL + local filesystem. Sandboxes
 are local subprocesses by default; switch to E2B for Firecracker isolation
 when you're past trusted-developer territory.
 
@@ -16,25 +16,23 @@ when you're past trusted-developer territory.
 
 ## Choose a backend
 
-One image, two compose files — pick the one that matches your durability
-& concurrency story. You can switch later (see [Migrating between
+One image, multiple SQL adapters — pick the one that matches your durability
+and concurrency story. You can switch later (see [Migrating between
 backends](#migrating-between-backends) below).
 
-| | SQLite + LocalFs (default) | Postgres + LocalFs |
-|---|---|---|
-| Compose file | `docker-compose.yml` | `docker-compose.postgres.yml` |
-| Best for | Single-user self-host, dev, demo, ≤10 GB sessions | Multi-instance, ≥50M sessions/events rows, share existing PG |
-| Concurrency | One writer (single oma-server) | Many writers; HA-able |
-| Backups | `cp ./data/*.db` or [litestream](https://litestream.io) → S3 | `pg_dump` / managed PG snapshots |
-| Extra services | None | + `postgres:16-alpine` (or external PG) |
-| When to switch | "I want PG already" / "want to scale out" | — |
+| | SQLite + LocalFs (default) | Postgres + LocalFs | MySQL + LocalFs |
+|---|---|---|---|
+| Bundled compose | `docker-compose.yml` | `docker-compose.postgres.yml` | Bring an external MySQL 8.x DSN |
+| Best for | Single-user self-host, dev, demo, ≤10 GB sessions | Multi-instance, ≥50M sessions/events rows, share existing PG | Existing MySQL 8.x infrastructure |
+| SQL concurrency | One writer (single oma-server) | Many writers; HA-able | Many writers; CAS-backed claims |
+| Backups | `cp ./data/*.db` or litestream → S3 | `pg_dump` / managed PG snapshots | `mysqldump` / managed MySQL snapshots |
 
 **Same Docker image either way** (`openma/main-node:dev` built from
 `apps/main-node/Dockerfile`) — `DATABASE_URL` env at runtime decides.
-SQLite needs only `DATABASE_PATH`; Postgres needs `DATABASE_URL=
-postgres://…`. In Postgres mode better-auth's tables live in the same
-PG database (no separate `auth.db` file); in SQLite mode they live in
-`./data/auth.db`.
+SQLite needs only `DATABASE_PATH`; server databases use
+`DATABASE_URL=postgres://…` or `DATABASE_URL=mysql://…`. In Postgres and
+MySQL modes better-auth's tables live in the same database (no separate
+`auth.db` file); in SQLite mode they live in `./data/auth.db`.
 
 ## Quick start (Docker, SQLite)
 
@@ -135,6 +133,29 @@ What changes vs the SQLite stack:
   — the main store stays on `postgres.js`. `AUTH_DATABASE_PATH` is
   ignored in PG mode.
 
+## MySQL backend
+
+Point the same main-node image at a fresh MySQL 8.x database:
+
+```bash
+DATABASE_URL=mysql://oma:password@mysql.example.internal:3306/oma \
+  pnpm --filter @open-managed-agents/main-node start
+
+curl localhost:8787/health
+# → {"auth":"better-auth-mysql","backends":{"agents":"mysql","events":"mysql",...}}
+```
+
+The composition root only selects the backend. MySQL-native DDL, ANSI
+identifier normalization, optimistic CAS, and transactional result readback
+live below the SQL Port; v1 Agent, Session, Environment Work, lease/fence, and
+auth code do not branch on MySQL.
+
+MySQL schema bootstrap is idempotent for the same canonical snapshot and
+fails closed if a newer application snapshot needs an explicit migration; it
+never marks an un-applied schema upgrade as successful. The current
+in-process realtime hub means a MySQL deployment should remain one main-node
+replica until a shared realtime adapter is configured.
+
 ### Running multiple oma-server replicas (PG mode only)
 
 PG mode supports >1 `oma-server` process behind a load balancer. SSE
@@ -195,14 +216,15 @@ Sandbox sides (Daytona / E2B) already mount the bucket via s3fs using
 the same env vars; the loop "agent writes via FUSE → S3 PUT → poller
 upserts SQL index" is the multi-replica analog of the chokidar path.
 
-Limitation: `local-subprocess` sandboxes still need
-`MEMORY_BLOB_DIR` for their `/mnt/memory` symlinks — the local subprocess
-adapter doesn't speak s3fs. Use S3 mode together with a remote sandbox
-provider. Inside the `openma/main-node` container the adapter creates a
-real `/mnt/memory/<storeName>` symlink (visible to bash that hardcodes
-the path); on hosts without a writable `/mnt`, it transparently rewrites
-`/mnt/memory/...` to the workdir-relative `.mnt/memory/...` so harness
-read/write/edit/glob/grep tools still land on the right files.
+Limitation: `local-subprocess` sandboxes still need `MEMORY_BLOB_DIR`; the
+adapter does not speak s3fs. It exposes session-scoped workdir projections
+through `OMA_MEMORY_DIR`, `OMA_MEMORY_<NAME>`, and `OMA_OUTPUTS_DIR`, while
+harness filesystem tools translate the canonical `/mnt/...` paths into that
+workdir. It deliberately does not create process-global `/mnt` symlinks,
+because concurrent Sessions would overwrite one another. The low-level
+adapter has an explicit `rootMountBase` option only for callers that own an
+exclusive mount namespace. Use S3 mode with an isolated remote sandbox when
+arbitrary agent commands must see canonical `/mnt/...` paths directly.
 
 ### Pointing at an existing Postgres cluster
 
@@ -248,15 +270,15 @@ both sides).
 
 ### Backups & operations
 
-| | SQLite + LocalFs | Postgres + LocalFs |
-|---|---|---|
-| Hot backup | [litestream](https://litestream.io) replicates `./data/*.db` to S3 continuously | `pg_dump` cron / managed PG snapshots / WAL streaming |
-| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it |
-| Sandbox workdirs | Always on local FS — back up `./data/sandboxes/` separately | Same |
-| Memory blobs | `./data/memory-blobs/` — back up separately or set `MEMORY_S3_*` (s3fs mount) | Same |
-| auth.db | Always SQLite — back up `./data/auth.db` | Same |
+| | SQLite + LocalFs | Postgres + LocalFs | MySQL + LocalFs |
+|---|---|---|---|
+| Hot backup | litestream replicates `./data/*.db` to S3 continuously | `pg_dump` / managed PG snapshots / WAL streaming | `mysqldump` / managed MySQL snapshots |
+| Restore | Stop server, copy db back, restart | `pg_restore` into fresh PG, point `DATABASE_URL` at it | Restore into fresh MySQL, point `DATABASE_URL` at it |
+| Sandbox workdirs | Back up `./data/sandboxes/` separately | Same | Same |
+| Memory blobs | Back up `./data/memory-blobs/` or set `MEMORY_S3_*` | Same | Same |
+| Auth | Separate `./data/auth.db` | In the Postgres database | In the MySQL database |
 
-Both backends pass the same crash-recovery test surface (55 tests across
+The backends pass the same crash-recovery test surface (55 tests across
 adapter / recovery-logic / SIGKILL bootstrap / CF DO eviction).
 
 ## Operator gotchas
@@ -342,7 +364,7 @@ The same demo works on the Postgres compose unchanged.
 | `web_fetch` tool (HTML → markdown via turndown) | ✓ |
 | `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
 | `browser` tool | ✗  CF-only (uses @cloudflare/playwright) |
-| Memory stores (mount + agent fs writes → SQL index) | ✓ symlink + chokidar watcher |
+| Memory stores | ✓ legacy `/v1/oma` mount + watcher; official `/v1/sessions` local harness mounts immutable read-only snapshots and rejects `read_write` until reverse sync is configured |
 | `/v1/vaults` + `/v1/vaults/:id/credentials` full CRUD + `mcp_oauth_validate` | ✓ via package |
 | Vault credential injection for outbound MCP / API calls | ✓ via `oma-vault` sidecar (uses `@open-managed-agents/vault-forward`) |
 | `/v1/api_keys` mint / list / revoke (SHA-256 hashed in `api_keys` table) | ✓ |
@@ -374,21 +396,40 @@ The same demo works on the Postgres compose unchanged.
 
 | Provider | bash | fs | net | `/mnt/memory` | `/mnt/outputs` | vault CA | workspace backup |
 |---|---|---|---|---|---|---|---|
-| `LocalSubprocess` | ✓ | ✓ | ✓ | ✓ (real symlink at /mnt/memory inside the container; falls back to workdir-relative `.mnt/memory` when /mnt isn't writable) | ✓ (same pattern) | ✓ | ✓ (tar+upload to BlobStore) |
+| `LocalSubprocess` | ✓ | ✓ | ✓ | ✓ for harness tools and `OMA_MEMORY_*`; arbitrary commands use the env path (canonical root mount requires an exclusive namespace) | ✓ via `OMA_OUTPUTS_DIR` (same root-mount boundary) | ✓ | ✓ (tar+upload to BlobStore) |
 | `LiteBox` | ✓ | ✓ | ✓ | ✓ (host bind-mount via SimpleBox volumes) | ✓ | ✓ (CA copyIn on first exec) | ✓ (tar via exec + readFileBytes) |
 | `Daytona` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*`) | ✓ (single-bucket layout: outputs under `session-outputs/<tenant>/<session>/`) | ✓ (CA upload on box create) | ✓ (tar via exec + readFileBytes) |
 | `E2B` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*` + template with s3fs) | ✓ (same bucket, session-outputs prefix) | ⚠ (template must allow sudo writes to /etc/ssl/) | ✓ (tar via exec + readFileBytes) |
 | `BoxRun` | ✓ | ✓ | ✓ | ✗ (HTTP API has no mount primitive — use a custom image with s3fs preinstalled) | ✗ (same — no host-bind primitive) | ✓ (CA upload via tar PUT) | ⚠ (best-effort tar via exec) |
 | `CloudflareSandbox` | ✓ | ✓ | ✓ | ✓ (R2 + FUSE) | ✓ | ✓ (interceptHttps + outboundHandlers) | ✓ (squashfs to R2 backup bucket) |
 
-Read-only memory mounts: enforced via `chmod -R a-w` on the mount target where supported (LocalSubprocess, Daytona, E2B). LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
+Read-only memory mounts: LocalSubprocess creates a sandbox-owned copy and removes write bits recursively, so it never changes permissions on the backing blob/checkpoint tree; Daytona and E2B enforce read-only on their mounted view. LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
 
-## Vault credential injection (oma-vault sidecar)
+## Vault credential injection
 
-When the sandbox's bash runs `curl https://api.github.com/...`, OMA injects
+For managed harnesses inside a sandbox, use the scoped HTTP MCP gateway:
+`/v1/oma/mcp-proxy/<session>/<server>`. The ACP projection replaces each
+declared upstream MCP URL with this gateway URL and authenticates with the
+current Work `sessions_token`. The server validates the exact active claim,
+Session and server declaration, then overwrites the Work bearer with the
+upstream Vault credential. The upstream URL and credential are not given to
+the sandbox.
+
+### Legacy transparent `oma-vault` sidecar
+
+The sidecar below is retained for single-operator/local compatibility. It is
+**advisory, not a multi-tenant security boundary**: a process can ignore proxy
+environment variables, and the current CONNECT path cannot prove which
+Session/Work generation originated a request. Do not use it for an untrusted
+multi-tenant `required` credential-egress profile. A production Node/Docker
+transparent deployment needs an isolated network plus a scoped, fenced egress
+gateway that passes ADR 0007 conformance.
+
+When a cooperating sandbox bash runs `curl https://api.github.com/...`, the
+legacy sidecar injects
 the matching vault credential as an `Authorization: Bearer ...` header
-without ever exposing the token to the agent process. This mirrors the CF
-build's `outboundByHost` + `MAIN_MCP.outboundForward` zero-trust pattern.
+without exposing the token to that process. Unlike the Cloudflare fenced
+interceptor, this alone does not prevent bypass or safely attribute tenants.
 
 How it works:
 
@@ -470,7 +511,7 @@ Eight runtime-agnostic ports separate "what" from "how":
 
   - `BlobStore`  — files/memory/workspace bytes (R2 / S3 / local FS)
   - `KvStore`    — config/snapshot key-value (CONFIG_KV / pg table / memory)
-  - `SqlClient`  — SQL with batch (D1 / better-sqlite3 / postgres.js)
+  - `SqlClient`  — SQL with batch (D1 / better-sqlite3 / postgres.js / mysql2)
   - `EventLogRepo`+`StreamRepo` — per-session event durability
   - `SandboxExecutor` — code execution sandbox (CF / E2B / subprocess)
   - `ToMarkdownProvider` — web_fetch HTML→md (Workers AI / turndown)
@@ -600,6 +641,71 @@ binding, same shared INTEGRATIONS_DB.
 `/billing-api/*` and `/v1/internal/usage_events` are CF-only by design
 (both call out to a `USAGE_METER` worker that lives in a separate repo).
 Self-host operators run their own metering or skip the billing pipeline.
+
+## Local provider chaos lab
+
+The repository includes an opt-in local cluster runner for exercising a real
+Daytona, LiteBox, or BoxRun adapter without sending model traffic to a paid
+provider. The runner starts three pieces in one disposable lab:
+
+```
+local Anthropic Messages fixture ──┐
+                                  ├── OpenMA main-node (temporary SQLite + event log)
+configured SandboxPort provider ──┘       └── Daytona | LiteBox | BoxRun
+```
+
+The fixture is the only mocked external dependency. Sandbox calls are real,
+so a run is meaningful only when the selected provider is configured. The
+chaos sequence is:
+
+1. complete a healthy turn through `/v1/oma/*`;
+2. delay the next model response, kill main-node in-flight, and leave its
+   SQLite/event-log state behind;
+3. restart main-node with the same state directory, verify orphan recovery,
+   then complete another turn;
+4. optionally invoke an operator-supplied provider delete endpoint.
+
+Run it from the repository root:
+
+```sh
+# Local hardware-isolated BoxLite/LiteBox (requires its native runtime/KVM).
+OMA_CHAOS_PROVIDER=litebox pnpm test:e2e:provider-chaos
+
+# Daytona (the adapter creates a real VM; the key is never printed).
+OMA_CHAOS_PROVIDER=daytona DAYTONA_API_KEY="$DAYTONA_API_KEY" \
+  pnpm test:e2e:provider-chaos
+
+# BoxRun/boxlite serve (the endpoint must already be running).
+OMA_CHAOS_PROVIDER=boxrun BOXRUN_URL=http://127.0.0.1:8100/v1/default \
+  pnpm test:e2e:provider-chaos
+```
+
+Useful controls:
+
+| Variable | Meaning |
+| --- | --- |
+| `OMA_CHAOS_LLM_DELAY_MS` | Delay used to create the in-flight crash window (default `15000`). |
+| `OMA_CHAOS_HEALTH_TIMEOUT_MS` | Main-node boot deadline (default `60000`). |
+| `OMA_CHAOS_TURN_TIMEOUT_MS` | Per-turn/recovery deadline (default `60000`). |
+| `OMA_CHAOS_PORT` | Fixed local main-node port; otherwise a free port is selected. |
+| `OMA_CHAOS_KEEP_DATA=1` | Keep the temporary SQLite/blob/workdir tree for inspection. |
+| `OMA_CHAOS_PROVIDER_KILL_URL` | Explicit destructive provider endpoint. If absent, the provider-kill step is reported as skipped. |
+| `OMA_CHAOS_PROVIDER_KILL_TOKEN` | Optional bearer token for that endpoint (never logged). |
+
+The runner is deliberately not a claim that every adapter has Managed
+Runtime Host fencing. It verifies the common `SandboxPort` execution path and
+Node `SessionRegistry` crash recovery. Daytona/LiteBox/BoxRun sessions are
+created lazily by their adapters; a hard kill can leave a provider-side box
+or VM orphaned when the provider has no discover/delete hook. Use the explicit
+kill URL or the provider's own cleanup tooling for that case. Full lease,
+fencing, split-brain, and retry-budget chaos remains covered by the
+deterministic managed-runtime tests and is not silently attributed to a
+SandboxPort-only provider.
+
+The runner always forces `AUTH_DISABLED=1`, a temporary SQLite database, and
+local blob roots. It inherits provider configuration but replaces
+`ANTHROPIC_API_KEY`/`ANTHROPIC_BASE_URL` with the local fixture, so no real LLM
+credential is required or used.
 
 ## Production hardening (what's NOT in the PoC)
 

@@ -1,0 +1,103 @@
+import { Hono } from "hono";
+import {
+  forwardWithRefresh,
+  type OauthRefreshMetadata,
+  type RefreshedTokens,
+} from "@open-managed-agents/vault-forward";
+
+export interface NodeMcpProxyTarget {
+  upstreamUrl: string;
+  accessToken: string;
+  refresh?: OauthRefreshMetadata;
+  onRefreshed?: (tokens: RefreshedTokens) => Promise<void>;
+}
+
+export interface NodeHttpMcpProxyDependencies {
+  resolveTarget(input: {
+    tenantId: string;
+    sessionId: string;
+    serverName: string;
+  }): Promise<NodeMcpProxyTarget | null>;
+  fetcher?: typeof fetch;
+}
+
+export interface NodeMcpProxyBinding {
+  fetch(request: Request): Promise<Response>;
+}
+
+/** In-process counterpart of the public HTTP route. Host-side harnesses use
+ * this binding so credential resolution and refresh remain in the control
+ * plane while no standing API key or Vault secret is exposed to the harness. */
+export function createNodeMcpProxyBinding(
+  dependencies: NodeHttpMcpProxyDependencies,
+): NodeMcpProxyBinding {
+  return {
+    async fetch(request) {
+      const tenantId = request.headers.get("x-oma-tenant");
+      const sessionId = request.headers.get("x-oma-session");
+      const serverName = request.headers.get("x-oma-mcp-server");
+      if (!tenantId || !sessionId || !serverName) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      const target = await dependencies.resolveTarget({
+        tenantId,
+        sessionId,
+        serverName,
+      });
+      if (target === null) {
+        return Response.json({ error: "forbidden" }, { status: 403 });
+      }
+      const body = ["GET", "HEAD"].includes(request.method.toUpperCase())
+        ? null
+        : await request.arrayBuffer();
+      return forwardWithRefresh({
+        upstreamUrl: target.upstreamUrl,
+        method: request.method,
+        inboundHeaders: new Headers(request.headers),
+        body,
+        accessToken: target.accessToken,
+        refresh: target.refresh,
+        onRefreshed: target.onRefreshed,
+        fetcher: dependencies.fetcher,
+      });
+    },
+  };
+}
+
+/** Node/self-host equivalent of the Cloudflare HTTP MCP gateway. Authentication
+ * stays in the parent v1 middleware; this route consumes only its tenant
+ * projection and never accepts tenant identity from request headers. */
+export function buildNodeHttpMcpProxyRoutes(
+  dependencies: NodeHttpMcpProxyDependencies,
+) {
+  const routes = new Hono<{ Variables: { tenant_id: string } }>();
+  routes.all("/:sessionId/:serverName", async (context) => {
+    const tenantId = context.get("tenant_id");
+    const sessionId = context.req.param("sessionId");
+    const serverName = context.req.param("serverName");
+    const target = await dependencies.resolveTarget({
+      tenantId,
+      sessionId,
+      serverName,
+    });
+    if (target === null) {
+      return context.json({ error: "forbidden" }, 403);
+    }
+
+    const inboundHeaders = new Headers(context.req.raw.headers);
+    const body = ["GET", "HEAD"].includes(context.req.method.toUpperCase())
+      ? null
+      : await context.req.raw.arrayBuffer();
+    return forwardWithRefresh({
+      upstreamUrl: target.upstreamUrl,
+      method: context.req.method,
+      inboundHeaders,
+      body,
+      accessToken: target.accessToken,
+      refresh: target.refresh,
+      onRefreshed: target.onRefreshed,
+      fetcher: dependencies.fetcher,
+    });
+  });
+  return routes;
+}

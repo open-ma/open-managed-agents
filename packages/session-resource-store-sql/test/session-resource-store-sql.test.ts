@@ -2,7 +2,9 @@ import { beforeEach, describe, expect, it } from "vitest";
 import { createBetterSqlite3SqlClient } from "@open-managed-agents/sql-client";
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type { Session, SessionResource } from "@open-managed-agents/domain/sessions";
-import { SqlSessionResourceStore } from "../src/index";
+import * as sessionResourceSql from "../src/index";
+
+const { SqlSessionResourceStore } = sessionResourceSql;
 
 const SCHEMA = `
 CREATE TABLE managed_sessions (
@@ -36,11 +38,11 @@ CREATE TABLE managed_session_resource_secrets (
 );
 `;
 
-const oldMemory: SessionResource = {
+const oldMemory: Extract<SessionResource, { type: "memory_store" }> = {
   type: "memory_store",
   memoryStoreId: "memory_old",
   access: "read_only",
-  description: null,
+  description: "",
   name: "old",
 };
 
@@ -185,5 +187,50 @@ describe("SqlSessionResourceStore", () => {
       .first<{ document: string }>();
     expect(stored?.document).not.toContain("ghp_current");
     expect(stored?.document).not.toContain("ghp_stale");
+  });
+
+  it("opens a GitHub token only within its workspace, session, and resource scope", async () => {
+    await client
+      .prepare(
+        `INSERT INTO managed_session_resource_secrets
+          (workspace_id, session_id, resource_id, secret_type, sealed_value, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+      .bind(
+        "workspace_01",
+        session.id,
+        repository.id,
+        "github_token",
+        "sealed:ghp_private",
+        Date.parse(session.updatedAt),
+      )
+      .run();
+    const Source = (sessionResourceSql as Record<string, unknown>)
+      .SqlSessionResourceSecretSource as undefined | (new (
+        client: SqlClient,
+        opener: { open(value: string): Promise<string> },
+      ) => {
+        findGithubToken(input: {
+          workspaceId: string;
+          sessionId: string;
+          resourceId: string;
+        }): Promise<string | null>;
+      });
+    expect(Source).toBeTypeOf("function");
+    if (Source === undefined) return;
+    const source = new Source(client, {
+      open: async (value) => value.replace(/^sealed:/u, ""),
+    });
+
+    await expect(source.findGithubToken({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      resourceId: repository.id,
+    })).resolves.toBe("ghp_private");
+    await expect(source.findGithubToken({
+      workspaceId: "workspace_other",
+      sessionId: session.id,
+      resourceId: repository.id,
+    })).resolves.toBeNull();
   });
 });

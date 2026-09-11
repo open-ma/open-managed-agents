@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@open-managed-agents/session-runtime-contract": "workspace:*",
     "@open-managed-agents/session-store": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*"
   }

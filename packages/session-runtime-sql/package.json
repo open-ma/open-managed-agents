@@ -5,15 +5,21 @@
   "type": "module",
   "exports": {
     ".": "./src/index.ts",
+    "./coordination": "./src/coordination.ts",
     "./context": "./src/context.ts",
     "./history": "./src/history.ts"
   },
   "scripts": {
+    "test": "vitest run --config vitest.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
     "@open-managed-agents/domain": "workspace:*",
     "@open-managed-agents/session-runtime-contract": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^13.0.3",
+    "vitest": "^4.1.3"
   }
 }

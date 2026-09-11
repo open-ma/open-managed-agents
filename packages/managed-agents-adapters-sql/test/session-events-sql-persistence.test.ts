@@ -8,6 +8,10 @@ import type {
   SessionEventView,
 } from "@open-managed-agents/managed-agents-application";
 import { SqlSessionEventPersistence } from "../src";
+import {
+  ensureSessionExecutionCoordinatorSchema,
+  SqlSessionExecutionCoordinator,
+} from "@open-managed-agents/session-runtime-sql/coordination";
 
 const SCHEMA_SQL = `
 CREATE TABLE managed_sessions (
@@ -93,6 +97,7 @@ describe("SqlSessionEventPersistence", () => {
   beforeEach(async () => {
     client = await createBetterSqlite3SqlClient(":memory:");
     await client.exec(SCHEMA_SQL);
+    await ensureSessionExecutionCoordinatorSchema(client);
     await client
       .prepare(
         `INSERT INTO managed_sessions
@@ -159,6 +164,260 @@ describe("SqlSessionEventPersistence", () => {
         .bind("workspace_01", "session_01", event.id)
         .first<{ thread_id: string | null }>(),
     ).resolves.toEqual({ thread_id: "thread_01" });
+  });
+
+  it("atomically commits accepted events and their durable execution outbox", async () => {
+    const persistence = new SqlSessionEventPersistence(client, {
+      executionOutbox: true,
+    });
+    const event: SentSessionEvent = {
+      id: "event_user_01",
+      type: "user.message",
+      content: [{ type: "text", text: "Run the task" }],
+      processedAt: "2026-08-26T05:00:00.000Z",
+    };
+
+    await expect(persistence.append(appendCommand([event]))).resolves.toMatchObject({
+      type: "appended",
+    });
+
+    const coordinator = new SqlSessionExecutionCoordinator(client);
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: event.id,
+    })).resolves.toMatchObject({
+      id: event.id,
+      sessionId: "session_01",
+      state: "queued",
+      events: [event],
+    });
+  });
+
+  it("creates one atomic execution outbox row per thread lane in a mixed SDK batch", async () => {
+    const persistence = new SqlSessionEventPersistence(client, {
+      executionOutbox: true,
+    });
+    const primary: SentSessionEvent = {
+      id: "event_primary",
+      type: "user.message",
+      content: [{ type: "text", text: "Primary" }],
+      processedAt: "2026-08-26T05:00:00.000Z",
+    };
+    const child: SentSessionEvent = {
+      id: "event_child",
+      type: "user.message",
+      sessionThreadId: "sthr_child",
+      content: [{ type: "text", text: "Child" }],
+      processedAt: "2026-08-26T05:00:00.000Z",
+    };
+
+    await expect(
+      persistence.append(appendCommand([primary, child])),
+    ).resolves.toMatchObject({ type: "appended" });
+
+    const rows = await client.prepare(
+      `SELECT id, lane_id, events_json
+         FROM managed_session_executions ORDER BY id`,
+    ).all<{ id: string; lane_id: string; events_json: string }>();
+    expect(rows.results?.map((row) => ({
+      id: row.id,
+      lane_id: row.lane_id,
+      events: JSON.parse(row.events_json),
+    }))).toEqual([
+      {
+        id: "event_child",
+        lane_id: "sthr_child",
+        events: [child],
+      },
+      {
+        id: "event_primary",
+        lane_id: "sthr_primary",
+        events: [primary],
+      },
+    ]);
+  });
+
+  it("atomically interrupts only the named thread lane", async () => {
+    const persistence = new SqlSessionEventPersistence(client, {
+      executionOutbox: true,
+    });
+    const coordinator = new SqlSessionExecutionCoordinator(client);
+    await coordinator.admit({
+      execution: {
+        id: "primary_running",
+        workspaceId: "workspace_01",
+        sessionId: "session_01",
+        laneId: "sthr_primary",
+        admittedAt: "2026-08-26T05:00:00.000Z",
+        events: [{
+          id: "primary_running",
+          type: "user.message",
+          content: [{ type: "text", text: "Primary" }],
+          processedAt: "2026-08-26T05:00:00.000Z",
+        }],
+      },
+    });
+    await coordinator.admit({
+      execution: {
+        id: "child_running",
+        workspaceId: "workspace_01",
+        sessionId: "session_01",
+        laneId: "sthr_child",
+        admittedAt: "2026-08-26T05:00:00.000Z",
+        events: [{
+          id: "child_running",
+          type: "user.message",
+          sessionThreadId: "sthr_child",
+          content: [{ type: "text", text: "Child" }],
+          processedAt: "2026-08-26T05:00:00.000Z",
+        }],
+      },
+    });
+    await coordinator.claim({
+      ownerId: "owner_primary",
+      attemptId: "attempt_primary",
+      claimedAt: "2026-08-26T05:00:01.000Z",
+      leaseTtlMs: 30_000,
+    });
+    await coordinator.claim({
+      ownerId: "owner_child",
+      attemptId: "attempt_child",
+      claimedAt: "2026-08-26T05:00:01.000Z",
+      leaseTtlMs: 30_000,
+    });
+    const interrupt: SentSessionEvent = {
+      id: "interrupt_primary",
+      type: "user.interrupt",
+      sessionThreadId: "sthr_primary",
+      processedAt: "2026-08-26T05:00:02.000Z",
+    };
+
+    await expect(
+      persistence.append(appendCommand([interrupt])),
+    ).resolves.toMatchObject({ type: "appended" });
+
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: "primary_running",
+    })).resolves.toMatchObject({
+      interruptRequestedAt: interrupt.processedAt,
+    });
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: "child_running",
+    })).resolves.toMatchObject({ interruptRequestedAt: null });
+  });
+
+  it("does not leak events or work when two acceptances use the same revision", async () => {
+    const persistence = new SqlSessionEventPersistence(client, {
+      executionOutbox: true,
+    });
+    const first: SentSessionEvent = {
+      id: "event_winner",
+      type: "user.message",
+      content: [{ type: "text", text: "Winner" }],
+      processedAt: "2026-08-26T05:00:00.000Z",
+    };
+    const loser: SentSessionEvent = {
+      id: "event_loser",
+      type: "user.message",
+      content: [{ type: "text", text: "Loser" }],
+      processedAt: "2026-08-26T05:00:01.000Z",
+    };
+
+    await expect(persistence.append(appendCommand([first]))).resolves.toMatchObject({
+      type: "appended",
+    });
+    await expect(persistence.append(appendCommand([loser]))).resolves.toEqual({
+      type: "revision_conflict",
+      actualRevision: 2,
+    });
+
+    const events = await client.prepare(
+      `SELECT id FROM managed_session_events ORDER BY id`,
+    ).all<{ id: string }>();
+    const executions = await client.prepare(
+      `SELECT id FROM managed_session_executions ORDER BY id`,
+    ).all<{ id: string }>();
+    expect(events.results).toEqual([{ id: "event_winner" }]);
+    expect(executions.results).toEqual([{ id: "event_winner" }]);
+  });
+
+  it("atomically signals the running attempt and queues non-interrupt work from a mixed batch", async () => {
+    const persistence = new SqlSessionEventPersistence(client, {
+      executionOutbox: true,
+    });
+    const current: SentSessionEvent = {
+      id: "event_current",
+      type: "user.message",
+      content: [{ type: "text", text: "Long task" }],
+      processedAt: "2026-08-26T05:00:00.000Z",
+    };
+    await persistence.append(appendCommand([current]));
+    const coordinator = new SqlSessionExecutionCoordinator(client);
+    await coordinator.claim({
+      ownerId: "node_01",
+      attemptId: "attempt_01",
+      claimedAt: "2026-08-26T05:00:01.000Z",
+      leaseTtlMs: 30_000,
+    });
+    await coordinator.admit({
+      execution: {
+        id: "event_already_queued",
+        workspaceId: "workspace_01",
+        sessionId: "session_01",
+        admittedAt: "2026-08-26T05:00:01.500Z",
+        events: [{
+          id: "event_already_queued",
+          type: "user.message",
+          content: [{ type: "text", text: "Stale queued task" }],
+          processedAt: "2026-08-26T05:00:01.500Z",
+        }],
+      },
+    });
+    const interrupt: SentSessionEvent = {
+      id: "event_interrupt",
+      type: "user.interrupt",
+      processedAt: "2026-08-26T05:00:02.000Z",
+    };
+    const next: SentSessionEvent = {
+      id: "event_next",
+      type: "user.message",
+      content: [{ type: "text", text: "Replacement task" }],
+      processedAt: "2026-08-26T05:00:02.000Z",
+    };
+
+    await expect(persistence.append({
+      ...appendCommand([interrupt, next]),
+      expectedRevision: 2,
+      nextSession: {
+        ...session,
+        updatedAt: "2026-08-26T05:00:02.000Z",
+      },
+    })).resolves.toMatchObject({ type: "appended" });
+
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: current.id,
+    })).resolves.toMatchObject({
+      state: "running",
+      interruptRequestedAt: interrupt.processedAt,
+    });
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: next.id,
+    })).resolves.toMatchObject({
+      state: "queued",
+      events: [next],
+    });
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: "event_already_queued",
+    })).resolves.toMatchObject({ state: "cancelled" });
+    await expect(coordinator.find({
+      workspaceId: "workspace_01",
+      executionId: interrupt.id,
+    })).resolves.toBeNull();
   });
 
   it("lists by official filters and advances from a stable composite position", async () => {

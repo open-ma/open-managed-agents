@@ -6,7 +6,14 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "hono": "^4.7.0"
+  },
+  "devDependencies": {
+    "vitest": "^4.1.3"
   }
 }

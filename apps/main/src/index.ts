@@ -65,6 +65,7 @@ import {
   environmentWorkEnqueuerModule,
   environmentWorkEnvironmentSourcePort,
   environmentWorkSessionCredentialIssuerPort,
+  environmentWorkWakeupPort,
 } from "@open-managed-agents/app/modules/environment-work";
 import {
   memoryContentDescriptorPort,
@@ -83,6 +84,13 @@ import {
 import {
   userProfileEnrollmentIssuerPort,
 } from "@open-managed-agents/app/modules/user-profiles";
+import { resolveManagedSkillArchive } from "./lib/managed-skill-source";
+import {
+  downloadManagedSessionInputFile,
+  materializeManagedSessionMemorySnapshot,
+  resolveManagedSessionInputs,
+  withMissingManagedSessionSchemaFallback,
+} from "./lib/managed-session-runtime-source";
 import {
   createCloudflareManagedAgentsApp,
 } from "@open-managed-agents/platform-cloudflare";
@@ -96,17 +104,21 @@ import {
   SqlFileMetadataPersistence,
   SqlMemoryStoreSource,
   SqlManagedSessionsComposition,
+  SqlPersistedSessionEventStream,
   SqlSessionEnvironmentSource,
+  SqlSessionResourceSecretSource,
   SqlSessionSource,
   SqlSessionRuntimeProjectionPersistence,
 } from "@open-managed-agents/managed-agents-adapters-sql";
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
 import { CfD1SqlClient } from "@open-managed-agents/sql-client/adapters/cf-d1";
+import { SqlRuntimeResourceFencePort } from "@open-managed-agents/runtime-resource-fence-sql";
 import {
   createCfShardPoolService,
   createCfTenantShardDirectoryService,
 } from "@open-managed-agents/tenant-dbs-store";
 import {
+  fileR2Key,
   LOCAL_RUNTIME_ENV_ID,
   listAuthProviders,
 } from "@open-managed-agents/shared";
@@ -119,24 +131,31 @@ import { CfSessionRouter } from "./lib/cf-session-router";
 import { CfManagedRuntimeFetcher } from "./lib/cf-managed-runtime-fetcher";
 import { CfManagedSessionRuntimeAdapter } from "./lib/cf-managed-session-runtime";
 import { CfManagedSessionSecretSealer } from "./lib/cf-managed-session-secret-sealer";
+import { synchronizeManagedSessionMemoryWorkspaces } from "./lib/managed-memory-workspace-sync";
 import {
   AnthropicMessagesDreamCurator,
   ApplicationDreamMemoryWorkspace,
   ModelCardCatalogSource,
   decodeRuntimeProducedSessionEvent,
   CronDeploymentSchedulePlanner,
+  EnvironmentAwareSessionEventDispatchRouter,
+  EnvironmentAwareSessionEventStreamRouter,
   EnvironmentAwareSessionLifecycleRouter,
+  ingestEnvironmentWorkRuntimeEvents,
   TimerEnvironmentWorkAvailabilityWaiter,
   IndeterminateCredentialValidationProbe,
   inProcessDreamExecutionSchedulerModule,
   LocalTunnelProvisioner,
-  OpaqueEnvironmentWorkSessionCredentialIssuer,
+  ManagedMemorySnapshotMaterializer,
+  SealedEnvironmentWorkSessionCredentialIssuer,
+  StandardWebhookEnvironmentWorkWakeup,
   DeduplicatingDreamCurator,
   WebCryptoTunnelCertificateAuthority,
   WebCryptoTunnelTokenManager,
   WebCryptoMemoryContentDescriptor,
   ZipSkillPackageCompiler,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
+import type { ApiKeyResolution } from "@open-managed-agents/auth";
 import { WebCryptoAesGcm } from "@open-managed-agents/integrations-adapters-cf";
 import {
   cfSessionLifecycle,
@@ -161,11 +180,15 @@ import integrationsRoutes from "./routes/integrations";
 import { runtimesRoutes, runtimeDaemonRoutes, authenticateRuntimeToken } from "./routes/runtimes";
 import statsRoutes from "./routes/stats";
 import mcpProxyRoutes, {
+  createManagedMcpProxyCredentialSource,
   resolveProxyTargetByTenant,
   resolveOutboundCredentialByHost,
   forwardWithRefresh,
 } from "./routes/mcp-proxy";
-import { resolveGithubCredentials } from "./lib/github-creds";
+import {
+  resolveGithubCredentials,
+  resolveManagedGithubCredentials,
+} from "./lib/github-creds";
 import { buildCfScheduler } from "./lib/cf-scheduler-jobs";
 import { buildCfMemoryQueue, dispatchCfMemoryQueueBatch } from "./lib/cf-queue-handlers";
 import { logError, recordEvent, errFields } from "@open-managed-agents/shared";
@@ -278,6 +301,7 @@ type AppCtx = import("hono").Context<{
   Variables: {
     tenant_id: string;
     user_id?: string;
+    auth_credential?: ApiKeyResolution["credential"];
     services: import("@open-managed-agents/services").Services;
     tenantDb: D1Database;
   };
@@ -360,6 +384,25 @@ const managedEnvironmentsRoutes = buildManagedEnvironmentRoutes((context) => {
     .port(managedAgentsPortTokens.environments);
 });
 
+function managedFilesApplicationFor(input: {
+  workspaceId: string;
+  tenantDb: D1Database;
+  blobs: NonNullable<import("@open-managed-agents/services").Services["filesBlob"]>;
+}) {
+  return createCloudflareManagedAgentsApp({
+    workspaceId: input.workspaceId,
+    sql: new CfD1SqlClient(input.tenantDb),
+    fileContent: new BlobFileContentStore(input.blobs),
+  }, {
+    features: { preset: "none", files: true },
+    clock: { now: () => new Date() },
+    ids: {
+      next: (namespace) =>
+        `${namespace}_${crypto.randomUUID().replaceAll("-", "")}`,
+    },
+  }).port(managedAgentsPortTokens.files);
+}
+
 const managedFilesRoutes = buildManagedFileRoutes((context) => {
   const request = context.var as {
     tenant_id: string;
@@ -370,18 +413,11 @@ const managedFilesRoutes = buildManagedFileRoutes((context) => {
   if (blobs === null) {
     throw new Error("FILES_BUCKET binding is required for managed Files");
   }
-  return createCloudflareManagedAgentsApp({
+  return managedFilesApplicationFor({
     workspaceId: request.tenant_id,
-    sql: new CfD1SqlClient(request.tenantDb),
-    fileContent: new BlobFileContentStore(blobs),
-  }, {
-    features: { preset: "none", files: true },
-    clock: { now: () => new Date() },
-    ids: {
-      next: (namespace) =>
-        `${namespace}_${crypto.randomUUID().replaceAll("-", "")}`,
-    },
-  }).port(managedAgentsPortTokens.files);
+    tenantDb: request.tenantDb,
+    blobs,
+  });
 });
 
 const managedMemoryStoresRoutes = buildManagedMemoryStoreRoutes((context) => {
@@ -405,9 +441,21 @@ const managedMemoryVersionsRoutes = buildManagedMemoryVersionRoutes((context) =>
 });
 
 function managedMemoriesApplicationFor(ctx: AppCtx) {
-  const client = new CfD1SqlClient(ctx.var.tenantDb);
+  return managedMemoriesApplication(
+    ctx.var.tenant_id,
+    ctx.var.tenantDb,
+    ctx.var.user_id,
+  );
+}
+
+function managedMemoriesApplication(
+  workspaceId: string,
+  tenantDb: D1Database,
+  userId?: string,
+) {
+  const client = new CfD1SqlClient(tenantDb);
   return createCloudflareManagedAgentsApp({
-    workspaceId: ctx.var.tenant_id,
+    workspaceId,
     sql: client,
   }, {
     features: {
@@ -433,7 +481,7 @@ function managedMemoriesApplicationFor(ctx: AppCtx) {
       providePort(memoryContentDescriptorPort, managedMemoryContent),
       providePort(
         memoryVersionActorPort,
-        managedMemoryActor(ctx.var.user_id),
+        managedMemoryActor(userId),
       ),
     ],
   });
@@ -448,10 +496,13 @@ function nextManagedSkillVersion(): string {
     : lastManagedSkillVersion + 1n;
   return lastManagedSkillVersion.toString();
 }
-function managedSkillsApplicationFor(ctx: AppCtx) {
-  const client = new CfD1SqlClient(ctx.var.tenantDb);
+function managedSkillsApplication(
+  workspaceId: string,
+  tenantDb: D1Database,
+) {
+  const client = new CfD1SqlClient(tenantDb);
   return createCloudflareManagedAgentsApp({
-    workspaceId: ctx.var.tenant_id,
+    workspaceId,
     sql: client,
   }, {
     features: {
@@ -470,6 +521,9 @@ function managedSkillsApplicationFor(ctx: AppCtx) {
       providePort(skillPackageCompilerPort, managedSkillCompiler),
     ],
   });
+}
+function managedSkillsApplicationFor(ctx: AppCtx) {
+  return managedSkillsApplication(ctx.var.tenant_id, ctx.var.tenantDb);
 }
 const managedSkillsRoutes = buildManagedSkillRoutes((context) =>
   managedSkillsApplicationFor(context as unknown as AppCtx)
@@ -695,15 +749,32 @@ function managedSessionsCompositionFor(ctx: AppCtx): SqlManagedSessionsCompositi
   const workspaceId = ctx.var.tenant_id;
   const selfHostedWork = managedEnvironmentWorkApplicationFor(ctx)
     .port(environmentSessionWorkEnqueuerPort);
+  const sessionLifecycleHooks = cfSessionLifecycle(ctx as never);
   return new SqlManagedSessionsComposition({
     client,
+    // Event acceptance and runtime work admission must share one D1 batch.
+    // SessionDO is only an execution host; a failed service-binding wakeup
+    // therefore cannot erase already accepted work.
+    executionOutbox: true,
     environments,
     lifecycle: new EnvironmentAwareSessionLifecycleRouter({
       environments,
       runtime,
       selfHostedWork,
+      cleanupSession: async ({ workspaceId, sessionId }) => {
+        await sessionLifecycleHooks.cascadeDeleteFiles?.({
+          tenantId: workspaceId,
+          sessionId,
+        });
+      },
     }),
     runtime,
+    eventDispatch: new EnvironmentAwareSessionEventDispatchRouter({ runtime }),
+    eventStream: new EnvironmentAwareSessionEventStreamRouter({
+      environments,
+      runtime,
+      selfHosted: new SqlPersistedSessionEventStream(client),
+    }),
     sealer: new CfManagedSessionSecretSealer(ctx.env.PLATFORM_ROOT_SECRET),
     clock: { now: () => new Date() },
     ids: {
@@ -717,6 +788,14 @@ function managedSessionsCompositionFor(ctx: AppCtx): SqlManagedSessionsCompositi
         `sesrsc_${crypto.randomUUID().replaceAll("-", "")}`,
     },
   });
+}
+
+async function managedMcpSources(env: Env, workspaceId: string) {
+  const tenantDb = await buildCfTenantDbProvider(env).resolve(workspaceId);
+  return {
+    sessionSource: new SqlSessionSource(new CfD1SqlClient(tenantDb)),
+    credentialSource: createManagedMcpProxyCredentialSource(env, tenantDb),
+  };
 }
 
 const managedSessionsRoutes = new Hono<{
@@ -734,8 +813,60 @@ const managedSessionsRoutes = new Hono<{
       sessionResources: () => ports.sessionResources,
       sessionThreads: () => ports.sessionThreads,
       sessionThreadEvents: () => ports.sessionThreadEvents,
+    }, {
+      outputs: {
+        workspaceId: () => ctx.var.tenant_id,
+        store: cfOutputsAdapter(ctx.env),
+      },
     }),
   );
+});
+
+const managedRuntimeIngressRoutes = new Hono<{
+  Bindings: Env;
+  Variables: {
+    tenant_id: string;
+    tenantDb: D1Database;
+    auth_credential?: ApiKeyResolution["credential"];
+  };
+}>().post("/:sessionId/runtime-events", async (c) => {
+  const credential = c.get("auth_credential");
+  if (credential?.type !== "environment_work_session") {
+    return c.json({ error: "Environment Work session credential required" }, 403);
+  }
+  let body: unknown;
+  try {
+    body = await c.req.json();
+  } catch {
+    return c.json({ error: "Request body must be valid JSON" }, 400);
+  }
+  const ctx = c as unknown as AppCtx;
+  const composition = managedSessionsCompositionFor(ctx);
+  const result = await ingestEnvironmentWorkRuntimeEvents({
+    claim: {
+      workspaceId: ctx.var.tenant_id,
+      environmentId: credential.environmentId,
+      sessionId: credential.sessionId,
+      workId: credential.workId,
+      generation: credential.generation,
+    },
+    sessionId: c.req.param("sessionId"),
+    body,
+    projection: new SessionRuntimeProjectionApplicationService({
+      workspaceId: ctx.var.tenant_id,
+      persistence: composition.runtimeProjection,
+    }),
+    publish: async () => {},
+  });
+  if (result.type === "recorded") {
+    return c.json({ data: result.eventIds.map((id) => ({ id })) }, 200);
+  }
+  if (result.type === "invalid_request") {
+    return c.json({ error: result.message }, 400);
+  }
+  if (result.type === "not_found") return c.json({ error: "Session not found" }, 404);
+  if (result.type === "forbidden") return c.json({ error: "Forbidden" }, 403);
+  return c.json({ error: result.type }, 409);
 });
 
 const managedDeploymentSchedulePlanner = new CronDeploymentSchedulePlanner();
@@ -800,6 +931,23 @@ function managedEnvironmentWorkCipherFor(
 
 function managedEnvironmentWorkApplicationFor(ctx: AppCtx) {
   const client = new CfD1SqlClient(ctx.var.tenantDb);
+  const platformRootSecret = ctx.env.PLATFORM_ROOT_SECRET;
+  if (!platformRootSecret) {
+    throw new Error(
+      "PLATFORM_ROOT_SECRET is required for managed Environment Work credentials",
+    );
+  }
+  const webhookUrl = ctx.env.OMA_MANAGED_AGENTS_WEBHOOK_URL;
+  const webhookKey = ctx.env.OMA_MANAGED_AGENTS_WEBHOOK_SIGNING_KEY;
+  const webhookWakeup = webhookUrl !== undefined && webhookKey !== undefined
+    ? new StandardWebhookEnvironmentWorkWakeup({
+        endpoint: webhookUrl,
+        signingKey: webhookKey,
+        organizationId: ({ workspaceId }) =>
+          ctx.env.OMA_MANAGED_AGENTS_ORGANIZATION_ID ?? workspaceId,
+        nextEventId: () => `whe_${crypto.randomUUID().replaceAll("-", "")}`,
+      })
+    : null;
   return createCloudflareManagedAgentsApp({
     workspaceId: ctx.var.tenant_id,
     sql: client,
@@ -822,11 +970,28 @@ function managedEnvironmentWorkApplicationFor(ctx: AppCtx) {
       ),
       providePort(
         environmentWorkSessionCredentialIssuerPort,
-        new OpaqueEnvironmentWorkSessionCredentialIssuer({
-          nextToken: () => crypto.randomUUID().replaceAll("-", ""),
+        new SealedEnvironmentWorkSessionCredentialIssuer({
+          crypto: new WebCryptoAesGcm(
+            platformRootSecret,
+            "managed.environment-work.session-token",
+          ),
+          now: () => new Date(),
           apiBaseUrl: new URL(ctx.req.url).origin,
         }),
       ),
+      providePort(environmentWorkWakeupPort, {
+        notifyRunStarted: async (input) => {
+          if (webhookWakeup === null) return;
+          ctx.executionCtx.waitUntil(
+            webhookWakeup.notifyRunStarted(input).catch((err) => {
+              logError(
+                { op: "environment_work.webhook_failed", err },
+                "Managed Agents webhook wake-up failed; poll fallback remains active",
+              );
+            }),
+          );
+        },
+      }),
       environmentWorkEnqueuerModule(),
     ],
   });
@@ -1118,6 +1283,7 @@ app.route("/v1/environments", managedEnvironmentsRoutes);
 app.route("/v1/environments", managedEnvironmentWorkRoutes);
 app.route("/v1/oma/environments", legacyEnvironmentsRoutes);
 app.route("/v1/sessions", managedSessionsRoutes);
+app.route("/v1/oma/sessions", managedRuntimeIngressRoutes);
 app.route("/v1/oma/sessions", legacySessionsRoutes);
 app.route("/v1/vaults", managedVaultsRoutes);
 app.route("/v1/vaults", managedCredentialsRoutes);
@@ -1188,8 +1354,9 @@ app.all("/billing-api/*", async (c) => {
   };
   return meter.fetch(url.toString(), init);
 });
-// MCP proxy bypasses /v1/* authMiddleware (declared in auth.ts as a
-// path-prefix skip) — auth is the Bearer oma_* the ACP child sends.
+// HTTP MCP gateway accepts either the local bridge's workspace bearer or the
+// current Work-scoped sessions_token. authMiddleware resolves both; the route
+// then validates that the requested server belongs to the same Session.
 app.route("/v1/oma/mcp-proxy", mcpProxyRoutes);
 
 // /v1/oma/* aliases — OMA-only namespaces re-mounted under an `oma/` prefix
@@ -1331,10 +1498,247 @@ export { RuntimeRoom } from "./runtime-room";
  * `forwardToUpstream` helpers in routes/mcp-proxy.ts.
  */
 export class McpProxyRpc extends WorkerEntrypoint<Env> {
+  async resolveManagedSessionInputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }) {
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const canonical = await withMissingManagedSessionSchemaFallback(
+      () => resolveManagedSessionInputs(
+        new SqlSessionSource(new CfD1SqlClient(tenantDb)),
+        { workspaceId: opts.tenantId, sessionId: opts.sessionId },
+      ),
+      async () => ({ type: "not_found" as const }),
+    );
+    if (canonical.type === "found") return canonical;
+
+    // Compatibility lane for `/v1/oma` Sessions. The fallback remains in
+    // the main control plane; the sandbox worker never reads D1/KV directly.
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const legacy = await services.sessions
+      .get({ tenantId: opts.tenantId, sessionId: opts.sessionId })
+      .catch(() => null);
+    if (legacy === null || legacy.archived_at !== null) {
+      return { type: "not_found" as const };
+    }
+    const rows = await services.sessions.listResourcesBySession({
+      sessionId: opts.sessionId,
+    });
+    const metadata = Object.fromEntries(
+      Object.entries(legacy.metadata ?? {}).filter(
+        (entry): entry is [string, string] => typeof entry[1] === "string",
+      ),
+    );
+    return {
+      type: "found" as const,
+      session: {
+        id: legacy.id,
+        environmentId: legacy.environment_id ?? "",
+        metadata,
+        resources: rows.map((row) => ({
+          ...row.resource,
+          id: row.id,
+        })),
+      },
+    };
+  }
+
+  async downloadManagedSessionFile(opts: {
+    tenantId: string;
+    sessionId: string;
+    fileId: string;
+  }) {
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const filesBlob = services.filesBlob;
+    if (filesBlob === null) {
+      throw new Error("FILES_BUCKET binding is required for managed Files");
+    }
+    const client = new CfD1SqlClient(tenantDb);
+    const canonical = await withMissingManagedSessionSchemaFallback(
+      () => downloadManagedSessionInputFile(
+        new SqlSessionSource(client),
+        managedFilesApplicationFor({
+          workspaceId: opts.tenantId,
+          tenantDb,
+          blobs: filesBlob,
+        }),
+        {
+          workspaceId: opts.tenantId,
+          sessionId: opts.sessionId,
+          fileId: opts.fileId,
+        },
+      ),
+      async () => ({ type: "not_found" as const }),
+    );
+    if (canonical.type === "found") return canonical;
+
+    const legacyResources = await services.sessions
+      .listResources({ tenantId: opts.tenantId, sessionId: opts.sessionId })
+      .catch(() => []);
+    if (!legacyResources.some(
+      (row) => row.resource.type === "file"
+        && row.resource.file_id === opts.fileId,
+    )) {
+      return { type: "not_found" as const };
+    }
+    const object = await filesBlob.get(
+      fileR2Key(opts.tenantId, opts.fileId),
+    );
+    if (object === null) return { type: "not_found" as const };
+    return {
+      type: "found" as const,
+      content: await object.bytes(),
+      mimeType: object.httpMetadata?.contentType ?? "application/octet-stream",
+    };
+  }
+
+  async materializeManagedMemorySnapshot(opts: {
+    tenantId: string;
+    sessionId: string;
+    memoryStoreId: string;
+    access: "read_only" | "read_write";
+    runtimeGeneration?: string;
+  }) {
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const client = new CfD1SqlClient(tenantDb);
+    const sessionSource = new SqlSessionSource(client);
+    const canonicalSession = await withMissingManagedSessionSchemaFallback(
+      () => resolveManagedSessionInputs(sessionSource, {
+        workspaceId: opts.tenantId,
+        sessionId: opts.sessionId,
+      }),
+      async () => ({ type: "not_found" as const }),
+    );
+    if (canonicalSession.type === "found") {
+      if (this.env.MEMORY_BUCKET === undefined) {
+        throw new Error("MEMORY_BUCKET binding is required for Managed Memory snapshots");
+      }
+      const memories = managedMemoriesApplication(opts.tenantId, tenantDb)
+        .port(managedAgentsPortTokens.memories);
+      const snapshots = new ManagedMemorySnapshotMaterializer(memories, {
+        getText: async (key) => {
+          const object = await this.env.MEMORY_BUCKET!.get(key);
+          return object === null ? null : object.text();
+        },
+        put: async (key, content) => {
+          const object = await this.env.MEMORY_BUCKET!.put(key, content);
+          return object ?? { key };
+        },
+      });
+      return materializeManagedSessionMemorySnapshot(
+        sessionSource,
+        snapshots,
+        {
+          workspaceId: opts.tenantId,
+          sessionId: opts.sessionId,
+          memoryStoreId: opts.memoryStoreId,
+          access: opts.access,
+          ...(opts.runtimeGeneration === undefined
+            ? {}
+            : { runtimeGeneration: opts.runtimeGeneration }),
+        },
+      );
+    }
+
+    // Legacy `/v1/oma` Memory Stores already use their mutable R2 prefix as
+    // bytes-of-truth, so no canonical snapshot projection is required.
+    const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const resources = await services.sessions
+      .listResources({ tenantId: opts.tenantId, sessionId: opts.sessionId })
+      .catch(() => []);
+    return resources.some(
+      (row) => row.resource.type === "memory_store"
+        && row.resource.memory_store_id === opts.memoryStoreId,
+    )
+      ? { type: "found" as const, mountStoreId: opts.memoryStoreId }
+      : { type: "not_found" as const };
+  }
+
+  async synchronizeManagedMemorySnapshots(opts: {
+    tenantId: string;
+    sessionId: string;
+    runtimeGeneration: string;
+    executionFence: import("@open-managed-agents/session-runtime-contract/coordination").SessionExecutionFence;
+  }) {
+    if (this.env.MEMORY_BUCKET === undefined) {
+      throw new Error("MEMORY_BUCKET binding is required for Managed Memory synchronization");
+    }
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const client = new CfD1SqlClient(tenantDb);
+    const memories = managedMemoriesApplication(opts.tenantId, tenantDb)
+      .port(managedAgentsPortTokens.memories);
+    const bucket = this.env.MEMORY_BUCKET;
+    return synchronizeManagedSessionMemoryWorkspaces(
+      new SqlSessionSource(client),
+      memories,
+      {
+        getText: async (key) => {
+          const object = await bucket.get(key);
+          return object === null ? null : object.text();
+        },
+        list: async (prefix, cursor) => {
+          const page = await bucket.list({
+            prefix,
+            limit: 1_000,
+            ...(cursor === undefined ? {} : { cursor }),
+          });
+          return {
+            keys: page.objects.map((object) => object.key),
+            nextCursor: page.truncated ? page.cursor : null,
+          };
+        },
+        put: async (key, content) => (await bucket.put(key, content)) ?? { key },
+        delete: async (key) => bucket.delete(key),
+      },
+      {
+        workspaceId: opts.tenantId,
+        sessionId: opts.sessionId,
+        runtimeGeneration: opts.runtimeGeneration,
+        executionFence: opts.executionFence,
+        isFenceActive: async (fence) => {
+          if (
+            fence.workspaceId !== opts.tenantId
+            || fence.sessionId !== opts.sessionId
+            || !Number.isSafeInteger(fence.generation)
+            || fence.generation < 1
+          ) return false;
+          const active = await client.prepare(
+            `SELECT 1 AS active FROM managed_session_executions
+              WHERE workspace_id = ? AND id = ? AND session_id = ?
+                AND state = 'running' AND attempt_id = ? AND owner_id = ?
+                AND generation = ? AND lease_expires_at_ms > ?`,
+          ).bind(
+            fence.workspaceId,
+            fence.executionId,
+            fence.sessionId,
+            fence.attemptId,
+            fence.ownerId,
+            fence.generation,
+            Date.now(),
+          ).first<{ active: number }>();
+          return active !== null;
+        },
+      },
+    );
+  }
+
+  async resolveManagedSkillVersion(opts: {
+    tenantId: string;
+    skillId: string;
+    requestedVersion: string;
+  }) {
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const versions = managedSkillsApplication(opts.tenantId, tenantDb)
+      .port(managedAgentsPortTokens.skillVersions);
+    return resolveManagedSkillArchive(versions, opts);
+  }
+
   async managedSessionEventProduced(opts: {
     workspaceId: string;
     sessionId: string;
     event: string;
+    executionFence?: import("@open-managed-agents/session-runtime-contract/coordination").SessionExecutionFence;
   }): Promise<
     | { type: "recorded" }
     | { type: "ignored" }
@@ -1362,9 +1766,13 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       }).recordSessionRuntimeEvents({
         sessionId: opts.sessionId,
         events: [event],
+        ...(opts.executionFence !== undefined && {
+          executionFence: opts.executionFence,
+        }),
       });
       if (result.type === "recorded") return { type: "recorded" };
       if (result.type === "not_found") return { type: "not_found" };
+      if (result.type === "execution_fence_lost") return { type: "version_conflict" };
     }
     return { type: "version_conflict" };
   }
@@ -1386,12 +1794,18 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     body: string;
   }> {
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      opts.tenantId,
+    );
     const target = await resolveProxyTargetByTenant(
       this.env,
       services,
       opts.tenantId,
       opts.sessionId,
       opts.serverName,
+      sessionSource,
+      credentialSource,
     );
     if (!target) {
       return {
@@ -1462,12 +1876,18 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
       );
     }
     const services = await getCfServicesForTenant(this.env, tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      tenantId,
+    );
     const target = await resolveProxyTargetByTenant(
       this.env,
       services,
       tenantId,
       sessionId,
       serverName,
+      sessionSource,
+      credentialSource,
     );
     if (!target) {
       return new Response('{"error":"forbidden"}', {
@@ -1525,15 +1945,52 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     tenantId: string;
     sessionId: string;
     hostname: string;
+    runtimeFence?: {
+      environmentId: string;
+      workId: string;
+      ownerId: string;
+      generation: number;
+      token: string;
+    };
   }): Promise<{ type: "bearer"; token: string } | null> {
+    const fence = opts.runtimeFence === undefined
+      ? null
+      : {
+          workspaceId: opts.tenantId,
+          environmentId: opts.runtimeFence.environmentId,
+          sessionId: opts.sessionId,
+          workId: opts.runtimeFence.workId,
+          ownerId: opts.runtimeFence.ownerId,
+          generation: opts.runtimeFence.generation,
+          token: opts.runtimeFence.token,
+          // SQL validation uses the database expiry; the caller cannot choose it.
+          expiresAt: new Date(0).toISOString(),
+        };
+    const runtimeFences = fence === null
+      ? null
+      : new SqlRuntimeResourceFencePort(new CfD1SqlClient(this.env.MAIN_DB));
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      opts.tenantId,
+    );
     const cred = await resolveOutboundCredentialByHost(
       this.env,
       services,
       opts.tenantId,
       opts.sessionId,
       opts.hostname,
+      sessionSource,
+      credentialSource,
     );
+    // Re-check after the tenant lookup so expiry/reclaim during a slow Vault
+    // read cannot release a credential to the stale owner.
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
     if (!cred) return null;
     return { type: "bearer", token: cred.upstreamToken };
   }
@@ -1557,15 +2014,67 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     sessionId: string;
     hostname: string;
     pathname: string;
+    runtimeFence?: {
+      environmentId: string;
+      workId: string;
+      ownerId: string;
+      generation: number;
+      token: string;
+    };
   }): Promise<{ scheme: "Basic" | "Bearer"; token: string; slug: string } | null> {
-    const services = await getCfServicesForTenant(this.env, opts.tenantId);
-    return resolveGithubCredentials(
-      services,
-      opts.tenantId,
-      opts.sessionId,
-      opts.hostname,
-      opts.pathname,
+    const fence = opts.runtimeFence === undefined
+      ? null
+      : {
+          workspaceId: opts.tenantId,
+          environmentId: opts.runtimeFence.environmentId,
+          sessionId: opts.sessionId,
+          workId: opts.runtimeFence.workId,
+          ownerId: opts.runtimeFence.ownerId,
+          generation: opts.runtimeFence.generation,
+          token: opts.runtimeFence.token,
+          expiresAt: new Date(0).toISOString(),
+        };
+    const runtimeFences = fence === null
+      ? null
+      : new SqlRuntimeResourceFencePort(new CfD1SqlClient(this.env.MAIN_DB));
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
+    const tenantDb = await buildCfTenantDbProvider(this.env).resolve(opts.tenantId);
+    const client = new CfD1SqlClient(tenantDb);
+    const sessionSource = new SqlSessionSource(client);
+    const canonicalSession = await withMissingManagedSessionSchemaFallback(
+      () => sessionSource.find({
+        workspaceId: opts.tenantId,
+        sessionId: opts.sessionId,
+      }),
+      async () => null,
     );
+    const credential = canonicalSession === null
+      ? await resolveGithubCredentials(
+          await getCfServicesForTenant(this.env, opts.tenantId),
+          opts.tenantId,
+          opts.sessionId,
+          opts.hostname,
+          opts.pathname,
+        )
+      : await resolveManagedGithubCredentials(
+          { find: async () => canonicalSession },
+          new SqlSessionResourceSecretSource(
+            client,
+            new CfManagedSessionSecretSealer(this.env.PLATFORM_ROOT_SECRET),
+          ),
+          {
+            workspaceId: opts.tenantId,
+            sessionId: opts.sessionId,
+            hostname: opts.hostname,
+            pathname: opts.pathname,
+          },
+        );
+    if (fence !== null && !await runtimeFences!.isCurrent(fence)) {
+      throw new Error("stale runtime credential-egress fence");
+    }
+    return credential;
   }
 
 
@@ -1617,12 +2126,18 @@ export class McpProxyRpc extends WorkerEntrypoint<Env> {
     }
 
     const services = await getCfServicesForTenant(this.env, opts.tenantId);
+    const { sessionSource, credentialSource } = await managedMcpSources(
+      this.env,
+      opts.tenantId,
+    );
     const cred = await resolveOutboundCredentialByHost(
       this.env,
       services,
       opts.tenantId,
       opts.sessionId,
       parsedUrl.hostname,
+      sessionSource,
+      credentialSource,
     );
 
     const inboundHeaders = new Headers(opts.headers);

@@ -109,4 +109,53 @@ describe("@open-managed-agents/vault-forward", () => {
     expect(res.status).toBe(200);
     expect(persisted).toEqual({ access_token: "new-tok", refresh_token: "new-r" });
   });
+
+  it("never follows an upstream redirect with the injected bearer", async () => {
+    const fakeFetch: typeof fetch = async (_input, init) => {
+      expect(init?.redirect).toBe("manual");
+      expect(new Headers(init?.headers).get("authorization")).toBe("Bearer vault-token");
+      return new Response(null, {
+        status: 302,
+        headers: { location: "https://attacker.example/collect" },
+      });
+    };
+
+    const response = await forwardWithRefresh({
+      upstreamUrl: "https://mcp.example/rpc",
+      method: "POST",
+      inboundHeaders: new Headers(),
+      body: "{}",
+      accessToken: "vault-token",
+      fetcher: fakeFetch,
+    });
+
+    expect(response.status).toBe(302);
+  });
+
+  it("scrubs OpenMA and proxy authentication headers before forwarding", async () => {
+    const fakeFetch: typeof fetch = async (_input, init) => {
+      const headers = new Headers(init?.headers);
+      expect(headers.get("authorization")).toBe("Bearer vault-token");
+      expect(headers.has("x-api-key")).toBe(false);
+      expect(headers.has("proxy-authorization")).toBe(false);
+      expect(headers.has("cookie")).toBe(false);
+      expect(headers.has("x-active-tenant")).toBe(false);
+      return new Response("ok");
+    };
+
+    await forwardWithRefresh({
+      upstreamUrl: "https://mcp.example/rpc",
+      method: "POST",
+      inboundHeaders: new Headers({
+        authorization: "Bearer work-token",
+        "x-api-key": "openma-api-key",
+        "proxy-authorization": "Basic local-proxy-capability",
+        cookie: "openma-session=cookie",
+        "x-active-tenant": "tenant-1",
+      }),
+      body: "{}",
+      accessToken: "vault-token",
+      fetcher: fakeFetch,
+    });
+  });
 });

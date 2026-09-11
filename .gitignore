@@ -5,6 +5,7 @@ dist/
 # local SQLite DB incl. encrypted integration credentials. Never commit.
 .wrangler-shared/
 .dev.vars
+.env.certification.local
 # Astro content-collection types cache (apps/web). Regenerated on
 # `astro check` / `astro build`; not part of source.
 .astro/
@@ -23,10 +24,14 @@ apps/*/wrangler.lane-*.jsonc
 # Test
 .act.secrets
 .act.vars
+test-results/
 test-heatmap.html
 test/eval/data/
 # Coverage output (vitest --coverage HTML/JSON/clover)
 coverage/
+# Certification reports are local evidence and may contain
+# provider diagnostics even after redaction.
+artifacts/certification/
 
 # RL training artifacts
 rl/output/

@@ -1,0 +1,23 @@
+{
+  "name": "@open-managed-agents/runtime-resource-fence-sql",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*"
+  },
+  "devDependencies": {
+    "better-sqlite3": "^13.0.3",
+    "postgres": "^3.4.0",
+    "vitest": "^4.1.3"
+  }
+}

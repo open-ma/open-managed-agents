@@ -56,6 +56,20 @@ interface AcpSessionUpdate {
   kind?: string;
 }
 
+interface AcpPromptUsage {
+  totalTokens?: number | null;
+  inputTokens?: number | null;
+  outputTokens?: number | null;
+  thoughtTokens?: number | null;
+  cachedReadTokens?: number | null;
+  cachedWriteTokens?: number | null;
+}
+
+interface AcpPromptResponse {
+  stopReason?: string;
+  usage?: AcpPromptUsage | null;
+}
+
 /** Wire shape of an ACP `session/update` notification. The agent SDK
  *  yields these to the Client.sessionUpdate callback as
  *  `{ sessionId, update: { sessionUpdate, ... } }` — the actual update
@@ -71,6 +85,13 @@ interface AcpEvent {
   event?: AcpNotification;
   // session.error / session.complete carry these
   message?: string;
+  // Terminal records emitted by the shared ACP runtime around PromptResponse.
+  response?: AcpPromptResponse;
+  error?: string;
+}
+
+interface AcpTranslatorOptions {
+  model?: string;
 }
 
 /**
@@ -81,6 +102,10 @@ interface AcpEvent {
  */
 export class AcpTranslator {
   #runtime: HarnessRuntime;
+  #model?: string;
+  #modelRequestStartId: string;
+  #modelRequestClosed = false;
+  #finalTextLength = 0;
   #activeMessage: { id: string; text: string } | null = null;
   #activeThinking: { id: string; text: string } | null = null;
   /** Tool calls observed but not yet emitted as agent.tool_use. ACP child
@@ -95,13 +120,57 @@ export class AcpTranslator {
    *  honor by patching pending state but never re-emit a second tool_use. */
   #emittedToolUses: Set<string> = new Set();
 
-  constructor(runtime: HarnessRuntime) {
+  constructor(runtime: HarnessRuntime, options: AcpTranslatorOptions = {}) {
     this.#runtime = runtime;
+    this.#model = options.model;
+    this.#modelRequestStartId = generateEventId();
+    this.#runtime.broadcast({
+      type: "span.model_request_start",
+      id: this.#modelRequestStartId,
+      ...(this.#model ? { model: this.#model } : {}),
+    });
+  }
+
+  /** Consume one item yielded by AcpSession.prompt(). Session updates and the
+   * terminal promptComplete/promptError records share this iterable. */
+  async consumePromptItem(item: unknown, sessionId?: string): Promise<void> {
+    if (isPromptTerminal(item)) {
+      await this.consume(item);
+      return;
+    }
+    await this.consume({
+      type: "session.event",
+      event: { sessionId, update: item as AcpSessionUpdate },
+    });
   }
 
   /** Process one message from the daemon-relayed stream. */
   async consume(msg: AcpEvent): Promise<void> {
+    // PromptResponse is the canonical ACP turn-usage carrier. In particular,
+    // its experimental Usage shape preserves cachedReadTokens/cachedWriteTokens;
+    // usage_update only describes context-window occupancy (used/size).
+    if (msg.type === "promptComplete") {
+      await this.#flushAllPendingToolUses();
+      await this.#closeMessage();
+      await this.#closeThinking();
+      await this.#closeModelRequest(msg.response);
+      return;
+    }
+    if (msg.type === "promptError") {
+      await this.#flushAllPendingToolUses();
+      await this.#closeMessage();
+      await this.#closeThinking();
+      await this.#closeModelRequest(undefined, msg.error ?? "ACP prompt failed");
+      return;
+    }
     if (msg.type !== "session.event" || !msg.event) return;
+    // Daemon placement transports the terminal record as a session.event so
+    // it survives RuntimeRoom's product-neutral relay without extending the
+    // session-kernel wire vocabulary.
+    if (isPromptTerminal(msg.event)) {
+      await this.consume(msg.event);
+      return;
+    }
     const upd = msg.event.update;
     if (!upd) return;
     switch (upd.sessionUpdate) {
@@ -171,11 +240,15 @@ export class AcpTranslator {
       // Drop unflushed tool_uses on abort — they'd be misleading without a
       // matching tool_result, and the user already knows the turn was killed.
       this.#pendingToolUses.clear();
+      await this.#closeModelRequest(undefined, "ACP prompt aborted");
       return;
     }
     await this.#flushAllPendingToolUses();
     await this.#closeMessage();
     await this.#closeThinking();
+    // Backward compatibility with daemons predating PromptResponse relay:
+    // close the span even though those hosts cannot report usage details.
+    await this.#closeModelRequest({ stopReason: "end_turn" });
   }
 
   async #onTextChunk(delta: string): Promise<void> {
@@ -210,6 +283,38 @@ export class AcpTranslator {
       message_id: m.id,
       content: [{ type: "text", text: m.text.replace(/\s+$/, "") }],
     });
+    this.#finalTextLength += m.text.replace(/\s+$/, "").length;
+  }
+
+  async #closeModelRequest(
+    response?: AcpPromptResponse,
+    errorMessage?: string,
+  ): Promise<void> {
+    if (this.#modelRequestClosed) return;
+    this.#modelRequestClosed = true;
+    const usage = response?.usage;
+    const finite = (value: number | null | undefined): number =>
+      typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : 0;
+    const input = finite(usage?.inputTokens);
+    const output = finite(usage?.outputTokens);
+    this.#runtime.broadcast({
+      type: "span.model_request_end",
+      ...(this.#model ? { model: this.#model } : {}),
+      model_request_start_id: this.#modelRequestStartId,
+      ...(usage ? {
+        model_usage: {
+          input_tokens: input,
+          output_tokens: output,
+          cache_read_input_tokens: finite(usage.cachedReadTokens),
+          cache_creation_input_tokens: finite(usage.cachedWriteTokens),
+        },
+      } : {}),
+      finish_reason: errorMessage ? "error" : (response?.stopReason ?? "other"),
+      final_text_length: this.#finalTextLength,
+      is_error: Boolean(errorMessage),
+      ...(errorMessage ? { error_message: errorMessage.slice(0, 500) } : {}),
+    });
+    if (usage) await this.#runtime.reportUsage?.(input, output);
   }
 
   async #closeThinking(): Promise<void> {
@@ -313,4 +418,10 @@ export class AcpTranslator {
       content: text,
     });
   }
+}
+
+function isPromptTerminal(value: unknown): value is AcpEvent {
+  if (value === null || typeof value !== "object") return false;
+  const type = (value as { type?: unknown }).type;
+  return type === "promptComplete" || type === "promptError";
 }

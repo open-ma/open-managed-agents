@@ -775,7 +775,8 @@ describe("threads HTTP endpoints", () => {
   //   2. Promise.all kicks off drainEventQueue per thread (no global
   //      mutex; per-thread mutex from _draining set keeps each call
   //      isolated).
-  //   3. Empty pending set → defensive primary drain (cheap no-op).
+  //   3. Empty pending set → strict no-op (must not enter the central
+  //      execution path just to discover that there is no work).
   it("recoverEventQueue drains every thread that has pending events", async () => {
     // Spy on drainEventQueue: confirms recoverEventQueue dispatched a
     // call for each thread with pending rows (3 distinct thread ids).
@@ -823,11 +824,10 @@ describe("threads HTTP endpoints", () => {
     );
   });
 
-  it("recoverEventQueue with no pending events runs a defensive primary drain", async () => {
-    // Empty pending set: the cursor returns zero rows. Implementation
-    // falls back to a single drainEventQueue("sthr_primary") call so
-    // the alarm tail isn't wasted — the partial-index lookup inside
-    // drainEventQueue early-returns when there's nothing to do.
+  it("recoverEventQueue with no pending events is a strict no-op", async () => {
+    // Empty pending set: do not call drainEventQueue at all. Entering the
+    // central execution path only to discover an empty queue can arm a
+    // lease heartbeat on an otherwise idle session.
     const stub = freshDoStub("recover_empty");
     await seedSchemaAndState(stub);
 
@@ -841,7 +841,7 @@ describe("threads HTTP endpoints", () => {
       await (instance as { recoverEventQueue: () => Promise<void> }).recoverEventQueue();
       return { calls };
     });
-    expect(result.calls).toEqual(["sthr_primary"]);
+    expect(result.calls).toEqual([]);
   });
 
   it("recoverEventQueue DISTINCT query collapses duplicate thread ids", async () => {

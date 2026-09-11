@@ -21,6 +21,9 @@ export interface ApiKeyMeta {
   prefix: string;
   created_at: string;
   source?: string;
+  credential?:
+    | { type: "workspace" }
+    | { type: "environment"; environmentId: string };
 }
 
 export interface ApiKeyRecord {
@@ -30,6 +33,9 @@ export interface ApiKeyRecord {
   name: string;
   created_at: string;
   source?: string;
+  credential?:
+    | { type: "workspace" }
+    | { type: "environment"; environmentId: string };
 }
 
 export interface ApiKeyStorage {
@@ -57,11 +63,11 @@ async function sha256Hex(s: string): Promise<string> {
     .join("");
 }
 
-function generateRawKey(): string {
+function generateRawKey(prefix = "oma_"): string {
   const bytes = new Uint8Array(36);
   crypto.getRandomValues(bytes);
   const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
-  let s = "oma_";
+  let s = prefix;
   for (const b of bytes) s += chars[b % chars.length];
   return s;
 }
@@ -77,11 +83,20 @@ export function buildApiKeyRoutes(deps: ApiKeyRoutesDeps) {
     const tenantId = c.var.tenant_id;
     const userId = c.var.user_id;
     const body = await c.req
-      .json<{ name?: string }>()
-      .catch(() => ({}) as { name?: string });
+      .json<{ name?: string; environment_id?: string }>()
+      .catch(() => ({}) as { name?: string; environment_id?: string });
     const name = body.name || "Untitled key";
+    if (body.environment_id !== undefined && body.environment_id.trim() === "") {
+      return c.json({ error: "environment_id must not be empty" }, 400);
+    }
+    const credential = body.environment_id === undefined
+      ? { type: "workspace" as const }
+      : { type: "environment" as const, environmentId: body.environment_id };
 
-    const raw = generateRawKey();
+    const raw = generateRawKey(
+      credential.type === "environment" ? "oma_env_" : "oma_",
+    );
+    const prefix = raw.slice(0, credential.type === "environment" ? 12 : 8);
     const hash = await sha256Hex(raw);
     const id = `ak_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
     const now = new Date().toISOString();
@@ -89,16 +104,17 @@ export function buildApiKeyRoutes(deps: ApiKeyRoutesDeps) {
     await deps.storage.insert({
       id,
       hash,
-      prefix: raw.slice(0, 8),
+      prefix,
       record: {
         id,
         tenant_id: tenantId,
         ...(userId ? { user_id: userId } : {}),
         name,
         created_at: now,
+        credential,
       },
     });
-    return c.json({ id, name, key: raw, prefix: raw.slice(0, 8), created_at: now }, 201);
+    return c.json({ id, name, key: raw, prefix, created_at: now }, 201);
   });
 
   app.get("/", async (c) => {
@@ -119,16 +135,28 @@ export function buildApiKeyRoutes(deps: ApiKeyRoutesDeps) {
  *  insert step. Returns the meta the route should echo back. */
 export async function mintApiKeyOnStorage(
   storage: ApiKeyStorage,
-  input: { tenantId: string; userId: string; name: string; source?: string },
+  input: {
+    tenantId: string;
+    userId: string;
+    name: string;
+    source?: string;
+    environmentId?: string;
+  },
 ): Promise<{ id: string; key: string; prefix: string; createdAt: string }> {
-  const raw = generateRawKey();
+  const credential = input.environmentId === undefined
+    ? { type: "workspace" as const }
+    : { type: "environment" as const, environmentId: input.environmentId };
+  const raw = generateRawKey(
+    credential.type === "environment" ? "oma_env_" : "oma_",
+  );
+  const prefix = raw.slice(0, credential.type === "environment" ? 12 : 8);
   const hash = await sha256Hex(raw);
   const id = `ak_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
   const now = new Date().toISOString();
   await storage.insert({
     id,
     hash,
-    prefix: raw.slice(0, 8),
+    prefix,
     record: {
       id,
       tenant_id: input.tenantId,
@@ -136,9 +164,10 @@ export async function mintApiKeyOnStorage(
       name: input.name,
       created_at: now,
       source: input.source,
+      credential,
     },
   });
-  return { id, key: raw, prefix: raw.slice(0, 8), createdAt: now };
+  return { id, key: raw, prefix, createdAt: now };
 }
 
 export { sha256Hex };

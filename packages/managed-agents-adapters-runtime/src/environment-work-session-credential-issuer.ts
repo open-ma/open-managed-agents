@@ -35,4 +35,25 @@ export class OpaqueEnvironmentWorkSessionCredentialIssuer
       },
     };
   }
+
+  async bindToClaim(
+    input: {
+      secret: { sessionsToken: string; apiBaseUrl?: string };
+      claimedAt: string;
+      generation: number;
+    },
+  ) {
+    const token = this.dependencies.nextToken();
+    if (token.length === 0) {
+      throw new Error("Session credential token is empty");
+    }
+    return {
+      secret: {
+        ...input.secret,
+        sessionsToken: token.startsWith("sk-ant-req-")
+          ? token
+          : `sk-ant-req-${token}`,
+      },
+    };
+  }
 }

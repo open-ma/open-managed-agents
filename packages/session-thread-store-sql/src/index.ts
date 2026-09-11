@@ -39,15 +39,31 @@ function toSessionThread(row: SessionThreadRow): SessionThread {
 }
 
 export class SqlSessionThreadStore implements SessionThreadStore {
-  constructor(private readonly client: SqlClient) {}
+  constructor(
+    private readonly client: SqlClient,
+    private readonly options: { now?: () => Date } = {},
+  ) {}
 
   async insert(input: InsertSessionThread): Promise<SessionThread> {
     const value = input.thread;
+    const fence = input.executionFence;
+    if (fence !== undefined && (fence.workspaceId !== input.workspaceId || fence.sessionId !== value.sessionId)) {
+      throw new Error("Session Thread creation fence scope does not match the parent Session");
+    }
+    const guard = fence === undefined ? "" : `WHERE EXISTS (
+      SELECT 1 FROM managed_session_executions
+        WHERE workspace_id = ? AND id = ? AND session_id = ?
+          AND state = 'running' AND attempt_id = ? AND owner_id = ?
+          AND generation = ? AND lease_expires_at_ms > ?
+    )`;
+    const fenceBindings = fence === undefined ? [] : [fence.workspaceId, fence.executionId,
+      fence.sessionId, fence.attemptId, fence.ownerId, fence.generation,
+      (this.options.now?.() ?? new Date()).getTime()];
     const result = await this.client
       .prepare(
         `INSERT INTO managed_session_threads
           (workspace_id, session_id, id, document, created_at, updated_at, archived_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+         SELECT ?, ?, ?, ?, ?, ?, ? ${guard}`,
       )
       .bind(
         input.workspaceId,
@@ -57,9 +73,13 @@ export class SqlSessionThreadStore implements SessionThreadStore {
         timestamp(value.createdAt),
         timestamp(value.updatedAt),
         value.archivedAt === null ? null : timestamp(value.archivedAt),
+        ...fenceBindings,
       )
       .run();
     if (result.meta.changes !== 1) {
+      if (fence !== undefined && result.meta.changes === 0) {
+        throw new Error("Session Thread creation rejected because its parent execution fence was lost");
+      }
       throw new Error(
         `Session Thread insertion affected ${result.meta.changes} rows`,
       );

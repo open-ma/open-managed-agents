@@ -21,6 +21,7 @@ const POSTGRES_DATABASES = {
   eventFanout: "openma_event_fanout_test",
   queue: "openma_queue_test",
   s3Memory: "openma_s3_memory_test",
+  runtimeFence: "openma_runtime_fence_test",
 } as const;
 
 function databaseUrl(connectionUri: string, database: string): string {
@@ -101,6 +102,7 @@ export default async function setup(project: TestProject): Promise<() => Promise
         eventFanout: databaseUrl(connectionUri, POSTGRES_DATABASES.eventFanout),
         queue: databaseUrl(connectionUri, POSTGRES_DATABASES.queue),
         s3Memory: databaseUrl(connectionUri, POSTGRES_DATABASES.s3Memory),
+        runtimeFence: databaseUrl(connectionUri, POSTGRES_DATABASES.runtimeFence),
       },
       s3: {
         endpoint,

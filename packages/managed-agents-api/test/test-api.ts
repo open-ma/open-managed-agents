@@ -86,6 +86,41 @@ function buildRequestScopedTestApi(
   });
 }
 
+/** Compose more than one real application Port for cross-resource protocol
+ * tests (for example the official EnvironmentWorker, which traverses Work,
+ * Sessions, and Session Events). Unspecified resources remain fail-fast
+ * fixtures so the test cannot accidentally widen its dependency surface. */
+export function buildManagedAgentsTestApi(
+  overrides: Partial<ManagedAgentsApplicationPorts>,
+) {
+  return buildRequestScopedTestApi({
+    agents: makeAgentsPort({}),
+    credentials: makeCredentialsPort({}),
+    deploymentRuns: makeDeploymentRunsPort({}),
+    deployments: makeDeploymentsPort({}),
+    dreams: makeDreamsPort({}),
+    environments: makeEnvironmentsPort({}),
+    environmentWork: makeEnvironmentWorkPort({}),
+    files: makeFilesPort({}),
+    memories: makeMemoriesPort({}),
+    memoryStores: makeMemoryStoresPort({}),
+    memoryVersions: makeMemoryVersionsPort({}),
+    models: makeModelsPort({}),
+    sessionEvents: makeSessionEventsPort({}),
+    sessionResources: makeSessionResourcesPort({}),
+    sessionThreadEvents: makeSessionThreadEventsPort({}),
+    sessionThreads: makeSessionThreadsPort({}),
+    sessions: makeSessionsPort({}),
+    skillVersions: makeSkillVersionsPort({}),
+    skills: makeSkillsPort({}),
+    tunnelCertificates: makeTunnelCertificatesPort({}),
+    tunnels: makeTunnelsPort({}),
+    userProfiles: makeUserProfilesPort({}),
+    vaults: makeVaultsPort({}),
+    ...overrides,
+  });
+}
+
 export function buildAgentsTestApi(agents: AgentsApplicationPort) {
   return buildRequestScopedTestApi({
     agents,

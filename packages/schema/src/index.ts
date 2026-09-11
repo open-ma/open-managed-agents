@@ -9,7 +9,7 @@
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import { ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 
-export type SqlDialect = "sqlite" | "postgres";
+export type SqlDialect = "sqlite" | "postgres" | "mysql";
 
 export interface ApplySchemaOptions {
   sql: SqlClient;
@@ -106,6 +106,59 @@ export async function applyBetterAuthSchema(opts: {
           ON "verification" ("identifier");
       `);
     }, true);
+  } else if (dialect === "mysql") {
+    // The main MySQL adapter installs these as part of its canonical schema.
+    // Keep this idempotent bootstrap here as well because Better Auth owns
+    // the column representation (native DATETIME values, not epoch millis).
+    await sql.exec(`
+      CREATE TABLE IF NOT EXISTS \`user\` (
+        \`id\` VARCHAR(191) PRIMARY KEY NOT NULL,
+        \`email\` VARCHAR(191) NOT NULL UNIQUE,
+        \`emailVerified\` BOOLEAN NOT NULL DEFAULT FALSE,
+        \`name\` LONGTEXT NOT NULL,
+        \`image\` LONGTEXT,
+        \`tenantId\` VARCHAR(191),
+        \`role\` VARCHAR(191),
+        \`createdAt\` DATETIME(3) NOT NULL,
+        \`updatedAt\` DATETIME(3) NOT NULL
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      CREATE TABLE IF NOT EXISTS \`session\` (
+        \`id\` VARCHAR(191) PRIMARY KEY NOT NULL,
+        \`userId\` VARCHAR(191) NOT NULL,
+        \`token\` VARCHAR(191) NOT NULL UNIQUE,
+        \`expiresAt\` DATETIME(3) NOT NULL,
+        \`ipAddress\` LONGTEXT,
+        \`userAgent\` LONGTEXT,
+        \`createdAt\` DATETIME(3) NOT NULL,
+        \`updatedAt\` DATETIME(3) NOT NULL,
+        KEY \`idx_session_userId\` (\`userId\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      CREATE TABLE IF NOT EXISTS \`account\` (
+        \`id\` VARCHAR(191) PRIMARY KEY NOT NULL,
+        \`userId\` VARCHAR(191) NOT NULL,
+        \`accountId\` VARCHAR(191) NOT NULL,
+        \`providerId\` VARCHAR(191) NOT NULL,
+        \`accessToken\` LONGTEXT,
+        \`refreshToken\` LONGTEXT,
+        \`idToken\` LONGTEXT,
+        \`accessTokenExpiresAt\` DATETIME(3),
+        \`refreshTokenExpiresAt\` DATETIME(3),
+        \`scope\` LONGTEXT,
+        \`password\` LONGTEXT,
+        \`createdAt\` DATETIME(3) NOT NULL,
+        \`updatedAt\` DATETIME(3) NOT NULL,
+        KEY \`idx_account_userId\` (\`userId\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+      CREATE TABLE IF NOT EXISTS \`verification\` (
+        \`id\` VARCHAR(191) PRIMARY KEY NOT NULL,
+        \`identifier\` VARCHAR(191) NOT NULL,
+        \`value\` LONGTEXT NOT NULL,
+        \`expiresAt\` DATETIME(3) NOT NULL,
+        \`createdAt\` DATETIME(3),
+        \`updatedAt\` DATETIME(3),
+        KEY \`idx_verification_identifier\` (\`identifier\`)
+      ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4
+    `);
   } else {
     // sqlite — better-auth's kysely adapter wants the better-sqlite3 native
     // db; main-node still applies these tables via a direct .exec() because

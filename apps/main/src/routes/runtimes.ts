@@ -728,11 +728,11 @@ runtimeDaemonRoutes.get("/sessions/:sid/bundle", async (c) => {
  *   - opencode: skills materialize as `.opencode/agents/<id>.md` so the
  *     spawned `opencode acp` child auto-discovers them as subagents per
  *     OpenCode's per-project agent convention.
- *   - codex-cli (via acpx), hermes, openclaw: no per-skill native
+ *   - codex-cli (via acpx), hermes: no per-skill native
  *     convention we can rely on, so skills get inlined into AGENTS.md as
  *     a `## Available Skills` section. Codex reads project-root AGENTS.md
- *     natively, so this works out of the box for it. Hermes / openclaw
- *     just see the section as part of their system context.
+ *     natively, so this works out of the box for it. Hermes sees the
+ *     section as part of its system context.
  *   - gemini-cli: extensions live as `.gemini/extensions/<id>/GEMINI.md`
  *     with a `gemini-extension.json` manifest. Generating those manifests
  *     correctly is out of scope for v1; we fall back to inlining for now.
@@ -796,7 +796,7 @@ async function renderSessionBundle(
       }
     } else {
       // Inline path: drop full skill content into AGENTS.md so codex /
-      // hermes / openclaw read it as part of their system prompt. We
+      // Hermes reads it as part of its system prompt. We
       // still try to load the real SKILL.md (was missing pre-v2 — only
       // the type/version line was emitted).
       agentsMd += `## Available Skills\n\n`;

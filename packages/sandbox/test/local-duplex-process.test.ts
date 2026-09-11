@@ -27,6 +27,25 @@ afterEach(async () => {
 });
 
 describe("LocalSubprocessSandbox duplex process", () => {
+  it("projects logical workspace paths in process env onto the local workdir", async () => {
+    const workdir = await mkdtemp(join(tmpdir(), "oma-sandbox-env-path-"));
+    temporaryDirectories.push(workdir);
+    const sandbox = new LocalSubprocessSandbox({ workdir });
+    const child = await sandbox.spawnDuplexProcess({
+      command: process.execPath,
+      args: ["-e", "process.stdout.write(process.env.AGENT_STATE ?? '')"],
+      env: {
+        AGENT_STATE: "/workspace/.openma/harness-state/native",
+        REMOTE_URL: "https://example.com/workspace/value",
+      },
+    });
+
+    await expect(readAll(child.stdout)).resolves.toBe(
+      join(workdir, ".openma/harness-state/native"),
+    );
+    await expect(child.exited).resolves.toEqual({ code: 0, signal: null });
+  });
+
   it("carries multiple ACP-style stdin frames and exposes both output streams", async () => {
     const workdir = await mkdtemp(join(tmpdir(), "oma-sandbox-duplex-"));
     temporaryDirectories.push(workdir);

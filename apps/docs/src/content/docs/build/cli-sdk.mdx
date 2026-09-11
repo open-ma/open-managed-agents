@@ -235,6 +235,7 @@ A small set of OMA-specific agent fields (auxiliary model, harness selector, san
 |---|---|
 | `aux_model` | Auxiliary model used for tool-internal LLM work (e.g. `web_fetch` summarization). When unset, tools fall back to returning raw content. |
 | `harness` | Selects the agent loop harness implementation. Reserved for OMA-managed runtimes. |
+| `acp` | Process, restart, idle-timeout, and per-turn-timeout configuration used when `harness` is `acp-sandbox`. The command runs through the selected sandbox provider's duplex-process Port. |
 | `runtime_binding` | Selects which sandbox runtime services the agent's sessions. Reserved for OMA-managed runtimes. |
 
 The Stainless-generated SDKs in every language pass unknown body fields through unchanged — there is no separate `@openma/sdk` to install. Use the SDK's standard escape hatch:

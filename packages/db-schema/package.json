@@ -9,9 +9,11 @@
     "./cf-integrations": "./src/cf-integrations/index.ts",
     "./cf-router": "./src/cf-router/index.ts",
     "./node-pg": "./src/node-pg/index.ts",
+    "./node-mysql": "./src/node-mysql/index.ts",
     "./node-sqlite": "./src/node-sqlite/index.ts"
   },
   "dependencies": {
+    "@open-managed-agents/sql-client": "workspace:*",
     "drizzle-orm": "^0.45.2"
   },
   "peerDependencies": {

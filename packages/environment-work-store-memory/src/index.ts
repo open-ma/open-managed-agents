@@ -44,6 +44,32 @@ function descending(left: StoredEnvironmentWork, right: StoredEnvironmentWork): 
     || right.work.id.localeCompare(left.work.id);
 }
 
+function hasExpiredLease(record: StoredEnvironmentWork, claimedAt: string): boolean {
+  if (record.work.state !== "starting" && record.work.state !== "active") {
+    return false;
+  }
+  if (record.claim === null) return false;
+  return Date.parse(record.claim.claimedAt) + record.heartbeatTtlSeconds * 1_000
+    <= Date.parse(claimedAt);
+}
+
+function requeueExpiredLease(
+  record: StoredEnvironmentWork,
+  heartbeatTtlSeconds: number,
+): EnvironmentWorkRecord {
+  return {
+    ...cloneRecord(record),
+    heartbeatTtlSeconds,
+    work: {
+      ...record.work,
+      acknowledgedAt: null,
+      latestHeartbeatAt: null,
+      startedAt: null,
+      state: "queued",
+    },
+  };
+}
+
 export class MemoryEnvironmentWorkStore implements EnvironmentWorkStore {
   private readonly records = new Map<string, StoredEnvironmentWork>();
   private readonly workerPolls = new Map<string, string>();
@@ -137,9 +163,10 @@ export class MemoryEnvironmentWorkStore implements EnvironmentWorkStore {
     const candidate = [...this.records.entries()]
       .filter(([recordKey, record]) =>
         recordKey.startsWith(`${input.workspaceId}\u0000${input.environmentId}\u0000`)
-        && record.work.state === "queued"
-        && (record.claim === null
-          || record.claim.claimedAt <= input.reclaimBefore)
+        && ((record.work.state === "queued"
+          && (record.claim === null
+            || record.claim.claimedAt <= input.reclaimBefore))
+          || hasExpiredLease(record, input.claimedAt))
       )
       .sort((left, right) =>
         left[1].work.createdAt.localeCompare(right[1].work.createdAt)
@@ -147,9 +174,16 @@ export class MemoryEnvironmentWorkStore implements EnvironmentWorkStore {
       )[0];
     if (candidate === undefined) return { type: "empty" };
     const [recordKey, current] = candidate;
+    const next = hasExpiredLease(current, input.claimedAt)
+      ? requeueExpiredLease(current, input.heartbeatTtlSeconds)
+      : cloneRecord(current);
     const record: StoredEnvironmentWork = {
-      ...cloneRecord(current),
-      claim: { claimedAt: input.claimedAt, workerId: input.workerId },
+      ...next,
+      claim: {
+        claimedAt: input.claimedAt,
+        workerId: input.workerId,
+        generation: (current.claim?.generation ?? 0) + 1,
+      },
       revision: current.revision + 1,
     };
     this.records.set(recordKey, record);

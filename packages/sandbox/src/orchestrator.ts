@@ -16,7 +16,12 @@
 // orchestrator can refuse session creation when a tenant policy requires
 // a feature the chosen provider doesn't support.
 
-import type { SandboxExecutor } from "./ports";
+import {
+  supportsManagedWorkspaceLifecycle,
+  supportsSessionOutputMount,
+  supportsWorkspaceBackup,
+  type SandboxExecutor,
+} from "./ports";
 
 export interface OrchestratorMemoryMount {
   storeName: string;
@@ -137,12 +142,12 @@ export class DefaultSandboxOrchestrator implements SandboxOrchestrator {
     // so the orchestrator doesn't block normal flows.
     return {
       enforceReadOnlyMemory: typeof sandbox.mountMemoryStore === "function",
-      hasSessionOutputs: typeof sandbox.mountSessionOutputs === "function",
+      hasSessionOutputs: supportsSessionOutputMount(sandbox),
       hasVaultOutbound: typeof sandbox.setOutboundContext === "function",
       hasWorkspaceBackup:
         this.deps.backups !== null &&
         this.deps.backups !== undefined &&
-        (typeof sandbox.createWorkspaceBackup === "function" ||
+        (supportsWorkspaceBackup(sandbox) ||
           typeof sandbox.readFileBytes === "function"),
     };
   }
@@ -165,7 +170,7 @@ export class DefaultSandboxOrchestrator implements SandboxOrchestrator {
     }
 
     // 2. Backup context (CF only) + best-effort restore.
-    if (input.environmentId && sandbox.setBackupContext) {
+    if (input.environmentId && supportsManagedWorkspaceLifecycle(sandbox)) {
       await sandbox.setBackupContext({
         tenantId: input.tenantId,
         environmentId: input.environmentId,
@@ -214,17 +219,16 @@ export class DefaultSandboxOrchestrator implements SandboxOrchestrator {
     }
 
     // 4. Mount session outputs.
-    if (input.mountOutputs && sandbox.mountSessionOutputs) {
-      try {
-        await sandbox.mountSessionOutputs({
-          tenantId: input.tenantId,
-          sessionId: input.sessionId,
-        });
-      } catch (err) {
-        this.deps.logger?.warn(
-          `[sandbox-orchestrator] mountSessionOutputs failed: ${(err as Error).message}`,
+    if (input.mountOutputs) {
+      if (!supportsSessionOutputMount(sandbox)) {
+        throw new Error(
+          "Session output mount was requested but the sandbox does not provide it",
         );
       }
+      await sandbox.mountSessionOutputs({
+        tenantId: input.tenantId,
+        sessionId: input.sessionId,
+      });
     }
   }
 
@@ -233,7 +237,7 @@ export class DefaultSandboxOrchestrator implements SandboxOrchestrator {
     input: { sessionId: string; tenantId: string },
   ): Promise<OrchestratorBackupHandle | null> {
     // Prefer the adapter's native snapshot when available (CF squashfs).
-    if (sandbox.snapshotWorkspaceNow) {
+    if (supportsManagedWorkspaceLifecycle(sandbox)) {
       try {
         await sandbox.snapshotWorkspaceNow();
         // CF's snapshot writes the row from inside the OmaSandbox DO; we

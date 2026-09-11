@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Session } from "@open-managed-agents/managed-agents-application";
+import * as managedAgentCodec from "../src/lib/node-managed-agent-codec.js";
 import {
   allowAllLegacyHarnessTools,
   toLegacyHarnessAgentConfig,
@@ -107,6 +108,40 @@ const session: Session = {
 };
 
 describe("managed Agent to legacy Node harness codec", () => {
+  it("projects Environment networking policy for the shared harness tools", () => {
+    const encodeEnvironment = (managedAgentCodec as Record<string, unknown>)
+      .toLegacyHarnessEnvironmentConfig as undefined | ((environment: unknown) => unknown);
+    expect(encodeEnvironment).toBeTypeOf("function");
+    if (encodeEnvironment === undefined) return;
+
+    expect(encodeEnvironment({
+      id: "env_limited",
+      archivedAt: null,
+      config: {
+        type: "cloud",
+        networking: {
+          type: "limited",
+          allowMcpServers: false,
+          allowPackageManagers: true,
+          allowedHosts: ["api.example.test"],
+        },
+        packages: { apt: [], cargo: [], gem: [], go: [], npm: [], pip: [] },
+      },
+      createdAt: "2026-09-09T00:00:00.000Z",
+      description: null,
+      metadata: {},
+      name: "Limited",
+      updatedAt: "2026-09-09T00:00:00.000Z",
+    })).toEqual({
+      networking: {
+        type: "limited",
+        allow_mcp_servers: false,
+        allow_package_managers: true,
+        allowed_hosts: ["api.example.test"],
+      },
+    });
+  });
+
   it("encodes application-native resolved definitions at the final adapter", () => {
     expect(toLegacyHarnessAgentConfig(session)).toEqual({
       id: "agent_coordinator",

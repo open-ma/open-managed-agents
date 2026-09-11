@@ -9,6 +9,12 @@ import type {
 import { SqlSessionExecutionContextSource } from "./context";
 import { SqlSessionRuntimeHistorySource } from "./history";
 
+export {
+  ensureSessionExecutionCoordinatorSchema,
+  sessionExecutionCoordinatorSqlSchema,
+  SqlSessionExecutionStore,
+  SqlSessionExecutionCoordinator,
+} from "./coordination";
 export { SqlSessionExecutionContextSource } from "./context";
 export { SqlSessionRuntimeHistorySource } from "./history";
 

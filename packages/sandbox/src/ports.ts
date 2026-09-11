@@ -106,6 +106,80 @@ export interface SandboxRuntimePort {
   }): Promise<SandboxCheckpointHandle>;
 }
 
+/** Provider primitive for creating and restoring portable `/workspace`
+ * backups. This is intentionally separate from {@link SandboxPort}: process
+ * execution does not imply durable workspace support. Runtime hosts normally
+ * adapt this primitive to `WorkspacePersistencePort`. */
+export interface SandboxWorkspaceBackupPort {
+  createWorkspaceBackup(opts: {
+    name?: string;
+    ttlSec: number;
+  }): Promise<{ id: string; dir: string; localBucket?: boolean } | null>;
+  restoreWorkspaceBackup(handle: {
+    id: string;
+    dir: string;
+    localBucket?: boolean;
+  }): Promise<{ ok: boolean; error?: string }>;
+}
+
+/** Cloud/runtime-host managed workspace lifecycle. The host supplies the
+ * durable scope before the provider's own idle/destroy hook snapshots it. */
+export interface SandboxManagedWorkspaceLifecyclePort {
+  setBackupContext(opts: {
+    tenantId: string;
+    environmentId: string;
+    sessionId: string;
+  }): Promise<void>;
+  snapshotWorkspaceNow(): Promise<void>;
+}
+
+/** Provider primitive for attaching the Managed Agents output directory.
+ * Runtime hosts normally adapt it to `SessionOutputPort`; it is not a generic
+ * compute capability. */
+export interface SandboxSessionOutputMountPort {
+  sessionOutputMountCapabilities(): {
+    durability: "durable" | "best_effort";
+  } | null;
+  mountSessionOutputs(opts: {
+    tenantId: string;
+    sessionId: string;
+  }): Promise<void>;
+}
+
+export function supportsWorkspaceBackup(
+  value: unknown,
+): value is SandboxWorkspaceBackupPort {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<SandboxWorkspaceBackupPort>;
+  return typeof candidate.createWorkspaceBackup === "function"
+    && typeof candidate.restoreWorkspaceBackup === "function";
+}
+
+export function supportsManagedWorkspaceLifecycle(
+  value: unknown,
+): value is SandboxManagedWorkspaceLifecyclePort {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<SandboxManagedWorkspaceLifecyclePort>;
+  return typeof candidate.setBackupContext === "function"
+    && typeof candidate.snapshotWorkspaceNow === "function";
+}
+
+export function supportsSessionOutputMount(
+  value: unknown,
+): value is SandboxSessionOutputMountPort {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as Partial<SandboxSessionOutputMountPort>;
+  if (
+    typeof candidate.sessionOutputMountCapabilities !== "function"
+    || typeof candidate.mountSessionOutputs !== "function"
+  ) return false;
+  try {
+    return candidate.sessionOutputMountCapabilities() !== null;
+  } catch {
+    return false;
+  }
+}
+
 export interface SandboxPort {
   exec(command: string, timeout?: number): Promise<string>;
   /** Start a process without blocking. Returns handle for kill/status/logs. */
@@ -126,22 +200,6 @@ export interface SandboxPort {
     tenantId: string;
     sessionId: string;
   }): Promise<void>;
-  /**
-   * Hand the (tenant, env, session) tuple to the OmaSandbox container DO so
-   * its onActivityExpired hook (sleepAfter teardown) records the final
-   * /workspace snapshot scoped to this session.
-   */
-  setBackupContext?(opts: {
-    tenantId: string;
-    environmentId: string;
-    sessionId: string;
-  }): Promise<void>;
-  /**
-   * Trigger an immediate /workspace snapshot via OmaSandbox. Used by the
-   * explicit-destroy path to capture state before sandbox.destroy() wipes
-   * the container.
-   */
-  snapshotWorkspaceNow?(): Promise<void>;
   readFile(path: string): Promise<string>;
   /** Read raw bytes — required for binary-safe `POST /v1/sessions/:id/files`
    *  promotion. Optional so adapters that only see text can omit it. */
@@ -162,36 +220,6 @@ export interface SandboxPort {
     storeId: string;
     readOnly: boolean;
   }): Promise<void>;
-  /**
-   * Mount FILES_BUCKET at /mnt/session/outputs/ scoped to (tenantId, sessionId)
-   * via R2 prefix. Anything the agent writes here appears in real time via
-   * the caller-facing GET /v1/sessions/:id/outputs endpoint. AMA-aligned
-   * "magic dir" pattern — agent uses standard file tools, no extra tool.
-   */
-  mountSessionOutputs?(opts: {
-    tenantId: string;
-    sessionId: string;
-  }): Promise<void>;
-  /**
-   * Snapshot /workspace into durable storage. Returns a serializable
-   * handle; null on failure. CF: squashfs → R2. Node: tar → S3 (when wired).
-   */
-  createWorkspaceBackup?(opts: {
-    name?: string;
-    ttlSec: number;
-  }): Promise<{ id: string; dir: string; localBucket?: boolean } | null>;
-  /**
-   * Restore a previously-created backup into /workspace. Returns
-   * `{ok:true}` on success, `{ok:false, error?}` when the backup is
-   * missing/expired/etc. Best-effort: callers treat ok=false as "/workspace
-   * is empty, proceed". Matches the apps/agent SandboxExecutor signature so
-   * adapters can satisfy both ports without divergence.
-   */
-  restoreWorkspaceBackup?(handle: {
-    id: string;
-    dir: string;
-    localBucket?: boolean;
-  }): Promise<{ ok: boolean; error?: string }>;
   /** Destroy the sandbox — kills processes, unmounts, stops. */
   destroy?(): Promise<void>;
   /**

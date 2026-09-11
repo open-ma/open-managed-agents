@@ -1,6 +1,11 @@
 import Anthropic from "@anthropic-ai/sdk";
 import { exports } from "cloudflare:workers";
 import { unzipSync } from "fflate";
+import {
+  createManagedEnvironmentWorker,
+  type ManagedRuntimeHost,
+  type ManagedRuntimeProfile,
+} from "@open-managed-agents/managed-runtime-host";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
 import { withAnthropicFormDataSupport } from "../anthropic-sdk-fetch";
 import { verifyManagedAgentsClientStateModel } from "../model/managed-agents-client-state-model";
@@ -49,6 +54,30 @@ beforeAll(async () => {
   await workerFetch("http://localhost/health");
 });
 
+async function mintEnvironmentKey(
+  environmentId: string,
+  fetchImpl: typeof fetch = workerFetch,
+): Promise<string> {
+  const response = await fetchImpl("http://localhost/v1/oma/api_keys", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      "x-api-key": "test-key",
+    },
+    body: JSON.stringify({
+      name: `worker-${crypto.randomUUID()}`,
+      environment_id: environmentId,
+    }),
+  });
+  if (!response.ok) {
+    throw new Error(`Environment key creation failed: ${response.status} ${await response.text()}`);
+  }
+  const body = await response.json() as { key?: unknown };
+  if (typeof body.key !== "string" || !body.key.startsWith("oma_env_")) {
+    throw new Error("Environment key creation returned an invalid credential");
+  }
+  return body.key;
+}
 afterAll(() => {
   vi.restoreAllMocks();
 });
@@ -705,6 +734,510 @@ describe("Cloudflare official Managed Agents route", () => {
       prefix: `cf-${suffix}`,
     });
   }, 60_000);
+
+  it("accepts the official worker's environment bearer and scopes its per-work sessions token", async () => {
+    const client = new Anthropic({
+      apiKey: "test-key",
+      baseURL: "http://localhost",
+      fetch: workerFetch,
+      maxRetries: 0,
+    });
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const modelId = `worker-auth-${suffix}`;
+    const modelCard = await workerFetch("http://localhost/v1/oma/model_cards", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        provider: "ant",
+        model_id: modelId,
+        api_key: "sk-ant-worker-auth-test-key",
+      }),
+    });
+    expect(modelCard.status).toBe(201);
+    const environment = await client.beta.environments.create({
+      name: `worker-auth-${suffix}`,
+      config: { type: "self_hosted" },
+    });
+    const environmentKey = await mintEnvironmentKey(environment.id);
+    const attachedFile = await client.beta.files.upload({
+      file: new File(["cloudflare work input"], "input.txt", {
+        type: "text/plain",
+      }),
+    });
+    const attachedSkill = await client.beta.skills.create({
+      display_title: "Cloudflare worker skill",
+      files: [
+        new File([SKILL_MARKDOWN], "repository-guide/SKILL.md", {
+          type: "text/markdown",
+        }),
+      ],
+    });
+    const attachedMemoryStore = await client.beta.memoryStores.create({
+      name: `worker-memory-${suffix}`,
+    });
+    const attachedMemory = await client.beta.memoryStores.memories.create(
+      attachedMemoryStore.id,
+      {
+        content: "cloudflare worker memory",
+        path: "/input.md",
+        view: "full",
+      },
+    );
+    const agent = await client.beta.agents.create({
+      name: `worker-auth-${suffix}`,
+      model: modelId,
+      skills: [{
+        type: "custom",
+        skill_id: attachedSkill.id,
+        version: "latest",
+      }],
+    });
+    const session = await client.beta.sessions.create({
+      agent: { type: "agent", id: agent.id, version: agent.version },
+      environment_id: environment.id,
+      title: "Official worker bearer auth",
+      resources: [
+        { type: "file", file_id: attachedFile.id },
+        {
+          type: "memory_store",
+          memory_store_id: attachedMemoryStore.id,
+          access: "read_only",
+        },
+      ],
+    });
+
+    const poller = client.beta.environments.work.poller({
+      environmentId: environment.id,
+      environmentKey,
+      workerId: `worker-${suffix}`,
+      blockMs: null,
+      autoStop: false,
+    });
+    const iterator = poller[Symbol.asyncIterator]();
+    const next = await iterator.next();
+    expect(next.done).toBe(false);
+    const work = next.value!;
+    const secret = decodeWorkSecret(work.secret!);
+    const sessionsToken = secret.sessions_token;
+    expect(sessionsToken).toMatch(/^sk-ant-req-v1\./);
+
+    const sessionClient = new Anthropic({
+      apiKey: null,
+      authToken: String(sessionsToken),
+      baseURL: "http://localhost",
+      fetch: workerFetch,
+      maxRetries: 0,
+    });
+    await expect(sessionClient.beta.sessions.retrieve(session.id)).resolves.toMatchObject({
+      id: session.id,
+      environment_id: environment.id,
+    });
+    await expect(
+      sessionClient.beta.sessions.events.list(session.id),
+    ).resolves.toMatchObject({ data: expect.any(Array) });
+    await expect(
+      sessionClient.beta.files.download(attachedFile.id).then((file) => file.text()),
+    ).resolves.toBe("cloudflare work input");
+    const versions = await sessionClient.beta.skills.versions.list(attachedSkill.id);
+    expect(versions.data).toHaveLength(1);
+    await expect(
+      sessionClient.beta.skills.versions.download(versions.data[0]!.version, {
+        skill_id: attachedSkill.id,
+      }).then((file) => file.arrayBuffer()),
+    ).resolves.toBeInstanceOf(ArrayBuffer);
+    await expect(
+      sessionClient.beta.memoryStores.memories.list(attachedMemoryStore.id, {
+        view: "full",
+      }),
+    ).resolves.toMatchObject({
+      data: [expect.objectContaining({
+        id: attachedMemory.id,
+        content: "cloudflare worker memory",
+      })],
+    });
+    await expect(
+      sessionClient.beta.memoryStores.memories.create(attachedMemoryStore.id, {
+        content: "must remain read-only",
+        path: "/denied.md",
+      }),
+    ).rejects.toMatchObject({ status: 401 });
+
+    const unrelated = await workerFetch("http://localhost/v1/agents", {
+      headers: { Authorization: `Bearer ${sessionsToken}` },
+    });
+    expect(unrelated.status).toBe(401);
+    const tampered = await workerFetch(`http://localhost/v1/sessions/${session.id}`, {
+      headers: { Authorization: `Bearer ${sessionsToken}tampered` },
+    });
+    expect(tampered.status).toBe(401);
+
+    await expect(
+      sessionClient.beta.environments.work.heartbeat(work.id, {
+        environment_id: environment.id,
+        desired_ttl_seconds: 90,
+      }),
+    ).resolves.toMatchObject({ type: "work_heartbeat", lease_extended: true });
+    await expect(
+      sessionClient.beta.environments.work.stop(work.id, {
+        environment_id: environment.id,
+        force: true,
+      }),
+    ).resolves.toMatchObject({ id: work.id, state: "stopped" });
+    poller.abort();
+    await iterator.return?.();
+  }, 60_000);
+
+  it("reclaims an expired acknowledged lease once across competing official SDK workers", async () => {
+    const parent = new Anthropic({
+      apiKey: "test-key",
+      baseURL: "http://localhost",
+      fetch: workerFetch,
+      maxRetries: 0,
+    });
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const modelId = `worker-reclaim-${suffix}`;
+    const modelCard = await workerFetch("http://localhost/v1/oma/model_cards", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        provider: "ant",
+        model_id: modelId,
+        api_key: "sk-ant-worker-reclaim-test-key",
+      }),
+    });
+    expect(modelCard.status).toBe(201);
+    const environment = await parent.beta.environments.create({
+      name: `worker-reclaim-${suffix}`,
+      config: { type: "self_hosted" },
+    });
+    const environmentKey = await mintEnvironmentKey(environment.id);
+    const worker = new Anthropic({
+      apiKey: null,
+      authToken: environmentKey,
+      baseURL: "http://localhost",
+      fetch: workerFetch,
+      maxRetries: 0,
+    });
+    const agent = await parent.beta.agents.create({
+      name: `worker-reclaim-${suffix}`,
+      model: modelId,
+    });
+    const session = await parent.beta.sessions.create({
+      agent: { type: "agent", id: agent.id, version: agent.version },
+      environment_id: environment.id,
+      title: "Official worker reclaim",
+    });
+
+    const originallyClaimed = await worker.beta.environments.work.poll(
+      environment.id,
+      { "Anthropic-Worker-ID": `dead-${suffix}` },
+    );
+    expect(originallyClaimed).not.toBeNull();
+    if (originallyClaimed === null) throw new Error("expected work");
+    const originalSessionsToken = String(
+      decodeWorkSecret(originallyClaimed.secret!).sessions_token,
+    );
+    await worker.beta.environments.work.ack(originallyClaimed.id, {
+      environment_id: environment.id,
+    });
+    const originalHeartbeat = await worker.beta.environments.work.heartbeat(
+      originallyClaimed.id,
+      {
+        environment_id: environment.id,
+        desired_ttl_seconds: 0,
+        expected_last_heartbeat: "NO_HEARTBEAT",
+      },
+    );
+
+    const replacements = await Promise.all([
+      worker.beta.environments.work.poll(environment.id, {
+        "Anthropic-Worker-ID": `replacement-a-${suffix}`,
+        reclaim_older_than_ms: 5_000,
+      }),
+      worker.beta.environments.work.poll(environment.id, {
+        "Anthropic-Worker-ID": `replacement-b-${suffix}`,
+        reclaim_older_than_ms: 5_000,
+      }),
+    ]);
+    expect(replacements.filter((candidate) => candidate !== null)).toHaveLength(1);
+    const replacement = replacements.find((candidate) => candidate !== null);
+    if (replacement === undefined || replacement === null) {
+      throw new Error("expected one replacement claim");
+    }
+    expect(replacement).toMatchObject({
+      id: originallyClaimed.id,
+      acknowledged_at: null,
+      latest_heartbeat_at: null,
+      started_at: null,
+      state: "queued",
+    });
+    const replacementSessionsToken = String(
+      decodeWorkSecret(replacement.secret!).sessions_token,
+    );
+    expect(replacementSessionsToken).not.toBe(originalSessionsToken);
+
+    await expect(worker.beta.environments.work.heartbeat(originallyClaimed.id, {
+      environment_id: environment.id,
+      expected_last_heartbeat: originalHeartbeat.last_heartbeat,
+    })).rejects.toMatchObject({ status: 412 });
+    await worker.beta.environments.work.ack(replacement.id, {
+      environment_id: environment.id,
+    });
+    const staleSessionClient = new Anthropic({
+      apiKey: null,
+      authToken: originalSessionsToken,
+      baseURL: "http://localhost",
+      fetch: workerFetch,
+      maxRetries: 0,
+    });
+    const replacementSessionClient = new Anthropic({
+      apiKey: null,
+      authToken: replacementSessionsToken,
+      baseURL: "http://localhost",
+      fetch: workerFetch,
+      maxRetries: 0,
+    });
+    await expect(staleSessionClient.beta.sessions.events.send(session.id, {
+      events: [{
+        type: "system.message",
+        content: [{ type: "text", text: "stale executor must be fenced" }],
+      }],
+    })).rejects.toMatchObject({ status: 401 });
+    await expect(
+      replacementSessionClient.beta.sessions.events.list(session.id),
+    ).resolves.toMatchObject({ data: expect.any(Array) });
+    const runtimeEventId = `runtime-${suffix}`;
+    const runtimeRequest = (token: string, eventId: string) => workerFetch(
+      `http://localhost/v1/oma/sessions/${session.id}/runtime-events`,
+      {
+        method: "POST",
+        headers: {
+          authorization: `Bearer ${token}`,
+          "content-type": "application/json",
+        },
+        body: JSON.stringify({
+          events: [{
+            id: eventId,
+            type: "session.status_idle",
+            processed_at: new Date().toISOString(),
+            stop_reason: { type: "end_turn" },
+          }],
+        }),
+      },
+    );
+    await expect(runtimeRequest(
+      originalSessionsToken,
+      `runtime-stale-${suffix}`,
+    )).resolves.toMatchObject({ status: 401 });
+    const runtimeIngress = await runtimeRequest(
+      replacementSessionsToken,
+      runtimeEventId,
+    );
+    expect(runtimeIngress.status).toBe(200);
+    await expect(runtimeIngress.json()).resolves.toEqual({
+      data: [{ id: runtimeEventId }],
+    });
+    const runtimeHistory = await replacementSessionClient.beta.sessions.events.list(
+      session.id,
+      { types: ["session.status_idle"] },
+    );
+    expect(runtimeHistory.data).toContainEqual(expect.objectContaining({
+      id: runtimeEventId,
+      type: "session.status_idle",
+    }));
+    await expect(worker.beta.environments.work.heartbeat(replacement.id, {
+      environment_id: environment.id,
+      expected_last_heartbeat: "NO_HEARTBEAT",
+    })).resolves.toMatchObject({
+      type: "work_heartbeat",
+      state: "active",
+      lease_extended: true,
+    });
+    await worker.beta.environments.work.stop(replacement.id, {
+      environment_id: environment.id,
+      force: true,
+    });
+    await expect(runtimeRequest(
+      replacementSessionsToken,
+      `runtime-after-stop-${suffix}`,
+    )).resolves.toMatchObject({ status: 401 });
+  }, 60_000);
+
+  it("recovers a lost webhook and crashed host through one fenced replacement", async () => {
+    const suffix = crypto.randomUUID().replaceAll("-", "");
+    const requestTrace: Array<{ method: string; path: string; status: number }> = [];
+    const tracedWorkerFetch: typeof fetch = async (input, init) => {
+      const request = input instanceof Request
+        ? input
+        : new Request(input instanceof URL ? input.toString() : input, init);
+      const response = await workerFetch(input, init);
+      requestTrace.push({
+        method: request.method,
+        path: new URL(request.url).pathname,
+        status: response.status,
+      });
+      return response;
+    };
+    const parent = new Anthropic({
+      apiKey: "test-key",
+      baseURL: "http://localhost",
+      fetch: tracedWorkerFetch,
+      maxRetries: 0,
+    });
+    const modelId = `worker-chaos-${suffix}`;
+    const modelCard = await workerFetch("http://localhost/v1/oma/model_cards", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "x-api-key": "test-key",
+      },
+      body: JSON.stringify({
+        provider: "ant",
+        model_id: modelId,
+        api_key: "sk-ant-worker-chaos-test-key",
+      }),
+    });
+    expect(modelCard.status).toBe(201);
+    const environment = await parent.beta.environments.create({
+      name: `worker-chaos-${suffix}`,
+      config: { type: "self_hosted" },
+    });
+    const environmentKey = await mintEnvironmentKey(
+      environment.id,
+      tracedWorkerFetch,
+    );
+    const runner = new Anthropic({
+      apiKey: null,
+      authToken: environmentKey,
+      baseURL: "http://localhost",
+      fetch: tracedWorkerFetch,
+      maxRetries: 0,
+    });
+    const agent = await parent.beta.agents.create({
+      name: `worker-chaos-${suffix}`,
+      model: modelId,
+    });
+    const session = await parent.beta.sessions.create({
+      agent: { type: "agent", id: agent.id, version: agent.version },
+      environment_id: environment.id,
+      title: "Lost webhook and crashed environment host",
+    });
+
+    const profile: ManagedRuntimeProfile = {
+      workspace: { requirement: "ephemeral" },
+      outputs: { requirement: "disabled" },
+      runtimeCheckpoint: "disabled",
+      driver: {
+        type: "ama_worker",
+        process: { command: "node", args: ["worker.mjs"] },
+      },
+    };
+    let deadHeartbeat: string | null = null;
+    const firstErrors: unknown[] = [];
+    const crashedHost: ManagedRuntimeHost = {
+      async run({ scope }) {
+        const heartbeat = await runner.beta.environments.work.heartbeat(
+          scope.workId,
+          {
+            environment_id: environment.id,
+            desired_ttl_seconds: 0,
+            expected_last_heartbeat: "NO_HEARTBEAT",
+          },
+        );
+        deadHeartbeat = heartbeat.last_heartbeat;
+        throw new Error("injected host crash after ACK");
+      },
+    };
+    const lostWebhookAbort = new AbortController();
+    const firstWorker = createManagedEnvironmentWorker({
+      client: parent,
+      environmentId: environment.id,
+      environmentKey,
+      workspaceId: "default",
+      workerId: `dead-${suffix}`,
+      host: crashedHost,
+      profileFor: async () => profile,
+      scheduler: {
+        async sleep() {
+          lostWebhookAbort.abort(new Error("end fallback poll probe"));
+          lostWebhookAbort.signal.throwIfAborted();
+        },
+      },
+      onError: async (error) => {
+        firstErrors.push(error);
+      },
+    });
+
+    // No webhook is delivered. run() must poll immediately, ACK the work and
+    // survive the injected host crash so another replica can reclaim it.
+    try {
+      await within(firstWorker.run(lostWebhookAbort.signal), 5_000, "fallback worker");
+    } catch (error) {
+      lostWebhookAbort.abort(error);
+      throw new Error(`fallback worker failed; trace=${JSON.stringify(requestTrace)}`, {
+        cause: error,
+      });
+    }
+    expect(firstErrors).toEqual([
+      expect.objectContaining({ message: "injected host crash after ACK" }),
+    ]);
+    expect(deadHeartbeat).not.toBeNull();
+
+    const replacementRuns: string[] = [];
+    const staleHeartbeatStatuses: number[] = [];
+    const replacement = (workerId: string) => createManagedEnvironmentWorker({
+      client: parent,
+      environmentId: environment.id,
+      environmentKey,
+      workspaceId: "default",
+      workerId,
+      reclaimOlderThanMs: 5_000,
+      host: {
+        async run({ scope }) {
+          replacementRuns.push(workerId);
+          try {
+            await runner.beta.environments.work.heartbeat(scope.workId, {
+              environment_id: environment.id,
+              expected_last_heartbeat: deadHeartbeat!,
+            });
+          } catch (error) {
+            staleHeartbeatStatuses.push(
+              typeof error === "object" && error !== null && "status" in error
+                ? Number(error.status)
+                : -1,
+            );
+          }
+          await runner.beta.environments.work.heartbeat(scope.workId, {
+            environment_id: environment.id,
+            expected_last_heartbeat: "NO_HEARTBEAT",
+          });
+          await runner.beta.environments.work.stop(scope.workId, {
+            environment_id: environment.id,
+            force: true,
+          });
+          return { type: "completed", revision: 1 };
+        },
+      },
+      profileFor: async () => profile,
+    });
+
+    await within(Promise.all([
+      replacement(`replacement-a-${suffix}`).drain(),
+      replacement(`replacement-b-${suffix}`).drain(),
+    ]), 5_000, "replacement workers");
+
+    expect(replacementRuns).toHaveLength(1);
+    expect(staleHeartbeatStatuses).toEqual([412]);
+    await expect(
+      parent.beta.sessions.retrieve(session.id),
+    ).resolves.toMatchObject({ id: session.id });
+  }, 60_000);
 });
 
 function decodeWorkSecret(secret: string): Record<string, unknown> {
@@ -723,6 +1256,23 @@ async function waitForTerminalDream<T extends { status: string }>(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("Dream did not reach a terminal state");
+}
+
+async function within<T>(promise: Promise<T>, milliseconds: number, stage: string): Promise<T> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`${stage} did not settle within ${milliseconds}ms`)),
+          milliseconds,
+        );
+      }),
+    ]);
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+  }
 }
 
 function testCertificatePem(): string {

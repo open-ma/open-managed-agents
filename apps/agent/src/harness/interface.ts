@@ -257,11 +257,23 @@ export interface HarnessContext {
   env: {
     ANTHROPIC_API_KEY: string;
     ANTHROPIC_BASE_URL?: string;
+    /** Official Environment Work secret (base64url JSON). Only its
+     * sessions_token/api_base_url fields are decoded by ACP projection. */
+    ANTHROPIC_WORK_SECRET?: string;
     ANTHROPIC_MODEL?: string;
     TAVILY_API_KEY?: string;
     delegateToAgent?: (agentId: string, message: string) => Promise<string>;
     CONFIG_KV?: KVNamespace;
     memoryStoreIds?: string[];
+    /**
+     * Work-scoped HTTP gateway for ACP agents running inside a sandbox.
+     * The bearer is the short-lived sessions_token already delivered in the
+     * official Work secret; it is not an upstream MCP/Vault credential.
+     */
+    mcpProxy?: {
+      gatewayBaseUrl: string;
+      sessionsToken: string;
+    };
     environmentConfig?: { networking?: { type: string; allowed_hosts?: string[] } };
     /** Register a background task for completion notification (CC-style task_notification). */
     watchBackgroundTask?: (taskId: string, pid: string, outputFile: string, proc: ProcessHandle | null) => void;

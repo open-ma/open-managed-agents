@@ -1,4 +1,4 @@
-import type { FileMetadata, FileScope } from "../domain/file";
+import type { FileMetadata, FileScope, FileOrigin } from "../domain/file";
 
 export type FileScopeView = FileScope;
 export type FileMetadataView = FileMetadata;
@@ -25,6 +25,8 @@ export interface UploadFileCommand {
   filename: string;
   mimeType: string;
   content: Uint8Array;
+  /** Internal output publication only. Public uploads do not populate provenance. */
+  origin?: FileOrigin;
 }
 
 export interface DeleteFileCommand {

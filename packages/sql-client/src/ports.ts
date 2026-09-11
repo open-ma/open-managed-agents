@@ -16,8 +16,9 @@
 // then constructs `BetterSqlite3SqlClient(localDb)` and the same repo runs
 // on Node + sqlite without further edits.
 //
-// Adapters: see ./adapters/cf-d1.ts (CF passthrough) and
-// ./adapters/better-sqlite3.ts (Node, lazy-imports the driver).
+// Adapters: see ./adapters/cf-d1.ts (CF passthrough),
+// ./adapters/better-sqlite3.ts, ./adapters/postgres.ts, and
+// ./adapters/mysql2.ts (Node adapters lazy-import their drivers).
 
 /**
  * Per-statement metadata returned by mutation execution. Mirrors D1Result.meta.

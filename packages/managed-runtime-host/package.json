@@ -1,0 +1,25 @@
+{
+  "name": "@open-managed-agents/managed-runtime-host",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./testing": "./src/testing.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:chaos": "vitest run --config vitest.config.ts test/runtime-chaos.test.ts test/runtime-fault-matrix.test.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "0.120.0",
+    "@open-managed-agents/execution-control": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*"
+  },
+  "devDependencies": {
+    "standardwebhooks": "1.0.0",
+    "vitest": "^4.1.3"
+  }
+}

@@ -484,6 +484,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "agent.mcp_tool_result":
       return {
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         mcp_tool_use_id: event.mcpToolUseId,
@@ -510,17 +511,24 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "agent.message":
       return {
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         content: event.content.map(fromUserMessageContent),
         processed_at: event.processedAt,
       };
     case "agent.thinking":
+    case "span.model_request_start":
+      return {
+        id: event.id,
+        type: event.type,
+        processed_at: event.processedAt,
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
+      };
     case "agent.thread_context_compacted":
     case "session.status_rescheduled":
     case "session.status_running":
     case "session.status_terminated":
-    case "span.model_request_start":
     case "session.deleted":
       return {
         id: event.id,
@@ -529,6 +537,8 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "agent.thread_message_received":
       return {
+        ...(event.fromMessageId !== undefined && { from_message_id: event.fromMessageId }),
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         content: event.content.map(fromUserMessageContent),
@@ -540,6 +550,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "agent.thread_message_sent":
       return {
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         content: event.content.map(fromUserMessageContent),
@@ -551,6 +562,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "agent.tool_result":
       return {
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         processed_at: event.processedAt,
@@ -576,6 +588,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "session.error":
       return {
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         error: fromSessionExecutionError(event.error),
@@ -590,6 +603,9 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "session.thread_created":
       return {
+        ...(event.content !== undefined && { content: event.content }),
+        ...(event.parentThreadId !== undefined && { parent_thread_id: event.parentThreadId }),
+        ...(event.parentToolUseId !== undefined && { parent_tool_use_id: event.parentToolUseId }),
         id: event.id,
         type: event.type,
         agent_name: event.agentName,
@@ -598,6 +614,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "session.thread_status_idle":
       return {
+        ...(event.interrupted !== undefined && { interrupted: event.interrupted }),
         id: event.id,
         type: event.type,
         agent_name: event.agentName,
@@ -617,6 +634,7 @@ export function toSessionEventResponse(event: SessionEventView): object {
       };
     case "span.model_request_end":
       return {
+        ...(event.sessionThreadId !== undefined && { session_thread_id: event.sessionThreadId }),
         id: event.id,
         type: event.type,
         is_error: event.isError,

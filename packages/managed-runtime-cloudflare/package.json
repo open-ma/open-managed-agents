@@ -1,0 +1,30 @@
+{
+  "name": "@open-managed-agents/managed-runtime-cloudflare",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:certification": "pnpm run test:certification:offline && OMA_CLOUDFLARE_LIVE_CERTIFICATION=1 vitest run test/cloudflare.live.test.ts --config vitest.config.ts",
+    "test:certification:r2": "OMA_CLOUDFLARE_LIVE_CERTIFICATION=1 OMA_CLOUDFLARE_R2_CERTIFICATION=1 vitest run test/cloudflare.live.test.ts --config vitest.config.ts",
+    "test:certification:offline": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/blob-store": "workspace:*",
+    "@open-managed-agents/managed-runtime-host": "workspace:*",
+    "@open-managed-agents/managed-runtime-sandbox": "workspace:*",
+    "@open-managed-agents/runtime-resource-contract": "workspace:*",
+    "@open-managed-agents/runtime-resource-fence-sql": "workspace:*",
+    "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/shared": "workspace:*",
+    "@open-managed-agents/sql-client": "workspace:*"
+  },
+  "devDependencies": {
+    "@aws-sdk/client-s3": "^3.1096.0",
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.3"
+  }
+}

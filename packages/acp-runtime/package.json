@@ -9,10 +9,13 @@
     "./sandbox-spawner": "./src/spawners/sandbox.ts",
     "./placement": "./src/placement.ts",
     "./registry": "./src/registry.ts",
-    "./known-agents": "./src/known-agents.ts"
+    "./known-agents": "./src/known-agents.ts",
+    "./native-state": "./src/native-state.ts",
+    "./sandbox-agent": "./src/sandbox-agent.ts"
   },
   "scripts": {
     "test": "vitest run --config vitest.config.ts",
+    "test:native-state:coverage": "vitest run --config vitest.native-state.coverage.config.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {

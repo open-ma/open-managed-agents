@@ -45,6 +45,16 @@
     "@opentelemetry/semantic-conventions": { "optional": true }
   },
   "devDependencies": {
+    "@opentelemetry/api": "^1.9.0",
+    "@opentelemetry/auto-instrumentations-node": "^0.51.0",
+    "@opentelemetry/exporter-metrics-otlp-http": "^0.55.0",
+    "@opentelemetry/exporter-trace-otlp-http": "^0.55.0",
+    "@opentelemetry/resources": "^1.27.0",
+    "@opentelemetry/sdk-node": "^0.55.0",
+    "@opentelemetry/semantic-conventions": "^1.27.0",
+    "pino": "^9.0.0",
+    "pino-pretty": "^11.0.0",
+    "prom-client": "^15.1.0",
     "vitest": "^4.1.3"
   }
 }

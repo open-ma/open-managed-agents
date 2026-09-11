@@ -15,6 +15,7 @@ import { createScriptedMcpServer } from "../fakes/scripted-mcp-server";
 
 const HEADERS = {
   "x-api-key": "test-key",
+  "anthropic-beta": "managed-agents-2026-04-01",
   "content-type": "application/json",
 };
 const MCP_ORIGIN = "https://managed-turn-mcp.example.test";
@@ -202,6 +203,115 @@ afterEach(() => {
 });
 
 describe("managed turn MCP E2E", () => {
+  it("proxies official v1 Session and Vault credentials through the real service binding", async () => {
+    const external = installExternalMocks();
+    let vaultId;
+    let credentialId;
+    let agentId;
+    let environmentId;
+    let sessionId;
+    try {
+      const vaultResponse = await post("/v1/vaults", {
+        display_name: `managed-v1-vault-${crypto.randomUUID()}`,
+      });
+      expect(vaultResponse.status).toBe(201);
+      vaultId = ((await vaultResponse.json()) as { id: string }).id;
+
+      const credentialResponse = await post(`/v1/vaults/${vaultId}/credentials`, {
+        display_name: "Managed v1 MCP OAuth",
+        auth: {
+          type: "mcp_oauth",
+          mcp_server_url: `${MCP_ORIGIN}/rpc`,
+          access_token: "stale-access-token",
+          refresh: {
+            client_id: "managed-v1-client",
+            refresh_token: "refresh-token-1",
+            token_endpoint: `${OAUTH_ORIGIN}/token`,
+            token_endpoint_auth: { type: "none" },
+          },
+        },
+      });
+      expect(credentialResponse.status).toBe(201);
+      credentialId = ((await credentialResponse.json()) as { id: string }).id;
+
+      const environmentResponse = await post("/v1/environments", {
+        name: `managed-v1-env-${crypto.randomUUID()}`,
+        scope: "organization",
+        config: {
+          type: "cloud",
+          networking: { type: "unrestricted" },
+          packages: { type: "packages" },
+        },
+      });
+      expect(environmentResponse.status).toBe(201);
+      environmentId = ((await environmentResponse.json()) as { id: string }).id;
+
+      const agentResponse = await post("/v1/agents", {
+        name: `Managed v1 MCP ${crypto.randomUUID()}`,
+        model: "managed-turn-model",
+        mcp_servers: [{ type: "url", name: "fake", url: `${MCP_ORIGIN}/rpc` }],
+        tools: [{
+          type: "mcp_toolset",
+          mcp_server_name: "fake",
+          default_config: { enabled: true },
+        }],
+      });
+      expect(agentResponse.status).toBe(201);
+      const agent = (await agentResponse.json()) as { id: string; version: number };
+      agentId = agent.id;
+
+      const sessionResponse = await post("/v1/sessions", {
+        agent: { type: "agent", id: agent.id, version: agent.version },
+        environment_id: environmentId,
+        vault_ids: [vaultId],
+      });
+      expect(sessionResponse.status).toBe(201);
+      sessionId = ((await sessionResponse.json()) as { id: string }).id;
+
+      const proxied = await env.MAIN_MCP.fetch(new Request(`${MCP_ORIGIN}/rpc`, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          accept: "application/json, text/event-stream",
+          "x-oma-tenant": "default",
+          "x-oma-session": sessionId,
+          "x-oma-mcp-server": "fake",
+        },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "initialize",
+          params: {
+            protocolVersion: "2025-11-25",
+            capabilities: {},
+            clientInfo: { name: "managed-v1-test", version: "1.0.0" },
+          },
+        }),
+      }));
+      expect(proxied.status).toBe(200);
+      expect((await proxied.json()).result.serverInfo.name).toBe("managed-turn-fake");
+      expect(external.state).toMatchObject({
+        oauthRefreshCount: 1,
+        staleBearerCount: 1,
+        freshBearerCount: 1,
+      });
+    } finally {
+      if (sessionId) await api(`/v1/sessions/${sessionId}`, { method: "DELETE", headers: HEADERS });
+      if (agentId) await api(`/v1/agents/${agentId}/archive`, { method: "POST", headers: HEADERS });
+      if (environmentId) {
+        await api(`/v1/environments/${environmentId}`, { method: "DELETE", headers: HEADERS });
+      }
+      if (credentialId && vaultId) {
+        await api(`/v1/vaults/${vaultId}/credentials/${credentialId}`, {
+          method: "DELETE",
+          headers: HEADERS,
+        });
+      }
+      if (vaultId) await api(`/v1/vaults/${vaultId}`, { method: "DELETE", headers: HEADERS });
+      external.restore();
+    }
+  }, 120_000);
+
   it("keeps OpenMA internals real while mocking only LLM, MCP, and OAuth", async () => {
     expect(env.MAIN_MCP).toBeDefined();
 
@@ -276,6 +386,9 @@ describe("managed turn MCP E2E", () => {
       const events = await waitForCompletedTurn(session.id);
       const mcpUse = events.find((event) => event.type === "agent.mcp_tool_use");
       const mcpResult = events.find((event) => event.type === "agent.mcp_tool_result");
+      const degradedMcp = events.find((event) =>
+        event.type === "session.warning"
+        && String(event.message ?? "").includes('MCP setup failed for "broken"'));
 
       expect(mcpUse).toMatchObject({
         id: "mcp-call-1",
@@ -285,6 +398,7 @@ describe("managed turn MCP E2E", () => {
       });
       expect(JSON.stringify(mcpResult?.content)).toContain("echo:managed");
       expect(mcpResult?.parent_event_id).toBe("mcp-call-1");
+      expect(degradedMcp).toBeDefined();
 
       const services = await getCfServicesForTenant(env, "default");
       const persistedCredential = await services.credentials.get({
@@ -314,5 +428,5 @@ describe("managed turn MCP E2E", () => {
     } finally {
       external.restore();
     }
-  });
+  }, 120_000);
 });

@@ -114,9 +114,19 @@ export interface SqlManagedSessionsCompositionDependencies {
   environments: SessionEnvironmentSourcePort;
   lifecycle: SessionLifecycleCommandPort;
   runtime: SqlManagedSessionsRuntime;
+  /** Optional execution-authority router for accepted input events. */
+  eventDispatch?: SessionEventDispatchPort;
+  /** Optional execution-authority router for live Session and thread events. */
+  eventStream?: SessionEventStreamPort & SessionThreadEventStreamPort;
   sealer: SessionResourceSecretSealer;
   clock: { now(): Date };
   ids: SqlManagedSessionsIds;
+  /**
+   * Atomically create durable Session Execution work with accepted events.
+   * Enable for lease-based Node workers. Structural single-writer runtimes
+   * such as Cloudflare Durable Objects dispatch directly instead.
+   */
+  executionOutbox?: boolean;
 }
 
 interface SqlManagedSessionsWorkspaceApp extends App {
@@ -184,9 +194,13 @@ export class SqlManagedSessionsComposition {
     const { client, sealer, environments } = dependencies;
     this.agents = new SqlAgentPersistence(client);
     this.files = new SqlFileMetadataPersistence(client);
-    this.sessions = new SqlSessionPersistence(client, sealer);
+    this.sessions = new SqlSessionPersistence(client, sealer, {
+      executionOutbox: dependencies.executionOutbox,
+    });
     this.sessionSource = new SqlSessionSource(client);
-    this.sessionEvents = new SqlSessionEventPersistence(client);
+    this.sessionEvents = new SqlSessionEventPersistence(client, {
+      executionOutbox: dependencies.executionOutbox,
+    });
     this.sessionResources = new SqlSessionResourceStore(client, sealer);
     this.sessionThreads = new SqlSessionThreadStore(client);
     this.sessionThreadContext = new SqlSessionThreadContextSource(client);
@@ -214,7 +228,15 @@ export class SqlManagedSessionsComposition {
   }
 
   private createWorkspaceApp(workspaceId: string): SqlManagedSessionsWorkspaceApp {
-    const { clock, ids, lifecycle, runtime, environments } = this.dependencies;
+    const {
+      clock,
+      ids,
+      lifecycle,
+      runtime,
+      environments,
+      eventDispatch = runtime,
+      eventStream = runtime,
+    } = this.dependencies;
     const resources = new SessionResourceResolverService({
       files: this.files,
       memoryStores: this.memoryStores,
@@ -250,8 +272,8 @@ export class SqlManagedSessionsComposition {
         providePort(sessionEventStorePort, this.sessionEvents),
         providePort(sessionEventSourcePort, this.sessionSource),
         providePort(sessionEventExecutionContextSourcePort, this.executionContext),
-        providePort(sessionEventStreamPort, runtime),
-        providePort(sessionEventDispatchPort, runtime),
+        providePort(sessionEventStreamPort, eventStream),
+        providePort(sessionEventDispatchPort, eventDispatch),
         providePort(sessionResourceStorePort, this.sessionResources),
         providePort(sessionResourceFileSourcePort, this.files),
         providePort(sessionThreadSessionSourcePort, this.sessionSource),
@@ -259,7 +281,7 @@ export class SqlManagedSessionsComposition {
         providePort(sessionThreadLifecyclePort, runtime),
         providePort(sessionThreadEventThreadSourcePort, this.sessionThreadContext),
         providePort(sessionThreadEventStorePort, this.sessionEvents),
-        providePort(sessionThreadEventStreamPort, runtime),
+        providePort(sessionThreadEventStreamPort, eventStream),
         sessionsModule(),
         sessionEventsModule(),
         sessionResourcesModule(),

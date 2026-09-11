@@ -4,6 +4,7 @@ import type {
   ReplaceCurrentSessionResources,
   ReplaceCurrentSessionResourcesResult,
   SessionResourceSecretChange,
+  SessionResourceSecretSource,
   SessionResourceStore,
   StoredSessionResources,
 } from "@open-managed-agents/session-resource-store";
@@ -11,6 +12,40 @@ import type { SqlClient, SqlStatement } from "@open-managed-agents/sql-client";
 
 export interface SessionResourceSecretSealer {
   seal(value: string): Promise<string>;
+}
+
+export interface SessionResourceSecretOpener {
+  open(value: string): Promise<string>;
+}
+
+interface SessionResourceSecretRow {
+  sealed_value: string;
+}
+
+export class SqlSessionResourceSecretSource
+  implements SessionResourceSecretSource
+{
+  constructor(
+    private readonly client: SqlClient,
+    private readonly opener: SessionResourceSecretOpener,
+  ) {}
+
+  async findGithubToken(input: {
+    workspaceId: string;
+    sessionId: string;
+    resourceId: string;
+  }): Promise<string | null> {
+    const row = await this.client
+      .prepare(
+        `SELECT sealed_value
+           FROM managed_session_resource_secrets
+          WHERE workspace_id = ? AND session_id = ? AND resource_id = ?
+            AND secret_type = 'github_token'`,
+      )
+      .bind(input.workspaceId, input.sessionId, input.resourceId)
+      .first<SessionResourceSecretRow>();
+    return row === null ? null : this.opener.open(row.sealed_value);
+  }
 }
 
 interface SessionResourceRow {

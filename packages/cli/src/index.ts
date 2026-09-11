@@ -822,7 +822,14 @@ const commands: Cmd[] = [
     usage: "oma agents list", desc: "List agents",
     http: "GET    /v1/agents?limit=N&order=asc|desc",
     async run(config) {
-      const { data } = await apiFetch<{ data: Array<{ id: string; name: string; model: any; created_at: string }> }>(config, "/v1/agents?limit=100");
+      const page = await apiFetch<{
+        data: Array<{ id: string; name: string; model: any; created_at: string }>;
+        has_more?: boolean;
+        next_page?: string | null;
+        [key: string]: unknown;
+      }>(config, "/v1/agents?limit=100");
+      const { data } = page;
+      if (config.json) { console.log(JSON.stringify(page, null, 2)); return; }
       if (!data.length) { console.log("No agents. Create one with: oma agents create"); return; }
       table([["NAME", "ID", "MODEL", "CREATED"], ...data.map(a => [a.name, a.id, typeof a.model === "string" ? a.model : a.model?.id || "", new Date(a.created_at).toLocaleDateString()])]);
     },

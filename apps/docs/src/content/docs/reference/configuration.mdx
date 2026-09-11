@@ -28,6 +28,47 @@ interface AgentConfig {
 }
 ```
 
+### Pi harness compaction
+
+`harness: "pi"` always enables harness-owned context compaction. These optional
+metadata keys select and tune the built-in policy:
+
+```json
+{
+  "harness": "pi",
+  "metadata": {
+    "compaction_strategy": "cc-style",
+    "compaction_trigger_fraction": 0.75,
+    "compaction_max_summary_tokens": 2000,
+    "compaction_summary_prompt": "Optional replacement summary prompt"
+  }
+}
+```
+
+`compaction_strategy` accepts `cc-style` (default), `opencode-style`, or
+`summarize`. Invalid names fall back to `cc-style`; there is intentionally no
+`none` mode. All built-in policies use `pi-ai` without requesting reasoning.
+
+- `cc-style` uses an isolated summary payload: a short summary-only system
+  prompt, no tools, image placeholders instead of image bytes, and a separate
+  compaction session id. This is the robust default and intentionally does not
+  reuse the main agent's provider prefix cache.
+- `opencode-style` has the same isolated payload boundary, with a structured
+  Goal / Instructions / Discoveries / Accomplished / Files summary template.
+- `summarize` is the explicit cache-aware strategy. It replays the main
+  request's exact system prompt, tool declarations, message history, and session
+  id, then appends the private compaction instruction. It deliberately leaves
+  `toolChoice` unset because some provider adapters remove tools for
+  `toolChoice: "none"`, which changes the cache prefix. `completeSimple` does
+  not execute tools; a returned tool call rejects the compaction boundary.
+  Prefix-caching providers can therefore reuse the warm conversation prefix.
+
+Applications can replace the whole `PiCompactionPolicy` when constructing
+`PiHarness`; OpenMA still owns the canonical boundary event, failure fallback,
+and the single overflow retry. Every strategy replaces old history with a new
+summary boundary, so the first main-model request after compaction is a new
+prefix even when the summary call itself reused the old prefix.
+
 ### Tool definitions
 
 ```ts
@@ -50,7 +91,7 @@ type ToolDefinition =
 interface McpServerConfig {
   name: string;                 // becomes the prefix: mcp__<name>__<tool>
   type: 'url' | 'stdio';
-  url?: string;                 // required for HTTP/SSE; derived for stdio
+  url?: string;                 // required by host-side OpenMA harnesses
   authorization_token?: string; // inline bearer (otherwise: matched vault credential)
   stdio?: {
     command: string;
@@ -62,7 +103,7 @@ interface McpServerConfig {
 }
 ```
 
-For `type: 'stdio'`, OMA spawns the process **inside the sandbox container**, waits for the port to bind, and proxies the existing HTTP-based MCP tool wiring at it. Tool discovery is bounded at 15 s per server; up to 20 servers per agent.
+`stdio` is an adapter-owned declaration. It works only when an external Worker or a harness running inside the sandbox owns the child process and transport. The built-in Node and Cloudflare host-side harnesses require `url` and reject stdio-only declarations, because sandbox-local `127.0.0.1` is not automatically reachable from the control plane. URL MCP discovery is bounded at 15 s per server; up to 20 servers per agent.
 
 ## Environment
 
@@ -110,6 +151,44 @@ type CredentialAuth =
 ```
 
 Binding to a host happens via the credential, not the vault: a `static_bearer` / `mcp_oauth` credential matches by parsing the request hostname against `mcp_server_url`; a `cap_cli` credential matches by `cli_id` lookup in the cap spec registry. Up to 20 credentials per vault. Tokens are AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` and never returned via the API once written.
+
+### Codex / ChatGPT subscription credentials
+
+<Aside type="caution" title="Local debugging only — high risk">
+  A Codex or ChatGPT subscription login is a local direct-host convenience, not
+  a production model integration. Provider terms, rate limits, and security
+  checks can restrict or suspend an account. Keep this path to local debugging
+  on a trusted machine only.
+</Aside>
+
+**Current status:** Model Cards currently accept static API-key credentials.
+Codex/ChatGPT subscription OAuth is a direct-host adapter contract for local
+debugging; it is not a hosted Model Card or a remote-sandbox credential type.
+
+When that direct-host adapter is enabled, it keeps the provider OAuth credential
+in the host's local Pi-compatible credentials store. It must never copy
+`~/.codex/auth.json`, a refresh token, or an access token into a sandbox,
+workspace checkpoint, output archive, Model Card, or request payload. The
+sandbox receives no subscription credential and cannot refresh it.
+
+For a remote or managed sandbox, configure an approved API key or provider
+OAuth credential behind the OMA model gateway instead. The gateway is the
+credential boundary: it authenticates the request, applies the tenant/model
+policy, and returns only the model response to the sandbox. This preserves the
+same harness endpoint shape without turning a subscription login into a
+portable secret.
+
+These paths are intentionally distinct:
+
+| Path | Credential location | Intended use |
+|---|---|---|
+| Local `direct-host` | Trusted host Pi credentials store | Local debugging only |
+| Remote/managed sandbox | OMA model gateway; approved API/OAuth credential stays in the control plane | Production/managed execution |
+
+Do not treat the local credential file as a portable session artifact. If it is
+missing after a runtime replacement, resume the ACP/native session from its
+declared session state and require the user to authenticate again on the trusted
+host; do not reconstruct or transmit the subscription token from Session events.
 
 ## Skill
 

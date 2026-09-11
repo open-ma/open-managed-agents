@@ -1,0 +1,1112 @@
+{
+  "schemaVersion": 1,
+  "sdk": {
+    "name": "openai",
+    "version": "7.15.0",
+    "namespace": "beta.agents"
+  },
+  "scope": "SDK serialization and local response parsing; no OpenMA runtime calls",
+  "runtimeVerified": false,
+  "methodCount": 43,
+  "scenarioCount": 44,
+  "operations": [
+    {
+      "id": "create",
+      "method": "beta.agents.create",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents",
+          "query": {},
+          "body": {
+            "model": "audit-model",
+            "instructions": "Audit",
+            "metadata": {
+              "source": "audit"
+            }
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "retrieve",
+      "method": "beta.agents.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/agent_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "update",
+      "method": "beta.agents.update",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/agent_audit",
+          "query": {},
+          "body": {
+            "instructions": null,
+            "metadata": {}
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "list",
+      "method": "beta.agents.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "delete",
+      "method": "beta.agents.delete",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "DELETE",
+          "path": "/v1/agents/agent_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.retrieve",
+      "method": "beta.agents.environments.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/environments/env_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.files.create",
+      "method": "beta.agents.environments.files.create",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/environments/env_audit/files",
+          "query": {},
+          "body": {
+            "type": "inline",
+            "path": "/workspace/a.txt",
+            "data": "SGVsbG8="
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.files.list",
+      "method": "beta.agents.environments.files.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/environments/env_audit/files",
+          "query": {
+            "limit": "2",
+            "page": "opaque_audit",
+            "path": "/workspace",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.templates.create",
+      "method": "beta.agents.environments.templates.create",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/environments/templates",
+          "query": {},
+          "body": {},
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.templates.retrieve",
+      "method": "beta.agents.environments.templates.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/environments/templates/et_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.templates.update",
+      "method": "beta.agents.environments.templates.update",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/environments/templates/et_audit",
+          "query": {},
+          "body": {},
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.templates.list",
+      "method": "beta.agents.environments.templates.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/environments/templates",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "environments.templates.delete",
+      "method": "beta.agents.environments.templates.delete",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "DELETE",
+          "path": "/v1/agents/environments/templates/et_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.create",
+      "method": "beta.agents.vaults.create",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/vaults",
+          "query": {},
+          "body": {
+            "name": "Audit",
+            "metadata": {
+              "source": "audit"
+            }
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.retrieve",
+      "method": "beta.agents.vaults.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/vaults/vault_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.list",
+      "method": "beta.agents.vaults.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/vaults",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc",
+            "status[]": [
+              "active",
+              "archived"
+            ]
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.delete",
+      "method": "beta.agents.vaults.delete",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "DELETE",
+          "path": "/v1/vaults/vault_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.credentials.create",
+      "method": "beta.agents.vaults.credentials.create",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/vaults/vault_audit/credentials",
+          "query": {},
+          "body": {
+            "name": "Audit",
+            "auth": {
+              "type": "mcp_oauth",
+              "access_token": "synthetic-audit-secret",
+              "mcp_server_url": "https://mcp.example.test"
+            }
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.credentials.retrieve",
+      "method": "beta.agents.vaults.credentials.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/vaults/vault_audit/credentials/cred_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.credentials.update",
+      "method": "beta.agents.vaults.credentials.update",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/vaults/vault_audit/credentials/cred_audit",
+          "query": {},
+          "body": {
+            "auth": {
+              "type": "mcp_oauth",
+              "access_token": "synthetic-rotated-secret"
+            }
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.credentials.list",
+      "method": "beta.agents.vaults.credentials.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/vaults/vault_audit/credentials",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "vaults.credentials.delete",
+      "method": "beta.agents.vaults.credentials.delete",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "DELETE",
+          "path": "/v1/vaults/vault_audit/credentials/cred_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.create",
+      "method": "beta.agents.sessions.create",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/sessions",
+          "query": {},
+          "body": {
+            "agent_id": "agent_audit",
+            "environment": {
+              "type": "none"
+            },
+            "input": "Hello"
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.create.streaming",
+      "method": "beta.agents.sessions.create",
+      "mode": "stream",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/sessions",
+          "query": {},
+          "body": {
+            "agent_id": "agent_audit",
+            "environment": {
+              "type": "none"
+            },
+            "input": "Hello",
+            "stream": true
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.retrieve",
+      "method": "beta.agents.sessions.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.update",
+      "method": "beta.agents.sessions.update",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/sessions/sess_audit",
+          "query": {},
+          "body": {
+            "metadata": null
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json",
+            "content-type": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.list",
+      "method": "beta.agents.sessions.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc",
+            "agent_id": "agent_audit"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.delete",
+      "method": "beta.agents.sessions.delete",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "DELETE",
+          "path": "/v1/agents/sessions/sess_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.subagents.retrieve",
+      "method": "beta.agents.sessions.subagents.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/subagents/sub_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.subagents.list",
+      "method": "beta.agents.sessions.subagents.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/subagents",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.subagents.items.list",
+      "method": "beta.agents.sessions.subagents.items.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/subagents/sub_audit/items",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.subagents.turns.retrieve",
+      "method": "beta.agents.sessions.subagents.turns.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/subagents/sub_audit/turns/turn_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.subagents.turns.list",
+      "method": "beta.agents.sessions.subagents.turns.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/subagents/sub_audit/turns",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.subagents.turns.items.list",
+      "method": "beta.agents.sessions.subagents.turns.items.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/subagents/sub_audit/turns/turn_audit/items",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.artifacts.retrieve",
+      "method": "beta.agents.sessions.artifacts.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/artifacts/artifact_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.artifacts.list",
+      "method": "beta.agents.sessions.artifacts.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/artifacts",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.artifacts.delete",
+      "method": "beta.agents.sessions.artifacts.delete",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "DELETE",
+          "path": "/v1/agents/sessions/sess_audit/artifacts/artifact_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.artifacts.content",
+      "method": "beta.agents.sessions.artifacts.content",
+      "mode": "binary",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/artifacts/artifact_audit/content",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/octet-stream"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.items.list",
+      "method": "beta.agents.sessions.items.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/items",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.events.create",
+      "method": "beta.agents.sessions.events.create",
+      "mode": "void",
+      "requests": [
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/sessions/sess_audit/events",
+          "query": {},
+          "body": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Hello"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "*/*",
+            "content-type": "application/json",
+            "idempotency-key": "audit-input-key"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.events.stream",
+      "method": "beta.agents.sessions.events.stream",
+      "mode": "stream",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/events",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "text/event-stream"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.turns.retrieve",
+      "method": "beta.agents.sessions.turns.retrieve",
+      "mode": "json",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/turns/turn_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.turns.list",
+      "method": "beta.agents.sessions.turns.list",
+      "mode": "page",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/turns",
+          "query": {
+            "limit": "2",
+            "after": "cursor_audit",
+            "order": "asc"
+          },
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    },
+    {
+      "id": "sessions.stream",
+      "method": "beta.agents.sessions.stream",
+      "mode": "helper",
+      "requests": [
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "application/json"
+          }
+        },
+        {
+          "httpMethod": "GET",
+          "path": "/v1/agents/sessions/sess_audit/events",
+          "query": {},
+          "body": null,
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "text/event-stream"
+          }
+        },
+        {
+          "httpMethod": "POST",
+          "path": "/v1/agents/sessions/sess_audit/events",
+          "query": {},
+          "body": {
+            "events": [
+              {
+                "type": "agent.session.input.message",
+                "input": [
+                  {
+                    "role": "user",
+                    "content": [
+                      {
+                        "type": "input_text",
+                        "text": "Hello"
+                      }
+                    ]
+                  }
+                ]
+              }
+            ]
+          },
+          "headers": {
+            "openai-beta": "agents=v1",
+            "authorization": "Bearer sdk-audit-key",
+            "accept": "*/*",
+            "content-type": "application/json",
+            "idempotency-key": "audit-helper-input"
+          }
+        }
+      ],
+      "requestContract": "captured",
+      "openmaCompatibility": "unverified",
+      "compatibilityEvidence": []
+    }
+  ]
+}

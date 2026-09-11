@@ -6,6 +6,9 @@
   "exports": {
     ".": "./src/index.ts"
   },
+  "scripts": {
+    "test:official-worker": "vitest run --config vitest.worker.config.ts"
+  },
   "dependencies": {
     "@open-managed-agents/managed-agents-application": "workspace:*",
     "hono": "4.12.12",

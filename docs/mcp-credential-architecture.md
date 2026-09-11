@@ -4,9 +4,43 @@
 
 ## TL;DR
 
-OMA's **vault** is the single source of truth for upstream credentials (MCP-server tokens, OAuth tokens, API keys). The agent itself — whether it's the cloud DO running `generateText`, the local daemon spawning `claude-agent-acp`, or the sandbox container running `curl` — **never holds plaintext credentials in memory**. All three callers know only `(tenantId, sessionId, server-name | hostname)` and ask the **main worker** to make the actual upstream call on their behalf. Main looks up the credential **live on every call** (no per-session snapshot in agent worker / DO), injects the bearer token, and forwards.
+OMA's **vault** is the single source of truth for upstream credentials (MCP-server tokens, OAuth tokens, API keys). An untrusted agent/container receives only an OpenMA capability; it does not receive the upstream credential. The trusted gateway resolves the Session's declared MCP server and active `vault_ids`, overwrites any caller-supplied `Authorization`, and performs the upstream request. Cloudflare transparent egress performs a fenced live lookup in the trusted Worker outside the container.
 
 This mirrors [Anthropic Managed Agents' "credential proxy outside the harness"](https://www.anthropic.com/engineering/managed-agents) pattern — a prompt-injected agent has no credential to leak because there isn't one in its address space.
+
+The official self-hosted Work `sessions_token` is used as the in-sandbox MCP
+gateway capability. It is safe only with all of these invariants:
+
+- it is sent in `Authorization`, never a URL, checkpoint, log field, or MCP
+  upstream header;
+- its sealed claims bind workspace, environment, Session, Work, issue time and
+  expiry;
+- every request is checked against the current stored Work claim, including
+  exact token equality and heartbeat TTL;
+- the path is limited to that Session's events/resources and
+  `/v1/oma/mcp-proxy/{session}/{server}`;
+- a reclaim rotates the token, so an old sandbox fails before Vault lookup;
+- the gateway resolves `server` from the Session snapshot and `vault_ids`; the
+  token is not a general Vault-read credential.
+
+This limits authority; it does not make a compromised active sandbox harmless.
+While its Work lease is current, it can call the allowed Session/MCP routes.
+Rate limits and destination policy remain necessary blast-radius controls.
+
+## Current enforcement status
+
+| Path | Status | Boundary |
+|---|---|---|
+| Harness in sandbox → HTTP MCP gateway, Cloudflare and Node | implemented | current Work token + exact Session/server/Vault resolution; upstream bearer is replaced |
+| Cloudflare transparent HTTP/HTTPS egress | enforced | Internet disabled, outbound handler required, complete runtime fence checked before and after Vault lookup, revoke swaps to deny handler |
+| Node/Docker `oma-vault` transparent sidecar | legacy/advisory | proxy environment variables are bypassable; hostname-only lookup is not a multi-tenant security boundary |
+| E2B, Daytona, LiteBox | provider-dependent | only `enforced` after a native network/substitution adapter passes conformance; current generic proxy-env adapters are advisory |
+| BoxRun | unsupported | no proven network/secret creation-time wire point in the current adapter |
+
+The portable policy/lifecycle contract is `CredentialEgressPort`; it is an
+OpenMA Runtime Host extension and does not add fields to the official Managed
+Agents Work/Environment protocol. See
+[`adr/0007-sandbox-credential-egress.md`](./adr/0007-sandbox-credential-egress.md).
 
 ## Architecture diagram
 
@@ -25,14 +59,14 @@ This mirrors [Anthropic Managed Agents' "credential proxy outside the harness"](
               │   │ forwardWithRefresh                 │ │  inject + 401-refresh
               │   └────────────────────────────────────┘ │
               │   exposes three entrypoints:             │
-              │   ① HTTP /v1/mcp-proxy/<sid>/<server>    │
+              │   ① HTTP /v1/oma/mcp-proxy/<sid>/<server>│
               │   ② McpProxyRpc.mcpForward (RPC)         │
               │   ③ McpProxyRpc.outboundForward (RPC)    │
               └────┬─────────────┬────────────┬─────────┘
                    │             │            │
        ┌───────────┘             │            └───────────┐
        │ HTTP                    │ RPC                    │ RPC
-       │ Bearer apiKey           │ binding=auth           │ binding=auth
+       │ Bearer API/Work token   │ binding=auth           │ fenced binding
        ▼                         ▼                        ▼
   ┌──────────────┐       ┌───────────────┐       ┌────────────────────┐
   │ ACP child    │       │ Cloud DO      │       │ Sandbox container  │
@@ -48,14 +82,16 @@ This mirrors [Anthropic Managed Agents' "credential proxy outside the harness"](
 
 | Caller | What it knows | How it asks | Why |
 |---|---|---|---|
-| **Local-runtime ACP child** (`claude-agent-acp` spawned by the user's daemon) | `(sid, server_name, agent api key)` | HTTP `POST /v1/mcp-proxy/<sid>/<server>` with `Authorization: Bearer <agentApiKey>` | Daemon already has an apiKey from `oma bridge setup`. HTTP works over the public network |
+| **Local-runtime ACP child** (`claude-agent-acp` spawned by the user's daemon) | `(sid, server_name, agent api key)` | HTTP `POST /v1/oma/mcp-proxy/<sid>/<server>` with its API key | Daemon already has an apiKey from `oma bridge setup`. HTTP works over the public network |
+| **Self-hosted Work / harness in sandbox** | `(sid, server_name, sessions_token)` | HTTP `POST /v1/oma/mcp-proxy/<sid>/<server>` with the current Work bearer | Reuses the official Work secret; middleware verifies the current claim before routing |
 | **Cloud agent DO** (cloud-side `generateText` loop) | `(tenantId, sid, server_name)` | `env.MAIN_MCP.mcpForward(...)` via Cloudflare service-binding RPC | Binding scope IS the auth — only Workers configured with `services[].entrypoint = "McpProxyRpc"` can invoke it. No apiKey to manage |
-| **Sandbox container** (the HTTPS-intercepted shell of the cloud agent's container) | The full upstream URL it wants to fetch — that's it | `env.MAIN_MCP.outboundForward(...)` via the same service binding (called by the agent worker's `inject_vault_creds` outbound handler in `apps/agent/src/oma-sandbox.ts`) | Same — binding scope is the auth |
+| **Cloudflare sandbox container** (transparent HTTPS) | The full upstream URL it wants to fetch — that's it | trusted outbound handler calls fenced `lookupOutboundCredential(...)`, strips caller auth, then fetches upstream | runtime fence and forced interception are the authorization boundary |
 
-All three converge on `apps/main/src/routes/mcp-proxy.ts`'s shared helpers:
+The gateway paths converge on the same Session/Vault resolution and
+`@open-managed-agents/vault-forward` behavior:
 - `resolveProxyTargetByTenant(env, services, tenantId, sid, serverName)` — for MCP servers, matches by URL
 - `resolveOutboundCredentialByHost(env, services, tenantId, sid, hostname)` — for arbitrary HTTPS, matches by hostname
-- `forwardWithRefresh(services, tenantId, target, method, headers, body, audit?)` — fetch upstream + auto-refresh on 401 + audit log
+- `forwardWithRefresh(...)` / `@open-managed-agents/vault-forward` — fetch upstream + auto-refresh on 401 + audit log
 
 ## OAuth refresh on 401
 
@@ -108,6 +144,13 @@ Production incident response can answer "who called what when" without per-call-
 - **Streaming uploads** through `outboundForward` — the RPC body type is `string | null`, so multi-MB binary uploads from sandbox `curl -F file=@big.pdf` would need the body type widened to `ArrayBuffer | ReadableStream` first. OMA's current use cases don't trip this.
 
 - **Rate limiting** — there's no per-credential / per-session quota in mcp-proxy. A misbehaving agent can spam an upstream MCP server until it rate-limits the entire tenant. Future work; not currently a production blocker because OMA traffic is well below any upstream's free-tier limits.
+
+- **Legacy self-host `oma-vault` is not a multi-tenant isolation boundary.**
+  `HTTP_PROXY`/`HTTPS_PROXY` are cooperative settings and the current sidecar
+  cannot attribute an arbitrary CONNECT request to a Work generation. Use the
+  HTTP MCP gateway for managed in-sandbox MCP traffic. Do not advertise
+  transparent Node/Docker egress as `required` until an isolated network and a
+  scoped, fenced sidecar adapter pass the ADR 0007 conformance matrix.
 
 ## Deploy ordering invariant
 

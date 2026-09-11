@@ -169,7 +169,7 @@ Auth modes — credentials never enter the sandbox:
 | vault static bearer | matching `auth.type: "static_bearer"` credential in a session vault (matched by `mcp_server_url` host) |
 | vault OAuth | matching `auth.type: "mcp_oauth"` credential — refreshes on 401 **and 403** (Airtable/Asana/Sentry use 403 for expired tokens), CAS-writes new token to D1, retries once |
 
-stdio MCP servers run **inside the sandbox container**: set `type: "stdio"` with `command`, `args`, `port`. OMA spawns the process, waits for the port to bind, proxies the existing tool wiring at it. Tool discovery is bounded at 15 s per server; up to 20 servers per agent.
+Host-side OpenMA harnesses support URL-based MCP servers. A `stdio` declaration is provider-specific and is accepted only when an external Worker or harness running inside the sandbox owns both the child process and its transport. Node and Cloudflare host-side harnesses reject a stdio declaration without `url`; they do not pretend that sandbox-local `127.0.0.1` is reachable from the control plane. Tool discovery is bounded at 15 s per URL server; up to 20 servers per agent.
 
 ## Where to go next
 

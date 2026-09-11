@@ -1,0 +1,26 @@
+{
+  "name": "@open-managed-agents/sandbox-adapter-e2b",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "test:coverage": "vitest run --config vitest.coverage.config.ts",
+    "test:certification": "OMA_E2B_CERTIFICATION=1 vitest run --config vitest.config.ts test/e2b-certification.e2e.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@open-managed-agents/sandbox": "workspace:*"
+  },
+  "peerDependencies": {
+    "e2b": "^2.46.1"
+  },
+  "peerDependenciesMeta": {
+    "e2b": { "optional": true }
+  },
+  "devDependencies": {
+    "@types/node": "^26.2.0",
+    "vitest": "^4.1.3"
+  }
+}

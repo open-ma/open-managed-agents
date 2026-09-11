@@ -59,6 +59,7 @@ export interface ManagedAgentsSessionPromptInput {
 interface ActiveSession {
   acp: AcpSession;
   turns: Map<string, AbortController>;
+  completedTurns: Set<string>;
   checkpoint?: ManagedAgentsSessionCheckpoint;
 }
 
@@ -188,6 +189,11 @@ export class ManagedAgentsSessionHost {
     this.#sessions.set(input.sessionId, {
       acp: session,
       turns: new Map(),
+      completedTurns: new Set(
+        durableCheckpoint?.lastCompletedTurnId
+          ? [durableCheckpoint.lastCompletedTurnId]
+          : [],
+      ),
       ...(claimedCheckpoint ? { checkpoint: claimedCheckpoint } : {}),
     });
 
@@ -229,6 +235,15 @@ export class ManagedAgentsSessionHost {
       });
       return;
     }
+    if (session.completedTurns.has(input.turnId)) {
+      this.#emit({
+        type: "session.complete",
+        sessionId: input.sessionId,
+        turnId: input.turnId,
+      });
+      return;
+    }
+    if (session.turns.has(input.turnId)) return;
     if (!await this.#retainGenerationLease(input.sessionId, session)) return;
     const controller = new AbortController();
     session.turns.set(input.turnId, controller);
@@ -243,6 +258,12 @@ export class ManagedAgentsSessionHost {
           error?: unknown;
         } | null;
         if (sentinel?.type === "promptComplete") {
+          this.#emit({
+            type: "session.event",
+            sessionId: input.sessionId,
+            turnId: input.turnId,
+            event,
+          });
           continue;
         }
         if (sentinel?.type === "promptError") {
@@ -258,18 +279,24 @@ export class ManagedAgentsSessionHost {
           event,
         });
       }
-      this.#emit(promptError
-        ? {
+      if (promptError) {
+        this.#emit({
             type: "session.error",
             sessionId: input.sessionId,
             turnId: input.turnId,
             message: promptError,
-          }
-        : {
-            type: "session.complete",
-            sessionId: input.sessionId,
-            turnId: input.turnId,
-          });
+        });
+      } else {
+        if (!await this.#commitCompletedTurn(input.sessionId, session, input.turnId)) {
+          return;
+        }
+        session.completedTurns.add(input.turnId);
+        this.#emit({
+          type: "session.complete",
+          sessionId: input.sessionId,
+          turnId: input.turnId,
+        });
+      }
     } catch (error) {
       this.#emit({
         type: "session.error",
@@ -411,6 +438,33 @@ export class ManagedAgentsSessionHost {
     }).catch(() => false);
     if (retained) {
       session.checkpoint = retainedCheckpoint;
+      return true;
+    }
+    if (this.#sessions.get(sessionId) === session) {
+      this.#sessions.delete(sessionId);
+    }
+    await session.acp.dispose().catch(() => undefined);
+    this.#emitLeaseLost(sessionId);
+    return false;
+  }
+
+  async #commitCompletedTurn(
+    sessionId: string,
+    session: ActiveSession,
+    turnId: string,
+  ): Promise<boolean> {
+    if (!session.checkpoint || !this.#checkpointStore) return true;
+    const completedCheckpoint: ManagedAgentsSessionCheckpoint = {
+      ...session.checkpoint,
+      lastCompletedTurnId: turnId,
+      updatedAt: this.#scheduler.now(),
+    };
+    const committed = await this.#checkpointStore.compareAndSet({
+      expectedGeneration: session.checkpoint.generation,
+      checkpoint: completedCheckpoint,
+    }).catch(() => false);
+    if (committed) {
+      session.checkpoint = completedCheckpoint;
       return true;
     }
     if (this.#sessions.get(sessionId) === session) {

@@ -13,6 +13,7 @@
   "dependencies": {
     "@open-managed-agents/domain": "workspace:*",
     "@open-managed-agents/session-event-store": "workspace:*",
+    "@open-managed-agents/session-runtime-contract": "workspace:*",
     "@open-managed-agents/sql-client": "workspace:*"
   },
   "devDependencies": {

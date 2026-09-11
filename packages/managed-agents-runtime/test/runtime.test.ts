@@ -158,6 +158,66 @@ describe("createManagedAgentsRuntime", () => {
     ]);
   });
 
+  it("replays completion without running ACP again when a completed turn is redelivered", async () => {
+    const events: unknown[] = [];
+    let promptCount = 0;
+    const runtime = createManagedAgentsRuntime({
+      acpRuntime: {
+        async start() {
+          return acpSessionFixture({
+            acpSessionId: "acp-runtime-idempotent",
+            async *prompt() {
+              promptCount += 1;
+              yield { type: "agent_message_chunk", text: "only once" };
+            },
+          });
+        },
+      },
+      sessionPreparation: {
+        async prepare() {
+          return { agent: { command: "idempotent-agent" } };
+        },
+      },
+    });
+    runtime.attach({ publish: (event: unknown) => events.push(event) });
+    await runtime.dispatch({
+      type: "session.start",
+      sessionId: "session-runtime-idempotent",
+      agentId: "idempotent-agent",
+      runtime: "cloud",
+    });
+    events.length = 0;
+    const command = {
+      type: "session.prompt" as const,
+      sessionId: "session-runtime-idempotent",
+      turnId: "turn-runtime-idempotent",
+      text: "apply the change",
+    };
+
+    await runtime.dispatch(command);
+    await runtime.dispatch(command);
+
+    expect(promptCount).toBe(1);
+    expect(events).toEqual([
+      {
+        type: "session.event",
+        sessionId: "session-runtime-idempotent",
+        turnId: "turn-runtime-idempotent",
+        event: { type: "agent_message_chunk", text: "only once" },
+      },
+      {
+        type: "session.complete",
+        sessionId: "session-runtime-idempotent",
+        turnId: "turn-runtime-idempotent",
+      },
+      {
+        type: "session.complete",
+        sessionId: "session-runtime-idempotent",
+        turnId: "turn-runtime-idempotent",
+      },
+    ]);
+  });
+
   it("routes cancel to the selected active turn", async () => {
     let promptSignal: AbortSignal | undefined;
     const runtime = createManagedAgentsRuntime({

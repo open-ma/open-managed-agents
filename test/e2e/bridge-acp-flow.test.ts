@@ -5,7 +5,7 @@
  *   `oma bridge daemon` (already attached) → openma relay → ACP child → reply
  *
  * Covers the changes from this branch:
- *   - 6-agent registry (claude / codex / gemini / opencode / hermes / openclaw)
+ *   - supported ACP registry (claude / codex / gemini / opencode / hermes)
  *   - claude-code-acp legacy alias canonicalize + legacySpec fallback
  *   - per-agent bundle layout (.claude/skills, .opencode/agents, inline)
  *   - local_skill_blocklist filtering at spawn time
@@ -272,7 +272,7 @@ test("registry: daemon reports core ACP agents from merged (official + overlay) 
   // After A2 the daemon merges the official ACP registry with OMA's
   // overlay. ids match the official slugs (claude-acp not claude-
   // agent-acp); pre-A2 ids still resolve via overlay aliases on lookup.
-  for (const want of ["claude-acp", "gemini", "opencode", "hermes", "openclaw"]) {
+  for (const want of ["claude-acp", "gemini", "opencode", "hermes"]) {
     assert.ok(reported.includes(want), `${want} missing from runtime.agents (got: ${reported})`);
   }
 });
@@ -359,7 +359,6 @@ test("console bundle: ships canonicalize + install-hint code", () => {
     "codex-cli",
     "gemini-cli",
     "opencode",
-    "openclaw",
     "hermes",
     "claude-code-acp", // legacy alias must reach the bundle for canonicalize
   ]) {
