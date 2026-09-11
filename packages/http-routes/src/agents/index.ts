@@ -32,7 +32,11 @@ function formatAgent(agent: AgentConfig) {
   const model =
     !agent.model || typeof agent.model === "string"
       ? { id: agent.model || "", speed: "standard" as const }
-      : { id: agent.model.id, speed: agent.model.speed || ("standard" as const) };
+      : {
+          ...(agent.model as Record<string, unknown>),
+          id: agent.model.id,
+          speed: agent.model.speed || ("standard" as const),
+        };
 
   // OMA-only fields nest under `_oma:` so AMA SDK consumers ignore them
   // while OMA tooling can read the platform extensions.
@@ -41,7 +45,11 @@ function formatAgent(agent: AgentConfig) {
     oma.aux_model =
       typeof agent.aux_model === "string"
         ? { id: agent.aux_model, speed: "standard" as const }
-        : { id: agent.aux_model.id, speed: agent.aux_model.speed || ("standard" as const) };
+        : {
+            ...(agent.aux_model as Record<string, unknown>),
+            id: agent.aux_model.id,
+            speed: agent.aux_model.speed || ("standard" as const),
+          };
   }
   if (agent.harness) oma.harness = agent.harness;
   if (agent.acp) oma.acp = agent.acp;
@@ -222,9 +230,13 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
       }
     }
 
+    // Keep non-secret, unknown config fields intact. This makes the explicit
+    // OMA lane forward-compatible with AgentConfig additions.
+    const { _oma: _omaEnvelope, multiagent: _multiagent, ...passthrough } = body;
     const row = await services.agents.create({
       tenantId,
       input: {
+        ...passthrough,
         name: body.name,
         model: body.model ?? "",
         system: body.system,
@@ -445,11 +457,20 @@ export function buildAgentRoutes(deps: AgentRoutesDeps) {
     }
 
     try {
+      // Do not persist transport envelopes / optimistic-lock fields, but pass
+      // through every actual config key so Console edits are lossless.
+      const {
+        version: _version,
+        _oma: _omaEnvelope,
+        multiagent: _multiagent,
+        ...passthrough
+      } = body;
       const row = await services.agents.update({
         tenantId,
         agentId: id,
         expectedVersion: body.version,
         input: {
+          ...passthrough,
           name: body.name,
           model: body.model,
           system: body.system,

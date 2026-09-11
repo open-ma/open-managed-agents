@@ -4,6 +4,7 @@ import {
   agentToForm,
   agentToPreservedConfig,
   buildModelValue,
+  configToForm,
   mergeFormIntoConfig,
   mergeMcpServers,
   mergeToolsField,
@@ -14,7 +15,12 @@ function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "agent_1",
     name: "Coder",
-    model: { id: "claude-sonnet-4-6", speed: "fast" },
+    model: {
+      id: "claude-sonnet-4-6",
+      speed: "fast",
+      effort: "high",
+      provider_options: { region: "us-east-1" },
+    },
     system: "Be helpful",
     version: 3,
     description: "desc",
@@ -39,6 +45,12 @@ function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
         mcp_server_name: "github",
         default_config: { permission_policy: { type: "always_ask" } },
       },
+      {
+        type: "mcp_toolset",
+        mcp_server_name: "future-managed-server",
+        default_config: { permission_policy: { type: "always_ask" } },
+        future_policy: { retain: true },
+      },
       { type: "future_toolset_2099", keep: true },
     ],
     mcp_servers: [
@@ -48,12 +60,15 @@ function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
         stdio: {
           command: "uvx",
           args: ["mcp-server-github"],
+          env: { LOG_LEVEL: "debug" },
           port: 8765,
+          sse_path: "/events",
           ready_timeout_ms: 30_000,
         },
       },
     ],
     metadata: { team: "platform", owner: "alice" },
+    custom_future_flag: "preserved",
     _oma: {
       aux_model: { id: "claude-haiku-4-5", speed: "fast" },
       appendable_prompts: ["prompt_a"],
@@ -75,7 +90,12 @@ describe("agentFormCodec lossless update", () => {
       forUpdate: true,
     });
     expect(payload.name).toBe("Renamed");
-    expect(payload.model).toEqual({ id: "claude-sonnet-4-6", speed: "fast" });
+    expect(payload.model).toMatchObject({
+      id: "claude-sonnet-4-6",
+      speed: "fast",
+      effort: "high",
+      provider_options: { region: "us-east-1" },
+    });
   });
 
   it("merges tools without dropping custom / unknown / mcp policies", () => {
@@ -94,6 +114,12 @@ describe("agentFormCodec lossless update", () => {
         (t as { mcp_server_name?: string }).mcp_server_name === "github",
     ) as { default_config?: { permission_policy?: { type?: string } } };
     expect(mcp?.default_config?.permission_policy?.type).toBe("always_ask");
+    expect(tools).toContainEqual({
+      type: "mcp_toolset",
+      mcp_server_name: "future-managed-server",
+      default_config: { permission_policy: { type: "always_ask" } },
+      future_policy: { retain: true },
+    });
 
     const builtin = tools.find(
       (t) => (t as { type?: string }).type === "agent_toolset_20260401",
@@ -109,7 +135,9 @@ describe("agentFormCodec lossless update", () => {
     expect(merged[0].stdio).toEqual({
       command: "uvx",
       args: ["mcp-server-github"],
+      env: { LOG_LEVEL: "debug" },
       port: 8765,
+      sse_path: "/events",
       ready_timeout_ms: 30_000,
     });
     expect(merged[0].type).toBe("stdio");
@@ -131,7 +159,9 @@ describe("agentFormCodec lossless update", () => {
         stdio: {
           command: "uvx",
           args: ["mcp-server-github"],
+          env: { LOG_LEVEL: "debug" },
           port: 8765,
+          sse_path: "/events",
           ready_timeout_ms: 30_000,
         },
       },
@@ -151,6 +181,7 @@ describe("agentFormCodec lossless update", () => {
       forUpdate: true,
     });
     expect(payload.metadata).toEqual({ team: "platform", owner: "alice" });
+    expect(payload.custom_future_flag).toBe("preserved");
     expect(payload._oma).toMatchObject({
       aux_model: { id: "claude-haiku-4-5", speed: "fast" },
       appendable_prompts: ["prompt_a"],
@@ -172,12 +203,46 @@ describe("agentFormCodec lossless update", () => {
       { forUpdate: true },
     );
     expect(payload.name).toBe("Final");
-    expect(payload.model).toEqual({ id: "claude-sonnet-4-6", speed: "fast" });
+    expect(payload.model).toMatchObject({
+      id: "claude-sonnet-4-6",
+      speed: "fast",
+      effort: "high",
+      provider_options: { region: "us-east-1" },
+    });
     expect(
       (payload.tools as unknown[]).some((t) => (t as { type?: string }).type === "custom"),
     ).toBe(true);
     expect((payload.mcp_servers as Array<{ stdio?: unknown }>)[0]?.stdio).toBeTruthy();
     expect(payload.metadata).toEqual({ team: "platform", owner: "alice" });
+    expect(payload.custom_future_flag).toBe("preserved");
+  });
+
+  it("round-trips every stdio field and legacy credentials through Form ↔ code", () => {
+    const agent = sampleAgent({
+      mcp_servers: [
+        {
+          name: "github",
+          type: "stdio",
+          authorization_token: "legacy-do-not-replace",
+          stdio: {
+            command: "uvx",
+            args: ["mcp-server-github", "--transport", "sse"],
+            env: { LOG_LEVEL: "debug", FEATURE: "1" },
+            port: 8765,
+            sse_path: "/events",
+            ready_timeout_ms: 30_000,
+          },
+        },
+      ] as never,
+    });
+    const baseline = agentToPreservedConfig(agent);
+    const afterForm = mergeFormIntoConfig(agentToForm(agent), baseline, { forUpdate: true });
+    const afterCode = mergeFormIntoConfig(configToForm(afterForm), afterForm, { forUpdate: true });
+
+    expect(afterCode.mcp_servers).toEqual(afterForm.mcp_servers);
+    expect((afterCode.mcp_servers as Array<{ authorization_token?: string }>)[0]?.authorization_token)
+      .toBe("legacy-do-not-replace");
+    expect(afterCode.custom_future_flag).toBe("preserved");
   });
 });
 
@@ -197,6 +262,8 @@ describe("agent endpoint boundary", () => {
     [{ runtime_binding: { runtime_id: "rt_1", acp_agent_id: "codex" } }],
     [{ enable_general_subagent: true }],
     [{ mcp_servers: [{ name: "local", type: "stdio", stdio: { command: "mcp" } }] }],
+    [{ custom_future_flag: "preserved" }],
+    [{ model: { id: "m", speed: "fast", provider_options: { region: "us" } } }],
   ])("routes explicit OpenMA extensions through /v1/oma/agents", (extension) => {
     expect(requiresOmaAgentEndpoint({ name: "Extended", model: "m", ...extension })).toBe(
       true,

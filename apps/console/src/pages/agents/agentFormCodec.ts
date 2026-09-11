@@ -3,8 +3,9 @@
  *
  * Form mode only models a subset of AgentConfig. Updates and Form↔YAML/JSON
  * switches must be lossless for unsupported fields (model.speed, custom
- * tools, MCP stdio, unknown toolsets, metadata, etc.). Full-field UI is
- * tracked separately in #155 — this module only guarantees round-trips.
+ * tools, MCP stdio, unknown toolsets, metadata, etc.). Form controls own the
+ * common fields; the full YAML/JSON editor remains available for every other
+ * AgentConfig key.
  */
 import type { AgentRecord as Agent } from "../../types/agent";
 
@@ -12,6 +13,13 @@ export interface McpEntry {
   name: string;
   type: string;
   url: string;
+  /** Non-secret configuration for a sandbox-hosted stdio MCP server. */
+  stdioCommand: string;
+  stdioArgs: string[];
+  stdioEnv: Record<string, string>;
+  stdioPort: string;
+  stdioSsePath: string;
+  stdioReadyTimeoutMs: string;
   /** Stable identity used to preserve fields when an existing server is renamed. */
   originalName?: string;
 }
@@ -19,7 +27,7 @@ export interface McpEntry {
 export interface SkillEntry {
   type: "anthropic" | "custom";
   skill_id: string;
-  version?: string;
+  version?: string | number;
 }
 
 export interface CallableEntry {
@@ -35,6 +43,10 @@ export type FormState = {
   model: string;
   /** Preserved from `{ id, speed }` model objects; not edited in Form UI yet. */
   modelSpeed: "" | "standard" | "fast";
+  auxiliaryModel: string;
+  auxiliaryModelSpeed: "" | "standard" | "fast";
+  appendablePrompts: string[];
+  metadataJson: string;
   system: string;
   description: string;
   modelCardId: string;
@@ -54,6 +66,10 @@ export const INITIAL_FORM: FormState = {
   name: "",
   model: "",
   modelSpeed: "",
+  auxiliaryModel: "",
+  auxiliaryModelSpeed: "",
+  appendablePrompts: [],
+  metadataJson: "{}",
   system: "",
   description: "",
   modelCardId: "",
@@ -138,6 +154,20 @@ function modelSpeedOf(model: unknown): "" | "standard" | "fast" {
   return speed === "standard" || speed === "fast" ? speed : "";
 }
 
+function modelValueFromParts(
+  id: string,
+  speed: "" | "standard" | "fast",
+  existing?: unknown,
+): string | Record<string, unknown> {
+  if (existing && typeof existing === "object" && !Array.isArray(existing)) {
+    const model = structuredClone(existing as Record<string, unknown>);
+    model.id = id;
+    if (speed === "standard" || speed === "fast") model.speed = speed;
+    return model;
+  }
+  return speed === "standard" || speed === "fast" ? { id, speed } : id;
+}
+
 type RuntimeBinding = {
   runtime_id?: string;
   acp_agent_id?: string;
@@ -146,18 +176,33 @@ type RuntimeBinding = {
 
 /** Map an API / pasted config into form state (lossy by design for the UI). */
 export function configToForm(config: Record<string, unknown>): FormState {
-  const oma = config._oma as { runtime_binding?: RuntimeBinding } | undefined;
+  const oma = config._oma as {
+    runtime_binding?: RuntimeBinding;
+    aux_model?: unknown;
+    appendable_prompts?: unknown;
+  } | undefined;
   const rb: RuntimeBinding | undefined =
     oma?.runtime_binding ?? (config.runtime_binding as RuntimeBinding | undefined);
   const toolPolicy = parseToolPolicy(
     Array.isArray(config.tools) ? (config.tools as unknown[]) : undefined,
   );
   const multiagent = config.multiagent as { agents?: CallableEntry[] } | undefined;
+  const callableAgents = Array.isArray(config.callable_agents)
+    ? (config.callable_agents as CallableEntry[])
+    : multiagent?.agents;
   return {
     ...INITIAL_FORM,
     name: String(config.name || ""),
     model: modelIdOf(config.model) || (typeof config.model === "string" ? config.model : ""),
     modelSpeed: modelSpeedOf(config.model),
+    auxiliaryModel: modelIdOf(oma?.aux_model ?? config.aux_model),
+    auxiliaryModelSpeed: modelSpeedOf(oma?.aux_model ?? config.aux_model),
+    appendablePrompts: Array.isArray(oma?.appendable_prompts ?? config.appendable_prompts)
+      ? ((oma?.appendable_prompts ?? config.appendable_prompts) as unknown[]).filter(
+          (value): value is string => typeof value === "string",
+        )
+      : [],
+    metadataJson: JSON.stringify(config.metadata ?? {}, null, 2),
     modelCardId: "",
     system: String(config.system || ""),
     description: String(config.description || ""),
@@ -166,6 +211,35 @@ export function configToForm(config: Record<string, unknown>): FormState {
           name: String(m.name || ""),
           type: String(m.type || "url"),
           url: typeof m.url === "string" ? m.url : "",
+          stdioCommand:
+            typeof (m.stdio as { command?: unknown } | undefined)?.command === "string"
+              ? (m.stdio as { command: string }).command
+              : "",
+          stdioArgs: Array.isArray((m.stdio as { args?: unknown } | undefined)?.args)
+            ? (m.stdio as { args: unknown[] }).args.filter((arg): arg is string => typeof arg === "string")
+            : [],
+          stdioEnv:
+            (m.stdio as { env?: unknown } | undefined)?.env &&
+            typeof (m.stdio as { env?: unknown }).env === "object"
+              ? Object.entries((m.stdio as { env: Record<string, unknown> }).env).reduce<
+                  Record<string, string>
+                >((env, [key, value]) => {
+                  if (typeof value === "string") env[key] = value;
+                  return env;
+                }, {})
+              : {},
+          stdioPort:
+            typeof (m.stdio as { port?: unknown } | undefined)?.port === "number"
+              ? String((m.stdio as { port: number }).port)
+              : "",
+          stdioSsePath:
+            typeof (m.stdio as { sse_path?: unknown } | undefined)?.sse_path === "string"
+              ? (m.stdio as { sse_path: string }).sse_path
+              : "",
+          stdioReadyTimeoutMs:
+            typeof (m.stdio as { ready_timeout_ms?: unknown } | undefined)?.ready_timeout_ms === "number"
+              ? String((m.stdio as { ready_timeout_ms: number }).ready_timeout_ms)
+              : "",
           originalName: String(m.name || "") || undefined,
         }))
       : [],
@@ -173,11 +247,13 @@ export function configToForm(config: Record<string, unknown>): FormState {
       ? (config.skills as Array<Record<string, unknown>>).map((s) => ({
           type: (s.type === "anthropic" ? "anthropic" : "custom") as "anthropic" | "custom",
           skill_id: String(s.skill_id || ""),
-          ...(typeof s.version === "string" ? { version: s.version } : {}),
+          ...(typeof s.version === "string" || typeof s.version === "number"
+            ? { version: s.version }
+            : {}),
         }))
       : [],
-    callableAgents: Array.isArray(multiagent?.agents)
-      ? multiagent.agents.map((a) => ({
+    callableAgents: Array.isArray(callableAgents)
+      ? callableAgents.map((a) => ({
           type: "agent" as const,
           id: a.id,
           version: a.version ?? 1,
@@ -199,15 +275,16 @@ export function agentToForm(agent: Agent): FormState {
 
 export function buildModelValue(
   form: FormState,
-): string | { id: string; speed: "standard" | "fast" } {
-  if (form.modelSpeed === "standard" || form.modelSpeed === "fast") {
-    return { id: form.model, speed: form.modelSpeed };
-  }
-  return form.model;
+  existingModel?: unknown,
+): string | Record<string, unknown> {
+  return modelValueFromParts(form.model, form.modelSpeed, existingModel);
 }
 
 /** Form-managed built-in toolset entry only. */
-export function buildManagedToolset(form: FormState): Record<string, unknown> {
+export function buildManagedToolset(
+  form: FormState,
+  previous?: Record<string, unknown>,
+): Record<string, unknown> {
   const overrides = Object.entries(form.toolOverrides)
     .filter(([, v]) => v !== "default")
     .map(([name, v]) => {
@@ -218,13 +295,47 @@ export function buildManagedToolset(form: FormState): Record<string, unknown> {
         permission_policy: { type: v as "always_allow" | "always_ask" },
       };
     });
+  const previousDefault =
+    previous?.default_config && typeof previous.default_config === "object"
+      ? structuredClone(previous.default_config as Record<string, unknown>)
+      : {};
+  const previousByName = new Map(
+    (Array.isArray(previous?.configs) ? previous.configs : [])
+      .filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
+      .map((value) => [typeof value.name === "string" ? value.name : "", value]),
+  );
+  // Retain configs not represented by the current UI as well. They can be
+  // new built-ins or provider extensions, and must not disappear on a name
+  // edit. Form-authored overrides replace only their corresponding row.
+  const configs = (Array.isArray(previous?.configs) ? previous.configs : []).map((value) =>
+    structuredClone(value),
+  );
+  for (const override of overrides) {
+    const next = {
+      ...(previousByName.has(override.name)
+        ? structuredClone(previousByName.get(override.name)!)
+        : {}),
+      ...override,
+    };
+    const index = configs.findIndex(
+      (value) =>
+        !!value &&
+        typeof value === "object" &&
+        (value as { name?: unknown }).name === override.name,
+    );
+    if (index === -1) configs.push(next);
+    else configs[index] = next;
+  }
+
   return {
+    ...(previous ? structuredClone(previous) : {}),
     type: "agent_toolset_20260401",
     default_config: {
+      ...previousDefault,
       enabled: form.toolDefaultEnabled,
       permission_policy: { type: form.toolDefaultPermission },
     },
-    ...(overrides.length > 0 ? { configs: overrides } : {}),
+    ...(configs.length > 0 ? { configs } : {}),
   };
 }
 
@@ -238,7 +349,13 @@ export function mergeToolsField(
   form: FormState,
 ): unknown[] {
   const existing = Array.isArray(existingTools) ? existingTools : [];
-  const result: unknown[] = [buildManagedToolset(form)];
+  const existingBuiltin = existing.find(
+    (tool): tool is Record<string, unknown> =>
+      !!tool &&
+      typeof tool === "object" &&
+      (tool as { type?: unknown }).type === "agent_toolset_20260401",
+  );
+  const result: unknown[] = [buildManagedToolset(form, existingBuiltin)];
 
   for (const tool of existing) {
     if (!tool || typeof tool !== "object") {
@@ -247,7 +364,22 @@ export function mergeToolsField(
     }
     const type = (tool as { type?: unknown }).type;
     if (type === "agent_toolset_20260401") continue;
-    if (type === "mcp_toolset") continue;
+    if (type === "mcp_toolset") {
+      const serverName = (tool as { mcp_server_name?: unknown }).mcp_server_name;
+      // Rebuild only MCP toolsets associated with a Form-managed server so
+      // renames track correctly. Orphaned/future MCP declarations are still
+      // valid data and must survive a harmless Form edit.
+      if (
+        typeof serverName === "string" &&
+        form.mcpServers.some((server) =>
+          [server.name, server.originalName].includes(serverName),
+        )
+      ) {
+        continue;
+      }
+      result.push(tool);
+      continue;
+    }
     result.push(tool);
   }
 
@@ -301,7 +433,13 @@ export function mergeMcpServers(
     .map((m) => {
       const prior = priorByName.get(m.originalName || m.name);
       if (!prior) {
-        return { name: m.name, type: m.type || "url", ...(m.url ? { url: m.url } : {}) };
+        const created: Record<string, unknown> = {
+          name: m.name,
+          type: m.type || "url",
+          ...(m.url ? { url: m.url } : {}),
+        };
+        if (m.type === "stdio") created.stdio = stdioFromForm({}, m);
+        return created;
       }
       const next: Record<string, unknown> = { ...prior, name: m.name, type: m.type || prior.type || "url" };
       if (m.url) next.url = m.url;
@@ -312,8 +450,71 @@ export function mergeMcpServers(
         // Keep prior url when the form left it blank (stdio / incomplete edit).
         next.url = prior.url;
       }
+      if (m.type === "stdio") {
+        next.stdio = stdioFromForm(
+          next.stdio && typeof next.stdio === "object"
+            ? (next.stdio as Record<string, unknown>)
+            : {},
+          m,
+        );
+      }
       return next;
     });
+}
+
+/** Apply only values the form can author, retaining unknown stdio extensions. */
+function stdioFromForm(
+  previous: Record<string, unknown>,
+  form: McpEntry,
+): Record<string, unknown> {
+  const next = structuredClone(previous);
+  if (form.stdioCommand) next.command = form.stdioCommand;
+  if (form.stdioArgs.length || Object.hasOwn(previous, "args")) next.args = [...form.stdioArgs];
+  if (Object.keys(form.stdioEnv).length || Object.hasOwn(previous, "env")) {
+    next.env = structuredClone(form.stdioEnv);
+  }
+  const port = Number(form.stdioPort);
+  if (Number.isFinite(port) && port > 0) next.port = port;
+  if (form.stdioSsePath || Object.hasOwn(previous, "sse_path")) {
+    next.sse_path = form.stdioSsePath;
+  }
+  const timeout = Number(form.stdioReadyTimeoutMs);
+  if (Number.isFinite(timeout) && timeout >= 0) next.ready_timeout_ms = timeout;
+  return next;
+}
+
+function mergeSkillsField(existing: unknown, skills: SkillEntry[]): SkillEntry[] {
+  const byKey = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(existing)) {
+    for (const skill of existing) {
+      if (!skill || typeof skill !== "object") continue;
+      const entry = skill as Record<string, unknown>;
+      if (typeof entry.type === "string" && typeof entry.skill_id === "string") {
+        byKey.set(`${entry.type}:${entry.skill_id}`, entry);
+      }
+    }
+  }
+  return skills.map((skill) => ({
+    ...(byKey.get(`${skill.type}:${skill.skill_id}`)
+      ? structuredClone(byKey.get(`${skill.type}:${skill.skill_id}`)!)
+      : {}),
+    ...skill,
+  })) as SkillEntry[];
+}
+
+function mergeCallableAgentsField(existing: unknown, agents: CallableEntry[]): CallableEntry[] {
+  const byId = new Map<string, Record<string, unknown>>();
+  if (Array.isArray(existing)) {
+    for (const agent of existing) {
+      if (agent && typeof agent === "object" && typeof (agent as { id?: unknown }).id === "string") {
+        byId.set((agent as { id: string }).id, agent as Record<string, unknown>);
+      }
+    }
+  }
+  return agents.map((agent) => ({
+    ...(byId.get(agent.id) ? structuredClone(byId.get(agent.id)!) : {}),
+    ...agent,
+  })) as CallableEntry[];
 }
 
 function buildOmaPatch(
@@ -332,6 +533,18 @@ function buildOmaPatch(
   if (form.runtimeId && form.acpAgentId) {
     return {
       ...baseOma,
+      ...(form.auxiliaryModel
+        ? {
+            aux_model: modelValueFromParts(
+              form.auxiliaryModel,
+              form.auxiliaryModelSpeed,
+              baseOma.aux_model ?? base?.aux_model,
+            ),
+          }
+        : {}),
+      ...(form.appendablePrompts.length > 0
+        ? { appendable_prompts: [...form.appendablePrompts] }
+        : {}),
       harness: "acp-proxy",
       runtime_binding: {
         runtime_id: form.runtimeId,
@@ -344,7 +557,34 @@ function buildOmaPatch(
   }
 
   if (forUpdate && hadBinding) {
-    return { ...baseOma, harness: "default", runtime_binding: null };
+    return {
+      ...baseOma,
+      ...(form.auxiliaryModel
+        ? {
+            aux_model: modelValueFromParts(
+              form.auxiliaryModel,
+              form.auxiliaryModelSpeed,
+              baseOma.aux_model ?? base?.aux_model,
+            ),
+          }
+        : {}),
+      ...(form.appendablePrompts.length > 0
+        ? { appendable_prompts: [...form.appendablePrompts] }
+        : {}),
+      harness: "default",
+      runtime_binding: null,
+    };
+  }
+
+  if (form.auxiliaryModel) {
+    baseOma.aux_model = modelValueFromParts(
+      form.auxiliaryModel,
+      form.auxiliaryModelSpeed,
+      baseOma.aux_model ?? base?.aux_model,
+    );
+  }
+  if (form.appendablePrompts.length > 0) {
+    baseOma.appendable_prompts = [...form.appendablePrompts];
   }
 
   // Preserve untouched _oma (aux_model, appendable_prompts, …) on update /
@@ -376,8 +616,17 @@ export function mergeFormIntoConfig(
   for (const k of RESPONSE_ONLY_KEYS) delete payload[k];
 
   payload.name = form.name;
-  payload.model = buildModelValue(form);
+  payload.model = buildModelValue(form, base?.model);
   payload.tools = mergeToolsField(existingTools, form);
+  try {
+    const metadata: unknown = JSON.parse(form.metadataJson);
+    if (metadata && typeof metadata === "object" && !Array.isArray(metadata)) {
+      payload.metadata = metadata;
+    }
+  } catch {
+    // Keep the preserved metadata during an incomplete JSON edit. The Form UI
+    // surfaces invalid JSON and blocks submit.
+  }
 
   if (forUpdate) {
     payload.system = form.system || null;
@@ -385,9 +634,11 @@ export function mergeFormIntoConfig(
     payload.mcp_servers = form.mcpServers.some((m) => m.name)
       ? mergeMcpServers(existingMcp, form.mcpServers)
       : null;
-    payload.skills = form.skills.length ? form.skills : null;
-    payload.multiagent = form.callableAgents.length
-      ? { type: "coordinator", agents: form.callableAgents }
+    payload.skills = form.skills.length ? mergeSkillsField(base?.skills, form.skills) : null;
+    const callableAgents = mergeCallableAgentsField(base?.callable_agents, form.callableAgents);
+    payload.callable_agents = callableAgents.length ? callableAgents : null;
+    payload.multiagent = callableAgents.length
+      ? { type: "coordinator", agents: callableAgents }
       : null;
     payload.enable_general_subagent = form.enableGeneralSubagent;
   } else {
@@ -400,12 +651,15 @@ export function mergeFormIntoConfig(
     } else {
       delete payload.mcp_servers;
     }
-    if (form.skills.length) payload.skills = form.skills;
+    if (form.skills.length) payload.skills = mergeSkillsField(base?.skills, form.skills);
     else delete payload.skills;
     if (form.callableAgents.length) {
-      payload.multiagent = { type: "coordinator", agents: form.callableAgents };
+      const callableAgents = mergeCallableAgentsField(base?.callable_agents, form.callableAgents);
+      payload.callable_agents = callableAgents;
+      payload.multiagent = { type: "coordinator", agents: callableAgents };
     } else {
       delete payload.multiagent;
+      delete payload.callable_agents;
     }
     if (form.enableGeneralSubagent) payload.enable_general_subagent = true;
     else delete payload.enable_general_subagent;
@@ -440,6 +694,32 @@ export function requiresOmaAgentEndpoint(payload: Record<string, unknown>): bool
     "callable_agents",
   ];
   if (omaOnlyKeys.some((key) => Object.prototype.hasOwnProperty.call(payload, key))) {
+    return true;
+  }
+
+  // The Managed Agents SDK endpoint validates a fixed public schema. Route
+  // full config payloads (including provider options and future fields)
+  // through OMA's pass-through endpoint instead of letting that schema strip
+  // them during a read-modify-write cycle.
+  const managedKeys = new Set([
+    "name",
+    "model",
+    "system",
+    "description",
+    "tools",
+    "mcp_servers",
+    "skills",
+    "multiagent",
+    "metadata",
+  ]);
+  if (Object.keys(payload).some((key) => !managedKeys.has(key))) return true;
+  if (
+    payload.model &&
+    typeof payload.model === "object" &&
+    Object.keys(payload.model as Record<string, unknown>).some(
+      (key) => key !== "id" && key !== "speed",
+    )
+  ) {
     return true;
   }
 

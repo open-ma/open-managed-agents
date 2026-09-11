@@ -267,6 +267,10 @@ export function AgentFormDialog({
     setCreateError("");
     setSaving(true);
     try {
+      const metadata = JSON.parse(form.metadataJson);
+      if (!metadata || typeof metadata !== "object" || Array.isArray(metadata)) {
+        throw new Error("Metadata must be a JSON object");
+      }
       const payload = mergeFormIntoConfig(form, preservedConfig, { forUpdate: isEdit });
       if (isEdit && editingAgent) {
         const updated = await persistAgent(payload);
@@ -287,16 +291,27 @@ export function AgentFormDialog({
     }
   };
 
+  const newMcpEntry = (name = "", type = "url", url = ""): McpEntry => ({
+    name,
+    type,
+    url,
+    stdioCommand: "",
+    stdioArgs: [],
+    stdioEnv: {},
+    stdioPort: "",
+    stdioSsePath: "",
+    stdioReadyTimeoutMs: "",
+  });
   const addMcp = () =>
-    setForm({ ...form, mcpServers: [...form.mcpServers, { name: "", type: "url", url: "" }] });
+    setForm({ ...form, mcpServers: [...form.mcpServers, newMcpEntry()] });
   const addMcpFromRegistry = (entry: { id: string; name: string; url: string }) => {
     if (form.mcpServers.some((m) => m.url === entry.url)) return;
     setForm({
       ...form,
-      mcpServers: [...form.mcpServers, { name: entry.id, type: "url", url: entry.url }],
+      mcpServers: [...form.mcpServers, newMcpEntry(entry.id, "url", entry.url)],
     });
   };
-  const updateMcp = (i: number, field: keyof McpEntry, val: string) => {
+  const updateMcp = <K extends keyof McpEntry>(i: number, field: K, val: McpEntry[K]) => {
     const updated = [...form.mcpServers];
     updated[i] = { ...updated[i], [field]: val };
     setForm({ ...form, mcpServers: updated });
@@ -340,7 +355,7 @@ export function AgentFormDialog({
         model: tmpl.model,
         system: tmpl.system,
         description: tmpl.description,
-        mcpServers: tmpl.mcpServers.map((m) => ({ ...m })),
+        mcpServers: tmpl.mcpServers.map((m) => newMcpEntry(m.name, m.type, m.url)),
         skills: tmpl.skills.map((s) => ({ ...s } as SkillEntry)),
       });
       setPreservedConfig(null);
@@ -853,6 +868,25 @@ function BasicTab({
                   : "Select a model card..."
               }
             />
+            <div className="mt-2 flex items-center gap-2">
+              <Label className="text-xs text-fg-muted">Speed</Label>
+              <Select
+                value={form.modelSpeed || "__provider_default__"}
+                onValueChange={(value) =>
+                  setForm({
+                    ...form,
+                    modelSpeed:
+                      value === "standard" || value === "fast" ? value : "",
+                  })
+                }
+                className="border border-border rounded-md px-2 py-1 text-xs bg-bg text-fg"
+              >
+                <SelectOption value="__provider_default__">Provider default</SelectOption>
+                <SelectOption value="standard">standard</SelectOption>
+                <SelectOption value="fast">fast</SelectOption>
+              </Select>
+              <span className="text-xs text-fg-subtle">Other model options are retained unchanged.</span>
+            </div>
           </div>
         ))}
       {form.runtimeId && (
@@ -885,6 +919,67 @@ function BasicTab({
           className={`${inputCls} resize-none font-mono text-xs leading-relaxed`}
           placeholder="You are a helpful assistant..."
         />
+      </div>
+      <div className="border border-border rounded-lg p-3 space-y-3">
+        <div>
+          <Label htmlFor="agent-aux-model" className="text-sm text-fg-muted block mb-1">
+            Auxiliary model <span className="text-xs text-fg-subtle">(optional)</span>
+          </Label>
+          <Input
+            id="agent-aux-model"
+            value={form.auxiliaryModel}
+            onChange={(e) => setForm({ ...form, auxiliaryModel: e.target.value })}
+            className={inputCls}
+            placeholder="claude-haiku-4-5"
+          />
+          <div className="mt-2 flex items-center gap-2">
+            <Label className="text-xs text-fg-muted">Speed</Label>
+            <Select
+              value={form.auxiliaryModelSpeed || "__provider_default__"}
+              onValueChange={(value) =>
+                setForm({
+                  ...form,
+                  auxiliaryModelSpeed:
+                    value === "standard" || value === "fast" ? value : "",
+                })
+              }
+              className="border border-border rounded-md px-2 py-1 text-xs bg-bg text-fg"
+            >
+              <SelectOption value="__provider_default__">Provider default</SelectOption>
+              <SelectOption value="standard">standard</SelectOption>
+              <SelectOption value="fast">fast</SelectOption>
+            </Select>
+          </div>
+        </div>
+        <div>
+          <Label htmlFor="agent-appendable-prompts" className="text-sm text-fg-muted block mb-1">
+            Appendable prompt IDs
+          </Label>
+          <Textarea
+            id="agent-appendable-prompts"
+            value={form.appendablePrompts.join("\n")}
+            onChange={(e) =>
+              setForm({
+                ...form,
+                appendablePrompts: e.target.value.split("\n").map((value) => value.trim()).filter(Boolean),
+              })
+            }
+            className={`${inputCls} min-h-16 font-mono text-xs`}
+            placeholder="prompt_security_review"
+          />
+        </div>
+        <div>
+          <Label htmlFor="agent-metadata" className="text-sm text-fg-muted block mb-1">
+            Metadata (JSON)
+          </Label>
+          <Textarea
+            id="agent-metadata"
+            value={form.metadataJson}
+            onChange={(e) => setForm({ ...form, metadataJson: e.target.value })}
+            className={`${inputCls} min-h-20 font-mono text-xs`}
+            spellCheck={false}
+          />
+        </div>
       </div>
       {/* Local Runtime — bind agent's loop to a user-registered machine
           instead of OMA's cloud SessionDO. The "no runtime" option is the
@@ -1319,6 +1414,28 @@ function SkillsTab({
           </p>
         )}
       </div>
+      {form.skills.length > 0 && (
+        <div className="border border-border rounded-lg p-3 space-y-2">
+          <Label className="text-sm font-medium text-fg block">Pinned skill versions</Label>
+          {form.skills.map((skill, index) => (
+            <div key={`${skill.type}:${skill.skill_id}`} className="flex items-center gap-2">
+              <span className="flex-1 min-w-0 truncate font-mono text-xs text-fg-muted">
+                {skill.skill_id}
+              </span>
+              <Input
+                value={skill.version ?? ""}
+                onChange={(e) => {
+                  const skills = [...form.skills];
+                  skills[index] = { ...skill, version: e.target.value || undefined };
+                  setForm({ ...form, skills });
+                }}
+                className="w-32 border border-border rounded px-2 py-1 text-xs bg-bg text-fg"
+                placeholder="latest"
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1335,7 +1452,7 @@ function McpTab({
   inputCls: string;
   onPickFromRegistry: () => void;
   addMcp: () => void;
-  updateMcp: (i: number, field: keyof McpEntry, val: string) => void;
+  updateMcp: <K extends keyof McpEntry>(i: number, field: K, val: McpEntry[K]) => void;
   removeMcp: (i: number) => void;
 }) {
   return (
@@ -1375,6 +1492,7 @@ function McpTab({
             <div className="w-24">
               <Label className="text-xs text-fg-muted block mb-0.5">Type</Label>
               <Select value={mcp.type} onValueChange={(v) => updateMcp(i, "type", v)}>
+                <SelectOption value="url">url</SelectOption>
                 <SelectOption value="sse">sse</SelectOption>
                 <SelectOption value="stdio">stdio</SelectOption>
               </Select>
@@ -1399,6 +1517,72 @@ function McpTab({
               placeholder="https://mcp.github.com/sse"
             />
           </div>
+          {mcp.type === "stdio" && (
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+              <div>
+                <Label htmlFor={`mcp-command-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Command
+                </Label>
+                <Input id={`mcp-command-${i}`} value={mcp.stdioCommand}
+                  onChange={(e) => updateMcp(i, "stdioCommand", e.target.value)} className={inputCls}
+                  placeholder="uvx" />
+              </div>
+              <div>
+                <Label htmlFor={`mcp-port-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Port
+                </Label>
+                <Input id={`mcp-port-${i}`} type="number" value={mcp.stdioPort}
+                  onChange={(e) => updateMcp(i, "stdioPort", e.target.value)} className={inputCls}
+                  placeholder="8765" />
+              </div>
+              <div>
+                <Label htmlFor={`mcp-sse-path-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  SSE path (optional)
+                </Label>
+                <Input id={`mcp-sse-path-${i}`} value={mcp.stdioSsePath}
+                  onChange={(e) => updateMcp(i, "stdioSsePath", e.target.value)} className={inputCls}
+                  placeholder="/sse" />
+              </div>
+              <div>
+                <Label htmlFor={`mcp-ready-timeout-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Ready timeout (ms)
+                </Label>
+                <Input id={`mcp-ready-timeout-${i}`} type="number" value={mcp.stdioReadyTimeoutMs}
+                  onChange={(e) => updateMcp(i, "stdioReadyTimeoutMs", e.target.value)} className={inputCls}
+                  placeholder="60000" />
+              </div>
+              <div className="sm:col-span-2">
+                <Label htmlFor={`mcp-args-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Arguments (one per line)
+                </Label>
+                <Textarea id={`mcp-args-${i}`} value={mcp.stdioArgs.join("\n")}
+                  onChange={(e) => updateMcp(i, "stdioArgs", e.target.value.split("\n").filter(Boolean))}
+                  className={`${inputCls} min-h-16 font-mono text-xs`} placeholder="mcp-server-github" />
+              </div>
+              <div className="sm:col-span-2">
+                <Label htmlFor={`mcp-env-${i}`} className="text-xs text-fg-muted block mb-0.5">
+                  Environment (JSON, non-secret)
+                </Label>
+                <Textarea id={`mcp-env-${i}`} value={JSON.stringify(mcp.stdioEnv)}
+                  onChange={(e) => {
+                    try {
+                      const parsed: unknown = JSON.parse(e.target.value);
+                      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+                        const env = Object.entries(parsed).reduce<Record<string, string>>(
+                          (next, [key, value]) => {
+                            if (typeof value === "string") next[key] = value;
+                            return next;
+                          },
+                          {},
+                        );
+                        updateMcp(i, "stdioEnv", env);
+                      }
+                    } catch { /* retain the last valid env while typing */ }
+                  }} className={`${inputCls} min-h-16 font-mono text-xs`} placeholder='{"LOG_LEVEL":"info"}' />
+                <p className="text-xs text-fg-subtle mt-1">Use Vaults for credentials; existing legacy credential fields are retained but never displayed here.</p>
+              </div>
+            </div>
+          )}
         </div>
       ))}
       {form.mcpServers.length === 0 && (
@@ -1470,6 +1654,22 @@ function AgentsTab({
             <div className="flex-1">
               <div className="text-sm font-medium text-fg">{agentInfo?.name || ca.id}</div>
               <div className="text-xs text-fg-subtle font-mono">{ca.id}</div>
+            </div>
+            <div className="w-20">
+              <Label className="text-xs text-fg-subtle">Version</Label>
+              <Input
+                type="number"
+                min="1"
+                value={ca.version}
+                onChange={(e) => {
+                  const version = Number(e.target.value);
+                  if (!Number.isInteger(version) || version < 1) return;
+                  const callableAgents = [...form.callableAgents];
+                  callableAgents[i] = { ...ca, version };
+                  setForm({ ...form, callableAgents });
+                }}
+                className="w-full border border-border rounded px-1 py-1 text-xs bg-bg text-fg"
+              />
             </div>
             <Button variant="ghost"
               onClick={() => removeCallable(i)}

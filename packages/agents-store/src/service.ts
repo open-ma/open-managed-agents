@@ -25,6 +25,7 @@ export interface AgentServiceDeps {
 /** Subset of AgentConfig fields callers may set on create. id + version +
  *  created_at + updated_at are stamped by the service. */
 export interface NewAgentInput {
+  [key: string]: unknown;
   name: string;
   model: AgentConfig["model"];
   system?: string;
@@ -46,6 +47,7 @@ export interface NewAgentInput {
  *  reproduces the legacy semantics (system / description → empty string,
  *  optional refs → undefined). Pass `undefined` to leave a field untouched. */
 export interface UpdateAgentInput {
+  [key: string]: unknown;
   name?: string;
   model?: AgentConfig["model"];
   system?: string | null;
@@ -67,25 +69,15 @@ export interface UpdateAgentInput {
 /** Default tools value when none provided — matches agents.ts:125. */
 const DEFAULT_TOOLS: ToolConfig[] = [{ type: "agent_toolset_20260401" }];
 
-/** Field set the legacy update path inspects for change-detection — kept in
- *  sync with agents.ts:238. */
-const UPDATABLE_FIELDS = [
-  "name",
-  "model",
-  "system",
-  "tools",
-  "harness",
-  "acp",
-  "description",
-  "mcp_servers",
-  "skills",
-  "callable_agents",
-  "aux_model",
-  "metadata",
-  "appendable_prompts",
-  "runtime_binding",
-  "enable_general_subagent",
-] as const;
+/** API/resource fields must never be accepted as pass-through config keys. */
+const IMMUTABLE_AGENT_KEYS = new Set([
+  "id",
+  "version",
+  "created_at",
+  "updated_at",
+  "archived_at",
+  "tenant_id",
+]);
 
 const MAX_CONCURRENT_UPDATE_RETRIES = 2;
 
@@ -136,8 +128,13 @@ export class AgentService {
     const id = this.ids.agentId();
     const nowMs = this.clock.nowMs();
     const nowIso = msToIso(nowMs);
+    const configInput = omitImmutableAgentKeys(opts.input);
 
     const config: AgentConfig = {
+      // Keep arbitrary, forward-compatible configuration keys supplied by
+      // the Console. Explicit values below remain authoritative for identity
+      // and lifecycle fields.
+      ...configInput,
       id,
       name: opts.input.name,
       model: opts.input.model,
@@ -415,7 +412,8 @@ export class AgentService {
    *  semantics, same edge cases (so a no-op metadata patch with the same
    *  keys still skips the version bump). */
   private detectChanges(existing: AgentRow, patch: UpdateAgentInput): boolean {
-    for (const key of UPDATABLE_FIELDS) {
+    for (const key of Object.keys(patch)) {
+      if (IMMUTABLE_AGENT_KEYS.has(key)) continue;
       const next = (patch as unknown as Record<string, unknown>)[key];
       if (next === undefined) continue;
       const current = (existing as unknown as Record<string, unknown>)[key];
@@ -430,7 +428,8 @@ export class AgentService {
     // Strip tenant_id so we round-trip pure AgentConfig back to the repo.
     const next: AgentConfig = stripTenantId(existing);
 
-    for (const key of UPDATABLE_FIELDS) {
+    for (const key of Object.keys(patch)) {
+      if (IMMUTABLE_AGENT_KEYS.has(key)) continue;
       const value = (patch as unknown as Record<string, unknown>)[key];
       if (value === undefined) continue;
 
@@ -470,6 +469,12 @@ export class AgentService {
 function stripTenantId(row: AgentRow): AgentConfig {
   const { tenant_id: _t, ...rest } = row;
   return rest;
+}
+
+function omitImmutableAgentKeys(input: Record<string, unknown>): Record<string, unknown> {
+  return Object.fromEntries(
+    Object.entries(input).filter(([key]) => !IMMUTABLE_AGENT_KEYS.has(key)),
+  );
 }
 
 function msToIso(ms: number): string {

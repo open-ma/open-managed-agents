@@ -44,6 +44,8 @@ export interface CustomToolConfig {
 export type ToolConfig = ToolsetConfig | CustomToolConfig;
 
 export interface AgentConfig {
+  /** Preserve forward-compatible, non-secret agent configuration keys. */
+  [key: string]: unknown;
   id: string;
   name: string;
   model: string | {
