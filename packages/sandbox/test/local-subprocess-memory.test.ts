@@ -30,26 +30,34 @@ describe("LocalSubprocessSandbox memory mounts", () => {
       memoryRoot,
     });
 
-    await sandbox.mountMemoryStore({
-      storeName: "certification",
-      storeId: "snapshot",
-      readOnly: true,
-    });
+    try {
+      await sandbox.mountMemoryStore({
+        storeName: "certification",
+        storeId: "snapshot",
+        readOnly: true,
+      });
 
-    await expect(sandbox.readFile("/mnt/memory/certification/notes/input.txt"))
-      .resolves.toBe("MEMORY_INPUT_OK");
-    await expect(sandbox.writeFile(
-      "/mnt/memory/certification/notes/blocked.txt",
-      "no",
-    )).rejects.toThrow("mounted read-only");
-    await expect(sandbox.exec(
-      'printf mutation > "$OMA_MEMORY_CERTIFICATION/notes/input.txt"',
-    )).resolves.toContain("[exit exit=1]");
+      await expect(sandbox.readFile("/mnt/memory/certification/notes/input.txt"))
+        .resolves.toBe("MEMORY_INPUT_OK");
+      await expect(sandbox.writeFile(
+        "/mnt/memory/certification/notes/blocked.txt",
+        "no",
+      )).rejects.toThrow("mounted read-only");
+      // Shells report denied redirection with different nonzero exit codes.
+      await expect(sandbox.exec(
+        'printf mutation > "$OMA_MEMORY_CERTIFICATION/notes/input.txt"',
+      )).resolves.toMatch(/\[exit exit=[1-9]\d*\]/);
+      await expect(sandbox.readFile("/mnt/memory/certification/notes/input.txt"))
+        .resolves.toBe("MEMORY_INPUT_OK");
+      await expect(readFile(join(source, "input.txt"), "utf8"))
+        .resolves.toBe("MEMORY_INPUT_OK");
 
-    await writeFile(join(source, "collector-can-write.txt"), "yes", "utf8");
-    await expect(readFile(join(source, "collector-can-write.txt"), "utf8"))
-      .resolves.toBe("yes");
-    await sandbox.destroy();
+      await writeFile(join(source, "collector-can-write.txt"), "yes", "utf8");
+      await expect(readFile(join(source, "collector-can-write.txt"), "utf8"))
+        .resolves.toBe("yes");
+    } finally {
+      await sandbox.destroy();
+    }
   });
 
   it("does not create process-global /mnt symlinks by default", async () => {
