@@ -1,4 +1,3 @@
-import type { OrderedSessionEvent } from '@open-managed-agents/session-runtime-contract/history';
 import type {
   SentSessionEvent,
   SessionEventView,
@@ -63,6 +62,16 @@ export interface LoadSessionRuntimeHistoryQuery {
   sessionId: string;
 }
 
+/** Application view of an event's stable place in the Session history. */
+export interface SessionRuntimeHistoryEventView {
+  event: SessionEventView;
+  position: {
+    revision: number;
+    index: number;
+  };
+  executionId?: string;
+}
+
 export type LoadSessionRuntimeHistoryResult =
   | {
       type: "found";
@@ -70,7 +79,7 @@ export type LoadSessionRuntimeHistoryResult =
       revision?: number;
       initialEvents: SessionBootstrapEvent[];
       events: SessionEventView[];
-      orderedEvents?: OrderedSessionEvent[];
+      orderedEvents?: SessionRuntimeHistoryEventView[];
     }
   | { type: "not_found" };
 
