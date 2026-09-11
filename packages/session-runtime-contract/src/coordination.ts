@@ -1,4 +1,4 @@
-import type { SentSessionEvent } from "@open-managed-agents/domain/sessions";
+import type { SentSessionEvent, SessionBootstrapEvent } from "@open-managed-agents/domain/sessions";
 
 export type SessionExecutionState =
   | "queued"
@@ -161,6 +161,20 @@ export interface SessionExecutionEventBatch {
   id: string;
   laneId: string;
   events: SentSessionEvent[];
+}
+
+/** Stable execution identity for bootstrap facts already stored with a Session. */
+export function sessionBootstrapExecutionEvents(input: {
+  sessionId: string;
+  createdAt: string;
+  initialEvents: readonly SessionBootstrapEvent[];
+}): SentSessionEvent[] {
+  return input.initialEvents.map((event, index) => {
+    const id = `bootstrap_${input.sessionId}:${index}`;
+    return event.type === "user.define_outcome"
+      ? { ...event, id, processedAt: input.createdAt, maxIterations: event.maxIterations ?? null, outcomeId: `outcome_${id}` }
+      : { ...event, id, processedAt: input.createdAt };
+  });
 }
 
 /** Split one SDK event batch into independently executable thread lanes. */

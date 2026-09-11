@@ -43,6 +43,14 @@ describe("SqlFileStore", () => {
     await client.exec(schema);
   });
 
+  it("persists exact session output provenance in the existing file document without another table", async () => {
+    const store = new SqlFileStore(client);
+    await store.insert({ workspaceId: "workspace_a", file: { ...file("artifact_snapshot", "2026-09-11T01:00:00.000Z", "session_a"), origin: { type: "session_output", sessionId: "session_a", environmentId: "environment_original", turnId: "completed_execution_7", path: "/workspace/outputs/report.txt" } } });
+    const recreated = new SqlFileStore(client);
+    expect(await recreated.find({ workspaceId: "workspace_a", fileId: "artifact_snapshot" })).toMatchObject({ scope: { type: "session", id: "session_a" }, origin: { type: "session_output", sessionId: "session_a", environmentId: "environment_original", turnId: "completed_execution_7", path: "/workspace/outputs/report.txt" } });
+    expect(await recreated.find({ workspaceId: "workspace_b", fileId: "artifact_snapshot" })).toBeNull();
+  });
+
   it("preserves tenant-scoped directional and scope-filtered metadata behavior", async () => {
     const store = new SqlFileStore(client);
     const oldest = file("file_01", "2026-08-26T01:00:00.000Z", "session_01");

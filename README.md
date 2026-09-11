@@ -8,19 +8,21 @@
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
   <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
+  <img src="https://img.shields.io/badge/OpenAI-Agents%20API%20%2B%20SDK-412991" alt="OpenAI Agents API and SDK support" />
 </p>
 
 # Open Managed Agents
 
-**Open-source alternative to Claude Managed Agents** — and a foundation for open-source, self-hosted Claude Tag-style agents.
+**Open-source, self-hosted alternative to Claude Managed Agents and OpenAI Agents API.**
 
 🌐 **[openma.dev](https://openma.dev)** · 📖 **[docs.openma.dev](https://docs.openma.dev)** · 💬 **[github.com/openma-ai/open-managed-agents](https://github.com/openma-ai/open-managed-agents)**
 
-Write a harness. Deploy. The platform runs it — with sessions, sandboxes, tools, memory, vaults, Slack/GitHub/Linear integrations, and crash recovery out of the box. Drop-in compatible with the Claude Managed Agents API; runs on Cloudflare Workers + Durable Objects, or `docker compose up` on your own box.
+OpenMA runs agents with durable sessions, sandboxed tools, memory, encrypted credentials, and crash recovery. Use the Claude Managed Agents API on Cloudflare or Node, or the official OpenAI SDK with the Node server's `/openai/v1` endpoint. Bring your own model keys and deploy on your own infrastructure.
 
 Use Open Managed Agents when you want:
 
 - A self-hosted Claude Managed Agents API implementation.
+- OpenAI Agents API support with durable sessions, function continuation, and subagent controls on Node.
 - An open-source, self-hosted Claude Tag-style workflow with BYOK model credentials.
 - MCP, private tools, encrypted vaults, and durable sessions under your own deployment boundary.
 
@@ -41,8 +43,51 @@ one that matches your hosting story:
 | Time to running | `docker compose up` (~2 min) | wrangler deploy (~10 min once configured) |
 | Best for | OSS users, on-prem, no CF account, data-resident deploys | Edge scale, no host management, already on CF |
 
-**Same SDK.** Same `/v1/agents` / `/v1/sessions` API. Same Console UI. Same
-crash-recovery semantics. Switch between them by changing env vars, not code.
+Both hosts expose the Claude-compatible `/v1/agents` and `/v1/sessions` API
+and Console UI. The OpenAI Agents API adapter is currently mounted on the
+Node host at `/openai/v1`.
+
+---
+
+## OpenAI Agents API quickstart (Node)
+
+[Start a Node server with Docker](#quick-start-self-host-docker), create an
+OpenMA API key, and configure a model in your deployment. Then install the
+supported OpenAI SDK version:
+
+```bash
+npm install openai@7.15.0
+```
+
+Point the client at your OpenMA server:
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENMA_API_KEY,
+  baseURL: "http://localhost:8787/openai/v1",
+});
+
+const session = await client.beta.agents.sessions.create({
+  agent: { model: "your-configured-model", instructions: "Be concise." },
+  environment: { type: "none" },
+  input: "Hello",
+});
+console.log(session.id);
+```
+
+Sessions support text, function calls that wait for your application's result,
+and subagents. Set `agent.multi_agent.enabled: true` to let the main agent
+delegate subtasks. You can send input, wait, interrupt, close, and resume each
+child. Children keep separate conversations and share the parent's files;
+they cannot create more children.
+
+The OpenAI API currently runs on Node. Advanced environment and plugin settings,
+plus some MCP and model options, are not supported yet. Check the
+[supported features and limits](docs/openai-agents-compatibility-status.md)
+before migrating an existing application. See the
+[adapter guide](packages/openai-agents-compat/README.md) for configuration details.
 
 ---
 
@@ -255,7 +300,10 @@ The harness is bundled into the agent worker at build time. Your code runs in th
 
 ## API
 
-Compatible with the [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents). Same endpoints, same event types, works with existing SDKs.
+The endpoints below expose the [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents) at `/v1`.
+The Node host also supports the [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview)
+at `/openai/v1`; see the [OpenAI SDK quickstart](#openai-agents-api-quickstart-node)
+for its separate resource and event contract.
 
 <details>
 <summary><strong>Agents</strong> — Create and manage agent configurations</summary>
@@ -718,7 +766,14 @@ Keys are AES-256-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` (label `mode
 ```bash
 npm test          # unit + integration suite
 npm run typecheck # zero errors
+pnpm run test:openai-agents      # OpenAI SDK, HTTP and session behavior
+pnpm run test:openai-agents:node # Node execution and subagents
+pnpm run test:e2e:openai-agents # Production Node E2E with the official SDK
 ```
+
+See the [OpenAI compatibility report](docs/openai-agents-compatibility-status.md)
+and [upstream test audit](docs/openai-agents-upstream-test-audit.md) for the
+tested SDK version, coverage and known limits.
 
 ---
 

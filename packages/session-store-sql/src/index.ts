@@ -12,8 +12,15 @@ import type {
   SessionStore,
 } from "@open-managed-agents/session-store";
 import type { SessionResourceSecretSealer } from "./secret-sealer";
+import { sessionBootstrapExecutionEvents, sessionExecutionEventBatches } from "@open-managed-agents/session-runtime-contract/coordination";
 
 export type { SessionResourceSecretSealer } from "./secret-sealer";
+
+export interface SqlSessionStoreOptions {
+  /** Commit bootstrap execution work atomically with the new Session. */
+  executionOutbox?: boolean;
+  executionPolicy?: { maxAttempts: number; timeoutMs: number };
+}
 
 interface SessionRow {
   id: string;
@@ -53,6 +60,7 @@ export class SqlSessionStore implements SessionStore {
   constructor(
     private readonly client: SqlClient,
     private readonly sealer: SessionResourceSecretSealer,
+    private readonly options: SqlSessionStoreOptions = {},
   ) {}
 
   async insert(input: InsertSessionRecord): Promise<StoredSession> {
@@ -63,6 +71,12 @@ export class SqlSessionStore implements SessionStore {
         sealedValue: await this.sealer.seal(secret.authorizationToken),
       })),
     );
+    const bootstrapBatches = this.options.executionOutbox === true
+      ? sessionExecutionEventBatches(sessionBootstrapExecutionEvents({
+          sessionId: session.id, createdAt: session.createdAt, initialEvents: input.initialEvents,
+        }))
+      : [];
+    const policy = this.options.executionPolicy ?? { maxAttempts: 10, timeoutMs: 60 * 60 * 1_000 };
     const statements = [
       this.client
         .prepare(
@@ -121,6 +135,18 @@ export class SqlSessionStore implements SessionStore {
             timestamp(session.createdAt),
           ),
       ),
+      ...bootstrapBatches.map((batch) => {
+        const eventsJson = JSON.stringify(batch.events);
+        return this.client.prepare(
+          `INSERT INTO managed_session_executions (
+             workspace_id, session_id, lane_id, id, admitted_at_ms, events_json,
+             events_fingerprint, state, generation, attempt_count, max_attempts,
+             deadline_at_ms, revision
+           ) VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', 0, 0, ?, ?, 1)`,
+        ).bind(input.workspaceId, session.id, batch.laneId, batch.id,
+          timestamp(session.createdAt), eventsJson, eventsJson, policy.maxAttempts,
+          timestamp(session.createdAt) + policy.timeoutMs);
+      }),
     ];
     const results = await this.client.batch(statements);
     if (results.some((result) => result.meta.changes !== 1)) {

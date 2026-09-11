@@ -1,3 +1,4 @@
+import { decodeSessionEventDocument } from '@open-managed-agents/session-runtime-contract/history';
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type {
   SessionEventStreamPort,
@@ -113,7 +114,7 @@ export class SqlPersistedSessionEventStream
       ...(threadId === undefined ? [] : [threadId]),
     ).first<EventRow>();
     if (row === null) return undefined;
-    return positionOf(JSON.parse(row.document) as StreamSessionEvent);
+    return positionOf(decodeSessionEventDocument(row.document).event);
   }
 
   private async readAfter(
@@ -144,7 +145,7 @@ export class SqlPersistedSessionEventStream
           ]),
     ).all<EventRow>();
     return (rows.results ?? []).map(
-      (row) => JSON.parse(row.document) as StreamSessionEvent,
+      (row) => decodeSessionEventDocument(row.document).event,
     );
   }
 }

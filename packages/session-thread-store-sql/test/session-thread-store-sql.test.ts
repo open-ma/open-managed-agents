@@ -108,4 +108,27 @@ describe("SqlSessionThreadStore", () => {
       },
     });
   });
+
+  it("rejects child creation after its parent execution fence expires or changes owner", async () => {
+    await client.exec(`CREATE TABLE managed_session_executions (
+      workspace_id text, id text, session_id text, state text, attempt_id text,
+      owner_id text, generation integer, lease_expires_at_ms integer
+    )`);
+    const now = Date.parse("2026-09-11T00:00:00Z");
+    await client.prepare(`INSERT INTO managed_session_executions VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+      .bind("workspace_01", "execution", "session_01", "running", "attempt", "owner", 2, now + 60_000).run();
+    const store = new SqlSessionThreadStore(client, { now: () => new Date(now) });
+    const fence = { workspaceId: "workspace_01", sessionId: "session_01", executionId: "execution",
+      attemptId: "attempt", ownerId: "owner", generation: 2, expiresAt: new Date(now + 60_000).toISOString() };
+    const child = thread("child_fenced", new Date(now).toISOString());
+    await expect(store.insert({ workspaceId: "workspace_01", thread: child, executionFence: { ...fence, generation: 1 } }))
+      .rejects.toThrow(/fence/i);
+    expect(await store.find({ workspaceId: "workspace_01", sessionId: "session_01", threadId: child.id })).toBeNull();
+    await expect(store.insert({ workspaceId: "workspace_other", thread: child, executionFence: fence })).rejects.toThrow(/scope|fence/i);
+    await store.insert({ workspaceId: "workspace_01", thread: child, executionFence: fence });
+    const expiredStore = new SqlSessionThreadStore(client, { now: () => new Date(now + 60_001) });
+    await expect(expiredStore.insert({ workspaceId: "workspace_01", thread: { ...child, id: "child_after_expiry" }, executionFence: fence }))
+      .rejects.toThrow(/fence/i);
+    expect((await store.list({ workspaceId: "workspace_01", sessionId: "session_01", limit: 10 })).map((value) => value.id)).toEqual(["child_fenced"]);
+  });
 });

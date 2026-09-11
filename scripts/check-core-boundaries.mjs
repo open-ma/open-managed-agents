@@ -10,6 +10,8 @@ const CORE_PACKAGES = [
   "packages/managed-agents-domain",
   "packages/managed-agents-application",
   "packages/managed-agents-api",
+  "packages/openai-agents-api",
+  "packages/openai-agents-compat",
   "packages/managed-agents-app",
 ];
 

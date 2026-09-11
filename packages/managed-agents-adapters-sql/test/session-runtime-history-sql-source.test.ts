@@ -13,6 +13,7 @@ const SCHEMA_SQL = `
 CREATE TABLE managed_sessions (
   workspace_id text NOT NULL,
   id text NOT NULL,
+  revision integer NOT NULL DEFAULT 1,
   PRIMARY KEY (workspace_id, id)
 );
 CREATE TABLE managed_session_initial_events (
@@ -116,7 +117,7 @@ describe("SqlSessionRuntimeHistorySource", () => {
 
     await expect(
       source.load({ workspaceId: "workspace_01", sessionId: "session_01" }),
-    ).resolves.toEqual({ initialEvents, events: [events[1], events[0]] });
+    ).resolves.toEqual({ revision: 1, initialEvents, events: [events[1], events[0]] });
     await expect(
       source.load({ workspaceId: "workspace_other", sessionId: "session_01" }),
     ).resolves.toBeNull();

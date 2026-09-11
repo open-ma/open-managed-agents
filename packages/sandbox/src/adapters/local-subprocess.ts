@@ -242,7 +242,12 @@ export class LocalSubprocessSandbox
   }
 
   async setEnvVars(envVars: Record<string, string>): Promise<void> {
-    this.envVars = { ...this.envVars, ...envVars };
+    this.envVars = {
+      ...this.envVars,
+      ...Object.fromEntries(Object.entries(envVars).map(([key, value]) =>
+        [key, this.resolveProcessEnvValue(value)]
+      )),
+    };
   }
 
   async gitCheckout(

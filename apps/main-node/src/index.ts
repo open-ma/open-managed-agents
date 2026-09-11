@@ -10,6 +10,21 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { Hono } from "hono";
+import { OpenAIAgentsProtocolError } from "@open-managed-agents/openai-agents-api";
+import {
+  createArtifactsHandler,
+  createManagedSessionMapping,
+  createResourcesHandler,
+  createSessionsHandler,
+  isManagedNoEnvironmentSession,
+  readManagedSessionMappingMetadata,
+} from "@open-managed-agents/openai-agents-compat";
+import { SqlSessionThreadStore } from "@open-managed-agents/session-thread-store-sql";
+import { buildOpenAISubagentTools, nodeOpenAISubagentPolicy, openAISubagentSession } from "./openai-subagents.js";
+import { buildNodeOpenAIAgentsRoutes } from "./openai-agents.js";
+import { createNodeOpenAIAgentsRuntime } from "./openai-managed-runtime.js";
+import { createNodeOpenAIArtifactPublisher, withReportedArtifactPublication } from "./openai-artifact-publication.js";
+import { createNoEnvironmentSandbox, isNoEnvironmentSandbox } from "./openai-no-environment.js";
 import {
   createNodeLogger,
 } from "@open-managed-agents/observability/logger/node";
@@ -456,6 +471,19 @@ const managedAgentsPlatform = createNodePlatform({
 // above so they're always created — the gate now only controls subsystem
 // wiring, not schema bootstrap.
 const platformRootSecret = process.env.PLATFORM_ROOT_SECRET;
+const openAIAgentsConfigurationCipher = platformRootSecret === undefined
+  ? null
+  : new WebCryptoAesGcm(platformRootSecret, "openai.agents.configuration");
+const openAIAgentsSecrets = {
+  seal: async (plaintext: string) => {
+    if (!openAIAgentsConfigurationCipher) throw new OpenAIAgentsProtocolError(503, "PLATFORM_ROOT_SECRET is required for confidential Agents API configuration", undefined, "configuration_unavailable");
+    return openAIAgentsConfigurationCipher.encrypt(plaintext);
+  },
+  open: async (ciphertext: string) => {
+    if (!openAIAgentsConfigurationCipher) throw new OpenAIAgentsProtocolError(503, "PLATFORM_ROOT_SECRET is required for confidential Agents API configuration", undefined, "configuration_unavailable");
+    return openAIAgentsConfigurationCipher.decrypt(ciphertext);
+  },
+};
 
 // ─── Auth ───────────────────────────────────────────────────────────────
 
@@ -1047,7 +1075,42 @@ const managedSessionResourceSecrets = new SqlSessionResourceSecretSource(sql, {
   },
 });
 
+const managedSessionExecutionCoordinator = new SqlSessionExecutionCoordinator(sql);
+
+async function isManagedSessionExecutionFenceActive(fence: {
+  workspaceId: string;
+  sessionId: string;
+  executionId: string;
+  attemptId: string;
+  ownerId: string;
+  generation: number;
+  expiresAt: string;
+}): Promise<boolean> {
+  if (Date.parse(fence.expiresAt) <= Date.now()) return false;
+  const execution = await managedSessionExecutionCoordinator.find({
+    workspaceId: fence.workspaceId,
+    executionId: fence.executionId,
+  });
+  return execution?.state === "running"
+    && execution.sessionId === fence.sessionId
+    && execution.attempt?.id === fence.attemptId
+    && execution.attempt.ownerId === fence.ownerId
+    && execution.attempt.generation === fence.generation
+    && Date.parse(execution.attempt.leaseExpiresAt) > Date.now();
+}
+
 const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
+  subagentThreads: new SqlSessionThreadStore(sql),
+  subagentPolicy: ({ session }) => nodeOpenAISubagentPolicy(session, openAIAgentsSecrets),
+  resolveSubagentSession: async ({ workspaceId, session, request }) => {
+    const saved = await readManagedSessionMappingMetadata(session, openAIAgentsSecrets);
+    if (saved) return openAISubagentSession(session, request);
+    const member = session.agent.multiagent?.agents.find(item => item.type === "agent" && item.id === request.agentId);
+    if (!member || member.type !== "agent") throw new Error("Subagent is not in the configured callable agent roster");
+    const selected = await managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.agents).retrieveAgent({ agentId: member.id, version: member.version });
+    if (selected.type !== "found" || selected.agent.archivedAt !== null) throw new Error("Configured subagent is unavailable");
+    return { ...session, agent: { ...selected.agent, multiagent: null } };
+  },
   confirmedTools: new NodeManagedConfirmedToolExecutor({
     buildExecutableTools: async ({ workspaceId, session, environment, sandbox }) => {
       const agent = allowAllLegacyHarnessTools(
@@ -1084,12 +1147,15 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       };
     },
   }),
-  buildSandbox: ({ session }) =>
-    buildSandbox(
+  buildSandbox: async ({ session }) =>
+    await isManagedNoEnvironmentSession(session, openAIAgentsSecrets)
+      ? createNoEnvironmentSandbox()
+      : buildSandbox(
       session.id,
       join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", session.id),
     ),
   prepareSandbox: async ({ workspaceId, session, sandbox }) => {
+    if (isNoEnvironmentSandbox(sandbox)) return;
     const preparer = new NodeManagedSessionInputPreparer({
       files: managedAgentsPlatform
         .app({ workspaceId })
@@ -1109,12 +1175,27 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     });
     await preparer.prepare({ workspaceId, session, sandbox });
   },
+  afterExecution: withReportedArtifactPublication(createNodeOpenAIArtifactPublisher({
+    historyForWorkspace: workspaceId => new SessionRuntimeHistoryApplicationService({ workspaceId, source: managedRuntimeReaders.history }),
+    filesForWorkspace: workspaceId => managedAgentsPlatform.app({ workspaceId }).port(managedAgentsPortTokens.files),
+    secrets: openAIAgentsSecrets,
+    isFenceActive: isManagedSessionExecutionFenceActive,
+    environmentId: session => `oai_env_${session.id}`,
+  }), (error, input) => {
+    logger.error({
+      err: error,
+      op: "main-node.openai_agents.artifact_publication_failed",
+      workspaceId: input.workspaceId,
+      sessionId: input.session.id,
+      executionId: input.executionFence.executionId,
+    }, "Completed Session output could not be published as an Agents API artifact");
+  }),
   buildModel: ({ workspaceId, session }) =>
     buildNodeLanguageModel(workspaceId, session.agent.model),
-  buildTools: async ({ workspaceId, session, environment, sandbox }) => {
+  buildTools: async ({ workspaceId, session, environment, sandbox, subagents, delegateToAgent }) => {
     const agent = toLegacyHarnessAgentConfig(session);
     const creds = await resolveNodeModelCreds(workspaceId, agent.model);
-    return buildTools(agent, sandbox, {
+    const tools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: creds.apiKey,
       ANTHROPIC_BASE_URL: creds.baseURL,
       toMarkdown: toMarkdownProvider,
@@ -1122,7 +1203,16 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       sessionId: session.id,
       mcpBinding: nodeMcpProxyBinding,
       environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
+      delegateToAgent,
     });
+    if (subagents && (await readManagedSessionMappingMetadata(session, openAIAgentsSecrets))?.agent.multi_agent?.enabled) {
+      for (const [name, definition] of Object.entries(buildOpenAISubagentTools(subagents))) {
+        let available = name;
+        while (Object.hasOwn(tools, available)) available = `openma_${available}`;
+        tools[available] = definition;
+      }
+    }
+    return tools;
   },
   disposeTools,
   buildHarness: () => new ManagedNodeDefaultHarness(),
@@ -1151,6 +1241,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   },
   clock: { now: () => new Date() },
   ids: { nextEventId: () => `sevt_${nanoid()}` },
+  runtimeGenerations: { next: () => `runtime_${nanoid()}` },
 });
 
 const managedRuntimeReaders = createSqlSessionRuntimeReaders(sql);
@@ -1172,7 +1263,7 @@ const managedRuntimeDriver = new DefaultNodeManagedSessionRuntimeDriver({
     }),
 });
 const managedSessionExecutionWorker = new NodeSessionExecutionWorker({
-  coordinator: new SqlSessionExecutionCoordinator(sql),
+  coordinator: managedSessionExecutionCoordinator,
   context: managedRuntimeReaders.executionContext,
   runtime: {
     run: async ({ executionId: _executionId, fence, ...input }) => {
@@ -2642,6 +2733,40 @@ v1.get("/oma/sessions/:id/memory_stores", async (c) => {
 });
 
 app.route("/v1", v1);
+app.route("/openai", buildNodeOpenAIAgentsRoutes({
+  authMiddleware: authMw,
+  portFor: (workspaceId) => {
+    const application = managedAgentsPlatform.app({ workspaceId });
+    const credentialApplication = managedCredentialsPlatform.app({ workspaceId });
+    const native = managedSessionsComposition.portsFor(workspaceId);
+    const agents = application.port(managedAgentsPortTokens.agents);
+    const environments = application.port(managedAgentsPortTokens.environments);
+    const files = application.port(managedAgentsPortTokens.files);
+    const runtime = createNodeOpenAIAgentsRuntime({
+      environments, sessions: native.sessions, secrets: openAIAgentsSecrets,
+      connectedSandbox: sessionId => managedRuntimeRunner.connectedSandbox({ workspaceId, sessionId }),
+    });
+    const resources = createResourcesHandler({
+      agents, environments, files, secrets: openAIAgentsSecrets, runtime: runtime.files,
+      vaults: credentialApplication.port(managedAgentsPortTokens.vaults),
+      credentials: credentialApplication.port(managedAgentsPortTokens.credentials),
+    });
+    const artifacts = createArtifactsHandler({
+      files,
+      requireSession: async sessionId => {
+        const found = await native.sessions.retrieveSession({ sessionId });
+        if (found.type !== "found") throw new OpenAIAgentsProtocolError(404, "Session not found");
+      },
+    });
+    const sessions = createSessionsHandler({
+      workspaceId, sessions: native.sessions, sessionEvents: native.sessionEvents,
+      history: new SessionRuntimeHistoryApplicationService({ workspaceId, source: managedRuntimeReaders.history }),
+      mapping: createManagedSessionMapping({ agents, environments, resources, secrets: openAIAgentsSecrets, runtime: runtime.mapping }),
+      resources: { execute: artifacts },
+    });
+    return { execute: request => request.operation.startsWith("sessions.") ? sessions.execute(request) : resources(request) };
+  },
+}));
 
 // ─── Integrations gateway (OAuth callbacks, setup pages, Linear MCP,
 // GitHub internal refresh, webhooks) — mounted on `app` (NOT under /v1)

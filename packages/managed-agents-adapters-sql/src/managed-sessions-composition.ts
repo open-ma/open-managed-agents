@@ -194,7 +194,9 @@ export class SqlManagedSessionsComposition {
     const { client, sealer, environments } = dependencies;
     this.agents = new SqlAgentPersistence(client);
     this.files = new SqlFileMetadataPersistence(client);
-    this.sessions = new SqlSessionPersistence(client, sealer);
+    this.sessions = new SqlSessionPersistence(client, sealer, {
+      executionOutbox: dependencies.executionOutbox,
+    });
     this.sessionSource = new SqlSessionSource(client);
     this.sessionEvents = new SqlSessionEventPersistence(client, {
       executionOutbox: dependencies.executionOutbox,

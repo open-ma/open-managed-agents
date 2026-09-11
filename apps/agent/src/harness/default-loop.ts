@@ -92,7 +92,7 @@ function emitToolCallEvent(
       name: toolName,
       input: callInput,
     });
-  } else if (isBuiltinTool(toolName)) {
+  } else if (isBuiltinTool(toolName) || tools[toolName]?.metadata?.openmaBuiltin === true) {
     const event: AgentToolUseEvent = {
       type: "agent.tool_use",
       id: toolCallId,
@@ -159,6 +159,7 @@ function emitToolResultEvent(
       type: "agent.mcp_tool_result",
       mcp_tool_use_id: toolCallId,
       content: typeof content === "string" ? content : JSON.stringify(content),
+      ...(part.type === "tool-error" && { is_error: true }),
       // v1-additive: causal predecessor is the matching agent.mcp_tool_use,
       // whose EventBase.id is set explicitly to toolCallId in
       // emitToolCallEvent above. Same identity, no extra plumbing.
@@ -169,6 +170,7 @@ function emitToolResultEvent(
       type: "agent.tool_result",
       tool_use_id: toolCallId,
       content,
+      ...(part.type === "tool-error" && { is_error: true }),
       // v1-additive: causal predecessor is the matching agent.tool_use,
       // whose EventBase.id is set explicitly to toolCallId in
       // emitToolCallEvent above. (AgentToolUseEvent.id overrides

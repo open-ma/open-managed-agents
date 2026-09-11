@@ -47,7 +47,7 @@ export function organizationSchema() {
     // we register it (or any other social account), append the URL here.
     sameAs: [REPO_URL],
     description:
-      "Open Managed Agents — open-source alternative to Claude Managed Agents. Self-host Claude agents on Cloudflare Workers or Docker. Apache 2.0.",
+      "Open Managed Agents makes open-source software for running AI agents on your own infrastructure, using the Claude and OpenAI SDKs.",
   };
 }
 
@@ -58,7 +58,7 @@ export function websiteSchema() {
     name: ORG_NAME,
     url: SITE_URL,
     description:
-      "Open-source alternative to Claude Managed Agents — self-host Claude agents on Cloudflare or Docker.",
+      "Run Claude and OpenAI agents on your own server with OpenMA. Find deployment guides, SDK examples and ways to connect your tools.",
   };
 }
 
@@ -83,16 +83,18 @@ export function softwareApplicationSchema() {
     downloadUrl: REPO_URL,
     license: "https://www.apache.org/licenses/LICENSE-2.0",
     keywords:
-      "Claude Managed Agents alternative, Claude Tag alternative, open-source Claude Tag, self-hosted Claude Tag, MCP, BYOK",
+      "OpenAI Agents API alternative, self-hosted OpenAI agents, Claude Managed Agents alternative, open-source agent platform, subagents, ACP, MCP, BYOK",
     featureList: [
-      "Claude Managed Agents API compatibility",
+      "Use the Claude and OpenAI SDKs",
+      "OpenAI Agents API on Node",
+      "Delegate subtasks to agents that share your files",
       "Claude Tag-style Slack publication",
       "MCP server hosting",
       "Vault-backed credentials",
       "Cloudflare Workers and Docker self-hosting",
     ],
     description:
-      "Open-source alternative to Claude Managed Agents and a foundation for self-hosted Claude Tag-style agents. Self-host Claude agents on Cloudflare Workers or Docker. Wire-compatible API, MCP + Claude Code skills built in.",
+      "Run agents on your own server with the Claude and OpenAI SDKs. OpenMA handles sessions, tools and recovery. Bring your own model keys and connect the files and services your agents need.",
     sameAs: [REPO_URL],
   };
 }

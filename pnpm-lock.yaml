@@ -791,6 +791,12 @@ importers:
       '@open-managed-agents/oma-cap-adapter':
         specifier: workspace:*
         version: link:../../packages/oma-cap-adapter
+      '@open-managed-agents/openai-agents-api':
+        specifier: workspace:*
+        version: link:../../packages/openai-agents-api
+      '@open-managed-agents/openai-agents-compat':
+        specifier: workspace:*
+        version: link:../../packages/openai-agents-compat
       '@open-managed-agents/platform-node':
         specifier: workspace:*
         version: link:../../packages/platform-node
@@ -945,6 +951,9 @@ importers:
       '@types/turndown':
         specifier: ^5.0.5
         version: 5.0.6
+      openai:
+        specifier: 7.15.0
+        version: 7.15.0(@aws-sdk/credential-provider-node@3.972.73)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.0)(zod@4.4.3)
       tsx:
         specifier: ^4.19.0
         version: 4.21.0
@@ -2826,6 +2835,47 @@ importers:
         specifier: ^4.1.3
         version: 4.1.4(@opentelemetry/api@1.9.0)(@types/node@26.3.0)(@vitest/coverage-v8@4.1.4)(jiti@2.6.1)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)(msw@2.14.6(@types/node@26.3.0)(typescript@7.0.2))(tsx@4.21.0)(yaml@2.9.0)
 
+  packages/openai-agents-api:
+    dependencies:
+      '@open-managed-agents/managed-agents-application':
+        specifier: workspace:*
+        version: link:../managed-agents-application
+      hono:
+        specifier: 4.12.12
+        version: 4.12.12
+      zod:
+        specifier: 4.3.6
+        version: 4.3.6
+    devDependencies:
+      openai:
+        specifier: 7.15.0
+        version: 7.15.0(@aws-sdk/credential-provider-node@3.972.73)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.0)(zod@4.3.6)
+
+  packages/openai-agents-compat:
+    dependencies:
+      '@open-managed-agents/managed-agents-application':
+        specifier: workspace:*
+        version: link:../managed-agents-application
+      '@open-managed-agents/openai-agents-api':
+        specifier: workspace:*
+        version: link:../openai-agents-api
+      '@openma/common':
+        specifier: github:openma-ai/openma-common#00358ff9c1e4a694171f5617a4715602c61433e7
+        version: https://codeload.github.com/openma-ai/openma-common/tar.gz/00358ff9c1e4a694171f5617a4715602c61433e7(@anthropic-ai/sdk@0.120.0(zod@4.4.3))(@types/react-dom@19.2.4(@types/react@19.2.18))(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(zod@4.4.3)
+    devDependencies:
+      openai:
+        specifier: 7.15.0
+        version: 7.15.0(@aws-sdk/credential-provider-node@3.972.73)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.0)(zod@4.4.3)
+      vitest:
+        specifier: ^4.1.3
+        version: 4.1.4(@opentelemetry/api@1.9.0)(@types/node@26.3.0)(@vitest/coverage-v8@4.1.4)(jiti@2.6.1)(jsdom@29.1.1(@noble/hashes@2.2.0))(lightningcss@1.32.0)(msw@2.14.6(@types/node@26.3.0)(typescript@7.0.2))(tsx@4.21.0)(yaml@2.9.0)
+
+  packages/openai-agents-sdk-audit:
+    dependencies:
+      openai:
+        specifier: 7.15.0
+        version: 7.15.0(@aws-sdk/credential-provider-node@3.972.73)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.0)(zod@4.4.3)
+
   packages/outbound-snapshots-store:
     dependencies:
       '@open-managed-agents/shared':
@@ -3528,6 +3578,9 @@ importers:
 
   packages/session-store-sql:
     dependencies:
+      '@open-managed-agents/session-runtime-contract':
+        specifier: workspace:*
+        version: link:../session-runtime-contract
       '@open-managed-agents/session-store':
         specifier: workspace:*
         version: link:../session-store
@@ -3540,6 +3593,9 @@ importers:
       '@open-managed-agents/domain':
         specifier: workspace:*
         version: link:../managed-agents-domain
+      '@open-managed-agents/session-runtime-contract':
+        specifier: workspace:*
+        version: link:../session-runtime-contract
 
   packages/session-thread-store-memory:
     dependencies:
@@ -11143,6 +11199,30 @@ packages:
       ws: ^8.18.0
       zod: ^3.25 || ^4.0
     peerDependenciesMeta:
+      ws:
+        optional: true
+      zod:
+        optional: true
+
+  openai@7.15.0:
+    resolution: {integrity: sha512-2DIwesnPSduw68MFx7nAdgvshrgvS8WOan5W8+tgUMlAy/tY+Q41g80Pa+w/v64rHA6rtn+dketa8QvMVxU96w==}
+    engines: {node: '>=22.0.0'}
+    peerDependencies:
+      '@aws-sdk/credential-provider-node': '>=3.972.0 <4'
+      '@smithy/hash-node': '>=4.3.0 <5'
+      '@smithy/signature-v4': '>=5.4.0 <6'
+      undici: '>=5 <9'
+      ws: ^8.21.0
+      zod: ^3.25 || ^4.0
+    peerDependenciesMeta:
+      '@aws-sdk/credential-provider-node':
+        optional: true
+      '@smithy/hash-node':
+        optional: true
+      '@smithy/signature-v4':
+        optional: true
+      undici:
+        optional: true
       ws:
         optional: true
       zod:
@@ -21512,6 +21592,22 @@ snapshots:
 
   openai@6.40.0(ws@8.21.0)(zod@4.4.3):
     optionalDependencies:
+      ws: 8.21.0
+      zod: 4.4.3
+
+  openai@7.15.0(@aws-sdk/credential-provider-node@3.972.73)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.0)(zod@4.3.6):
+    optionalDependencies:
+      '@aws-sdk/credential-provider-node': 3.972.73
+      '@smithy/signature-v4': 5.7.3
+      undici: 8.10.0
+      ws: 8.21.0
+      zod: 4.3.6
+
+  openai@7.15.0(@aws-sdk/credential-provider-node@3.972.73)(@smithy/signature-v4@5.7.3)(undici@8.10.0)(ws@8.21.0)(zod@4.4.3):
+    optionalDependencies:
+      '@aws-sdk/credential-provider-node': 3.972.73
+      '@smithy/signature-v4': 5.7.3
+      undici: 8.10.0
       ws: 8.21.0
       zod: 4.4.3
 

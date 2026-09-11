@@ -13,7 +13,7 @@ import {
   sessionEventStreamQuerySchema,
   sessionStreamEventResponseSchema,
 } from "../contracts/session-events";
-import { apiError, invalidRequest, notFound } from "../errors";
+import { apiError, conflict, invalidRequest, notFound } from "../errors";
 import {
   toListSessionEventsQuery,
   toSendSessionEventsCommand,
@@ -192,6 +192,9 @@ export function buildSessionEventRoutes(
     );
     if (result.type === "invalid_request") {
       return c.json(invalidRequest(result.message), 400);
+    }
+    if (result.type === "version_conflict" || result.type === "idempotency_conflict") {
+      return c.json(conflict(result.message), 409);
     }
     if (result.type === "not_found") {
       return c.json(

@@ -1,0 +1,23 @@
+{
+  "name": "@open-managed-agents/openai-agents-api",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./ports": "./src/ports.ts",
+    "./contracts": "./src/contracts.ts"
+  },
+  "scripts": {
+    "test": "vitest run --config vitest.config.ts",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "dependencies": {
+    "hono": "4.12.12",
+    "zod": "4.3.6",
+    "@open-managed-agents/managed-agents-application": "workspace:*"
+  },
+  "devDependencies": {
+    "openai": "7.15.0"
+  }
+}

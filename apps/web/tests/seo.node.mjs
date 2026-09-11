@@ -93,14 +93,18 @@ test("high-impression landing pages emit concise, user-facing search snippets", 
     "utf8",
   );
 
-  assert.match(
-    homepage,
-    /<title>OpenMA: Open-Source Claude Managed Agents Alternative<\/title>/,
-  );
-  assert.match(
-    homepage,
-    /<meta name="description" content="Run OpenMA on Cloudflare or Docker: an Apache-2\.0 Claude Managed Agents alternative with durable sessions, MCP tools, vaults, memory, and BYOK\."/,
-  );
+  const title = homepage.match(/<title>([^<]+)<\/title>/)?.[1];
+  const description = homepage.match(/<meta name="description" content="([^"]+)"/)?.[1];
+  assert.match(title, /OpenMA/);
+  assert.match(title, /Claude Managed Agents/);
+  assert.match(title, /OpenAI Agents API/);
+  assert.ok(title.length <= 65, "homepage title stays concise");
+  assert.match(description, /Self-host/);
+  assert.match(description, /OpenAI.*Node/);
+  assert.ok(description.length <= 170, "homepage description stays concise");
+  assert.equal(homepage.match(/<meta property="og:description" content="([^"]+)"/)?.[1], description);
+  assert.match(homepage, /href="#openai-agents-api"/);
+  assert.match(homepage, /id="openai-agents-api"/);
   assert.match(
     alternative,
     /<title>Open-Source Claude Tag Alternative You Can Self-Host \| OpenMA<\/title>/,

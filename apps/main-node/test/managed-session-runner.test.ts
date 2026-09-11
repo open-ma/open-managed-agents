@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { withReportedArtifactPublication } from "../src/openai-artifact-publication";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type {
@@ -64,6 +65,15 @@ interface RunnerConstructor {
       session: Session;
       environment: Environment;
       sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+    }): Promise<void>;
+    afterExecution?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+      executionFence: NonNullable<NodeManagedSessionRunnerAcceptInput["executionFence"]>;
     }): Promise<void>;
     buildModel(input: {
       workspaceId: string;
@@ -135,7 +145,8 @@ interface RunnerConstructor {
     };
     clock: { now(): Date };
     ids: { nextEventId(): string };
-  }): NodeManagedSessionRunner;
+    runtimeGenerations?: { next(): string };
+  }): NodeManagedSessionRunner & { connectedSandbox(input: { workspaceId: string; sessionId: string }): SandboxExecutor | null };
 }
 
 describe("DefaultNodeManagedSessionRunner", () => {
@@ -178,6 +189,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
       ids: { nextEventId: () => "event_inputs" },
     });
 
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBeNull();
     await runner.start({
       workspaceId: "workspace_01",
       sessionId: session.id,
@@ -186,6 +198,10 @@ describe("DefaultNodeManagedSessionRunner", () => {
       initialEvents: [],
     });
     expect(order).toEqual(["build", "prepare"]);
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBe(sandbox);
+    expect(runner.connectedSandbox({ workspaceId: "workspace_other", sessionId: session.id })).toBeNull();
+    await runner.stop({ workspaceId: "workspace_01", sessionId: session.id });
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBeNull();
   });
 
   it("destroys a new sandbox when Session input preparation fails", async () => {
@@ -302,6 +318,16 @@ describe("DefaultNodeManagedSessionRunner", () => {
         expect(tools).toBe(builtTools);
         lifecycle.push("dispose");
       },
+      afterExecution: withReportedArtifactPublication(async input => {
+        expect(input.executionFence.executionId).toBe("event_user_01");
+        expect(lifecycle.at(-1)).toBe("idle");
+        lifecycle.push("afterExecution");
+        throw new Error("Output copy failed after completion");
+      }, (error, input) => {
+        expect(error).toMatchObject({ message: "Output copy failed after completion" });
+        expect(input.session.id).toBe(session.id);
+        lifecycle.push("publicationReported");
+      }),
       buildHarness: () => ({
         run: async (context) => {
           lifecycle.push("run");
@@ -320,6 +346,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
       },
       clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
       ids: { nextEventId: () => `event_runtime_0${++nextId}` },
+      runtimeGenerations: { next: () => "runtime_generation_01" },
     });
     await runner.start({
       workspaceId: "workspace_01",
@@ -343,6 +370,15 @@ describe("DefaultNodeManagedSessionRunner", () => {
       initialEvents: [],
       events: [event],
       historyEvents: [event],
+      executionFence: {
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        executionId: "event_user_01",
+        attemptId: "attempt_01",
+        ownerId: "worker_01",
+        generation: 1,
+        expiresAt: "2026-08-26T02:01:00.000Z",
+      },
       output: async (frame) => {
         output.push(frame);
         if ((frame as { type?: string }).type === "session.status_idle") {
@@ -382,7 +418,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
         processed_at: "2026-08-26T02:00:00.000Z",
       },
     ]);
-    expect(lifecycle).toEqual(["run", "dispose", "idle"]);
+    expect(lifecycle).toEqual(["run", "dispose", "idle", "afterExecution", "publicationReported"]);
   });
 
   it("projects a terminal session error before returning a harness failure", async () => {

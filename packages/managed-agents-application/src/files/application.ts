@@ -40,6 +40,12 @@ export class FilesApplicationService
     if (command.mimeType.trim().length === 0) {
       return { type: "invalid_request", message: "MIME type must not be empty" };
     }
+    const origin = command.origin;
+    if (origin !== undefined && (
+      origin.type !== "session_output" ||
+      [origin.sessionId, origin.environmentId, origin.turnId].some(value => typeof value !== "string" || value.trim().length === 0 || value.includes("\0")) ||
+      typeof origin.path !== "string" || !origin.path.startsWith("/") || origin.path.includes("\0") || origin.path.endsWith("/") || origin.path.split("/").includes("..")
+    )) return { type: "invalid_request", message: "Output publication requires exact session, environment, turn and absolute file path provenance" };
     const file: FileMetadata = {
       id: this.dependencies.ids.nextFileId(),
       createdAt: this.dependencies.clock.now().toISOString(),
@@ -47,6 +53,7 @@ export class FilesApplicationService
       mimeType: command.mimeType,
       sizeBytes: command.content.byteLength,
       downloadable: true,
+      ...(origin !== undefined && { origin: { ...origin }, scope: { type: "session" as const, id: origin.sessionId } }),
     };
     const location = {
       workspaceId: this.dependencies.workspaceId,

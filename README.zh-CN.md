@@ -8,15 +8,16 @@
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
   <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
+  <img src="https://img.shields.io/badge/OpenAI-Agents%20API%20%2B%20SDK-412991" alt="OpenAI Agents API 和 SDK 支持" />
 </p>
 
 # Open Managed Agents
 
-**Claude Managed Agents 的开源替代品** —— 一个你可以自部署的 AI 智能体元框架（meta-harness）。
+**Claude Managed Agents 和 OpenAI Agents API 的开源、自部署替代方案。**
 
 🌐 **[openma.dev](https://openma.dev)** · 📖 **[docs.openma.dev](https://docs.openma.dev)** · 💬 **[github.com/openma-ai/open-managed-agents](https://github.com/openma-ai/open-managed-agents)**
 
-写一个 harness，部署它。平台负责运行 —— 内置会话、沙箱、工具、记忆、保险库和崩溃恢复。API 与 Claude Managed Agents 兼容；可以跑在 Cloudflare Workers + Durable Objects 上，或者直接 `docker compose up` 在你自己的机器上。
+OpenMA 提供持久会话、沙箱工具、记忆、加密凭证和崩溃恢复。Cloudflare 与 Node 支持 Claude Managed Agents API；Node 还提供 `/openai/v1` 入口，可使用官方 OpenAI SDK。你可以使用自己的模型 API key，部署到自己的基础设施上。
 
 ---
 
@@ -32,7 +33,46 @@
 | 启动时间 | `docker compose up`（约 2 分钟） | wrangler deploy（首次配置后约 10 分钟） |
 | 适合谁 | 开源用户、私有部署、不想用 CF、需要数据驻留 | 边缘规模、不想运维主机、已在 CF 上 |
 
-**同一套 SDK。** 同一套 `/v1/agents` / `/v1/sessions` API。同一个 Console UI。同一套崩溃恢复语义。两种部署之间只改环境变量，不改代码。
+两种部署都提供 Claude 兼容的 `/v1/agents`、`/v1/sessions` API 和 Console UI。
+OpenAI Agents API 适配器目前挂载在 Node 的 `/openai/v1`。
+
+---
+
+## OpenAI Agents API 快速开始（Node）
+
+先按下方 Docker 部署说明启动 Node 服务，创建 OpenMA API key，并配置模型。
+然后安装支持的 OpenAI SDK 版本：
+
+```bash
+npm install openai@7.15.0
+```
+
+把客户端地址指向你的 OpenMA 服务：
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENMA_API_KEY,
+  baseURL: "http://localhost:8787/openai/v1",
+});
+
+const session = await client.beta.agents.sessions.create({
+  agent: { model: "your-configured-model", instructions: "Be concise." },
+  environment: { type: "none" },
+  input: "Hello",
+});
+console.log(session.id);
+```
+
+会话支持文本、等待应用返回结果的函数调用，以及子代理。设置
+`agent.multi_agent.enabled: true` 后，主代理可以把子任务分派给子代理；
+你可以向子代理发消息、等待结果、中断、关闭或恢复它。子代理分别保存对话，
+共享父代理的文件，不能继续创建下一级子代理。
+
+OpenAI API 目前在 Node 上可用。高级环境和插件设置、部分 MCP 与模型选项
+尚不支持。迁移现有应用前，请查看[支持的功能与限制](docs/openai-agents-compatibility-status.md)；
+具体配置见[适配器指南](packages/openai-agents-compat/README.md)。
 
 ---
 
@@ -244,7 +284,9 @@ Harness 在构建时被打包进 agent worker。你的代码和 SessionDO 跑在
 
 ## API
 
-与 [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents) 兼容。相同端点、相同事件类型，可与现有 SDK 一起使用。
+以下端点为 `/v1` 下的 [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents)。
+Node 另在 `/openai/v1` 提供 [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview)，
+其独立的资源与事件合同见上方 OpenAI SDK 快速开始及兼容状态文档。
 
 <details>
 <summary><strong>智能体</strong> —— 创建和管理智能体配置</summary>
@@ -698,7 +740,14 @@ Key 以 AES-256-GCM 加密静态存储，密钥派自 `PLATFORM_ROOT_SECRET`（l
 ```bash
 npm test          # 单元 + 集成套件
 npm run typecheck # 零错误
+pnpm run test:openai-agents      # OpenAI SDK、HTTP 与会话行为
+pnpm run test:openai-agents:node # Node 执行与子代理
+pnpm run test:e2e:openai-agents # 官方 SDK 访问真实 Node 服务的 E2E
 ```
+
+已测试的 SDK 版本、覆盖范围和已知限制见
+[OpenAI 兼容报告](docs/openai-agents-compatibility-status.md)与
+[上游测试审计](docs/openai-agents-upstream-test-audit.md)。
 
 ---
 
