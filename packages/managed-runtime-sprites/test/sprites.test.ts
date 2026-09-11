@@ -53,7 +53,14 @@ class FakeSprite implements SpriteSdkPort {
       stdin,
       stdout,
       stderr,
-      start: vi.fn(async () => { stdout.end("worker output"); stderr.end(); }),
+      once(event: "spawn" | "error", listener: (...args: unknown[]) => void) {
+        if (event === "spawn") queueMicrotask(() => {
+          stdout.end("worker output");
+          stderr.end();
+          listener();
+        });
+        return this;
+      },
       wait: vi.fn(async () => 0),
       kill: vi.fn(),
       close: vi.fn(),

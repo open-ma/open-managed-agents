@@ -1,6 +1,5 @@
 {
   "extends": "../../tsconfig.json",
   "compilerOptions": { "composite": false, "noEmit": true, "types": ["node"] },
-  "include": ["src/**/*.ts", "test/**/*.ts"],
-  "exclude": ["test/**/*-certification.e2e.test.ts"]
+  "include": ["src/**/*.ts", "test/sprites-certification.e2e.test.ts"]
 }

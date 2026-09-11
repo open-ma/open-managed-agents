@@ -1,0 +1,11 @@
+FROM node:24-bookworm-slim
+
+RUN apt-get update \
+    && apt-get install --yes --no-install-recommends python3 make g++ \
+    && rm -rf /var/lib/apt/lists/*
+RUN npm install --global pnpm@11.0.8
+WORKDIR /workspace
+COPY . .
+RUN pnpm install --filter @open-managed-agents/managed-runtime-sprites... --frozen-lockfile
+
+CMD ["pnpm", "--filter", "@open-managed-agents/managed-runtime-sprites", "test:certification"]

@@ -44,7 +44,7 @@ export interface SpriteCommandPort {
   readonly stdin: Writable;
   readonly stdout: Readable;
   readonly stderr: Readable;
-  start(): Promise<void>;
+  once(event: "spawn" | "error", listener: (...args: unknown[]) => void): this;
   wait(): Promise<number>;
   kill(signal?: string): void;
   close(): void;
@@ -345,7 +345,10 @@ export class SpritesRuntime
         maxRunAfterDisconnect: "1h",
       },
     );
-    await command.start();
+    await new Promise<void>((resolve, reject) => {
+      command.once("spawn", () => resolve());
+      command.once("error", (error) => reject(error));
+    });
     return {
       stdin: Writable.toWeb(command.stdin) as WritableStream<Uint8Array>,
       stdout: Readable.toWeb(command.stdout) as unknown as ReadableStream<Uint8Array>,

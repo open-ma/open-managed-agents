@@ -30,17 +30,20 @@ class Filesystem implements SpriteFilesystemPort {
   readonly mkdir = vi.fn(async () => undefined);
 }
 
-function command(input: { code?: number; start?: () => void | Promise<void> } = {}): SpriteCommandPort {
+function command(input: { code?: number } = {}): SpriteCommandPort {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const stderr = new PassThrough();
+  queueMicrotask(() => {
+    stdout.end("out");
+    stderr.end("err");
+  });
   return {
     stdin, stdout, stderr,
-    start: vi.fn(async () => {
-      await input.start?.();
-      stdout.end("out");
-      stderr.end("err");
-    }),
+    once(event: "spawn" | "error", listener: (...args: unknown[]) => void) {
+      if (event === "spawn") queueMicrotask(listener);
+      return this;
+    },
     wait: vi.fn(async () => input.code ?? 0),
     kill: vi.fn(),
     close: vi.fn(),
