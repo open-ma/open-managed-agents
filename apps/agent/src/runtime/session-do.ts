@@ -80,6 +80,10 @@ import {
   createPiModelRuntime,
   toAiSdkLanguageModel,
 } from "../harness/pi-provider";
+import {
+  bindStoredModelCardCredentials,
+  type ResolvedModelCardCredentials,
+} from "../harness/model-card-credentials";
 import type { LanguageModel } from "ai";
 import { generateText } from "ai";
 import { extractTextFromContent } from "@open-managed-agents/shared";
@@ -3958,18 +3962,12 @@ export class SessionDO extends DurableObject<Env> {
    */
   private async resolveModelCardCredentials(
     handle: string,
-  ): Promise<{
-    model: string;
-    apiKey: string;
-    baseURL?: string;
-    provider?: string;
-    customHeaders?: Record<string, string>;
-  }> {
-    let apiKey = this.env.ANTHROPIC_API_KEY;
-    let baseURL = this.env.ANTHROPIC_BASE_URL;
-    let provider: string | undefined;
-    let customHeaders: Record<string, string> | undefined;
-    let wireModel = handle;
+  ): Promise<ResolvedModelCardCredentials> {
+    const fallback: ResolvedModelCardCredentials = {
+      model: handle,
+      apiKey: this.env.ANTHROPIC_API_KEY,
+      baseURL: this.env.ANTHROPIC_BASE_URL,
+    };
 
     if (this.env.MAIN_DB) {
       try {
@@ -3979,12 +3977,8 @@ export class SessionDO extends DurableObject<Env> {
         if (card && !card.archived_at) {
           const key = await services.modelCards.getApiKey({ tenantId, cardId: card.id });
           if (key) {
-            apiKey = key;
-            provider = card.provider;
-            wireModel = card.model;
-            if (card.base_url) baseURL = card.base_url;
-            if (card.custom_headers) customHeaders = card.custom_headers;
             console.log(`[model-card] resolved from D1: id=${card.id} model_id=${card.model_id} model=${card.model} baseURL=${card.base_url ?? "(default)"} provider=${card.provider}`);
+            return bindStoredModelCardCredentials(fallback, card, key);
           }
         }
       } catch (err) {
@@ -3992,7 +3986,7 @@ export class SessionDO extends DurableObject<Env> {
       }
     }
 
-    return { model: wireModel, apiKey, baseURL, provider, customHeaders };
+    return fallback;
   }
 
   /**
@@ -4014,6 +4008,8 @@ export class SessionDO extends DurableObject<Env> {
       provider: creds.provider,
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
+      piConfig: creds.piConfig,
+      speed: typeof agent.aux_model === "string" ? undefined : agent.aux_model.speed,
     }));
     return { model, modelInfo: { model_id: handle } };
   }
@@ -4548,6 +4544,9 @@ export class SessionDO extends DurableObject<Env> {
       provider: subCreds.provider,
       baseURL: subCreds.baseURL,
       customHeaders: subCreds.customHeaders,
+      piConfig: subCreds.piConfig,
+      thinkingLevel: typeof subAgent.model === "string" ? undefined : subAgent.model.effort,
+      speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
     });
     const subModel = toAiSdkLanguageModel(subPiRuntime);
 
@@ -4719,6 +4718,12 @@ export class SessionDO extends DurableObject<Env> {
     // path did.
     let idleEmitted = false;
     let managedMemorySynchronized = false;
+    // A successful turn knows its precise stop reason before tool disposal,
+    // but `status_idle` is the externally visible lifecycle boundary. Hold
+    // the event until every turn-scoped tool (including remote MCP sessions)
+    // has finished closing so clients cannot observe idle while resources are
+    // still live.
+    let completedIdleEvent: SessionEvent | undefined;
 
     // Reuse session-level sandbox (singleton) — files persist across turns.
     // Returned object is a lazy proxy. Warmup starts concurrently with the
@@ -4872,6 +4877,9 @@ export class SessionDO extends DurableObject<Env> {
       provider: creds.provider,
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
+      piConfig: creds.piConfig,
+      thinkingLevel: typeof agent.model === "string" ? undefined : agent.model.effort,
+      speed: typeof agent.model === "string" ? undefined : agent.model.speed,
     });
     const model = toAiSdkLanguageModel(piRuntime);
 
@@ -5288,15 +5296,7 @@ export class SessionDO extends DurableObject<Env> {
         type: "session.status_idle",
         stop_reason: stopReason,
       };
-      // A terminal status is the public completion boundary. Close any
-      // per-turn protocol clients before publishing it so callers that react
-      // to `status_idle` never observe an MCP session that is still alive.
-      // The finally block below repeats this call as an idempotent safety net
-      // for error/abort paths.
-      await disposeTools(allTools);
-      history.append(idleEvent);
-      this.broadcastEvent(idleEvent, activeFence);
-      idleEmitted = true;
+      completedIdleEvent = idleEvent;
     } catch (err) {
       const errorMessage = this.describeError(err);
 
@@ -5417,16 +5417,14 @@ export class SessionDO extends DurableObject<Env> {
         this._threadAbortControllers.delete(turnThreadId);
       }
       parentSignal?.removeEventListener("abort", abortFromParent);
-      // Catch-all status_idle emit. Pairs with the status_running emit
-      // at the start of this function so Console's status pill never
-      // hangs at "Running" after the turn dies in any non-AbortError
-      // way (model crash, transient retries exhausted, anything that
-      // hits the catch block above without already setting idleEmitted).
-      // No stop_reason — error paths don't have a meaningful one and
-      // the field is optional in SessionStatusEvent.
+      // Emit status_idle only after turn-scoped resources have settled. On a
+      // successful turn this preserves its precise stop_reason; error paths
+      // use the generic event because they have no meaningful stop reason.
+      // This also pairs with status_running so Console never remains stuck at
+      // "Running" after a model/tool failure.
       if (!idleEmitted) {
         try {
-          const idleEvent: SessionEvent = { type: "session.status_idle" };
+          const idleEvent: SessionEvent = completedIdleEvent ?? { type: "session.status_idle" };
           history.append(idleEvent);
           this.broadcastEvent(idleEvent, activeFence);
         } catch (err) {

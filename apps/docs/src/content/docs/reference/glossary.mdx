@@ -63,7 +63,7 @@ Per-agent semantic memory backed by Vectorize + Workers AI embeddings. See [Conc
 
 ## Model card
 
-Per-tenant LLM credential row: provider tag (`ant`, `ant-compatible`, `oai`, `oai-compatible`), base URL, custom headers, API key. The api_key is AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` directly on the row (not via a Vault). See [Reference → Model Cards](/reference/api/#model-cards).
+Per-tenant executable LLM binding: stable `model_id`, open Pi provider id, wire model, optional Pi metadata/base URL/custom headers, and API key. Legacy `ant`/`oai` tags remain migration aliases. The api_key is AES-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` directly on the row (not via a Vault). Agent-version `effort`, `speed`, and `inference_geo` are intentionally not Card fields. See [Reference → Model Cards](/reference/api/#model-cards).
 
 ## Outbound proxy
 

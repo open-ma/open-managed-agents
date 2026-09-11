@@ -53,6 +53,7 @@
     "@open-managed-agents/kv-store": "workspace:*",
     "@open-managed-agents/linear": "workspace:*",
     "@open-managed-agents/managed-agents-adapters-blob": "workspace:*",
+    "@open-managed-agents/managed-agents-adapters-http": "workspace:*",
     "@open-managed-agents/managed-agents-adapters-sql": "workspace:*",
     "@open-managed-agents/managed-agents-adapters-runtime": "workspace:*",
     "@open-managed-agents/managed-agents-api": "workspace:*",

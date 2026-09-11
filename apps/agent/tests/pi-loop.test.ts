@@ -10,7 +10,9 @@ import { z } from "zod";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type { HarnessContext, HarnessRuntime } from "../src/harness/interface";
 import type { PiCompactionPolicy } from "../src/harness/pi-compaction";
+import { PiSummaryCompactionPolicy } from "../src/harness/pi-compaction";
 import { PiHarness } from "../src/harness/pi-loop";
+import { createPiModelRuntime } from "../src/harness/pi-provider";
 
 function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
   const faux = fauxProvider({ tokensPerSecond: 100_000 });
@@ -65,7 +67,7 @@ function makeContext(responses: ReturnType<typeof fauxAssistantMessage>[]) {
       },
     },
     model: {} as HarnessContext["model"],
-    pi: { models, model: faux.getModel() },
+    pi: { models, model: faux.getModel(), thinkingLevel: "off", speed: "standard" },
     systemPrompt: "You are concise.",
     env: { ANTHROPIC_API_KEY: "unused" },
     runtime,
@@ -96,6 +98,15 @@ describe("PiHarness", () => {
     const { ctx, faux } = makeContext([]);
     ctx.pi!.model = { ...ctx.pi!.model, reasoning: true };
     ctx.agent.model = { id: ctx.pi!.model.id, effort: "high" };
+    // Runtime construction owns normalization; the harness uses its result.
+    ctx.pi!.thinkingLevel = createPiModelRuntime({
+      model: ctx.agent.model.id,
+      apiKey: "local-test-key",
+      provider: "ant-compatible",
+      baseURL: "https://model.example.test",
+      piConfig: { reasoning: ctx.pi!.model.reasoning },
+      thinkingLevel: ctx.agent.model.effort,
+    }).thinkingLevel;
     let reasoning: unknown;
     faux.setResponses([
       (_context, options) => {
@@ -208,6 +219,81 @@ describe("PiHarness", () => {
     }));
   });
 
+  it("preserves fast speed and custom request options through a real Pi compaction request", async () => {
+    const { ctx, events } = makeContext([]);
+    events.unshift(
+      { type: "user.message", content: [{ type: "text", text: "first question" }] },
+      { type: "agent.message", message_id: "first", content: [{ type: "text", text: "first answer" }] },
+      { type: "user.message", content: [{ type: "text", text: "second question" }] },
+      { type: "agent.message", message_id: "second", content: [{ type: "text", text: "second answer" }] },
+    );
+    ctx.pi = createPiModelRuntime({
+      model: "claude-opus-5",
+      provider: "ant-compatible",
+      apiKey: "local-pi-compaction-key",
+      baseURL: "https://tenant-model.example.test",
+      speed: "fast",
+    });
+    const requests: Request[] = [];
+    vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {
+      requests.push(new Request(input, init));
+      const text = requests.length === 1 ? "COMPACTION_DONE" : "TURN_DONE";
+      const responseEvents = [
+        { type: "message_start", message: { id: `msg_${requests.length}`, type: "message", role: "assistant", content: [], model: "claude-opus-5", stop_reason: null, stop_sequence: null, usage: { input_tokens: 5, output_tokens: 0 } } },
+        { type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
+        { type: "content_block_delta", index: 0, delta: { type: "text_delta", text } },
+        { type: "content_block_stop", index: 0 },
+        { type: "message_delta", delta: { stop_reason: "end_turn", stop_sequence: null }, usage: { output_tokens: 5 } },
+        { type: "message_stop" },
+      ];
+      return new Response(responseEvents.map(event => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), {
+        headers: { "content-type": "text/event-stream" },
+      });
+    });
+    const summary = new PiSummaryCompactionPolicy();
+    const policy: PiCompactionPolicy = {
+      name: "custom-summary-transport",
+      shouldCompact: () => true,
+      compact: (history, input) => {
+        const inherited = input.requestOptions;
+        return summary.compact(history, {
+          ...input,
+          requestOptions: {
+            ...inherited,
+            fetch: (request, init) => {
+              const forwarded = new Request(request, init);
+              forwarded.headers.set("x-compaction-transport", "custom");
+              return (inherited?.fetch ?? globalThis.fetch)(forwarded);
+            },
+            onPayload: async (payload, model) => {
+              const projected = (await inherited?.onPayload?.(payload, model)) ?? payload;
+              if (typeof projected !== "object" || projected === null) throw new Error("Expected a model request");
+              return { ...projected, metadata: { user_id: "custom-compaction-payload" } };
+            },
+          },
+        });
+      },
+    };
+
+    try {
+      await new PiHarness({ compaction: policy }).run(ctx);
+
+      expect(requests).toHaveLength(2);
+      const [compaction, turn] = await Promise.all(requests.map(request => request.json()));
+      expect(compaction).toMatchObject({ speed: "fast", metadata: { user_id: "custom-compaction-payload" }, max_tokens: 2_000 });
+      expect(turn).toMatchObject({ speed: "fast" });
+      expect(requests[0]!.headers.get("x-compaction-transport")).toBe("custom");
+      for (const request of requests) {
+        expect(request.url).toBe("https://tenant-model.example.test/v1/messages");
+        expect(request.headers.get("anthropic-beta")).toContain("fast-mode-2026-02-01");
+      }
+      expect(JSON.stringify(turn.messages)).toContain("COMPACTION_DONE");
+      expect(events).toContainEqual(expect.objectContaining({ type: "agent.message", content: [{ type: "text", text: "TURN_DONE" }] }));
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
   it("does one forced compact-and-retry when Pi classifies a context overflow", async () => {
     const { ctx, events, faux } = makeContext([]);
     events.unshift(
@@ -302,6 +388,20 @@ describe("PiHarness", () => {
     expect(
       events.filter((event) => event.type === "agent.message"),
     ).toHaveLength(2);
+  });
+
+  it("uses the runtime thinking level for every Pi agent turn", async () => {
+    const { ctx } = makeContext([fauxAssistantMessage("careful answer")]);
+    const streamSimple = vi.spyOn(ctx.pi!.models, "streamSimple");
+    Reflect.set(ctx.pi!, "thinkingLevel", "high");
+
+    await new PiHarness().run(ctx);
+
+    expect(streamSimple).toHaveBeenCalledWith(
+      ctx.pi!.model,
+      expect.any(Object),
+      expect.objectContaining({ reasoning: "high" }),
+    );
   });
 
   it("pauses non-executable tools for OpenMA confirmation", async () => {

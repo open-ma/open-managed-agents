@@ -71,6 +71,37 @@ afterAll(async () => {
 });
 
 describe.sequential("main-node MySQL composition root", () => {
+  it("upgrades the known local snapshot with Pi configuration and preserves model cards", async () => {
+    if (child) await killProcessTree(child);
+    child = undefined;
+    const sql = await createMysql2SqlClient(mysqlContainer.getConnectionUri());
+    try {
+      // Reproduce the last pre-merge MySQL snapshot using its recorded
+      // identity and only structural difference from the merged snapshot.
+      await sql.exec("ALTER TABLE model_cards DROP COLUMN pi_config");
+      await sql.prepare("UPDATE openma_schema_metadata SET snapshot_id = ? WHERE name = ?")
+        .bind("d5cf91d0-02c4-4655-9ecf-af7e8d916ecc", "main-node").run();
+      await sql.prepare(`INSERT INTO model_cards
+        (id, tenant_id, model_id, model, provider, api_key_cipher, api_key_preview, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)`)
+        .bind("merge_keep", "default", "merge-model", "wire-model", "ant", "encrypted-test", "test", 1)
+        .run();
+
+      await startServer(true);
+      expect(await sql.prepare("SELECT model, pi_config FROM model_cards WHERE id = ?")
+        .bind("merge_keep").first()).toEqual({ model: "wire-model", pi_config: null });
+      // A second startup must accept the migrated snapshot and retain data.
+      if (child) await killProcessTree(child);
+      child = undefined;
+      await startServer(true);
+      expect(await sql.prepare("SELECT model FROM model_cards WHERE id = ?")
+        .bind("merge_keep").first()).toEqual({ model: "wire-model" });
+    } finally {
+      await sql.prepare("DELETE FROM model_cards WHERE id = ?").bind("merge_keep").run();
+      await sql.close();
+    }
+  });
+
   it("installs the shared durable queue schema on MySQL", async () => {
     const sql = await createMysql2SqlClient(mysqlContainer.getConnectionUri());
     try {

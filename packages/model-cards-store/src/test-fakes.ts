@@ -27,6 +27,7 @@ interface InMemModelCard {
   model: string;
   base_url: string | null;
   custom_headers: Record<string, string> | null;
+  pi_config: Record<string, unknown> | null;
   api_key_cipher: string;
   api_key_preview: string;
   is_default: boolean;
@@ -61,6 +62,7 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
       model: input.model,
       base_url: input.baseUrl,
       custom_headers: input.customHeaders,
+      pi_config: input.piConfig,
       api_key_cipher: input.apiKeyCipher,
       api_key_preview: input.apiKeyPreview,
       is_default: input.isDefault,
@@ -186,6 +188,7 @@ export class InMemoryModelCardRepo implements ModelCardRepo {
     if (update.model !== undefined) row.model = update.model;
     if (update.baseUrl !== undefined) row.base_url = update.baseUrl;
     if (update.customHeaders !== undefined) row.custom_headers = update.customHeaders;
+    if (update.piConfig !== undefined) row.pi_config = update.piConfig;
     if (update.apiKeyCipher !== undefined) row.api_key_cipher = update.apiKeyCipher;
     if (update.apiKeyPreview !== undefined) row.api_key_preview = update.apiKeyPreview;
     if (update.isDefault !== undefined) row.is_default = update.isDefault;
@@ -332,6 +335,7 @@ function toRow(c: InMemModelCard): ModelCardRow {
     provider: c.provider,
     base_url: c.base_url,
     custom_headers: c.custom_headers,
+    pi_config: c.pi_config,
     api_key_preview: c.api_key_preview,
     is_default: c.is_default,
     created_at: msToIso(c.created_at),

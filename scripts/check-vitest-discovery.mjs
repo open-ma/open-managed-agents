@@ -7,6 +7,17 @@ import { fileURLToPath } from "node:url";
 
 const repoRoot = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+test("release planning lets Changesets derive the prerelease npm tag", async () => {
+  const releaseModule = await import("./publish-changesets.mjs").catch(() => ({}));
+  assert.equal(
+    typeof releaseModule.changesetPublishArgs,
+    "function",
+    "publish-changesets.mjs must export changesetPublishArgs",
+  );
+
+  assert.deepEqual(releaseModule.changesetPublishArgs(), ["publish"]);
+});
+
 test("root Cloudflare runtime aliases stay inside the repository checkout", async () => {
   const { default: config } = await import(join(repoRoot, "vitest.config.ts"));
 

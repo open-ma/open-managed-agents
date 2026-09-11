@@ -27,6 +27,7 @@ function toApiShape(card: ModelCardRow) {
     api_key_preview: card.api_key_preview,
     base_url: card.base_url ?? undefined,
     custom_headers: card.custom_headers ?? undefined,
+    pi_config: card.pi_config ?? undefined,
     is_default: card.is_default,
     created_at: card.created_at,
     updated_at: card.updated_at ?? undefined,
@@ -148,11 +149,18 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
       api_key: string;
       base_url?: string;
       custom_headers?: Record<string, string>;
+      pi_config?: Record<string, unknown>;
       is_default?: boolean;
     }>();
 
     if (!body.model_id || !body.provider || !body.api_key) {
       return c.json({ error: "model_id, provider, and api_key are required" }, 400);
+    }
+    if (
+      body.pi_config !== undefined
+      && (body.pi_config === null || typeof body.pi_config !== "object" || Array.isArray(body.pi_config))
+    ) {
+      return c.json({ error: "pi_config must be a JSON object" }, 400);
     }
     try {
       const card = await modelCards.create({
@@ -163,6 +171,7 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
         apiKey: body.api_key,
         baseUrl: body.base_url ?? null,
         customHeaders: body.custom_headers ?? null,
+        piConfig: body.pi_config ?? null,
         makeDefault: !!body.is_default,
       });
       const probe = await probeModelCard({
@@ -183,25 +192,10 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
 
   // GET / — list (cursor-paginated)
   app.get("/", async (c) => {
+    // Pi provider ids are open: built-ins and custom providers share the
+    // same exact-match filter. OpenMA does not own an enum here.
     const providerRaw = c.req.query("provider");
-    const PROVIDERS = ["ant", "ant-compatible", "oai", "oai-compatible"] as const;
-    let provider: (typeof PROVIDERS)[number] | undefined;
-    if (providerRaw !== undefined) {
-      if ((PROVIDERS as readonly string[]).includes(providerRaw)) {
-        provider = providerRaw as (typeof PROVIDERS)[number];
-      } else {
-        return c.json(
-          {
-            error: {
-              type: "invalid_request_error",
-              code: "invalid_provider",
-              message: `Invalid provider '${providerRaw}'; expected one of ${PROVIDERS.join("|")}.`,
-            },
-          },
-          400,
-        );
-      }
-    }
+    const provider = providerRaw?.trim() || undefined;
 
     const parseMs = (
       raw: string | undefined,
@@ -272,8 +266,16 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
       api_key?: string;
       base_url?: string | null;
       custom_headers?: Record<string, string> | null;
+      pi_config?: Record<string, unknown> | null;
       is_default?: boolean;
     }>();
+    if (
+      body.pi_config !== undefined
+      && body.pi_config !== null
+      && (typeof body.pi_config !== "object" || Array.isArray(body.pi_config))
+    ) {
+      return c.json({ error: "pi_config must be a JSON object or null" }, 400);
+    }
     try {
       const updated = await modelCards.update({
         tenantId: c.var.tenant_id,
@@ -287,6 +289,7 @@ export function buildModelCardRoutes(deps: ModelCardRoutesDeps) {
           body.custom_headers === undefined
             ? undefined
             : body.custom_headers || null,
+        piConfig: body.pi_config,
         apiKey: body.api_key,
         isDefault: body.is_default,
       });

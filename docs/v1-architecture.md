@@ -392,6 +392,21 @@ as a separate request/workspace-scoped capability, while the existing Files
 application service remains the owner of upload and cleanup behavior. OMA
 Models remains a separate `/v1/oma/models/list` lane.
 
+The separation is semantic, not merely a namespace split:
+
+- the official Models Port reads active tenant Model Cards and projects Pi
+  metadata into the Managed Agents Model resource;
+- the OMA Models Port reads Pi's built-in provider catalog for setup UI/CLI;
+- Model Card credentials remain behind the Model Card service boundary and are
+  never returned by either catalog;
+- Agent-version request controls (`effort`, `speed`, `inference_geo`) stay in
+  the Agents domain. Pi normalizes effort, maps supported fast modes, and the
+  runtime deliberately ignores `inference_geo` until a routing Port exists.
+
+Provider ids are open strings owned by Pi. The legacy `ant`/`oai` aliases are
+translation-only compatibility at the boundary; domain Ports do not encode a
+provider enum. Custom providers declare their Pi wire API in `pi_config.api`.
+
 Node composes official Vaults and Credentials over one `SqlVaultStore`.
 Cloudflare creates its official application graphs at the request boundary so
 a workspace cannot retain a request-specific D1 shard, actor, cipher, or

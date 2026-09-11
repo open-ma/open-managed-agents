@@ -4,6 +4,7 @@ import type {
   Message,
   Model,
   Models,
+  SimpleStreamOptions,
   TextContent,
   Tool,
 } from "@earendil-works/pi-ai";
@@ -30,6 +31,8 @@ export interface PiCompactionRunContext extends PiCompactionCheckContext {
   runtime: HarnessRuntime;
   sessionId?: string;
   abortSignal?: AbortSignal;
+  /** Resolved provider controls and transport; summary bounds remain local. */
+  requestOptions?: SimpleStreamOptions;
 }
 
 /**
@@ -83,7 +86,7 @@ export class PiSummaryCompactionPolicy implements PiCompactionPolicy {
 
   async compact(
     _events: SessionEvent[],
-    { messages, models, model, systemPrompt, tools, runtime, sessionId, abortSignal }: PiCompactionRunContext,
+    { messages, models, model, systemPrompt, tools, runtime, sessionId, abortSignal, requestOptions }: PiCompactionRunContext,
   ): Promise<PiCompactionResult | null> {
     if (messages.length < 4) return null;
 
@@ -117,11 +120,12 @@ export class PiSummaryCompactionPolicy implements PiCompactionPolicy {
         model,
         requestContext,
         {
+          ...requestOptions,
           maxTokens: Math.min(
             this.options.maxSummaryTokens ?? 2_000,
             model.maxTokens || 2_000,
           ),
-          signal: abortSignal,
+          signal: abortSignal ?? requestOptions?.signal,
           ...(sessionId
             ? { sessionId: cacheAware ? sessionId : `${sessionId}:compaction` }
             : {}),

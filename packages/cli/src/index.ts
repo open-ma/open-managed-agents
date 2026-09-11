@@ -9,6 +9,10 @@ import {
   normalizeSessionEvent,
   type WireSessionEvent,
 } from "@openma/common/session-events/managed";
+import {
+  decodeManagedStreamEvent,
+  type ManagedStreamEvent,
+} from "@openma/common/protocol/managed";
 import { DEFAULT_BRIDGE_SERVER_URL } from "./bridge/lib/defaults.js";
 import { currentProfile } from "./bridge/lib/platform.js";
 
@@ -249,7 +253,8 @@ async function apiFetch<T = unknown>(config: Config, path: string, init?: Reques
 //
 // Two streaming endpoints, two helpers:
 //
-//   streamChat   — POST /v1/sessions/:id/messages with one user turn,
+//   streamChat   — subscribe to GET /v1/sessions/:id/events/stream, then
+//                  POST one user.message to /v1/sessions/:id/events and
 //                  read text/event-stream until session.status_idle,
 //                  render text deltas inline + thinking deltas dimmed
 //                  + tool calls as one-line headers. Auto-closes on
@@ -308,71 +313,121 @@ const cyan = (s: string) => (tty ? `\x1b[36m${s}\x1b[0m` : s);
 const yellow = (s: string) => (tty ? `\x1b[33m${s}\x1b[0m` : s);
 
 async function streamChat(config: Config, sessionId: string, text: string): Promise<void> {
-  const res = await rawStream(config, `/v1/sessions/${sessionId}/messages`, {
-    method: "POST",
-    headers: { "content-type": "application/json", accept: "text/event-stream" },
-    body: JSON.stringify({ content: text }),
-  });
+  const controller = new AbortController();
+  const res = await rawStream(
+    config,
+    `/v1/sessions/${sessionId}/events/stream?event_deltas%5B%5D=agent.message&event_deltas%5B%5D=agent.thinking`,
+    { headers: { accept: "text/event-stream" }, signal: controller.signal },
+  );
   let textOpen = false;       // are we mid-message-text on the current line?
   let thinkOpen = false;      // are we mid-thinking on stderr?
-  for await (const ev of parseSSE(res)) {
-    const normalized = normalizeSessionEvent(ev as WireSessionEvent);
-    switch (normalized.kind) {
-      case "assistant_delta":
-        process.stdout.write(normalized.text);
-        textOpen = true;
-        break;
-      case "assistant_stream_end":
-      case "assistant_message":
-        if (textOpen) { process.stdout.write("\n"); textOpen = false; }
-        break;
-      case "thinking_delta":
-        if (!thinkOpen) {
-          process.stderr.write(dim("💭 "));
-          thinkOpen = true;
+  const streamedEventTypes = new Map<string, string>();
+  const streamedAssistantIds = new Set<string>();
+  try {
+    await apiFetch(config, `/v1/sessions/${sessionId}/events`, {
+      method: "POST",
+      body: JSON.stringify({
+        events: [{
+          type: "user.message",
+          content: [{ type: "text", text }],
+        }],
+      }),
+    });
+    for await (const ev of parseSSE(res)) {
+      if (ev.type === "event_start") {
+        const preview = ev.event;
+        if (preview && typeof preview === "object") {
+          const id = (preview as { id?: unknown }).id;
+          const type = (preview as { type?: unknown }).type;
+          if (typeof id === "string" && typeof type === "string") {
+            streamedEventTypes.set(id, type);
+          }
         }
-        process.stderr.write(dim(normalized.text));
-        break;
-      case "thinking_stream_end":
-      case "thinking":
-        if (thinkOpen) { process.stderr.write("\n"); thinkOpen = false; }
-        break;
-      case "tool_input_start":
-        process.stdout.write(cyan(`→ tool: ${normalized.name}`) + dim(" preparing…\n"));
-        break;
-      case "tool_use":
-        process.stdout.write(cyan(`→ ${normalized.tool.family} tool: ${normalized.tool.name}`) + " " + dim(JSON.stringify(normalized.tool.input ?? {})) + "\n");
-        break;
-      case "tool_result": {
-        const out = typeof normalized.output === "string"
-          ? normalized.output
-          : JSON.stringify(normalized.output ?? "");
-        const trimmed = out.length > 280 ? out.slice(0, 280) + "…" : out;
-        process.stdout.write(dim("← ") + trimmed + "\n");
-        break;
+        continue;
       }
-      case "notice":
-        process.stderr.write(yellow(
-          normalized.tone === "error"
-            ? `✗ error: ${normalized.message}`
-            : `⚠ ${normalized.source ? `${normalized.source}: ` : ""}${normalized.message}`,
-        ) + "\n");
-        break;
-      case "turn_complete":
-        if (textOpen) { process.stdout.write("\n"); textOpen = false; }
-        return;
+      if (ev.type === "event_delta") {
+        const decoded = decodeManagedStreamEvent(ev as unknown as ManagedStreamEvent, { sessionId });
+        const data = decoded.event.data as { text?: unknown };
+        const deltaText = typeof data.text === "string" ? data.text : "";
+        const eventId = typeof ev.event_id === "string" ? ev.event_id : "";
+        if (streamedEventTypes.get(eventId) === "agent.thinking") {
+          if (!thinkOpen) {
+            process.stderr.write(dim("💭 "));
+            thinkOpen = true;
+          }
+          process.stderr.write(dim(deltaText));
+        } else {
+          process.stdout.write(deltaText);
+          textOpen = true;
+          if (eventId) streamedAssistantIds.add(eventId);
+        }
+        continue;
+      }
+
+      const normalized = normalizeSessionEvent(ev as WireSessionEvent);
+      switch (normalized.kind) {
+        case "assistant_delta":
+          process.stdout.write(normalized.text);
+          textOpen = true;
+          break;
+        case "assistant_stream_end":
+          if (textOpen) { process.stdout.write("\n"); textOpen = false; }
+          break;
+        case "assistant_message":
+          if (textOpen) { process.stdout.write("\n"); textOpen = false; }
+          if (!streamedAssistantIds.has(normalized.id) && normalized.text) {
+            process.stdout.write(normalized.text + "\n");
+          }
+          break;
+        case "thinking_delta":
+          if (!thinkOpen) {
+            process.stderr.write(dim("💭 "));
+            thinkOpen = true;
+          }
+          process.stderr.write(dim(normalized.text));
+          break;
+        case "thinking_stream_end":
+        case "thinking":
+          if (thinkOpen) { process.stderr.write("\n"); thinkOpen = false; }
+          break;
+        case "tool_input_start":
+          process.stdout.write(cyan(`→ tool: ${normalized.name}`) + dim(" preparing…\n"));
+          break;
+        case "tool_use":
+          process.stdout.write(cyan(`→ ${normalized.tool.family} tool: ${normalized.tool.name}`) + " " + dim(JSON.stringify(normalized.tool.input ?? {})) + "\n");
+          break;
+        case "tool_result": {
+          const out = typeof normalized.output === "string"
+            ? normalized.output
+            : JSON.stringify(normalized.output ?? "");
+          const trimmed = out.length > 280 ? out.slice(0, 280) + "…" : out;
+          process.stdout.write(dim("← ") + trimmed + "\n");
+          break;
+        }
+        case "notice":
+          process.stderr.write(yellow(
+            normalized.tone === "error"
+              ? `✗ error: ${normalized.message}`
+              : `⚠ ${normalized.source ? `${normalized.source}: ` : ""}${normalized.message}`,
+          ) + "\n");
+          break;
+        case "turn_complete":
+          if (textOpen) { process.stdout.write("\n"); textOpen = false; }
+          return;
+      }
     }
+  } finally {
+    controller.abort();
   }
 }
 
 async function tailSession(config: Config, sessionId: string): Promise<void> {
-  // Match SDK's tail() default: opt into chunks + history replay so the
-  // CLI keeps rendering the full timeline as it has historically. Server
-  // default (no flags) is Anthropic-spec-aligned (no replay, spec types
-  // only); these query params restore the OMA-extension stream.
+  // Stay on the official Managed stream and opt into SDK delta envelopes for
+  // live assistant text/thinking. Persisted history is available separately
+  // through `oma sessions logs`; the official stream has no replay flag.
   const res = await rawStream(
     config,
-    `/v1/sessions/${sessionId}/events/stream?include=chunks&replay=1`,
+    `/v1/sessions/${sessionId}/events/stream?event_deltas%5B%5D=agent.message&event_deltas%5B%5D=agent.thinking`,
     { headers: { accept: "text/event-stream" } },
   );
   for await (const ev of parseSSE(res)) {
@@ -918,7 +973,7 @@ const commands: Cmd[] = [
   {
     group: "Sessions", match: ["sessions", "chat"], needsArg: true,
     usage: "oma sessions chat <id> <text>", desc: "Send a turn AND stream the reply token-by-token",
-    http: "POST   /v1/sessions/:id/messages {content:\"...\"}  (text/event-stream)",
+    http: "GET    /v1/sessions/:id/events/stream + POST /v1/sessions/:id/events",
     async run(config, args) {
       const text = args.slice(1).join(" ");
       if (!text) { console.error("Usage: oma sessions chat <id> <text>"); process.exit(1); }
@@ -980,11 +1035,11 @@ const commands: Cmd[] = [
   },
   {
     group: "Model Cards", match: ["models", "create"],
-    usage: "oma models create --model-id <id> --api-key <key> [--model <wire>] [--provider <p>]", desc: "Create model card",
+    usage: "oma models create --model-id <id> --api-key <key> [--model <wire>] [--provider <pi-id>]", desc: "Create model card",
     http: "POST   /v1/oma/model_cards {model_id, provider, model?, api_key, base_url?, is_default?}",
     async run(config, args) {
       const modelId = flag(args, "--model-id"); const provider = flag(args, "--provider") || "ant"; const model = flag(args, "--model"); const apiKey = flag(args, "--api-key"); const baseUrl = flag(args, "--base-url");
-      if (!modelId || !apiKey) { console.error("Usage: oma models create --model-id <id> --api-key <key> [--model <wire>] [--provider ant|oai|ant-compatible|oai-compatible] [--base-url <url>]"); process.exit(1); }
+      if (!modelId || !apiKey) { console.error("Usage: oma models create --model-id <id> --api-key <key> [--model <wire>] [--provider <pi-provider-id>] [--base-url <url>]"); process.exit(1); }
       const card = await apiFetch<{ id: string; model_id: string }>(config, "/v1/oma/model_cards", { method: "POST", body: JSON.stringify({ model_id: modelId, provider, model, api_key: apiKey, base_url: baseUrl }) });
       console.log(`Model card created: ${card.model_id} (${card.id})`);
     },
@@ -2108,7 +2163,7 @@ const extraEndpoints: { group: string; http: string }[] = [
   { group: "Model Cards", http: "GET    /v1/oma/model_cards/:id                     Get model card" },
   { group: "Model Cards", http: "POST   /v1/oma/model_cards/:id                     Update model card" },
   { group: "Model Cards", http: "DELETE /v1/oma/model_cards/:id                     Delete model card" },
-  { group: "Model Cards", http: "POST   /v1/oma/models/list                         Fetch provider models {provider, api_key}" },
+  { group: "Model Cards", http: "POST   /v1/oma/models/list                         List Pi provider models {provider}; api_key is legacy-only" },
   { group: "Vaults", http: "DELETE /v1/vaults/:id                          Delete vault" },
   { group: "Vaults", http: "DELETE /v1/vaults/:id/credentials/:cid         Delete credential" },
   { group: "Linear", http: "PATCH  /v1/oma/integrations/linear/publications/:id  Update persona / capabilities" },

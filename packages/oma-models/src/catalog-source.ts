@@ -2,7 +2,8 @@ import type { OmaProviderModel } from "./model";
 
 export interface ListProviderCatalogModelsQuery {
   provider: string;
-  apiKey: string;
+  /** @deprecated Compatibility-only live discovery credential. */
+  apiKey?: string;
 }
 
 export type ListProviderCatalogModelsResult =

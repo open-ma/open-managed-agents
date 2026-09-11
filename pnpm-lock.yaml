@@ -572,6 +572,9 @@ importers:
       '@open-managed-agents/managed-agents-adapters-blob':
         specifier: workspace:*
         version: link:../../packages/managed-agents-adapters-blob
+      '@open-managed-agents/managed-agents-adapters-http':
+        specifier: workspace:*
+        version: link:../../packages/managed-agents-adapters-http
       '@open-managed-agents/managed-agents-adapters-runtime':
         specifier: workspace:*
         version: link:../../packages/managed-agents-adapters-runtime
@@ -758,6 +761,9 @@ importers:
       '@open-managed-agents/managed-agents-adapters-blob':
         specifier: workspace:*
         version: link:../../packages/managed-agents-adapters-blob
+      '@open-managed-agents/managed-agents-adapters-http':
+        specifier: workspace:*
+        version: link:../../packages/managed-agents-adapters-http
       '@open-managed-agents/managed-agents-adapters-runtime':
         specifier: workspace:*
         version: link:../../packages/managed-agents-adapters-runtime
@@ -1964,6 +1970,9 @@ importers:
 
   packages/managed-agents-adapters-http:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: 0.84.4
+        version: 0.84.4(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
       '@open-managed-agents/app':
         specifier: workspace:*
         version: link:../managed-agents-app
@@ -1989,6 +1998,9 @@ importers:
 
   packages/managed-agents-adapters-runtime:
     dependencies:
+      '@earendil-works/pi-ai':
+        specifier: 0.84.4
+        version: 0.84.4(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
       '@open-managed-agents/app':
         specifier: workspace:*
         version: link:../managed-agents-app
@@ -3330,6 +3342,9 @@ importers:
       '@anthropic-ai/sdk':
         specifier: 0.120.0
         version: 0.120.0(zod@4.4.3)
+      '@earendil-works/pi-ai':
+        specifier: 0.84.4
+        version: 0.84.4(@modelcontextprotocol/sdk@1.29.0(zod@4.4.3))(ws@8.21.0)(zod@4.4.3)
     devDependencies:
       typescript:
         specifier: ^7.0.2

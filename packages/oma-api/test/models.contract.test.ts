@@ -6,7 +6,7 @@ import { buildOmaModelRoutes } from "../src/index";
 type OmaModelsApplicationPort = {
   listProviderModels(input: {
     provider: string;
-    apiKey: string;
+    apiKey?: string;
   }): Promise<
     | { type: "success"; models: Array<{ id: string; name: string }> }
     | { type: "upstream_error"; message: string }
@@ -43,19 +43,26 @@ describe("OMA model discovery contract", () => {
     expect(officialNamespace.status).toBe(404);
   });
 
-  it("rejects a missing provider API key before invoking the Port", async () => {
-    const listProviderModels = vi.fn<OmaModelsApplicationPort["listProviderModels"]>();
+  it("allows provider catalog discovery without an API key", async () => {
+    const listProviderModels = vi.fn(async () => ({
+      type: "success" as const,
+      models: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }],
+    }));
     const app = new Hono();
     app.route("/v1/oma/models", buildOmaModelRoutes({ listProviderModels }));
 
     const response = await app.request("/v1/oma/models/list", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ provider: "ant" }),
+      body: JSON.stringify({ provider: "deepseek" }),
     });
 
-    expect(response.status).toBe(400);
-    expect(await response.json()).toEqual({ error: "api_key is required" });
-    expect(listProviderModels).not.toHaveBeenCalled();
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({
+      data: [{ id: "deepseek-v4-flash", name: "DeepSeek V4 Flash" }],
+    });
+    expect(listProviderModels).toHaveBeenCalledWith({
+      provider: "deepseek",
+    });
   });
 });

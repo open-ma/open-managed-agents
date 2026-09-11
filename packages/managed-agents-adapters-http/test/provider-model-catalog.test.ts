@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from "vitest";
 import * as adapter from "../src/provider-model-catalog";
 
 type Catalog = {
-  list(input: { provider: string; apiKey: string }): Promise<unknown>;
+  list(input: { provider: string; apiKey?: string }): Promise<unknown>;
 };
 
 const HttpProviderModelCatalog = (
@@ -50,14 +50,26 @@ describe("HTTP provider model catalog adapter", () => {
     });
   });
 
-  it("does not perform HTTP for an unsupported provider", async () => {
+  it("lists every Pi provider catalog without proxying tenant credentials", async () => {
     const fetch = vi.fn();
     const catalog = new HttpProviderModelCatalog({ fetch });
 
     await expect(catalog.list({
-      provider: "future-provider",
-      apiKey: "secret",
-    })).resolves.toEqual({ type: "unsupported_provider" });
+      provider: "deepseek",
+    })).resolves.toMatchObject({
+      type: "success",
+      models: expect.arrayContaining([
+        expect.objectContaining({
+          id: "deepseek-v4-flash",
+          name: expect.any(String),
+          provider: "deepseek",
+          api: "openai-completions",
+          reasoning: true,
+          context_window: expect.any(Number),
+          max_tokens: expect.any(Number),
+        }),
+      ]),
+    });
     expect(fetch).not.toHaveBeenCalled();
   });
 });

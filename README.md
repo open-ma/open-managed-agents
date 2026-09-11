@@ -735,27 +735,39 @@ Full list (integrations OAuth credentials, Postgres URL, sandbox tunables, memor
 
 Per-tenant LLM credentials. An agent references one by setting `agent.model = "<model_id>"` — the worker looks up the card and signs the outbound request with its api_key, base_url, and headers. This is the canonical replacement for the global `ANTHROPIC_API_KEY` env var.
 
-Providers (wire tag → request shape):
+Providers are Pi provider ids. The four legacy tags remain migration aliases:
 
-| tag | shape | typical use |
+| provider | Pi protocol / use |
 |---|---|---|
-| `ant` | Anthropic `/v1/messages` | Claude on `api.anthropic.com` |
-| `ant-compatible` | Anthropic shape, custom `base_url` | Bedrock proxy, self-hosted Anthropic-compatible |
-| `oai` | OpenAI `/v1/chat/completions` | OpenAI, Azure OpenAI |
-| `oai-compatible` | OpenAI shape, custom `base_url` | vLLM, OpenRouter, Groq, etc. |
+| `anthropic` (`ant`) | Pi Anthropic Messages; Claude on `api.anthropic.com` |
+| `openai` (`oai`) | Pi OpenAI Responses/Completions |
+| Any Pi built-in id | `deepseek`, `openrouter`, `google`, `minimax`, etc.; Pi owns model metadata and wire behavior |
+| Custom id | Requires `base_url` and `pi_config.api`; compatible aliases still map to Anthropic/OpenAI protocols |
 
 Add one from **Console → Model Cards**, or via CLI:
 
 ```bash
 oma models create \
   --model-id claude-prod \
-  --provider ant \
+  --provider anthropic \
   --model claude-sonnet-4-6 \
   --api-key sk-ant-...
 oma models list
 ```
 
-REST: `POST /v1/oma/model_cards`, `GET /v1/oma/model_cards`, `POST /v1/oma/model_cards/:id` (rotate), `DELETE /v1/oma/model_cards/:id`. Create runs a 6-second probe so a bad key fails loudly, not at first turn.
+REST: `POST /v1/oma/model_cards`, `GET /v1/oma/model_cards`, `POST /v1/oma/model_cards/:id` (rotate), `DELETE /v1/oma/model_cards/:id`. Create runs a bounded live probe for the legacy Anthropic/OpenAI protocols; other Pi providers return an explicit skipped probe result and are validated when their runtime request is exercised.
+
+There are two model catalogs. Official `GET /v1/models` lists this tenant's
+executable Model Cards in the Managed Agents shape, with capabilities and token
+limits projected from Pi. OMA `POST /v1/oma/models/list {provider}` lists Pi's
+built-in catalog while configuring a card and does not require a provider key;
+the old `api_key` field remains optional for 0.x Anthropic/OpenAI live discovery.
+
+Agent request controls are versioned with the Agent and inherited by Sessions:
+`model.effort` maps to Pi thinking levels (Pi normalizes unsupported levels),
+`model.speed=fast` maps to Anthropic fast mode or OpenAI priority tier, and
+`model.inference_geo` is preserved in the official API but is not currently a
+runtime routing input. These controls are not Model Card `pi_config` fields.
 
 Keys are AES-256-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` (label `model.cards.keys`); list responses surface only the last-4 preview. Rotate by POSTing a new `api_key` — no redeploy, no key versioning (re-run the backfill script if you rotate `PLATFORM_ROOT_SECRET` itself).
 

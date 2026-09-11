@@ -83,6 +83,32 @@ describe("ModelCardService — create + read", () => {
     // helper agrees
     expect(apiKeyPreview("sk-oai-abcdef-LAST")).toBe("LAST");
   });
+
+  it("persists Pi-native model configuration for custom providers", async () => {
+    const { service } = createInMemoryModelCardService();
+    const piConfig = {
+      api: "openai-completions",
+      reasoning: true,
+      contextWindow: 262_144,
+      maxTokens: 65_536,
+      thinkingLevelMap: { low: "low", high: "high", max: "max" },
+      compat: { supportsDeveloperRole: false },
+    };
+    const create = service.create.bind(service) as unknown as (
+      input: Record<string, unknown>,
+    ) => Promise<Record<string, unknown>>;
+
+    const card = await create({
+      tenantId: TENANT,
+      modelId: "custom-reasoner",
+      model: "custom-reasoner-v1",
+      provider: "oai-compatible",
+      apiKey: "sk-custom-1234",
+      piConfig,
+    });
+
+    expect(card.pi_config).toEqual(piConfig);
+  });
 });
 
 describe("ModelCardService — UNIQUE(tenant_id, model_id)", () => {

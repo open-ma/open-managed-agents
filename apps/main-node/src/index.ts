@@ -84,6 +84,7 @@ import {
   createPiModelRuntime,
   toAiSdkLanguageModel,
 } from "@open-managed-agents/agent/harness/pi-provider";
+import type { PiModelConfig } from "@open-managed-agents/agent/harness/pi-provider";
 import { generateText } from "ai";
 import { composeSystemPrompt } from "@open-managed-agents/agent/harness/platform-guidance";
 import type { HarnessContext } from "@open-managed-agents/agent/harness/interface";
@@ -91,6 +92,7 @@ import { nodeToMarkdown } from "@open-managed-agents/markdown/adapters/node";
 import { applyBetterAuthSchema } from "@open-managed-agents/schema";
 import type { OmaDb } from "@open-managed-agents/db-schema";
 import { migrateNodeMysqlSchema } from "@open-managed-agents/db-schema/node-mysql";
+import { reconcilePiModelConfigMigration } from "./lib/reconcile-pi-model-config-migration.js";
 import { ensureSchema as ensureEventLogSchema } from "@open-managed-agents/event-log/sql";
 import {
   buildAgentRoutes as buildLegacyAgentRoutes,
@@ -250,6 +252,7 @@ import {
 } from "@open-managed-agents/managed-agents-adapters-runtime";
 import { isCurrentEnvironmentWorkClaim } from "@open-managed-agents/environment-work-store";
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
+import { buildOmaModelsHttpRoutes } from "@open-managed-agents/managed-agents-adapters-http";
 import {
   buildNodeRepos,
   SqlFeishuInstallationRepo,
@@ -423,6 +426,7 @@ if (usePostgres) {
 const migrationsFolder = usePostgres
   ? new URL("../migrations", import.meta.url).pathname
   : new URL("../migrations-sqlite", import.meta.url).pathname;
+await reconcilePiModelConfigMigration(sql, dialect);
 if (usePostgres) {
   const { migrate } = await import("drizzle-orm/postgres-js/migrator");
   await migrate(drizzleDb as never, { migrationsFolder });
@@ -782,13 +786,18 @@ async function buildSandbox(
  *  Prefer a matching model card; fall back to ANTHROPIC_* env vars. */
 async function resolveNodeModelCreds(
   tenantId: string,
-  agentModel: string | { id: string; speed?: string },
+  agentModel: string | {
+    id: string;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    speed?: string;
+  },
 ): Promise<{
   wireModel: string;
   apiKey: string;
   baseURL?: string;
   provider?: string;
   customHeaders?: Record<string, string>;
+  piConfig?: PiModelConfig;
 }> {
   const handle = typeof agentModel === "string" ? agentModel : agentModel.id;
   try {
@@ -802,6 +811,9 @@ async function resolveNodeModelCreds(
           baseURL: card.base_url ?? undefined,
           provider: card.provider,
           customHeaders: card.custom_headers ?? undefined,
+          piConfig: card.pi_config
+            ? card.pi_config as PiModelConfig
+            : undefined,
         };
       }
     }
@@ -826,7 +838,11 @@ async function resolveNodeModelCreds(
 
 async function buildNodeLanguageModel(
   tenantId: string,
-  agentModel: string | { id: string; speed?: string },
+  agentModel: string | {
+    id: string;
+    effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    speed?: string;
+  },
 ) {
   const creds = await resolveNodeModelCreds(tenantId, agentModel);
   return toAiSdkLanguageModel(createPiModelRuntime({
@@ -835,6 +851,11 @@ async function buildNodeLanguageModel(
     provider: creds.provider,
     baseURL: creds.baseURL,
     customHeaders: creds.customHeaders,
+    piConfig: creds.piConfig,
+    thinkingLevel: typeof agentModel === "string" ? undefined : agentModel.effort,
+    speed: typeof agentModel === "string"
+      ? undefined
+      : agentModel.speed === "fast" ? "fast" : "standard",
   }));
 }
 
@@ -874,6 +895,13 @@ const sessionRegistry = new SessionRegistry({
       provider: creds.provider,
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
+      piConfig: creds.piConfig,
+      thinkingLevel:
+        typeof input.agent.model === "string" ? undefined : input.agent.model.effort,
+      speed:
+        typeof input.agent.model === "string"
+          ? undefined
+          : input.agent.model.speed === "fast" ? "fast" : "standard",
     });
     const runtime = new NodeHarnessRuntime({
       sessionId: input.sessionId,
@@ -2460,57 +2488,9 @@ v1.route("/oma/environments", buildLegacyEnvironmentRoutes({
 }));
 v1.route("/files", managedFilesRoutes);
 v1.route("/oma/model_cards", buildModelCardRoutes({ modelCards: modelCardsService }));
-v1.get("/oma/models/list", (c) =>
-  c.json({
-    data: [
-      { id: "claude-haiku-4-5-20251001", display_name: "Claude Haiku 4.5", speeds: ["standard", "fast"] },
-      { id: "claude-sonnet-4-6", display_name: "Claude Sonnet 4.6", speeds: ["standard"] },
-      { id: "claude-opus-4-7", display_name: "Claude Opus 4.7", speeds: ["standard"] },
-    ],
-  }),
-);
-// Console ModelCardsList fetches suggestions via POST /v1/oma/models/list with
-// the user's key — proxy through to Anthropic/OpenAI when possible.
-v1.post("/oma/models/list", async (c) => {
-  const body = await c.req.json<{ provider?: string; api_key?: string }>();
-  const provider = body.provider || "ant";
-  const apiKey = body.api_key || "";
-  if (!apiKey) return c.json({ error: "api_key is required" }, 400);
-  try {
-    if (provider === "ant") {
-      const res = await fetch("https://api.anthropic.com/v1/models?limit=100", {
-        headers: { "x-api-key": apiKey, "anthropic-version": "2023-06-01" },
-      });
-      if (!res.ok) throw new Error(`Anthropic API ${res.status}`);
-      const data = (await res.json()) as {
-        data: Array<{ id: string; display_name: string }>;
-      };
-      return c.json({
-        data: data.data.map((m) => ({ id: m.id, name: m.display_name || m.id })),
-      });
-    }
-    if (provider === "oai") {
-      const res = await fetch("https://api.openai.com/v1/models", {
-        headers: { Authorization: `Bearer ${apiKey}` },
-      });
-      if (!res.ok) throw new Error(`OpenAI API ${res.status}`);
-      const data = (await res.json()) as { data: Array<{ id: string }> };
-      const chatPrefixes = ["gpt-", "o1", "o3", "o4", "chatgpt-"];
-      return c.json({
-        data: data.data
-          .filter((m) => chatPrefixes.some((p) => m.id.startsWith(p)))
-          .sort((a, b) => a.id.localeCompare(b.id))
-          .map((m) => ({ id: m.id, name: m.id })),
-      });
-    }
-    return c.json({ data: [] });
-  } catch (err) {
-    return c.json(
-      { error: `Failed to fetch models: ${(err as Error).message}` },
-      502,
-    );
-  }
-});
+v1.route("/oma/models", buildOmaModelsHttpRoutes({
+  fetch: (input, init) => fetch(input, init),
+}));
 v1.get("/oma/integrations/github/credentials", (c) => c.json({ data: [] }));
 v1.get("/oma/integrations/linear/credentials", (c) => c.json({ data: [] }));
 v1.get("/oma/integrations/slack/credentials", (c) => c.json({ data: [] }));

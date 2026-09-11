@@ -146,7 +146,7 @@ describe("managed Agent to legacy Node harness codec", () => {
     expect(toLegacyHarnessAgentConfig(session)).toEqual({
       id: "agent_coordinator",
       name: "Coordinator",
-      model: { id: "claude-opus-5", speed: "fast" },
+      model: { id: "claude-opus-5", effort: "high", speed: "fast" },
       system: "Coordinate carefully",
       tools: [
         {

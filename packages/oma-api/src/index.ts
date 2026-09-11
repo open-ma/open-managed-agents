@@ -32,11 +32,13 @@ export function buildOmaModelRoutes(
     const provider = typeof body.provider === "string" && body.provider.length > 0
       ? body.provider
       : "ant";
-    if (typeof body.api_key !== "string" || body.api_key.length === 0) {
-      return context.json({ error: "api_key is required" }, 400);
-    }
     const result = await resolveApplicationPort(source, context)
-      .listProviderModels({ provider, apiKey: body.api_key });
+      .listProviderModels({
+        provider,
+        ...(typeof body.api_key === "string" && body.api_key.length > 0
+          ? { apiKey: body.api_key }
+          : {}),
+      });
     if (result.type === "upstream_error") {
       return context.json({ error: result.message }, 502);
     }

@@ -5,10 +5,18 @@ import { OmaResources } from "./oma.js";
 
 export {
   OmaModelsResource,
+  OmaModelCardsResource,
   OmaResources,
+  type OmaModelCard,
+  type OmaModelCardCreateParams,
+  type OmaModelCardDeleted,
+  type OmaModelCardListParams,
+  type OmaModelCardListResponse,
+  type OmaModelCardUpdateParams,
   type OmaModelListParams,
   type OmaModelListResponse,
   type OmaModelProvider,
+  type OmaPiModelConfig,
   type OmaProviderModel,
   type OmaHTTPMethod,
   type OmaPath,

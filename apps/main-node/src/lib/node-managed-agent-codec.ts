@@ -218,6 +218,7 @@ export function toLegacyHarnessAgentConfig(
     name: agent.name,
     model: {
       id: agent.model.id,
+      ...(agent.model.effort !== undefined && { effort: agent.model.effort }),
       ...(agent.model.speed !== undefined && { speed: agent.model.speed }),
     },
     system: agent.system ?? "",

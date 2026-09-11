@@ -27,6 +27,10 @@ describe("Cloudflare single-D1 migrations", () => {
         "shard_pool",
         "tenant_shard",
       ]);
+      const modelCardColumns = db
+        .prepare("PRAGMA table_info(model_cards)")
+        .all() as Array<{ name: string }>;
+      expect(modelCardColumns.map(({ name }) => name)).toContain("pi_config");
     } finally {
       db.close();
     }

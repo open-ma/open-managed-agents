@@ -79,6 +79,8 @@ export class ModelCardService {
     apiKey: string;
     baseUrl?: string | null;
     customHeaders?: Record<string, string> | null;
+    /** Pi-native serializable Model fields. No OpenMA semantic translation. */
+    piConfig?: Record<string, unknown> | null;
     /** When true, atomically clears any existing default before inserting. */
     makeDefault?: boolean;
   }): Promise<ModelCardRow> {
@@ -91,6 +93,7 @@ export class ModelCardService {
       model: opts.model ?? opts.modelId,
       baseUrl: opts.baseUrl ?? null,
       customHeaders: opts.customHeaders ?? null,
+      piConfig: opts.piConfig ?? null,
       apiKeyCipher,
       apiKeyPreview: apiKeyPreview(opts.apiKey),
       isDefault: !!opts.makeDefault,
@@ -110,6 +113,8 @@ export class ModelCardService {
     baseUrl?: string | null;
     /** Pass `null` to clear. Pass an object to replace. */
     customHeaders?: Record<string, string> | null;
+    /** Pass null to restore Pi catalog/default model configuration. */
+    piConfig?: Record<string, unknown> | null;
     /** New plaintext api_key. Service derives + stores cipher + preview. */
     apiKey?: string;
     /** Atomically clears other defaults if true (per partial UNIQUE). */
@@ -122,6 +127,7 @@ export class ModelCardService {
     if (opts.model !== undefined) update.model = opts.model;
     if (opts.baseUrl !== undefined) update.baseUrl = opts.baseUrl;
     if (opts.customHeaders !== undefined) update.customHeaders = opts.customHeaders;
+    if (opts.piConfig !== undefined) update.piConfig = opts.piConfig;
     if (opts.isDefault !== undefined) update.isDefault = opts.isDefault;
     if (opts.apiKey !== undefined) {
       update.apiKeyCipher = await this.crypto.encrypt(opts.apiKey);

@@ -58,6 +58,7 @@ export class SqlModelCardRepo implements ModelCardRepo {
       base_url: input.baseUrl,
       custom_headers:
         input.customHeaders !== null ? JSON.stringify(input.customHeaders) : null,
+      pi_config: input.piConfig !== null ? JSON.stringify(input.piConfig) : null,
       api_key_cipher: input.apiKeyCipher,
       api_key_preview: input.apiKeyPreview,
       is_default: input.isDefault ? 1 : 0,
@@ -213,6 +214,9 @@ export class SqlModelCardRepo implements ModelCardRepo {
       set.custom_headers =
         update.customHeaders !== null ? JSON.stringify(update.customHeaders) : null;
     }
+    if (update.piConfig !== undefined) {
+      set.pi_config = update.piConfig !== null ? JSON.stringify(update.piConfig) : null;
+    }
     if (update.apiKeyCipher !== undefined) set.api_key_cipher = update.apiKeyCipher;
     if (update.apiKeyPreview !== undefined) set.api_key_preview = update.apiKeyPreview;
     if (update.isDefault !== undefined) set.is_default = update.isDefault ? 1 : 0;
@@ -336,6 +340,10 @@ function toRow(r: typeof model_cards.$inferSelect): ModelCardRow {
     custom_headers:
       r.custom_headers !== null
         ? (JSON.parse(r.custom_headers) as Record<string, string>)
+        : null,
+    pi_config:
+      r.pi_config !== null
+        ? (JSON.parse(r.pi_config) as Record<string, unknown>)
         : null,
     api_key_preview: r.api_key_preview,
     // postgres.js returns BIGINT columns as strings by default, even though

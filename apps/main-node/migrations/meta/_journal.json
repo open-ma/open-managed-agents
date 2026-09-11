@@ -159,19 +159,26 @@
     {
       "idx": 22,
       "version": "7",
+      "when": 1788327636529,
+      "tag": "0022_chief_phantom_reporter",
+      "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
       "when": 1788455359814,
       "tag": "0022_minor_drax",
       "breakpoints": true
     },
     {
-      "idx": 23,
+      "idx": 24,
       "version": "7",
       "when": 1788697582965,
       "tag": "0023_parallel_starhawk",
       "breakpoints": true
     },
     {
-      "idx": 24,
+      "idx": 25,
       "version": "7",
       "when": 1788804354295,
       "tag": "0024_strange_lady_deathstrike",

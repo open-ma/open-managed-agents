@@ -1,4 +1,5 @@
 import { Input } from "@/components/ui/input";
+import { Textarea } from "@/components/ui/textarea";
 import { Label } from "@/components/ui/label";
 import { Checkbox } from "@/components/ui/checkbox";
 import { useState, useMemo, useCallback } from "react";
@@ -16,33 +17,32 @@ import type { ModelCard } from "@open-managed-agents/api-types";
 import { useI18n } from "../i18n";
 import { LocalDebugOnlyWarning } from "../components/LocalDebugOnlyWarning";
 
-// Provider enum — mirrors the whitelist on the server
-// (apps/main/src/routes/model-cards.ts GET handler). Anything outside
-// these four values is rejected with a 400 there, so the chip's option
-// set + the form's tile picker must stay in sync with this list.
+// Common Pi provider presets. The actual provider id is an open string; the
+// text field below also accepts any current/future Pi id or a custom id.
 const PROVIDERS = [
-  { value: "ant", label: "Anthropic", desc: "Claude models" },
-  { value: "ant-compatible", label: "Anthropic-compatible", desc: "Proxies speaking Anthropic API" },
-  { value: "oai", label: "OpenAI", desc: "GPT models" },
-  { value: "oai-compatible", label: "OpenAI-compatible", desc: "DeepSeek, Groq, Together, Ollama, etc." },
+  { value: "anthropic", label: "Anthropic", desc: "Claude models" },
+  { value: "openai", label: "OpenAI", desc: "GPT models" },
+  { value: "deepseek", label: "DeepSeek", desc: "DeepSeek catalog" },
+  { value: "openrouter", label: "OpenRouter", desc: "OpenRouter catalog" },
+  { value: "google", label: "Google", desc: "Gemini models" },
+  { value: "minimax", label: "MiniMax", desc: "MiniMax models" },
 ] as const;
 
-type ProviderValue = (typeof PROVIDERS)[number]["value"];
+type ProviderValue = string;
 
 const PROVIDER_FILTER_OPTIONS: { value: ProviderValue | "any"; label: string }[] = [
   { value: "any", label: "All" },
   ...PROVIDERS.map((p) => ({ value: p.value, label: p.label })),
 ];
 
-const OFFICIAL_PROVIDERS = new Set(["ant", "oai"]);
-
 const INITIAL_FORM = {
-  provider: "ant" as ProviderValue,
+  provider: "anthropic" as ProviderValue,
   model_id: "",
   model: "",
   api_key: "",
   base_url: "",
   is_default: false,
+  pi_config: "",
   custom_headers: [{ key: "", value: "" }] as Array<{ key: string; value: string }>,
 };
 
@@ -87,9 +87,10 @@ export function ModelCardsList() {
     refresh: load,
   } = useOmaInfiniteApiQuery<ModelCard>("/v1/oma/model_cards", { limit: 20, params: cardsParams });
 
-  // Fetch models from official API using the user's key
-  const fetchModels = useCallback(async (provider: string, apiKey: string) => {
-    if (!OFFICIAL_PROVIDERS.has(provider) || !apiKey || apiKey.length < 8) {
+  // Provider discovery is Pi catalog metadata; credentials stay in the Model
+  // Card create/rotate request and are never forwarded just to browse models.
+  const fetchModels = useCallback(async (provider: string) => {
+    if (!provider.trim()) {
       setAvailableModels([]);
       return;
     }
@@ -97,7 +98,7 @@ export function ModelCardsList() {
     try {
       const result = await api<{ data: Array<{ id: string; name: string }> }>("/v1/oma/models/list", {
         method: "POST",
-        body: JSON.stringify({ provider, api_key: apiKey }),
+        body: JSON.stringify({ provider }),
       });
       setAvailableModels(result.data);
     } catch {
@@ -132,6 +133,20 @@ export function ModelCardsList() {
         if (h.key && h.value) hdrs[h.key] = h.value;
       }
       if (Object.keys(hdrs).length > 0) payload.custom_headers = hdrs;
+      if (form.pi_config.trim()) {
+        let piConfig: unknown;
+        try {
+          piConfig = JSON.parse(form.pi_config);
+        } catch {
+          setError("Pi Config must be valid JSON.");
+          return;
+        }
+        if (typeof piConfig !== "object" || piConfig === null || Array.isArray(piConfig)) {
+          setError("Pi Config must be a JSON object.");
+          return;
+        }
+        payload.pi_config = piConfig;
+      }
       if (editingId) {
         if (!form.api_key) delete payload.api_key;
         await api(`/v1/oma/model_cards/${editingId}`, { method: "POST", body: JSON.stringify(payload) });
@@ -177,6 +192,7 @@ export function ModelCardsList() {
       api_key: "",
       base_url: card.base_url || "",
       is_default: card.is_default || false,
+      pi_config: card.pi_config ? JSON.stringify(card.pi_config, null, 2) : "",
       custom_headers: hdrs,
     });
     setEditingId(card.id); setShowCreate(true); setError("");
@@ -191,8 +207,8 @@ export function ModelCardsList() {
   const providerLabel = (p: string) => PROVIDERS.find((x) => x.value === p)?.label || p;
 
   const providerBadge = (p: string) => {
-    if (p === "ant" || p === "ant-compatible") return "bg-warning-subtle text-warning";
-    if (p === "oai" || p === "oai-compatible") return "bg-success-subtle text-success";
+    if (p === "anthropic" || p === "ant" || p === "ant-compatible") return "bg-warning-subtle text-warning";
+    if (p === "openai" || p === "oai" || p === "oai-compatible") return "bg-success-subtle text-success";
     return "bg-bg-surface text-fg-muted";
   };
 
@@ -389,14 +405,18 @@ export function ModelCardsList() {
               placeholder="claude-prod, claude-sonnet-4-6, bedrock-sonnet, ..." />
           </div>
           <div role="group" aria-labelledby="modelcard-provider-label">
-            <span id="modelcard-provider-label" className="text-sm text-fg-muted block mb-1">API Format *</span>
+            <span id="modelcard-provider-label" className="text-sm text-fg-muted block mb-1">Pi Provider *</span>
             <div className="grid grid-cols-2 gap-2">
               {PROVIDERS.map((p) => (
                 <Button variant="ghost"
                   key={p.value}
                   type="button"
                   aria-pressed={form.provider === p.value}
-                  onClick={() => { setForm({ ...form, provider: p.value, model: "", base_url: "" }); setAvailableModels([]); }}
+                  onClick={() => {
+                    setForm({ ...form, provider: p.value, model: "", base_url: "" });
+                    setAvailableModels([]);
+                    void fetchModels(p.value);
+                  }}
                   className={`text-left px-3 py-2 border rounded-md text-sm transition-colors duration-[var(--dur-quick)] ease-[var(--ease-soft)] ${
                     form.provider === p.value
                       ? "border-brand bg-brand-subtle text-fg"
@@ -408,14 +428,24 @@ export function ModelCardsList() {
                 </Button>
               ))}
             </div>
+            <TextInput
+              value={form.provider}
+              onChange={(e) => {
+                setForm({ ...form, provider: e.target.value });
+                setAvailableModels([]);
+              }}
+              onBlur={() => void fetchModels(form.provider)}
+              className={`${inputCls} mt-2`}
+              placeholder="Pi provider id, e.g. anthropic, deepseek, my-vllm"
+              aria-label="Pi provider id"
+            />
           </div>
           <div>
             <Label htmlFor="modelcard-api-key" className="text-sm text-fg-muted block mb-1">API Key {editingId ? "" : "*"}</Label>
             <SecretInput id="modelcard-api-key" value={form.api_key} onChange={(e) => setForm({ ...form, api_key: e.target.value })} className={inputCls}
               placeholder={editingId ? "Leave blank to keep current key" : "sk-..."}
-              name="model-api-key-field"
-              onBlur={() => { if (OFFICIAL_PROVIDERS.has(form.provider) && form.api_key) fetchModels(form.provider, form.api_key); }} />
-            {OFFICIAL_PROVIDERS.has(form.provider) && modelsLoading && (
+              name="model-api-key-field" />
+            {modelsLoading && (
               <p className="text-xs text-fg-subtle mt-1">Loading models...</p>
             )}
           </div>
@@ -426,12 +456,13 @@ export function ModelCardsList() {
             </Label>
             <Input id="modelcard-wire-model" value={form.model}
               onChange={(e) => { setForm({ ...form, model: e.target.value }); setShowModelSuggestions(true); }}
-              onFocus={() => setShowModelSuggestions(true)}
+              onFocus={() => {
+                setShowModelSuggestions(true);
+                if (availableModels.length === 0) void fetchModels(form.provider);
+              }}
               onBlur={() => setTimeout(() => setShowModelSuggestions(false), 150)}
               className={inputCls}
-              placeholder={form.model_id || (OFFICIAL_PROVIDERS.has(form.provider)
-                ? (form.provider === "ant" ? "claude-sonnet-4-6" : "gpt-4o")
-                : "e.g. deepseek-chat, llama-3.1-70b, ...")}
+              placeholder={form.model_id || "e.g. claude-sonnet-4-6, deepseek-v4-flash, org/model"}
               autoComplete="off" name="model-field" />
             {showModelSuggestions && availableModels.length > 0 && (
               <div className="absolute z-10 w-full mt-1 bg-bg border border-border rounded-md shadow-lg py-1 max-h-48 overflow-y-auto">
@@ -447,19 +478,27 @@ export function ModelCardsList() {
                   ))}
               </div>
             )}
-            {OFFICIAL_PROVIDERS.has(form.provider) && !availableModels.length && !modelsLoading && form.api_key && (
-              <p className="text-xs text-fg-subtle mt-1">Enter a valid API key to load available models</p>
+            {!availableModels.length && !modelsLoading && form.provider && (
+              <p className="text-xs text-fg-subtle mt-1">No Pi catalog entries loaded — enter a wire model manually for custom providers.</p>
             )}
           </div>
-          {!OFFICIAL_PROVIDERS.has(form.provider) && (
-            <div>
-              <Label htmlFor="modelcard-base-url" className="text-sm text-fg-muted block mb-1">Base URL *</Label>
-              <Input id="modelcard-base-url" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
-                placeholder={form.provider === "ant-compatible" ? "https://your-proxy.com/v1" : "https://api.deepseek.com/v1"} autoComplete="off" />
-            </div>
-          )}
-          {!OFFICIAL_PROVIDERS.has(form.provider) && (
-            <div>
+          <div>
+            <Label htmlFor="modelcard-base-url" className="text-sm text-fg-muted block mb-1">Base URL <span className="text-fg-subtle">(optional for Pi built-ins)</span></Label>
+            <Input id="modelcard-base-url" value={form.base_url} onChange={(e) => setForm({ ...form, base_url: e.target.value })} className={inputCls}
+              placeholder="https://your-provider.example/v1" autoComplete="off" />
+          </div>
+          <div>
+            <Label htmlFor="modelcard-pi-config" className="text-sm text-fg-muted block mb-1">Pi Config <span className="text-fg-subtle">(JSON; custom provider requires api)</span></Label>
+            <Textarea
+              id="modelcard-pi-config"
+              value={form.pi_config}
+              onChange={(e) => setForm({ ...form, pi_config: e.target.value })}
+              className={`${inputCls} min-h-24 font-mono`}
+              placeholder={'{"api":"openai-completions","reasoning":false,"contextWindow":128000,"maxTokens":16384}'}
+              spellCheck={false}
+            />
+          </div>
+          <div>
               <Label className="text-sm text-fg-muted block mb-1">Custom Headers <span className="text-fg-subtle">(optional)</span></Label>
               <div className="space-y-1.5">
                 {form.custom_headers.map((h, i) => (
@@ -483,8 +522,7 @@ export function ModelCardsList() {
                 <Button variant="ghost" type="button" onClick={() => setForm({ ...form, custom_headers: [...form.custom_headers, { key: "", value: "" }] })}
                   className="inline-flex items-center justify-center min-h-11 sm:min-h-0 px-2 text-xs text-fg-muted hover:text-fg">+ Add header</Button>
               </div>
-            </div>
-          )}
+          </div>
           <Label className="flex items-center gap-2 text-sm text-fg-muted cursor-pointer">
             <Checkbox
               checked={form.is_default}

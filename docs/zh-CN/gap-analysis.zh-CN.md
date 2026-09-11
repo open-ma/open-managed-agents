@@ -2,6 +2,11 @@
 
 生成日期：2026-04-10
 
+> **历史快照，不代表当前 v1 实现。** 本文保留的是 2026-04-10 的审计输入；
+> 此后官方 SDK facade、HTTP shape 与模型系统已经重构。当前模型目录、Pi
+> provider、Model Card、`effort` / `speed` / `inference_geo` 的规范见
+> [模型系统](./model-system.zh-CN.md)。不要用本文的“我们当前行为”作为发布验收依据。
+
 本文档把我们的实现与 Anthropic 官方 Managed Agents API 规格（2026-04-10 抓取）逐 endpoint、逐 field 地对比。
 
 严重等级：

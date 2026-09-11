@@ -587,7 +587,7 @@ Endpoints main-node implements for the console:
 - `/v1/environments` CRUD (+ archive). Node persists the environment config,
   but currently runs sessions in the local sandbox snapshot; environment
   package lists are not installed automatically at warmup yet.
-- `/v1/models/list` (GET catalog stub + POST provider key probe)
+- `/v1/models` and `/v1/models/:id` (official tenant Model Card catalog), plus `/v1/oma/models/list` (Pi provider setup catalog; optional legacy provider-key discovery)
 - `/v1/integrations/{linear,github,slack}/{installations,publications,...}` — read + persona/capability PATCH + dispatch-rule CRUD. Active when `PLATFORM_ROOT_SECRET` env var is set. Publication-create endpoints (`start-a1`, `credentials`, `handoff-link`, `personal-token`) now run in-process via `NodeInstallBridge.startInstallation` — wire shape matches the CF gateway verbatim. The OAuth callback / setup-page / webhook / Linear MCP / GitHub refresh-by-vault routes are all in-process via `buildIntegrationsGatewayRoutes`.
 
 Endpoints stubbed (return empty `data: []` so the UI degrades gracefully):

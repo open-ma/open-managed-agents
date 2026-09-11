@@ -4,7 +4,8 @@ export type OmaProviderModelView = OmaProviderModel;
 
 export interface ListOmaProviderModelsCommand {
   provider: string;
-  apiKey: string;
+  /** @deprecated Compatibility-only live discovery credential. */
+  apiKey?: string;
 }
 
 export type ListOmaProviderModelsResult =

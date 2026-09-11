@@ -1,6 +1,6 @@
 {
-  "id": "f3483428-2af8-4c74-bb0a-b8d9f1050075",
-  "prevId": "ea3f85f9-e340-4890-9177-776ab7bfaa0b",
+  "id": "39944aa8-5254-4d22-880b-f9f7a8a5eb18",
+  "prevId": "896def92-befd-41a6-8407-fa5756216e81",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -4209,6 +4209,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "''"
+        },
+        "pi_config": {
+          "name": "pi_config",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {
@@ -5223,19 +5229,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": true
-        },
-        "credential_type": {
-          "name": "credential_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'workspace'"
-        },
-        "environment_id": {
-          "name": "environment_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -9281,12 +9274,6 @@
           "primaryKey": false,
           "notNull": true
         },
-        "lane_id": {
-          "name": "lane_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
         "id": {
           "name": "id",
           "type": "text",
@@ -9335,26 +9322,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 0
-        },
-        "attempt_count": {
-          "name": "attempt_count",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 10
-        },
-        "deadline_at_ms": {
-          "name": "deadline_at_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
         },
         "claimed_at_ms": {
           "name": "claimed_at_ms",
@@ -9439,12 +9406,6 @@
             },
             {
               "expression": "session_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "lane_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

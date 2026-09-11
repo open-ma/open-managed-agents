@@ -1,5 +1,19 @@
 # @openma/cli
 
+## 0.6.0-beta.1
+
+### Patch Changes
+
+- 7629a91: Expose typed Model Card management and Pi provider metadata through the SDK,
+  align model catalog discovery across Node and Cloudflare, and document the
+  runtime semantics of effort, speed, and custom Pi model configuration.
+
+## 0.6.0-beta.0
+
+### Minor Changes
+
+- 68d2772: Align CLI requests with the Managed Agents and OMA API namespaces, and run daemon sessions through the shared managed runtime.
+
 ## 0.5.1
 
 ### Patch Changes

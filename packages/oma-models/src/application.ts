@@ -12,7 +12,7 @@ export class OmaModelsApplicationService implements OmaModelsApplicationPort {
 
   async listProviderModels(command: {
     provider: string;
-    apiKey: string;
+    apiKey?: string;
   }) {
     const result = await this.dependencies.catalog.list(command);
     if (result.type === "unsupported_provider") {

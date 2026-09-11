@@ -2,6 +2,7 @@ import type {
   ListProviderCatalogModelsResult,
   ProviderModelCatalogSourcePort,
 } from "@open-managed-agents/oma-models";
+import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
 
 export interface HttpFetchPort {
   fetch(input: string, init?: RequestInit): Promise<Response>;
@@ -12,13 +13,36 @@ export class HttpProviderModelCatalog implements ProviderModelCatalogSourcePort 
 
   async list(input: {
     provider: string;
-    apiKey: string;
+    apiKey?: string;
   }): Promise<ListProviderCatalogModelsResult> {
-    if (input.provider !== "ant" && input.provider !== "oai") {
+    const providerId = normalizeProviderId(input.provider);
+
+    // The SDK-first path reads Pi's built-in catalog and never receives a
+    // tenant credential. The old ant/oai + api_key path remains below as a
+    // compatibility-only live discovery lane.
+    if (!input.apiKey) {
+      const provider = builtinProviders().find((candidate) => candidate.id === providerId);
+      if (!provider) return { type: "unsupported_provider" };
+      return {
+        type: "success",
+        models: provider.getModels().map((model) => ({
+          id: model.id,
+          name: model.name,
+          provider: model.provider,
+          api: model.api,
+          reasoning: model.reasoning,
+          input: model.input,
+          context_window: model.contextWindow,
+          max_tokens: model.maxTokens,
+        })),
+      };
+    }
+
+    if (providerId !== "anthropic" && providerId !== "openai") {
       return { type: "unsupported_provider" };
     }
     try {
-      if (input.provider === "ant") {
+      if (providerId === "anthropic") {
         const response = await this.dependencies.fetch(
           "https://api.anthropic.com/v1/models?limit=100",
           {
@@ -77,4 +101,11 @@ export class HttpProviderModelCatalog implements ProviderModelCatalogSourcePort 
       };
     }
   }
+}
+
+function normalizeProviderId(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  if (normalized === "ant") return "anthropic";
+  if (normalized === "oai") return "openai";
+  return normalized;
 }

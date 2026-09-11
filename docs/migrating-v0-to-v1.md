@@ -60,6 +60,22 @@ keys are rejected before routing.
   `GET /v1/models`, `GET /v1/models/:id`, and
   `POST /v1/oma/models/list`.
 
+Model migration is SDK-first:
+
+- `GET /v1/models` represents active tenant Model Cards in the official
+  Managed Agents shape. Pi supplies display names, token limits, and the
+  conservative capability projection.
+- `POST /v1/oma/models/list` accepts an open Pi provider id and no longer
+  requires `api_key`. Supplying `api_key` remains a deprecated compatibility
+  branch for the old Anthropic/OpenAI live catalog.
+- Stored `ant`, `oai`, `ant-compatible`, and `oai-compatible` tags continue to
+  resolve. New cards should use Pi provider ids. A custom provider needs
+  `base_url` plus `pi_config.api`.
+- Agent `model.effort` and `model.speed` are runtime policy. They must not be
+  migrated into a Model Card. Pi normalizes effort; fast speed maps only where
+  Pi has an explicit Anthropic/OpenAI request control. `inference_geo` remains
+  round-trip-only and does not currently route requests.
+
 ## Lowest-risk first change
 
 Existing Agent, Environment, and Session persistence implementations already

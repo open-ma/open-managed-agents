@@ -161,7 +161,20 @@ Delete.
 
 ## Model Cards
 
-Per-tenant LLM credentials. Keys are AES-256-GCM-encrypted at rest under `PLATFORM_ROOT_SECRET` directly on the row (no Vault indirection). List responses surface only the last-4 preview.
+Model Cards are the tenant-scoped executable model registry. A card binds a
+stable handle (`model_id`) to a Pi provider, its wire-level model id, endpoint,
+metadata, and encrypted credential. Keys are AES-256-GCM-encrypted at rest
+under `PLATFORM_ROOT_SECRET`; list/retrieve responses surface only the preview.
+
+### The two model catalogs
+
+| Endpoint | Shape and purpose |
+|---|---|
+| `GET /v1/models` / `GET /v1/models/:id` | Official Managed Agents Model resources. Lists active Model Cards the tenant can execute. Display name, token limits, image/thinking/effort and strict-output capabilities are conservatively projected from Pi metadata. Provider credentials never appear. |
+| `POST /v1/oma/models/list` | OMA setup helper. Body `{ "provider": "deepseek" }` returns Pi's built-in catalog for that provider. The SDK-first path does not send provider credentials. Optional `api_key` is a deprecated 0.x compatibility path for Anthropic/OpenAI live discovery. |
+
+An unknown custom provider has no discoverable catalog. Create its Model Card
+directly with `base_url` and `pi_config.api`.
 
 ### `GET /v1/oma/model_cards`
 List configured model cards.
@@ -170,16 +183,50 @@ List configured model cards.
 Add a model card. Runs a 6-second capability probe so a bad key fails loudly. Body:
 ```json
 {
-  "model_id": "my-anthropic",
-  "provider": "ant",
-  "model": "claude-sonnet-4-6",
-  "base_url": "https://api.anthropic.com",
+  "model_id": "deepseek-fast",
+  "provider": "deepseek",
+  "model": "deepseek-v4-flash",
   "custom_headers": { "x-extra": "..." },
-  "api_key": "sk-ant-..."
+  "api_key": "sk-...",
+  "pi_config": { "reasoning": true }
 }
 ```
 
-`provider` is one of `ant` | `ant-compatible` | `oai` | `oai-compatible`. `model_id` is the string an agent sets as `agent.model = "<model_id>"` to bind this card.
+`provider` is an open Pi provider id, not an OpenMA enum. Pi built-ins include
+`anthropic`, `openai`, `deepseek`, `openrouter`, `google`, `minimax`, and more.
+Legacy aliases `ant`, `oai`, `ant-compatible`, and `oai-compatible` remain
+accepted. `model_id` is the handle used in the official Agent model:
+
+```json
+{
+  "model": {
+    "id": "deepseek-fast",
+    "effort": { "type": "high" },
+    "speed": "standard",
+    "inference_geo": "us"
+  }
+}
+```
+
+These controls belong to the Agent version, not the Model Card. A Session pins
+an Agent version and inherits them:
+
+| Field | Runtime mapping |
+|---|---|
+| `effort` | Pi `thinkingLevel`. Pi normalizes a requested level to the nearest level the resolved model supports. |
+| `speed: "standard"` | Leaves Pi/provider defaults unchanged. |
+| `speed: "fast"` | Anthropic fast mode (`speed: fast` plus its beta header), or OpenAI priority service tier. Other Pi APIs return an explicit unsupported error. |
+| `inference_geo` | Validated, stored, versioned, and returned; currently ignored by runtime routing. |
+
+`pi_config` accepts Pi's serializable Model metadata (`name`, `api`,
+`reasoning`, `thinkingLevelMap`, `input`, `cost`, `contextWindow`, `maxTokens`,
+`samplingParams`, `headers`, and `compat`). It cannot override card identity,
+provider, wire model, endpoint, or credential. Custom providers must specify
+`pi_config.api` so Pi can select a protocol implementation.
+
+Create returns a `probe` result. The current bounded live probe covers the
+legacy Anthropic/OpenAI protocols. `{"ok":null,"reason":"unsupported_provider"}`
+means the probe was skipped; it is not a Pi runtime rejection.
 
 ### `POST /v1/oma/model_cards/:id`
 Rotate the api_key, base_url, headers, or default model. Body shape matches `POST`. In-flight sessions keep the cached key until next credential resolve.

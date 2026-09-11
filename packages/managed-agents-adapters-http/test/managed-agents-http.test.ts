@@ -14,10 +14,36 @@ import {
 import {
   managedAgentsHttpHandlerPort,
   managedAgentsHttpModule,
+  buildOmaModelsHttpRoutes,
   omaModelsHttpModule,
 } from "../src/index";
 
 describe("Managed Agents HTTP adapter module", () => {
+  it("preinstalls the same credential-free Pi catalog route for platform entrypoints", async () => {
+    const routes = buildOmaModelsHttpRoutes({
+      fetch: async () => {
+        throw new Error("provider credentials must not be proxied");
+      },
+    });
+
+    const response = await routes.request("/list", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: "deepseek" }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({
+      data: expect.arrayContaining([
+        expect.objectContaining({
+          id: "deepseek-v4-flash",
+          provider: "deepseek",
+          api: "openai-completions",
+        }),
+      ]),
+    });
+  });
+
   it("mounts official and OMA model APIs without sharing their namespace", async () => {
     const model = {
       id: "claude-opus-5",

@@ -26,6 +26,7 @@ import {
   type PiCompactionPolicy,
   type PiCompactionResult,
 } from "./pi-compaction";
+import { withPiRuntimeRequestOptions } from "./pi-provider";
 
 const EMPTY_USAGE: Usage = {
   input: 0,
@@ -114,18 +115,16 @@ export class PiHarness implements HarnessInterface {
         model: ctx.pi!.model,
         messages,
         tools: toolsToPi(ctx),
-        // `model.reasoning` describes capability, not user intent. Managed
-        // Agents effort is opt-in; an omitted effort must remain non-thinking.
-        // Pi owns provider-specific validation and maps the portable effort to
-        // the concrete request payload.
-        thinkingLevel:
-          typeof ctx.agent.model === "object"
-            ? (ctx.agent.model.effort ?? "off")
-            : "off",
+        // The tenant runtime maps effort to the model's supported Pi level.
+        thinkingLevel: ctx.pi!.thinkingLevel,
       },
       sessionId: ctx.session_id,
       streamFn: (model, context, options) =>
-        ctx.pi!.models.streamSimple(model, context, options),
+        ctx.pi!.models.streamSimple(
+          model,
+          context,
+          withPiRuntimeRequestOptions(ctx.pi!, options),
+        ),
       toolExecution: "parallel",
     });
 
@@ -174,6 +173,9 @@ export class PiHarness implements HarnessInterface {
         runtime: ctx.runtime,
         sessionId: ctx.session_id,
         abortSignal: ctx.runtime.abortSignal,
+        requestOptions: withPiRuntimeRequestOptions(ctx.pi, {
+          ...(ctx.pi.thinkingLevel === "off" ? {} : { reasoning: ctx.pi.thinkingLevel }),
+        }),
       });
       return this.persistCompaction(result, ctx);
     } catch (error) {

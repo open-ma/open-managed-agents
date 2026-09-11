@@ -100,7 +100,7 @@
     "db:check": "pnpm db:check:cf-auth && pnpm db:check:cf-integrations && pnpm db:check:cf-router && pnpm db:check:node-pg && pnpm db:check:node-sqlite",
     "changeset": "changeset",
     "version-packages": "changeset version",
-    "release": "pnpm -r --filter='@openma/*' build && changeset publish",
+    "release": "pnpm -r --filter='@openma/*' build && node scripts/publish-changesets.mjs",
     "audit:openai-agents": "pnpm --filter @open-managed-agents/openai-agents-sdk-audit run audit",
     "test:openai-agents": "pnpm run audit:openai-agents && pnpm --filter @open-managed-agents/openai-agents-sdk-audit test && pnpm --filter @open-managed-agents/openai-agents-api test && pnpm --filter @open-managed-agents/openai-agents-api typecheck && pnpm --filter @open-managed-agents/openai-agents-compat test && pnpm --filter @open-managed-agents/openai-agents-compat typecheck",
     "test:openai-agents:node": "pnpm --filter @open-managed-agents/main-node test test/openai test/acp-subagents-openai.test.ts test/managed-host-tool-errors.test.ts test/managed-session-subagents.test.ts",

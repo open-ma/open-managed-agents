@@ -94,6 +94,7 @@ import {
 import {
   createCloudflareManagedAgentsApp,
 } from "@open-managed-agents/platform-cloudflare";
+import { buildOmaModelsHttpRoutes } from "@open-managed-agents/managed-agents-adapters-http";
 import type { CredentialDocumentCipher } from "@open-managed-agents/credential-store-sql";
 import type { DeploymentResourceSecretCipher } from "@open-managed-agents/deployment-store-sql";
 import type { EnvironmentWorkSecretCipher } from "@open-managed-agents/environment-work-store-sql";
@@ -171,7 +172,6 @@ import dreamsRoutes from "./routes/dreams";
 import legacyFilesRoutes from "./routes/files";
 import legacySkillsRoutes from "./routes/skills";
 import modelCardsRoutes from "./routes/model-cards";
-import modelsRoutes from "./routes/models";
 import clawhubRoutes from "./routes/clawhub";
 import evalsRoutes from "./routes/evals";
 import costReportRoutes from "./routes/cost-report";
@@ -1305,7 +1305,9 @@ app.route("/v1/models", managedModelsRoutes);
 app.route("/v1/files", managedFilesRoutes);
 app.route("/v1/oma/files", legacyFilesRoutes);
 app.route("/v1/oma/skills", legacySkillsRoutes);
-app.route("/v1/oma/models", modelsRoutes);
+app.route("/v1/oma/models", buildOmaModelsHttpRoutes({
+  fetch: (input, init) => fetch(input, init),
+}));
 app.route("/v1/oma/stats", statsRoutes);
 
 // Billing-API proxy needs the session-resolved tenant_id, so it must

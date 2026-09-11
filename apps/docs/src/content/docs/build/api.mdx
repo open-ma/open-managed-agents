@@ -47,6 +47,22 @@ export OMA_API_KEY="oma_..."
 
 A full endpoint-by-endpoint reference lives at [Reference → API Endpoints](/reference/api/).
 
+## Models, Pi, and runtime controls
+
+`GET /v1/models` is the official Managed Agents catalog and lists the active
+Model Cards executable by the current tenant. `POST /v1/oma/models/list` is a
+separate setup helper that lists models known by a Pi provider; it accepts a Pi
+provider id and does not require a provider credential on the SDK-first path.
+
+An Agent references a card by `model.id`. `model.effort` is normalized through
+Pi's supported thinking levels, while `model.speed=fast` maps to Anthropic fast
+mode or OpenAI priority service tier. `model.inference_geo` is round-tripped in
+the official shape but does not currently affect region routing. All three are
+Agent-version settings inherited by Sessions, not Model Card configuration.
+
+See [API Endpoints → Model Cards](/reference/api/#model-cards) for Pi built-in
+and custom provider rules, `pi_config`, and probe semantics.
+
 ## Common patterns
 
 ### Create an agent

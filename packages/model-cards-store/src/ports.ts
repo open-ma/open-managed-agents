@@ -28,6 +28,7 @@ export interface NewModelCardInput {
   model: string;
   baseUrl: string | null;
   customHeaders: Record<string, string> | null;
+  piConfig: Record<string, unknown> | null;
   apiKeyCipher: string;
   apiKeyPreview: string;
   /**
@@ -46,6 +47,7 @@ export interface ModelCardUpdateFields {
   model?: string;
   baseUrl?: string | null;
   customHeaders?: Record<string, string> | null;
+  piConfig?: Record<string, unknown> | null;
   /** New ciphertext when the api_key is rotated. Pair with `apiKeyPreview`. */
   apiKeyCipher?: string;
   apiKeyPreview?: string;

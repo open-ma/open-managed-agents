@@ -24,7 +24,10 @@ import type {
 } from "@earendil-works/pi-ai";
 import { Type } from "@earendil-works/pi-ai";
 import type { Api } from "@earendil-works/pi-ai";
-import type { PiModelRuntime } from "./pi-provider";
+import {
+  withPiRuntimeRequestOptions,
+  type PiModelRuntime,
+} from "./pi-provider";
 
 /**
  * Present a Pi provider/model pair as the AI SDK model consumed by
@@ -51,7 +54,7 @@ async function generateWithPi(
   const message = await runtime.models.completeSimple(
     runtime.model,
     toPiContext(options, runtime.model),
-    toPiStreamOptions(options),
+    toPiStreamOptions(runtime, options),
   );
   if (message.stopReason === "error" || message.stopReason === "aborted") {
     throw new Error(message.errorMessage ?? `Pi model stopped with ${message.stopReason}`);
@@ -80,7 +83,7 @@ async function streamWithPi(
   const piStream = runtime.models.streamSimple(
     runtime.model,
     toPiContext(options, runtime.model),
-    toPiStreamOptions(options, abortController.signal),
+    toPiStreamOptions(runtime, options, abortController.signal),
   );
   const iterator = piStream[Symbol.asyncIterator]();
   const warnings = collectWarnings(options);
@@ -259,6 +262,7 @@ function toPiTools(
 }
 
 function toPiStreamOptions(
+  runtime: PiModelRuntime,
   options: LanguageModelV3CallOptions,
   signal = options.abortSignal,
 ): SimpleStreamOptions {
@@ -271,14 +275,17 @@ function toPiStreamOptions(
     ...(options.stopSequences ? { stop: options.stopSequences } : {}),
     ...(options.seed !== undefined ? { seed: options.seed } : {}),
   };
-  return {
+  return withPiRuntimeRequestOptions(runtime, {
     ...piOptions,
+    ...(piOptions.reasoning === undefined && runtime.thinkingLevel !== "off"
+      ? { reasoning: runtime.thinkingLevel }
+      : {}),
     ...(signal ? { signal } : {}),
     ...(options.temperature !== undefined ? { temperature: options.temperature } : {}),
     ...(options.maxOutputTokens !== undefined ? { maxTokens: options.maxOutputTokens } : {}),
     ...(Object.keys(samplingParams).length > 0 ? { samplingParams } : {}),
     toolChoice: options.toolChoice?.type === "none" ? "none" : "auto",
-  };
+  });
 }
 
 function toAiSdkStreamParts(event: AssistantMessageEvent): LanguageModelV3StreamPart[] {
@@ -337,11 +344,16 @@ function toAiSdkStreamParts(event: AssistantMessageEvent): LanguageModelV3Stream
         finishReason: toFinishReason(event.reason, event.message.rawStopReason),
         providerMetadata: piMessageMetadata(event.message),
       }];
-    case "error":
+    case "error": {
+      const message = event.error.errorMessage ?? `Pi model stopped with ${event.reason}`;
       return [{
         type: "error",
-        error: new Error(event.error.errorMessage ?? `Pi model stopped with ${event.reason}`),
+        // LanguageModelV3 accepts `unknown` here. Preserve Pi's string rather
+        // than wrapping it in Error: Errors serialize as `{}` in our R2/event
+        // diagnostics and erase the upstream provider message.
+        error: message,
       }];
+    }
   }
 }
 

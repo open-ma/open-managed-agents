@@ -1,6 +1,6 @@
 {
   "name": "@openma/sdk",
-  "version": "0.1.0",
+  "version": "1.0.0-beta.1",
   "description": "OpenMA composition SDK: the official Anthropic Managed Agents client plus typed OpenMA extensions.",
   "type": "module",
   "main": "./dist/index.js",
@@ -49,6 +49,7 @@
     "url": "https://github.com/openma-ai/open-managed-agents/issues"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
     "@anthropic-ai/sdk": "0.120.0"
   },
   "devDependencies": {

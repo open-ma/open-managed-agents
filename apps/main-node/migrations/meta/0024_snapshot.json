@@ -1,6 +1,6 @@
 {
-  "id": "d1ef2a11-f213-4eec-a25c-b4dba3724890",
-  "prevId": "f3483428-2af8-4c74-bb0a-b8d9f1050075",
+  "id": "915d9884-8ead-4c81-be46-7e6076d5e658",
+  "prevId": "39944aa8-5254-4d22-880b-f9f7a8a5eb18",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
@@ -1303,13 +1303,6 @@
           "type": "text",
           "primaryKey": false,
           "notNull": false
-        },
-        "claim_generation": {
-          "name": "claim_generation",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
         },
         "heartbeat_ttl_seconds": {
           "name": "heartbeat_ttl_seconds",
@@ -4216,6 +4209,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": "''"
+        },
+        "pi_config": {
+          "name": "pi_config",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {

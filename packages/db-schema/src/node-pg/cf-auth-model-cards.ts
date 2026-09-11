@@ -17,6 +17,7 @@ export const model_cards = pgTable(
     provider: text("provider").notNull(),
     base_url: text("base_url"),
     custom_headers: text("custom_headers"),
+    pi_config: text("pi_config"),
     api_key_cipher: text("api_key_cipher").notNull(),
     api_key_preview: text("api_key_preview").notNull(),
     // Integer flag (NOT boolean) to mirror CF / source SQL.

@@ -191,7 +191,7 @@ open-managed-agents/
 | `harness/tools.ts` (51 KB) | bash / read / write / edit / glob / grep / web_fetch / web_search + 派生 mcp_*、call_agent_* |
 | `harness/browser-tools.ts` | 由 Browser Rendering 暴露的 navigate / click / extract |
 | `harness/skills.ts` | 把 skill 文件挂到 `/home/user/.skills/`，并把 prompt 拼进 system |
-| `harness/provider.ts` | 模型解析（anthropic / openai / 自定义 base_url） |
+| `harness/pi-provider.ts` | 通过 Pi 解析官方/自定义 provider、Model Card 元数据、effort 与 speed 请求控制 |
 | `harness/outcome-evaluator.ts` | LLM-as-judge：根据 rubric 判定 satisfied / needs_revision |
 | `harness/acp-translate.ts` + `acp-proxy-loop.ts` | ACP 协议 ⇄ SessionEvent 互译，把 agent loop 委派到本地 Claude Code |
 
@@ -546,7 +546,7 @@ Linear webhook  ──▶  apps/integrations /linear/webhook
 | 接入新第三方平台 | 新建 `packages/<provider>/` 实现 `integrations-core` ports；在 `apps/integrations/wire.ts` 注册；加 `routes/<provider>/` | `docs/linear-integration-design.md` |
 | 改用自托管 Postgres | 新增 `buildNodeServices`；改 `apps/main/src/index.ts` 工厂调用 | `packages/services/README.md` |
 | 让 agent 跑在用户机器 | 已支持：用户 `oma bridge setup && bridge daemon`；agent 配置 `harness: "acp-proxy"` | `docs/archive/external-agent-runtime.md` |
-| 训练自有模型 | 用 `rl/cli.ts rollout` + `rl/verl/verl_trainer.py`；`provider.ts` 已支持 `oai-compatible` 指向 vLLM | `rl/README.md`、`docs/trajectory-v1-spec.md` |
+| 训练自有模型 | 用 `rl/cli.ts rollout` + `rl/verl/verl_trainer.py`；Model Card 以自定义 provider + `pi_config.api=openai-completions` 指向 vLLM | `rl/README.md`、`docs/trajectory-v1-spec.md` |
 
 ## 9. 小结
 

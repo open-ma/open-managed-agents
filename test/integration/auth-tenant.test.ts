@@ -171,6 +171,7 @@ describe("model cards", () => {
   let cardId: string;
 
   it("creates a model card", async () => {
+    mockInvalidProviderKey("https://api.anthropic.com/");
     const res = await api("/v1/oma/model_cards", {
       method: "POST",
       headers: HEADERS,
@@ -187,26 +188,43 @@ describe("model cards", () => {
     expect(body.model).toBe("claude-sonnet-4-6");
     expect(body.provider).toBe("ant");
     expect(body.api_key_preview).toBe("7890");
+    expect(body.probe).toEqual(expect.objectContaining({ ok: false }));
     // Full key should NOT be in response
     expect(body.api_key).toBeUndefined();
     cardId = body.id;
   });
 
   it("creates a model card with custom headers", async () => {
+    const piConfig = {
+      reasoning: true,
+      contextWindow: 262144,
+      maxTokens: 65536,
+      thinkingLevelMap: { low: "low", high: "high" },
+    };
     const res = await api("/v1/oma/model_cards", {
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({
-        provider: "oai-compatible",
+        provider: "deepseek",
         model_id: "deepseek-chat",
         api_key: "sk-test-deepseek",
         base_url: "https://api.deepseek.com/v1",
         custom_headers: { "X-Project-Id": "proj_123" },
+        pi_config: piConfig,
       }),
     });
     expect(res.status).toBe(201);
     const body = await res.json();
     expect(body.custom_headers).toEqual({ "X-Project-Id": "proj_123" });
+    expect(body.pi_config).toEqual(piConfig);
+
+    const filtered = await api("/v1/oma/model_cards?provider=deepseek", {
+      headers: HEADERS,
+    });
+    expect(filtered.status).toBe(200);
+    expect((await filtered.json()).data).toEqual([
+      expect.objectContaining({ model_id: "deepseek-chat", provider: "deepseek" }),
+    ]);
   });
 
   it("lists model cards without exposing keys", async () => {
@@ -298,15 +316,22 @@ describe("provider resolution", () => {
 // ============================================================
 
 describe("models list endpoint", () => {
-  it("rejects when no api_key provided", async () => {
+  it("lists the Pi catalog when no api_key is provided", async () => {
     const res = await api("/v1/oma/models/list", {
       method: "POST",
       headers: HEADERS,
       body: JSON.stringify({ provider: "ant" }),
     });
-    expect(res.status).toBe(400);
-    const body = await res.json();
-    expect(body.error?.message ?? body.error).toContain("api_key");
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      data?: Array<{ id?: string; provider?: string }>;
+    };
+    expect(body.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: expect.any(String),
+        provider: "anthropic",
+      }),
+    ]));
   });
 
   it("returns 502 for invalid Anthropic key", async () => {

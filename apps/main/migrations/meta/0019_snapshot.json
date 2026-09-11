@@ -1,7 +1,7 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "3a95b61d-8196-4b4b-ba57-a79d79e6132d",
+  "id": "7f844209-f096-4b24-afaf-9f06d81c11c0",
   "prevId": "90a038b1-6496-4159-a5e9-4c4716808bb5",
   "tables": {
     "account": {
@@ -3391,6 +3391,13 @@
           "notNull": false,
           "autoincrement": false
         },
+        "pi_config": {
+          "name": "pi_config",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
+        },
         "api_key_cipher": {
           "name": "api_key_cipher",
           "type": "text",
@@ -4291,21 +4298,6 @@
           "notNull": true,
           "autoincrement": false
         },
-        "credential_type": {
-          "name": "credential_type",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": "'workspace'"
-        },
-        "environment_id": {
-          "name": "environment_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
         "created_at": {
           "name": "created_at",
           "type": "integer",
@@ -4391,190 +4383,6 @@
             "key"
           ],
           "name": "kv_entries_tenant_id_key_pk"
-        }
-      },
-      "uniqueConstraints": {},
-      "checkConstraints": {}
-    },
-    "managed_session_executions": {
-      "name": "managed_session_executions",
-      "columns": {
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "lane_id": {
-          "name": "lane_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "admitted_at_ms": {
-          "name": "admitted_at_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "events_json": {
-          "name": "events_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "events_fingerprint": {
-          "name": "events_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "attempt_id": {
-          "name": "attempt_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "owner_id": {
-          "name": "owner_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "generation": {
-          "name": "generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "attempt_count": {
-          "name": "attempt_count",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
-        },
-        "max_attempts": {
-          "name": "max_attempts",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 10
-        },
-        "deadline_at_ms": {
-          "name": "deadline_at_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false
-        },
-        "claimed_at_ms": {
-          "name": "claimed_at_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "lease_expires_at_ms": {
-          "name": "lease_expires_at_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "interrupt_requested_at_ms": {
-          "name": "interrupt_requested_at_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "settled_at_ms": {
-          "name": "settled_at_ms",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "failure": {
-          "name": "failure",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false,
-          "autoincrement": false
-        },
-        "revision": {
-          "name": "revision",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 1
-        }
-      },
-      "indexes": {
-        "managed_session_executions_claim_idx": {
-          "name": "managed_session_executions_claim_idx",
-          "columns": [
-            "state",
-            "lease_expires_at_ms",
-            "admitted_at_ms",
-            "id"
-          ],
-          "isUnique": false
-        },
-        "managed_session_executions_session_idx": {
-          "name": "managed_session_executions_session_idx",
-          "columns": [
-            "workspace_id",
-            "session_id",
-            "lane_id",
-            "admitted_at_ms",
-            "id"
-          ],
-          "isUnique": false
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "managed_session_executions_workspace_id_id_pk": {
-          "columns": [
-            "workspace_id",
-            "id"
-          ],
-          "name": "managed_session_executions_workspace_id_id_pk"
         }
       },
       "uniqueConstraints": {},

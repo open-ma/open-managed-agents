@@ -40,6 +40,8 @@ export interface ModelCardRow {
   base_url: string | null;
   /** Optional extra HTTP headers (used by *-compatible providers). NULL when unset. */
   custom_headers: Record<string, string> | null;
+  /** Pi-native serializable model configuration. NULL uses catalog defaults. */
+  pi_config: Record<string, unknown> | null;
   /** Last-4 of the api key, safe to surface in API responses. */
   api_key_preview: string;
   is_default: boolean;

@@ -6,10 +6,13 @@ export interface ModelCard {
   model_id: string;
   /** LLM string sent to the provider on each turn (e.g. "claude-sonnet-4-6"). */
   model: string;
-  provider: string;             // API compat: "ant" | "oai" | "ant-compatible" | "oai-compatible"
+  /** Pi provider id. Legacy ant/oai aliases remain accepted. */
+  provider: string;
   api_key_preview?: string; // last 4 chars only, for display
   base_url?: string;        // custom base URL (compatible providers)
   custom_headers?: Record<string, string>; // custom HTTP headers (compatible providers)
+  /** Pi-native serializable Model fields for custom/catalog overrides. */
+  pi_config?: Record<string, unknown>;
   is_default?: boolean;
   created_at: string;
   updated_at?: string;

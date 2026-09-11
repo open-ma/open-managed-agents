@@ -11,6 +11,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@earendil-works/pi-ai": "0.84.4",
     "@open-managed-agents/app": "workspace:*",
     "@open-managed-agents/managed-agents-application": "workspace:*",
     "@open-managed-agents/session-runtime-contract": "workspace:*",

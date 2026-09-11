@@ -197,11 +197,17 @@ try {
       }
       const events = streamed.events;
       const types = events.map(({ type }) => type);
-      assert.ok(
-        types.includes("agent.message"),
-        `received: ${JSON.stringify(events)}`,
-      );
-      assert.ok(types.includes("session.status_idle"), `received: ${types.join(", ")}`);
+      const diagnostic = JSON.stringify(events);
+      assert.ok(types.includes("agent.message"), `received: ${diagnostic}`);
+      assert.ok(types.includes("session.status_idle"), `received: ${diagnostic}`);
+      const reply = events
+        .filter((event) => event.type === "agent.message")
+        .flatMap((event) => event.content)
+        .filter((part) => part.type === "text")
+        .map((part) => part.text)
+        .join("")
+        .trim();
+      assert.equal(reply, "E2E_OK", `received: ${diagnostic}`);
     });
   } else {
     console.log("  ↷ real turn skipped (set OMA_E2E_RUN_TURN=1 to enable)");

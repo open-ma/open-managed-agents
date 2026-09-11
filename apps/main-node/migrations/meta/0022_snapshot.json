@@ -1,5 +1,5 @@
 {
-  "id": "ea3f85f9-e340-4890-9177-776ab7bfaa0b",
+  "id": "896def92-befd-41a6-8407-fa5756216e81",
   "prevId": "3036fe75-cf12-4b5c-9e9a-b3d14a311dc3",
   "version": "7",
   "dialect": "postgresql",
@@ -4162,6 +4162,12 @@
         },
         "custom_headers": {
           "name": "custom_headers",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "pi_config": {
+          "name": "pi_config",
           "type": "text",
           "primaryKey": false,
           "notNull": false
@@ -9243,192 +9249,6 @@
           "name": "session_threads_session_id_id_pk",
           "columns": [
             "session_id",
-            "id"
-          ]
-        }
-      },
-      "uniqueConstraints": {},
-      "policies": {},
-      "checkConstraints": {},
-      "isRLSEnabled": false
-    },
-    "public.managed_session_executions": {
-      "name": "managed_session_executions",
-      "schema": "",
-      "columns": {
-        "workspace_id": {
-          "name": "workspace_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "session_id": {
-          "name": "session_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "id": {
-          "name": "id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "admitted_at_ms": {
-          "name": "admitted_at_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "events_json": {
-          "name": "events_json",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "events_fingerprint": {
-          "name": "events_fingerprint",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "state": {
-          "name": "state",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "attempt_id": {
-          "name": "attempt_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "owner_id": {
-          "name": "owner_id",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "generation": {
-          "name": "generation",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 0
-        },
-        "claimed_at_ms": {
-          "name": "claimed_at_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "lease_expires_at_ms": {
-          "name": "lease_expires_at_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "interrupt_requested_at_ms": {
-          "name": "interrupt_requested_at_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "settled_at_ms": {
-          "name": "settled_at_ms",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "failure": {
-          "name": "failure",
-          "type": "text",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "revision": {
-          "name": "revision",
-          "type": "bigint",
-          "primaryKey": false,
-          "notNull": true,
-          "default": 1
-        }
-      },
-      "indexes": {
-        "managed_session_executions_claim_idx": {
-          "name": "managed_session_executions_claim_idx",
-          "columns": [
-            {
-              "expression": "state",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "lease_expires_at_ms",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "admitted_at_ms",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "managed_session_executions_session_idx": {
-          "name": "managed_session_executions_session_idx",
-          "columns": [
-            {
-              "expression": "workspace_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "session_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "admitted_at_ms",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            },
-            {
-              "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        }
-      },
-      "foreignKeys": {},
-      "compositePrimaryKeys": {
-        "managed_session_executions_workspace_id_id_pk": {
-          "name": "managed_session_executions_workspace_id_id_pk",
-          "columns": [
-            "workspace_id",
             "id"
           ]
         }

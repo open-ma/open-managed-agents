@@ -28,6 +28,7 @@ function toApiShape(card: ModelCardRow) {
     api_key_preview: card.api_key_preview,
     base_url: card.base_url ?? undefined,
     custom_headers: card.custom_headers ?? undefined,
+    pi_config: card.pi_config ?? undefined,
     is_default: card.is_default,
     created_at: card.created_at,
     updated_at: card.updated_at ?? undefined,
@@ -134,11 +135,18 @@ app.post("/", async (c) => {
     api_key: string;
     base_url?: string;
     custom_headers?: Record<string, string>;
+    pi_config?: Record<string, unknown>;
     is_default?: boolean;
   }>();
 
   if (!body.model_id || !body.provider || !body.api_key) {
     return c.json({ error: "model_id, provider, and api_key are required" }, 400);
+  }
+  if (
+    body.pi_config !== undefined
+    && (body.pi_config === null || typeof body.pi_config !== "object" || Array.isArray(body.pi_config))
+  ) {
+    return c.json({ error: "pi_config must be a JSON object" }, 400);
   }
   try {
     const card = await c.var.services.modelCards.create({
@@ -149,6 +157,7 @@ app.post("/", async (c) => {
       apiKey: body.api_key,
       baseUrl: body.base_url ?? null,
       customHeaders: body.custom_headers ?? null,
+      piConfig: body.pi_config ?? null,
       makeDefault: !!body.is_default,
     });
     // Probe the model with a minimal request so the user finds out NOW
@@ -174,30 +183,10 @@ app.post("/", async (c) => {
 
 // GET /v1/oma/model_cards — list (cursor-paginated)
 app.get("/", async (c) => {
-  // provider: enum filter. Whitelist strictly — any unknown value is a
-  // 400, NOT a silent fallback to "all". The enum mirrors what the
-  // Console + agent worker recognize (api-types/src/types.ts:9).
-  // Allowing arbitrary strings here would mask client bugs (typo'd
-  // "ant " returning nothing looks like "no rows for that provider").
+  // Pi provider ids are open: built-ins and custom providers share the
+  // same exact-match filter. OpenMA does not own an enum here.
   const providerRaw = c.req.query("provider");
-  const PROVIDERS = ["ant", "ant-compatible", "oai", "oai-compatible"] as const;
-  let provider: (typeof PROVIDERS)[number] | undefined;
-  if (providerRaw !== undefined) {
-    if ((PROVIDERS as readonly string[]).includes(providerRaw)) {
-      provider = providerRaw as (typeof PROVIDERS)[number];
-    } else {
-      return c.json(
-        {
-          error: {
-            type: "invalid_request_error",
-            code: "invalid_provider",
-            message: `Invalid provider '${providerRaw}'; expected one of ${PROVIDERS.join("|")}.`,
-          },
-        },
-        400,
-      );
-    }
-  }
+  const provider = providerRaw?.trim() || undefined;
 
   // created_after / created_before: ISO timestamps → epoch ms. Reject
   // unparseable values explicitly so the client knows it's a malformed
@@ -269,8 +258,16 @@ app.post("/:id", async (c) => {
     api_key?: string;
     base_url?: string | null;
     custom_headers?: Record<string, string> | null;
+    pi_config?: Record<string, unknown> | null;
     is_default?: boolean;
   }>();
+  if (
+    body.pi_config !== undefined
+    && body.pi_config !== null
+    && (typeof body.pi_config !== "object" || Array.isArray(body.pi_config))
+  ) {
+    return c.json({ error: "pi_config must be a JSON object or null" }, 400);
+  }
   try {
     const updated = await c.var.services.modelCards.update({
       tenantId: t,
@@ -285,6 +282,7 @@ app.post("/:id", async (c) => {
       customHeaders: body.custom_headers === undefined
         ? undefined
         : (body.custom_headers || null),
+      piConfig: body.pi_config,
       apiKey: body.api_key,
       isDefault: body.is_default,
     });

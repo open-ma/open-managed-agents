@@ -11,6 +11,7 @@ describe("SqlModelCardRepo PostgreSQL rows", () => {
       provider: "oai-compatible",
       base_url: null,
       custom_headers: null,
+      pi_config: null,
       api_key_cipher: "cipher",
       api_key_preview: "last",
       is_default: "1",

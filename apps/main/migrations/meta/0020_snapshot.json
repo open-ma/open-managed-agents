@@ -1,8 +1,8 @@
 {
   "version": "6",
   "dialect": "sqlite",
-  "id": "dbc16b14-7f35-45c0-b45f-40467fb371e2",
-  "prevId": "3a95b61d-8196-4b4b-ba57-a79d79e6132d",
+  "id": "964f24d3-20bf-4a92-ad6d-ef67f37cb2b8",
+  "prevId": "7f844209-f096-4b24-afaf-9f06d81c11c0",
   "tables": {
     "account": {
       "name": "account",
@@ -1146,14 +1146,6 @@
           "primaryKey": false,
           "notNull": false,
           "autoincrement": false
-        },
-        "claim_generation": {
-          "name": "claim_generation",
-          "type": "integer",
-          "primaryKey": false,
-          "notNull": true,
-          "autoincrement": false,
-          "default": 0
         },
         "heartbeat_ttl_seconds": {
           "name": "heartbeat_ttl_seconds",
@@ -3449,6 +3441,13 @@
           "notNull": true,
           "autoincrement": false,
           "default": "''"
+        },
+        "pi_config": {
+          "name": "pi_config",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false,
+          "autoincrement": false
         }
       },
       "indexes": {

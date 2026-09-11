@@ -99,6 +99,75 @@ describe("OpenMA SDK composition facade", () => {
     expect(requests[0]!.headers.get("x-active-tenant")).toBe("tn_console");
   });
 
+  it("uses Pi provider ids and does not require forwarding provider credentials", async () => {
+    let captured: Request | undefined;
+    const client = new OpenMA({
+      apiKey: "oma_test_key",
+      baseURL: "https://openma.test",
+      maxRetries: 0,
+      fetch: async (input, init) => {
+        captured = input instanceof Request
+          ? new Request(input, init)
+          : new Request(input.toString(), init);
+        return jsonResponse({ data: [] });
+      },
+    });
+
+    await client.oma.models.list({ provider: "deepseek" });
+
+    expect(await captured!.json()).toEqual({ provider: "deepseek" });
+  });
+
+  it("provides typed Model Card CRUD on the OMA lane", async () => {
+    const requests: Request[] = [];
+    const client = new OpenMA({
+      apiKey: "oma_test_key",
+      baseURL: "https://openma.test",
+      maxRetries: 0,
+      fetch: async (input, init) => {
+        const request = input instanceof Request
+          ? new Request(input, init)
+          : new Request(input.toString(), init);
+        requests.push(request);
+        return jsonResponse({
+          id: "mcard_1",
+          model_id: "deepseek-fast",
+          model: "deepseek-v4-flash",
+          provider: "deepseek",
+          api_key_preview: "sk-...1234",
+          pi_config: { reasoning: true },
+          is_default: true,
+          created_at: "2026-09-02T00:00:00.000Z",
+          archived_at: null,
+        }, request.method === "POST" && new URL(request.url).pathname.endsWith("model_cards") ? 201 : 200);
+      },
+    });
+    const modelCards = client.oma.modelCards;
+
+    expect(modelCards).toBeDefined();
+    await modelCards.create({
+      model_id: "deepseek-fast",
+      model: "deepseek-v4-flash",
+      provider: "deepseek",
+      api_key: "sk-tenant-secret",
+      pi_config: { reasoning: true },
+    });
+    await modelCards.retrieve("mcard_1");
+    await modelCards.update("mcard_1", { pi_config: { reasoning: false } });
+    await modelCards.delete("mcard_1");
+
+    expect(requests.map((request) => [request.method, new URL(request.url).pathname]))
+      .toEqual([
+        ["POST", "/v1/oma/model_cards"],
+        ["GET", "/v1/oma/model_cards/mcard_1"],
+        ["POST", "/v1/oma/model_cards/mcard_1"],
+        ["DELETE", "/v1/oma/model_cards/mcard_1"],
+      ]);
+    expect(JSON.stringify(await requests[0]!.clone().json())).toContain(
+      "deepseek-v4-flash",
+    );
+  });
+
   it("keeps official SDK errors on the OMA lane", async () => {
     const client = new OpenMA({
       apiKey: "oma_test_key",

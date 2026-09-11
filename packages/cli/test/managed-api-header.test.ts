@@ -142,6 +142,102 @@ describe("Managed Agents CLI transport", () => {
     expect(result.stdout).toContain("Session created: session_123");
   });
 
+  it("chats by subscribing to the official event stream before sending a user event", async () => {
+    let streamURL: URL | undefined;
+    let streamResponse: Parameters<Parameters<typeof createServer>[0]>[1] | undefined;
+    let sentBody: unknown;
+    const baseURL = await listen((request, response) => {
+      const url = new URL(request.url ?? "/", "http://127.0.0.1");
+      if (
+        request.method === "GET"
+        && url.pathname === "/v1/sessions/session_123/events/stream"
+      ) {
+        streamURL = url;
+        streamResponse = response;
+        response.writeHead(200, {
+          "content-type": "text/event-stream; charset=utf-8",
+          "cache-control": "no-cache",
+        });
+        response.flushHeaders();
+        return;
+      }
+
+      if (
+        request.method === "POST"
+        && url.pathname === "/v1/sessions/session_123/events"
+      ) {
+        let raw = "";
+        request.on("data", (chunk) => raw += chunk);
+        request.on("end", () => {
+          sentBody = JSON.parse(raw);
+          response.writeHead(200, { "content-type": "application/json" });
+          response.end(JSON.stringify({
+            data: [{
+              id: "event_user_01",
+              type: "user.message",
+              content: [{ type: "text", text: "Reply exactly E2E_OK." }],
+              processed_at: "2026-09-01T00:00:00.000Z",
+            }],
+          }));
+          streamResponse?.write(
+            `event: event_start\ndata: ${JSON.stringify({
+              type: "event_start",
+              event: { id: "event_agent_01", type: "agent.message" },
+            })}\n\n`,
+          );
+          streamResponse?.write(
+            `event: event_delta\ndata: ${JSON.stringify({
+              type: "event_delta",
+              event_id: "event_agent_01",
+              delta: {
+                type: "content_delta",
+                content: { type: "text", text: "E2E_OK" },
+                index: 0,
+              },
+            })}\n\n`,
+          );
+          streamResponse?.write(
+            `event: agent.message\ndata: ${JSON.stringify({
+              id: "event_agent_01",
+              type: "agent.message",
+              content: [{ type: "text", text: "E2E_OK" }],
+              processed_at: "2026-09-01T00:00:01.000Z",
+            })}\n\n`,
+          );
+          streamResponse?.end(
+            `event: session.status_idle\ndata: ${JSON.stringify({
+              id: "event_idle_01",
+              type: "session.status_idle",
+              stop_reason: { type: "end_turn" },
+              processed_at: "2026-09-01T00:00:01.000Z",
+            })}\n\n`,
+          );
+        });
+        return;
+      }
+
+      response.statusCode = 404;
+      response.end(JSON.stringify({ error: "wrong route" }));
+    });
+
+    const result = await runCli(
+      baseURL,
+      "sessions", "chat", "session_123", "Reply", "exactly", "E2E_OK.",
+    );
+
+    expect(streamURL?.searchParams.getAll("event_deltas[]")).toEqual([
+      "agent.message",
+      "agent.thinking",
+    ]);
+    expect(sentBody).toEqual({
+      events: [{
+        type: "user.message",
+        content: [{ type: "text", text: "Reply exactly E2E_OK." }],
+      }],
+    });
+    expect(result.stdout).toBe("E2E_OK\n");
+  });
+
   it("renders the official nested session agent reference", async () => {
     const baseURL = await listen((_request, response) => {
       response.writeHead(200, { "content-type": "application/json" });
