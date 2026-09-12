@@ -1,7 +1,9 @@
 import type {
   Agent,
+  AgentAcpConfig,
   AgentEffortLevel,
   AgentModel,
+  AgentRuntimeBinding,
   AgentSpeed,
 } from "../domain/agent";
 import type {
@@ -27,6 +29,15 @@ export interface AgentModelInput {
   speed?: AgentSpeed | null;
 }
 
+export interface AgentOpenMaInput {
+  auxiliaryModel?: string | AgentModelInput | null;
+  appendablePrompts?: string[] | null;
+  harness?: string | null;
+  acp?: AgentAcpConfig | null;
+  runtimeBinding?: AgentRuntimeBinding | null;
+  enableGeneralSubagent?: boolean | null;
+}
+
 export type AgentModelView = AgentModel;
 
 export interface CreateAgentCommand {
@@ -36,6 +47,7 @@ export interface CreateAgentCommand {
   mcpServers?: AgentMcpServerInput[];
   metadata?: Record<string, string>;
   multiagent?: AgentMultiagentInput | null;
+  openma?: AgentOpenMaInput;
   skills?: AgentSkillInput[];
   system?: string | null;
   tools?: AgentToolInput[];
@@ -54,6 +66,7 @@ export interface UpdateAgentCommand {
   model?: string | AgentModelInput;
   multiagent?: AgentMultiagentInput | null;
   name?: string;
+  openma?: AgentOpenMaInput;
   skills?: AgentSkillInput[] | null;
   system?: string | null;
   tools?: AgentToolInput[] | null;

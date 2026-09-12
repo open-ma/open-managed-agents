@@ -173,4 +173,62 @@ describe("Managed Agents API — GET /v1/sessions/:session_id/threads/:thread_id
       ],
     });
   });
+
+  it("returns the OpenMA extension pinned to a resolved thread agent", async () => {
+    const api = buildSessionThreadsTestApi(
+      makeSessionThreadsPort({
+        retrieveSessionThread: async () => ({
+          type: "found",
+          thread: {
+            id: "sthr_agent_openma",
+            agent: {
+              type: "agent",
+              id: sessionView.agent.id,
+              description: sessionView.agent.description,
+              mcpServers: [],
+              model: sessionView.agent.model,
+              name: sessionView.agent.name,
+              openma: {
+                appendablePrompts: ["prompt_review"],
+                runtimeBinding: {
+                  runtimeId: "runtime_pi",
+                  acpAgentId: "pi",
+                },
+              },
+              skills: [],
+              system: sessionView.agent.system,
+              tools: [],
+              version: sessionView.agent.version,
+            },
+            archivedAt: null,
+            createdAt: "2026-08-26T06:10:00.000Z",
+            parentThreadId: null,
+            sessionId: sessionWire.id,
+            stats: null,
+            status: "idle",
+            updatedAt: "2026-08-26T06:10:05.000Z",
+            usage: null,
+          },
+        }),
+      }),
+    );
+
+    const response = await api.request(
+      `http://openma.test/v1/sessions/${sessionWire.id}/threads/sthr_agent_openma`,
+      { headers: { "anthropic-beta": "managed-agents-2026-04-01" } },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      agent: {
+        _oma: {
+          appendable_prompts: ["prompt_review"],
+          runtime_binding: {
+            runtime_id: "runtime_pi",
+            acp_agent_id: "pi",
+          },
+        },
+      },
+    });
+  });
 });

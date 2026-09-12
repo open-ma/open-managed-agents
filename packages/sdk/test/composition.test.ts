@@ -54,6 +54,108 @@ describe("OpenMA SDK composition facade", () => {
     );
   });
 
+  it("types and forwards OpenMA Agent extensions on the official beta resource", async () => {
+    let captured: Request | undefined;
+    const client = new OpenMA({
+      apiKey: "oma_test_key",
+      baseURL: "https://openma.test",
+      maxRetries: 0,
+      fetch: async (input, init) => {
+        captured = input instanceof Request
+          ? new Request(input, init)
+          : new Request(input.toString(), init);
+        return jsonResponse({
+          id: "agent_extended",
+          type: "agent",
+          name: "Extended agent",
+          archived_at: null,
+          created_at: "2026-09-12T00:00:00.000Z",
+          description: null,
+          mcp_servers: [],
+          metadata: {},
+          model: { id: "claude-opus-5" },
+          multiagent: null,
+          skills: [],
+          system: null,
+          tools: [],
+          updated_at: "2026-09-12T00:00:00.000Z",
+          version: 1,
+          _oma: {
+            aux_model: { id: "deepseek-chat", speed: "fast" },
+            appendable_prompts: ["prompt_review"],
+          },
+        }, 201);
+      },
+    });
+
+    const agent = await client.beta.agents.create({
+      name: "Extended agent",
+      model: "claude-opus-5",
+      _oma: {
+        aux_model: { id: "deepseek-chat", speed: "fast" },
+        appendable_prompts: ["prompt_review"],
+      },
+    });
+
+    expect(await captured!.json()).toEqual({
+      name: "Extended agent",
+      model: "claude-opus-5",
+      _oma: {
+        aux_model: { id: "deepseek-chat", speed: "fast" },
+        appendable_prompts: ["prompt_review"],
+      },
+    });
+    expect(agent._oma?.aux_model?.id).toBe("deepseek-chat");
+    expect(agent._oma?.appendable_prompts).toEqual(["prompt_review"]);
+  });
+
+  it("types OpenMA extensions on the Session agent snapshot used by workers", async () => {
+    const client = new OpenMA({
+      apiKey: "oma_test_key",
+      baseURL: "https://openma.test",
+      maxRetries: 0,
+      fetch: async () => jsonResponse({
+        id: "session_extended",
+        type: "session",
+        agent: {
+          id: "agent_extended",
+          type: "agent",
+          name: "Extended agent",
+          description: null,
+          mcp_servers: [],
+          model: { id: "claude-opus-5" },
+          multiagent: null,
+          skills: [],
+          system: null,
+          tools: [],
+          version: 1,
+          _oma: {
+            aux_model: { id: "deepseek-chat" },
+            harness: "pi",
+          },
+        },
+        archived_at: null,
+        budget: null,
+        created_at: "2026-09-12T00:00:00.000Z",
+        environment_id: "env_1",
+        metadata: {},
+        outcome_evaluations: [],
+        resources: [],
+        stats: {},
+        status: "idle",
+        title: null,
+        updated_at: "2026-09-12T00:00:00.000Z",
+        usage: {},
+        vault_ids: [],
+      }),
+    });
+
+    const session = await client.beta.sessions.retrieve("session_extended");
+
+    expect(session.agent._oma?.aux_model?.id).toBe("deepseek-chat");
+    expect(session.agent._oma?.harness).toBe("pi");
+  });
+
   it("routes provider discovery through the OMA namespace with the shared official transport", async () => {
     const requests: Request[] = [];
     const fetcher: typeof fetch = async (input, init) => {

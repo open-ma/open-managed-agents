@@ -27,6 +27,7 @@ import {
 } from "./agent-definition";
 import { toSessionResourceResponse } from "./session-resources";
 import { toSendableSessionEvent } from "./session-events";
+import { fromOpenMaAgentExtension } from "./openma-agent-extension";
 
 function toAgentSelector(agent: SessionCreateBody["agent"]): SessionAgentSelector {
   if (typeof agent === "string") {
@@ -204,6 +205,10 @@ export function toSessionAgentResponse(agent: SessionAgentView): object {
             agents: agent.multiagent.agents.map(fromSessionThreadAgent),
           },
     name: agent.name,
+    ...(agent.openma !== undefined &&
+      Object.keys(agent.openma).length > 0 && {
+        _oma: fromOpenMaAgentExtension(agent.openma),
+      }),
     skills: agent.skills.map(fromAgentSkillInput),
     system: agent.system,
     tools: agent.tools.map(fromAgentToolInput),

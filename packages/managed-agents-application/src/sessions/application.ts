@@ -114,6 +114,7 @@ function snapshotThreadAgent(agent: Agent): SessionThreadAgent {
     mcpServers: agent.mcpServers,
     model: agent.model,
     name: agent.name,
+    ...(agent.openma !== undefined && { openma: agent.openma }),
     skills: agent.skills,
     system: agent.system,
     tools: agent.tools,
@@ -163,6 +164,7 @@ async function snapshotAgent(
         ? null
         : { type: "coordinator", agents: roster },
     name: agent.name,
+    ...(agent.openma !== undefined && { openma: agent.openma }),
     skills: agent.skills,
     system: agent.system,
     tools: agent.tools,

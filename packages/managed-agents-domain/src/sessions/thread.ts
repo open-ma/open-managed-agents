@@ -1,4 +1,4 @@
-import type { AgentModel } from "../agents";
+import type { AgentModel, AgentOpenMaExtensions } from "../agents";
 import type {
   AgentMcpServer,
   AgentSkill,
@@ -14,6 +14,7 @@ export type SessionThreadAgent =
       mcpServers: AgentMcpServer[];
       model: AgentModel;
       name: string;
+      openma?: AgentOpenMaExtensions;
       skills: AgentSkill[];
       system: string | null;
       tools: AgentTool[];

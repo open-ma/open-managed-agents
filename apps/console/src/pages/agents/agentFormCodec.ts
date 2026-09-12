@@ -35,6 +35,9 @@ export type FormState = {
   model: string;
   /** Preserved from `{ id, speed }` model objects; not edited in Form UI yet. */
   modelSpeed: "" | "standard" | "fast";
+  auxiliaryModel: string;
+  auxiliaryModelSpeed: "" | "standard" | "fast";
+  appendablePrompts: string[];
   system: string;
   description: string;
   modelCardId: string;
@@ -50,6 +53,9 @@ export const INITIAL_FORM: FormState = {
   name: "",
   model: "",
   modelSpeed: "",
+  auxiliaryModel: "",
+  auxiliaryModelSpeed: "",
+  appendablePrompts: [],
   system: "",
   description: "",
   modelCardId: "",
@@ -71,7 +77,6 @@ const RESPONSE_ONLY_KEYS = new Set([
 ]);
 
 const OMA_ONLY_KEYS = new Set([
-  "_oma",
   "runtime_binding",
   "harness",
   "acp",
@@ -148,11 +153,22 @@ export function configToForm(config: Record<string, unknown>): FormState {
     Array.isArray(config.tools) ? (config.tools as unknown[]) : undefined,
   );
   const multiagent = config.multiagent as { agents?: CallableEntry[] } | undefined;
+  const openma =
+    config._oma && typeof config._oma === "object"
+      ? (config._oma as Record<string, unknown>)
+      : undefined;
   return {
     ...INITIAL_FORM,
     name: String(config.name || ""),
     model: modelIdOf(config.model) || (typeof config.model === "string" ? config.model : ""),
     modelSpeed: modelSpeedOf(config.model),
+    auxiliaryModel: modelIdOf(openma?.aux_model),
+    auxiliaryModelSpeed: modelSpeedOf(openma?.aux_model),
+    appendablePrompts: Array.isArray(openma?.appendable_prompts)
+      ? openma.appendable_prompts.filter(
+          (prompt): prompt is string => typeof prompt === "string",
+        )
+      : [],
     modelCardId: "",
     system: String(config.system || ""),
     description: String(config.description || ""),
@@ -331,6 +347,43 @@ export function mergeFormIntoConfig(
   payload.name = form.name;
   payload.model = buildModelValue(form);
   payload.tools = mergeToolsField(existingTools, form);
+
+  const existingOpenMa =
+    base?._oma && typeof base._oma === "object"
+      ? (base._oma as Record<string, unknown>)
+      : undefined;
+  const openma: Record<string, unknown> = existingOpenMa
+    ? structuredClone(existingOpenMa)
+    : {};
+  if (form.auxiliaryModel) {
+    const priorAuxiliary =
+      existingOpenMa?.aux_model && typeof existingOpenMa.aux_model === "object"
+        ? structuredClone(existingOpenMa.aux_model as Record<string, unknown>)
+        : {};
+    openma.aux_model = {
+      ...priorAuxiliary,
+      id: form.auxiliaryModel,
+      ...(form.auxiliaryModelSpeed
+        ? { speed: form.auxiliaryModelSpeed }
+        : {}),
+    };
+    if (!form.auxiliaryModelSpeed) {
+      delete (openma.aux_model as Record<string, unknown>).speed;
+    }
+  } else if (forUpdate && existingOpenMa?.aux_model !== undefined) {
+    openma.aux_model = null;
+  } else {
+    delete openma.aux_model;
+  }
+  if (form.appendablePrompts.length > 0) {
+    openma.appendable_prompts = form.appendablePrompts;
+  } else if (forUpdate && existingOpenMa?.appendable_prompts !== undefined) {
+    openma.appendable_prompts = [];
+  } else {
+    delete openma.appendable_prompts;
+  }
+  if (Object.keys(openma).length > 0) payload._oma = openma;
+  else delete payload._oma;
 
   if (forUpdate) {
     payload.system = form.system || null;

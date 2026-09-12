@@ -12,7 +12,7 @@ type Equal<Left, Right> =
     : false;
 
 const agentCreateBodyMatchesOfficialContract: Equal<
-  AgentCreateBody,
+  Omit<AgentCreateBody, "_oma">,
   OfficialAgentCreateBody
 > = true;
 

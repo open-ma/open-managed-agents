@@ -106,6 +106,42 @@ describe("Managed Agents API — GET /v1/sessions/:session_id", () => {
     }]);
   });
 
+  it("returns the OpenMA extension pinned to the Session agent snapshot", async () => {
+    const port = makeSessionsPort({
+      retrieveSession: async () => ({
+        type: "found",
+        session: {
+          ...sessionView,
+          agent: {
+            ...sessionView.agent,
+            openma: {
+              auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+              appendablePrompts: ["prompt_linear"],
+              harness: "pi",
+            },
+          },
+        },
+      }),
+    });
+    const api = buildSessionsTestApi(port);
+
+    const response = await api.request(
+      `http://openma.test/v1/sessions/${sessionWire.id}`,
+      { headers: { "anthropic-beta": "managed-agents-2026-04-01" } },
+    );
+
+    expect(response.status).toBe(200);
+    await expect(response.json()).resolves.toMatchObject({
+      agent: {
+        _oma: {
+          aux_model: { id: "deepseek-chat", speed: "fast" },
+          appendable_prompts: ["prompt_linear"],
+          harness: "pi",
+        },
+      },
+    });
+  });
+
   it("rejects a session whose application resource cannot satisfy the official resource union", async () => {
     const port = makeSessionsPort({
       retrieveSession: async () => ({

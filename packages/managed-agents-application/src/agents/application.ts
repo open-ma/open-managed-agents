@@ -109,6 +109,57 @@ function normalizeModel(model: string | AgentModelInput): AgentModelView {
   };
 }
 
+function normalizeOpenMaCreate(
+  input: CreateAgentCommand["openma"],
+): AgentView["openma"] {
+  if (input === undefined) return undefined;
+  const extension = {
+    ...(input.auxiliaryModel != null && {
+      auxiliaryModel: normalizeModel(input.auxiliaryModel),
+    }),
+    ...(input.appendablePrompts != null && {
+      appendablePrompts: input.appendablePrompts,
+    }),
+    ...(input.harness != null && { harness: input.harness }),
+    ...(input.acp != null && { acp: input.acp }),
+    ...(input.runtimeBinding != null && {
+      runtimeBinding: input.runtimeBinding,
+    }),
+    ...(input.enableGeneralSubagent != null && {
+      enableGeneralSubagent: input.enableGeneralSubagent,
+    }),
+  };
+  return Object.keys(extension).length === 0 ? undefined : extension;
+}
+
+function patchOpenMa(
+  current: AgentView["openma"],
+  patch: UpdateAgentCommand["openma"],
+): AgentView["openma"] {
+  if (patch === undefined) return current;
+  const next = { ...current };
+  const assign = <Key extends keyof NonNullable<AgentView["openma"]>>(
+    key: Key,
+    value: NonNullable<AgentView["openma"]>[Key] | null | undefined,
+  ) => {
+    if (value === undefined) return;
+    if (value === null) delete next[key];
+    else next[key] = value;
+  };
+  assign(
+    "auxiliaryModel",
+    patch.auxiliaryModel == null
+      ? patch.auxiliaryModel
+      : normalizeModel(patch.auxiliaryModel),
+  );
+  assign("appendablePrompts", patch.appendablePrompts);
+  assign("harness", patch.harness);
+  assign("acp", patch.acp);
+  assign("runtimeBinding", patch.runtimeBinding);
+  assign("enableGeneralSubagent", patch.enableGeneralSubagent);
+  return Object.keys(next).length === 0 ? undefined : next;
+}
+
 function patchMetadata(
   current: Record<string, string>,
   patch: Record<string, string | null> | null,
@@ -200,6 +251,7 @@ export class AgentsApplicationService implements AgentsApplicationPort {
     if (resolvedMultiagent.type === "invalid_request") {
       return resolvedMultiagent;
     }
+    const openma = normalizeOpenMaCreate(command.openma);
     const agent = await this.dependencies.store.insert({
       workspaceId: this.dependencies.workspaceId,
       agent: {
@@ -212,6 +264,7 @@ export class AgentsApplicationService implements AgentsApplicationPort {
         model: normalizeModel(command.model),
         multiagent: resolvedMultiagent.multiagent,
         name: command.name,
+        ...(openma !== undefined && { openma }),
         skills: resolveAgentSkills(command.skills ?? []),
         system: command.system ?? null,
         tools: resolveAgentTools(command.tools ?? []),
@@ -274,6 +327,7 @@ export class AgentsApplicationService implements AgentsApplicationPort {
     if (resolvedMultiagent.type === "invalid_request") {
       return resolvedMultiagent;
     }
+    const openma = patchOpenMa(current.openma, command.openma);
     const next: AgentView = {
       ...current,
       ...(command.description !== undefined && {
@@ -300,6 +354,10 @@ export class AgentsApplicationService implements AgentsApplicationPort {
       updatedAt: this.dependencies.clock.now().toISOString(),
       version: current.version + 1,
     };
+    if (command.openma !== undefined) {
+      if (openma === undefined) delete next.openma;
+      else next.openma = openma;
+    }
 
     const result = await this.dependencies.store.replaceCurrent({
       workspaceId: this.dependencies.workspaceId,
