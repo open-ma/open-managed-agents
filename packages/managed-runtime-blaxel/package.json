@@ -19,7 +19,7 @@
   "peerDependencies": { "@blaxel/core": "^0.3.19" },
   "peerDependenciesMeta": { "@blaxel/core": { "optional": true } },
   "devDependencies": {
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.5.0",
     "vitest": "^4.1.3"
   }
 }

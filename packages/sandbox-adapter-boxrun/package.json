@@ -13,5 +13,5 @@
     "@open-managed-agents/observability": "workspace:*",
     "@open-managed-agents/sandbox": "workspace:*"
   },
-  "devDependencies": { "@types/node": "^26.2.0", "vitest": "^4.1.3" }
+  "devDependencies": { "@types/node": "^26.5.0", "vitest": "^4.1.3" }
 }
