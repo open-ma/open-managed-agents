@@ -53,6 +53,7 @@ async function startServer(authDisabled: boolean): Promise<void> {
       PLATFORM_ROOT_SECRET: "mysql-integration-platform-root-secret",
       PORT: String(port),
       PUBLIC_BASE_URL: baseUrl,
+      OPENMA_TEST_SANDBOX_PROVIDER: "local-subprocess",
       SANDBOX_WORKDIR: resolve(scratchRoot, "sandboxes"),
       SESSION_OUTPUTS_DIR: resolve(scratchRoot, "outputs"),
       NODE_ENV: "test",
