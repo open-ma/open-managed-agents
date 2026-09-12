@@ -318,6 +318,7 @@ import {
   allowAllLegacyHarnessTools,
   toLegacyHarnessAgentConfig,
   toLegacyHarnessEnvironmentConfig,
+  resolveNodeManagedAuxiliaryToolModel,
 } from "./lib/node-managed-agent-codec.js";
 import { NodeManagedConfirmedToolExecutor } from "./lib/node-managed-confirmed-tool-executor.js";
 import { NodeManagedOutcomeEvaluator } from "./lib/node-managed-outcome-evaluator.js";
@@ -329,6 +330,7 @@ import {
 import { DefaultNodeManagedSessionRunner } from "./lib/node-managed-session-runner.js";
 import {
   buildNodeManagedSkillReminders,
+  buildNodeManagedAppendablePromptReminders,
   NodeManagedSessionInputPreparer,
 } from "./lib/node-managed-session-inputs.js";
 import { NodeManagedMemorySnapshotMaterializer } from "./lib/node-managed-memory-snapshots.js";
@@ -1159,6 +1161,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         toLegacyHarnessAgentConfig(session),
       );
       const creds = await resolveNodeModelCreds(workspaceId, agent.model);
+      const auxiliary = await resolveNodeManagedAuxiliaryToolModel(
+        session,
+        (model) => buildNodeLanguageModel(workspaceId, model),
+      );
       return buildTools(agent, sandbox, {
         ANTHROPIC_API_KEY: creds.apiKey,
         ANTHROPIC_BASE_URL: creds.baseURL,
@@ -1167,6 +1173,8 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         sessionId: session.id,
         mcpBinding: nodeMcpProxyBinding,
         environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
+        auxModel: auxiliary?.model,
+        auxModelInfo: auxiliary?.modelInfo,
       });
     },
   }),
@@ -1303,6 +1311,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   buildTools: async ({ workspaceId, session, environment, sandbox, subagents, delegateToAgent }) => {
     const agent = toLegacyHarnessAgentConfig(session);
     const creds = await resolveNodeModelCreds(workspaceId, agent.model);
+    const auxiliary = await resolveNodeManagedAuxiliaryToolModel(
+      session,
+      (model) => buildNodeLanguageModel(workspaceId, model),
+    );
     const tools = await buildTools(agent, sandbox, {
       ANTHROPIC_API_KEY: creds.apiKey,
       ANTHROPIC_BASE_URL: creds.baseURL,
@@ -1311,6 +1323,8 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       sessionId: session.id,
       mcpBinding: nodeMcpProxyBinding,
       environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
+      auxModel: auxiliary?.model,
+      auxModelInfo: auxiliary?.modelInfo,
       delegateToAgent,
     });
     if (subagents && (await readManagedSessionMappingMetadata(session, openAIAgentsSecrets))?.agent.multi_agent?.enabled) {
@@ -1328,7 +1342,10 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
     const agent = toLegacyHarnessAgentConfig(input.session);
     const creds = await resolveNodeModelCreds(input.workspaceId, agent.model);
     const rawSystemPrompt = input.session.agent.system ?? "";
-    const platformReminders = buildNodeManagedSkillReminders(input.session);
+    const platformReminders = [
+      ...buildNodeManagedSkillReminders(input.session),
+      ...buildNodeManagedAppendablePromptReminders(input.session),
+    ];
     const feishuTools = await resolveFeishuAgentTools(input.session.id);
     return {
       agent,

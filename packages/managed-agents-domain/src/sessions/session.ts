@@ -1,4 +1,4 @@
-import type { AgentModel } from "../agents";
+import type { AgentModel, AgentOpenMaExtensions } from "../agents";
 import type {
   AgentMcpServer,
   AgentSkill,
@@ -21,6 +21,7 @@ export interface SessionAgent {
   model: AgentModel;
   multiagent: SessionAgentMultiagent | null;
   name: string;
+  openma?: AgentOpenMaExtensions;
   skills: AgentSkill[];
   system: string | null;
   tools: AgentTool[];

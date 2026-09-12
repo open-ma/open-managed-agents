@@ -17,17 +17,57 @@ import {
   agentMcpServerResponseSchema,
   agentModelResponseSchema,
   agentMultiagentResponseSchema,
+  openMaAgentExtensionResponseSchema,
   agentSkillResponseSchema,
   agentToolResponseSchema,
 } from "./agent-response-components";
 
-export type AgentCreateBody = Omit<AgentCreateParams, "betas">;
+type OfficialAgentCreateBody = Omit<AgentCreateParams, "betas">;
 export type AgentListQuery = Omit<AgentListParams, "betas">;
 export type AgentRetrieveQuery = Omit<AgentRetrieveParams, "betas">;
-export type AgentUpdateBody = Omit<AgentUpdateParams, "betas">;
+type OfficialAgentUpdateBody = Omit<AgentUpdateParams, "betas">;
 export type AgentVersionListQuery = Omit<VersionListParams, "betas">;
 
-type AgentModelConfig = Exclude<AgentCreateBody["model"], string>;
+type AgentModelConfig = Exclude<OfficialAgentCreateBody["model"], string>;
+
+export interface OpenMaAgentAcpBody {
+  agent: {
+    id?: string;
+    command: string;
+    args?: string[];
+    env?: Record<string, string | null>;
+    cwd?: string;
+  };
+  restart?: {
+    mode: "never" | "on-crash" | "always";
+    max_restarts?: number;
+    window_ms?: number;
+  };
+  idle_timeout_ms?: number;
+  per_turn_timeout_ms?: number;
+}
+
+export interface OpenMaAgentRuntimeBindingBody {
+  runtime_id: string;
+  acp_agent_id: string;
+  local_skill_blocklist?: string[];
+}
+
+export interface OpenMaAgentExtensionBody {
+  aux_model?: OfficialAgentCreateBody["model"] | null;
+  appendable_prompts?: string[] | null;
+  harness?: string | null;
+  acp?: OpenMaAgentAcpBody | null;
+  runtime_binding?: OpenMaAgentRuntimeBindingBody | null;
+  enable_general_subagent?: boolean | null;
+}
+
+export type AgentCreateBody = OfficialAgentCreateBody & {
+  _oma?: OpenMaAgentExtensionBody;
+};
+export type AgentUpdateBody = OfficialAgentUpdateBody & {
+  _oma?: OpenMaAgentExtensionBody;
+};
 
 const effortLevelSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
 const modelConfigSchema: z.ZodType<AgentModelConfig> = z
@@ -50,6 +90,49 @@ export const agentModelInputSchema: z.ZodType<AgentCreateBody["model"]> = z.unio
   modelConfigSchema,
 ]);
 
+const agentAcpSchema: z.ZodType<OpenMaAgentAcpBody> = z
+  .object({
+    agent: z
+      .object({
+        id: z.string().min(1).optional(),
+        command: z.string().min(1),
+        args: z.array(z.string()).optional(),
+        env: z.record(z.string(), z.string().nullable()).optional(),
+        cwd: z.string().min(1).optional(),
+      })
+      .strict(),
+    restart: z
+      .object({
+        mode: z.enum(["never", "on-crash", "always"]),
+        max_restarts: z.number().int().min(0).optional(),
+        window_ms: z.number().int().positive().optional(),
+      })
+      .strict()
+      .optional(),
+    idle_timeout_ms: z.number().int().positive().optional(),
+    per_turn_timeout_ms: z.number().int().positive().optional(),
+  })
+  .strict();
+
+const runtimeBindingSchema: z.ZodType<OpenMaAgentRuntimeBindingBody> = z
+  .object({
+    runtime_id: z.string().min(1),
+    acp_agent_id: z.string().min(1),
+    local_skill_blocklist: z.array(z.string().min(1)).optional(),
+  })
+  .strict();
+
+const openMaAgentExtensionSchema: z.ZodType<OpenMaAgentExtensionBody> = z
+  .object({
+    aux_model: agentModelInputSchema.nullable().optional(),
+    appendable_prompts: z.array(z.string().min(1)).nullable().optional(),
+    harness: z.string().min(1).nullable().optional(),
+    acp: agentAcpSchema.nullable().optional(),
+    runtime_binding: runtimeBindingSchema.nullable().optional(),
+    enable_general_subagent: z.boolean().nullable().optional(),
+  })
+  .strict();
+
 export const agentCreateBodySchema: z.ZodType<AgentCreateBody> = z
   .object({
     name: z.string().min(1),
@@ -61,6 +144,7 @@ export const agentCreateBodySchema: z.ZodType<AgentCreateBody> = z
     skills: z.array(agentSkillInputSchema).optional(),
     system: z.string().nullable().optional(),
     tools: z.array(agentToolInputSchema).optional(),
+    _oma: openMaAgentExtensionSchema.optional(),
   })
   .strict();
 
@@ -105,6 +189,7 @@ export const agentUpdateBodySchema: z.ZodType<AgentUpdateBody> = z
     system: z.string().nullable().optional(),
     tools: z.array(agentToolInputSchema).nullable().optional(),
     version: z.number().int().min(1).optional(),
+    _oma: openMaAgentExtensionSchema.optional(),
   })
   .strict();
 
@@ -125,6 +210,7 @@ export const agentResponseSchema: z.ZodType<BetaManagedAgentsAgent> = z
     type: z.literal("agent"),
     updated_at: z.string(),
     version: z.number().int().min(1),
+    _oma: openMaAgentExtensionResponseSchema.optional(),
   })
   .strict();
 

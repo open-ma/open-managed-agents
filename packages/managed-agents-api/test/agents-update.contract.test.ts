@@ -79,6 +79,58 @@ describe("Managed Agents API — POST /v1/agents/:agent_id", () => {
     });
   });
 
+  it("forwards typed OpenMA clears through the official SDK escape hatch", async () => {
+    const updateCalls: unknown[] = [];
+    const api = buildAgentsTestApi(
+      makeAgentsPort({
+        updateAgent: async (command) => {
+          updateCalls.push(command);
+          return { type: "updated", agent: agentView };
+        },
+      }),
+    );
+    const client = new Anthropic({
+      apiKey: "test-key",
+      baseURL: "http://openma.test",
+      maxRetries: 0,
+      fetch: async (input, init) => {
+        const request =
+          input instanceof Request
+            ? new Request(input, init)
+            : new Request(input.toString(), init);
+        return api.fetch(request);
+      },
+    });
+
+    const result = await client.beta.agents.update(
+      agentWire.id,
+      {
+        name: "Coding Assistant",
+        _oma: {
+          aux_model: null,
+          appendable_prompts: [],
+        },
+      } as Parameters<typeof client.beta.agents.update>[1] & {
+        _oma: {
+          aux_model: null;
+          appendable_prompts: string[];
+        };
+      },
+    );
+
+    expect(updateCalls).toEqual([
+      {
+        agentId: agentWire.id,
+        name: "Coding Assistant",
+        openma: {
+          auxiliaryModel: null,
+          appendablePrompts: [],
+        },
+      },
+    ]);
+    expect(result).toEqual(agentWire);
+  });
+
   it("maps an optimistic version conflict to the official SDK error", async () => {
     const api = buildAgentsTestApi(
       makeAgentsPort({
