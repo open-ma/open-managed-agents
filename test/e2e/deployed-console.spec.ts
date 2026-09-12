@@ -5,7 +5,6 @@ const deployedBaseURL = process.env.OMA_E2E_BASE_URL?.replace(/\/$/, "");
 const apiKey = process.env.OMA_E2E_API_KEY;
 const turnModel = process.env.OMA_E2E_MODEL;
 const mockModelBaseURL = process.env.OMA_E2E_MOCK_MODEL_BASE_URL?.replace(/\/$/, "");
-const managedAgentsBeta = "managed-agents-2026-04-01";
 
 test.describe("deployed Console smoke", () => {
   test.skip(!deployedBaseURL, "OMA_E2E_BASE_URL is required for deployed smoke");
@@ -31,7 +30,7 @@ test.describe("deployed Console smoke", () => {
     await expect(response.json()).resolves.toMatchObject({ status: "ok" });
   });
 
-  test("sends and renders a real Managed Agents turn", async ({ page }) => {
+  test("round-trips a Managed Agent and Session through the Console", async ({ page }) => {
     test.skip(
       !apiKey || (!turnModel && !mockModelBaseURL),
       "OMA_E2E_API_KEY plus OMA_E2E_MODEL or OMA_E2E_MOCK_MODEL_BASE_URL are required",
@@ -49,6 +48,25 @@ test.describe("deployed Console smoke", () => {
     let agent: { id: string; version: number } | undefined;
     let session: { id: string } | undefined;
     let modelCard: { id: string; model_id: string } | undefined;
+    const pageErrors: string[] = [];
+    const apiFailures: Array<{ method: string; path: string; status: number }> = [];
+    const cleanupErrors: unknown[] = [];
+
+    page.on("pageerror", (error) => pageErrors.push(error.message));
+    page.on("response", (response) => {
+      const url = new URL(response.url());
+      if (
+        url.origin === new URL(deployedBaseURL!).origin &&
+        url.pathname.startsWith("/v1/") &&
+        response.status() >= 400
+      ) {
+        apiFailures.push({
+          method: response.request().method(),
+          path: url.pathname,
+          status: response.status(),
+        });
+      }
+    });
 
     try {
       if (mockModelBaseURL) {
@@ -79,6 +97,7 @@ test.describe("deployed Console smoke", () => {
       });
       agent = await client.beta.agents.create({
         name: `console-e2e-agent-${suffix}`,
+        description: "Created through the official SDK",
         model: modelCard?.model_id ?? turnModel!,
         system: "Follow the user's exact response-format instruction.",
       });
@@ -119,15 +138,39 @@ test.describe("deployed Console smoke", () => {
         await route.continue({
           headers: {
             ...route.request().headers(),
-            "anthropic-beta": managedAgentsBeta,
             "x-api-key": apiKey!,
           },
         });
       });
 
+      await page.goto(`${deployedBaseURL}/agents/${agent.id}`, {
+        waitUntil: "networkidle",
+      });
+      await expect(
+        page.getByRole("heading", { level: 1, name: `console-e2e-agent-${suffix}` }),
+      ).toBeVisible();
+      await expect(page.getByText("Created through the official SDK", { exact: true }))
+        .toBeVisible();
+
+      await page.getByRole("button", { name: "Edit" }).click();
+      const editedDescription = `Edited through the Console ${suffix}`;
+      await page.getByLabel("Description").fill(editedDescription);
+      await page.getByRole("button", { name: "Save changes" }).click();
+      await expect(page.getByText(editedDescription, { exact: true })).toBeVisible();
+      const updatedAgent = await client.beta.agents.retrieve(agent.id);
+      expect(updatedAgent.description).toBe(editedDescription);
+      agent = { id: updatedAgent.id, version: updatedAgent.version };
+
       await page.goto(`${deployedBaseURL}/sessions/${session.id}`, {
         waitUntil: "domcontentloaded",
       });
+      await expect(
+        page.getByRole("heading", { level: 2, name: `console-e2e-session-${suffix}` }),
+      ).toBeVisible({ timeout: 30_000 });
+      await page.getByRole("button", { name: "Files", exact: true }).click();
+      await expect(page.getByText("Session outputs", { exact: true })).toBeVisible();
+      await expect(page.getByText(/No files yet/)).toBeVisible();
+
       const composer = page.getByRole("textbox", { name: "Message" });
       await expect(composer).toBeVisible({ timeout: 30_000 });
       const expectedReply = mockModelBaseURL ? "E2E_OK" : "E2E_UI_OK";
@@ -139,15 +182,31 @@ test.describe("deployed Console smoke", () => {
       await expect(page.getByText(expectedReply, { exact: true })).toBeVisible({
         timeout: 90_000,
       });
+
+      expect(pageErrors).toEqual([]);
+      expect(apiFailures).toEqual([]);
     } finally {
-      if (session) await client.beta.sessions.delete(session.id).catch(() => undefined);
-      if (agent) await client.beta.agents.archive(agent.id).catch(() => undefined);
-      if (environment) await client.beta.environments.delete(environment.id).catch(() => undefined);
+      if (session) {
+        await client.beta.sessions.delete(session.id).catch((error) => cleanupErrors.push(error));
+      }
+      if (agent) {
+        await client.beta.agents.archive(agent.id).catch((error) => cleanupErrors.push(error));
+      }
+      if (environment) {
+        await client.beta.environments.delete(environment.id).catch((error) => cleanupErrors.push(error));
+      }
       if (modelCard) {
         await fetch(`${deployedBaseURL}/v1/oma/model_cards/${encodeURIComponent(modelCard.id)}`, {
           method: "DELETE",
           headers: { "x-api-key": apiKey! },
-        }).catch(() => undefined);
+        }).then(async (response) => {
+          if (!response.ok) {
+            throw new Error(`Model Card cleanup failed: ${response.status} ${await response.text()}`);
+          }
+        }).catch((error) => cleanupErrors.push(error));
+      }
+      if (cleanupErrors.length > 0) {
+        throw new AggregateError(cleanupErrors, "Console E2E cleanup failed");
       }
     }
   });

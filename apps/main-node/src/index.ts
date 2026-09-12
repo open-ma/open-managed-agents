@@ -249,6 +249,7 @@ import {
   WebCryptoTunnelTokenManager,
   WebCryptoMemoryContentDescriptor,
   ZipSkillPackageCompiler,
+  synchronizeManagedSessionMemoryWorkspaces,
 } from "@open-managed-agents/managed-agents-adapters-runtime";
 import { isCurrentEnvironmentWorkClaim } from "@open-managed-agents/environment-work-store";
 import { BlobFileContentStore } from "@open-managed-agents/managed-agents-adapters-blob";
@@ -277,6 +278,7 @@ import {
   sqlSessionMetadataReader,
 } from "./lib/feishu-agent-tools.js";
 import { nodeOutputsAdapter } from "./lib/node-outputs-adapter.js";
+import { NodeManagedSessionOutputCollector } from "./lib/node-managed-session-outputs.js";
 import { nodeSessionLifecycle } from "./lib/node-session-lifecycle.js";
 import { SqlSessionResourceSecretSource } from "@open-managed-agents/session-resource-store-sql";
 import { NodeWorkspaceBackupService } from "./lib/node-workspace-backup.js";
@@ -300,6 +302,7 @@ import { startMemoryBlobWatcher } from "./lib/memory-blob-watcher.js";
 import { buildNodeScheduler } from "./lib/node-scheduler-jobs.js";
 import { startNodeMemoryQueue } from "./lib/node-memory-queue.js";
 import { mkdirSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { nanoid } from "nanoid";
 import {
@@ -335,8 +338,20 @@ import {
   createNodeMcpProxyBinding,
   type NodeMcpProxyTarget,
 } from "./lib/http-mcp-proxy.js";
+import {
+  resolveNodeProcessMode,
+  validateNodeProcessEnvironment,
+} from "./process-mode.js";
+import { resolveSandboxProviderForEnvironment } from "./sandbox-provider.js";
 
 registerCoreHarnesses();
+
+const processMode = resolveNodeProcessMode(process.env);
+validateNodeProcessEnvironment(process.env);
+const ownsLongLivedProcesses = processMode === "standalone";
+const standaloneSandboxProvider = ownsLongLivedProcesses
+  ? resolveSandboxProviderForEnvironment(process.env)
+  : null;
 
 const toMarkdownProvider = nodeToMarkdown();
 
@@ -651,7 +666,9 @@ const memoryRepo = new SqlMemoryRepo(drizzleDb);
 // Set MEMORY_QUEUE=disabled to skip wiring and fall back to the legacy
 // direct-call watcher.
 const useQueue = (process.env.MEMORY_QUEUE ?? "auto") !== "disabled";
-const memoryWatcher = memoryBlobLocalDir && useQueue
+const memoryWatcher = !ownsLongLivedProcesses
+  ? { stop: async () => {} }
+  : memoryBlobLocalDir && useQueue
   ? await startNodeMemoryQueue({
       mode: "sql",
       sql,
@@ -666,7 +683,7 @@ const memoryWatcher = memoryBlobLocalDir && useQueue
 
 let s3Poller: { stop: () => Promise<void> } | null = null;
 let feishuRunner: { stop: () => Promise<void> } | null = null;
-if (s3MemoryConfig) {
+if (ownsLongLivedProcesses && s3MemoryConfig) {
   // memory_blob_poller_lease lives in the consolidated baseline already; no
   // separate schema bootstrap needed here.
   const replicaId = `replica_${process.pid}_${Math.floor(Math.random() * 1e9).toString(36)}`;
@@ -746,27 +763,13 @@ if (usePostgres) {
 
 // ─── Sandbox factory ────────────────────────────────────────────────────
 
-const SANDBOX_PROVIDER_PATHS: Record<string, string> = {
-  subprocess: "@open-managed-agents/sandbox/adapters/local-subprocess",
-  litebox: "@open-managed-agents/sandbox-adapter-litebox",
-  boxlite: "@open-managed-agents/sandbox-adapter-litebox",
-  boxrun: "@open-managed-agents/sandbox-adapter-boxrun",
-  daytona: "@open-managed-agents/sandbox-adapter-daytona",
-  e2b: "@open-managed-agents/sandbox-adapter-e2b",
-};
-
 async function buildSandbox(
   sessionId: string,
   workdir: string,
 ): Promise<import("@open-managed-agents/sandbox").SandboxExecutor> {
-  const provider = (process.env.SANDBOX_PROVIDER ?? "subprocess").toLowerCase();
-  const path = SANDBOX_PROVIDER_PATHS[provider];
-  if (!path) {
-    throw new Error(
-      `SANDBOX_PROVIDER=${provider} not recognized; valid: ${Object.keys(SANDBOX_PROVIDER_PATHS).join(", ")}`,
-    );
-  }
-  const mod = (await import(path)) as {
+  const selection = standaloneSandboxProvider
+    ?? resolveSandboxProviderForEnvironment(process.env);
+  const mod = (await import(selection.modulePath)) as {
     sandboxFactory: import("@open-managed-agents/sandbox").SandboxFactory;
   };
   return mod.sandboxFactory(
@@ -774,6 +777,12 @@ async function buildSandbox(
       sessionId,
       workdir,
       memoryRoot: memoryBlobLocalDir ?? "",
+      memoryWorkspace: {
+        getText: (key) => memoryBlobs.getText(key),
+        list: (prefix, cursor) => memoryBlobs.list(prefix, cursor),
+        put: (key, content) => memoryBlobs.put(key, content),
+        delete: (key) => memoryBlobs.delete(key),
+      },
       outputsRoot,
     },
     process.env,
@@ -1127,6 +1136,11 @@ async function isManagedSessionExecutionFenceActive(fence: {
     && Date.parse(execution.attempt.leaseExpiresAt) > Date.now();
 }
 
+const managedSessionOutputCollector = new NodeManagedSessionOutputCollector({
+  outputsRoot,
+  isFenceActive: isManagedSessionExecutionFenceActive,
+});
+
 const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
   subagentThreads: new SqlSessionThreadStore(sql),
   subagentPolicy: ({ session }) => nodeOpenAISubagentPolicy(session, openAIAgentsSecrets),
@@ -1182,7 +1196,12 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       session.id,
       join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", session.id),
     ),
-  prepareSandbox: async ({ workspaceId, session, sandbox }) => {
+  prepareSandbox: async ({
+    workspaceId,
+    session,
+    sandbox,
+    runtimeGeneration,
+  }) => {
     if (isNoEnvironmentSandbox(sandbox)) return;
     const preparer = new NodeManagedSessionInputPreparer({
       files: managedAgentsPlatform
@@ -1201,7 +1220,68 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         },
       ),
     });
-    await preparer.prepare({ workspaceId, session, sandbox });
+    await preparer.prepare({
+      workspaceId,
+      session,
+      sandbox,
+      runtimeGeneration,
+    });
+  },
+  synchronizeSandbox: async ({
+    workspaceId,
+    session,
+    sandbox,
+    runtimeGeneration,
+    executionFence,
+  }) => {
+    if (isNoEnvironmentSandbox(sandbox)) return;
+    await sandbox.synchronizeMemoryStores?.();
+    const memories = managedMemoriesApplicationForWorkspace(workspaceId)
+      .port(managedAgentsPortTokens.memories);
+    const result = await synchronizeManagedSessionMemoryWorkspaces(
+      { find: async () => session },
+      memories,
+      {
+        getText: async (key) => (await memoryBlobs.getText(key))?.text ?? null,
+        list: (prefix, cursor) => memoryBlobs.list(prefix, cursor),
+        put: (key, content) => memoryBlobs.put(key, content),
+        delete: (key) => memoryBlobs.delete(key),
+      },
+      {
+        workspaceId,
+        sessionId: session.id,
+        runtimeGeneration,
+        executionFence,
+        isFenceActive: isManagedSessionExecutionFenceActive,
+      },
+    );
+    if (result.type === "fence_lost") {
+      throw new Error(
+        `Managed Memory synchronization lost the execution fence for ${session.id}`,
+      );
+    }
+    if (result.type === "not_found") {
+      throw new Error(`Managed Session ${session.id} disappeared before Memory synchronization`);
+    }
+    if (result.recoveredWipes.length > 0) {
+      throw new Error(
+        `Writable Managed Memory workspace became distrusted: ${result.recoveredWipes.join(", ")}`,
+      );
+    }
+    if (result.conflicts.length > 0) {
+      logger.warn({
+        conflicts: result.conflicts,
+        op: "main-node.managed_memory.conflicts",
+        sessionId: session.id,
+        workspaceId,
+      }, "Managed Memory synchronization kept canonical winners for conflicts");
+    }
+    await managedSessionOutputCollector.synchronize({
+      workspaceId,
+      sessionId: session.id,
+      sandbox,
+      executionFence,
+    });
   },
   afterExecution: withReportedArtifactPublication(createNodeOpenAIArtifactPublisher({
     historyForWorkspace: workspaceId => new SessionRuntimeHistoryApplicationService({ workspaceId, source: managedRuntimeReaders.history }),
@@ -1359,6 +1439,10 @@ const managedSessionLifecycle = new EnvironmentAwareSessionLifecycleRouter({
       tenantId: workspaceId,
       sessionId,
     });
+    await rm(
+      join(process.env.SANDBOX_WORKDIR ?? "./data/sandboxes", sessionId),
+      { recursive: true, force: true },
+    );
   },
 });
 const managedResourceCipher = platformRootSecret === undefined
@@ -2544,7 +2628,12 @@ if (platformRootSecret) {
 // public URL is needed. Opt-in (`FEISHU_WS_RUNNER=1`) until it has been
 // exercised against real Feishu app credentials — otherwise a stale
 // publication with fake creds would dial out and backoff-loop on every boot.
-if (platformRootSecret && installBridge && process.env.FEISHU_WS_RUNNER === "1") {
+if (
+  ownsLongLivedProcesses
+  && platformRootSecret
+  && installBridge
+  && process.env.FEISHU_WS_RUNNER === "1"
+) {
   try {
     const { startFeishuWsRunner } = await import("./lib/ws-feishu-runner.js");
     const feishuContainer = installBridge.buildContainers().feishu;
@@ -2830,18 +2919,6 @@ app.onError((err, c) => {
 
 // ─── Listen ──────────────────────────────────────────────────────────────
 
-const port = Number(process.env.PORT ?? 8787);
-const host = process.env.HOST ?? "0.0.0.0";
-// Start the execution poller only after every runtime dependency below its
-// declaration (Managed Memory/Skill applications included) has initialized.
-managedSessionExecutionWorker.start();
-serve({ fetch: app.fetch, port, hostname: host }, (info) => {
-  logger.info(
-    { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },
-    `listening on http://${info.address}:${info.port}`,
-  );
-});
-
 // Cron — eval-tick + memory retention sweep + (when integrations schema is
 // applied) webhook-events retention. Linear dispatch is left un-wired here
 // because main-node doesn't construct a LinearProvider; pass `linearSweeper`
@@ -2857,10 +2934,8 @@ const scheduler = buildNodeScheduler({
   memory: memoryService,
   integrationsSql: platformRootSecret ? sql : null,
 });
-await scheduler.start();
-logger.info({ op: "main-node.scheduler.started" }, "scheduler started");
 
-const shutdown = async (signal: string) => {
+export const shutdownNodeApp = async (signal = "dispose") => {
   logger.info({ op: "main-node.shutdown", signal }, `received ${signal}, shutting down`);
   managedSessionExecutionWorker.stop();
   try { await managedSessionsComposition.stopAll(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.managed_sessions_stop_failed" }, "managed Sessions app graphs stop failed"); }
@@ -2887,10 +2962,32 @@ const shutdown = async (signal: string) => {
   }
   try { await sessionRegistry.shutdown(); } catch (err) { logger.warn({ err, op: "main-node.shutdown.session_registry_failed" }, "session registry shutdown failed"); }
   try { await tracer.shutdown(); } catch { /* tracer shutdown is best-effort */ }
-  process.exit(0);
 };
-process.on("SIGTERM", () => void shutdown("SIGTERM"));
-process.on("SIGINT", () => void shutdown("SIGINT"));
+
+export { app };
+
+if (ownsLongLivedProcesses) {
+  const port = Number(process.env.PORT ?? 8787);
+  const host = process.env.HOST ?? "0.0.0.0";
+  // Start the execution poller only after every runtime dependency below its
+  // declaration (Managed Memory/Skill applications included) has initialized.
+  managedSessionExecutionWorker.start();
+  serve({ fetch: app.fetch, port, hostname: host }, (info) => {
+    logger.info(
+      { op: "main-node.listening", address: info.address, port: info.port, db: backendDescription },
+      `listening on http://${info.address}:${info.port}`,
+    );
+  });
+  await scheduler.start();
+  logger.info({ op: "main-node.scheduler.started" }, "scheduler started");
+
+  const shutdownProcess = async (signal: string) => {
+    await shutdownNodeApp(signal);
+    process.exit(0);
+  };
+  process.on("SIGTERM", () => void shutdownProcess("SIGTERM"));
+  process.on("SIGINT", () => void shutdownProcess("SIGINT"));
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────
 

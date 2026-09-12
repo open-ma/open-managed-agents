@@ -523,7 +523,7 @@ pnpm test:certification:live -- --providers cloudflare
 pnpm test:certification:live -- --providers cloudflare-r2
 
 # Exercise Node, the official SDK, CLI, Console browser, and a real local
-# subprocess sandbox against one isolated local cluster.
+# LiteBox microVM against one isolated local cluster.
 pnpm test:certification:local-release
 
 # If ~/.dsh contains a DeepSeek credential, certify harness-out tool use,
@@ -598,7 +598,7 @@ persistence separate prevents a lifecycle pass from being mistaken for
 checkpoint certification.
 
 The `local-release` lane builds the Console, starts an isolated Node deployment
-with SQLite and the real local-subprocess sandbox, exercises the official
+with SQLite and a real LiteBox microVM, exercises the official
 Managed Agents SDK through a complete streamed turn, verifies the CLI managed
 projection, and drives the Console with Playwright through the same API. It
 also asserts that child processes and temporary state are removed.

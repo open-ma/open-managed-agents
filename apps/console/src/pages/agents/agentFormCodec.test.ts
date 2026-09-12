@@ -7,12 +7,12 @@ import {
   mergeFormIntoConfig,
   mergeMcpServers,
   mergeToolsField,
-  requiresOmaAgentEndpoint,
 } from "./agentFormCodec";
 
 function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
   return {
     id: "agent_1",
+    type: "agent",
     name: "Coder",
     model: { id: "claude-sonnet-4-6", speed: "fast" },
     system: "Be helpful",
@@ -44,20 +44,11 @@ function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
     mcp_servers: [
       {
         name: "github",
-        type: "stdio",
-        stdio: {
-          command: "uvx",
-          args: ["mcp-server-github"],
-          port: 8765,
-          ready_timeout_ms: 30_000,
-        },
+        type: "url",
+        url: "https://mcp.example.test/github",
       },
     ],
     metadata: { team: "platform", owner: "alice" },
-    _oma: {
-      aux_model: { id: "claude-haiku-4-5", speed: "fast" },
-      appendable_prompts: ["prompt_a"],
-    },
     ...overrides,
   } as AgentRecord;
 }
@@ -101,18 +92,16 @@ describe("agentFormCodec lossless update", () => {
     expect(builtin?.configs?.some((c) => c.name === "bash")).toBe(true);
   });
 
-  it("preserves MCP stdio when only form name/type/url fields are managed", () => {
+  it("preserves a Managed URL MCP server", () => {
     const agent = sampleAgent();
     const form = agentToForm(agent);
     const merged = mergeMcpServers(agent.mcp_servers as unknown[], form.mcpServers);
     expect(merged).toHaveLength(1);
-    expect(merged[0].stdio).toEqual({
-      command: "uvx",
-      args: ["mcp-server-github"],
-      port: 8765,
-      ready_timeout_ms: 30_000,
+    expect(merged[0]).toEqual({
+      name: "github",
+      type: "url",
+      url: "https://mcp.example.test/github",
     });
-    expect(merged[0].type).toBe("stdio");
   });
 
   it("preserves MCP config and tool policy when an existing server is renamed", () => {
@@ -127,13 +116,8 @@ describe("agentFormCodec lossless update", () => {
     expect(payload.mcp_servers).toEqual([
       {
         name: "renamed-github",
-        type: "stdio",
-        stdio: {
-          command: "uvx",
-          args: ["mcp-server-github"],
-          port: 8765,
-          ready_timeout_ms: 30_000,
-        },
+        type: "url",
+        url: "https://mcp.example.test/github",
       },
     ]);
     expect(payload.tools).toContainEqual({
@@ -143,7 +127,7 @@ describe("agentFormCodec lossless update", () => {
     });
   });
 
-  it("round-trips unsupported top-level fields through form update merge", () => {
+  it("round-trips official top-level fields through form update merge", () => {
     const agent = sampleAgent();
     const form = agentToForm(agent);
     form.description = "tweaked";
@@ -151,10 +135,6 @@ describe("agentFormCodec lossless update", () => {
       forUpdate: true,
     });
     expect(payload.metadata).toEqual({ team: "platform", owner: "alice" });
-    expect(payload._oma).toMatchObject({
-      aux_model: { id: "claude-haiku-4-5", speed: "fast" },
-      appendable_prompts: ["prompt_a"],
-    });
     expect(payload.description).toBe("tweaked");
     expect(payload.id).toBeUndefined();
     expect(payload.version).toBeUndefined();
@@ -176,30 +156,28 @@ describe("agentFormCodec lossless update", () => {
     expect(
       (payload.tools as unknown[]).some((t) => (t as { type?: string }).type === "custom"),
     ).toBe(true);
-    expect((payload.mcp_servers as Array<{ stdio?: unknown }>)[0]?.stdio).toBeTruthy();
+    expect((payload.mcp_servers as Array<{ url?: unknown }>)[0]?.url).toBe(
+      "https://mcp.example.test/github",
+    );
     expect(payload.metadata).toEqual({ team: "platform", owner: "alice" });
   });
 });
 
 describe("agent endpoint boundary", () => {
-  it("keeps a strict Managed agent payload on /v1/agents", () => {
-    expect(
-      requiresOmaAgentEndpoint({
-        name: "Managed",
-        model: "claude-sonnet-4-6",
-        mcp_servers: [{ name: "github", type: "url", url: "https://mcp.example" }],
-      }),
-    ).toBe(false);
-  });
+  it("emits only Managed Agent fields when editing a standard agent", () => {
+    const agent = sampleAgent({
+      mcp_servers: [],
+    });
+    const form = agentToForm(agent);
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
 
-  it.each([
-    [{ _oma: { harness: "acp-proxy" } }],
-    [{ runtime_binding: { runtime_id: "rt_1", acp_agent_id: "codex" } }],
-    [{ enable_general_subagent: true }],
-    [{ mcp_servers: [{ name: "local", type: "stdio", stdio: { command: "mcp" } }] }],
-  ])("routes explicit OpenMA extensions through /v1/oma/agents", (extension) => {
-    expect(requiresOmaAgentEndpoint({ name: "Extended", model: "m", ...extension })).toBe(
-      true,
-    );
+    expect(payload).not.toHaveProperty("_oma");
+    expect(payload).not.toHaveProperty("runtime_binding");
+    expect(payload).not.toHaveProperty("enable_general_subagent");
+    expect(payload).not.toHaveProperty("type");
+    expect(payload).not.toHaveProperty("created_at");
+    expect(payload).not.toHaveProperty("updated_at");
   });
 });

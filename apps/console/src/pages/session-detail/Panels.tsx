@@ -137,7 +137,7 @@ export function FilesPanel({
     setFiles(null);
     setErr(null);
     api<{ data: SessionOutputFile[]; has_more: boolean }>(
-      `/v1/oma/sessions/${sessionId}/outputs`,
+      `/v1/sessions/${sessionId}/outputs`,
     )
       .then((d) => setFiles(d.data ?? []))
       .catch((e) => setErr(e instanceof Error ? e.message : String(e)));
@@ -183,7 +183,7 @@ export function FilesPanel({
               >
                 <div className="min-w-0 flex-1">
                   <a
-                    href={`/v1/oma/sessions/${sessionId}/outputs/${encodeURIComponent(f.filename)}`}
+                    href={`/v1/sessions/${sessionId}/outputs/${encodeURIComponent(f.filename)}`}
                     download={f.filename}
                     className="font-mono text-fg hover:text-info truncate block"
                     title={f.filename}

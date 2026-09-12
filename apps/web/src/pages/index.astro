@@ -46,6 +46,11 @@ const schemas = [softwareApplicationSchema()];
       </p>
       <div class="mt-8 flex items-center justify-center gap-3 flex-wrap">
         <a
+          href="/deploy/"
+          class="px-5 py-3 rounded-md bg-[var(--color-brand)] text-[var(--color-brand-fg)] font-medium"
+          >Deploy your own</a
+        >
+        <a
           href="https://github.com/openma-ai/open-managed-agents"
           target="_blank" rel="noopener noreferrer"
           class="px-5 py-3 rounded-md bg-[var(--color-fg)] text-[var(--color-bg)] font-medium"
@@ -136,7 +141,7 @@ curl localhost:8787/v1/agents -d '&#123;"name":"hello", \
     <h2 class="font-display text-3xl font-bold mb-4">Connect the SDK you already use</h2>
     <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
       OpenMA supports Claude Managed Agents and OpenAI Agents API. Start with
-      <a href="https://docs.openma.dev/quickstart/">a deployment</a>, add your model key, and connect your
+      <a href="/deploy/">a deployment</a>, add your model key, and connect your
       application. Here's an OpenAI SDK example for a local Node server:
     </p>
     <p class="text-[var(--color-fg-muted)] leading-relaxed mb-4">
@@ -288,7 +293,7 @@ const session = await client.beta.agents.sessions.create({
           </tr>
           <tr>
             <th scope="row" class="px-4 py-3 font-medium border-b border-[var(--color-border)]">Sandbox runtime</th>
-            <td class="px-4 py-3 border-b border-[var(--color-border)]">Cloudflare Containers, LocalSubprocess, E2B, Daytona, BoxRun</td>
+            <td class="px-4 py-3 border-b border-[var(--color-border)]">Cloudflare Containers, LiteBox, E2B, Daytona, BoxRun</td>
             <td class="px-4 py-3 border-b border-[var(--color-border)]">Anthropic-managed sandbox</td>
           </tr>
           <tr>

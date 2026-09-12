@@ -41,13 +41,9 @@ export type FormState = {
   mcpServers: McpEntry[];
   skills: SkillEntry[];
   callableAgents: CallableEntry[];
-  runtimeId: string;
-  acpAgentId: string;
-  localSkillBlocklist: string[];
   toolDefaultEnabled: boolean;
   toolDefaultPermission: "always_allow" | "always_ask";
   toolOverrides: Record<string, ToolOverride>;
-  enableGeneralSubagent: boolean;
 };
 
 export const INITIAL_FORM: FormState = {
@@ -60,28 +56,36 @@ export const INITIAL_FORM: FormState = {
   mcpServers: [],
   skills: [],
   callableAgents: [],
-  runtimeId: "",
-  acpAgentId: "claude-agent-acp",
-  localSkillBlocklist: [],
   toolDefaultEnabled: true,
   toolDefaultPermission: "always_allow",
   toolOverrides: {},
-  enableGeneralSubagent: false,
 };
 
 const RESPONSE_ONLY_KEYS = new Set([
   "id",
+  "type",
   "version",
   "created_at",
   "updated_at",
   "archived_at",
 ]);
 
+const OMA_ONLY_KEYS = new Set([
+  "_oma",
+  "runtime_binding",
+  "harness",
+  "acp",
+  "aux_model",
+  "appendable_prompts",
+  "enable_general_subagent",
+  "callable_agents",
+]);
+
 /** Clone an API agent into a config baseline for lossless form merges. */
 export function agentToPreservedConfig(agent: Agent): Record<string, unknown> {
   const out: Record<string, unknown> = {};
   for (const [k, v] of Object.entries(agent as unknown as Record<string, unknown>)) {
-    if (RESPONSE_ONLY_KEYS.has(k)) continue;
+    if (RESPONSE_ONLY_KEYS.has(k) || OMA_ONLY_KEYS.has(k)) continue;
     if (v === undefined) continue;
     out[k] = structuredClone(v);
   }
@@ -138,17 +142,8 @@ function modelSpeedOf(model: unknown): "" | "standard" | "fast" {
   return speed === "standard" || speed === "fast" ? speed : "";
 }
 
-type RuntimeBinding = {
-  runtime_id?: string;
-  acp_agent_id?: string;
-  local_skill_blocklist?: string[];
-};
-
 /** Map an API / pasted config into form state (lossy by design for the UI). */
 export function configToForm(config: Record<string, unknown>): FormState {
-  const oma = config._oma as { runtime_binding?: RuntimeBinding } | undefined;
-  const rb: RuntimeBinding | undefined =
-    oma?.runtime_binding ?? (config.runtime_binding as RuntimeBinding | undefined);
   const toolPolicy = parseToolPolicy(
     Array.isArray(config.tools) ? (config.tools as unknown[]) : undefined,
   );
@@ -183,13 +178,7 @@ export function configToForm(config: Record<string, unknown>): FormState {
           version: a.version ?? 1,
         }))
       : [],
-    runtimeId: rb?.runtime_id ?? "",
-    acpAgentId: rb?.acp_agent_id ?? "claude-agent-acp",
-    localSkillBlocklist: Array.isArray(rb?.local_skill_blocklist)
-      ? rb.local_skill_blocklist
-      : [],
     ...toolPolicy,
-    enableGeneralSubagent: config.enable_general_subagent === true,
   };
 }
 
@@ -316,43 +305,6 @@ export function mergeMcpServers(
     });
 }
 
-function buildOmaPatch(
-  form: FormState,
-  forUpdate: boolean,
-  base: Record<string, unknown> | null | undefined,
-): Record<string, unknown> | undefined {
-  const baseOma =
-    base?._oma && typeof base._oma === "object"
-      ? structuredClone(base._oma as Record<string, unknown>)
-      : {};
-  const hadBinding =
-    !!(baseOma.runtime_binding) ||
-    !!(base?.runtime_binding);
-
-  if (form.runtimeId && form.acpAgentId) {
-    return {
-      ...baseOma,
-      harness: "acp-proxy",
-      runtime_binding: {
-        runtime_id: form.runtimeId,
-        acp_agent_id: form.acpAgentId,
-        ...(form.localSkillBlocklist.length > 0
-          ? { local_skill_blocklist: form.localSkillBlocklist }
-          : {}),
-      },
-    };
-  }
-
-  if (forUpdate && hadBinding) {
-    return { ...baseOma, harness: "default", runtime_binding: null };
-  }
-
-  // Preserve untouched _oma (aux_model, appendable_prompts, …) on update /
-  // mode switches even when the form does not manage a runtime binding.
-  if (Object.keys(baseOma).length > 0) return baseOma;
-  return undefined;
-}
-
 /**
  * Overlay form-managed fields onto a preserved config baseline.
  * Create mode (no base) emits only the fields the form owns.
@@ -374,6 +326,7 @@ export function mergeFormIntoConfig(
 
   // Drop response-ish keys if a caller passed a full agent record.
   for (const k of RESPONSE_ONLY_KEYS) delete payload[k];
+  for (const k of OMA_ONLY_KEYS) delete payload[k];
 
   payload.name = form.name;
   payload.model = buildModelValue(form);
@@ -389,7 +342,6 @@ export function mergeFormIntoConfig(
     payload.multiagent = form.callableAgents.length
       ? { type: "coordinator", agents: form.callableAgents }
       : null;
-    payload.enable_general_subagent = form.enableGeneralSubagent;
   } else {
     if (form.system) payload.system = form.system;
     else delete payload.system;
@@ -407,51 +359,7 @@ export function mergeFormIntoConfig(
     } else {
       delete payload.multiagent;
     }
-    if (form.enableGeneralSubagent) payload.enable_general_subagent = true;
-    else delete payload.enable_general_subagent;
-  }
-
-  const oma = buildOmaPatch(form, forUpdate, base);
-  if (oma) payload._oma = oma;
-  else if (forUpdate) {
-    // Leave existing _oma alone when base had none and form cleared nothing.
-    delete payload._oma;
-  } else {
-    delete payload._oma;
   }
 
   return payload;
-}
-
-/**
- * Keep the standard Managed Agents endpoint strict. OpenMA-only runtime,
- * harness and local-process fields are routed through the explicit product
- * namespace instead of being smuggled into `/v1/agents`.
- */
-export function requiresOmaAgentEndpoint(payload: Record<string, unknown>): boolean {
-  const omaOnlyKeys = [
-    "_oma",
-    "runtime_binding",
-    "harness",
-    "acp",
-    "aux_model",
-    "appendable_prompts",
-    "enable_general_subagent",
-    "callable_agents",
-  ];
-  if (omaOnlyKeys.some((key) => Object.prototype.hasOwnProperty.call(payload, key))) {
-    return true;
-  }
-
-  const servers = payload.mcp_servers;
-  return (
-    Array.isArray(servers) &&
-    servers.some(
-      (server) =>
-        !!server &&
-        typeof server === "object" &&
-        ((server as { type?: unknown }).type !== "url" ||
-          Object.prototype.hasOwnProperty.call(server, "stdio")),
-    )
-  );
 }

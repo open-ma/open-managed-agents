@@ -25,6 +25,7 @@ describe("Managed runtime adapter boundary", () => {
       "../src/index.ts",
       "../src/local-tunnel-provisioner.ts",
       "../src/managed-memory-snapshot.ts",
+      "../src/managed-session-memory-sync.ts",
       "../src/memory-content-descriptor.ts",
       "../src/model-card-catalog.ts",
       "../src/session-lifecycle-router.ts",

@@ -399,6 +399,18 @@ export class InMemoryBlobStore implements BlobStore {
     return obj ? { text: obj.text, etag: obj.etag, size: obj.size } : null;
   }
 
+  async list(
+    prefix: string,
+    _cursor?: string,
+  ): Promise<{ keys: string[]; nextCursor: string | null }> {
+    return {
+      keys: [...this.objects.keys()]
+        .filter((key) => key.startsWith(prefix))
+        .sort(),
+      nextCursor: null,
+    };
+  }
+
   async put(
     key: string,
     body: string,

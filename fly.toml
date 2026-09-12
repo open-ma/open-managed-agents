@@ -1,0 +1,55 @@
+kill_signal = "SIGTERM"
+kill_timeout = "30s"
+
+[build]
+  dockerfile = "apps/main-node/Dockerfile"
+
+[env]
+  HOST = "0.0.0.0"
+  PORT = "8080"
+  OPENMA_PROCESS_MODE = "standalone"
+  DATABASE_PATH = "/app/data/oma.db"
+  AUTH_DATABASE_PATH = "/app/data/auth.db"
+  SANDBOX_WORKDIR = "/app/data/sandboxes"
+  MEMORY_BLOB_DIR = "/app/data/memory-blobs"
+  FILES_BLOB_DIR = "/app/data/files-blobs"
+  SESSION_OUTPUTS_DIR = "/app/data/session-outputs"
+
+[processes]
+  app = "pnpm --filter @open-managed-agents/main-fly start"
+
+[http_service]
+  processes = ["app"]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "off"
+  auto_start_machines = true
+  min_machines_running = 1
+
+  [http_service.concurrency]
+    type = "requests"
+    soft_limit = 100
+    hard_limit = 150
+
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "30s"
+    method = "GET"
+    path = "/health"
+
+[[mounts]]
+  source = "openma_data"
+  destination = "/app/data"
+  processes = ["app"]
+  initial_size = "10gb"
+  snapshot_retention = 14
+  auto_extend_size_threshold = 80
+  auto_extend_size_increment = "5gb"
+  auto_extend_size_limit = "50gb"
+
+[[vm]]
+  processes = ["app"]
+  cpu_kind = "shared"
+  cpus = 1
+  memory = "1gb"

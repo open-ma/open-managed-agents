@@ -4,6 +4,36 @@ import { ManagedAgentsSessionHost } from "../src/session-host";
 import { acpSessionFixture } from "./acp-fixtures";
 
 describe("ManagedAgentsSessionHost", () => {
+  it("rejects and disposes an ACP session that cannot steer", async () => {
+    const events: unknown[] = [];
+    let disposeCount = 0;
+    const host = new ManagedAgentsSessionHost({
+      runtime: {
+        async start() {
+          return acpSessionFixture({
+            acpSessionId: "acp-without-steer",
+            supportsSteering: false,
+            async dispose() { disposeCount += 1; },
+          });
+        },
+      },
+      emit: (event: unknown) => events.push(event),
+    });
+
+    await host.start({
+      sessionId: "session-without-steer",
+      options: { agent: { command: "non-conforming-acp" } },
+    });
+
+    expect(disposeCount).toBe(1);
+    expect(host.has("session-without-steer")).toBe(false);
+    expect(events).toEqual([{
+      type: "session.error",
+      sessionId: "session-without-steer",
+      message: "ACP agent does not support required session steering",
+    }]);
+  });
+
   it("starts one ACP session and re-announces it idempotently", async () => {
     const starts: unknown[] = [];
     const events: unknown[] = [];

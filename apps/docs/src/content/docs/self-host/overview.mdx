@@ -13,7 +13,7 @@ Pick the one that matches your hosting story:
 
 <CardGrid>
   <Card title="Node + Docker (no Cloudflare)" icon="seti:docker">
-    `docker compose up`. Single Node process, SQLite or Postgres, local sandbox. Run on a VPS, your laptop, fly.io, your k8s cluster — anywhere with Linux/macOS. **No Cloudflare account.**
+    `docker compose up`. Single Node process, SQLite or Postgres, explicit isolated sandbox provider. Run on a VPS, your laptop, fly.io, your k8s cluster — anywhere with Linux/macOS. **No Cloudflare account.**
   </Card>
   <Card title="Cloudflare Workers" icon="cloudflare">
     `wrangler deploy`. Three Workers + DO + Containers + D1 + R2 + KV. Edge-distributed, no host management. Requires a Cloudflare Workers Paid plan.
@@ -28,7 +28,7 @@ adapter). Switch between them by changing env vars, not code.
 |---|---|---|
 | Where it runs | Your VPS / Mac / k8s / fly.io | Cloudflare Workers + DO + Containers |
 | Storage | SQLite or Postgres + local FS | D1 + KV + R2 |
-| Sandbox | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
+| Sandbox | LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox (Containers) |
 | Time to running | ~2 min | ~10 min once configured |
 | Best for | OSS / on-prem / no CF account / data-resident | Edge scale / no host mgmt / already on CF |
 | Cost floor | Hetzner €5–50/mo, or your own hardware | Workers Paid plan ($5/mo) + usage |

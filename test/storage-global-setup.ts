@@ -11,7 +11,11 @@ import type { TestProject } from "vitest/node";
 import type { StorageIntegrationConfig } from "./storage-integration.js";
 
 const POSTGRES_IMAGE = "postgres:16-alpine";
-const MINIO_IMAGE = "minio/minio:RELEASE.2025-09-07T16-13-09Z";
+// Pin the official Quay multi-arch manifest. 2025-09-07 is an `mc` client
+// release, not a MinIO Server image, and Docker Hub now answers 404 for that
+// mistaken tag on clean CI runners.
+const MINIO_IMAGE =
+  "quay.io/minio/minio@sha256:d249d1fb6966de4d8ad26c04754b545205ff15a62e4fd19ebd0f26fa5baacbc0";
 const REGION = "us-east-1";
 const POSTGRES_DATABASES = {
   agentsSql: "openma_agents_sql_test",

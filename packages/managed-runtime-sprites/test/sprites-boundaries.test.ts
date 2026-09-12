@@ -156,12 +156,53 @@ describe("Sprites provider boundary contracts", () => {
     }
     await expect(new SpritesRuntime({ client: client(sprite()), sprite: sprite({ checkError: new Error("network") }) }).status())
       .resolves.toBe("unknown");
-    const running = new SpritesRuntime({ client: client(sprite()), sprite: sprite() });
+    const runningSprite = sprite();
+    const running = new SpritesRuntime({ client: client(runningSprite), sprite: runningSprite });
     expect(running.runtimeHandle()).toEqual({ provider: "sprites", runtimeId: name });
-    expect(running.runtimeCapabilities()).toEqual({ lease: false, suspend: ["filesystem"], checkpoint: [] });
-    await expect(running.renewLease()).resolves.toBeUndefined();
-    await expect(new SpritesRuntime({ client: client(sprite()), sprite: sprite({ status: "stopped" }) }).renewLease())
-      .rejects.toThrow("no longer available");
+    expect(running.runtimeCapabilities()).toEqual({ lease: true, suspend: ["filesystem"], checkpoint: [] });
+    await expect(running.renewLease({ ttlMs: 90_000 })).resolves.toBeUndefined();
+    expect(runningSprite.execFileHTTP).toHaveBeenCalledWith(
+      "/bin/sh",
+      ["-lc", expect.stringContaining("PUT /v1/tasks/openma-runtime")],
+      expect.objectContaining({ cwd: "/", timeout: 60_000 }),
+    );
+
+    const rejected = sprite();
+    (rejected.execFileHTTP as ReturnType<typeof vi.fn>).mockResolvedValueOnce({
+      stdout: "",
+      stderr: "task api unavailable",
+      exitCode: 1,
+    });
+    await expect(new SpritesRuntime({ client: client(rejected), sprite: rejected }).renewLease({ ttlMs: 90_000 }))
+      .rejects.toThrow("keep-alive");
+  });
+
+  it("uses an exclusive process lock and releases provider keep-alive before suspend", async () => {
+    const value = sprite();
+    const runtime = new SpritesRuntime({ client: client(value), sprite: value });
+    const process = await runtime.spawnDuplexProcess({
+      command: "openma-harness-supervisor",
+      args: ["--stdio"],
+      cwd: "/workspace",
+    });
+    await process.exited;
+    expect(value.spawn).toHaveBeenCalledWith(
+      "/usr/bin/flock",
+      [
+        "--nonblock",
+        "/run/openma-managed-agent.lock",
+        "openma-harness-supervisor",
+        "--stdio",
+      ],
+      expect.objectContaining({ cwd: "/workspace", tty: false }),
+    );
+
+    await runtime.suspend({ kind: "filesystem" });
+    expect(value.execFileHTTP).toHaveBeenCalledWith(
+      "/bin/sh",
+      ["-lc", expect.stringContaining("DELETE /v1/tasks/openma-runtime")],
+      expect.objectContaining({ cwd: "/", timeout: 60_000 }),
+    );
   });
 
   it("syncs retained filesystems and validates resume handles", async () => {
@@ -195,6 +236,52 @@ describe("Sprites provider boundary contracts", () => {
     expect(value.updateNetworkPolicy).toHaveBeenCalledWith({ rules: [{ domain: "example.com", action: "allow" }] });
   });
 
+  it("projects and flushes generation-scoped Memory workspaces when the host supplies a bridge", async () => {
+    const value = sprite({
+      exec: { stdout: "/mnt/memory/project/notes/alpha.txt\0", exitCode: 0 },
+    });
+    const put = vi.fn(async () => ({ etag: "etag", size: 4 }));
+    const remove = vi.fn(async () => undefined);
+    const memoryWorkspace = {
+      getText: vi.fn(async (key: string) => ({ text: key.endsWith("alpha.txt") ? "alpha" : "stale" })),
+      list: vi.fn(async () => ({
+        keys: ["snapshot/data/notes/alpha.txt", "snapshot/data/notes/deleted.txt"],
+        nextCursor: null,
+      })),
+      put,
+      delete: remove,
+    };
+    const runtime = await createSpritesProvider({
+      client: client(value),
+      memoryWorkspace,
+    }).create(
+      { sessionId: scope.sessionId, workdir: "/workspace" },
+      {},
+      acquisition(),
+    );
+
+    expect(runtime.mountMemoryStore).toBeTypeOf("function");
+    expect(runtime.synchronizeMemoryStores).toBeTypeOf("function");
+    await runtime.mountMemoryStore!({
+      storeName: "project",
+      storeId: "snapshot/data",
+      readOnly: false,
+    });
+    expect(value.filesystemPort.writeFile).toHaveBeenCalledWith(
+      "/mnt/memory/project/notes/alpha.txt",
+      "alpha",
+    );
+    await runtime.synchronizeMemoryStores!();
+    expect(put).toHaveBeenCalledWith("snapshot/data/notes/alpha.txt", "text");
+    expect(remove).toHaveBeenCalledWith("snapshot/data/notes/deleted.txt");
+
+    await expect(runtime.mountMemoryStore!({
+      storeName: "../escape",
+      storeId: "snapshot/data",
+      readOnly: false,
+    })).rejects.toThrow(/safe path segment/i);
+  });
+
   it("preserves native duplex streams and process termination semantics", async () => {
     const process = command({ code: 4 });
     const value = sprite({ command: process });
@@ -204,7 +291,12 @@ describe("Sprites provider boundary contracts", () => {
     await expect(Promise.all([new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited]))
       .resolves.toEqual(["out", "err", { code: 4, signal: null }]);
     expect(process.close).toHaveBeenCalledOnce();
-    expect(value.spawn).toHaveBeenCalledWith("worker", ["--poll"], {
+    expect(value.spawn).toHaveBeenCalledWith("/usr/bin/flock", [
+      "--nonblock",
+      "/run/openma-managed-agent.lock",
+      "worker",
+      "--poll",
+    ], {
       cwd: "/workspace/project", env: { KEY: "value" }, tty: false, maxRunAfterDisconnect: "1h",
     });
     await child.kill();
@@ -213,7 +305,11 @@ describe("Sprites provider boundary contracts", () => {
     expect(process.kill).toHaveBeenNthCalledWith(2, "SIGKILL");
     const defaults = sprite({ command: command() });
     await new SpritesRuntime({ client: client(defaults), sprite: defaults }).spawnDuplexProcess({ command: "worker" });
-    expect(defaults.spawn).toHaveBeenCalledWith("worker", [], {
+    expect(defaults.spawn).toHaveBeenCalledWith("/usr/bin/flock", [
+      "--nonblock",
+      "/run/openma-managed-agent.lock",
+      "worker",
+    ], {
       cwd: "/workspace", tty: false, maxRunAfterDisconnect: "1h",
     });
   });
@@ -274,7 +370,10 @@ describe("Sprites provider boundary contracts", () => {
       expect(sdk.getSprite).toHaveBeenCalledTimes(2);
     }
     for (const error of ["network", {}, new Error("network")]) {
-      await expect(createSpritesProvider({ client: client(sprite(), { getError: error }) }).create(
+      await expect(createSpritesProvider({
+        client: client(sprite(), { getError: error }),
+        lifecycleRetry: { wait: async () => undefined },
+      }).create(
         { sessionId: scope.sessionId, workdir: "/workspace" }, {}, acquisition(),
       )).rejects.toBe(error);
     }
@@ -287,6 +386,35 @@ describe("Sprites provider boundary contracts", () => {
     await expect(createSpritesProvider({ client: client(sprite()), networkPolicy: () => null }).create(
       { sessionId: scope.sessionId, workdir: "/workspace" }, {}, acquisition(),
     )).resolves.toBeInstanceOf(SpritesRuntime);
+  });
+
+  it("retries transient lifecycle requests without retrying arbitrary provider failures", async () => {
+    const value = sprite();
+    const transient = Object.assign(new Error("Network error: fetch failed"), { code: "ETIMEDOUT" });
+    const sdk = client(value, { getError: transient });
+    const waits: number[] = [];
+    await expect(createSpritesProvider({
+      client: sdk,
+      lifecycleRetry: {
+        maxAttempts: 3,
+        baseDelayMs: 10,
+        wait: async (milliseconds) => { waits.push(milliseconds); },
+      },
+    }).create(
+      { sessionId: scope.sessionId, workdir: "/workspace" }, {}, acquisition(),
+    )).resolves.toBeInstanceOf(SpritesRuntime);
+    expect(sdk.getSprite).toHaveBeenCalledTimes(2);
+    expect(waits).toEqual([10]);
+
+    const permanent = new Error("permission denied");
+    const rejected = client(value, { getError: permanent });
+    await expect(createSpritesProvider({
+      client: rejected,
+      lifecycleRetry: { wait: async () => undefined },
+    }).create(
+      { sessionId: scope.sessionId, workdir: "/workspace" }, {}, acquisition(),
+    )).rejects.toBe(permanent);
+    expect(rejected.getSprite).toHaveBeenCalledOnce();
   });
 
   it("handles readiness failures and aborts after the readiness command", async () => {

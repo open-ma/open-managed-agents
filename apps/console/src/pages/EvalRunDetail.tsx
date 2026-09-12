@@ -1,7 +1,6 @@
 import { Table, TableHeader, TableBody, TableHead, TableRow, TableCell } from "@/components/ui/table";
 import { useState } from "react";
 import { Link, useParams } from "react-router";
-import { useApi } from "../lib/api";
 import { useApiQuery } from "../lib/useApiQuery";
 import { shortenId } from "../lib/format";
 import type { Trajectory } from "../lib/trajectory";
@@ -76,17 +75,7 @@ function durationStr(start?: string, end?: string): string {
 
 export function EvalRunDetail() {
   const { id } = useParams<{ id: string }>();
-  const { api } = useApi();
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
-  /** Cache of trajectory fetches keyed by session_id. Populated lazily when
-   *  the user expands a task row — we don't pull every trial's trajectory
-   *  on initial page load (could be hundreds of trials per run). The
-   *  sentinel "loading" / "error" states keep the UI honest while inflight
-   *  / after a failure (404 = trajectory not built yet, 5xx = sandbox flaky)
-   *  so we don't retry on every render. */
-  const [trajectories, setTrajectories] = useState<
-    Map<string, Trajectory | "loading" | "error">
-  >(new Map());
 
   // Run detail with auto-poll while the run is unfinished. Using TQ's
   // refetchInterval so we don't have to hand-roll the cleanup-on-unmount
@@ -116,40 +105,6 @@ export function EvalRunDetail() {
       else next.add(taskId);
       return next;
     });
-    // Lazy-fetch trajectories for any trial in this task that has a
-    // session_id and hasn't been requested yet. The fetch result lands in
-    // `trajectories` keyed by session_id; render reads from that map.
-    const task = run?.tasks.find(t => t.id === taskId);
-    if (!task) return;
-    for (const tr of task.trials) {
-      if (!tr.session_id) continue;
-      // Avoid re-fetching anything already in flight, completed, or failed.
-      if (trajectories.has(tr.session_id)) continue;
-      void fetchTrajectory(tr.session_id);
-    }
-  }
-
-  async function fetchTrajectory(sessionId: string) {
-    setTrajectories(prev => {
-      if (prev.has(sessionId)) return prev;
-      const next = new Map(prev);
-      next.set(sessionId, "loading");
-      return next;
-    });
-    try {
-      const traj = await api<Trajectory>(`/v1/oma/sessions/${sessionId}/trajectory`);
-      setTrajectories(prev => {
-        const next = new Map(prev);
-        next.set(sessionId, traj);
-        return next;
-      });
-    } catch {
-      setTrajectories(prev => {
-        const next = new Map(prev);
-        next.set(sessionId, "error");
-        return next;
-      });
-    }
   }
 
   if (loading) {
@@ -327,7 +282,7 @@ export function EvalRunDetail() {
                               <TableCell className="py-1 pr-3">
                                 <TrialReward
                                   fallback={tr.reward}
-                                  trajectory={tr.session_id ? trajectories.get(tr.session_id) : undefined}
+                                  trajectory={undefined}
                                 />
                               </TableCell>
                               <TableCell className="py-1 pr-3 font-mono text-fg-muted">{tr.exit_code ?? "—"}</TableCell>
@@ -351,28 +306,6 @@ export function EvalRunDetail() {
                       </Table>
                       </div>
 
-                      {t.trials.some(tr => tr.session_id && trajectories.get(tr.session_id) && trajectories.get(tr.session_id) !== "loading" && trajectories.get(tr.session_id) !== "error") && (
-                        <details>
-                          <summary className="cursor-pointer text-xs text-fg-subtle hover:text-fg">
-                            reward breakdown
-                          </summary>
-                          <div className="mt-1 space-y-2">
-                            {t.trials.map(tr => {
-                              if (!tr.session_id) return null;
-                              const traj = trajectories.get(tr.session_id);
-                              if (!traj || traj === "loading" || traj === "error") return null;
-                              if (!traj.reward) return null;
-                              return (
-                                <RewardBreakdown
-                                  key={tr.trial_index}
-                                  trialIndex={tr.trial_index}
-                                  reward={traj.reward}
-                                />
-                              );
-                            })}
-                          </div>
-                        </details>
-                      )}
 
                       {t.trials.some(tr => tr.error) && (
                         <div className="text-xs text-danger space-y-0.5">
@@ -437,11 +370,10 @@ export function EvalRunDetail() {
 
 /** Reward cell on a trial row.
  *
- *  Prefers `Trajectory.reward.final_reward` (the unified Verifier output)
- *  when the lazy-fetched trajectory is available — that's the v1 story.
- *  Falls back to the legacy `EvalTrialResult.reward` (from when the eval
- *  runner stamped a single number directly on the trial) so trials whose
- *  trajectory isn't built yet still render something useful.
+ *  Renders the reward already projected on the eval result. The optional
+ *  trajectory branch remains reusable for a future Managed Session
+ *  trajectory extension, but the Console never probes the retired OMA
+ *  Session route.
  *
  *  Sentinel handling:
  *   - "loading" → small dim placeholder (no extra chrome)

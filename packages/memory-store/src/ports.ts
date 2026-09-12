@@ -221,6 +221,13 @@ export interface BlobStore {
   /** GET text content + metadata. Returns null if not found. */
   getText(key: string): Promise<BlobReadResult | null>;
 
+  /** List logical object keys below a prefix. Cursors are adapter-owned and
+   * opaque; implementations without pagination return a null cursor. */
+  list(
+    prefix: string,
+    cursor?: string,
+  ): Promise<{ keys: string[]; nextCursor: string | null }>;
+
   /**
    * PUT with optional precondition. Returns the new metadata on success,
    * or null if the precondition failed. Throws on transport / 5xx errors.

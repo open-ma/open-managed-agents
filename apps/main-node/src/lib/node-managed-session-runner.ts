@@ -115,6 +115,12 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
     sandbox: SandboxExecutor;
     runtimeGeneration: string;
   }): Promise<void>;
+  /** Fenced turn barrier for provider-neutral writable state reconciliation. */
+  synchronizeSandbox?(input: ManagedRunnerContext & {
+    sandbox: SandboxExecutor;
+    runtimeGeneration: string;
+    executionFence: SessionExecutionFence;
+  }): Promise<void>;
   /** Runs after all terminal facts have committed, while the execution still
    * owns its existing fence. Suitable for immutable output publication. */
   afterExecution?(input: ManagedRunnerContext & {
@@ -138,6 +144,25 @@ export interface DefaultNodeManagedSessionRunnerDependencies {
   clock: { now(): Date };
   ids: { nextEventId(): string };
   runtimeGenerations?: { next(): string };
+}
+
+function findLastMatching<T, S extends T>(
+  values: readonly T[],
+  predicate: (value: T) => value is S,
+): S | undefined;
+function findLastMatching<T>(
+  values: readonly T[],
+  predicate: (value: T) => boolean,
+): T | undefined;
+function findLastMatching<T>(
+  values: readonly T[],
+  predicate: (value: T) => boolean,
+): T | undefined {
+  for (let index = values.length - 1; index >= 0; index -= 1) {
+    const value = values[index];
+    if (value !== undefined && predicate(value)) return value;
+  }
+  return undefined;
 }
 
 export class DefaultNodeManagedSessionRunner
@@ -220,7 +245,8 @@ export class DefaultNodeManagedSessionRunner
       this.abortControllers.get(input)?.abort();
       return;
     }
-    const event = input.events.findLast(
+    const event = findLastMatching(
+      input.events,
       (candidate) => candidate.type !== "system.message",
     );
     if (event === undefined) {
@@ -270,7 +296,8 @@ export class DefaultNodeManagedSessionRunner
     let runFailed = false;
     try {
       if (event.type === "user.tool_confirmation") {
-        const toolUse = input.historyEvents.findLast(
+        const toolUse = findLastMatching(
+          input.historyEvents,
           (candidate): candidate is ManagedNodeConfirmableToolUse =>
             (candidate.type === "agent.tool_use" ||
               candidate.type === "agent.mcp_tool_use") &&
@@ -484,6 +511,23 @@ export class DefaultNodeManagedSessionRunner
         }
       } catch (error) {
         finalizationError = error instanceof Error ? error : new Error(String(error));
+      }
+      try {
+        if (
+          input.executionFence !== undefined &&
+          this.dependencies.synchronizeSandbox !== undefined
+        ) {
+          await this.dependencies.synchronizeSandbox({
+            workspaceId: input.workspaceId,
+            session: input.session,
+            environment: input.environment,
+            sandbox: rawSandbox,
+            runtimeGeneration,
+            executionFence: input.executionFence,
+          });
+        }
+      } catch (error) {
+        finalizationError ??= error instanceof Error ? error : new Error(String(error));
       }
       if (finalizationError !== undefined && !runFailed) {
         runtime.broadcastProducedEvent({

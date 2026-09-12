@@ -266,6 +266,66 @@ describe("createManagedAgentsRuntime", () => {
     expect(promptSignal?.aborted).toBe(true);
   });
 
+  it("delivers a steer command to the active ACP turn without waiting for it to finish", async () => {
+    let releasePrompt!: () => void;
+    const promptReleased = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    let promptStarted!: () => void;
+    const started = new Promise<void>((resolve) => {
+      promptStarted = resolve;
+    });
+    const steers: string[] = [];
+    const runtime = createManagedAgentsRuntime({
+      acpRuntime: {
+        async start() {
+          return acpSessionFixture({
+            acpSessionId: "acp-runtime-steer",
+            supportsSteering: true,
+            async *prompt() {
+              promptStarted();
+              await promptReleased;
+            },
+            async steer(text) {
+              steers.push(text);
+              return "injected";
+            },
+          });
+        },
+      },
+      sessionPreparation: {
+        async prepare() {
+          return { agent: { command: "steer-agent" } };
+        },
+      },
+    });
+    runtime.attach({ publish() {} });
+    await runtime.dispatch({
+      type: "session.start",
+      sessionId: "session-runtime-steer",
+      agentId: "steer-agent",
+      runtime: "cloud",
+    });
+    const activePrompt = runtime.dispatch({
+      type: "session.prompt",
+      sessionId: "session-runtime-steer",
+      turnId: "turn-runtime-steer",
+      text: "start",
+    });
+    await started;
+
+    await expect(runtime.dispatch({
+      type: "session.steer",
+      sessionId: "session-runtime-steer",
+      eventId: "event-runtime-steer",
+      text: "use the other approach",
+    } as never)).resolves.toBeUndefined();
+
+    expect(steers).toEqual(["use the other approach"]);
+    releasePrompt();
+    await activePrompt;
+  });
+
   it("routes dispose and emits the matching host event", async () => {
     const events: unknown[] = [];
     let disposeCount = 0;

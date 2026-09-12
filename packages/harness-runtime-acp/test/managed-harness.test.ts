@@ -1,5 +1,4 @@
 import type { AcpRuntime, SessionOptions } from "@open-managed-agents/acp-runtime";
-import type { SessionCommand } from "@openma/common/session-kernel";
 import { describe, expect, it, vi } from "vitest";
 
 import {
@@ -17,7 +16,7 @@ const scope = {
   workId: "work_1",
 };
 
-function commandChannel(commands: readonly SessionCommand[], log: string[]) {
+function commandChannel(commands: readonly ManagedHarnessControlMessage[], log: string[]) {
   const published: ManagedHarnessPublishedEvent[] = [];
   const channel: ManagedHarnessControlChannel = {
     async *commands() {
@@ -56,14 +55,19 @@ function abruptlyClosedChannel(
   };
 }
 
-function fakeAcpRuntime(log: string[]): AcpRuntime {
+function fakeAcpRuntime(log: string[], hooks: {
+  promptGate?: Promise<void>;
+  promptError?: Error;
+  onPromptStarted?(): void;
+  onSteer?(text: string): void;
+} = {}): AcpRuntime {
   return {
-    async start(options: SessionOptions) {
-      log.push(`acp:start:${options.resumeAcpSessionId ?? "new"}`);
+    async start(sessionOptions: SessionOptions) {
+      log.push(`acp:start:${sessionOptions.resumeAcpSessionId ?? "new"}`);
       return {
         id: "internal_1",
         acpSessionId: "acp_1",
-        options,
+        options: sessionOptions,
         authMethods: [],
         protocolVersion: null,
         agentInfo: null,
@@ -84,16 +88,25 @@ function fakeAcpRuntime(log: string[]): AcpRuntime {
         supportsNes: false,
         nesCapabilities: null,
         positionEncoding: null,
-        supportsSteering: false,
+        // Every ACP harness admitted by OpenMA supports steering. Tests that
+        // do not care about a steer still model a conforming agent.
+        supportsSteering: true,
         async *prompt(text: string | readonly unknown[]) {
           log.push(`acp:prompt:${String(text)}`);
+          hooks.onPromptStarted?.();
+          await hooks.promptGate;
+          if (hooks.promptError !== undefined) throw hooks.promptError;
           yield { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } };
           yield {
             type: "promptComplete",
             response: { usage: { inputTokens: 10, outputTokens: 2, cachedReadTokens: 8 } },
           };
         },
-        async steer() { return "promptRequired" as const; },
+        async steer(text: string | readonly unknown[]) {
+          hooks.onSteer?.(String(text));
+          log.push(`acp:steer:${String(text)}`);
+          return "injected" as const;
+        },
         async cancelCurrentTurn() {},
         drainPendingEvents() { return []; },
         async setConfigOption() { return []; },
@@ -202,6 +215,75 @@ describe("managed ACP harness in sandbox", () => {
       "session.event",
       "session.complete",
     ]);
+  });
+
+  it("keeps consuming control commands so steer reaches a still-running ACP turn", async () => {
+    const log: string[] = [];
+    let releasePrompt!: () => void;
+    const promptGate = new Promise<void>((resolve) => {
+      releasePrompt = resolve;
+    });
+    let announcePromptStarted!: () => void;
+    const promptStarted = new Promise<void>((resolve) => {
+      announcePromptStarted = resolve;
+    });
+    const steers: string[] = [];
+    const { channel } = commandChannel([
+      {
+        type: "session.start",
+        sessionId: scope.sessionId,
+        agentId: "codex-acp",
+        runtime: "cloud",
+      },
+      {
+        type: "session.prompt",
+        sessionId: scope.sessionId,
+        turnId: "turn_1",
+        text: "start",
+      },
+      {
+        type: "session.steer",
+        sessionId: scope.sessionId,
+        eventId: "steer_1",
+        text: "focus on cache behavior",
+      },
+    ], log);
+    const harness = createManagedAcpSupervisorHarness({
+      connect: async () => channel,
+      acpRuntime: fakeAcpRuntime(log, {
+        promptGate,
+        onPromptStarted: announcePromptStarted,
+        onSteer: (text) => steers.push(text),
+      }),
+      sessionPreparation: {
+        async prepare(command) {
+          return { agent: { command: command.agentId } };
+        },
+      },
+      sessionState: {
+        async beforeStart(command) { return { command }; },
+        async onReady() {},
+        async checkpoint() {},
+        async release() {},
+      },
+      drainDeadlineMs: 100,
+    });
+    const run = await harness.start({
+      scope,
+      harness: { id: "acp", version: "1" },
+      workspacePath: "/workspace",
+      outputPath: null,
+      checkpoint: async () => {},
+      signal: new AbortController().signal,
+    });
+    await promptStarted;
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const steersBeforePromptRelease = [...steers];
+    releasePrompt();
+    await run.completed;
+    await run.drain();
+
+    expect(steersBeforePromptRelease).toEqual(["focus on cache behavior"]);
   });
 
   it.each([
@@ -389,6 +471,46 @@ describe("managed ACP harness in sandbox", () => {
       "Native ACP state is unavailable and no semantic recovery Port is configured",
     );
   });
+
+  it.each(["dispose", "complete"] as const)(
+    "publishes an ACP prompt error and still settles control %s cleanly",
+    async (boundary) => {
+      const log: string[] = [];
+      const commands: ManagedHarnessControlMessage[] = [
+        {
+          type: "session.start",
+          sessionId: scope.sessionId,
+          agentId: "codex-acp",
+          runtime: "cloud",
+        },
+        {
+          type: "session.prompt",
+          sessionId: scope.sessionId,
+          turnId: "turn_failed",
+          text: "fail",
+        },
+      ];
+      const channel = boundary === "dispose"
+        ? commandChannel([
+            ...commands,
+            { type: "session.dispose", sessionId: scope.sessionId },
+          ], log).channel
+        : commandChannel(commands, log).channel;
+      const harness = createManagedAcpSupervisorHarness({
+        connect: async () => channel,
+        acpRuntime: fakeAcpRuntime(log, { promptError: new Error("prompt failed") }),
+        sessionPreparation: {
+          async prepare() { return { agent: { command: "codex-acp" } }; },
+        },
+        sessionState: inertState(),
+      });
+
+      const run = await startHarness(harness);
+      await expect(run.completed).resolves.toEqual({ exitCode: 0 });
+      expect(log).toContain("publish:session.error");
+      await run.drain();
+    },
+  );
 
   it("surfaces workspace CAS failure after canonical completion publication", async () => {
     const log: string[] = [];

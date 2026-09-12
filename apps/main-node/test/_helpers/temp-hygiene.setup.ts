@@ -4,6 +4,11 @@ import { afterAll } from "vitest";
 
 const OWNED_PREFIXES = ["oma-", "openma-"] as const;
 
+// Process-level route tests need a deterministic sandbox without booting a VM
+// in the generic unit-test lane. The production selector never exposes this
+// adapter; live provider certification owns LiteBox and the other runtimes.
+process.env.OPENMA_TEST_SANDBOX_PROVIDER ??= "local-subprocess";
+
 async function ownedEntries(): Promise<Set<string>> {
   return new Set(
     (await readdir(tmpdir()))

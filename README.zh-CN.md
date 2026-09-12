@@ -29,7 +29,7 @@ OpenMA 提供持久会话、沙箱工具、记忆、加密凭证和崩溃恢复�
 |---|---|---|
 | 跑在哪里 | 你的 VPS / Mac / Docker 主机 / fly.io / k8s | Cloudflare Workers + DO + Containers |
 | 存储 | SQLite 或 Postgres + 本地文件系统 | D1 + KV + R2 |
-| 沙箱 | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox（Containers） |
+| 沙箱 | LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox（Containers） |
 | 启动时间 | `docker compose up`（约 2 分钟） | wrangler deploy（首次配置后约 10 分钟） |
 | 适合谁 | 开源用户、私有部署、不想用 CF、需要数据驻留 | 边缘规模、不想运维主机、已在 CF 上 |
 
@@ -93,8 +93,9 @@ $EDITOR .env
 #
 # 可选：ANTHROPIC_API_KEY 让第一个 agent 在还没添加 Model Card 时也能跑起来。
 # 生产环境请改为在 Console 里按 tenant 添加 Model Card。
+# 必须显式配置隔离沙箱，例如 SANDBOX_PROVIDER=e2b 和 E2B_API_KEY。
 
-# SQLite + LocalSubprocess 沙箱（默认，最快路径）
+# SQLite + 显式配置的隔离沙箱
 docker compose up -d
 
 # 或者用 Postgres
@@ -213,7 +214,7 @@ curl -N -X POST $BASE/v1/sessions/$SESSION/messages \
 ├─────────────────────────────────────────────────────────┤
 │  基础设施（Cloudflare 或 Node 自部署）                  │
 │  - 事件日志：DO 内的 SQLite（CF），或 SQLite/Postgres   │
-│  - 沙箱：CF Containers / subprocess / LiteBox / E2B     │
+│  - 沙箱：CF Containers / LiteBox / E2B / Daytona        │
 │  - 存储：KV + R2（CF），或本地文件系统（自部署）        │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -671,7 +672,7 @@ open-managed-agents/
 │   ├── api-types/                 # 共享 TypeScript 类型（配置 schema、事件类型）
 │   ├── http-routes/               # 公开 REST 路由定义（main 与 main-node 共用）
 │   ├── session-runtime/           # Harness 运行时 —— 事件日志、广播、恢复
-│   ├── sandbox/                   # 沙箱适配器（subprocess / litebox / daytona / e2b / boxrun）
+│   ├── sandbox/                   # 沙箱 Port 与 provider-neutral 编排
 │   ├── credentials-store/         # 加密凭证存储（基于 PLATFORM_ROOT_SECRET 的 AES-GCM）
 │   ├── model-cards-store/         # 加密的 Model Card API key 存储
 │   ├── vaults-store/              # 保险库定义 + 出站鉴权配线
@@ -698,7 +699,7 @@ open-managed-agents/
 | `ANTHROPIC_API_KEY` | 否 | tenant 还没添加 Model Card 时使用的备用 LLM 凭证。**生产环境请在 Console 里按 tenant 添加 Model Card** —— 它会基于 `PLATFORM_ROOT_SECRET` 加密静态存储、按 tenant 隔离、并且能不重新部署就轮换。 |
 | `ANTHROPIC_BASE_URL` | 否 | 切到任意 Anthropic 兼容代理。 |
 | `PUBLIC_BASE_URL` | 否（开发） / 是（生产） | Cookie 域和 OAuth redirect 的根。默认 `*` trusted-origins —— 只适合本地开发。 |
-| `SANDBOX_PROVIDER` | 否 | `subprocess`（默认，无隔离）、`litebox`（Firecracker）、`daytona`、`e2b`、`boxrun`。运行不可信 agent 请用带隔离的后端。 |
+| `SANDBOX_PROVIDER` | **是**（Node/Fly） | 显式选择隔离后端：`litebox`（本机 Firecracker）、`daytona`、`e2b` 或 `boxrun`。可部署入口没有 subprocess 回退。 |
 | `TAVILY_API_KEY` | 否 | `web_search` 内置工具的后端。 |
 
 完整变量列表（集成 OAuth 凭证、Postgres URL、沙箱调参、记忆桶配置、Google 登录等）：**[docs.openma.dev/reference/configuration](https://docs.openma.dev/reference/configuration/)** 以及 `.env.example` / `.dev.vars.example`。

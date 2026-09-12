@@ -2,9 +2,9 @@
 
 A Node-side build of Open Managed Agents that runs on a single VPS / Mac /
 Docker host without any Cloudflare account, Workers, Durable Objects, or
-Containers. Storage is SQLite, Postgres, or MySQL + local filesystem. Sandboxes
-are local subprocesses by default; switch to E2B for Firecracker isolation
-when you're past trusted-developer territory.
+Containers. Storage is SQLite, Postgres, or MySQL + local filesystem. Every
+deployable entrypoint requires an explicitly configured isolated sandbox
+provider; there is no host-subprocess fallback.
 
 > **One of three deployment topologies.** See [deployment.md](./deployment.md)
 > for the full Self-host / CF Local / CF Prod comparison + decision
@@ -216,15 +216,11 @@ Sandbox sides (Daytona / E2B) already mount the bucket via s3fs using
 the same env vars; the loop "agent writes via FUSE → S3 PUT → poller
 upserts SQL index" is the multi-replica analog of the chokidar path.
 
-Limitation: `local-subprocess` sandboxes still need `MEMORY_BLOB_DIR`; the
-adapter does not speak s3fs. It exposes session-scoped workdir projections
-through `OMA_MEMORY_DIR`, `OMA_MEMORY_<NAME>`, and `OMA_OUTPUTS_DIR`, while
-harness filesystem tools translate the canonical `/mnt/...` paths into that
-workdir. It deliberately does not create process-global `/mnt` symlinks,
-because concurrent Sessions would overwrite one another. The low-level
-adapter has an explicit `rootMountBase` option only for callers that own an
-exclusive mount namespace. Use S3 mode with an isolated remote sandbox when
-arbitrary agent commands must see canonical `/mnt/...` paths directly.
+The internal local sandbox fixture used by deterministic tests is not exposed
+through the deployable server and is outside this production persistence
+contract.
+Use S3 mode with an isolated remote sandbox when arbitrary agent commands must
+see canonical `/mnt/...` paths directly.
 
 ### Pointing at an existing Postgres cluster
 
@@ -359,7 +355,7 @@ The same demo works on the Postgres compose unchanged.
 | `user.interrupt` aborts in-flight harness | ✓ via SessionRouter.interrupt → SessionRegistry abort |
 | Real LLM token streaming (any Anthropic-compatible endpoint) | ✓ |
 | Crash recovery on process restart | ✓ |
-| `bash` tool via host subprocess | ✓ |
+| `bash` tool via the selected isolated sandbox | ✓ |
 | `read` / `write` / `edit` / `glob` / `grep` tools | ✓ (workdir-relative) |
 | `web_fetch` tool (HTML → markdown via turndown) | ✓ |
 | `web_search` tool | ⏸  needs TAVILY_API_KEY env var |
@@ -385,7 +381,6 @@ The same demo works on the Postgres compose unchanged.
 
 | Mode | Use when | Configuration |
 |---|---|---|
-| `LocalSubprocessSandbox` (default) | Local dev, trusted agent code | Nothing — host subprocess in `./data/sandboxes/<sessionId>/`. `SANDBOX_PROVIDER=subprocess` (the default). |
 | `DaytonaSandbox` | Production / untrusted code with managed VMs | `SANDBOX_PROVIDER=daytona`, `DAYTONA_API_KEY=...`, optional `DAYTONA_API_URL` (self-hosted) and `SANDBOX_IMAGE=node:22-slim`. Vault CA uploaded into the box on first exec; memory mount via `MEMORY_S3_*` env vars (s3fs installed by the adapter). |
 | `LiteBoxSandbox` | Local hardware isolation without docker | `SANDBOX_PROVIDER=litebox`, optional `LITEBOX_MEMORY_MIB`, `LITEBOX_CPUS`, `SANDBOX_IMAGE`. BoxLite ships its own Firecracker runtime (no daemon). Memory mounts work via host bind-mount; vault CA copied into VM on first exec. |
 | `E2BSandbox` | Official E2B SDK adapter | `SANDBOX_PROVIDER=e2b`, `E2B_API_KEY=...`, optional `SANDBOX_IMAGE` (template id). Compatible/self-hosted services use `E2B_API_URL` plus `E2B_SANDBOX_URL`, or `E2B_DOMAIN` when they expose the standard wildcard domain. Memory uses `MEMORY_S3_*` (same s3fs setup as Daytona). Outbound vault CA upload requires a template that allows `sudo` writes to `/etc/ssl/`. |
@@ -396,14 +391,13 @@ The same demo works on the Postgres compose unchanged.
 
 | Provider | bash | fs | net | `/mnt/memory` | `/mnt/outputs` | vault CA | workspace backup |
 |---|---|---|---|---|---|---|---|
-| `LocalSubprocess` | ✓ | ✓ | ✓ | ✓ for harness tools and `OMA_MEMORY_*`; arbitrary commands use the env path (canonical root mount requires an exclusive namespace) | ✓ via `OMA_OUTPUTS_DIR` (same root-mount boundary) | ✓ | ✓ (tar+upload to BlobStore) |
 | `LiteBox` | ✓ | ✓ | ✓ | ✓ (host bind-mount via SimpleBox volumes) | ✓ | ✓ (CA copyIn on first exec) | ✓ (tar via exec + readFileBytes) |
 | `Daytona` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*`) | ✓ (single-bucket layout: outputs under `session-outputs/<tenant>/<session>/`) | ✓ (CA upload on box create) | ✓ (tar via exec + readFileBytes) |
 | `E2B` | ✓ | ✓ | ✓ | ✓ (s3fs, requires `MEMORY_S3_*` + template with s3fs) | ✓ (same bucket, session-outputs prefix) | ⚠ (template must allow sudo writes to /etc/ssl/) | ✓ (tar via exec + readFileBytes) |
 | `BoxRun` | ✓ | ✓ | ✓ | ✗ (HTTP API has no mount primitive — use a custom image with s3fs preinstalled) | ✗ (same — no host-bind primitive) | ✓ (CA upload via tar PUT) | ⚠ (best-effort tar via exec) |
 | `CloudflareSandbox` | ✓ | ✓ | ✓ | ✓ (R2 + FUSE) | ✓ | ✓ (interceptHttps + outboundHandlers) | ✓ (squashfs to R2 backup bucket) |
 
-Read-only memory mounts: LocalSubprocess creates a sandbox-owned copy and removes write bits recursively, so it never changes permissions on the backing blob/checkpoint tree; Daytona and E2B enforce read-only on their mounted view. LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
+Read-only memory mounts: Daytona and E2B enforce read-only on their mounted view. LiteBox honors the `readOnly` flag on its volume mount. CloudflareSandbox does not enforce ro at the FS layer — the harness's write tool checks `assertWritable` and refuses writes regardless of provider.
 
 ## Vault credential injection
 
@@ -496,15 +490,15 @@ start and persisted across restarts. Sandboxes mounted with the shared
               │  • DefaultHarness ──┐    │
               │                     │    │
               │  Sandbox: ▼         │    │
-              │   subprocess|e2b    │    │
+              │ litebox|e2b|remote  │    │
               └──────┬─────┬───────┘
                      │     │
             ┌────────┘     └─────────┐
             ▼                        ▼
         SQLite                     E2B Cloud
         ./data/oma.db              (Firecracker microVMs)
-        ./data/sandboxes/         OR
-                                   host /bin/sh subprocess
+        ./data/                   OR
+                                   isolated provider runtime
 ```
 
 Eight runtime-agnostic ports separate "what" from "how":
@@ -513,7 +507,7 @@ Eight runtime-agnostic ports separate "what" from "how":
   - `KvStore`    — config/snapshot key-value (CONFIG_KV / pg table / memory)
   - `SqlClient`  — SQL with batch (D1 / better-sqlite3 / postgres.js / mysql2)
   - `EventLogRepo`+`StreamRepo` — per-session event durability
-  - `SandboxExecutor` — code execution sandbox (CF / E2B / subprocess)
+  - `SandboxExecutor` — code execution sandbox (CF / LiteBox / E2B / Daytona / BoxRun)
   - `ToMarkdownProvider` — web_fetch HTML→md (Workers AI / turndown)
   - `TenantDbProvider` — per-tenant DB resolution
 
@@ -713,9 +707,8 @@ If you take this past trusted-dev territory, you'll want:
 
   - **Real auth.** Today every request is `tenant_id="default"`. Wire
     better-auth + the `auth.ts` middleware that apps/main uses.
-  - **E2B (or equivalent) sandbox.** `LocalSubprocessSandbox` is a
-    `chmod 777` on your host — fine for trusted dev, deadly for an agent
-    a stranger can prompt-inject.
+  - **Isolated sandbox credentials.** Configure E2B, Daytona, BoxRun, LiteBox,
+    or another certified isolated provider before starting the Node service.
   - **Backups.** SQLite + ./data is one host. `litestream` to S3 covers
     point-in-time recovery; for higher durability, swap to Postgres.
   - **Observability.** No Analytics Engine equivalent yet. Pipe

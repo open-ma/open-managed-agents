@@ -10,18 +10,13 @@ import type {
   AgentUpdateParams,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
 
-import { useApi } from "../../lib/api";
 import { useManagedApi } from "../../lib/useManagedApi";
 import { Button } from "@/components/ui/button";
-import { Select, SelectGroup, SelectGroupLabel, SelectOption } from "../../components/Select";
+import { Select, SelectOption } from "../../components/Select";
 import { Combobox } from "../../components/Combobox";
 import { McpServerPickerModal } from "../../components/McpServerPickerModal";
 import { AGENT_TEMPLATES, type AgentTemplate } from "../../data/templates";
 import type { ModelCard } from "@open-managed-agents/api-types";
-import {
-  KNOWN_ACP_AGENTS,
-  resolveKnownAgent,
-} from "@open-managed-agents/acp-runtime/known-agents";
 import type { AgentRecord as Agent } from "../../types/agent";
 import { useI18n } from "../../i18n";
 import {
@@ -30,7 +25,6 @@ import {
   agentToPreservedConfig,
   configToForm,
   mergeFormIntoConfig,
-  requiresOmaAgentEndpoint,
   type FormState,
   type McpEntry,
   type SkillEntry,
@@ -81,16 +75,6 @@ interface AgentFormDialogProps {
   allAgents: Agent[];
   customSkills: Array<{ id: string; name: string; description: string }>;
   modelCards: ModelCard[];
-  runtimes: Array<{
-    id: string;
-    hostname: string;
-    status: string;
-    agents: Array<{ id: string }>;
-    local_skills?: Record<
-      string,
-      Array<{ id: string; name?: string; description?: string; source?: string; source_label?: string }>
-    >;
-  }>;
 }
 
 /**
@@ -114,9 +98,7 @@ export function AgentFormDialog({
   allAgents,
   customSkills,
   modelCards,
-  runtimes,
 }: AgentFormDialogProps) {
-  const { api } = useApi();
   const managedApi = useManagedApi();
   const nav = useNavigate();
   const { t } = useI18n();
@@ -235,20 +217,6 @@ export function AgentFormDialog({
   }, [open]);
 
   const persistAgent = async (payload: Record<string, unknown>): Promise<Agent> => {
-    if (requiresOmaAgentEndpoint(payload)) {
-      const path = isEdit && editingAgent
-        ? `/v1/oma/agents/${editingAgent.id}`
-        : "/v1/oma/agents";
-      return api<Agent>(path, {
-        method: "POST",
-        body: JSON.stringify(
-          isEdit && editingAgent
-            ? { ...payload, version: editingAgent.version }
-            : payload,
-        ),
-      });
-    }
-
     if (isEdit && editingAgent) {
       const updated = await managedApi.agents.update(editingAgent.id, {
         ...payload,
@@ -670,7 +638,6 @@ export function AgentFormDialog({
                     createError={createError}
                     inputCls={inputCls}
                     modelCards={modelCards}
-                    runtimes={runtimes}
                     selectedCardId={selectedCardId}
                   />
                 )}
@@ -778,7 +745,6 @@ interface BasicTabProps {
   createError: string;
   inputCls: string;
   modelCards: ModelCard[];
-  runtimes: AgentFormDialogProps["runtimes"];
   selectedCardId: string;
 }
 
@@ -788,7 +754,6 @@ function BasicTab({
   createError,
   inputCls,
   modelCards,
-  runtimes,
   selectedCardId,
 }: BasicTabProps) {
   return (
@@ -811,8 +776,7 @@ function BasicTab({
         />
       </div>
       {/* Model picker — see comments at the original call site. */}
-      {!form.runtimeId &&
-        (modelCards.length === 0 ? (
+      {modelCards.length === 0 ? (
           <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
             No model cards configured. Cloud agents need at least one card to provide LLM
             credentials.{" "}
@@ -854,13 +818,7 @@ function BasicTab({
               }
             />
           </div>
-        ))}
-      {form.runtimeId && (
-        <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-          Model is determined by the ACP child on the runtime ({form.acpAgentId || "—"}) — it
-          uses its own LLM credentials.
-        </p>
-      )}
+        )}
       <div>
         <Label htmlFor="agent-description" className="text-sm text-fg-muted block mb-1">
           Description
@@ -886,195 +844,6 @@ function BasicTab({
           placeholder="You are a helpful assistant..."
         />
       </div>
-      {/* Local Runtime — bind agent's loop to a user-registered machine
-          instead of OMA's cloud SessionDO. The "no runtime" option is the
-          default cloud agent. */}
-      <div>
-        <Label className="text-sm text-fg-muted block mb-1">
-          Local Runtime
-          <span className="ml-1 text-xs text-fg-subtle">(optional)</span>
-        </Label>
-        {runtimes.length === 0 ? (
-          <p className="text-xs text-fg-subtle bg-bg-surface px-3 py-2 rounded-lg">
-            No runtimes registered.{" "}
-            <a href="/runtimes" className="underline hover:text-fg-muted">
-              Connect a machine
-            </a>{" "}
-            to delegate this agent's loop to your own Claude Code (or other ACP) child.
-          </p>
-        ) : (
-          <>
-            <Select
-              value={form.runtimeId || "__cloud__"}
-              onValueChange={(v) => {
-                const rid = v === "__cloud__" ? "" : v;
-                // Auto-pick the first detected ACP agent on the chosen runtime —
-                // user doesn't have to know what strings the daemon emits.
-                const first = runtimes.find((r) => r.id === rid)?.agents?.[0]?.id;
-                setForm({
-                  ...form,
-                  runtimeId: rid,
-                  acpAgentId: rid && first ? first : form.acpAgentId,
-                });
-              }}
-              placeholder="— Cloud (run on OMA) —"
-            >
-              <SelectOption value="__cloud__">— Cloud (run on OMA) —</SelectOption>
-              {runtimes.map((r) => (
-                <SelectOption key={r.id} value={r.id} disabled={r.status !== "online"}>
-                  {r.hostname} ({r.status}
-                  {r.status === "online" && r.agents?.length
-                    ? ` · ${r.agents.length} agents`
-                    : ""}
-                  )
-                </SelectOption>
-              ))}
-            </Select>
-            {form.runtimeId && (
-              <AcpAgentPicker form={form} setForm={setForm} runtimes={runtimes} />
-            )}
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function AcpAgentPicker({
-  form,
-  setForm,
-  runtimes,
-}: {
-  form: FormState;
-  setForm: FormSetter;
-  runtimes: AgentFormDialogProps["runtimes"];
-}) {
-  const detectedAgents = runtimes.find((r) => r.id === form.runtimeId)?.agents ?? [];
-  // OMA promotes 4 agents as "first class" in the UI (overlay's
-  // `featured` flag). Featured-detected render on top so the common
-  // case is one click. Anything not detected by the daemon is
-  // intentionally hidden — users must install via cli first.
-  const featuredIds = new Set(KNOWN_ACP_AGENTS.filter((e) => e.featured).map((e) => e.id));
-  const featuredDetected = detectedAgents.filter((a) => featuredIds.has(a.id));
-  const otherDetected = detectedAgents.filter((a) => !featuredIds.has(a.id));
-
-  // Canonicalize first: form.acpAgentId may be a legacy alias on stale
-  // rows ("claude-code-acp"), but the daemon emits local_skills under the
-  // canonical key ("claude-agent-acp"). Without resolving here the
-  // blocklist would silently show empty even though skills exist.
-  const canonicalId = resolveKnownAgent(form.acpAgentId)?.id ?? form.acpAgentId;
-  const localSkills =
-    runtimes.find((r) => r.id === form.runtimeId)?.local_skills?.[canonicalId] ?? [];
-
-  return (
-    <div className="mt-2">
-      <Label className="text-xs text-fg-subtle block mb-1">ACP agent on this machine</Label>
-      <Select
-        value={form.acpAgentId}
-        onValueChange={(v) =>
-          setForm({ ...form, acpAgentId: v, localSkillBlocklist: [] })
-        }
-      >
-        {featuredDetected.length > 0 && (
-          <SelectGroup>
-            <SelectGroupLabel>★ Featured</SelectGroupLabel>
-            {featuredDetected.map((a) => (
-              <SelectOption key={a.id} value={a.id}>
-                {a.id}
-              </SelectOption>
-            ))}
-          </SelectGroup>
-        )}
-        {otherDetected.length > 0 && (
-          <SelectGroup>
-            <SelectGroupLabel>Other detected on this runtime</SelectGroupLabel>
-            {otherDetected.map((a) => (
-              <SelectOption key={a.id} value={a.id}>
-                {a.id}
-              </SelectOption>
-            ))}
-          </SelectGroup>
-        )}
-      </Select>
-      <p className="text-xs text-fg-subtle mt-1">
-        Each turn spawns this ACP child on the runtime. Model + skills come from the
-        daemon-fetched bundle.
-      </p>
-
-      {/* Local-skill blocklist — multi-select fed by what the daemon
-          reported in hello.local_skills[acpAgentId]. */}
-      {localSkills.length > 0 && (
-        <LocalSkillBlocklist form={form} setForm={setForm} localSkills={localSkills} />
-      )}
-    </div>
-  );
-}
-
-function LocalSkillBlocklist({
-  form,
-  setForm,
-  localSkills,
-}: {
-  form: FormState;
-  setForm: FormSetter;
-  localSkills: Array<{
-    id: string;
-    name?: string;
-    description?: string;
-    source?: string;
-    source_label?: string;
-  }>;
-}) {
-  const allowed = new Set(localSkills.map((s) => s.id));
-  for (const id of form.localSkillBlocklist) allowed.delete(id);
-  return (
-    <div className="mt-3 border border-border rounded-md p-2.5 bg-bg-surface">
-      <div className="flex items-center justify-between mb-1.5">
-        <span className="text-xs text-fg-muted">
-          Local skills ({allowed.size}/{localSkills.length} visible)
-        </span>
-        <Button variant="ghost"
-          type="button"
-          onClick={() => setForm({ ...form, localSkillBlocklist: [] })}
-          className="inline-flex items-center min-h-11 sm:min-h-0 px-1 text-xs text-fg-subtle hover:text-fg underline"
-        >
-          reset
-        </Button>
-      </div>
-      <div className="space-y-0.5 max-h-40 overflow-y-auto">
-        {localSkills.map((s) => {
-          const blocked = form.localSkillBlocklist.includes(s.id);
-          return (
-            <Label
-              key={s.id}
-              className="flex items-start gap-2 text-xs cursor-pointer hover:bg-bg rounded px-1.5 py-0.5"
-            >
-              <Checkbox
-                checked={!blocked}
-                onCheckedChange={(checked) => {
-                  const next = new Set(form.localSkillBlocklist);
-                  if (checked === true) next.delete(s.id);
-                  else next.add(s.id);
-                  setForm({ ...form, localSkillBlocklist: [...next] });
-                }}
-                className="mt-0.5"
-              />
-              <span className="font-mono text-fg flex-shrink-0">{s.id}</span>
-              <span className="text-fg-subtle">
-                ({s.source ?? "global"}
-                {s.source_label ? `:${s.source_label}` : ""})
-              </span>
-              {s.name && s.name !== s.id && (
-                <span className="text-fg-muted truncate">— {s.name}</span>
-              )}
-            </Label>
-          );
-        })}
-      </div>
-      <p className="text-xs text-fg-subtle mt-1.5">
-        Unchecked = hidden from the ACP child (daemon won't symlink the dir into the spawn
-        cwd).
-      </p>
     </div>
   );
 }
@@ -1374,10 +1143,7 @@ function McpTab({
             </div>
             <div className="w-24">
               <Label className="text-xs text-fg-muted block mb-0.5">Type</Label>
-              <Select value={mcp.type} onValueChange={(v) => updateMcp(i, "type", v)}>
-                <SelectOption value="sse">sse</SelectOption>
-                <SelectOption value="stdio">stdio</SelectOption>
-              </Select>
+              <div className={`${inputCls} flex items-center text-fg-muted`}>URL</div>
             </div>
             <Button variant="ghost"
               onClick={() => removeMcp(i)}
@@ -1428,30 +1194,6 @@ function AgentsTab({
 }) {
   return (
     <div className="space-y-5">
-      {/* Built-in general sub-agent — opt-in. */}
-      <div className="rounded-md border border-border bg-bg-surface px-3 py-3">
-        <Label className="flex items-start gap-2 text-sm cursor-pointer">
-          <Checkbox
-            checked={form.enableGeneralSubagent}
-            onCheckedChange={(checked) =>
-              setForm({ ...form, enableGeneralSubagent: checked === true })
-            }
-            className="mt-0.5"
-          />
-          <div>
-            <div className="font-medium text-fg">Enable general sub-agent</div>
-            <p className="text-xs text-fg-subtle mt-0.5">
-              Exposes a built-in{" "}
-              <span className="font-mono">general_subagent(task)</span> tool. Spawns a
-              generic sub-agent thread (reserved id{" "}
-              <span className="font-mono">general</span>) inheriting this agent's model +
-              sandbox, with a safe built-in tool subset
-              (bash/read/write/edit/grep/glob). No roster setup needed.
-            </p>
-          </div>
-        </Label>
-      </div>
-
       <div>
         <Label className="text-sm font-medium text-fg block">Callable Agents</Label>
         <p className="text-xs text-fg-subtle mb-2">

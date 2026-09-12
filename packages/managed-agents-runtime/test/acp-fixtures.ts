@@ -7,6 +7,8 @@ interface AcpSessionFixtureOptions {
   acpSessionId: string;
   options?: SessionOptions;
   isAlive?(): boolean;
+  supportsSteering?: boolean;
+  steer?(input: string): ReturnType<AcpSession["steer"]>;
   prompt?(
     input: string,
     options?: { abortSignal?: AbortSignal },
@@ -46,14 +48,21 @@ export function acpSessionFixture(
     supportsNes: false,
     nesCapabilities: null,
     positionEncoding: null,
-    supportsSteering: false,
+    // Steering is part of the OpenMA ACP harness contract. Tests opt out only
+    // when they are exercising the fail-closed conformance boundary.
+    supportsSteering: fixture.supportsSteering ?? true,
     prompt(input, promptOptions) {
       if (typeof input !== "string") {
         throw new Error("ACP fixture only accepts text prompts");
       }
       return fixture.prompt?.(input, promptOptions) ?? (async function* () {})();
     },
-    async steer() { return "failed"; },
+    steer(input) {
+      if (typeof input !== "string") {
+        throw new Error("ACP fixture only accepts text steering input");
+      }
+      return fixture.steer?.(input) ?? Promise.resolve("failed");
+    },
     async cancelCurrentTurn() {},
     drainPendingEvents() { return []; },
     async setConfigOption() { return []; },

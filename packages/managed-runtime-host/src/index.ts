@@ -14,4 +14,5 @@ export * from "./dispatched-environment-worker";
 export * from "./environment-dispatch-loader";
 export * from "./environment-worker-installation";
 export * from "./external-worker-conformance";
+export * from "./claimed-environment-work";
 export type * from "@open-managed-agents/runtime-resource-contract";

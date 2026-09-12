@@ -238,6 +238,73 @@ describe("Managed harness HTTP control channel", () => {
     await channel.close();
   });
 
+  it("maps a user message received during an active turn to steering", async () => {
+    let eventRequest = 0;
+    const fetch = vi.fn(async (input: Parameters<typeof globalThis.fetch>[0], init?: RequestInit) => {
+      const request = new Request(input, init);
+      if (request.url.endsWith(`/v1/sessions/${scope.sessionId}`)) return json(session());
+      eventRequest += 1;
+      if (eventRequest === 1) {
+        return json({
+          data: [{
+            id: "turn_1",
+            type: "user.message",
+            processed_at: "2026-09-08T01:00:00.000Z",
+            content: [{ type: "text", text: "start the analysis" }],
+          }],
+          next_page: null,
+        });
+      }
+      if (eventRequest === 2) {
+        return json({
+          data: [{
+            id: "steer_1",
+            type: "user.message",
+            processed_at: "2026-09-08T01:00:01.000Z",
+            content: [{ type: "text", text: "focus on the cache path" }],
+          }],
+          next_page: null,
+        });
+      }
+      return json({
+        data: [{
+          id: "terminated",
+          type: "session.status_terminated",
+          processed_at: "2026-09-08T01:00:02.000Z",
+        }],
+        next_page: null,
+      });
+    });
+    const channel = createManagedHarnessHttpControlChannel({
+      scope,
+      harness: { id: "codex-acp", version: "1" },
+      workspacePath: "/workspace",
+      apiBaseUrl: "https://api.openma.test",
+      sessionsToken: "session-token",
+      fetch,
+      pollIntervalMs: 1,
+      scheduler: { sleep: async () => {} },
+    });
+
+    const commands = [];
+    for await (const command of channel.commands(new AbortController().signal)) {
+      commands.push(command);
+    }
+
+    expect(commands).toContainEqual({
+      type: "session.prompt",
+      sessionId: scope.sessionId,
+      turnId: "turn_1",
+      text: "start the analysis",
+    });
+    expect(commands).toContainEqual({
+      type: "session.steer",
+      sessionId: scope.sessionId,
+      eventId: "steer_1",
+      text: "focus on the cache path",
+    });
+  });
+
   it("retries transient publication with the same canonical event ids", async () => {
     const bodies: string[] = [];
     let calls = 0;
@@ -498,8 +565,10 @@ describe("Managed harness HTTP control channel", () => {
         text: "Tool unknown was answered.",
       }),
       expect.objectContaining({ turnId: "outcome", text: "Outcome requested: " }),
+    ]);
+    expect(commands.filter((command) => command.type === "session.steer")).toEqual([
       expect.objectContaining({
-        turnId: "attachments",
+        eventId: "attachments",
         text: "[image inline]\n[document spec file: file_2]",
       }),
     ]);
@@ -620,7 +689,10 @@ describe("Managed harness HTTP control channel", () => {
     expect(commands.filter((command) => command.type === "session.prompt"))
       .toEqual([
         expect.objectContaining({ turnId: "turn_newer", text: "newer" }),
-        expect.objectContaining({ turnId: "turn_older", text: "older page" }),
+      ]);
+    expect(commands.filter((command) => command.type === "session.steer"))
+      .toEqual([
+        expect.objectContaining({ eventId: "turn_older", text: "older page" }),
       ]);
     expect(commands.some((command) => command.type === "session.cancel")).toBe(false);
     expect(requests.some((request) => request.url.includes("page=page_2"))).toBe(true);

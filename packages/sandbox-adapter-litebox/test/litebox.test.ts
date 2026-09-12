@@ -73,9 +73,23 @@ describe("LiteBoxSandbox", () => {
     const sandbox = new LiteBoxSandbox();
     await expect(sandbox.exec("one")).resolves.toBe("ok");
     await expect(sandbox.exec("two")).resolves.toBe("ok");
-    expect(sdk.options).toEqual([{ image: "node:22-slim", memoryMib: undefined, cpus: undefined, name: undefined, volumes: [] }]);
-    expect(box.exec).toHaveBeenNthCalledWith(1, "sh", ["-c", "one"], {}, { timeoutSecs: 120 });
-    expect(box.exec).toHaveBeenNthCalledWith(2, "sh", ["-c", "two"], {}, { timeoutSecs: 120 });
+    expect(sdk.options).toEqual([{
+      image: "node:22-bookworm",
+      memoryMib: undefined,
+      cpus: undefined,
+      name: undefined,
+      volumes: [],
+      network: { mode: "enabled" },
+    }]);
+    expect(box.exec).toHaveBeenNthCalledWith(1, "mkdir", ["-p", "/workspace"]);
+    expect(box.exec).toHaveBeenNthCalledWith(2, "sh", ["-c", "one"], {}, {
+      cwd: "/workspace",
+      timeoutSecs: 120,
+    });
+    expect(box.exec).toHaveBeenNthCalledWith(3, "sh", ["-c", "two"], {}, {
+      cwd: "/workspace",
+      timeoutSecs: 120,
+    });
     await expect(sandbox.startProcess("ignored")).resolves.toBeNull();
     await sandbox.destroy();
   });
@@ -83,6 +97,7 @@ describe("LiteBoxSandbox", () => {
   it("maps output, minimum/default timeouts, env, secrets, and failures", async () => {
     const box = queueBox();
     box.exec
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
       .mockResolvedValueOnce({ exitCode: 4, stdout: "out\n", stderr: "err\n" })
       .mockResolvedValueOnce({ exitCode: 0, stdout: "out", stderr: "err" })
       .mockRejectedValueOnce(new Error("offline"));
@@ -94,9 +109,9 @@ describe("LiteBoxSandbox", () => {
     await expect(sandbox.exec("git clone", 1)).resolves.toBe("out\nerr\n[exit 4]");
     await expect(sandbox.exec("echo clean")).resolves.toBe("out\nerr");
     await expect(sandbox.exec("npm install")).resolves.toBe("[error: offline]");
-    expect(box.exec.mock.calls[0]?.[2]).toEqual({ A: "1", B: "2", TOKEN: "secret" });
-    expect(box.exec.mock.calls[1]?.[2]).toEqual({ A: "1", B: "2" });
-    expect(box.exec.mock.calls[0]?.[3]).toEqual({ timeoutSecs: 1 });
+    expect(box.exec.mock.calls[1]?.[2]).toEqual({ A: "1", B: "2", TOKEN: "secret" });
+    expect(box.exec.mock.calls[2]?.[2]).toEqual({ A: "1", B: "2" });
+    expect(box.exec.mock.calls[1]?.[3]).toEqual({ cwd: "/workspace", timeoutSecs: 1 });
     expect(sdk.options[0]).toMatchObject({ image: "image:1", memoryMib: 512, cpus: 2, name: "named" });
     await sandbox.destroy();
   });
@@ -179,6 +194,8 @@ describe("LiteBoxSandbox", () => {
     expect(box.copyOut.mock.calls[1]?.[0]).toBe("/absolute.bin");
     expect(box.copyIn.mock.calls[0]?.[1]).toBe("/workspace/relative.txt");
     expect(box.copyIn.mock.calls[1]?.[1]).toBe("/absolute.bin");
+    expect(box.exec).toHaveBeenCalledWith("mkdir", ["-p", "/workspace"]);
+    expect(box.exec).toHaveBeenCalledWith("mkdir", ["-p", "/"]);
     await sandbox.destroy();
   });
 
@@ -211,7 +228,8 @@ describe("LiteBoxSandbox", () => {
     await sandbox.setOutboundContext({ tenantId: "t", sessionId: "s" });
     await sandbox.exec("x");
     expect(box.copyIn).toHaveBeenCalledWith(caPath, "/etc/ssl/oma-vault-ca.crt");
-    expect(box.exec.mock.calls[0]?.[2]).toMatchObject({ HTTPS_PROXY: "http://proxy", SSL_CERT_FILE: "/etc/ssl/oma-vault-ca.crt" });
+    const shellCall = box.exec.mock.calls.find(([command]) => command === "sh");
+    expect(shellCall?.[2]).toMatchObject({ HTTPS_PROXY: "http://proxy", SSL_CERT_FILE: "/etc/ssl/oma-vault-ca.crt" });
     await sandbox.destroy();
 
     const warn = vi.fn();
@@ -244,7 +262,9 @@ describe("LiteBoxSandbox", () => {
     expect(warn).toHaveBeenCalledWith("destroy stop failed: stop failed");
 
     const rejected = queueBox();
-    rejected.exec.mockRejectedValueOnce(new Error("exec"));
+    rejected.exec
+      .mockResolvedValueOnce({ exitCode: 0, stdout: "", stderr: "" })
+      .mockRejectedValueOnce(new Error("exec"));
     const createPromise = new LiteBoxSandbox({ logger: { warn, log: vi.fn() } });
     await createPromise.exec("x");
     await createPromise.destroy();

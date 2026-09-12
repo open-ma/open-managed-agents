@@ -473,11 +473,23 @@ export function createManagedHarnessHttpControlChannel(
           sessionId: options.scope.sessionId,
           turnId: activeTurnId,
         });
+        // A user.message immediately following an interrupt is the next turn,
+        // not a soft steer into the turn being cancelled.
+        activeTurnId = null;
       }
       return false;
     }
     const text = eventPrompt(event);
     if (text !== null) {
+      if (event.type === "user.message" && activeTurnId !== null) {
+        queue.push({
+          type: "session.steer",
+          sessionId: options.scope.sessionId,
+          eventId: event.id,
+          text,
+        });
+        return false;
+      }
       activeTurnId = event.id;
       queue.push({
         type: "session.prompt",
