@@ -16,7 +16,7 @@
     "@open-managed-agents/main-node": "workspace:*"
   },
   "devDependencies": {
-    "@cloudflare/workers-types": "^5.20260822.1",
+    "@cloudflare/workers-types": "^5.20260908.1",
     "@types/node": "^26.5.0",
     "smol-toml": "^1.6.1",
     "tsx": "^4.19.0",
