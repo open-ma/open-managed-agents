@@ -1,4 +1,5 @@
 import type { ModelMessage, LanguageModel } from "ai";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { AgentConfig, SessionEvent, UserMessageEvent } from "@open-managed-agents/shared";
 import type { FileResolver } from "../runtime/history";
 import type { PiModelRuntime } from "./pi-provider";
@@ -73,6 +74,7 @@ export interface HarnessInterface {
       systemPrompt: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: Record<string, any>;
+      providerOptions?: SharedV3ProviderOptions;
     },
   ): Promise<void>;
 

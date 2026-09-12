@@ -1,5 +1,6 @@
 import { generateText } from "ai";
 import type { ModelMessage, LanguageModel } from "ai";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import type { ContentBlock, SessionEvent } from "@open-managed-agents/shared";
 import { eventsToMessages } from "../runtime/history";
 import type { HarnessRuntime } from "./interface";
@@ -32,6 +33,7 @@ export interface CompactionStrategy {
       systemPrompt: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: Record<string, any>;
+      providerOptions?: SharedV3ProviderOptions;
       /**
        * Apply provider-specific cache markers to (system, tools, messages).
        * Strategy calls this on the ORIGINAL messages (without the summarize
@@ -141,12 +143,13 @@ export class SummarizeCompactionStrategy implements CompactionStrategy {
 
   async compact(
     events: SessionEvent[],
-    { model, systemPrompt, tools, applyCacheStrategy, runtime }: {
+    { model, systemPrompt, tools, providerOptions, applyCacheStrategy, runtime }: {
       model: LanguageModel;
       contextWindowTokens: number;
       systemPrompt: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: Record<string, any>;
+      providerOptions?: SharedV3ProviderOptions;
       applyCacheStrategy: (
         systemPrompt: string,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -185,6 +188,7 @@ export class SummarizeCompactionStrategy implements CompactionStrategy {
       // Per Anthropic docs, tool_choice is NOT in the cache key — safe.
       toolChoice: "none",
       messages: [...cached.messages, summarizeRequest],
+      providerOptions,
       maxOutputTokens: this.opts.maxSummaryTokens ?? 2000,
     });
 
@@ -322,12 +326,13 @@ export class CCStyleCompactionStrategy implements CompactionStrategy {
 
   async compact(
     events: SessionEvent[],
-    { model, runtime }: {
+    { model, providerOptions, runtime }: {
       model: LanguageModel;
       contextWindowTokens: number;
       systemPrompt: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: Record<string, any>;
+      providerOptions?: SharedV3ProviderOptions;
       applyCacheStrategy: (
         systemPrompt: string,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -363,6 +368,7 @@ export class CCStyleCompactionStrategy implements CompactionStrategy {
       model,
       system: CC_STYLE_SYSTEM_PROMPT,
       messages: [...cleanedMessages, summarizeRequest],
+      providerOptions,
       maxOutputTokens: this.opts.maxSummaryTokens ?? 2000,
     });
 
@@ -438,12 +444,13 @@ export class OpenCodeStyleCompactionStrategy implements CompactionStrategy {
 
   async compact(
     events: SessionEvent[],
-    { model, runtime }: {
+    { model, providerOptions, runtime }: {
       model: LanguageModel;
       contextWindowTokens: number;
       systemPrompt: string;
       // eslint-disable-next-line @typescript-eslint/no-explicit-any
       tools: Record<string, any>;
+      providerOptions?: SharedV3ProviderOptions;
       applyCacheStrategy: (
         systemPrompt: string,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -470,6 +477,7 @@ export class OpenCodeStyleCompactionStrategy implements CompactionStrategy {
       model,
       system: OPENCODE_STYLE_SYSTEM_PROMPT,
       messages: [...cleanedMessages, summarizeRequest],
+      providerOptions,
       maxOutputTokens: this.opts.maxSummaryTokens ?? 2000,
     });
 

@@ -165,11 +165,20 @@ const agent: Agent = {
   description: "Pinned coding agent",
   mcpServers: [{ type: "url", name: "docs", url: "https://mcp.test" }],
   metadata: { owner: "agents" },
-  model: { id: "claude-opus-5", effort: "high", speed: "standard" },
+  model: {
+    id: "claude-opus-5",
+    effort: "high",
+    providerOptions: { anthropic: { beta: ["context-1m"] } },
+    speed: "standard",
+  },
   multiagent: null,
   name: "Coding Agent",
   openma: {
-    auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+    auxiliaryModel: {
+      id: "deepseek-chat",
+      providerOptions: { pi: { reasoning: "off" } },
+      speed: "fast",
+    },
     appendablePrompts: ["prompt_review"],
     harness: "pi",
   },
@@ -382,12 +391,17 @@ describe("SessionsApplicationService", () => {
           model: {
             id: "claude-opus-5",
             effort: "high",
+            providerOptions: { anthropic: { beta: ["context-1m"] } },
             speed: "standard",
           },
           multiagent: null,
           name: "Coding Agent",
           openma: {
-            auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+            auxiliaryModel: {
+              id: "deepseek-chat",
+              providerOptions: { pi: { reasoning: "off" } },
+              speed: "fast",
+            },
             appendablePrompts: ["prompt_review"],
             harness: "pi",
           },
@@ -606,7 +620,12 @@ describe("SessionsApplicationService", () => {
       },
     });
     expect(agent).toMatchObject({
-      model: { id: "claude-opus-5", effort: "high", speed: "standard" },
+      model: {
+        id: "claude-opus-5",
+        effort: "high",
+        providerOptions: { anthropic: { beta: ["context-1m"] } },
+        speed: "standard",
+      },
       mcpServers: [{ name: "docs" }],
       system: "Work carefully",
     });

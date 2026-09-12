@@ -56,6 +56,10 @@ The left sidebar groups everything into three areas:
   Every save creates a new agent version. Sessions pin the version they were created with — editing the agent later doesn't change running or replayed sessions.
 </Aside>
 
+<Aside type="note" title="YAML and JSON editing">
+  Form, YAML, and JSON modes edit the same structured Agent configuration. YAML is parsed before a mode switch or save and is never stored as source text. Invalid syntax and non-object documents stay in the editor; API validation then enforces the Managed Agents field shape, metadata limits, MCP references, and multiagent roster rules. A successful update stores a new JSON Agent document and retains the previous version atomically.
+</Aside>
+
 ## Common workflows
 
 ### Add a Vault so an agent can call a private API

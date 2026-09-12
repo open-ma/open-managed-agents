@@ -115,6 +115,9 @@ export function toAgentModelInput(
     ...(model.inference_geo !== undefined && {
       inferenceGeo: model.inference_geo,
     }),
+    ...(model.provider_options != null && {
+      providerOptions: structuredClone(model.provider_options),
+    }),
     ...(model.speed !== undefined && { speed: model.speed }),
   };
 }
@@ -208,6 +211,9 @@ export function toListAgentVersionsQuery(
 }
 
 export function toAgentResponse(agent: AgentView): object {
+  const publicOpenMa = agent.openma === undefined
+    ? undefined
+    : fromOpenMaAgentExtension(agent.openma);
   return {
     id: agent.id,
     archived_at: agent.archivedAt,
@@ -223,6 +229,9 @@ export function toAgentResponse(agent: AgentView): object {
       ...(agent.model.inferenceGeo !== undefined && {
         inference_geo: agent.model.inferenceGeo,
       }),
+      ...(agent.model.providerOptions !== undefined && {
+        provider_options: agent.model.providerOptions,
+      }),
       ...(agent.model.speed !== undefined && { speed: agent.model.speed }),
     },
     multiagent:
@@ -230,9 +239,9 @@ export function toAgentResponse(agent: AgentView): object {
         ? null
         : fromAgentMultiagentInput(agent.multiagent),
     name: agent.name,
-    ...(agent.openma !== undefined &&
-      Object.keys(agent.openma).length > 0 && {
-        _oma: fromOpenMaAgentExtension(agent.openma),
+    ...(publicOpenMa !== undefined &&
+      Object.keys(publicOpenMa).length > 0 && {
+        _oma: publicOpenMa,
       }),
     skills: agent.skills.map(fromAgentSkillInput),
     system: agent.system,

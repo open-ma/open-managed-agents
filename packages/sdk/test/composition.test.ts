@@ -73,7 +73,10 @@ describe("OpenMA SDK composition facade", () => {
           description: null,
           mcp_servers: [],
           metadata: {},
-          model: { id: "claude-opus-5" },
+          model: {
+            id: "claude-opus-5",
+            provider_options: { anthropic: { beta: ["context-1m"] } },
+          },
           multiagent: null,
           skills: [],
           system: null,
@@ -81,7 +84,13 @@ describe("OpenMA SDK composition facade", () => {
           updated_at: "2026-09-12T00:00:00.000Z",
           version: 1,
           _oma: {
-            aux_model: { id: "deepseek-chat", speed: "fast" },
+            aux_model: {
+              id: "deepseek-chat",
+              speed: "fast",
+              provider_options: {
+                deepseek: { thinking: { type: "disabled" } },
+              },
+            },
             appendable_prompts: ["prompt_review"],
           },
         }, 201);
@@ -90,22 +99,46 @@ describe("OpenMA SDK composition facade", () => {
 
     const agent = await client.beta.agents.create({
       name: "Extended agent",
-      model: "claude-opus-5",
+      model: {
+        id: "claude-opus-5",
+        provider_options: { anthropic: { beta: ["context-1m"] } },
+      },
       _oma: {
-        aux_model: { id: "deepseek-chat", speed: "fast" },
+        aux_model: {
+          id: "deepseek-chat",
+          speed: "fast",
+          provider_options: {
+            deepseek: { thinking: { type: "disabled" } },
+          },
+        },
         appendable_prompts: ["prompt_review"],
       },
     });
 
     expect(await captured!.json()).toEqual({
       name: "Extended agent",
-      model: "claude-opus-5",
+      model: {
+        id: "claude-opus-5",
+        provider_options: { anthropic: { beta: ["context-1m"] } },
+      },
       _oma: {
-        aux_model: { id: "deepseek-chat", speed: "fast" },
+        aux_model: {
+          id: "deepseek-chat",
+          speed: "fast",
+          provider_options: {
+            deepseek: { thinking: { type: "disabled" } },
+          },
+        },
         appendable_prompts: ["prompt_review"],
       },
     });
     expect(agent._oma?.aux_model?.id).toBe("deepseek-chat");
+    expect(agent.model.provider_options).toEqual({
+      anthropic: { beta: ["context-1m"] },
+    });
+    expect(agent._oma?.aux_model?.provider_options).toEqual({
+      deepseek: { thinking: { type: "disabled" } },
+    });
     expect(agent._oma?.appendable_prompts).toEqual(["prompt_review"]);
   });
 

@@ -14,6 +14,9 @@ export function fromOpenMaAgentExtension(
         ...(extension.auxiliaryModel.inferenceGeo !== undefined && {
           inference_geo: extension.auxiliaryModel.inferenceGeo,
         }),
+        ...(extension.auxiliaryModel.providerOptions !== undefined && {
+          provider_options: extension.auxiliaryModel.providerOptions,
+        }),
         ...(extension.auxiliaryModel.speed !== undefined && {
           speed: extension.auxiliaryModel.speed,
         }),

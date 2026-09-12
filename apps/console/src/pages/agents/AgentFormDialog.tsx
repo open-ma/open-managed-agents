@@ -24,7 +24,10 @@ import {
   agentToForm,
   agentToPreservedConfig,
   configToForm,
+  materializeAgentUpdate,
   mergeFormIntoConfig,
+  parseAgentConfigText,
+  prepareCodePayload,
   type FormState,
   type McpEntry,
   type SkillEntry,
@@ -291,7 +294,7 @@ export function AgentFormDialog({
     if (form.callableAgents.find((c) => c.id === agentId)) return;
     setForm({
       ...form,
-      callableAgents: [...form.callableAgents, { type: "agent", id: agentId, version: 1 }],
+      callableAgents: [...form.callableAgents, { type: "agent", id: agentId }],
     });
   };
   const removeCallable = (i: number) =>
@@ -327,38 +330,37 @@ export function AgentFormDialog({
     if (createMode === "form") {
       // form → code: serialize merged form + preserved unsupported fields
       const config = formToConfig();
-      setPreservedConfig(config);
       setCodeValue(
         mode === "yaml" ? yaml.dump(config, { lineWidth: -1 }) : JSON.stringify(config, null, 2),
       );
     } else if (mode === "form") {
       // code → form: parse into preserved baseline, then extract form fields
       try {
-        const parsed =
-          createMode === "yaml"
-            ? (yaml.load(codeValue) as Record<string, unknown>)
-            : (JSON.parse(codeValue) as Record<string, unknown>);
-        setPreservedConfig(parsed);
-        setForm(configToForm(parsed));
-      } catch {
-        /* keep current form if parse fails */
+        const parsed = parseAgentConfigText(codeValue, createMode);
+        const config = isEdit
+          ? materializeAgentUpdate(preservedConfig ?? {}, parsed)
+          : parsed;
+        setPreservedConfig(config);
+        setForm(configToForm(config));
+      } catch (error) {
+        setCreateError(error instanceof Error ? error.message : "Invalid config");
+        return;
       }
     } else {
       // yaml ↔ json: convert between formats
       try {
-        const parsed = createMode === "yaml" ? yaml.load(codeValue) : JSON.parse(codeValue);
-        if (parsed && typeof parsed === "object") {
-          setPreservedConfig(parsed as Record<string, unknown>);
-        }
+        const parsed = parseAgentConfigText(codeValue, createMode);
         setCodeValue(
           mode === "yaml"
             ? yaml.dump(parsed, { lineWidth: -1 })
             : JSON.stringify(parsed, null, 2),
         );
-      } catch {
-        /* keep current value if parse fails */
+      } catch (error) {
+        setCreateError(error instanceof Error ? error.message : "Invalid config");
+        return;
       }
     }
+    setCreateError("");
     setCreateMode(mode);
   };
 
@@ -367,16 +369,13 @@ export function AgentFormDialog({
     setCreateError("");
     setSaving(true);
     try {
-      const parsed =
-        createMode === "yaml"
-          ? (yaml.load(codeValue) as Record<string, unknown>)
-          : JSON.parse(codeValue);
-      if (!parsed.name) {
-        setCreateError("name is required");
-        setSaving(false);
-        return;
-      }
-      if (!parsed.tools) parsed.tools = [{ type: "agent_toolset_20260401" }];
+      const parsed = prepareCodePayload(
+        parseAgentConfigText(
+          codeValue,
+          createMode === "yaml" ? "yaml" : "json",
+        ),
+        { forUpdate: isEdit },
+      );
       if (isEdit && editingAgent) {
         const updated = await persistAgent(parsed);
         closeCreate();
@@ -901,6 +900,23 @@ function BasicTab({
         />
       </div>
       <div>
+        <Label htmlFor="agent-metadata" className="text-sm text-fg-muted block mb-1">
+          Metadata (JSON)
+        </Label>
+        <Textarea
+          id="agent-metadata"
+          value={form.metadataJson}
+          onChange={(event) => setForm({ ...form, metadataJson: event.target.value })}
+          rows={4}
+          className={`${inputCls} resize-y font-mono text-xs leading-relaxed`}
+          spellCheck={false}
+          placeholder='{"team":"platform"}'
+        />
+        <p className="mt-1 text-xs text-fg-subtle">
+          Up to 16 string pairs; keys up to 64 characters and values up to 512.
+        </p>
+      </div>
+      <div>
         <Label htmlFor="agent-system" className="text-sm text-fg-muted block mb-1">
           System Prompt
         </Label>
@@ -1157,6 +1173,34 @@ function SkillsTab({
           </p>
         )}
       </div>
+      {form.skills.length > 0 && (
+        <div className="border border-border rounded-lg p-3 space-y-2">
+          <Label className="text-sm font-medium text-fg block">Pinned skill versions</Label>
+          {form.skills.map((skill, index) => (
+            <div key={`${skill.type}:${skill.skill_id}`} className="flex items-center gap-2">
+              <span className="flex-1 min-w-0 truncate font-mono text-xs text-fg-muted">
+                {skill.skill_id}
+              </span>
+              <Input
+                value={skill.version ?? ""}
+                onChange={(event) => {
+                  const skills = [...form.skills];
+                  skills[index] = {
+                    ...skill,
+                    ...(event.target.value
+                      ? { version: event.target.value }
+                      : {}),
+                  };
+                  if (!event.target.value) delete skills[index].version;
+                  setForm({ ...form, skills });
+                }}
+                className="w-32 border border-border rounded px-2 py-1 text-xs bg-bg text-fg"
+                placeholder="latest"
+              />
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -1281,6 +1325,30 @@ function AgentsTab({
             <div className="flex-1">
               <div className="text-sm font-medium text-fg">{agentInfo?.name || ca.id}</div>
               <div className="text-xs text-fg-subtle font-mono">{ca.id}</div>
+            </div>
+            <div className="w-24">
+              <Label htmlFor={`callable-version-${i}`} className="text-xs text-fg-subtle">
+                Version
+              </Label>
+              <Input
+                id={`callable-version-${i}`}
+                type="number"
+                min="1"
+                value={ca.version ?? ""}
+                onChange={(event) => {
+                  const callableAgents = [...form.callableAgents];
+                  if (event.target.value === "") {
+                    callableAgents[i] = { ...ca, version: undefined };
+                  } else {
+                    const version = Number(event.target.value);
+                    if (!Number.isInteger(version) || version < 1) return;
+                    callableAgents[i] = { ...ca, version };
+                  }
+                  setForm({ ...form, callableAgents });
+                }}
+                className="w-full border border-border rounded px-2 py-1 text-xs bg-bg text-fg"
+                placeholder="latest"
+              />
             </div>
             <Button variant="ghost"
               onClick={() => removeCallable(i)}

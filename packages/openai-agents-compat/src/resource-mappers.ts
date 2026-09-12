@@ -4,6 +4,8 @@ import type { EnvironmentConfigInput, EnvironmentView } from "@open-managed-agen
 import type { ResourceObject } from "./resource-types";
 import { decodeResourceMetadata, encodeResourceMetadata, hintedName, nameHint } from "./resource-metadata";
 
+const OPENAI_AGENT_COMPATIBILITY_KEY = "openai_agents_v1";
+
 export const seconds = (iso: string) => Math.floor(Date.parse(iso) / 1000);
 export const coreName = (name: unknown, fallback: string) => typeof name === "string" && name.trim().length > 0 && name.length <= 255 && !/\p{Cc}/u.test(name) ? name : fallback;
 
@@ -60,7 +62,7 @@ export function toCoreAgentConfig(input: ResourceObject): CreateAgentCommand {
   };
 }
 
-export function agentMetadata(input: ResourceObject, core: CreateAgentCommand): Record<string, string> {
+export function agentCompatibilityFields(input: ResourceObject, core: CreateAgentCommand): ResourceObject {
   const fields: ResourceObject = { ...nameHint(input.name ?? null, core.name), tool_order: [], tool_extras: {} };
   if (input.reasoning?.summary != null) fields.reasoning_summary = input.reasoning.summary;
   if (["none", "minimal"].includes(input.reasoning?.effort)) fields.reasoning_effort = { model: input.model, effort: input.reasoning.effort };
@@ -78,11 +80,50 @@ export function agentMetadata(input: ResourceObject, core: CreateAgentCommand): 
       request_metadata: tool.request_metadata ?? {}, required: tool.required ?? false, headers: tool.transport.headers ?? {},
     };
   }
-  return encodeResourceMetadata(core.metadata ?? {}, "agent", fields);
+  return fields;
+}
+
+export function agentCompatibility(
+  input: ResourceObject,
+  core: CreateAgentCommand,
+): ResourceObject {
+  return {
+    [OPENAI_AGENT_COMPATIBILITY_KEY]: {
+      version: 1,
+      fields: agentCompatibilityFields(input, core),
+    },
+  };
+}
+
+/**
+ * Read the structured compatibility slot first. Metadata decoding remains only
+ * as a migration path for agents written by releases before the slot existed.
+ */
+export function storedAgentCompatibilityFields(agent: AgentView): ResourceObject | null {
+  const envelope = agent.openma?.compatibility?.[OPENAI_AGENT_COMPATIBILITY_KEY];
+  if (
+    envelope !== null &&
+    typeof envelope === "object" &&
+    !Array.isArray(envelope) &&
+    envelope.version === 1 &&
+    envelope.fields !== null &&
+    typeof envelope.fields === "object" &&
+    !Array.isArray(envelope.fields)
+  ) {
+    return envelope.fields as ResourceObject;
+  }
+  return decodeResourceMetadata(agent.metadata, "agent").fields;
+}
+
+export function isInlineSessionAgent(agent: AgentView): boolean {
+  return storedAgentCompatibilityFields(agent)?.session_inline === true;
 }
 
 export function agentResource(agent: AgentView): ResourceObject {
-  const { metadata, fields } = decodeResourceMetadata(agent.metadata, "agent");
+  const metadata = agent.openma?.compatibility?.[OPENAI_AGENT_COMPATIBILITY_KEY] === undefined
+    ? decodeResourceMetadata(agent.metadata, "agent").metadata
+    : { ...agent.metadata };
+  const fields = storedAgentCompatibilityFields(agent);
   const extras = fields?.tool_extras ?? {};
   const tools = new Map<string, ResourceObject>();
   for (const tool of agent.tools) {

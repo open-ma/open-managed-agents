@@ -852,10 +852,17 @@ async function buildNodeLanguageModel(
   agentModel: string | {
     id: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    providerOptions?: Record<string, unknown>;
+    provider_options?: Record<string, unknown>;
     speed?: string;
   },
 ) {
   const creds = await resolveNodeModelCreds(tenantId, agentModel);
+  const configuredProviderOptions =
+    typeof agentModel === "string"
+      ? undefined
+      : agentModel.providerOptions ?? agentModel.provider_options;
+  const piProviderOptions = configuredProviderOptions?.pi;
   return toAiSdkLanguageModel(createPiModelRuntime({
     model: creds.wireModel,
     apiKey: creds.apiKey,
@@ -863,6 +870,12 @@ async function buildNodeLanguageModel(
     baseURL: creds.baseURL,
     customHeaders: creds.customHeaders,
     piConfig: creds.piConfig,
+    providerOptions:
+      piProviderOptions &&
+      typeof piProviderOptions === "object" &&
+      !Array.isArray(piProviderOptions)
+        ? piProviderOptions as Record<string, unknown>
+        : undefined,
     thinkingLevel: typeof agentModel === "string" ? undefined : agentModel.effort,
     speed: typeof agentModel === "string"
       ? undefined
@@ -907,6 +920,13 @@ const sessionRegistry = new SessionRegistry({
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      providerOptions:
+        typeof input.agent.model !== "string" &&
+        input.agent.model.provider_options?.pi &&
+        typeof input.agent.model.provider_options.pi === "object" &&
+        !Array.isArray(input.agent.model.provider_options.pi)
+          ? input.agent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
       thinkingLevel:
         typeof input.agent.model === "string" ? undefined : input.agent.model.effort,
       speed:
@@ -1175,6 +1195,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
         environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
         auxModel: auxiliary?.model,
         auxModelInfo: auxiliary?.modelInfo,
+        auxProviderOptions: auxiliary?.providerOptions,
       });
     },
   }),
@@ -1325,6 +1346,7 @@ const managedRuntimeRunner = new DefaultNodeManagedSessionRunner({
       environmentConfig: toLegacyHarnessEnvironmentConfig(environment),
       auxModel: auxiliary?.model,
       auxModelInfo: auxiliary?.modelInfo,
+      auxProviderOptions: auxiliary?.providerOptions,
       delegateToAgent,
     });
     if (subagents && (await readManagedSessionMappingMetadata(session, openAIAgentsSecrets))?.agent.multi_agent?.enabled) {

@@ -4,7 +4,7 @@ import type { UserMessageContentBlock } from '@open-managed-agents/managed-agent
 import type { AgentsApplicationPort, AgentView } from '@open-managed-agents/managed-agents-application/ports/agents';
 import type { EnvironmentsApplicationPort } from '@open-managed-agents/managed-agents-application/ports/environments';
 import { OpenAIAgentsProtocolError } from '@open-managed-agents/openai-agents-api';
-import { agentMetadata, agentResource, auditAgentRuntimeMapping, nativeTemplateInputs, resolvedAgent, seconds, templateResource, toCoreAgentConfig, toCoreEnvironmentConfig, type AgentRuntimeMappingFinding } from './resource-mappers';
+import { agentCompatibilityFields, agentResource, auditAgentRuntimeMapping, isInlineSessionAgent, nativeTemplateInputs, resolvedAgent, seconds, templateResource, toCoreAgentConfig, toCoreEnvironmentConfig, type AgentRuntimeMappingFinding } from './resource-mappers';
 import { decodeResourceMetadata, encodeResourceMetadata } from './resource-metadata';
 import type { ResourceObject, ResourceSecretSealer } from './resource-types';
 
@@ -116,7 +116,7 @@ export function createManagedSessionMapping(deps: ManagedSessionMappingDependenc
       let nativeAgent: AgentView | undefined;
       if (body.agent_id != null) {
         const found = await deps.agents.retrieveAgent({ agentId: body.agent_id });
-        if (found.type !== 'found' || found.agent.archivedAt !== null || decodeResourceMetadata(found.agent.metadata, 'agent').fields?.session_inline) throw new OpenAIAgentsProtocolError(404, 'Agent not found', 'agent_id');
+        if (found.type !== 'found' || found.agent.archivedAt !== null || isInlineSessionAgent(found.agent)) throw new OpenAIAgentsProtocolError(404, 'Agent not found', 'agent_id');
         nativeAgent = found.agent;
       }
       // Derive both the selected version and its configuration from one native
@@ -141,9 +141,19 @@ export function createManagedSessionMapping(deps: ManagedSessionMappingDependenc
       }
       const core = toCoreAgentConfig(configuration);
       if (environment.type === 'none') core.tools = [{ type: 'agent_toolset_20260401', defaultConfig: { enabled: false }, configs: [] }, ...(core.tools ?? [])];
-      const { fields: agentFields } = decodeResourceMetadata(agentMetadata(configuration, core), 'agent');
+      const agentFields = agentCompatibilityFields(configuration, core);
       if (!nativeAgent) {
-        const created = await deps.agents.createAgent({ ...core, metadata: encodeResourceMetadata({}, 'agent', { session_inline: true }) });
+        const created = await deps.agents.createAgent({
+          ...core,
+          openma: {
+            compatibility: {
+              openai_agents_v1: {
+                version: 1,
+                fields: { session_inline: true },
+              },
+            },
+          },
+        });
         if (created.type !== 'created') throw new OpenAIAgentsProtocolError(400, created.message, 'agent');
         nativeAgent = created.agent;
       }
@@ -173,7 +183,23 @@ export function createManagedSessionMapping(deps: ManagedSessionMappingDependenc
         const view = templateResource(found.environment, config);
         environment = { id: session.environmentId, type: 'openai_hosted', capability_directories: view.capability_directories, network: view.network, packages: view.packages, files: view.files, plugins: view.plugins, skills: view.skills };
       }
-      const projected = agentResource({ ...session.agent, multiagent: null, archivedAt: null, createdAt: session.createdAt, updatedAt: session.createdAt, metadata: encodeResourceMetadata({}, 'agent', saved?.agent ?? {}) });
+      const projected = agentResource({
+        ...session.agent,
+        multiagent: null,
+        archivedAt: null,
+        createdAt: session.createdAt,
+        updatedAt: session.createdAt,
+        metadata: {},
+        openma: {
+          ...session.agent.openma,
+          compatibility: {
+            openai_agents_v1: {
+              version: 1,
+              fields: saved?.agent ?? {},
+            },
+          },
+        },
+      });
       const { id, instructions, model, multi_agent, name, reasoning, service_tier, text, tools } = projected;
       return {
         id: session.id, object: 'agent.session', agent: { id, instructions, model, multi_agent, name, reasoning, service_tier, text, tools },

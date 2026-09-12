@@ -228,6 +228,9 @@ describe("Managed session runtime codec", () => {
             id: "claude-opus-5",
             effort: "high",
             inferenceGeo: "us",
+            providerOptions: {
+              pi: { reasoning: "high", sampling: { temperature: 0 } },
+            },
             speed: "fast",
           },
           multiagent: {
@@ -332,6 +335,10 @@ describe("Managed session runtime codec", () => {
         model: {
           id: "claude-opus-5",
           effort: "high",
+          inference_geo: "us",
+          provider_options: {
+            pi: { reasoning: "high", sampling: { temperature: 0 } },
+          },
           speed: "fast",
         },
         skills: [

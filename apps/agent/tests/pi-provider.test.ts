@@ -108,6 +108,53 @@ describe("createPiModelRuntime", () => {
     expect(Reflect.get(runtime, "thinkingLevel")).toBe("high");
   });
 
+  it("applies per-agent Pi provider options to every request", () => {
+    const runtime = createPiModelRuntime({
+      model: "deepseek-v4-flash",
+      apiKey: "secret",
+      provider: "deepseek",
+      providerOptions: {
+        reasoning: "off",
+        samplingParams: { temperature: 0 },
+      },
+    } as Parameters<typeof createPiModelRuntime>[0] & {
+      providerOptions: {
+        reasoning: "off";
+        samplingParams: { temperature: number };
+      };
+    });
+
+    expect(withPiRuntimeRequestOptions(runtime, { maxTokens: 128 })).toMatchObject({
+      reasoning: "off",
+      samplingParams: { temperature: 0 },
+      maxTokens: 128,
+    });
+  });
+
+  it("keeps per-agent Pi provider options when fast speed decorates an OpenAI-compatible request", () => {
+    const runtime = createPiModelRuntime({
+      model: "deepseek-v4-flash",
+      apiKey: "secret",
+      provider: "deepseek",
+      speed: "fast",
+      providerOptions: {
+        reasoning: "off",
+        samplingParams: { temperature: 0 },
+      },
+    } as Parameters<typeof createPiModelRuntime>[0] & {
+      providerOptions: {
+        reasoning: "off";
+        samplingParams: { temperature: number };
+      };
+    });
+
+    expect(withPiRuntimeRequestOptions(runtime, { maxTokens: 128 })).toMatchObject({
+      reasoning: "off",
+      samplingParams: { temperature: 0 },
+      maxTokens: 128,
+    });
+  });
+
   it("projects Managed Agents fast speed through Pi into the Anthropic request", async () => {
     let captured: Request | undefined;
     vi.stubGlobal("fetch", async (input: RequestInfo | URL, init?: RequestInit) => {

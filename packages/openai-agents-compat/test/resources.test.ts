@@ -61,7 +61,19 @@ describe("OpenAI resource compatibility using real application services", () => 
     const agent = await f.run("agents.create", { model: "gpt-5", instructions: "Answer carefully", metadata: { remove: "old" }, tools: [{ type: "function", name: "lookup", description: "Look up a record", parameters: { type: "object", properties: {} } }] });
     expect(agent).toMatchObject({ object: "agent", name: null, instructions: "Answer carefully", model: "gpt-5", tools: [{ type: "function", defer_loading: false, name: "lookup" }] });
     const core = await f.agents.retrieveAgent({ agentId: agent.id });
-    expect(core).toMatchObject({ type: "found", agent: { system: "Answer carefully", tools: [{ type: "custom", name: "lookup" }] } });
+    expect(core).toMatchObject({
+      type: "found",
+      agent: {
+        system: "Answer carefully",
+        metadata: { remove: "old" },
+        openma: {
+          compatibility: {
+            openai_agents_v1: { version: 1 },
+          },
+        },
+        tools: [{ type: "custom", name: "lookup" }],
+      },
+    });
     const updated = await f.run("agents.update", { name: "Research", instructions: null, metadata: { only: "new" }, text: { verbosity: "high" } }, { agent_id: agent.id });
     expect(updated).toMatchObject({ name: "Research", instructions: null, metadata: { only: "new" }, text: { verbosity: "high", format: { type: "text" } } });
     expect(updated.metadata).not.toHaveProperty("remove");

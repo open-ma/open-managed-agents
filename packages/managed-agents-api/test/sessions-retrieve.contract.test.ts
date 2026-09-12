@@ -115,7 +115,11 @@ describe("Managed Agents API — GET /v1/sessions/:session_id", () => {
           agent: {
             ...sessionView.agent,
             openma: {
-              auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+              auxiliaryModel: {
+                id: "deepseek-chat",
+                providerOptions: { pi: { reasoning: "off" } },
+                speed: "fast",
+              },
               appendablePrompts: ["prompt_linear"],
               harness: "pi",
             },
@@ -134,7 +138,11 @@ describe("Managed Agents API — GET /v1/sessions/:session_id", () => {
     await expect(response.json()).resolves.toMatchObject({
       agent: {
         _oma: {
-          aux_model: { id: "deepseek-chat", speed: "fast" },
+          aux_model: {
+            id: "deepseek-chat",
+            provider_options: { pi: { reasoning: "off" } },
+            speed: "fast",
+          },
           appendable_prompts: ["prompt_linear"],
           harness: "pi",
         },

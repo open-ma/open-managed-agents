@@ -105,6 +105,9 @@ function normalizeModel(model: string | AgentModelInput): AgentModelView {
     id: model.id,
     ...(model.effort != null && { effort: model.effort }),
     ...(model.inferenceGeo != null && { inferenceGeo: model.inferenceGeo }),
+    ...(model.providerOptions != null && {
+      providerOptions: structuredClone(model.providerOptions),
+    }),
     ...(model.speed != null && { speed: model.speed }),
   };
 }
@@ -127,6 +130,9 @@ function normalizeOpenMaCreate(
     }),
     ...(input.enableGeneralSubagent != null && {
       enableGeneralSubagent: input.enableGeneralSubagent,
+    }),
+    ...(input.compatibility != null && {
+      compatibility: structuredClone(input.compatibility),
     }),
   };
   return Object.keys(extension).length === 0 ? undefined : extension;
@@ -157,6 +163,12 @@ function patchOpenMa(
   assign("acp", patch.acp);
   assign("runtimeBinding", patch.runtimeBinding);
   assign("enableGeneralSubagent", patch.enableGeneralSubagent);
+  assign(
+    "compatibility",
+    patch.compatibility == null
+      ? patch.compatibility
+      : structuredClone(patch.compatibility),
+  );
   return Object.keys(next).length === 0 ? undefined : next;
 }
 
@@ -173,6 +185,56 @@ function patchMetadata(
   return next;
 }
 
+function validateMetadata(metadata: Record<string, string>): string | null {
+  const entries = Object.entries(metadata);
+  if (entries.length > 16) {
+    return "Agent metadata may contain at most 16 keys";
+  }
+  for (const [key, value] of entries) {
+    if (key.length < 1 || key.length > 64) {
+      return "Agent metadata keys must contain 1 to 64 characters";
+    }
+    if (value.length > 512) {
+      return "Agent metadata values may contain at most 512 characters";
+    }
+  }
+  return null;
+}
+
+function validateMcpConfiguration(
+  mcpServers: Array<{ name: string }>,
+  tools: Array<{ type: string; mcpServerName?: string }>,
+): string | null {
+  if (mcpServers.length > 20) {
+    return "Agent MCP servers may contain at most 20 entries";
+  }
+  const serverNames = new Set<string>();
+  for (const server of mcpServers) {
+    if (serverNames.has(server.name)) {
+      return "Agent MCP server names must be unique";
+    }
+    serverNames.add(server.name);
+  }
+  const referencedNames = new Set(
+    tools.flatMap((tool) =>
+      tool.type === "mcp_toolset" && typeof tool.mcpServerName === "string"
+        ? [tool.mcpServerName]
+        : [],
+    ),
+  );
+  for (const referencedName of referencedNames) {
+    if (!serverNames.has(referencedName)) {
+      return `MCP toolset references unknown server ${referencedName}`;
+    }
+  }
+  for (const serverName of serverNames) {
+    if (!referencedNames.has(serverName)) {
+      return `MCP server ${serverName} must be referenced by an mcp_toolset`;
+    }
+  }
+  return null;
+}
+
 type ResolveMultiagentResult =
   | { type: "resolved"; multiagent: AgentMultiagent | null }
   | { type: "invalid_request"; message: string };
@@ -186,17 +248,40 @@ async function resolveMultiagent(
   if (input === null || input === undefined) {
     return { type: "resolved", multiagent: input ?? null };
   }
+  if (input.agents.length < 1 || input.agents.length > 20) {
+    return {
+      type: "invalid_request",
+      message: "Multiagent roster must contain 1 to 20 entries",
+    };
+  }
   const agents: AgentMultiagent["agents"] = [];
+  const referencedAgentIds = new Set<string>();
+  let selfCount = 0;
   for (const entry of input.agents) {
     if (typeof entry !== "string" && entry.type === "advisor") {
       agents.push({ type: entry.type, model: entry.model });
       continue;
     }
     if (typeof entry !== "string" && entry.type === "self") {
+      selfCount += 1;
+      if (selfCount > 1 || referencedAgentIds.has(self.agentId)) {
+        return {
+          type: "invalid_request",
+          message: "Multiagent roster agents must be distinct and may contain at most one self",
+        };
+      }
+      referencedAgentIds.add(self.agentId);
       agents.push({ type: "agent", ...self });
       continue;
     }
     const agentId = typeof entry === "string" ? entry : entry.agentId;
+    if (referencedAgentIds.has(agentId)) {
+      return {
+        type: "invalid_request",
+        message: "Multiagent roster agents must be distinct",
+      };
+    }
+    referencedAgentIds.add(agentId);
     const requestedVersion =
       typeof entry === "string" ? undefined : entry.version;
     const current = await store.findCurrent({ workspaceId, agentId });
@@ -240,6 +325,18 @@ export class AgentsApplicationService implements AgentsApplicationPort {
   constructor(private readonly dependencies: AgentsApplicationServiceDependencies) {}
 
   async createAgent(command: CreateAgentCommand): Promise<CreateAgentResult> {
+    const metadata = command.metadata ?? {};
+    const invalidMetadata = validateMetadata(metadata);
+    if (invalidMetadata !== null) {
+      return { type: "invalid_request", message: invalidMetadata };
+    }
+    const invalidMcpConfiguration = validateMcpConfiguration(
+      command.mcpServers ?? [],
+      command.tools ?? [],
+    );
+    if (invalidMcpConfiguration !== null) {
+      return { type: "invalid_request", message: invalidMcpConfiguration };
+    }
     const timestamp = this.dependencies.clock.now().toISOString();
     const agentId = this.dependencies.ids.nextAgentId();
     const resolvedMultiagent = await resolveMultiagent(
@@ -260,7 +357,7 @@ export class AgentsApplicationService implements AgentsApplicationPort {
         createdAt: timestamp,
         description: command.description ?? null,
         mcpServers: command.mcpServers ?? [],
-        metadata: command.metadata ?? {},
+        metadata,
         model: normalizeModel(command.model),
         multiagent: resolvedMultiagent.multiagent,
         name: command.name,
@@ -315,6 +412,24 @@ export class AgentsApplicationService implements AgentsApplicationPort {
         message: `Agent version does not match: expected ${command.expectedVersion}, current ${current.version}`,
       };
     }
+    const metadata =
+      command.metadata === undefined
+        ? current.metadata
+        : patchMetadata(current.metadata, command.metadata);
+    const invalidMetadata = validateMetadata(metadata);
+    if (invalidMetadata !== null) {
+      return { type: "invalid_request", message: invalidMetadata };
+    }
+    const mcpServers =
+      command.mcpServers === undefined
+        ? current.mcpServers
+        : command.mcpServers ?? [];
+    const tools =
+      command.tools === undefined ? current.tools : command.tools ?? [];
+    const invalidMcpConfiguration = validateMcpConfiguration(mcpServers, tools);
+    if (invalidMcpConfiguration !== null) {
+      return { type: "invalid_request", message: invalidMcpConfiguration };
+    }
     const resolvedMultiagent =
       command.multiagent === undefined
         ? { type: "resolved" as const, multiagent: current.multiagent }
@@ -337,7 +452,7 @@ export class AgentsApplicationService implements AgentsApplicationPort {
         mcpServers: command.mcpServers ?? [],
       }),
       ...(command.metadata !== undefined && {
-        metadata: patchMetadata(current.metadata, command.metadata),
+        metadata,
       }),
       ...(command.model !== undefined && {
         model: normalizeModel(command.model),
