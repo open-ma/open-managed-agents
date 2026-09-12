@@ -206,6 +206,7 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "agent.mcp_tool_result";
+      sessionThreadId?: string | null;
       mcpToolUseId: string;
       processedAt: string;
       content?: ToolResultContentBlock[];
@@ -224,10 +225,11 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "agent.message";
+      sessionThreadId?: string | null;
       content: AgentMessageContentBlock[];
       processedAt: string;
     }
-  | { id: string; type: "agent.thinking"; processedAt: string }
+  | { id: string; type: "agent.thinking"; processedAt: string; sessionThreadId?: string | null }
   | {
       id: string;
       type: "agent.thread_context_compacted";
@@ -236,6 +238,8 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "agent.thread_message_received";
+      fromMessageId?: string;
+      sessionThreadId?: string | null;
       content: UserMessageContentBlock[];
       fromSessionThreadId: string;
       processedAt: string;
@@ -244,6 +248,7 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "agent.thread_message_sent";
+      sessionThreadId?: string | null;
       content: UserMessageContentBlock[];
       processedAt: string;
       toSessionThreadId: string;
@@ -252,6 +257,7 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "agent.tool_result";
+      sessionThreadId?: string | null;
       processedAt: string;
       toolUseId: string;
       content?: ToolResultContentBlock[];
@@ -269,6 +275,7 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "session.error";
+      sessionThreadId?: string | null;
       error: SessionExecutionError;
       processedAt: string;
     }
@@ -284,6 +291,9 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "session.thread_created";
+      content?: TextContentBlock[];
+      parentThreadId?: string;
+      parentToolUseId?: string;
       agentName: string;
       processedAt: string;
       sessionThreadId: string;
@@ -291,6 +301,7 @@ export type HistorySessionEvent =
   | {
       id: string;
       type: "session.thread_status_idle";
+      interrupted?: boolean;
       agentName: string;
       processedAt: string;
       sessionThreadId: string;
@@ -317,10 +328,11 @@ export type HistorySessionEvent =
       processedAt: string;
       sessionThreadId: string;
     }
-  | { id: string; type: "span.model_request_start"; processedAt: string }
+  | { id: string; type: "span.model_request_start"; processedAt: string; sessionThreadId?: string | null }
   | {
       id: string;
       type: "span.model_request_end";
+      sessionThreadId?: string | null;
       isError: boolean | null;
       modelRequestStartId: string;
       modelUsage: SpanModelUsageView;

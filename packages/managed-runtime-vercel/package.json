@@ -14,7 +14,8 @@
     "@open-managed-agents/blob-store": "workspace:*",
     "@open-managed-agents/managed-runtime-sandbox": "workspace:*",
     "@open-managed-agents/runtime-resource-contract": "workspace:*",
-    "@open-managed-agents/sandbox": "workspace:*"
+    "@open-managed-agents/sandbox": "workspace:*",
+    "@open-managed-agents/vercel-sandbox-contract": "workspace:*"
   },
   "peerDependencies": { "@vercel/sandbox": "^3.2.1" },
   "peerDependenciesMeta": { "@vercel/sandbox": { "optional": true } },

@@ -47,6 +47,9 @@ $EDITOR .env
 # BETTER_AUTH_SECRET=$(openssl rand -hex 32)
 # PLATFORM_ROOT_SECRET=$(openssl rand -base64 32)
 # ANTHROPIC_API_KEY is optional — in production, prefer a per-tenant Model Card.
+# SANDBOX_PROVIDER is required; choose an isolated runtime and add its credentials:
+# SANDBOX_PROVIDER=e2b
+# E2B_API_KEY=...
 
 # First time builds the image; subsequent runs skip --build
 docker compose up -d --build
@@ -132,11 +135,14 @@ The agent's `bash` / `read` / `write` / etc. tools execute in a sandbox.
 
 | Mode | When to pick | Required env |
 |---|---|---|
-| `subprocess` (default) | Local dev, trusted agent code | None — host child_process under `./data/sandboxes/<sid>/`. Zero isolation; the agent has the host's filesystem. |
 | `litebox` | Local hardware isolation, no daemon | `SANDBOX_PROVIDER=litebox`. Host needs `/dev/kvm` (Linux) or Apple Silicon (macOS). Per-VM Firecracker-equivalent via libkrun. |
 | `boxrun` | Multi-host with KVM, OMA pods on managed k8s | `SANDBOX_PROVIDER=boxrun BOXRUN_URL=http://host:8100/v1/default`. Run `boxlite serve` on a separate KVM host; OMA pods reach it over HTTP. |
 | `daytona` | Production / untrusted code | `SANDBOX_PROVIDER=daytona DAYTONA_API_KEY=...` (+ optional `DAYTONA_API_URL`). Daytona-managed Linux VMs, one per session. |
 | `e2b` | E2B SaaS / E2B Infra self-host / Aliyun Agent Sandbox (e2b-compatible) | `SANDBOX_PROVIDER=e2b E2B_API_KEY=...` (+ optional `E2B_API_URL`, `E2B_SANDBOX_URL`, and `E2B_DOMAIN` for a compatible endpoint; `SANDBOX_IMAGE` selects the template). Firecracker microVMs. |
+
+`SANDBOX_PROVIDER` has no default. Missing, unknown, and `subprocess` values
+fail closed; the non-isolated local adapter is retained only as an internal
+test fixture and cannot be selected by the deployable Node server.
 
 **Remote sandboxes** (Daytona, E2B, BoxRun) sharing memory mounts use
 `MEMORY_S3_*` env (any S3-compatible store — AWS / R2 / OSS / MinIO).

@@ -34,6 +34,7 @@ import type {
   SessionRealtimeHub,
   SessionRealtimeWriter,
 } from "@open-managed-agents/session-realtime";
+import { randomUUID } from "node:crypto";
 import { ScopedSessionMap } from "./scoped-session-map.js";
 
 export type StartNodeManagedSessionRuntime = StartSessionExecution;
@@ -89,6 +90,8 @@ export interface DefaultNodeManagedSessionRuntimeDriverDependencies {
   projectionFor(
     workspaceId: string,
   ): SessionRuntimeProjectionApplicationPort;
+  clock?: { now(): Date };
+  ids?: { nextEventId(): string };
 }
 
 export interface NodeManagedSessionRunnerAcceptInput
@@ -272,13 +275,18 @@ export class DefaultNodeManagedSessionRuntimeDriver
     }
     if (fence !== undefined) this.executionFences.set(input, fence);
     try {
-      await this.start({
-        workspaceId: input.workspaceId,
-        sessionId: input.sessionId,
-        session: input.session,
-        environment: input.environment,
-        initialEvents: [],
-      });
+      try {
+        await this.start({
+          workspaceId: input.workspaceId,
+          sessionId: input.sessionId,
+          session: input.session,
+          environment: input.environment,
+          initialEvents: [],
+        });
+      } catch (error) {
+        await this.projectTerminalStartFailure(input, error);
+        throw error;
+      }
       const { executionFence: _executionFence, ...accepted } = input;
       await this.dependencies.engine.accept({
         ...accepted,
@@ -290,6 +298,41 @@ export class DefaultNodeManagedSessionRuntimeDriver
         this.executionFences.delete(input);
       }
     }
+  }
+
+  private async projectTerminalStartFailure(
+    input: ExecuteNodeManagedSessionEvents,
+    error: unknown,
+  ): Promise<void> {
+    const processedAt = (this.dependencies.clock?.now() ?? new Date()).toISOString();
+    const nextEventId = () => this.dependencies.ids?.nextEventId()
+      ?? `event_${randomUUID()}`;
+    await this.enqueueOutput(
+      input.workspaceId,
+      input.sessionId,
+      {
+        id: nextEventId(),
+        type: "session.error",
+        error: {
+          type: "unknown_error",
+          message: error instanceof Error ? error.message : String(error),
+          retry_status: "terminal",
+        },
+        processed_at: processedAt,
+      },
+      input.executionFence,
+    );
+    await this.enqueueOutput(
+      input.workspaceId,
+      input.sessionId,
+      {
+        id: nextEventId(),
+        type: "session.status_idle",
+        stop_reason: { type: "end_turn" },
+        processed_at: processedAt,
+      },
+      input.executionFence,
+    );
   }
 
   archiveThread(input: ArchiveNodeManagedSessionThread): Promise<void> {

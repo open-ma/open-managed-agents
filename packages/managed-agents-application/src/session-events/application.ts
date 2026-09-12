@@ -20,6 +20,18 @@ import type {
 const DEFAULT_PAGE_SIZE = 20;
 const MAX_PAGE_SIZE = 100;
 
+export async function sessionInputIdentityPrefix(workspaceId: string, sessionId: string, key: string): Promise<string> {
+  const bytes = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(JSON.stringify([workspaceId, sessionId, key])));
+  return `sevt_req_${Array.from(new Uint8Array(bytes), byte => byte.toString(16).padStart(2, "0")).join("")}_`;
+}
+function inputPayload(event: SentSessionEvent): string {
+  const { id: _id, processedAt: _time, ...body } = event;
+  if ("outcomeId" in body) delete (body as {outcomeId?: string}).outcomeId;
+  const normalize = (value: unknown): unknown => Array.isArray(value) ? value.map(normalize)
+    : value !== null && typeof value === "object" ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a.localeCompare(b)).map(([key, child]) => [key, normalize(child)])) : value;
+  return JSON.stringify(normalize(body));
+}
+
 function encodeCursorPart(value: string): string {
   return btoa(encodeURIComponent(value))
     .replaceAll("+", "-")
@@ -154,11 +166,18 @@ export class SessionEventsApplicationService
   async sendSessionEvents(
     command: SendSessionEventsCommand,
   ): Promise<SendSessionEventsResult> {
+    if (command.expectedRevision !== undefined && (!Number.isSafeInteger(command.expectedRevision) || command.expectedRevision < 1)) {
+      return { type: "invalid_request", message: "Expected Session revision must be a positive integer" };
+    }
+    if (command.idempotencyKey !== undefined && (command.idempotencyKey.length === 0 || command.events.length === 0)) {
+      return { type: "invalid_request", message: "Idempotent input requires a nonempty key and event batch" };
+    }
+    const prefix = command.idempotencyKey === undefined ? null : await sessionInputIdentityPrefix(this.dependencies.workspaceId, command.sessionId, command.idempotencyKey);
     const processedAt = this.dependencies.clock.now().toISOString();
-    const events = command.events.map((event) =>
+    const events = command.events.map((event, index) =>
       toSentEvent(
         event,
-        this.dependencies.ids.nextEventId(),
+        prefix === null ? this.dependencies.ids.nextEventId() : `${prefix}${index}`,
         processedAt,
         () => this.dependencies.ids.nextOutcomeId(),
       ),
@@ -169,6 +188,19 @@ export class SessionEventsApplicationService
         sessionId: command.sessionId,
       });
       if (execution === null) return { type: "not_found" };
+      if (prefix !== null) {
+        const previous = await this.dependencies.store.list({ workspaceId: this.dependencies.workspaceId, sessionId: command.sessionId, idPrefix: prefix, limit: events.length + 1, order: "asc" });
+        if (previous.length > 0) {
+          const byId = new Map(previous.map(event => [event.id, event]));
+          if (previous.length !== events.length || events.some(event => !byId.has(event.id) || inputPayload(byId.get(event.id)! as SentSessionEvent) !== inputPayload(event))) {
+            return { type: "idempotency_conflict", message: "Idempotency key was already used with different input" };
+          }
+          return { type: "accepted", events: events.map(event => byId.get(event.id)! as SentSessionEvent) };
+        }
+      }
+      if (command.expectedRevision !== undefined && command.expectedRevision !== execution.revision) {
+        return { type: "version_conflict", message: "Session changed after input validation; retrieve the session before retrying" };
+      }
       const appended = await this.dependencies.store.append({
         workspaceId: this.dependencies.workspaceId,
         sessionId: command.sessionId,

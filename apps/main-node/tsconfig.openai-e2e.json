@@ -1,0 +1,10 @@
+{
+  "extends": "../../tsconfig.json",
+  "compilerOptions": {
+    "lib": ["ES2023", "DOM"],
+    "types": ["node"],
+    "noEmit": true
+  },
+  "include": ["test/openai-agents-node.test.ts", "test/openai-e2e/**/*.test.ts"],
+  "exclude": ["node_modules", "dist"]
+}

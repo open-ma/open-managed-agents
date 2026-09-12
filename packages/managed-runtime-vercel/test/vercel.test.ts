@@ -37,6 +37,8 @@ class FakeSandbox implements VercelSandboxSdkPort {
   persistent = true;
   tags: Record<string, string> = {};
   currentSnapshotId: string | undefined = "snapshot_1";
+  expiresAt: Date | undefined = new Date(Date.now() + 120_000);
+  readonly extendTimeout = vi.fn(async (_durationMs: number) => {});
   readonly updateNetworkPolicy = vi.fn(async (
     policy: VercelNetworkPolicy,
     _options?: { signal?: AbortSignal },

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
+import { withReportedArtifactPublication } from "../src/openai-artifact-publication";
 import type { SandboxExecutor } from "@open-managed-agents/sandbox";
 import type { SessionEvent } from "@open-managed-agents/shared";
 import type {
@@ -64,6 +65,23 @@ interface RunnerConstructor {
       session: Session;
       environment: Environment;
       sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+    }): Promise<void>;
+    synchronizeSandbox?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+      executionFence: NonNullable<NodeManagedSessionRunnerAcceptInput["executionFence"]>;
+    }): Promise<void>;
+    afterExecution?(input: {
+      workspaceId: string;
+      session: Session;
+      environment: Environment;
+      sandbox: SandboxExecutor;
+      runtimeGeneration: string;
+      executionFence: NonNullable<NodeManagedSessionRunnerAcceptInput["executionFence"]>;
     }): Promise<void>;
     buildModel(input: {
       workspaceId: string;
@@ -135,7 +153,8 @@ interface RunnerConstructor {
     };
     clock: { now(): Date };
     ids: { nextEventId(): string };
-  }): NodeManagedSessionRunner;
+    runtimeGenerations?: { next(): string };
+  }): NodeManagedSessionRunner & { connectedSandbox(input: { workspaceId: string; sessionId: string }): SandboxExecutor | null };
 }
 
 describe("DefaultNodeManagedSessionRunner", () => {
@@ -178,6 +197,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
       ids: { nextEventId: () => "event_inputs" },
     });
 
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBeNull();
     await runner.start({
       workspaceId: "workspace_01",
       sessionId: session.id,
@@ -186,6 +206,10 @@ describe("DefaultNodeManagedSessionRunner", () => {
       initialEvents: [],
     });
     expect(order).toEqual(["build", "prepare"]);
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBe(sandbox);
+    expect(runner.connectedSandbox({ workspaceId: "workspace_other", sessionId: session.id })).toBeNull();
+    await runner.stop({ workspaceId: "workspace_01", sessionId: session.id });
+    expect(runner.connectedSandbox({ workspaceId: "workspace_01", sessionId: session.id })).toBeNull();
   });
 
   it("destroys a new sandbox when Session input preparation fails", async () => {
@@ -302,6 +326,32 @@ describe("DefaultNodeManagedSessionRunner", () => {
         expect(tools).toBe(builtTools);
         lifecycle.push("dispose");
       },
+      synchronizeSandbox: async (input) => {
+        expect(input).toMatchObject({
+          workspaceId: "workspace_01",
+          session,
+          environment,
+          sandbox,
+          runtimeGeneration: "runtime_generation_01",
+          executionFence: {
+            executionId: "event_user_01",
+            attemptId: "attempt_01",
+            ownerId: "worker_01",
+            generation: 1,
+          },
+        });
+        lifecycle.push("synchronize");
+      },
+      afterExecution: withReportedArtifactPublication(async input => {
+        expect(input.executionFence.executionId).toBe("event_user_01");
+        expect(lifecycle.at(-1)).toBe("idle");
+        lifecycle.push("afterExecution");
+        throw new Error("Output copy failed after completion");
+      }, (error, input) => {
+        expect(error).toMatchObject({ message: "Output copy failed after completion" });
+        expect(input.session.id).toBe(session.id);
+        lifecycle.push("publicationReported");
+      }),
       buildHarness: () => ({
         run: async (context) => {
           lifecycle.push("run");
@@ -320,6 +370,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
       },
       clock: { now: () => new Date("2026-08-26T02:00:00.000Z") },
       ids: { nextEventId: () => `event_runtime_0${++nextId}` },
+      runtimeGenerations: { next: () => "runtime_generation_01" },
     });
     await runner.start({
       workspaceId: "workspace_01",
@@ -343,6 +394,15 @@ describe("DefaultNodeManagedSessionRunner", () => {
       initialEvents: [],
       events: [event],
       historyEvents: [event],
+      executionFence: {
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        executionId: "event_user_01",
+        attemptId: "attempt_01",
+        ownerId: "worker_01",
+        generation: 1,
+        expiresAt: "2026-08-26T02:01:00.000Z",
+      },
       output: async (frame) => {
         output.push(frame);
         if ((frame as { type?: string }).type === "session.status_idle") {
@@ -382,7 +442,7 @@ describe("DefaultNodeManagedSessionRunner", () => {
         processed_at: "2026-08-26T02:00:00.000Z",
       },
     ]);
-    expect(lifecycle).toEqual(["run", "dispose", "idle"]);
+    expect(lifecycle).toEqual(["run", "dispose", "synchronize", "idle", "afterExecution", "publicationReported"]);
   });
 
   it("projects a terminal session error before returning a harness failure", async () => {
@@ -454,6 +514,84 @@ describe("DefaultNodeManagedSessionRunner", () => {
         type: "session.status_idle",
         stop_reason: { type: "end_turn" },
         processed_at: "2026-08-26T03:00:00.000Z",
+      },
+    ]);
+  });
+
+  it("projects a terminal error and idle state when fenced final collection fails", async () => {
+    const modulePath = "../src/lib/node-managed-session-runner.ts";
+    const runnerModule = await import(/* @vite-ignore */ modulePath) as {
+      DefaultNodeManagedSessionRunner: RunnerConstructor;
+    };
+    let nextId = 0;
+    const runner = new runnerModule.DefaultNodeManagedSessionRunner({
+      outcomes: { evaluate: async () => { throw new Error("unexpected outcome evaluation"); } },
+      confirmedTools: { execute: async () => { throw new Error("unexpected confirmed tool execution"); } },
+      buildSandbox: async () => ({} as SandboxExecutor),
+      synchronizeSandbox: async () => { throw new Error("final collect failed"); },
+      buildModel: async () => ({}),
+      buildTools: async () => ({}),
+      buildHarness: () => ({ run: async () => {} }),
+      buildHarnessContext: async (input) => input,
+      clock: { now: () => new Date("2026-08-26T03:15:00.000Z") },
+      ids: { nextEventId: () => `event_collect_failure_0${++nextId}` },
+    });
+    await runner.start({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+    });
+    const output: unknown[] = [];
+    const event: NodeManagedSessionRunnerAcceptInput["events"][number] = {
+      id: "event_user_collect_failure",
+      type: "user.message",
+      content: [{ type: "text", text: "Collect" }],
+      processedAt: "2026-08-26T03:14:00.000Z",
+    };
+
+    await expect(runner.accept({
+      workspaceId: "workspace_01",
+      sessionId: session.id,
+      session,
+      environment,
+      initialEvents: [],
+      events: [event],
+      historyEvents: [event],
+      executionFence: {
+        executionId: "execution_collect_failure",
+        workspaceId: "workspace_01",
+        sessionId: session.id,
+        attemptId: "attempt_collect_failure",
+        ownerId: "node_01",
+        generation: 1,
+        expiresAt: "2026-08-26T03:16:00.000Z",
+      },
+      output: async (frame) => { output.push(frame); },
+    })).rejects.toThrow("final collect failed");
+
+    expect(output).toEqual([
+      {
+        id: "event_collect_failure_01",
+        type: "session.status_running",
+        processed_at: "2026-08-26T03:15:00.000Z",
+      },
+      {
+        id: "event_collect_failure_02",
+        type: "session.error",
+        error: {
+          type: "unknown_error",
+          message: "final collect failed",
+          retry_status: "terminal",
+        },
+        processed_at: "2026-08-26T03:15:00.000Z",
+      },
+      {
+        id: "event_collect_failure_03",
+        type: "session.status_idle",
+        stop_reason: { type: "end_turn" },
+        processed_at: "2026-08-26T03:15:00.000Z",
       },
     ]);
   });

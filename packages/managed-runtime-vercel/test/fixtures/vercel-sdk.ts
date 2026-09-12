@@ -14,6 +14,8 @@ function sandbox(options: VercelGetOrCreateOptions): VercelSandboxSdkPort {
     persistent: true,
     tags: options.tags,
     currentSnapshotId: undefined,
+    expiresAt: new Date(Date.now() + 300_000),
+    async extendTimeout() {},
     async runCommand(input: VercelRunCommandInput) {
       if (input.detached === true) {
         input.stdout?.end();

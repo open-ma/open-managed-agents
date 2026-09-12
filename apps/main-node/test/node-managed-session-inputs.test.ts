@@ -390,7 +390,7 @@ describe("NodeManagedSessionInputPreparer", () => {
     })).rejects.toThrow(/memory store mounts/i);
   });
 
-  it("fails closed before snapshotting read-write Managed Memory", async () => {
+  it("materializes read-write Managed Memory in a fenced runtime generation", async () => {
     const session = managedSession();
     session.agent.skills = [];
     session.resources = [{
@@ -401,6 +401,7 @@ describe("NodeManagedSessionInputPreparer", () => {
     }];
     const materialize = vi.fn(async () => ({ mountStoreId: "unused" }));
     const mountMemoryStore = vi.fn(async () => undefined);
+    const setEnvVars = vi.fn(async () => undefined);
     const preparer = new NodeManagedSessionInputPreparer({
       files: { downloadFile: async () => { throw new Error("unexpected file download"); } },
       skillVersions: {
@@ -414,15 +415,34 @@ describe("NodeManagedSessionInputPreparer", () => {
       sessionOutputMountCapabilities: () => ({ durability: "durable" as const }),
       mountSessionOutputs: async () => undefined,
       mountMemoryStore,
+      setEnvVars,
     } as unknown as SandboxExecutor;
 
     await expect(preparer.prepare({
       workspaceId: "workspace_inputs",
       session,
       sandbox,
-    })).rejects.toThrow(/does not support read-write Memory Store/i);
-    expect(materialize).not.toHaveBeenCalled();
-    expect(mountMemoryStore).not.toHaveBeenCalled();
+      runtimeGeneration: "runtime_generation_01",
+    })).resolves.toBeUndefined();
+    expect(materialize).toHaveBeenCalledWith({
+      workspaceId: "workspace_inputs",
+      sessionId: "session_inputs_01",
+      memoryStoreId: "memory_01",
+      access: "read_write",
+      runtimeGeneration: "runtime_generation_01",
+    });
+    expect(mountMemoryStore).toHaveBeenCalledWith({
+      storeName: "project-memory",
+      storeId: "unused",
+      readOnly: false,
+    });
+    expect(setEnvVars).toHaveBeenCalledWith({
+      OMA_OUTPUTS_DIR: "/mnt/session/outputs",
+    });
+    expect(setEnvVars).toHaveBeenCalledWith({
+      OMA_MEMORY_DIR: "/mnt/memory",
+      OMA_MEMORY_PROJECT_MEMORY: "/mnt/memory/project-memory",
+    });
   });
 
   it("fails closed when a skill archive contains a parent traversal", async () => {

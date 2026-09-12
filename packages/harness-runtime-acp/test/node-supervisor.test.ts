@@ -58,7 +58,7 @@ function fakeAcpRuntime(seen: SessionOptions[], prompts: string[] = []): AcpRunt
         supportsNes: false,
         nesCapabilities: null,
         positionEncoding: null,
-        supportsSteering: false,
+        supportsSteering: true,
         async *prompt(text: string | readonly unknown[]) {
           prompts.push(String(text));
           yield { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "ok" } };

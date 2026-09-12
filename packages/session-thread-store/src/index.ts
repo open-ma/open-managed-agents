@@ -1,8 +1,10 @@
 import type { SessionThread } from "@open-managed-agents/domain/sessions";
+import type { SessionExecutionFence } from "@open-managed-agents/session-runtime-contract/coordination";
 
 export interface InsertSessionThread {
   workspaceId: string;
   thread: SessionThread;
+  executionFence?: SessionExecutionFence;
 }
 
 export interface SessionThreadLocation {

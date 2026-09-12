@@ -335,7 +335,7 @@ async function collectTurnEvents(sessionId) {
     const stream = await client.beta.sessions.events.stream(
       sessionId,
       {},
-      { signal: controller.signal },
+      { signal: controller.signal, timeout: 180_000 },
     );
     try {
       for await (const event of stream) {

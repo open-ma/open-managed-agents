@@ -325,6 +325,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("agent.mcp_tool_result"),
+      session_thread_id: z.string().nullable().optional(),
       mcp_tool_use_id: z.string(),
       processed_at: z.string(),
       content: z.array(toolResultContentSchema).optional(),
@@ -347,6 +348,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("agent.message"),
+      session_thread_id: z.string().nullable().optional(),
       content: z.array(z.union([textBlockSchema, redactedBlockSchema])),
       processed_at: z.string(),
     })
@@ -355,6 +357,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("agent.thinking"),
+      session_thread_id: z.string().nullable().optional(),
       processed_at: z.string(),
     })
     .strict(),
@@ -369,6 +372,8 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("agent.thread_message_received"),
+      from_message_id: z.string().optional(),
+      session_thread_id: z.string().nullable().optional(),
       content: z.array(userMessageContentSchema),
       from_session_thread_id: z.string(),
       processed_at: z.string(),
@@ -379,6 +384,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("agent.thread_message_sent"),
+      session_thread_id: z.string().nullable().optional(),
       content: z.array(userMessageContentSchema),
       processed_at: z.string(),
       to_session_thread_id: z.string(),
@@ -389,6 +395,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("agent.tool_result"),
+      session_thread_id: z.string().nullable().optional(),
       processed_at: z.string(),
       tool_use_id: z.string(),
       content: z.array(toolResultContentSchema).optional(),
@@ -410,6 +417,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("session.error"),
+      session_thread_id: z.string().nullable().optional(),
       error: sessionExecutionErrorSchema,
       processed_at: z.string(),
     })
@@ -447,6 +455,9 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("session.thread_created"),
+      content: z.array(textBlockSchema).optional(),
+      parent_thread_id: z.string().optional(),
+      parent_tool_use_id: z.string().optional(),
       agent_name: z.string(),
       processed_at: z.string(),
       session_thread_id: z.string(),
@@ -456,6 +467,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("session.thread_status_idle"),
+      interrupted: z.boolean().optional(),
       agent_name: z.string(),
       processed_at: z.string(),
       session_thread_id: z.string(),
@@ -493,6 +505,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("span.model_request_start"),
+      session_thread_id: z.string().nullable().optional(),
       processed_at: z.string(),
     })
     .strict(),
@@ -500,6 +513,7 @@ const historySessionEventSchema = z.discriminatedUnion("type", [
     .object({
       id: z.string().min(1),
       type: z.literal("span.model_request_end"),
+      session_thread_id: z.string().nullable().optional(),
       is_error: z.boolean().nullable(),
       model_request_start_id: z.string(),
       model_usage: spanModelUsageSchema,

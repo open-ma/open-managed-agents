@@ -8,6 +8,17 @@ import type {
   SessionHostEvent,
 } from "@openma/common/session-kernel";
 
+export interface ManagedAgentsSessionSteerCommand {
+  type: "session.steer";
+  sessionId: string;
+  eventId: string;
+  text: string;
+}
+
+export type ManagedAgentsSessionCommand =
+  | SessionCommand
+  | ManagedAgentsSessionSteerCommand;
+
 import {
   ManagedAgentsSessionHost,
   type ManagedAgentsDrainOptions,
@@ -35,7 +46,7 @@ export interface ManagedAgentsRuntimeDependencies {
 
 export interface ManagedAgentsRuntime {
   attach(sink: ManagedAgentsRuntimeEventSink): void;
-  dispatch(command: SessionCommand): Promise<void>;
+  dispatch(command: ManagedAgentsSessionCommand): Promise<void>;
   drain(options: ManagedAgentsDrainOptions): Promise<ManagedAgentsDrainReport>;
   announceAll(): void;
   hasSession(sessionId: string): boolean;
@@ -65,7 +76,7 @@ class ManagedAgentsRuntimeLoop implements ManagedAgentsRuntime {
     this.#sessionHost.announceAll();
   }
 
-  async dispatch(command: SessionCommand): Promise<void> {
+  async dispatch(command: ManagedAgentsSessionCommand): Promise<void> {
     switch (command.type) {
       case "session.start": {
         if (this.#sessionHost.announce(command.sessionId)) return;
@@ -87,6 +98,13 @@ class ManagedAgentsRuntimeLoop implements ManagedAgentsRuntime {
         await this.#sessionHost.prompt({
           sessionId: command.sessionId,
           turnId: command.turnId,
+          text: command.text,
+        });
+        return;
+      case "session.steer":
+        await this.#sessionHost.steer({
+          sessionId: command.sessionId,
+          eventId: command.eventId,
           text: command.text,
         });
         return;

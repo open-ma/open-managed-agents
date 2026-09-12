@@ -11,6 +11,10 @@ export type * from "../domain/session-event";
 export interface SendSessionEventsCommand {
   sessionId: string;
   events: SendableSessionEvent[];
+  /** Retries of the same logical input return its original accepted events. */
+  idempotencyKey?: string;
+  /** Bind state-dependent validation to the existing native Session CAS. */
+  expectedRevision?: number;
 }
 
 export interface ListSessionEventsQuery {
@@ -37,6 +41,8 @@ export interface StreamSessionEventsQuery {
 
 export type SendSessionEventsResult =
   | { type: "accepted"; events?: SentSessionEvent[] }
+  | { type: "idempotency_conflict"; message: string }
+  | { type: "version_conflict"; message: string }
   | { type: "invalid_request"; message: string }
   | { type: "not_found" };
 

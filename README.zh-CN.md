@@ -8,15 +8,16 @@
   <img src="https://img.shields.io/badge/License-Apache_2.0-blue.svg" alt="Apache 2.0 License" />
   <img src="https://img.shields.io/badge/Tests-passing-brightgreen" alt="Tests" />
   <img src="https://img.shields.io/badge/API-Anthropic%20Compatible-blueviolet" alt="Anthropic Compatible" />
+  <img src="https://img.shields.io/badge/OpenAI-Agents%20API%20%2B%20SDK-412991" alt="OpenAI Agents API 和 SDK 支持" />
 </p>
 
 # Open Managed Agents
 
-**Claude Managed Agents 的开源替代品** —— 一个你可以自部署的 AI 智能体元框架（meta-harness）。
+**Claude Managed Agents 和 OpenAI Agents API 的开源、自部署替代方案。**
 
 🌐 **[openma.dev](https://openma.dev)** · 📖 **[docs.openma.dev](https://docs.openma.dev)** · 💬 **[github.com/openma-ai/open-managed-agents](https://github.com/openma-ai/open-managed-agents)**
 
-写一个 harness，部署它。平台负责运行 —— 内置会话、沙箱、工具、记忆、保险库和崩溃恢复。API 与 Claude Managed Agents 兼容；可以跑在 Cloudflare Workers + Durable Objects 上，或者直接 `docker compose up` 在你自己的机器上。
+OpenMA 提供持久会话、沙箱工具、记忆、加密凭证和崩溃恢复。Cloudflare 与 Node 支持 Claude Managed Agents API；Node 还提供 `/openai/v1` 入口，可使用官方 OpenAI SDK。你可以使用自己的模型 API key，部署到自己的基础设施上。
 
 ---
 
@@ -28,11 +29,50 @@
 |---|---|---|
 | 跑在哪里 | 你的 VPS / Mac / Docker 主机 / fly.io / k8s | Cloudflare Workers + DO + Containers |
 | 存储 | SQLite 或 Postgres + 本地文件系统 | D1 + KV + R2 |
-| 沙箱 | LocalSubprocess / LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox（Containers） |
+| 沙箱 | LiteBox / Daytona / E2B / BoxRun | Cloudflare Sandbox（Containers） |
 | 启动时间 | `docker compose up`（约 2 分钟） | wrangler deploy（首次配置后约 10 分钟） |
 | 适合谁 | 开源用户、私有部署、不想用 CF、需要数据驻留 | 边缘规模、不想运维主机、已在 CF 上 |
 
-**同一套 SDK。** 同一套 `/v1/agents` / `/v1/sessions` API。同一个 Console UI。同一套崩溃恢复语义。两种部署之间只改环境变量，不改代码。
+两种部署都提供 Claude 兼容的 `/v1/agents`、`/v1/sessions` API 和 Console UI。
+OpenAI Agents API 适配器目前挂载在 Node 的 `/openai/v1`。
+
+---
+
+## OpenAI Agents API 快速开始（Node）
+
+先按下方 Docker 部署说明启动 Node 服务，创建 OpenMA API key，并配置模型。
+然后安装支持的 OpenAI SDK 版本：
+
+```bash
+npm install openai@7.15.0
+```
+
+把客户端地址指向你的 OpenMA 服务：
+
+```ts
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  apiKey: process.env.OPENMA_API_KEY,
+  baseURL: "http://localhost:8787/openai/v1",
+});
+
+const session = await client.beta.agents.sessions.create({
+  agent: { model: "your-configured-model", instructions: "Be concise." },
+  environment: { type: "none" },
+  input: "Hello",
+});
+console.log(session.id);
+```
+
+会话支持文本、等待应用返回结果的函数调用，以及子代理。设置
+`agent.multi_agent.enabled: true` 后，主代理可以把子任务分派给子代理；
+你可以向子代理发消息、等待结果、中断、关闭或恢复它。子代理分别保存对话，
+共享父代理的文件，不能继续创建下一级子代理。
+
+OpenAI API 目前在 Node 上可用。高级环境和插件设置、部分 MCP 与模型选项
+尚不支持。迁移现有应用前，请查看[支持的功能与限制](docs/openai-agents-compatibility-status.md)；
+具体配置见[适配器指南](packages/openai-agents-compat/README.md)。
 
 ---
 
@@ -53,8 +93,9 @@ $EDITOR .env
 #
 # 可选：ANTHROPIC_API_KEY 让第一个 agent 在还没添加 Model Card 时也能跑起来。
 # 生产环境请改为在 Console 里按 tenant 添加 Model Card。
+# 必须显式配置隔离沙箱，例如 SANDBOX_PROVIDER=e2b 和 E2B_API_KEY。
 
-# SQLite + LocalSubprocess 沙箱（默认，最快路径）
+# SQLite + 显式配置的隔离沙箱
 docker compose up -d
 
 # 或者用 Postgres
@@ -173,7 +214,7 @@ curl -N -X POST $BASE/v1/sessions/$SESSION/messages \
 ├─────────────────────────────────────────────────────────┤
 │  基础设施（Cloudflare 或 Node 自部署）                  │
 │  - 事件日志：DO 内的 SQLite（CF），或 SQLite/Postgres   │
-│  - 沙箱：CF Containers / subprocess / LiteBox / E2B     │
+│  - 沙箱：CF Containers / LiteBox / E2B / Daytona        │
 │  - 存储：KV + R2（CF），或本地文件系统（自部署）        │
 └─────────────────────────────────────────────────────────┘
 ```
@@ -244,7 +285,9 @@ Harness 在构建时被打包进 agent worker。你的代码和 SessionDO 跑在
 
 ## API
 
-与 [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents) 兼容。相同端点、相同事件类型，可与现有 SDK 一起使用。
+以下端点为 `/v1` 下的 [Claude Managed Agents API](https://docs.anthropic.com/en/docs/agents/managed-agents)。
+Node 另在 `/openai/v1` 提供 [OpenAI Agents API](https://developers.openai.com/api/docs/guides/agents-api/overview)，
+其独立的资源与事件合同见上方 OpenAI SDK 快速开始及兼容状态文档。
 
 <details>
 <summary><strong>智能体</strong> —— 创建和管理智能体配置</summary>
@@ -629,7 +672,7 @@ open-managed-agents/
 │   ├── api-types/                 # 共享 TypeScript 类型（配置 schema、事件类型）
 │   ├── http-routes/               # 公开 REST 路由定义（main 与 main-node 共用）
 │   ├── session-runtime/           # Harness 运行时 —— 事件日志、广播、恢复
-│   ├── sandbox/                   # 沙箱适配器（subprocess / litebox / daytona / e2b / boxrun）
+│   ├── sandbox/                   # 沙箱 Port 与 provider-neutral 编排
 │   ├── credentials-store/         # 加密凭证存储（基于 PLATFORM_ROOT_SECRET 的 AES-GCM）
 │   ├── model-cards-store/         # 加密的 Model Card API key 存储
 │   ├── vaults-store/              # 保险库定义 + 出站鉴权配线
@@ -656,7 +699,7 @@ open-managed-agents/
 | `ANTHROPIC_API_KEY` | 否 | tenant 还没添加 Model Card 时使用的备用 LLM 凭证。**生产环境请在 Console 里按 tenant 添加 Model Card** —— 它会基于 `PLATFORM_ROOT_SECRET` 加密静态存储、按 tenant 隔离、并且能不重新部署就轮换。 |
 | `ANTHROPIC_BASE_URL` | 否 | 切到任意 Anthropic 兼容代理。 |
 | `PUBLIC_BASE_URL` | 否（开发） / 是（生产） | Cookie 域和 OAuth redirect 的根。默认 `*` trusted-origins —— 只适合本地开发。 |
-| `SANDBOX_PROVIDER` | 否 | `subprocess`（默认，无隔离）、`litebox`（Firecracker）、`daytona`、`e2b`、`boxrun`。运行不可信 agent 请用带隔离的后端。 |
+| `SANDBOX_PROVIDER` | **是**（Node/Fly） | 显式选择隔离后端：`litebox`（本机 Firecracker）、`daytona`、`e2b` 或 `boxrun`。可部署入口没有 subprocess 回退。 |
 | `TAVILY_API_KEY` | 否 | `web_search` 内置工具的后端。 |
 
 完整变量列表（集成 OAuth 凭证、Postgres URL、沙箱调参、记忆桶配置、Google 登录等）：**[docs.openma.dev/reference/configuration](https://docs.openma.dev/reference/configuration/)** 以及 `.env.example` / `.dev.vars.example`。
@@ -698,7 +741,14 @@ Key 以 AES-256-GCM 加密静态存储，密钥派自 `PLATFORM_ROOT_SECRET`（l
 ```bash
 npm test          # 单元 + 集成套件
 npm run typecheck # 零错误
+pnpm run test:openai-agents      # OpenAI SDK、HTTP 与会话行为
+pnpm run test:openai-agents:node # Node 执行与子代理
+pnpm run test:e2e:openai-agents # 官方 SDK 访问真实 Node 服务的 E2E
 ```
+
+已测试的 SDK 版本、覆盖范围和已知限制见
+[OpenAI 兼容报告](docs/openai-agents-compatibility-status.md)与
+[上游测试审计](docs/openai-agents-upstream-test-audit.md)。
 
 ---
 

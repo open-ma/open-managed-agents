@@ -6,6 +6,8 @@ import {
   buildLocalReleaseEnvironment,
   buildLocalReleasePlan,
   hasMountedSkillReminder,
+  projectHostFixtureUrlForSandbox,
+  selectLocalReleaseSteps,
 } from "./local-release-certification.mjs";
 
 test("local release environment isolates durable state and serves the built console", () => {
@@ -24,7 +26,8 @@ test("local release environment isolates durable state and serves the built cons
   assert.equal(environment.SHOULD_SURVIVE, "yes");
   assert.equal(environment.PORT, "19433");
   assert.equal(environment.AUTH_DISABLED, "1");
-  assert.equal(environment.SANDBOX_PROVIDER, "subprocess");
+  assert.equal(environment.SANDBOX_PROVIDER, "litebox");
+  assert.equal(environment.SANDBOX_IMAGE, "node:22-bookworm");
   assert.equal(environment.ANTHROPIC_BASE_URL, "http://127.0.0.1:19434");
   assert.equal(environment.CONSOLE_DIR, "/repo/apps/console/dist");
   assert.equal(environment.DATABASE_PATH, join(root, "oma.db"));
@@ -47,10 +50,42 @@ test("local release plan covers every public interface with real product process
   ]);
 });
 
+test("local release selection keeps infrastructure and isolates one product lane", () => {
+  assert.deepEqual(selectLocalReleaseSteps("console-browser"), [
+    "console-build",
+    "main-node-start",
+    "console-browser",
+  ]);
+  assert.deepEqual(selectLocalReleaseSteps("managed-agents-sdk,cli-projection"), [
+    "console-build",
+    "main-node-start",
+    "managed-agents-sdk",
+    "cli-projection",
+  ]);
+  assert.throws(
+    () => selectLocalReleaseSteps("not-a-lane"),
+    /Unknown local release lane: not-a-lane/,
+  );
+});
+
 test("skill-reminder certification tolerates model requests without a system prompt", () => {
   assert.equal(hasMountedSkillReminder([
     { messages: [] },
     { system: [{ type: "text", text: "Read /workspace/.openma/skills/demo/SKILL.md" }] },
   ]), true);
   assert.equal(hasMountedSkillReminder([{ messages: [] }]), false);
+});
+
+test("LiteBox receives a guest-reachable URL for host-loopback fixtures", () => {
+  assert.equal(
+    projectHostFixtureUrlForSandbox(
+      "http://127.0.0.1:19435/repository.git",
+      "litebox",
+    ),
+    "http://host.boxlite.internal:19435/repository.git",
+  );
+  assert.equal(
+    projectHostFixtureUrlForSandbox("http://127.0.0.1:19435/mcp", "daytona"),
+    "http://127.0.0.1:19435/mcp",
+  );
 });

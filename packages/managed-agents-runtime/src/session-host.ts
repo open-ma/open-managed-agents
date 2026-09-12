@@ -56,6 +56,12 @@ export interface ManagedAgentsSessionPromptInput {
   text: string;
 }
 
+export interface ManagedAgentsSessionSteerInput {
+  sessionId: string;
+  eventId: string;
+  text: string;
+}
+
 interface ActiveSession {
   acp: AcpSession;
   turns: Map<string, AbortController>;
@@ -186,6 +192,15 @@ export class ManagedAgentsSessionHost {
       });
       return;
     }
+    if (!session.supportsSteering) {
+      await session.dispose().catch(() => undefined);
+      this.#emit({
+        type: "session.error",
+        sessionId: input.sessionId,
+        message: "ACP agent does not support required session steering",
+      });
+      return;
+    }
     this.#sessions.set(input.sessionId, {
       acp: session,
       turns: new Map(),
@@ -306,6 +321,45 @@ export class ManagedAgentsSessionHost {
       });
     } finally {
       session.turns.delete(input.turnId);
+    }
+  }
+
+  async steer(input: ManagedAgentsSessionSteerInput): Promise<void> {
+    const session = this.#liveSession(input.sessionId);
+    if (!session) {
+      this.#emit({
+        type: "session.error",
+        sessionId: input.sessionId,
+        turnId: input.eventId,
+        message: "no such session",
+      });
+      return;
+    }
+    if (session.turns.size === 0) {
+      await this.prompt({
+        sessionId: input.sessionId,
+        turnId: input.eventId,
+        text: input.text,
+      });
+      return;
+    }
+    try {
+      const outcome = await session.acp.steer(input.text);
+      if (outcome === "failed") {
+        this.#emit({
+          type: "session.error",
+          sessionId: input.sessionId,
+          turnId: input.eventId,
+          message: "ACP agent rejected session steering",
+        });
+      }
+    } catch (error) {
+      this.#emit({
+        type: "session.error",
+        sessionId: input.sessionId,
+        turnId: input.eventId,
+        message: error instanceof Error ? error.message : String(error),
+      });
     }
   }
 

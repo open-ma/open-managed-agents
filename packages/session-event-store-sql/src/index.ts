@@ -1,3 +1,4 @@
+import { decodeSessionEventDocument, encodeSessionEventDocument } from '@open-managed-agents/session-runtime-contract/history';
 import type { SqlClient } from "@open-managed-agents/sql-client";
 import type {
   SentSessionEvent,
@@ -83,7 +84,7 @@ export class SqlSessionEventStore
     if (this.options.executionOutbox === true && input.events.length > 0) {
       return this.appendWithExecutionOutbox(input);
     }
-    const eventStatements = input.events.map((event) =>
+    const eventStatements = input.events.map((event, index) =>
         this.client
           .prepare(
             `INSERT INTO managed_session_events
@@ -101,7 +102,7 @@ export class SqlSessionEventStore
             relatedThreadId(event),
             event.id,
             event.type,
-            JSON.stringify(event),
+            encodeSessionEventDocument(event, { revision: input.expectedRevision + 1, index }),
             timestamp(requiredProcessedAt(event)),
             input.workspaceId,
             input.sessionId,
@@ -122,7 +123,13 @@ export class SqlSessionEventStore
         input.sessionId,
         input.expectedRevision,
       );
-    const results = await this.client.batch([...eventStatements, update]);
+    // Lock before inserting: concurrent PostgreSQL appends must not share one
+    // successful source revision or leak events from a losing CAS.
+    const revisionGuard = this.client.prepare(
+      `UPDATE managed_sessions SET revision = revision
+        WHERE workspace_id = ? AND id = ? AND revision = ?`,
+    ).bind(input.workspaceId, input.sessionId, input.expectedRevision);
+    const results = await this.client.batch([revisionGuard, ...eventStatements, update]);
     const updateResult = results[results.length - 1];
     if (updateResult === undefined) {
       throw new Error("Session event append returned no Session update result");
@@ -201,7 +208,7 @@ export class SqlSessionEventStore
       input.sessionId,
       input.expectedRevision,
     );
-    const eventStatements = input.events.map((event) =>
+    const eventStatements = input.events.map((event, index) =>
       this.client.prepare(
         `INSERT INTO managed_session_events
           (workspace_id, session_id, thread_id, id, type, document, processed_at)
@@ -217,7 +224,7 @@ export class SqlSessionEventStore
         relatedThreadId(event),
         event.id,
         event.type,
-        JSON.stringify(event),
+        encodeSessionEventDocument(event, { revision: input.expectedRevision + 1, index }),
         timestamp(requiredProcessedAt(event)),
         input.workspaceId,
         input.sessionId,
@@ -392,6 +399,10 @@ export class SqlSessionEventStore
       conditions.push(`type IN (${input.types.map(() => "?").join(", ")})`);
       parameters.push(...input.types);
     }
+    if (input.idPrefix !== undefined) {
+      conditions.push("id LIKE ? ESCAPE '!'");
+      parameters.push(`${input.idPrefix.replace(/[!%_]/g, value => `!${value}`)}%`);
+    }
     if (input.position !== undefined) {
       const operator = input.order === "asc" ? ">" : "<";
       const positionTime = timestamp(input.position.processedAt);
@@ -417,7 +428,7 @@ export class SqlSessionEventStore
       .bind(...parameters)
       .all<SessionEventRow>();
     return (rows.results ?? []).map(
-      (row) => JSON.parse(row.document) as SessionEventView,
+      (row) => decodeSessionEventDocument(row.document).event,
     );
   }
 
@@ -462,7 +473,7 @@ export class SqlSessionEventStore
       .bind(...parameters)
       .all<SessionEventRow>();
     return (rows.results ?? []).map(
-      (row) => JSON.parse(row.document) as SessionEventView,
+      (row) => decodeSessionEventDocument(row.document).event,
     );
   }
 }

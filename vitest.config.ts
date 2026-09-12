@@ -417,6 +417,8 @@ export default defineConfig({
       // test:architecture, not inside workerd/Vitest.
       "scripts/provider-package-boundaries.test.mjs",
       "scripts/migration-compatibility.test.mjs",
+      "scripts/setup-cf.test.mjs",
+      "scripts/setup-fly.test.mjs",
       // Credential certification orchestrates real Node child processes and
       // is run explicitly by test:certification:runner.
       "scripts/live-certification.test.mjs",
@@ -425,9 +427,12 @@ export default defineConfig({
       "scripts/deepseek-live-certification.test.mjs",
       "scripts/harness-in-sandbox-live-certification.test.mjs",
       "test/e2e/**",
+      "**/.vercel/**",
       "apps/agent/build-*/**",
       "apps/console/**",
       "apps/main-node/**",
+      "apps/main-fly/**",
+      "apps/main-vercel/**",
       "packages/auth/**",
       "packages/acp-runtime/**",
       "packages/cli/**",
@@ -438,6 +443,9 @@ export default defineConfig({
       "packages/managed-agents-adapters-sql/test/**",
       "packages/managed-agents-adapters-runtime/test/**",
       "packages/managed-agents-runtime/**",
+      "packages/openai-agents-api/**",
+      "packages/openai-agents-compat/**",
+      "packages/openai-agents-sdk-audit/**",
       "packages/managed-runtime-host/**",
       "packages/managed-runtime-node/**",
       "packages/managed-runtime-cloudflare-bridge/**",

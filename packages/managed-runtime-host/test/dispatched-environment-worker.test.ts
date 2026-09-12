@@ -326,6 +326,47 @@ describe("provider-dispatched Managed Environment Worker", () => {
     expect(polls).toBeGreaterThanOrEqual(3);
   });
 
+  it("bounds one serverless drain without acknowledging the next queued Work", async () => {
+    const queued = [
+      queuedWork,
+      { ...queuedWork, id: "work_02", data: { type: "session", id: "session_02" } },
+    ] as BetaSelfHostedWork[];
+    const { client, poll } = fakeClient({ poll: async () => queued.shift() ?? null });
+    const { port, dispatch } = dispatcher();
+    const worker = createDispatchedManagedEnvironmentWorker({
+      client,
+      environmentId: "env_01",
+      environmentKey: "key",
+      workspaceId: "workspace_01",
+      dispatch: port,
+      maxWorkItemsPerDrain: 1,
+    });
+
+    await worker.drain();
+
+    expect(dispatch).toHaveBeenCalledOnce();
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({
+      work: expect.objectContaining({ id: "work_01" }),
+    }));
+    expect(poll).toHaveBeenCalledOnce();
+    expect(queued.map(({ id }) => id)).toEqual(["work_02"]);
+  });
+
+  it.each([0, -1, 1.5])(
+    "rejects invalid max Work items per drain %s",
+    (maxWorkItemsPerDrain) => {
+      const { client } = fakeClient();
+      expect(() => createDispatchedManagedEnvironmentWorker({
+        client,
+        environmentId: "env_01",
+        environmentKey: "key",
+        workspaceId: "workspace_01",
+        dispatch: dispatcher().port,
+        maxWorkItemsPerDrain,
+      })).toThrow("maxWorkItemsPerDrain must be a positive integer");
+    },
+  );
+
   it("propagates an abort from provider dispatch without reporting it", async () => {
     const errors: unknown[] = [];
     const { client } = fakeClient({ poll: async () => queuedWork });

@@ -40,6 +40,61 @@ function dependencies() {
 }
 
 describe("managed worker bearer authentication", () => {
+  it("returns Anthropic authentication errors from official Managed Agents routes", async () => {
+    const deps = dependencies();
+    const app = new Hono();
+    app.use("*", createAuthMiddleware(deps));
+    app.get("/v1/agents", (context) => context.json({ ok: true }));
+
+    const missing = await app.request("/v1/agents");
+    const invalid = await app.request("/v1/agents", {
+      headers: { "x-api-key": "invalid" },
+    });
+
+    expect(missing.status).toBe(401);
+    await expect(missing.json()).resolves.toEqual({
+      type: "error",
+      error: { type: "authentication_error", message: "Unauthorized" },
+    });
+    expect(invalid.status).toBe(401);
+    await expect(invalid.json()).resolves.toEqual({
+      type: "error",
+      error: { type: "authentication_error", message: "Invalid API key" },
+    });
+  });
+
+  it("keeps OpenMA Console authentication errors on the existing envelope", async () => {
+    const deps = dependencies();
+    const app = new Hono();
+    app.use("*", createAuthMiddleware(deps));
+    app.get("/v1/oma/agents", (context) => context.json({ ok: true }));
+
+    const response = await app.request("/v1/oma/agents");
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({ error: "Unauthorized" });
+  });
+
+  it("returns Anthropic permission errors when a credential escapes its official scope", async () => {
+    const deps = dependencies();
+    const app = new Hono();
+    app.use("*", createAuthMiddleware(deps));
+    app.get("/v1/agents", (context) => context.json({ ok: true }));
+
+    const response = await app.request("/v1/agents", {
+      headers: { Authorization: "Bearer environment-key" },
+    });
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      type: "error",
+      error: {
+        type: "permission_error",
+        message: "Bearer token is not authorized for this resource",
+      },
+    });
+  });
+
   it("accepts a scoped session bearer resolution before the API-key fallback", async () => {
     const deps = dependencies();
     const app = new Hono();

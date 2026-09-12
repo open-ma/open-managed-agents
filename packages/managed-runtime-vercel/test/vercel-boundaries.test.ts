@@ -46,6 +46,7 @@ function sandbox(input: {
   file?: Buffer | null;
   deleteError?: unknown;
   onReady?: () => void;
+  expiresAt?: Date;
 } = {}): VercelSandboxSdkPort {
   const runCommandMock = vi.fn(async (commandInput: { detached?: boolean; stdout?: NodeJS.WritableStream; stderr?: NodeJS.WritableStream }) => {
     if (commandInput.detached === true) {
@@ -62,6 +63,8 @@ function sandbox(input: {
     persistent: input.persistent ?? true,
     tags: Object.prototype.hasOwnProperty.call(input, "tags") ? input.tags : tags,
     currentSnapshotId: input.currentSnapshotId,
+    expiresAt: input.expiresAt,
+    extendTimeout: vi.fn(async () => undefined),
     runCommand: runCommandMock as VercelSandboxSdkPort["runCommand"],
     mkDir: vi.fn(async () => undefined),
     readFileToBuffer: vi.fn(async () => Object.prototype.hasOwnProperty.call(input, "file") ? input.file! : Buffer.from([1, 2, 3])),
@@ -117,12 +120,19 @@ describe("Vercel provider boundary contracts", () => {
     for (const status of ["failed", "ABORTED"]) await expect(new VercelRuntime(sandbox({ status })).status()).resolves.toBe("stopped");
     for (const status of ["running", "PENDING", "snapshotting", "stopping"]) await expect(new VercelRuntime(sandbox({ status })).status()).resolves.toBe("running");
     await expect(new VercelRuntime(sandbox({ status: "queued" })).status()).resolves.toBe("unknown");
-    const runtime = new VercelRuntime(sandbox());
+    const value = sandbox({ expiresAt: new Date("2026-09-01T00:00:30.000Z") });
+    const runtime = new VercelRuntime(value, () => Date.parse("2026-09-01T00:00:00.000Z"));
     expect(runtime.runtimeHandle()).toEqual({ provider: "vercel", runtimeId: name });
-    expect(runtime.runtimeCapabilities()).toEqual({ lease: false, suspend: ["filesystem"], checkpoint: [] });
-    await expect(runtime.renewLease()).resolves.toBeUndefined();
-    await expect(new VercelRuntime(sandbox({ status: "failed", persistent: false })).renewLease()).rejects.toThrow("no longer available");
-    await expect(new VercelRuntime(sandbox({ status: "failed", persistent: true })).renewLease()).resolves.toBeUndefined();
+    expect(runtime.runtimeCapabilities()).toEqual({ lease: true, suspend: ["filesystem"], checkpoint: [] });
+    await expect(runtime.renewLease({ ttlMs: 90_000 })).resolves.toBeUndefined();
+    expect(value.extendTimeout).toHaveBeenCalledWith(60_000);
+    await expect(runtime.renewLease({ ttlMs: 20_000 })).resolves.toBeUndefined();
+    expect(value.extendTimeout).toHaveBeenCalledTimes(1);
+    await expect(runtime.renewLease({ ttlMs: 0 })).rejects.toThrow("positive finite");
+    await expect(new VercelRuntime(sandbox({ status: "failed", persistent: false })).renewLease({ ttlMs: 10 }))
+      .rejects.toThrow("no longer available");
+    await expect(new VercelRuntime(sandbox({ status: "failed", persistent: true })).renewLease({ ttlMs: 10 }))
+      .rejects.toThrow("no longer available");
   });
 
   it("uses provider snapshot fallback order and validates retained handles", async () => {
@@ -202,7 +212,7 @@ describe("Vercel provider boundary contracts", () => {
     await runtime.destroy();
     expect(value.delete).toHaveBeenCalledTimes(2);
     await expect(runtime.status()).resolves.toBe("stopped");
-    await expect(runtime.renewLease()).rejects.toThrow("no longer available");
+    await expect(runtime.renewLease({ ttlMs: 10 })).rejects.toThrow("no longer available");
   });
 
   it("requires acquisition, validates ownership and persistence, and honors aborts", async () => {

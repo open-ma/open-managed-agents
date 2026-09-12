@@ -34,7 +34,7 @@ import { getLogger } from "@open-managed-agents/observability";
 const moduleLogger = getLogger("litebox-sandbox");
 
 export interface LiteBoxSandboxOptions {
-  /** Container image. Default: `node:22-slim`. */
+  /** Container image. Default: `node:22-bookworm` (includes git for Managed repository resources). */
   image?: string;
   /** Optional VM resource limits. */
   memoryMib?: number;
@@ -101,6 +101,7 @@ export class LiteBoxSandbox implements SandboxExecutor {
     const timeoutMs = timeout ?? this.opts.defaultTimeoutMs ?? 120_000;
     try {
       const r = await box.exec("sh", ["-c", command], env, {
+        cwd: "/workspace",
         timeoutSecs: Math.max(1, Math.ceil(timeoutMs / 1000)),
       });
       const separator = r.stdout.length > 0 && !r.stdout.endsWith("\n") ? "\n" : "";
@@ -255,7 +256,7 @@ export class LiteBoxSandbox implements SandboxExecutor {
     const target = this.normalise(path);
     await fs.writeFile(tmp, content, "utf8");
     try {
-      await box.copyIn(tmp, target);
+      await this.copyIntoBox(box, tmp, target);
     } finally {
       await removeBestEffort(tmp);
     }
@@ -268,7 +269,7 @@ export class LiteBoxSandbox implements SandboxExecutor {
     const target = this.normalise(path);
     await fs.writeFile(tmp, bytes);
     try {
-      await box.copyIn(tmp, target);
+      await this.copyIntoBox(box, tmp, target);
     } finally {
       await removeBestEffort(tmp);
     }
@@ -303,6 +304,7 @@ export class LiteBoxSandbox implements SandboxExecutor {
           cpus?: number;
           name?: string;
           volumes?: Array<{ hostPath: string; guestPath: string; readOnly?: boolean }>;
+          network?: { mode: "enabled" | "disabled"; allowNet?: string[] };
         }) => LiteBoxInstance;
       };
       const mod = (await import(
@@ -313,14 +315,21 @@ export class LiteBoxSandbox implements SandboxExecutor {
           `pnpm add @boxlite-ai/boxlite (cause: ${String(err)})`,
         );
       })) as LiteBoxModule;
-      this.logger.log(`creating box (image=${this.opts.image ?? "node:22-slim"})`);
+      this.logger.log(`creating box (image=${this.opts.image ?? "node:22-bookworm"})`);
       const box = new mod.SimpleBox({
-        image: this.opts.image ?? "node:22-slim",
+        image: this.opts.image ?? "node:22-bookworm",
         memoryMib: this.opts.memoryMib,
         cpus: this.opts.cpus,
         name: this.opts.name,
         volumes: this.volumes,
+        network: { mode: "enabled" },
       });
+      const workspace = await box.exec("mkdir", ["-p", "/workspace"]);
+      if (workspace.exitCode !== 0) {
+        throw new Error(
+          `LiteBoxSandbox could not initialize /workspace: ${workspace.stderr || workspace.stdout}`,
+        );
+      }
       // Apply pending CA cert upload now that the box exists (a no-op exec
       // forces lazy creation per BoxLite's contract).
       if (this.pendingCaUpload) {
@@ -356,6 +365,20 @@ export class LiteBoxSandbox implements SandboxExecutor {
       if (command.startsWith(prefix)) Object.assign(out, secrets);
     }
     return out;
+  }
+
+  private async copyIntoBox(
+    box: LiteBoxInstance,
+    hostPath: string,
+    target: string,
+  ): Promise<void> {
+    const prepared = await box.exec("mkdir", ["-p", dirname(target)]);
+    if (prepared.exitCode !== 0) {
+      throw new Error(
+        `LiteBoxSandbox could not create ${dirname(target)}: ${prepared.stderr || prepared.stdout}`,
+      );
+    }
+    await box.copyIn(hostPath, target);
   }
 }
 

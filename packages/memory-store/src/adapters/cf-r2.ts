@@ -30,6 +30,20 @@ export class CfR2BlobStore implements BlobStore {
     return { text, etag: obj.etag, size: obj.size };
   }
 
+  async list(
+    prefix: string,
+    cursor?: string,
+  ): Promise<{ keys: string[]; nextCursor: string | null }> {
+    const page = await this.bucket.list({
+      prefix,
+      ...(cursor === undefined ? {} : { cursor }),
+    });
+    return {
+      keys: page.objects.map((object) => object.key).sort(),
+      nextCursor: page.truncated ? page.cursor : null,
+    };
+  }
+
   async put(
     key: string,
     body: string,

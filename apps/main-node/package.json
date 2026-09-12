@@ -4,9 +4,6 @@
   "private": true,
   "type": "module",
   "main": "src/index.ts",
-  "bin": {
-    "oma-server": "./bin/oma-server.js"
-  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "tsx src/index.ts",
@@ -17,9 +14,12 @@
     "test:e2e:pi-acp-docker": "tsx scripts/pi-acp-deepseek-docker.e2e.ts",
     "test:e2e:codex-acp-docker": "tsx scripts/harness-in-sandbox/live.e2e.ts codex-acp",
     "test:e2e:mcode-acp-docker": "tsx scripts/harness-in-sandbox/live.e2e.ts mcode",
+    "test:e2e:pi-acp-sprites": "tsx scripts/pi-acp-deepseek-sprites.e2e.ts",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@open-managed-agents/openai-agents-api": "workspace:*",
+    "@open-managed-agents/openai-agents-compat": "workspace:*",
     "@hono/node-server": "^1.13.0",
     "@open-managed-agents/agent": "workspace:*",
     "@open-managed-agents/agents-store": "workspace:*",
@@ -61,6 +61,7 @@
     "@open-managed-agents/memory-store": "workspace:*",
     "@open-managed-agents/memory-store-store-sql": "workspace:*",
     "@open-managed-agents/memory-document-store-sql": "workspace:*",
+    "@open-managed-agents/managed-runtime-sprites": "workspace:*",
     "@open-managed-agents/skill-store-sql": "workspace:*",
     "@open-managed-agents/tunnel-store-sql": "workspace:*",
     "@open-managed-agents/model-cards-store": "workspace:*",
@@ -94,6 +95,7 @@
     "@open-managed-agents/vault-store-sql": "workspace:*",
     "@open-managed-agents/vaults-store": "workspace:*",
     "@aws-sdk/client-s3": "^3.1096.0",
+    "@fly/sprites": "^0.2.2",
     "@larksuiteoapi/node-sdk": "^1.73.0",
     "ai": "^7.0.76",
     "better-auth": "^1.6.3",
@@ -112,6 +114,7 @@
     "turndown": "^7.2.0"
   },
   "devDependencies": {
+    "openai": "7.15.0",
     "@anthropic-ai/sdk": "0.120.0",
     "@earendil-works/pi-ai": "0.84.4",
     "@open-managed-agents/acp-runtime": "workspace:*",

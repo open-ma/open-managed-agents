@@ -6,6 +6,7 @@ export {
   type ManagedAgentsRuntimeScheduler,
   type ManagedAgentsSessionHostDependencies,
   type ManagedAgentsSessionPromptInput,
+  type ManagedAgentsSessionSteerInput,
   type ManagedAgentsSessionStartInput,
 } from "./session-host.js";
 export {
@@ -14,6 +15,8 @@ export {
   type ManagedAgentsRuntimeDependencies,
   type ManagedAgentsRuntimeEventSink,
   type ManagedAgentsSessionPreparationPort,
+  type ManagedAgentsSessionCommand,
+  type ManagedAgentsSessionSteerCommand,
 } from "./runtime.js";
 export type {
   ManagedAgentsSessionCheckpoint,
