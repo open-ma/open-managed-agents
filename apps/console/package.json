@@ -16,7 +16,7 @@
     "@ai-sdk/react": "^4.0.79",
     "@anthropic-ai/sdk": "0.120.0",
     "@fontsource-variable/geist": "^5.2.8",
-    "@fontsource-variable/jetbrains-mono": "^5.2.8",
+    "@fontsource-variable/jetbrains-mono": "^5.3.0",
     "@hookform/resolvers": "^5.2.2",
     "@open-managed-agents/acp-runtime": "workspace:*",
     "@open-managed-agents/api-types": "workspace:*",
