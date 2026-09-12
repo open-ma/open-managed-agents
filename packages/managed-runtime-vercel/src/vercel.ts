@@ -21,128 +21,32 @@ import type {
   SandboxRuntimePort,
   SandboxRuntimeStatus,
 } from "@open-managed-agents/sandbox";
-import { Buffer } from "node:buffer";
+import {
+  renewVercelSandboxLease,
+  type VercelCreateOptions,
+  type VercelCredentials,
+  type VercelNetworkPolicy,
+  type VercelSandboxSdkPort,
+  type VercelSdkPort,
+} from "@open-managed-agents/vercel-sandbox-contract";
 import { createHash } from "node:crypto";
 import { PassThrough, Readable } from "node:stream";
 
 const providerName = "vercel";
 
-export type VercelNetworkMatcher =
-  | { exact: string }
-  | { startsWith: string }
-  | { regex: string };
-
-export interface VercelNetworkRule {
-  match?: {
-    path?: VercelNetworkMatcher;
-    method?: string[];
-    queryString?: Array<{ key?: VercelNetworkMatcher; value?: VercelNetworkMatcher }>;
-    headers?: Array<{ key?: VercelNetworkMatcher; value?: VercelNetworkMatcher }>;
-  };
-  transform?: Array<{ headers?: Record<string, string> }>;
-  forwardURL?: string;
-}
-
-export type VercelNetworkPolicy =
-  | "allow-all"
-  | "deny-all"
-  | {
-      allow?: string[] | Record<string, VercelNetworkRule[]>;
-      subnets?: { allow?: string[]; deny?: string[] };
-    };
-
-export interface VercelCommandFinishedPort {
-  readonly exitCode: number;
-  stdout(options?: { signal?: AbortSignal }): Promise<string>;
-  stderr(options?: { signal?: AbortSignal }): Promise<string>;
-}
-
-export interface VercelCommandPort {
-  wait(options?: { signal?: AbortSignal }): Promise<{ exitCode: number }>;
-  kill(
-    signal?: "SIGTERM" | "SIGKILL",
-    options?: { abortSignal?: AbortSignal },
-  ): Promise<void>;
-}
-
-export interface VercelRunCommandInput {
-  cmd: string;
-  args?: string[];
-  cwd?: string;
-  env?: Record<string, string>;
-  detached?: boolean;
-  stdout?: NodeJS.WritableStream;
-  stderr?: NodeJS.WritableStream;
-  signal?: AbortSignal;
-  timeoutMs?: number;
-}
-
-export interface VercelSandboxSdkPort {
-  readonly name: string;
-  readonly status: string;
-  readonly persistent: boolean;
-  readonly tags: Record<string, string> | undefined;
-  readonly currentSnapshotId: string | undefined;
-  runCommand(input: VercelRunCommandInput & { detached: true }): Promise<VercelCommandPort>;
-  runCommand(input: VercelRunCommandInput): Promise<VercelCommandFinishedPort>;
-  mkDir(path: string, options?: { signal?: AbortSignal }): Promise<void>;
-  readFileToBuffer(
-    file: { path: string; cwd?: string },
-    options?: { signal?: AbortSignal },
-  ): Promise<Buffer | null>;
-  writeFiles(
-    files: Array<{ path: string; content: string | Uint8Array; mode?: number }>,
-    options?: { signal?: AbortSignal },
-  ): Promise<void>;
-  stop(options?: { signal?: AbortSignal }): Promise<{
-    snapshot?: { id?: string };
-  }>;
-  updateNetworkPolicy(
-    policy: VercelNetworkPolicy,
-    options?: { signal?: AbortSignal },
-  ): Promise<VercelNetworkPolicy>;
-  delete(options?: { deleteOrphanSnapshots?: boolean; signal?: AbortSignal }): Promise<void>;
-}
-
-export interface VercelCredentials {
-  token: string;
-  teamId: string;
-  projectId: string;
-}
-
-export interface VercelCreateOptions {
-  image?: string;
-  source?:
-    | { type: "git"; url: string; depth?: number; revision?: string }
-    | { type: "git"; url: string; username: string; password: string; depth?: number; revision?: string }
-    | { type: "tarball"; url: string }
-    | { type: "snapshot"; snapshotId: string };
-  ports?: number[];
-  timeout?: number;
-  resources?: { vcpus: number };
-  region?: string;
-  failoverRegions?: string[];
-  snapshotExpiration?: number;
-  keepLastSnapshots?: { count: number; expiration?: number; deleteEvicted?: boolean };
-}
-
-export interface VercelGetOrCreateOptions extends VercelCreateOptions {
-  name: string;
-  persistent: true;
-  resume: true;
-  tags: Record<string, string>;
-  networkPolicy: VercelNetworkPolicy;
-  signal?: AbortSignal;
-}
-
-export interface VercelSdkPort {
-  getOrCreate(options: VercelGetOrCreateOptions): Promise<VercelSandboxSdkPort>;
-  get(options: {
-    name: string;
-    resume?: boolean;
-    signal?: AbortSignal;
-  }): Promise<VercelSandboxSdkPort>;
-}
+export type {
+  VercelCommandFinishedPort,
+  VercelCommandPort,
+  VercelCreateOptions,
+  VercelCredentials,
+  VercelGetOrCreateOptions,
+  VercelNetworkMatcher,
+  VercelNetworkPolicy,
+  VercelNetworkRule,
+  VercelRunCommandInput,
+  VercelSandboxSdkPort,
+  VercelSdkPort,
+} from "@open-managed-agents/vercel-sandbox-contract";
 
 export interface VercelProviderOptions {
   client?: VercelSdkPort;
@@ -250,10 +154,12 @@ async function ensureReady(sandbox: VercelSandboxSdkPort, signal: AbortSignal): 
 export class VercelRuntime
   implements SandboxPort, SandboxRuntimePort, SandboxDuplexProcessPort {
   readonly #sandbox: VercelSandboxSdkPort;
+  readonly #now: () => number;
   #destroyed = false;
 
-  constructor(sandbox: VercelSandboxSdkPort) {
+  constructor(sandbox: VercelSandboxSdkPort, now: () => number = Date.now) {
     this.#sandbox = sandbox;
+    this.#now = now;
   }
 
   runtimeHandle() {
@@ -261,7 +167,7 @@ export class VercelRuntime
   }
 
   runtimeCapabilities() {
-    return { lease: false, suspend: ["filesystem" as const], checkpoint: [] };
+    return { lease: true, suspend: ["filesystem" as const], checkpoint: [] };
   }
 
   async status(): Promise<SandboxRuntimeStatus> {
@@ -272,10 +178,15 @@ export class VercelRuntime
     return "unknown";
   }
 
-  async renewLease(): Promise<void> {
-    if (this.#destroyed || isStopped(this.#sandbox.status) && !this.#sandbox.persistent) {
+  async renewLease(input: { ttlMs: number }): Promise<void> {
+    if (this.#destroyed) {
       throw new Error("Vercel sandbox is no longer available");
     }
+    await renewVercelSandboxLease({
+      sandbox: this.#sandbox,
+      ttlMs: input.ttlMs,
+      now: this.#now,
+    });
   }
 
   async suspend(input: { kind: "filesystem" | "memory" }): Promise<SandboxCheckpointHandle> {

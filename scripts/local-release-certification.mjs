@@ -3,9 +3,9 @@
 /**
  * Keyless, process-level certification of the public Node interfaces.
  *
- * The OpenMA server, subprocess sandbox, SDK, CLI and browser console are all
- * real. Only the upstream Anthropic endpoint is replaced with the deterministic
- * protocol fixture used by the provider chaos lab.
+ * The OpenMA server, isolated LiteBox sandbox, SDK, CLI and browser console are
+ * all real. Only the upstream Anthropic endpoint is replaced with the
+ * deterministic protocol fixture used by the provider chaos lab.
  */
 
 import assert from "node:assert/strict";
@@ -36,6 +36,37 @@ export function buildLocalReleasePlan() {
   ];
 }
 
+/** Select product lanes without dropping their build/server prerequisites. */
+export function selectLocalReleaseSteps(value) {
+  const all = buildLocalReleasePlan().map(({ id }) => id);
+  const requested = String(value ?? "")
+    .split(",")
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+  if (requested.length === 0) return all;
+
+  const known = new Set(all);
+  for (const id of requested) {
+    if (!known.has(id)) throw new Error(`Unknown local release lane: ${id}`);
+  }
+  const selected = new Set(["console-build", "main-node-start", ...requested]);
+  return all.filter((id) => selected.has(id));
+}
+
+/**
+ * Project a host-loopback fixture URL into the address space of the selected
+ * local sandbox. BoxLite deliberately exposes host loopback through its own
+ * DNS alias; 127.0.0.1 inside the VM is the VM itself.
+ */
+export function projectHostFixtureUrlForSandbox(value, provider) {
+  if (provider !== "litebox" && provider !== "boxlite") return value;
+  const url = new URL(value);
+  if (url.hostname === "127.0.0.1" || url.hostname === "localhost" || url.hostname === "[::1]") {
+    url.hostname = "host.boxlite.internal";
+  }
+  return url.toString();
+}
+
 export function buildLocalReleaseEnvironment(baseEnv, options) {
   const root = resolve(options.root);
   return {
@@ -53,7 +84,8 @@ export function buildLocalReleaseEnvironment(baseEnv, options) {
     FILES_BLOB_DIR: join(root, "files-blobs"),
     ANTHROPIC_API_KEY: "openma-local-release-model-key",
     ANTHROPIC_BASE_URL: options.llmBaseUrl.replace(/\/$/, ""),
-    SANDBOX_PROVIDER: "subprocess",
+    SANDBOX_PROVIDER: "litebox",
+    SANDBOX_IMAGE: "node:22-bookworm",
     DREAM_CURATOR_MODE: "dedup",
     CONSOLE_DIR: join(options.repoRoot, "apps", "console", "dist"),
   };
@@ -87,6 +119,10 @@ export async function runLocalReleaseCertification(options = {}) {
             'test -n "$skill_file"',
             'grep -q "SKILL_INPUT_OK" "$skill_file"',
             'test "$(cat "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/input.txt")" = "MEMORY_INPUT_OK"',
+            'printf "MEMORY_UPDATED_OK" > "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/input.txt"',
+            'printf "MEMORY_CREATED_OK" > "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/created.txt"',
+            'mv "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/rename-source.txt" "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/renamed.txt"',
+            'rm "$OMA_MEMORY_CERTIFICATION_MEMORY/notes/delete.txt"',
             'test "$(cat repository/repo-marker.txt)" = "REPO_REVISION_OK"',
             `test "$(git -C repository rev-parse HEAD)" = "${repository.commitSha}"`,
             'printf "OUTPUT_OK" > "$OMA_OUTPUTS_DIR/certification.txt"',
@@ -103,6 +139,9 @@ export async function runLocalReleaseCertification(options = {}) {
     ],
   });
   const baseUrl = `http://127.0.0.1:${port}`;
+  const selectedSteps = new Set(
+    selectLocalReleaseSteps(options.only ?? process.env.OMA_LOCAL_RELEASE_ONLY),
+  );
   const environment = buildLocalReleaseEnvironment(options.env ?? process.env, {
     root,
     port,
@@ -114,7 +153,7 @@ export async function runLocalReleaseCertification(options = {}) {
     ok: false,
     base_url: baseUrl,
     llm: "deterministic-anthropic-compatible",
-    sandbox: "local-subprocess",
+    sandbox: environment.SANDBOX_PROVIDER,
     steps: buildLocalReleasePlan().map((step) => ({ ...step, status: "pending" })),
     cleanup: { process: "pending", fixtures: "pending", filesystem: "pending" },
   };
@@ -143,51 +182,65 @@ export async function runLocalReleaseCertification(options = {}) {
       OMA_E2E_MOCK_MODEL_BASE_URL: llm.baseUrl,
       OMA_E2E_INPUT_MODEL_BASE_URL: inputLlm.baseUrl,
       OMA_E2E_MCP_URL: mcp.url,
-      OMA_E2E_REPO_URL: repository.url,
+      OMA_E2E_REPO_URL: projectHostFixtureUrlForSandbox(
+        repository.url,
+        environment.SANDBOX_PROVIDER,
+      ),
       OMA_E2E_REPO_SHA: repository.commitSha,
       OMA_E2E_REPO_TOKEN: repository.token,
     };
-    await runStep(report, "managed-agents-sdk", () => runCommand(
-      process.execPath,
-      ["test/e2e/managed-agents-sdk.mjs"],
-      { cwd: repoRoot, env: e2eEnvironment, timeout: 240_000 },
-    ));
-    await runStep(report, "managed-inputs-mcp", () => runCommand(
-      process.execPath,
-      ["test/e2e/managed-inputs-mcp.mjs"],
-      { cwd: repoRoot, env: e2eEnvironment, timeout: 240_000 },
-    ));
-    assert.equal(mcp.state.unauthorized, 0, "MCP proxy sent a request without the Vault bearer");
-    assert.equal(mcp.state.calls, 1, "MCP tool must be called exactly once");
-    assert.equal(repository.state.unauthorized, 0, "Git clone did not use its Session-scoped credential");
-    assert.ok(
-      hasMountedSkillReminder(inputLlm.state.requestBodies),
-      "model request did not describe the mounted custom Skill",
-    );
-    assert.deepEqual(mcp.state.counts, {
-      "server/discover": 1,
-      initialize: 1,
-      "notifications/initialized": 1,
-      "tools/list": 1,
-      "tools/call": 1,
-      DELETE: 1,
-    });
-    assert.ok(repository.state.requests > 0, "Git fixture received no clone traffic");
-    await waitForEmptyDirectory(join(root, "sandboxes"), 5_000);
-    await runStep(report, "cli-projection", () => runCommand(
-      "pnpm",
-      ["--filter", "@openma/cli", "exec", "tsx", "src/index.ts", "agents", "list", "--json"],
-      {
-        cwd: repoRoot,
-        env: { ...e2eEnvironment, OMA_BASE_URL: baseUrl, OMA_API_KEY: API_KEY },
-        timeout: 60_000,
-      },
-    ));
-    await runStep(report, "console-browser", () => runCommand(
-      "pnpm",
-      ["exec", "playwright", "test", "test/e2e/deployed-console.spec.ts", "--config=playwright.config.ts"],
-      { cwd: repoRoot, env: e2eEnvironment, timeout: 240_000 },
-    ));
+    if (selectedSteps.has("managed-agents-sdk")) {
+      await runStep(report, "managed-agents-sdk", () => runCommand(
+        process.execPath,
+        ["test/e2e/managed-agents-sdk.mjs"],
+        { cwd: repoRoot, env: e2eEnvironment, timeout: 240_000 },
+      ));
+    } else markStepSkipped(report, "managed-agents-sdk");
+
+    if (selectedSteps.has("managed-inputs-mcp")) {
+      await runStep(report, "managed-inputs-mcp", () => runCommand(
+        process.execPath,
+        ["test/e2e/managed-inputs-mcp.mjs"],
+        { cwd: repoRoot, env: e2eEnvironment, timeout: 240_000 },
+      ));
+      assert.equal(mcp.state.unauthorized, 0, "MCP proxy sent a request without the Vault bearer");
+      assert.equal(mcp.state.calls, 1, "MCP tool must be called exactly once");
+      assert.equal(repository.state.unauthorized, 0, "Git clone did not use its Session-scoped credential");
+      assert.ok(
+        hasMountedSkillReminder(inputLlm.state.requestBodies),
+        "model request did not describe the mounted custom Skill",
+      );
+      assert.deepEqual(mcp.state.counts, {
+        "server/discover": 1,
+        initialize: 1,
+        "notifications/initialized": 1,
+        "tools/list": 1,
+        "tools/call": 1,
+        DELETE: 1,
+      });
+      assert.ok(repository.state.requests > 0, "Git fixture received no clone traffic");
+      await waitForEmptyDirectory(join(root, "sandboxes"), 5_000);
+    } else markStepSkipped(report, "managed-inputs-mcp");
+
+    if (selectedSteps.has("cli-projection")) {
+      await runStep(report, "cli-projection", () => runCommand(
+        "pnpm",
+        ["--filter", "@openma/cli", "exec", "tsx", "src/index.ts", "agents", "list", "--json"],
+        {
+          cwd: repoRoot,
+          env: { ...e2eEnvironment, OMA_BASE_URL: baseUrl, OMA_API_KEY: API_KEY },
+          timeout: 60_000,
+        },
+      ));
+    } else markStepSkipped(report, "cli-projection");
+
+    if (selectedSteps.has("console-browser")) {
+      await runStep(report, "console-browser", () => runCommand(
+        "pnpm",
+        ["exec", "playwright", "test", "test/e2e/deployed-console.spec.ts", "--config=playwright.config.ts"],
+        { cwd: repoRoot, env: e2eEnvironment, timeout: 240_000 },
+      ));
+    } else markStepSkipped(report, "console-browser");
     report.ok = true;
   } catch (error) {
     operationError = error;
@@ -481,6 +534,13 @@ async function runStep(report, id, operation) {
     step.duration_ms = Math.max(0, Math.round(performance.now() - started));
     throw error;
   }
+}
+
+function markStepSkipped(report, id) {
+  const step = report.steps.find((candidate) => candidate.id === id);
+  assert.ok(step, `unknown local release step ${id}`);
+  step.status = "skipped";
+  step.duration_ms = 0;
 }
 
 async function runCommand(command, args, options) {
