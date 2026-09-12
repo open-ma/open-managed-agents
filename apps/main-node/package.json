@@ -98,7 +98,7 @@
     "@aws-sdk/client-s3": "^3.1096.0",
     "@fly/sprites": "^0.2.2",
     "@larksuiteoapi/node-sdk": "^1.73.0",
-    "ai": "^7.0.76",
+    "ai": "^7.0.95",
     "better-auth": "^1.6.3",
     "better-sqlite3": "^13.0.3",
     "chokidar": "^4.0.0",
