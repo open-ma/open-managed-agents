@@ -36,7 +36,7 @@
   },
   "devDependencies": {
     "@testcontainers/mysql": "^12.1.0",
-    "@types/node": "26.2.0",
+    "@types/node": "26.5.0",
     "better-sqlite3": "^13.0.3",
     "mysql2": "^3.24.4",
     "postgres": "^3.4.0",

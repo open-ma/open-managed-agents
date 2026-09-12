@@ -47,7 +47,7 @@
     "@open-managed-agents/api-types": "workspace:*",
     "@open-managed-agents/runtime": "workspace:*",
     "@openma/common": "github:openma-ai/openma-common#00358ff9c1e4a694171f5617a4715602c61433e7",
-    "@types/node": "^26.2.0",
+    "@types/node": "^26.5.0",
     "@types/ws": "^8.5.0",
     "esbuild": "^0.25.0",
     "tsx": "^4.19.0",
