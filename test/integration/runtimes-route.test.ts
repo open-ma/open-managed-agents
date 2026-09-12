@@ -338,6 +338,258 @@ describe("/agents/runtime/* — multi-tenant CLI bridge daemon (step 2)", () => 
       return { stub, runtimeId: rid, userId: uid };
     }
 
+    it("evicts a daemon socket whose server-observed heartbeat lease expired", async () => {
+      const { stub, runtimeId, userId } = await freshRoom(["tn_ws_stale"]);
+      await env.AUTH_DB
+        .prepare(`UPDATE "runtimes" SET last_heartbeat = ? WHERE id = ?`)
+        .bind(Math.floor(Date.now() / 1000) - 300, runtimeId)
+        .run();
+
+      let staleSocketClosed = false;
+      await runInDurableObject(stub, async (instance) => {
+        const room = instance as unknown as {
+          ctx: { getWebSockets(tag?: string): WebSocket[] };
+          attachDaemon(request: Request): Promise<Response>;
+        };
+        const originalGetWebSockets = room.ctx.getWebSockets.bind(room.ctx);
+        const staleSocket = {
+          send() {},
+          close() { staleSocketClosed = true; },
+        } as unknown as WebSocket;
+        room.ctx.getWebSockets = (tag?: string) =>
+          tag === "daemon" ? [staleSocket] : originalGetWebSockets(tag);
+
+        const response = await room.attachDaemon(
+          new Request("http://runtime-room/_attach_daemon", {
+            headers: {
+              Upgrade: "websocket",
+              "x-runtime-id": runtimeId,
+              "x-runtime-user": userId,
+            },
+          }),
+        );
+
+        expect(response.status).toBe(101);
+      });
+      expect(staleSocketClosed).toBe(true);
+    });
+
+    it("keeps the current daemon while its server-observed lease is fresh", async () => {
+      const { stub, runtimeId, userId } = await freshRoom(["tn_ws_fresh"]);
+      await env.AUTH_DB
+        .prepare(`UPDATE "runtimes" SET status = 'online', last_heartbeat = ? WHERE id = ?`)
+        .bind(Math.floor(Date.now() / 1000), runtimeId)
+        .run();
+
+      let currentSocketClosed = false;
+      await runInDurableObject(stub, async (instance) => {
+        const room = instance as unknown as {
+          ctx: { getWebSockets(tag?: string): WebSocket[] };
+          attachDaemon(request: Request): Promise<Response>;
+        };
+        const originalGetWebSockets = room.ctx.getWebSockets.bind(room.ctx);
+        const currentSocket = {
+          send() {},
+          close() { currentSocketClosed = true; },
+        } as unknown as WebSocket;
+        room.ctx.getWebSockets = (tag?: string) =>
+          tag === "daemon" ? [currentSocket] : originalGetWebSockets(tag);
+
+        const response = await room.attachDaemon(
+          new Request("http://runtime-room/_attach_daemon", {
+            headers: {
+              Upgrade: "websocket",
+              "x-runtime-id": runtimeId,
+              "x-runtime-user": userId,
+            },
+          }),
+        );
+
+        expect(response.status).toBe(409);
+      });
+      expect(currentSocketClosed).toBe(false);
+    });
+
+    it("evicts a daemon already marked offline even when its last heartbeat is recent", async () => {
+      const { stub, runtimeId, userId } = await freshRoom(["tn_ws_offline"]);
+      await env.AUTH_DB
+        .prepare(`UPDATE "runtimes" SET status = 'offline', last_heartbeat = ? WHERE id = ?`)
+        .bind(Math.floor(Date.now() / 1000), runtimeId)
+        .run();
+
+      let offlineSocketClosed = false;
+      await runInDurableObject(stub, async (instance) => {
+        const room = instance as unknown as {
+          ctx: { getWebSockets(tag?: string): WebSocket[] };
+          attachDaemon(request: Request): Promise<Response>;
+        };
+        const originalGetWebSockets = room.ctx.getWebSockets.bind(room.ctx);
+        const offlineSocket = {
+          send() {},
+          close() { offlineSocketClosed = true; },
+        } as unknown as WebSocket;
+        room.ctx.getWebSockets = (tag?: string) =>
+          tag === "daemon" ? [offlineSocket] : originalGetWebSockets(tag);
+
+        const response = await room.attachDaemon(
+          new Request("http://runtime-room/_attach_daemon", {
+            headers: {
+              Upgrade: "websocket",
+              "x-runtime-id": runtimeId,
+              "x-runtime-user": userId,
+            },
+          }),
+        );
+
+        expect(response.status).toBe(101);
+      });
+      expect(offlineSocketClosed).toBe(true);
+    });
+
+    it("does not let an evicted daemon close mark its replacement offline", async () => {
+      const { stub, runtimeId, userId } = await freshRoom(["tn_ws_fenced"]);
+      await env.AUTH_DB
+        .prepare(`UPDATE "runtimes" SET last_heartbeat = ? WHERE id = ?`)
+        .bind(Math.floor(Date.now() / 1000) - 300, runtimeId)
+        .run();
+
+      await runInDurableObject(stub, async (instance) => {
+        const room = instance as unknown as {
+          ctx: {
+            getTags(socket: WebSocket): string[];
+            getWebSockets(tag?: string): WebSocket[];
+          };
+          attachDaemon(request: Request): Promise<Response>;
+          webSocketClose(socket: WebSocket, code: number, reason: string): Promise<void>;
+        };
+        const originalGetTags = room.ctx.getTags.bind(room.ctx);
+        const originalGetWebSockets = room.ctx.getWebSockets.bind(room.ctx);
+        const staleSocket = {
+          send() {},
+          close() {},
+        } as unknown as WebSocket;
+        room.ctx.getWebSockets = (tag?: string) =>
+          tag === "daemon" ? [staleSocket] : originalGetWebSockets(tag);
+        room.ctx.getTags = (socket: WebSocket) =>
+          socket === staleSocket ? ["daemon"] : originalGetTags(socket);
+
+        const response = await room.attachDaemon(
+          new Request("http://runtime-room/_attach_daemon", {
+            headers: {
+              Upgrade: "websocket",
+              "x-runtime-id": runtimeId,
+              "x-runtime-user": userId,
+            },
+          }),
+        );
+        expect(response.status).toBe(101);
+
+        await room.webSocketClose(staleSocket, 1012, "lease expired");
+      });
+
+      const row = await env.AUTH_DB
+        .prepare(`SELECT status FROM "runtimes" WHERE id = ?`)
+        .bind(runtimeId)
+        .first<{ status: string }>();
+      expect(row?.status).toBe("online");
+    });
+
+    it("drops messages from a daemon that no longer owns the room", async () => {
+      const { stub } = await freshRoom(["tn_ws_owner"]);
+      await runInDurableObject(stub, async (instance, state) => {
+        const sid = `sess_old_owner_${Math.random().toString(36).slice(2, 6)}`;
+        const staleSocket = {} as WebSocket;
+        const room = instance as unknown as {
+          ctx: { getTags(socket: WebSocket): string[] };
+          webSocketMessage(socket: WebSocket, message: string): Promise<void>;
+        };
+        const originalGetTags = room.ctx.getTags.bind(room.ctx);
+        room.ctx.getTags = (socket: WebSocket) =>
+          socket === staleSocket
+            ? ["daemon", "daemon-owner:owner_old"]
+            : originalGetTags(socket);
+        await state.storage.put("active_daemon_owner", "owner_new");
+
+        await room.webSocketMessage(
+          staleSocket,
+          JSON.stringify({
+            type: "session.ready",
+            session_id: sid,
+            tenant_id: "tn_ws_owner",
+            acp_session_id: "acp-from-stale-owner",
+          }),
+        );
+
+        expect(await state.storage.get(`session_state:${sid}`)).toBeUndefined();
+      });
+    });
+
+    it("does not let an evicted daemon error mark the active owner offline", async () => {
+      const { stub, runtimeId } = await freshRoom(["tn_ws_error_fence"]);
+      await env.AUTH_DB
+        .prepare(`UPDATE "runtimes" SET status = 'online' WHERE id = ?`)
+        .bind(runtimeId)
+        .run();
+
+      await runInDurableObject(stub, async (instance, state) => {
+        const staleSocket = { close() {} } as unknown as WebSocket;
+        const room = instance as unknown as {
+          ctx: { getTags(socket: WebSocket): string[] };
+          webSocketError(socket: WebSocket, error: unknown): Promise<void>;
+        };
+        const originalGetTags = room.ctx.getTags.bind(room.ctx);
+        room.ctx.getTags = (socket: WebSocket) =>
+          socket === staleSocket
+            ? ["daemon", "daemon-owner:owner_old"]
+            : originalGetTags(socket);
+        await state.storage.put("active_daemon_owner", "owner_new");
+
+        await room.webSocketError(staleSocket, new Error("late socket error"));
+      });
+
+      const row = await env.AUTH_DB
+        .prepare(`SELECT status FROM "runtimes" WHERE id = ?`)
+        .bind(runtimeId)
+        .first<{ status: string }>();
+      expect(row?.status).toBe("online");
+    });
+
+    it("routes harness commands only to the active daemon owner", async () => {
+      const { stub } = await freshRoom(["tn_ws_route_owner"]);
+      await runInDurableObject(stub, async (instance, state) => {
+        const oldMessages: string[] = [];
+        const newMessages: string[] = [];
+        const oldSocket = { send: (message: string) => oldMessages.push(message) } as unknown as WebSocket;
+        const newSocket = { send: (message: string) => newMessages.push(message) } as unknown as WebSocket;
+        const room = instance as unknown as {
+          ctx: {
+            getTags(socket: WebSocket): string[];
+            getWebSockets(tag?: string): WebSocket[];
+          };
+          onHarnessMessage(sessionId: string, message: Record<string, unknown>): Promise<void>;
+        };
+        const originalGetTags = room.ctx.getTags.bind(room.ctx);
+        const originalGetWebSockets = room.ctx.getWebSockets.bind(room.ctx);
+        room.ctx.getWebSockets = (tag?: string) =>
+          tag === "daemon" ? [oldSocket, newSocket] : originalGetWebSockets(tag);
+        room.ctx.getTags = (socket: WebSocket) => {
+          if (socket === oldSocket) return ["daemon", "daemon-owner:owner_old"];
+          if (socket === newSocket) return ["daemon", "daemon-owner:owner_new"];
+          return originalGetTags(socket);
+        };
+        await state.storage.put("active_daemon_owner", "owner_new");
+
+        await room.onHarnessMessage("sess_route_owner", {
+          type: "session.prompt",
+          turn_id: "turn_route_owner",
+          text: "route to current owner",
+        });
+
+        expect(oldMessages).toEqual([]);
+        expect(newMessages).toHaveLength(1);
+      });
+    });
+
     it("refreshAuthorizedTenants RPC: revoking a row mid-life → next inbound msg for that tenant drops", async () => {
       const { stub, runtimeId } = await freshRoom(["tn_rpc_a", "tn_rpc_b"]);
       // Before revoke: both tenants accepted.

@@ -59,11 +59,21 @@ import {
 type Side = "daemon" | "harness";
 
 const HARNESS_TAG_PREFIX = "harness:";
+const DAEMON_OWNER_TAG_PREFIX = "daemon-owner:";
+const ACTIVE_DAEMON_OWNER_KEY = "active_daemon_owner";
+const DAEMON_LEASE_TIMEOUT_SECONDS = 90;
 function harnessTag(sid: string): string {
   return `${HARNESS_TAG_PREFIX}${sid}`;
 }
 function sessionFromTag(tag: string): string | null {
   return tag.startsWith(HARNESS_TAG_PREFIX) ? tag.slice(HARNESS_TAG_PREFIX.length) : null;
+}
+function daemonOwnerTag(ownerId: string): string {
+  return `${DAEMON_OWNER_TAG_PREFIX}${ownerId}`;
+}
+function daemonOwnerFromTags(tags: string[]): string | null {
+  const tag = tags.find((candidate) => candidate.startsWith(DAEMON_OWNER_TAG_PREFIX));
+  return tag ? tag.slice(DAEMON_OWNER_TAG_PREFIX.length) : null;
 }
 
 export class RuntimeRoom extends DurableObject<Env> {
@@ -111,17 +121,17 @@ export class RuntimeRoom extends DurableObject<Env> {
       return new Response("missing runtime headers", { status: 400 });
     }
 
-    // One daemon per runtime. A reconnecting daemon needs the prior WS to be
-    // reaped first — CF should fire `webSocketClose` on the old TCP long
-    // before a fresh attempt arrives, but if not we 409 the new one and let
-    // the daemon retry after the close finally lands.
+    // One daemon per runtime. HibernatableWebSocket.send() only proves that
+    // workerd still owns a socket object; it does not prove the peer TCP is
+    // alive. Use the heartbeat observed by this control plane as the lease.
     const existing = this.ctx.getWebSockets("daemon");
     if (existing.length > 0) {
-      try {
-        existing[0].send(JSON.stringify({ type: "ping" }));
+      const leaseFresh = await this.isDaemonLeaseFresh(runtimeId);
+      if (leaseFresh !== false) {
         return new Response("daemon already attached", { status: 409 });
-      } catch {
-        try { existing[0].close(1011, "stale"); } catch { /* already closing */ }
+      }
+      for (const socket of existing) {
+        try { socket.close(1012, "daemon heartbeat lease expired"); } catch { /* already closing */ }
       }
     }
 
@@ -141,11 +151,31 @@ export class RuntimeRoom extends DurableObject<Env> {
 
     const pair = new WebSocketPair();
     const [client, server] = Object.values(pair);
-    this.ctx.acceptWebSocket(server, ["daemon"]);
+    const daemonOwnerId = crypto.randomUUID();
+    this.ctx.acceptWebSocket(server, ["daemon", daemonOwnerTag(daemonOwnerId)]);
+    await this.ctx.storage.put(ACTIVE_DAEMON_OWNER_KEY, daemonOwnerId);
     log({ op: "runtime_room.daemon_attach", runtime_id: runtimeId }, "daemon attached");
 
     await this.markOnline();
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  private async isDaemonLeaseFresh(runtimeId: string): Promise<boolean | null> {
+    try {
+      const row = await this.env.MAIN_DB
+        .prepare(`SELECT status, last_heartbeat FROM "runtimes" WHERE id = ?`)
+        .bind(runtimeId)
+        .first<{ status: string; last_heartbeat: number | null }>();
+      if (row?.status !== "online") return false;
+      if (row.last_heartbeat === null) return false;
+      return Math.floor(Date.now() / 1000) - row.last_heartbeat < DAEMON_LEASE_TIMEOUT_SECONDS;
+    } catch (error) {
+      logWarn(
+        { op: "runtime_room.daemon_lease_lookup_failed", err: String(error), runtime_id: runtimeId },
+        "daemon heartbeat lease lookup failed",
+      );
+      return null;
+    }
   }
 
   private async attachHarness(request: Request): Promise<Response> {
@@ -163,7 +193,7 @@ export class RuntimeRoom extends DurableObject<Env> {
     const [client, server] = Object.values(pair);
     this.ctx.acceptWebSocket(server, [harnessTag(sid)]);
 
-    const daemonUp = this.ctx.getWebSockets("daemon").length > 0;
+    const daemonUp = await this.activeDaemonSocket() !== null;
     try {
       server.send(JSON.stringify({ type: "attached", daemon_online: daemonUp }));
     } catch { /* race: harness already closed */ }
@@ -204,6 +234,14 @@ export class RuntimeRoom extends DurableObject<Env> {
     const isDaemon = tags.includes("daemon");
 
     if (isDaemon) {
+      if (!(await this.isActiveDaemonSocket(tags))) {
+        logWarn(
+          { op: "runtime_room.evicted_daemon_message", runtime_id: this.runtimeId },
+          "dropped message from evicted daemon",
+        );
+        try { ws.close(1008, "daemon lease lost"); } catch { /* already closed */ }
+        return;
+      }
       await this.onDaemonMessage(ws, parsed);
     } else {
       const sid = tags.map(sessionFromTag).find((s): s is string => !!s);
@@ -343,7 +381,7 @@ export class RuntimeRoom extends DurableObject<Env> {
     //   { type: "session.prompt", turn_id, text }            → forwards as-is
     //   { type: "session.cancel", turn_id }                  → forwards as-is
     //   { type: "session.dispose" }                          → forwards as-is
-    const daemon = this.ctx.getWebSockets("daemon")[0];
+    const daemon = await this.activeDaemonSocket();
     if (!daemon) {
       this.broadcastToHarness(sid, encodeSessionHostEvent({
         type: "session.error",
@@ -416,7 +454,7 @@ export class RuntimeRoom extends DurableObject<Env> {
   /** Tell the daemon to dispose a session. Called from internal route. */
   async sendToDaemon(msg: Record<string, unknown>): Promise<boolean> {
     await this.ensureIdentity();
-    const daemon = this.ctx.getWebSockets("daemon")[0];
+    const daemon = await this.activeDaemonSocket();
     if (!daemon) return false;
     try { daemon.send(JSON.stringify(msg)); return true; }
     catch { return false; }
@@ -426,6 +464,16 @@ export class RuntimeRoom extends DurableObject<Env> {
     await this.ensureIdentity();
     const tags = this.ctx.getTags(ws);
     if (tags.includes("daemon")) {
+      const activeOwnerId = await this.ctx.storage.get<string>(ACTIVE_DAEMON_OWNER_KEY);
+      const closingOwnerId = daemonOwnerFromTags(tags);
+      if (activeOwnerId && closingOwnerId !== activeOwnerId) {
+        log(
+          { op: "runtime_room.evicted_daemon_close", code, runtime_id: this.runtimeId },
+          "ignored close from evicted daemon",
+        );
+        return;
+      }
+      await this.ctx.storage.delete(ACTIVE_DAEMON_OWNER_KEY);
       log({ op: "runtime_room.daemon_close", code, reason: reason || "—", runtime_id: this.runtimeId }, "daemon closed");
       await this.markOffline();
       return;
@@ -443,9 +491,30 @@ export class RuntimeRoom extends DurableObject<Env> {
   async webSocketError(ws: WebSocket, error: unknown): Promise<void> {
     await this.ensureIdentity();
     logError({ op: "runtime_room.ws_error", err: String(error), runtime_id: this.runtimeId }, "ws error");
-    try { ws.close(1011, "ws error"); } catch { /* already closed */ }
     const tags = this.ctx.getTags(ws);
-    if (tags.includes("daemon")) await this.markOffline();
+    const activeDaemon = tags.includes("daemon") && await this.isActiveDaemonSocket(tags);
+    try { ws.close(1011, "ws error"); } catch { /* already closed */ }
+    if (activeDaemon) await this.markOffline();
+  }
+
+  private async isActiveDaemonSocket(tags: string[]): Promise<boolean> {
+    const activeOwnerId = await this.ctx.storage.get<string>(ACTIVE_DAEMON_OWNER_KEY);
+    if (!activeOwnerId) return true;
+    return daemonOwnerFromTags(tags) === activeOwnerId;
+  }
+
+  private async activeDaemonSocket(): Promise<WebSocket | null> {
+    const sockets = this.ctx.getWebSockets("daemon");
+    if (sockets.length === 0) return null;
+
+    const activeOwnerId = await this.ctx.storage.get<string>(ACTIVE_DAEMON_OWNER_KEY);
+    // Preserve compatibility with daemon sockets accepted before owner tags
+    // were introduced. A newly attached daemon always records an owner id.
+    if (!activeOwnerId) return sockets[0] ?? null;
+
+    return sockets.find((socket) =>
+      daemonOwnerFromTags(this.ctx.getTags(socket)) === activeOwnerId
+    ) ?? null;
   }
 
   private async ensureIdentity(): Promise<void> {
