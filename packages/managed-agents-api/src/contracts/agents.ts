@@ -29,6 +29,26 @@ type OfficialAgentUpdateBody = Omit<AgentUpdateParams, "betas">;
 export type AgentVersionListQuery = Omit<VersionListParams, "betas">;
 
 type AgentModelConfig = Exclude<OfficialAgentCreateBody["model"], string>;
+type AgentModelName = Exclude<OfficialAgentCreateBody["model"], AgentModelConfig>;
+
+export type OpenMaJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OpenMaProviderOptions
+  | OpenMaJsonValue[];
+
+export interface OpenMaProviderOptions {
+  [key: string]: OpenMaJsonValue;
+}
+
+export type OpenMaAgentModelConfigBody = AgentModelConfig & {
+  /** OpenMA extension: provider-namespaced, JSON-compatible inference options. */
+  provider_options?: OpenMaProviderOptions | null;
+};
+
+export type OpenMaAgentModelBody = AgentModelName | OpenMaAgentModelConfigBody;
 
 export interface OpenMaAgentAcpBody {
   agent: {
@@ -54,7 +74,7 @@ export interface OpenMaAgentRuntimeBindingBody {
 }
 
 export interface OpenMaAgentExtensionBody {
-  aux_model?: OfficialAgentCreateBody["model"] | null;
+  aux_model?: OpenMaAgentModelBody | null;
   appendable_prompts?: string[] | null;
   harness?: string | null;
   acp?: OpenMaAgentAcpBody | null;
@@ -62,15 +82,33 @@ export interface OpenMaAgentExtensionBody {
   enable_general_subagent?: boolean | null;
 }
 
-export type AgentCreateBody = OfficialAgentCreateBody & {
+export type AgentCreateBody = Omit<OfficialAgentCreateBody, "model"> & {
+  model: OpenMaAgentModelBody;
   _oma?: OpenMaAgentExtensionBody;
 };
-export type AgentUpdateBody = OfficialAgentUpdateBody & {
+export type AgentUpdateBody = Omit<OfficialAgentUpdateBody, "model"> & {
+  model?: OpenMaAgentModelBody;
   _oma?: OpenMaAgentExtensionBody;
 };
 
 const effortLevelSchema = z.enum(["low", "medium", "high", "xhigh", "max"]);
-const modelConfigSchema: z.ZodType<AgentModelConfig> = z
+const providerOptionsSchema: z.ZodType<OpenMaProviderOptions> = z.record(
+  z.string(),
+  z.json(),
+);
+const metadataKeySchema = z.string().min(1).max(64);
+const metadataValueSchema = z.string().max(512);
+const agentMetadataSchema = z
+  .record(metadataKeySchema, metadataValueSchema)
+  .refine((metadata) => Object.keys(metadata).length <= 16, {
+    message: "Agent metadata may contain at most 16 keys",
+  });
+const agentMetadataPatchSchema = z.record(
+  metadataKeySchema,
+  metadataValueSchema.nullable(),
+);
+
+const modelConfigSchema: z.ZodType<OpenMaAgentModelConfigBody> = z
   .object({
     id: z.string().min(1),
     effort: z
@@ -81,6 +119,7 @@ const modelConfigSchema: z.ZodType<AgentModelConfig> = z
       .nullable()
       .optional(),
     inference_geo: z.string().nullable().optional(),
+    provider_options: providerOptionsSchema.nullable().optional(),
     speed: z.enum(["standard", "fast"]).nullable().optional(),
   })
   .strict();
@@ -139,7 +178,7 @@ export const agentCreateBodySchema: z.ZodType<AgentCreateBody> = z
     model: agentModelInputSchema,
     description: z.string().nullable().optional(),
     mcp_servers: z.array(agentMcpServerInputSchema).optional(),
-    metadata: z.record(z.string(), z.string()).optional(),
+    metadata: agentMetadataSchema.optional(),
     multiagent: agentMultiagentInputSchema.nullable().optional(),
     skills: z.array(agentSkillInputSchema).optional(),
     system: z.string().nullable().optional(),
@@ -178,10 +217,7 @@ export const agentUpdateBodySchema: z.ZodType<AgentUpdateBody> = z
   .object({
     description: z.string().nullable().optional(),
     mcp_servers: z.array(agentMcpServerInputSchema).nullable().optional(),
-    metadata: z
-      .record(z.string(), z.string().nullable())
-      .nullable()
-      .optional(),
+    metadata: agentMetadataPatchSchema.nullable().optional(),
     model: agentModelInputSchema.optional(),
     multiagent: agentMultiagentInputSchema.nullable().optional(),
     name: z.string().min(1).optional(),

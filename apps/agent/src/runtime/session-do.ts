@@ -1,5 +1,6 @@
 import { DurableObject } from "cloudflare:workers";
 import { nanoid } from "nanoid";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import { parseCronExpression } from "cron-schedule";
 import {
   runAgentTurn,
@@ -3998,6 +3999,7 @@ export class SessionDO extends DurableObject<Env> {
   private async resolveAuxModel(agent: AgentConfig): Promise<{
     model: LanguageModel;
     modelInfo: { model_id: string };
+    providerOptions?: SharedV3ProviderOptions;
   } | null> {
     if (!agent.aux_model) return null;
     const handle = typeof agent.aux_model === "string" ? agent.aux_model : agent.aux_model.id;
@@ -4009,9 +4011,23 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      providerOptions:
+        typeof agent.aux_model !== "string" &&
+        agent.aux_model.provider_options?.pi &&
+        typeof agent.aux_model.provider_options.pi === "object" &&
+        !Array.isArray(agent.aux_model.provider_options.pi)
+          ? agent.aux_model.provider_options.pi as Record<string, unknown>
+          : undefined,
       speed: typeof agent.aux_model === "string" ? undefined : agent.aux_model.speed,
     }));
-    return { model, modelInfo: { model_id: handle } };
+    return {
+      model,
+      modelInfo: { model_id: handle },
+      ...(typeof agent.aux_model !== "string" &&
+        agent.aux_model.provider_options !== undefined && {
+          providerOptions: agent.aux_model.provider_options as SharedV3ProviderOptions,
+        }),
+    };
   }
 
   /**
@@ -4073,6 +4089,7 @@ export class SessionDO extends DurableObject<Env> {
           browser: this.getBrowserHarness() ?? undefined,
           auxModel: auxResolved?.model,
           auxModelInfo: auxResolved?.modelInfo,
+          auxProviderOptions: auxResolved?.providerOptions,
           broadcastEvent: (event) => this.persistAndBroadcastEvent(
             event,
             (confirmation as unknown as { session_thread_id?: string }).session_thread_id ?? "sthr_primary",
@@ -4514,6 +4531,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: subAuxResolved?.model,
       auxModelInfo: subAuxResolved?.modelInfo,
+      auxProviderOptions: subAuxResolved?.providerOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(
         event,
         parentThreadId,
@@ -4545,6 +4563,13 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: subCreds.baseURL,
       customHeaders: subCreds.customHeaders,
       piConfig: subCreds.piConfig,
+      providerOptions:
+        typeof subAgent.model !== "string" &&
+        subAgent.model.provider_options?.pi &&
+        typeof subAgent.model.provider_options.pi === "object" &&
+        !Array.isArray(subAgent.model.provider_options.pi)
+          ? subAgent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
       thinkingLevel: typeof subAgent.model === "string" ? undefined : subAgent.model.effort,
       speed: typeof subAgent.model === "string" ? undefined : subAgent.model.speed,
     });
@@ -4840,6 +4865,7 @@ export class SessionDO extends DurableObject<Env> {
       browser: this.getBrowserHarness() ?? undefined,
       auxModel: auxResolved?.model,
       auxModelInfo: auxResolved?.modelInfo,
+      auxProviderOptions: auxResolved?.providerOptions,
       broadcastEvent: (event) => this.persistAndBroadcastEvent(event, turnThreadId, activeFence),
       scheduleWakeup: (a) => this.scheduleWakeup(a),
       cancelWakeup: (id) => this.cancelWakeup(id),
@@ -4878,6 +4904,13 @@ export class SessionDO extends DurableObject<Env> {
       baseURL: creds.baseURL,
       customHeaders: creds.customHeaders,
       piConfig: creds.piConfig,
+      providerOptions:
+        typeof agent.model !== "string" &&
+        agent.model.provider_options?.pi &&
+        typeof agent.model.provider_options.pi === "object" &&
+        !Array.isArray(agent.model.provider_options.pi)
+          ? agent.model.provider_options.pi as Record<string, unknown>
+          : undefined,
       thinkingLevel: typeof agent.model === "string" ? undefined : agent.model.effort,
       speed: typeof agent.model === "string" ? undefined : agent.model.speed,
     });

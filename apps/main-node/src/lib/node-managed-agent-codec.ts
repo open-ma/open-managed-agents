@@ -10,12 +10,19 @@ import type {
 export async function resolveNodeManagedAuxiliaryToolModel<Model>(
   session: Session,
   buildModel: (model: Session["agent"]["model"]) => Promise<Model>,
-): Promise<{ model: Model; modelInfo: { model_id: string } } | undefined> {
+): Promise<{
+  model: Model;
+  modelInfo: { model_id: string };
+  providerOptions?: Record<string, unknown>;
+} | undefined> {
   const auxiliaryModel = session.agent.openma?.auxiliaryModel;
   if (auxiliaryModel === undefined) return undefined;
   return {
     model: await buildModel(auxiliaryModel),
     modelInfo: { model_id: auxiliaryModel.id },
+    ...(auxiliaryModel.providerOptions !== undefined && {
+      providerOptions: structuredClone(auxiliaryModel.providerOptions),
+    }),
   };
 }
 import type { AgentConfig } from "@open-managed-agents/shared";
@@ -231,6 +238,12 @@ export function toLegacyHarnessAgentConfig(
     model: {
       id: agent.model.id,
       ...(agent.model.effort !== undefined && { effort: agent.model.effort }),
+      ...(agent.model.inferenceGeo !== undefined && {
+        inference_geo: agent.model.inferenceGeo,
+      }),
+      ...(agent.model.providerOptions !== undefined && {
+        provider_options: structuredClone(agent.model.providerOptions),
+      }),
       ...(agent.model.speed !== undefined && { speed: agent.model.speed }),
     },
     system: agent.system ?? "",
@@ -256,6 +269,17 @@ export function toLegacyHarnessAgentConfig(
     ...(agent.openma?.auxiliaryModel !== undefined && {
       aux_model: {
         id: agent.openma.auxiliaryModel.id,
+        ...(agent.openma.auxiliaryModel.effort !== undefined && {
+          effort: agent.openma.auxiliaryModel.effort,
+        }),
+        ...(agent.openma.auxiliaryModel.inferenceGeo !== undefined && {
+          inference_geo: agent.openma.auxiliaryModel.inferenceGeo,
+        }),
+        ...(agent.openma.auxiliaryModel.providerOptions !== undefined && {
+          provider_options: structuredClone(
+            agent.openma.auxiliaryModel.providerOptions,
+          ),
+        }),
         ...(agent.openma.auxiliaryModel.speed !== undefined && {
           speed: agent.openma.auxiliaryModel.speed,
         }),

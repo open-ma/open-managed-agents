@@ -73,6 +73,7 @@
     "test:console": "pnpm --filter managed-agents-console test",
     "test:web": "pnpm --filter @open-managed-agents/web test",
     "test:e2e": "playwright test --config=playwright.config.ts",
+    "test:e2e:agent-editor": "playwright test test/e2e/agent-config-editor.spec.ts --config=playwright.agent-editor.config.ts",
     "test:e2e:api": "node test/e2e/managed-agents-sdk.mjs",
     "test:e2e:provider-chaos": "node scripts/provider-chaos-cluster.mjs",
     "test:e2e:external-worker-conformance": "tsx scripts/environment-worker-conformance.ts",

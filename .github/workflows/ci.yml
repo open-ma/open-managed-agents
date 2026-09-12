@@ -39,6 +39,12 @@ jobs:
       - name: Test
         run: pnpm test
 
+      - name: Install browser for Console E2E
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Console Agent editor E2E
+        run: pnpm test:e2e:agent-editor
+
       - name: Protocol coverage gate
         run: pnpm test:coverage:protocol
 

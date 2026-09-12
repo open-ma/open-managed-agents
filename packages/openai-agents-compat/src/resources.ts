@@ -2,7 +2,7 @@ import { OpenAIAgentsProtocolError, type OpenAIAgentsOperationRequest, type Open
 import type { AgentView } from "@open-managed-agents/managed-agents-application/ports/agents";
 import type { VaultView } from "@open-managed-agents/managed-agents-application/ports/vaults";
 import type { ResourceDependencies, ResourceObject } from "./resource-types";
-import { agentMetadata, agentResource, coreName, credentialResource, nativeTemplateInputs, resolvedAgent, seconds, templateResource, toCoreAgentConfig, toCoreEnvironmentConfig, toCredentialAuth, toCredentialRotation } from "./resource-mappers";
+import { agentCompatibility, agentResource, coreName, credentialResource, isInlineSessionAgent, nativeTemplateInputs, resolvedAgent, seconds, templateResource, toCoreAgentConfig, toCoreEnvironmentConfig, toCredentialAuth, toCredentialRotation } from "./resource-mappers";
 import { decodeResourceMetadata, encodeResourceMetadata, hintedName, nameHint } from "./resource-metadata";
 
 export { toCoreAgentConfig, toCoreEnvironmentConfig, resolvedAgent, templateResource } from "./resource-mappers";
@@ -148,7 +148,10 @@ export function createResourcesHandler(deps: ResourceDependencies) {
       case "agents.create": {
         const config = resolvedAgent(input);
         const command = toCoreAgentConfig(config);
-        const created = result(await deps.agents.createAgent({ ...command, metadata: agentMetadata(config, command) }));
+        const created = result(await deps.agents.createAgent({
+          ...command,
+          openma: { compatibility: agentCompatibility(config, command) },
+        }));
         if (created.type !== "created") throw new Error("Invalid agent create result");
         return { body: agentResource(created.agent) };
       }
@@ -158,9 +161,19 @@ export function createResourcesHandler(deps: ResourceDependencies) {
         const current = agentResource(core);
         const config = resolvedAgent({ ...current, ...input });
         const command = toCoreAgentConfig(config);
-        const encoded = agentMetadata(config, command);
-        const metadata = Object.fromEntries([...Object.keys(core.metadata).filter(key => !(key in encoded)).map(key => [key, null]), ...Object.entries(encoded)]);
-        const updated = result(await deps.agents.updateAgent({ ...command, agentId, metadata, expectedVersion: core.version }));
+        const metadata = Object.fromEntries([
+          ...Object.keys(core.metadata)
+            .filter(key => !(key in (command.metadata ?? {})))
+            .map(key => [key, null]),
+          ...Object.entries(command.metadata ?? {}),
+        ]);
+        const updated = result(await deps.agents.updateAgent({
+          ...command,
+          agentId,
+          metadata,
+          openma: { compatibility: agentCompatibility(config, command) },
+          expectedVersion: core.version,
+        }));
         if (updated.type !== "updated") throw new Error("Invalid agent update result");
         return { body: agentResource(updated.agent) };
       }
@@ -170,7 +183,7 @@ export function createResourcesHandler(deps: ResourceDependencies) {
           if (listed.type !== "page") throw new Error("Invalid agent page");
           return { values: listed.page.agents, cursor: listed.page.nextCursor };
         });
-        return { body: page(agents.filter(agent => decodeResourceMetadata(agent.metadata, "agent").fields?.session_inline !== true).map(agentResource), query) };
+        return { body: page(agents.filter(agent => !isInlineSessionAgent(agent)).map(agentResource), query) };
       }
       case "agents.delete": {
         await retrieveAgent(agentId);

@@ -2,6 +2,7 @@ import { dynamicTool, generateText, jsonSchema, tool } from "ai";
 import { z } from "zod";
 import { anthropic } from "@ai-sdk/anthropic";
 import type { LanguageModel } from "ai";
+import type { SharedV3ProviderOptions } from "@ai-sdk/provider";
 import {
   connectHttpMcpClient,
   type McpClientPort,
@@ -389,6 +390,8 @@ export async function buildTools(
      *  large pages and offloads raw markdown to /workspace/.web/.
      *  Falsy (default) = no aux work; web_fetch returns raw markdown. */
     auxModel?: LanguageModel;
+    /** Provider-specific request defaults for auxiliary model calls. */
+    auxProviderOptions?: Record<string, unknown>;
     /** Identifier metadata for the aux model — written into aux.model_call
      *  trajectory events so cost dashboards can attribute usage. */
     auxModelInfo?: { model_id: string };
@@ -840,6 +843,7 @@ export async function buildTools(
           try {
             const summarizeResult = await generateText({
               model: env.auxModel,
+              providerOptions: env.auxProviderOptions as SharedV3ProviderOptions | undefined,
               system: WEB_SUMMARIZE_SYSTEM_PROMPT,
               prompt: `URL: ${url}\n\nPAGE CONTENT (markdown):\n\n${markdown}`,
               maxOutputTokens: 1500,

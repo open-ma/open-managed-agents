@@ -6,6 +6,7 @@ import type {
   AgentRuntimeBinding,
   AgentSpeed,
 } from "../domain/agent";
+import type { JsonObject } from "../domain/json";
 import type {
   AgentMcpServerInput,
   AgentMultiagentInput,
@@ -26,6 +27,7 @@ export interface AgentModelInput {
   id: string;
   effort?: AgentEffortLevel | null;
   inferenceGeo?: string | null;
+  providerOptions?: JsonObject | null;
   speed?: AgentSpeed | null;
 }
 
@@ -36,6 +38,8 @@ export interface AgentOpenMaInput {
   acp?: AgentAcpConfig | null;
   runtimeBinding?: AgentRuntimeBinding | null;
   enableGeneralSubagent?: boolean | null;
+  /** Internal protocol-adapter state, never accepted from the public API. */
+  compatibility?: JsonObject | null;
 }
 
 export type AgentModelView = AgentModel;

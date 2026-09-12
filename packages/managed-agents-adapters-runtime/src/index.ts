@@ -564,6 +564,8 @@ interface RuntimeAgentSnapshot {
   model: {
     id: string;
     effort?: "low" | "medium" | "high" | "xhigh" | "max";
+    inference_geo?: string;
+    provider_options?: Record<string, unknown>;
     speed?: "standard" | "fast";
   };
   system: string;
@@ -710,6 +712,12 @@ function runtimeAgentSnapshot(input: StartSessionExecution): RuntimeAgentSnapsho
     model: {
       id: agent.model.id,
       ...(agent.model.effort !== undefined && { effort: agent.model.effort }),
+      ...(agent.model.inferenceGeo !== undefined && {
+        inference_geo: agent.model.inferenceGeo,
+      }),
+      ...(agent.model.providerOptions !== undefined && {
+        provider_options: structuredClone(agent.model.providerOptions),
+      }),
       ...(agent.model.speed !== undefined && { speed: agent.model.speed }),
     },
     system: agent.system ?? "",

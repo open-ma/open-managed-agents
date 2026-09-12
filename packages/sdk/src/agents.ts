@@ -4,6 +4,18 @@ import type {
   BetaManagedAgentsModelConfigParams,
 } from "@anthropic-ai/sdk/resources/beta/agents/agents";
 
+export type OpenMaJsonValue =
+  | string
+  | number
+  | boolean
+  | null
+  | OpenMaProviderOptions
+  | OpenMaJsonValue[];
+
+export interface OpenMaProviderOptions {
+  [key: string]: OpenMaJsonValue;
+}
+
 export type OpenMaAgentModelParams =
   | BetaManagedAgentsModel
   | BetaManagedAgentsModelConfigParams;
@@ -69,6 +81,16 @@ export interface OpenMaAgentExtension {
 }
 
 declare module "@anthropic-ai/sdk/resources/beta/agents/agents" {
+  interface BetaManagedAgentsModelConfigParams {
+    /** OpenMA extension for provider-namespaced inference options. */
+    provider_options?: OpenMaProviderOptions | null;
+  }
+
+  interface BetaManagedAgentsModelConfig {
+    /** Resolved OpenMA provider-namespaced inference options. */
+    provider_options?: OpenMaProviderOptions;
+  }
+
   interface AgentCreateParams {
     /** OpenMA-only settings accepted by OpenMA endpoints. */
     _oma?: OpenMaAgentExtensionParams;

@@ -4,6 +4,65 @@ import { agentView, agentWire, makeAgentsPort } from "./fixtures";
 import { buildAgentsTestApi } from "./test-api";
 
 describe("Managed Agents API — POST /v1/agents", () => {
+  it("rejects unknown roots, non-object provider options, and oversized metadata", async () => {
+    const createCalls: unknown[] = [];
+    const api = buildAgentsTestApi(
+      makeAgentsPort({
+        createAgent: async (input) => {
+          createCalls.push(input);
+          return { type: "created", agent: agentView };
+        },
+      }),
+    );
+    const request = (body: Record<string, unknown>) =>
+      api.request("/v1/agents", {
+        method: "POST",
+        headers: {
+          "anthropic-beta": "managed-agents-2026-04-01",
+          "content-type": "application/json",
+        },
+        body: JSON.stringify(body),
+      });
+
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        custom_future_flag: true,
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: { id: "claude-opus-5", provider_options: [] },
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        metadata: Object.fromEntries(
+          Array.from({ length: 17 }, (_, index) => [`key-${index}`, "value"]),
+        ),
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        metadata: { ["k".repeat(65)]: "value" },
+      })).status,
+    ).toBe(400);
+    expect(
+      (await request({
+        name: "Coder",
+        model: "claude-opus-5",
+        metadata: { key: "v".repeat(513) },
+      })).status,
+    ).toBe(400);
+    expect(createCalls).toEqual([]);
+  });
+
   it("rejects requests that omit the managed-agents beta header", async () => {
     const createCalls: unknown[] = [];
     const api = buildAgentsTestApi(
@@ -234,8 +293,18 @@ describe("Managed Agents API — POST /v1/agents", () => {
     const createCalls: unknown[] = [];
     const extendedAgent = {
       ...agentView,
+      model: {
+        ...agentView.model,
+        providerOptions: { anthropic: { beta: ["context-1m"] } },
+      },
       openma: {
-        auxiliaryModel: { id: "deepseek-chat", speed: "fast" as const },
+        auxiliaryModel: {
+          id: "deepseek-chat",
+          speed: "fast" as const,
+          providerOptions: {
+            deepseek: { thinking: { type: "disabled" } },
+          },
+        },
         appendablePrompts: ["prompt_review"],
         harness: "acp-sandbox",
         acp: {
@@ -275,9 +344,18 @@ describe("Managed Agents API — POST /v1/agents", () => {
       },
       body: JSON.stringify({
         name: "Coding Assistant",
-        model: "claude-opus-5",
+        model: {
+          id: "claude-opus-5",
+          provider_options: { anthropic: { beta: ["context-1m"] } },
+        },
         _oma: {
-          aux_model: { id: "deepseek-chat", speed: "fast" },
+          aux_model: {
+            id: "deepseek-chat",
+            speed: "fast",
+            provider_options: {
+              deepseek: { thinking: { type: "disabled" } },
+            },
+          },
           appendable_prompts: ["prompt_review"],
           harness: "acp-sandbox",
           acp: {
@@ -306,9 +384,18 @@ describe("Managed Agents API — POST /v1/agents", () => {
     expect(createCalls).toEqual([
       {
         name: "Coding Assistant",
-        model: "claude-opus-5",
+        model: {
+          id: "claude-opus-5",
+          providerOptions: { anthropic: { beta: ["context-1m"] } },
+        },
         openma: {
-          auxiliaryModel: { id: "deepseek-chat", speed: "fast" },
+          auxiliaryModel: {
+            id: "deepseek-chat",
+            speed: "fast",
+            providerOptions: {
+              deepseek: { thinking: { type: "disabled" } },
+            },
+          },
           appendablePrompts: ["prompt_review"],
           harness: "acp-sandbox",
           acp: {
@@ -338,8 +425,18 @@ describe("Managed Agents API — POST /v1/agents", () => {
     expect(Object.hasOwn(mappedEnvironment, "REMOVE_ME")).toBe(false);
     expect(await response.json()).toEqual({
       ...agentWire,
+      model: {
+        ...agentWire.model,
+        provider_options: { anthropic: { beta: ["context-1m"] } },
+      },
       _oma: {
-        aux_model: { id: "deepseek-chat", speed: "fast" },
+        aux_model: {
+          id: "deepseek-chat",
+          speed: "fast",
+          provider_options: {
+            deepseek: { thinking: { type: "disabled" } },
+          },
+        },
         appendable_prompts: ["prompt_review"],
         harness: "acp-sandbox",
         acp: {

@@ -63,9 +63,27 @@ const agent: AgentRecord = {
     { type: "url", name: "docs", url: "https://mcp.example.test" },
   ],
   metadata: { owner: "platform" },
-  model: { id: "claude-opus-5", effort: "high", speed: "fast" },
+  model: {
+    id: "claude-opus-5",
+    effort: "high",
+    providerOptions: {
+      anthropic: {
+        beta: ["context-1m"],
+        request: { priority: null },
+      },
+    },
+    speed: "fast",
+  },
   multiagent: null,
   name: "Coding Assistant",
+  openma: {
+    auxiliaryModel: {
+      id: "deepseek-chat",
+      providerOptions: {
+        pi: { reasoning: "off", sampling: { temperature: 0 } },
+      },
+    },
+  },
   skills: [{ type: "custom", skillId: "skill_review", version: "3" }],
   system: "Write tested code.",
   tools: [

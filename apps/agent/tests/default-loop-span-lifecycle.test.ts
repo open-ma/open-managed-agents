@@ -39,7 +39,15 @@ describe("DefaultHarness model span lifecycle", () => {
       pendingConfirmations: [],
     } as unknown as HarnessRuntime;
     const context = {
-      agent: { id: "agent-test", model: scripted.model.modelId },
+      agent: {
+        id: "agent-test",
+        model: {
+          id: scripted.model.modelId,
+          provider_options: {
+            pi: { reasoning: "off", sampling: { temperature: 0 } },
+          },
+        },
+      },
       userMessage: events[0],
       session_id: "session-test",
       tools: {},
@@ -62,6 +70,11 @@ describe("DefaultHarness model span lifecycle", () => {
     expect(ends[0]).toMatchObject({
       is_error: true,
       model_request_start_id: starts[0]?.id,
+    });
+    expect(scripted.calls[0]).toMatchObject({
+      providerOptions: {
+        pi: { reasoning: "off", sampling: { temperature: 0 } },
+      },
     });
   });
 });

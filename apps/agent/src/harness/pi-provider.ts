@@ -20,6 +20,8 @@ export { toAiSdkLanguageModel } from "./pi-ai-sdk";
 export interface PiModelRuntime {
   models: Models;
   model: Model<Api>;
+  /** JSON-compatible defaults from Agent `model.provider_options.pi`. */
+  providerOptions?: SimpleStreamOptions;
   /** Pi-native per-agent default. `off` is Pi's own default. */
   thinkingLevel: ModelThinkingLevel;
   /** Managed Agents request priority. Model cards do not own this setting. */
@@ -58,6 +60,8 @@ export interface PiModelCardBinding {
   customHeaders?: Record<string, string>;
   /** Optional Pi-native model metadata for a custom or overridden model. */
   piConfig?: PiModelConfig;
+  /** Pi-native request defaults projected from Agent provider options. */
+  providerOptions?: Record<string, unknown>;
   /** Pi-native agent setting. Managed Agents `model.effort` maps here. */
   thinkingLevel?: ModelThinkingLevel;
   /** Managed Agents `model.speed`; inherited by sessions pinned to this agent version. */
@@ -154,6 +158,7 @@ export function createPiModelRuntime(input: PiModelCardBinding): PiModelRuntime 
   return {
     models,
     model,
+    providerOptions: structuredClone(input.providerOptions ?? {}) as SimpleStreamOptions,
     thinkingLevel: clampThinkingLevel(model, input.thinkingLevel ?? "off"),
     speed: input.speed ?? "standard",
   };
@@ -167,10 +172,25 @@ export function withPiRuntimeRequestOptions(
   runtime: PiModelRuntime,
   options: SimpleStreamOptions = {},
 ): SimpleStreamOptions {
-  const baseFetch = options.fetch ?? observablePiFetch;
-  if (runtime.speed !== "fast") return { ...options, fetch: baseFetch };
+  const providerOptions = runtime.providerOptions ?? {};
+  const merged: SimpleStreamOptions = {
+    ...providerOptions,
+    ...options,
+    ...(
+      providerOptions.samplingParams || options.samplingParams
+        ? {
+            samplingParams: {
+              ...providerOptions.samplingParams,
+              ...options.samplingParams,
+            },
+          }
+        : {}
+    ),
+  };
+  const baseFetch = merged.fetch ?? observablePiFetch;
+  if (runtime.speed !== "fast") return { ...merged, fetch: baseFetch };
 
-  const originalPayload = options.onPayload;
+  const originalPayload = merged.onPayload;
   const api = runtime.model.api;
   const onPayload: NonNullable<SimpleStreamOptions["onPayload"]> = async (
     payload,
@@ -191,21 +211,21 @@ export function withPiRuntimeRequestOptions(
 
   if (api === "anthropic-messages") {
     return {
-      ...options,
+      ...merged,
       fetch: (input, init) => fastAnthropicFetch(baseFetch, input, init),
       onPayload,
     };
   }
   if (api === "openai-responses" || api === "openai-codex-responses") {
     return {
-      ...options,
+      ...merged,
       fetch: baseFetch,
       onPayload,
       serviceTier: "priority",
     } as SimpleStreamOptions;
   }
   if (api === "openai-completions") {
-    return { ...options, fetch: baseFetch, onPayload };
+    return { ...merged, fetch: baseFetch, onPayload };
   }
   throw new Error(
     `Managed Agents speed "fast" is not supported by Pi API "${api}"`,

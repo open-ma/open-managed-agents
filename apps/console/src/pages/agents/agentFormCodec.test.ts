@@ -1,12 +1,17 @@
 import { describe, expect, it } from "vitest";
 import type { AgentRecord } from "../../types/agent";
 import {
+  INITIAL_FORM,
   agentToForm,
   agentToPreservedConfig,
   buildModelValue,
+  configToForm,
   mergeFormIntoConfig,
   mergeMcpServers,
   mergeToolsField,
+  materializeAgentUpdate,
+  parseAgentConfigText,
+  prepareCodePayload,
 } from "./agentFormCodec";
 
 function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
@@ -14,7 +19,13 @@ function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
     id: "agent_1",
     type: "agent",
     name: "Coder",
-    model: { id: "claude-sonnet-4-6", speed: "fast" },
+    model: {
+      id: "claude-sonnet-4-6",
+      effort: { type: "high" },
+      inference_geo: "us",
+      speed: "fast",
+      provider_options: { anthropic: { beta: ["context-1m"] } },
+    },
     system: "Be helpful",
     version: 3,
     description: "desc",
@@ -54,6 +65,13 @@ function sampleAgent(overrides: Partial<AgentRecord> = {}): AgentRecord {
 }
 
 describe("agentFormCodec lossless update", () => {
+  it("rejects malformed or non-object YAML/JSON before an editor mode switch", () => {
+    expect(() => parseAgentConfigText("name: [", "yaml")).toThrow(/invalid yaml/i);
+    expect(() => parseAgentConfigText("- name: coder", "yaml")).toThrow(/object/i);
+    expect(() => parseAgentConfigText('"coder"', "json")).toThrow(/object/i);
+    expect(parseAgentConfigText('{"name":"Coder"}', "json")).toEqual({ name: "Coder" });
+  });
+
   it("preserves model.speed on a name-only edit", () => {
     const agent = sampleAgent();
     const form = agentToForm(agent);
@@ -66,7 +84,13 @@ describe("agentFormCodec lossless update", () => {
       forUpdate: true,
     });
     expect(payload.name).toBe("Renamed");
-    expect(payload.model).toEqual({ id: "claude-sonnet-4-6", speed: "fast" });
+    expect(payload.model).toEqual({
+      id: "claude-sonnet-4-6",
+      effort: { type: "high" },
+      inference_geo: "us",
+      speed: "fast",
+      provider_options: { anthropic: { beta: ["context-1m"] } },
+    });
   });
 
   it("merges tools without dropping custom / unknown / mcp policies", () => {
@@ -90,6 +114,94 @@ describe("agentFormCodec lossless update", () => {
       (t) => (t as { type?: string }).type === "agent_toolset_20260401",
     ) as { configs?: Array<{ name: string }> };
     expect(builtin?.configs?.some((c) => c.name === "bash")).toBe(true);
+  });
+
+  it("keeps the original tool array order during an unrelated Form edit", () => {
+    const agent = sampleAgent();
+    const form = agentToForm(agent);
+
+    expect(mergeToolsField(agent.tools, form)).toEqual(agent.tools);
+  });
+
+  it("preserves advanced built-in tool configuration on a name-only edit", () => {
+    const agent = sampleAgent({
+      mcp_servers: [],
+      tools: [
+        {
+          type: "agent_toolset_20260401",
+          default_config: {
+            enabled: true,
+            permission_policy: { type: "always_allow" },
+          },
+          configs: [
+            {
+              type: "web_fetch",
+              name: "web_fetch",
+              enabled: true,
+              permission_policy: { type: "always_ask" },
+              allowed_domains: ["docs.example.test"],
+              blocked_domains: ["private.example.test"],
+              max_content_tokens: 4096,
+            },
+          ],
+        },
+      ],
+    });
+    const form = agentToForm(agent);
+    form.name = "Renamed";
+
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
+
+    expect(payload.tools).toEqual(agent.tools);
+  });
+
+  it("resets only form-owned tool policy while retaining advanced settings", () => {
+    const agent = sampleAgent({
+      mcp_servers: [],
+      tools: [
+        {
+          type: "agent_toolset_20260401",
+          default_config: {
+            enabled: true,
+            permission_policy: { type: "always_allow" },
+          },
+          configs: [
+            {
+              type: "web_fetch",
+              name: "web_fetch",
+              enabled: true,
+              permission_policy: { type: "always_ask" },
+              allowed_domains: ["docs.example.test"],
+              max_content_tokens: 4096,
+            },
+          ],
+        },
+      ],
+    });
+    const form = agentToForm(agent);
+    form.toolOverrides.web_fetch = "default";
+
+    const tools = mergeToolsField(agent.tools, form);
+
+    expect(tools).toEqual([
+      {
+        type: "agent_toolset_20260401",
+        default_config: {
+          enabled: true,
+          permission_policy: { type: "always_allow" },
+        },
+        configs: [
+          {
+            type: "web_fetch",
+            name: "web_fetch",
+            allowed_domains: ["docs.example.test"],
+            max_content_tokens: 4096,
+          },
+        ],
+      },
+    ]);
   });
 
   it("preserves a Managed URL MCP server", () => {
@@ -134,10 +246,48 @@ describe("agentFormCodec lossless update", () => {
     const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
       forUpdate: true,
     });
-    expect(payload.metadata).toEqual({ team: "platform", owner: "alice" });
+    // Omission is the official update meaning for "preserve unchanged".
+    expect(payload.metadata).toBeUndefined();
     expect(payload.description).toBe("tweaked");
     expect(payload.id).toBeUndefined();
     expect(payload.version).toBeUndefined();
+  });
+
+  it("edits metadata with update-patch deletion semantics", () => {
+    const agent = sampleAgent();
+    const form = agentToForm(agent);
+    expect(JSON.parse(form.metadataJson)).toEqual({
+      team: "platform",
+      owner: "alice",
+    });
+    form.metadataJson = JSON.stringify({ owner: "bob", purpose: "review" });
+
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
+
+    expect(payload.metadata).toEqual({
+      team: null,
+      owner: "bob",
+      purpose: "review",
+    });
+  });
+
+  it("emits create metadata as a full object and rejects invalid form JSON", () => {
+    const form = {
+      ...INITIAL_FORM,
+      name: "Coder",
+      model: "deepseek-chat",
+      metadataJson: '{"team":"platform"}',
+    };
+    expect(
+      mergeFormIntoConfig(form, null, { forUpdate: false }).metadata,
+    ).toEqual({ team: "platform" });
+
+    form.metadataJson = "{";
+    expect(() => mergeFormIntoConfig(form, null, { forUpdate: false })).toThrow(
+      /metadata.*json/i,
+    );
   });
 
   it("keeps unsupported fields when Form state is re-merged after a mode switch baseline", () => {
@@ -152,7 +302,13 @@ describe("agentFormCodec lossless update", () => {
       { forUpdate: true },
     );
     expect(payload.name).toBe("Final");
-    expect(payload.model).toEqual({ id: "claude-sonnet-4-6", speed: "fast" });
+    expect(payload.model).toEqual({
+      id: "claude-sonnet-4-6",
+      effort: { type: "high" },
+      inference_geo: "us",
+      speed: "fast",
+      provider_options: { anthropic: { beta: ["context-1m"] } },
+    });
     expect(
       (payload.tools as unknown[]).some((t) => (t as { type?: string }).type === "custom"),
     ).toBe(true);
@@ -161,9 +317,135 @@ describe("agentFormCodec lossless update", () => {
     );
     expect(payload.metadata).toEqual({ team: "platform", owner: "alice" });
   });
+
+  it("materializes an update patch before switching back to Form mode", () => {
+    const current = agentToPreservedConfig(
+      sampleAgent({
+        _oma: {
+          aux_model: { id: "deepseek-chat" },
+          harness: "pi",
+        },
+      }),
+    );
+
+    const materialized = materializeAgentUpdate(current, {
+      metadata: { owner: "bob" },
+      tools: null,
+      _oma: { aux_model: null },
+    });
+
+    expect(materialized.metadata).toEqual({ team: "platform", owner: "bob" });
+    expect(materialized.tools).toEqual([]);
+    expect(materialized._oma).toEqual({ harness: "pi" });
+  });
+
+  it("does not carry provider-specific options onto a different model", () => {
+    const agent = sampleAgent();
+    const form = agentToForm(agent);
+    form.model = "deepseek-chat";
+    form.modelSpeed = "";
+
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
+
+    expect(payload.model).toBe("deepseek-chat");
+  });
+
+  it("does not carry provider-specific options onto a different auxiliary model", () => {
+    const agent = sampleAgent({
+      _oma: {
+        aux_model: {
+          id: "claude-haiku-4-5",
+          speed: "fast",
+          provider_options: { anthropic: { beta: ["context-1m"] } },
+        },
+      },
+    });
+    const form = agentToForm(agent);
+    form.auxiliaryModel = "deepseek-chat";
+    form.auxiliaryModelSpeed = "";
+
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
+
+    expect(payload._oma).toEqual({ aux_model: { id: "deepseek-chat" } });
+  });
+
+  it("preserves advisor roster members that the Form does not edit", () => {
+    const agent = sampleAgent({
+      multiagent: {
+        type: "coordinator",
+        agents: [
+          { type: "agent", id: "agent_reviewer", version: 3 },
+          { type: "advisor", model: "claude-haiku-4-5" },
+        ],
+      },
+    });
+    const form = agentToForm(agent);
+    form.name = "Renamed";
+
+    const payload = mergeFormIntoConfig(form, agentToPreservedConfig(agent), {
+      forUpdate: true,
+    });
+
+    expect(payload.multiagent).toEqual(agent.multiagent);
+  });
+
+  it("does not silently pin an unversioned callable agent to version 1", () => {
+    const config = agentToPreservedConfig(sampleAgent());
+    config.multiagent = {
+      type: "coordinator",
+      agents: [{ type: "agent", id: "agent_reviewer" }],
+    };
+    const form = configToForm(config);
+
+    expect(form.callableAgents).toEqual([
+      { type: "agent", id: "agent_reviewer" },
+    ]);
+    expect(
+      mergeFormIntoConfig(form, config, { forUpdate: true })
+        .multiagent,
+    ).toEqual({
+      type: "coordinator",
+      agents: [{ type: "agent", id: "agent_reviewer" }],
+    });
+  });
 });
 
 describe("agent endpoint boundary", () => {
+  it("preserves update omissions and explicit clears in code mode", () => {
+    expect(
+      prepareCodePayload({ model: "deepseek-chat" }, { forUpdate: true }),
+    ).toEqual({ model: "deepseek-chat" });
+    expect(
+      prepareCodePayload({ tools: null }, { forUpdate: true }),
+    ).toEqual({ tools: null });
+  });
+
+  it("requires a create name and only defaults omitted create tools", () => {
+    expect(() =>
+      prepareCodePayload({ model: "deepseek-chat" }, { forUpdate: false }),
+    ).toThrow(/name is required/i);
+    expect(
+      prepareCodePayload(
+        { name: "Coder", model: "deepseek-chat" },
+        { forUpdate: false },
+      ),
+    ).toEqual({
+      name: "Coder",
+      model: "deepseek-chat",
+      tools: [{ type: "agent_toolset_20260401" }],
+    });
+    expect(
+      prepareCodePayload(
+        { name: "Coder", model: "deepseek-chat", tools: [] },
+        { forUpdate: false },
+      ),
+    ).toEqual({ name: "Coder", model: "deepseek-chat", tools: [] });
+  });
+
   it("emits only Managed Agent fields when editing a standard agent", () => {
     const agent = sampleAgent({
       mcp_servers: [],

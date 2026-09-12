@@ -147,6 +147,7 @@ export const agentModelResponseSchema = z
       .strict()
       .optional(),
     inference_geo: z.string().optional(),
+    provider_options: z.record(z.string(), z.json()).optional(),
     speed: z.enum(["standard", "fast"]).optional(),
   })
   .strict() satisfies z.ZodType<BetaManagedAgentsModelConfig>;
